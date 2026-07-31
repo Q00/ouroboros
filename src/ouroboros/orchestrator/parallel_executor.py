@@ -54,7 +54,7 @@ from ouroboros.core.seed import (
     InvestmentSpec,
     ac_text,
     derive_semantic_ac_key,
-    expected_artifact_path_error,
+    expected_artifact_workspace_path_error,
 )
 from ouroboros.core.session_signal import (
     SessionSignalMode,
@@ -2706,7 +2706,7 @@ def _missing_expected_artifacts(artifacts: tuple[str, ...], cwd: str) -> tuple[s
     root = Path(cwd).resolve()
     missing: list[str] = []
     for artifact in artifacts:
-        path_error = expected_artifact_path_error(artifact)
+        path_error = expected_artifact_workspace_path_error(artifact, str(root))
         if path_error is not None:
             missing.append(f"{artifact!r} ({path_error})")
             continue

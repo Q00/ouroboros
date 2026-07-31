@@ -20,6 +20,7 @@ from ouroboros.core.seed import (
     MAX_AC_SUCCESS_CONTRACT_ARTIFACTS,
     MAX_AC_SUCCESS_CONTRACT_CHARS,
     AcceptanceCriterionSpec,
+    expected_artifact_workspace_path_error,
     validate_ac_success_contract_values,
 )
 from ouroboros.orchestrator.adapter import RuntimeHandle
@@ -709,6 +710,14 @@ def compile_ac_execution_capsule(
     """Compile one deterministic capsule from existing orchestrator authority."""
     canonical_workspace = os.path.realpath(workspace)
     success_contract = success_contract_override or ACSuccessContract.from_ac_spec(ac_spec)
+    unmaterializable_artifacts = tuple(
+        (path, error)
+        for path in success_contract.expected_artifacts
+        if (error := expected_artifact_workspace_path_error(path, canonical_workspace)) is not None
+    )
+    if unmaterializable_artifacts:
+        rendered = ", ".join(f"{path!r} ({error})" for path, error in unmaterializable_artifacts)
+        raise ValueError(f"success contract artifacts cannot materialize: {rendered}")
     required_references: list[ACContextReference] = [
         ACContextReference(
             kind=ACContextReferenceKind.WORKSPACE,

@@ -4,11 +4,12 @@ from __future__ import annotations
 
 from dataclasses import replace
 import json
+import os
 
 import pytest
 
 from ouroboros.core.seed import (
-    MAX_AC_SUCCESS_CONTRACT_ARTIFACT_BYTES,
+    MAX_AC_SUCCESS_CONTRACT_ARTIFACT_PATH_BYTES,
     AcceptanceCriterionSpec,
 )
 from ouroboros.events.base import BaseEvent
@@ -300,8 +301,8 @@ def test_capsule_rejects_multibyte_artifact_byte_overflow_before_hashing(tmp_pat
         execution_context_id="execution-encoded-contract-limit",
         retry_attempt=0,
     )
-    artifact = "/".join(("😀" * 63,) * 8 + ("a" * 15,))
-    assert len(artifact.encode("utf-8")) == MAX_AC_SUCCESS_CONTRACT_ARTIFACT_BYTES + 1
+    artifact = "/".join(("😀" * 62, "a" * 7))
+    assert len(artifact.encode("utf-8")) == MAX_AC_SUCCESS_CONTRACT_ARTIFACT_PATH_BYTES + 1
     spec = AcceptanceCriterionSpec.model_construct(
         description="Implement the encoded bounded AC",
         expected_artifacts=(artifact,),
@@ -320,6 +321,38 @@ def test_capsule_rejects_multibyte_artifact_byte_overflow_before_hashing(tmp_pat
             authority_scope="authority:v1",
             seed_goal="Ship the feature",
             ac_content="Implement the encoded bounded AC",
+            ac_spec=spec,
+        )
+
+
+def test_capsule_rejects_artifact_exceeding_workspace_path_capacity(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    if os.name == "nt":
+        pytest.skip("POSIX pathconf capacity regression")
+    identity = build_ac_runtime_identity(
+        0,
+        execution_context_id="execution-workspace-path-limit",
+        retry_attempt=0,
+    )
+    workspace = str(tmp_path.resolve())
+    capacity = len(os.fsencode(workspace)) + 2
+    monkeypatch.setattr("ouroboros.core.seed.os.pathconf", lambda *_args: capacity)
+    spec = AcceptanceCriterionSpec(
+        description="Materialize artifact under workspace",
+        expected_artifacts=("a" * 255,),
+    )
+
+    with pytest.raises(ValueError, match="workspace path exceeds POSIX capacity"):
+        compile_ac_execution_capsule(
+            runtime_identity=identity,
+            execution_id="execution-workspace-path-limit",
+            semantic_ac_key="semantic-key",
+            workspace=workspace,
+            authority_scope="authority:v1",
+            seed_goal="Ship the feature",
+            ac_content="Materialize artifact under workspace",
             ac_spec=spec,
         )
 

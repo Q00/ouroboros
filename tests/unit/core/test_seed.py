@@ -11,8 +11,8 @@ from pydantic import ValidationError as PydanticValidationError
 import pytest
 
 from ouroboros.core.seed import (
-    MAX_AC_SUCCESS_CONTRACT_ARTIFACT_BYTES,
     MAX_AC_SUCCESS_CONTRACT_ARTIFACT_CHARS,
+    MAX_AC_SUCCESS_CONTRACT_ARTIFACT_PATH_BYTES,
     MAX_AC_SUCCESS_CONTRACT_ARTIFACTS,
     MAX_AC_SUCCESS_CONTRACT_CHARS,
     AcceptanceCriterionSpec,
@@ -25,14 +25,15 @@ from ouroboros.core.seed import (
     SeedMetadata,
     ac_texts,
     expected_artifact_path_error,
+    expected_artifact_workspace_path_error,
     parse_expected_artifact_list,
 )
 
 
 def _multibyte_artifact_at_byte_budget(*, overflow_bytes: int = 0) -> str:
     """Build a component-valid UTF-8 path at the total artifact budget."""
-    path = "/".join((*("😀" * 63 for _ in range(8)), "a" * (14 + overflow_bytes)))
-    assert len(path.encode("utf-8")) == MAX_AC_SUCCESS_CONTRACT_ARTIFACT_BYTES + overflow_bytes
+    path = "/".join(("😀" * 62, "a" * (6 + overflow_bytes)))
+    assert len(path.encode("utf-8")) == MAX_AC_SUCCESS_CONTRACT_ARTIFACT_PATH_BYTES + overflow_bytes
     return path
 
 
@@ -429,7 +430,7 @@ class TestSeed:
         assert "relative to the run workspace" in field.description
         assert "resolved literally" in field.description
         assert "255 UTF-8 bytes" in field.description
-        assert "complete canonical path at most 2038" in field.description
+        assert "complete canonical path at most 255" in field.description
         assert "prefix top-level paths containing spaces with ./" in field.description
 
     def test_expected_artifact_path_grammar_is_portable(self) -> None:
@@ -481,9 +482,33 @@ class TestSeed:
         assert "component longer than 255 filesystem bytes" in (
             expected_artifact_path_error(component_overflow) or ""
         )
-        assert "path longer than 2038 filesystem bytes" in (
+        assert "canonical path longer than 255 portable filesystem bytes" in (
             expected_artifact_path_error(total_overflow) or ""
         )
+
+    @pytest.mark.parametrize(
+        ("platform", "workspace", "artifact", "capacity", "expected_error"),
+        (
+            ("posix", "/" + "w" * 900, "a" * 200, 1_024, "POSIX capacity"),
+            ("windows", "C:\\" + "w" * 250, "out.txt", 260, "Windows capacity"),
+        ),
+    )
+    def test_expected_artifact_workspace_capacity_fails_closed_by_platform(
+        self,
+        platform: str,
+        workspace: str,
+        artifact: str,
+        capacity: int,
+        expected_error: str,
+    ) -> None:
+        error = expected_artifact_workspace_path_error(
+            artifact,
+            workspace,
+            platform=platform,  # type: ignore[arg-type]
+            path_capacity=capacity,
+        )
+
+        assert expected_error in (error or "")
 
     def test_expected_artifact_list_uses_comma_whitespace_delimiter(self) -> None:
         assert parse_expected_artifact_list("tasks.json, logs/task.log, ./Build Outputs") == (
@@ -512,13 +537,16 @@ class TestSeed:
                 ),
             )
 
-    def test_success_contract_rejects_capsule_locator_overflow(self) -> None:
+    def test_success_contract_rejects_portable_path_overflow_before_capsule_locator(self) -> None:
         artifact = "/".join(
             "a" * 250 for _ in range(MAX_AC_SUCCESS_CONTRACT_ARTIFACT_CHARS // 251 + 1)
         )
         assert len(artifact) > MAX_AC_SUCCESS_CONTRACT_ARTIFACT_CHARS
 
-        with pytest.raises(PydanticValidationError, match="path longer than 2038 filesystem bytes"):
+        with pytest.raises(
+            PydanticValidationError,
+            match="canonical path longer than 255 portable filesystem bytes",
+        ):
             AcceptanceCriterionSpec(
                 description="oversized artifact locator",
                 expected_artifacts=(artifact,),
@@ -537,7 +565,10 @@ class TestSeed:
     def test_success_contract_rejects_multibyte_artifact_byte_overflow(self) -> None:
         artifact = _multibyte_artifact_at_byte_budget(overflow_bytes=1)
 
-        with pytest.raises(PydanticValidationError, match="path longer than 2038 filesystem bytes"):
+        with pytest.raises(
+            PydanticValidationError,
+            match="canonical path longer than 255 portable filesystem bytes",
+        ):
             AcceptanceCriterionSpec(
                 description="oversized encoded artifact locator",
                 expected_artifacts=(artifact,),

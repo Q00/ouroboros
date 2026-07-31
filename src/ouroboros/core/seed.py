@@ -20,6 +20,7 @@ from datetime import UTC, datetime
 import hashlib
 import json
 import math
+import os
 from pathlib import PurePosixPath, PureWindowsPath
 import re
 from typing import Any, Literal
@@ -62,13 +63,18 @@ _WINDOWS_RESERVED_COMPONENT_STEMS = frozenset(
 )
 _EXPECTED_ARTIFACT_DELIMITER_RE = re.compile(r",\s+")
 _PORTABLE_PATH_COMPONENT_MAX_BYTES = 255
+_POSIX_PORTABLE_PATH_MAX_BYTES = 256
+_WINDOWS_CONSERVATIVE_PATH_MAX_UTF16_UNITS = 260
 MAX_AC_SUCCESS_CONTRACT_ARTIFACTS = 253
 # The capsule locator allows 2,048 characters including ``workspace:``.
-# Keep the historical character ceiling for ASCII/capsule compatibility and
-# separately enforce the same payload ceiling in UTF-8 bytes so a multibyte
-# path cannot pass schema validation while exceeding the runtime path budget.
+# Keep that historical character ceiling as an independent serialization
+# contract; filesystem materializability uses the stricter byte ceiling below.
 MAX_AC_SUCCESS_CONTRACT_ARTIFACT_CHARS = 2_038
-MAX_AC_SUCCESS_CONTRACT_ARTIFACT_BYTES = 2_038
+# POSIX guarantees PATH_MAX >= 256 including the terminating NUL. Limiting the
+# canonical relative payload to 255 bytes makes every schema-valid artifact
+# materializable as a standalone relative pathname on a conforming target;
+# capsule/runtime checks below also account for the actual workspace prefix.
+MAX_AC_SUCCESS_CONTRACT_ARTIFACT_PATH_BYTES = _POSIX_PORTABLE_PATH_MAX_BYTES - 1
 MAX_AC_SUCCESS_CONTRACT_CHARS = 64_000
 
 
@@ -111,26 +117,77 @@ def expected_artifact_path_error(artifact: str) -> str | None:
         or ".." in windows_path.parts
     ):
         return "is absolute or escapes workspace"
-    try:
-        encoded_artifact = posix_path.as_posix().encode("utf-8")
-    except UnicodeEncodeError:
-        return "contains text that cannot be encoded as UTF-8"
-    if len(encoded_artifact) > MAX_AC_SUCCESS_CONTRACT_ARTIFACT_BYTES:
-        return (
-            "contains a canonical path longer than "
-            f"{MAX_AC_SUCCESS_CONTRACT_ARTIFACT_BYTES} filesystem bytes"
-        )
     for component in windows_path.parts:
         component_error = _windows_component_error(component)
         if component_error is not None:
             return component_error
     for component in posix_path.parts:
-        if len(component.encode()) > _PORTABLE_PATH_COMPONENT_MAX_BYTES:
+        try:
+            encoded_component = component.encode("utf-8")
+        except UnicodeEncodeError:
+            return "contains text that cannot be encoded as UTF-8"
+        if len(encoded_component) > _PORTABLE_PATH_COMPONENT_MAX_BYTES:
             return "contains a path component longer than 255 filesystem bytes"
+    encoded_artifact = posix_path.as_posix().encode("utf-8")
+    if len(encoded_artifact) > MAX_AC_SUCCESS_CONTRACT_ARTIFACT_PATH_BYTES:
+        return (
+            "contains a canonical path longer than "
+            f"{MAX_AC_SUCCESS_CONTRACT_ARTIFACT_PATH_BYTES} portable filesystem bytes"
+        )
     if any(character.isspace() for character in artifact):
         has_explicit_relative_structure = "/" in artifact or "\\" in artifact
         if not has_explicit_relative_structure:
             return "is ambiguous prose; prefix a top-level spaced path with ./"
+    return None
+
+
+def expected_artifact_workspace_path_error(
+    artifact: str,
+    workspace: str,
+    *,
+    platform: Literal["posix", "windows"] | None = None,
+    path_capacity: int | None = None,
+) -> str | None:
+    """Return why an artifact cannot materialize under a concrete workspace.
+
+    Schema validation owns the portable relative-path ceiling. Capsule and
+    runtime callers additionally use this function to include the workspace
+    prefix and the target platform's pathname capacity. Optional platform and
+    capacity parameters make Windows/POSIX fail-closed behavior deterministic
+    in tests without hard-coding the current machine.
+    """
+    path_error = expected_artifact_path_error(artifact)
+    if path_error is not None:
+        return path_error
+
+    selected_platform = platform or ("windows" if os.name == "nt" else "posix")
+    parts = PurePosixPath(artifact).parts
+    if selected_platform == "windows":
+        capacity = (
+            path_capacity
+            if path_capacity is not None
+            else _WINDOWS_CONSERVATIVE_PATH_MAX_UTF16_UNITS
+        )
+        candidate = str(PureWindowsPath(workspace, *parts))
+        path_units = len(candidate.encode("utf-16-le")) // 2 + 1
+        if path_units > capacity:
+            return f"workspace path exceeds Windows capacity ({capacity} UTF-16 units)"
+        return None
+
+    capacity = path_capacity
+    if capacity is None:
+        try:
+            discovered = os.pathconf(workspace, "PC_PATH_MAX")
+        except (AttributeError, OSError, ValueError):
+            discovered = _POSIX_PORTABLE_PATH_MAX_BYTES
+        capacity = discovered if discovered > 0 else _POSIX_PORTABLE_PATH_MAX_BYTES
+    candidate = str(PurePosixPath(workspace, *parts))
+    try:
+        path_bytes = len(os.fsencode(candidate)) + 1
+    except UnicodeEncodeError:
+        return "workspace path cannot be encoded for the POSIX filesystem"
+    if path_bytes > capacity:
+        return f"workspace path exceeds POSIX capacity ({capacity} bytes)"
     return None
 
 
@@ -186,7 +243,7 @@ def validate_ac_success_contract_values(
             not isinstance(path, str)
             or not path
             or len(path) > MAX_AC_SUCCESS_CONTRACT_ARTIFACT_CHARS
-            or len(encoded_path) > MAX_AC_SUCCESS_CONTRACT_ARTIFACT_BYTES
+            or len(encoded_path) > MAX_AC_SUCCESS_CONTRACT_ARTIFACT_PATH_BYTES
         ):
             raise ValueError("success contract artifacts are invalid")
         contract_chars += len(path)
@@ -408,7 +465,7 @@ class AcceptanceCriterionSpec(BaseModel, frozen=True):
         description=(
             "Exact file or directory paths relative to the run workspace; "
             "each path is resolved literally and must exist; each component "
-            "is at most 255 UTF-8 bytes and the complete canonical path at most 2038; "
+            "is at most 255 UTF-8 bytes and the complete canonical path at most 255; "
             "prefix top-level paths containing spaces with ./"
         ),
     )

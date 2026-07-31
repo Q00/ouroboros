@@ -131,13 +131,26 @@ def _scan_pipe_led_ac_field_fragment(
             if index < len(value) and (value[index].isalnum() or value[index] == "_"):
                 return None
 
+            # Whitespace after a complete canonical token is a boundary, not
+            # field-name obfuscation. It may lead to an outer ``name :`` marker
+            # or to quoted/escaped shell arguments such as ``verify "$mode"``
+            # and ``verify \--mode``. Obfuscators encountered *before* the name
+            # completed remain recorded by the loop below and fail closed.
             field_end = index
-            while field_end < len(value) and (
-                value[field_end].isspace() or value[field_end] in _AC_FIELD_NAME_OBFUSCATORS
-            ):
-                if value[field_end] in _AC_FIELD_NAME_OBFUSCATORS:
-                    obfuscated = True
+            saw_argument_boundary = False
+            while field_end < len(value) and value[field_end].isspace():
+                saw_argument_boundary = True
                 field_end += 1
+            if (
+                not saw_argument_boundary
+                and field_end < len(value)
+                and value[field_end] in _AC_FIELD_NAME_OBFUSCATORS
+            ):
+                obfuscated = True
+                while field_end < len(value) and (
+                    value[field_end].isspace() or value[field_end] in _AC_FIELD_NAME_OBFUSCATORS
+                ):
+                    field_end += 1
             has_colon = field_end < len(value) and value[field_end] == ":"
             return _ACReservedFieldFragment(
                 name=normalized,
@@ -1739,6 +1752,11 @@ EXIT_CONDITIONS: [{{"name": "<name>", "description": "<description>", "criteria"
 
 async def load_seed(file_path: Path) -> Result[Seed, ValidationError]:
     """Load seed from YAML file.
+
+    Legacy prose acceptance criteria remain supported by ``Seed.from_dict``.
+    Persisted structured contracts are revalidated against current portable
+    execution constraints and fail explicitly here when they can no longer be
+    materialized; resume must never admit an unsatisfiable verify gate.
 
     Args:
         file_path: Path to the seed YAML file.

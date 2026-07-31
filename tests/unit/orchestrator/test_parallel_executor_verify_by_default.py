@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import os
 import time
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -10,7 +11,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from ouroboros.core.seed import (
-    MAX_AC_SUCCESS_CONTRACT_ARTIFACT_BYTES,
+    MAX_AC_SUCCESS_CONTRACT_ARTIFACT_PATH_BYTES,
     AcceptanceCriterionSpec,
     OntologySchema,
     Seed,
@@ -95,8 +96,8 @@ async def test_verify_gate_passes_on_exit_zero(tmp_path: Any) -> None:
 def test_expected_artifact_runtime_uses_shared_portable_path_grammar(tmp_path: Any) -> None:
     spaced = tmp_path / "Build Outputs"
     spaced.mkdir()
-    encoded_overflow = "/".join(("😀" * 63,) * 8 + ("a" * 15,))
-    assert len(encoded_overflow.encode("utf-8")) == MAX_AC_SUCCESS_CONTRACT_ARTIFACT_BYTES + 1
+    encoded_overflow = "/".join(("😀" * 62, "a" * 7))
+    assert len(encoded_overflow.encode("utf-8")) == MAX_AC_SUCCESS_CONTRACT_ARTIFACT_PATH_BYTES + 1
 
     assert _missing_expected_artifacts(("./Build Outputs",), str(tmp_path)) == ()
     invalid = _missing_expected_artifacts(
@@ -118,12 +119,30 @@ def test_expected_artifact_runtime_uses_shared_portable_path_grammar(tmp_path: A
     )
     assert len(invalid) == 12
     assert any("longer than 255 filesystem bytes" in artifact for artifact in invalid)
-    assert any("path longer than 2038 filesystem bytes" in artifact for artifact in invalid)
+    assert any(
+        "canonical path longer than 255 portable filesystem bytes" in artifact
+        for artifact in invalid
+    )
     assert any("NONE mixed with artifact paths" in artifact for artifact in invalid)
     assert "control character" in invalid[0]
     assert "workspace root" in invalid[1]
     assert "escapes workspace" in invalid[2]
     assert all("Windows" in item for item in invalid[3:8])
+
+
+def test_expected_artifact_runtime_rejects_workspace_capacity_overflow(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if os.name == "nt":
+        pytest.skip("POSIX pathconf capacity regression")
+    capacity = len(os.fsencode(str(tmp_path.resolve()))) + 2
+    monkeypatch.setattr("ouroboros.core.seed.os.pathconf", lambda *_args: capacity)
+
+    missing = _missing_expected_artifacts(("a" * 255,), str(tmp_path))
+
+    assert len(missing) == 1
+    assert "workspace path exceeds POSIX capacity" in missing[0]
 
 
 @pytest.mark.asyncio

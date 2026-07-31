@@ -35,7 +35,7 @@ from ouroboros.bigbang.seed_generator import (
 from ouroboros.config.loader import get_clarification_model
 from ouroboros.core.errors import ProviderError, ValidationError
 from ouroboros.core.seed import (
-    MAX_AC_SUCCESS_CONTRACT_ARTIFACT_BYTES,
+    MAX_AC_SUCCESS_CONTRACT_ARTIFACT_PATH_BYTES,
     AcceptanceCriterionSpec,
     ContextReference,
     EvaluationPrinciple,
@@ -522,6 +522,21 @@ class TestSeedGeneratorExtraction:
             ("Pipeline works | verify: printf READY | ver ify --mode strict", "verify"),
             (r"Pipeline works | verify: printf READY | ver\ify --mode strict", "verify"),
             ("Pipeline works | verify: printf READY | ver'ify --mode strict", "verify"),
+            ("Pipeline works | verify: printf READY | arti facts output.txt", "artifacts"),
+            (r"Pipeline works | verify: printf READY | arti\facts output.txt", "artifacts"),
+            ("Pipeline works | verify: printf READY | arti'facts output.txt", "artifacts"),
+            ("Pipeline works | verify: printf READY | ex pect READY", "expect"),
+            (r"Pipeline works | verify: printf READY | ex\pect READY", "expect"),
+            ("Pipeline works | verify: printf READY | ex'pect READY", "expect"),
+            ("Pipeline works | verify: printf READY | verify'': strict", "verify"),
+            (r"Pipeline works | verify: printf READY | verify\:", "verify"),
+            ('Pipeline works | verify: printf READY | verify"": strict', "verify"),
+            ("Pipeline works | verify: printf READY | artifacts'': out.txt", "artifacts"),
+            (r"Pipeline works | verify: printf READY | artifacts\:", "artifacts"),
+            ('Pipeline works | verify: printf READY | artifacts"": out.txt', "artifacts"),
+            ("Pipeline works | verify: printf READY | expect'': READY", "expect"),
+            (r"Pipeline works | verify: printf READY | expect\:", "expect"),
+            ('Pipeline works | verify: printf READY | expect"": READY', "expect"),
         ),
     )
     def test_ac_field_marker_scanner_rejects_malformed_or_obfuscated_operator(
@@ -1727,12 +1742,24 @@ class TestSeedGeneratorExtraction:
         assert grade.may_run is True
 
     @pytest.mark.asyncio
-    async def test_generate_preserves_reserved_command_name_in_verify_pipeline(self) -> None:
-        """A colonless reserved word in a verify pipeline is command payload."""
+    @pytest.mark.parametrize(
+        "verify_invocation",
+        (
+            "verify --mode strict",
+            'verify "$mode"',
+            "verify 'strict'",
+            r"verify \--mode",
+        ),
+    )
+    async def test_generate_preserves_reserved_command_name_in_verify_pipeline(
+        self,
+        verify_invocation: str,
+    ) -> None:
+        """Arguments after a complete reserved command token remain payload."""
         mock_adapter = AsyncMock()
         state = create_interview_state_with_rounds()
         low_ambiguity = create_low_ambiguity_score()
-        verify_command = "verify(){ cat; }; printf READY | verify --mode strict"
+        verify_command = f"verify(){{ cat; }}; mode=strict; printf READY | {verify_invocation}"
         extraction_response = create_valid_extraction_response(
             acceptance_criteria=(
                 "\n"
@@ -2339,8 +2366,8 @@ class TestSeedGeneratorSaveAndLoad:
         sample_seed: Seed,
     ) -> None:
         """Legacy replay fails explicitly when a persisted path is unmaterializable."""
-        artifact = "/".join(("😀" * 63,) * 8 + ("a" * 15,))
-        assert len(artifact.encode("utf-8")) == MAX_AC_SUCCESS_CONTRACT_ARTIFACT_BYTES + 1
+        artifact = "/".join(("😀" * 62, "a" * 7))
+        assert len(artifact.encode("utf-8")) == MAX_AC_SUCCESS_CONTRACT_ARTIFACT_PATH_BYTES + 1
         seed_data = sample_seed.to_dict()
         seed_data["acceptance_criteria"] = [
             {
@@ -2357,7 +2384,7 @@ class TestSeedGeneratorSaveAndLoad:
 
         assert result.is_err
         assert isinstance(result.error, ValidationError)
-        assert "path longer than 2038 filesystem bytes" in result.error.message
+        assert "canonical path longer than 255 portable filesystem bytes" in result.error.message
 
     def test_save_seed_sync(self, sample_seed: Seed) -> None:
         """save_seed_sync() saves seed synchronously."""
