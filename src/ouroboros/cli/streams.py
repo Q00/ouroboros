@@ -6,6 +6,8 @@ import codecs
 import sys
 from typing import Any
 
+from typer.core import TyperGroup
+
 
 def _is_utf8_stream(stream: Any) -> bool:
     encoding = getattr(stream, "encoding", None)
@@ -54,4 +56,13 @@ def normalize_windows_standard_streams() -> None:
     _normalize_stream(sys.stderr)
 
 
-__all__ = ["normalize_windows_standard_streams"]
+class UnicodeSafeTyperGroup(TyperGroup):
+    """Normalize Windows streams for every standalone Typer entrypoint."""
+
+    def main(self, *args: object, **kwargs: object) -> object:
+        """Normalize active streams before Click parses eager options."""
+        normalize_windows_standard_streams()
+        return super().main(*args, **kwargs)
+
+
+__all__ = ["UnicodeSafeTyperGroup", "normalize_windows_standard_streams"]

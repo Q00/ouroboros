@@ -2,12 +2,15 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from importlib.metadata import entry_points
+from io import BytesIO, TextIOWrapper
 import os
 from pathlib import Path
+import sys
 import tomllib
 from unittest.mock import patch
 
 import pytest
+from typer.main import get_command
 from typer.testing import CliRunner
 
 from ouroboros.cli.commands import init as init_command
@@ -44,6 +47,26 @@ def test_ozo_installed_entrypoint_points_to_zcode_app() -> None:
         pytest.skip("ozo console script metadata is available after package install")
 
     assert any(script.value == "ouroboros.cli.commands.zcode:app" for script in ozo_scripts)
+
+
+def test_ozo_entrypoint_normalizes_legacy_windows_stream_before_help(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_stdout = BytesIO()
+    stdout = TextIOWrapper(raw_stdout, encoding="cp949")
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(sys, "stdout", stdout)
+
+    get_command(zcode_command.app).main(
+        args=["--help"],
+        prog_name="ozo",
+        standalone_mode=False,
+    )
+
+    assert stdout.encoding == "utf-8"
+    stdout.write("✓ → Unicode")
+    stdout.flush()
+    assert "✓ → Unicode" in raw_stdout.getvalue().decode("utf-8")
 
 
 def test_ozo_entrypoint_starts_interview_with_zcode() -> None:

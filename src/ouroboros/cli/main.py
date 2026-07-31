@@ -18,7 +18,6 @@ from typing import Annotated
 
 import click
 import typer
-from typer.core import TyperGroup
 
 from ouroboros import __version__
 from ouroboros.cli.commands import (
@@ -48,10 +47,10 @@ from ouroboros.cli.commands import (
 )
 from ouroboros.cli.commands.plugin_dispatch import build_plugin_dispatch_command
 from ouroboros.cli.formatters import console
-from ouroboros.cli.streams import normalize_windows_standard_streams
+from ouroboros.cli.streams import UnicodeSafeTyperGroup
 
 
-class _PluginAwareGroup(TyperGroup):
+class _PluginAwareGroup(UnicodeSafeTyperGroup):
     """A typer/click group that falls back to plugin dispatch for
     unknown top-level command names.
 
@@ -68,11 +67,6 @@ class _PluginAwareGroup(TyperGroup):
     runs only when typer's own resolution fails — registered
     first-party commands keep their fast path entirely.
     """
-
-    def main(self, *args: object, **kwargs: object) -> object:
-        """Normalize active Windows streams before Click parses any option."""
-        normalize_windows_standard_streams()
-        return super().main(*args, **kwargs)
 
     def get_command(self, ctx: click.Context, cmd_name: str) -> click.Command | None:
         cmd = super().get_command(ctx, cmd_name)
