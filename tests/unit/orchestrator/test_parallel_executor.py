@@ -9,7 +9,6 @@ import json
 import os
 from pathlib import Path
 import shlex
-import stat
 import subprocess
 import sys
 from types import SimpleNamespace
@@ -59,6 +58,8 @@ from ouroboros.orchestrator.execution_runtime_scope import (
 )
 from ouroboros.orchestrator.leaf_dispatcher import (
     _attach_bash_filesystem_effects,
+    _BashFilesystemLeaseTracker,
+    _close_pending_targets,
     _correlated_tool_result_name,
     _pending_bash_filesystem_targets,
 )
@@ -351,6 +352,8 @@ def test_files_touched_rejects_shell_receiver_symlink_replaced_after_execution(t
     pending_targets = _pending_bash_filesystem_targets(call, task_cwd=str(tmp_path))
 
     completed = subprocess.run(command, cwd=tmp_path, shell=True, check=False)  # noqa: S602
+    claimed_file.unlink()
+    claimed_file.write_text("replacement\n", encoding="utf-8")
     result = _attach_bash_filesystem_effects(
         AgentMessage(
             type="tool_result",
@@ -359,19 +362,400 @@ def test_files_touched_rejects_shell_receiver_symlink_replaced_after_execution(t
         ),
         pending_targets,
     )
-    claimed_file.unlink()
-    claimed_file.write_text("replacement\n", encoding="utf-8")
 
     assert completed.returncode == 0
-    effects = result.data["filesystem_effects"]
-    assert isinstance(effects, list)
-    assert stat.S_ISLNK(int(effects[0]["st_mode"]))
+    assert "filesystem_effects" not in result.data
     messages = (call, result)
     assert not _runtime_messages_support_file_claim(
         "claimed.py",
         messages,
         task_cwd=str(tmp_path),
     )
+
+
+def test_files_touched_rejects_parent_symlink_swap_restored_before_completion(tmp_path) -> None:
+    """A held parent dirfd detects swap/restore around the actual shell execution."""
+    link_dir = tmp_path / "link"
+    original_dir = tmp_path / "original-link"
+    outside_dir = tmp_path.parent / f"{tmp_path.name}-outside"
+    link_dir.mkdir()
+    outside_dir.mkdir()
+    inside_file = link_dir / "claimed.py"
+    outside_file = outside_dir / "claimed.py"
+    inside_file.write_text("inside\n", encoding="utf-8")
+    outside_file.write_text("outside\n", encoding="utf-8")
+    os.utime(inside_file, ns=(1_000_000_000, 1_000_000_000))
+    os.utime(outside_file, ns=(1_000_000_000, 1_000_000_000))
+    inside_before = inside_file.stat()
+    outside_before = outside_file.stat()
+    command = "touch link/claimed.py"
+    call = AgentMessage(
+        type="tool",
+        content=f"Bash: {command}",
+        tool_name="Bash",
+        data={"tool_input": {"command": command}},
+    )
+    pending_targets = _pending_bash_filesystem_targets(call, task_cwd=str(tmp_path))
+    if not pending_targets:  # pragma: no cover - fail-closed platform fallback
+        pytest.skip("dirfd/no-follow receiver leases are unavailable")
+    link_dir.rename(original_dir)
+    try:
+        os.symlink(outside_dir, link_dir)
+    except (OSError, NotImplementedError):  # pragma: no cover - unprivileged/Windows
+        original_dir.rename(link_dir)
+        _close_pending_targets(pending_targets)
+        pytest.skip("symlink creation not permitted in this environment")
+
+    completed = subprocess.run(command, cwd=tmp_path, shell=True, check=False)  # noqa: S602
+    link_dir.unlink()
+    original_dir.rename(link_dir)
+    result = _attach_bash_filesystem_effects(
+        AgentMessage(
+            type="tool_result",
+            content="command completed with exit code 0",
+            data={"subtype": "tool_result", "exit_code": 0},
+        ),
+        pending_targets,
+    )
+
+    assert completed.returncode == 0
+    assert inside_file.read_text(encoding="utf-8") == "inside\n"
+    assert inside_file.stat().st_mtime_ns == inside_before.st_mtime_ns
+    assert outside_file.stat().st_mtime_ns > outside_before.st_mtime_ns
+    assert "filesystem_effects" not in result.data
+    assert not _runtime_messages_support_file_claim(
+        "link/claimed.py",
+        (call, result),
+        task_cwd=str(tmp_path),
+    )
+
+
+def test_bash_receiver_lease_cleanup_is_idempotent(tmp_path) -> None:
+    """Unmatched/cancelled dispatch cleanup closes every held receiver dirfd."""
+    target = tmp_path / "claimed.py"
+    target.write_text("value\n", encoding="utf-8")
+    call = AgentMessage(
+        type="tool",
+        content="Bash: touch claimed.py",
+        tool_name="Bash",
+        data={"tool_input": {"command": "touch claimed.py"}},
+    )
+    pending_targets = _pending_bash_filesystem_targets(call, task_cwd=str(tmp_path))
+    if not pending_targets:  # pragma: no cover - fail-closed platform fallback
+        pytest.skip("dirfd/no-follow receiver leases are unavailable")
+    fds = tuple(target.parent_fd for target in pending_targets)
+
+    _close_pending_targets(pending_targets)
+    _close_pending_targets(pending_targets)
+
+    for fd in fds:
+        with pytest.raises(OSError):
+            os.fstat(fd)
+
+
+def test_completed_receiver_lease_cannot_close_reused_fd(tmp_path) -> None:
+    """A completed lease invalidates ownership before its fd number is reused."""
+    target = tmp_path / "claimed.py"
+    target.write_text("before\n", encoding="utf-8")
+    call = AgentMessage(
+        type="tool",
+        content="Bash: touch claimed.py",
+        tool_name="Bash",
+        data={"tool_input": {"command": "touch claimed.py"}},
+    )
+    pending_targets = _pending_bash_filesystem_targets(call, task_cwd=str(tmp_path))
+    if not pending_targets:  # pragma: no cover - fail-closed platform fallback
+        pytest.skip("dirfd/no-follow receiver leases are unavailable")
+    leased_fd = pending_targets[0].parent_fd
+    assert leased_fd is not None
+    os.utime(target, ns=(3_000_000_000, 3_000_000_000))
+    _attach_bash_filesystem_effects(
+        AgentMessage(
+            type="tool_result",
+            content="command completed with exit code 0",
+            data={"subtype": "tool_result", "exit_code": 0},
+        ),
+        pending_targets,
+    )
+    assert pending_targets[0].parent_fd is None
+    probe_fd = os.open(os.devnull, os.O_RDONLY)
+    if probe_fd != leased_fd:
+        os.dup2(probe_fd, leased_fd)
+        os.close(probe_fd)
+    try:
+        _close_pending_targets(pending_targets)
+        os.fstat(leased_fd)
+    finally:
+        os.close(leased_fd)
+
+
+def test_receiver_lease_rejects_regular_inode_replacement(tmp_path) -> None:
+    """A different post-execution inode is not mutation proof for the pre receiver."""
+    target = tmp_path / "claimed.py"
+    original = tmp_path / "original.py"
+    target.write_text("before\n", encoding="utf-8")
+    call = AgentMessage(
+        type="tool",
+        content="Bash: touch claimed.py",
+        tool_name="Bash",
+        data={"tool_input": {"command": "touch claimed.py"}},
+    )
+    pending_targets = _pending_bash_filesystem_targets(call, task_cwd=str(tmp_path))
+    if not pending_targets:  # pragma: no cover - fail-closed platform fallback
+        pytest.skip("dirfd/no-follow receiver leases are unavailable")
+    target.rename(original)
+    target.write_text("replacement\n", encoding="utf-8")
+
+    result = _attach_bash_filesystem_effects(
+        AgentMessage(
+            type="tool_result",
+            content="command completed with exit code 0",
+            data={"subtype": "tool_result", "exit_code": 0},
+        ),
+        pending_targets,
+    )
+
+    assert "filesystem_effects" not in result.data
+
+
+@pytest.mark.parametrize("exit_kind", ("normal", "exception", "cancellation"))
+def test_receiver_lease_tracker_closes_unmatched_calls_on_every_exit(
+    tmp_path,
+    exit_kind,
+) -> None:
+    """Normal end, adapter failure, and cancellation all release unmatched dirfds."""
+    target = tmp_path / "claimed.py"
+    target.write_text("value\n", encoding="utf-8")
+    call = AgentMessage(
+        type="tool",
+        content="Bash: touch claimed.py",
+        tool_name="Bash",
+        data={"tool_input": {"command": "touch claimed.py"}, "tool_call_id": "call-1"},
+    )
+    tracker = _BashFilesystemLeaseTracker(task_cwd=str(tmp_path))
+    captured_fds: tuple[int, ...] = ()
+    try:
+        with tracker:
+            tracker.observe(call)
+            leased = tracker._pending_by_id["call-1"]
+            captured_fds = tuple(
+                pending.parent_fd for pending in leased if pending.parent_fd is not None
+            )
+            if exit_kind == "exception":
+                raise RuntimeError("adapter failed")
+            if exit_kind == "cancellation":
+                raise asyncio.CancelledError
+    except (RuntimeError, asyncio.CancelledError):
+        pass
+
+    assert captured_fds
+    for fd in captured_fds:
+        with pytest.raises(OSError):
+            os.fstat(fd)
+
+
+def test_receiver_lease_tracker_rejects_duplicate_idless_pairing(tmp_path) -> None:
+    """Two id-less Bash starts cannot donate either receiver to one completion."""
+    first = tmp_path / "first.py"
+    second = tmp_path / "second.py"
+    first.write_text("first\n", encoding="utf-8")
+    second.write_text("second\n", encoding="utf-8")
+    first_call = AgentMessage(
+        type="tool",
+        content="Bash: touch first.py",
+        tool_name="Bash",
+        data={"tool_input": {"command": "touch first.py"}},
+    )
+    second_call = AgentMessage(
+        type="tool",
+        content="Bash: touch second.py",
+        tool_name="Bash",
+        data={"tool_input": {"command": "touch second.py"}},
+    )
+    completion = AgentMessage(
+        type="tool_result",
+        content="command completed with exit code 0",
+        data={"subtype": "tool_result", "exit_code": 0},
+    )
+
+    with _BashFilesystemLeaseTracker(task_cwd=str(tmp_path)) as tracker:
+        tracker.observe(first_call)
+        tracker.observe(second_call)
+        os.utime(first, None)
+        os.utime(second, None)
+        observed = tracker.observe(completion)
+
+    assert "filesystem_effects" not in observed.data
+
+
+def test_receiver_lease_tracker_rejects_duplicate_call_id_pairing(tmp_path) -> None:
+    """A repeated call id makes its single completion irreducibly ambiguous."""
+    first = tmp_path / "first.py"
+    second = tmp_path / "second.py"
+    first.write_text("first\n", encoding="utf-8")
+    second.write_text("second\n", encoding="utf-8")
+    first_call = AgentMessage(
+        type="tool",
+        content="Bash: touch first.py",
+        tool_name="Bash",
+        data={"tool_input": {"command": "touch first.py"}, "tool_call_id": "same"},
+    )
+    second_call = AgentMessage(
+        type="tool",
+        content="Bash: touch second.py",
+        tool_name="Bash",
+        data={"tool_input": {"command": "touch second.py"}, "tool_call_id": "same"},
+    )
+    completion = AgentMessage(
+        type="tool_result",
+        content="command completed with exit code 0",
+        data={"subtype": "tool_result", "exit_code": 0, "tool_call_id": "same"},
+    )
+
+    with _BashFilesystemLeaseTracker(task_cwd=str(tmp_path)) as tracker:
+        tracker.observe(first_call)
+        tracker.observe(second_call)
+        tracker.observe(first_call)
+        os.utime(second, ns=(4_000_000_000, 4_000_000_000))
+        observed = tracker.observe(completion)
+
+    assert "filesystem_effects" not in observed.data
+
+
+@pytest.mark.parametrize("call_id", (None, "call-1"))
+def test_receiver_lease_tracker_rejects_explicit_non_bash_completion(
+    tmp_path,
+    call_id,
+) -> None:
+    """An Edit completion cannot consume a Bash lease even with the same id."""
+    target = tmp_path / "claimed.py"
+    target.write_text("before\n", encoding="utf-8")
+    call_data: dict[str, object] = {"tool_input": {"command": "touch claimed.py"}}
+    completion_data: dict[str, object] = {
+        "subtype": "tool_result",
+        "exit_code": 0,
+    }
+    if call_id is not None:
+        call_data["tool_call_id"] = call_id
+        completion_data["tool_call_id"] = call_id
+    call = AgentMessage(
+        type="tool",
+        content="Bash: touch claimed.py",
+        tool_name="Bash",
+        data=call_data,
+    )
+    completion = AgentMessage(
+        type="tool_result",
+        content="Edit completed",
+        tool_name="Edit",
+        data=completion_data,
+    )
+
+    with _BashFilesystemLeaseTracker(task_cwd=str(tmp_path)) as tracker:
+        tracker.observe(call)
+        os.utime(target, ns=(5_000_000_000, 5_000_000_000))
+        observed = tracker.observe(completion)
+
+    assert "filesystem_effects" not in observed.data
+
+
+@pytest.mark.parametrize("call_id", (None, "shared-call"))
+@pytest.mark.parametrize("bash_first", (False, True))
+def test_receiver_lease_tracker_rejects_mixed_tool_call_ownership(
+    tmp_path,
+    call_id,
+    bash_first,
+) -> None:
+    """A mixed Bash/Edit call identity cannot feed a nameless completion."""
+    target = tmp_path / "claimed.py"
+    target.write_text("before\n", encoding="utf-8")
+    bash_data: dict[str, object] = {"tool_input": {"command": "touch claimed.py"}}
+    edit_data: dict[str, object] = {"tool_input": {"file_path": "other.py"}}
+    completion_data: dict[str, object] = {
+        "subtype": "tool_result",
+        "exit_code": 0,
+    }
+    if call_id is not None:
+        bash_data["tool_call_id"] = call_id
+        edit_data["tool_call_id"] = call_id
+        completion_data["tool_call_id"] = call_id
+    bash_call = AgentMessage(
+        type="tool",
+        content="Bash: touch claimed.py",
+        tool_name="Bash",
+        data=bash_data,
+    )
+    edit_call = AgentMessage(
+        type="tool",
+        content="Edit: other.py",
+        tool_name="Edit",
+        data=edit_data,
+    )
+    completion = AgentMessage(
+        type="tool_result",
+        content="completed",
+        data=completion_data,
+    )
+    calls = (bash_call, edit_call) if bash_first else (edit_call, bash_call)
+
+    with _BashFilesystemLeaseTracker(task_cwd=str(tmp_path)) as tracker:
+        for call in calls:
+            tracker.observe(call)
+        os.utime(target, ns=(6_000_000_000, 6_000_000_000))
+        observed = tracker.observe(completion)
+
+    assert "filesystem_effects" not in observed.data
+
+
+def test_bash_receiver_leases_do_not_leak_fds_across_repeated_completions(tmp_path) -> None:
+    """Repeated successful capture/close cycles retain no receiver descriptors."""
+    fd_directory = Path("/proc/self/fd")
+    if not fd_directory.exists():
+        fd_directory = Path("/dev/fd")
+    if not fd_directory.exists():  # pragma: no cover - platform-specific observability
+        pytest.skip("open descriptor directory is unavailable")
+    target = tmp_path / "claimed.py"
+    target.write_text("value\n", encoding="utf-8")
+    call = AgentMessage(
+        type="tool",
+        content="Bash: touch claimed.py",
+        tool_name="Bash",
+        data={"tool_input": {"command": "touch claimed.py"}},
+    )
+    before = len(tuple(fd_directory.iterdir()))
+
+    for iteration in range(64):
+        pending_targets = _pending_bash_filesystem_targets(call, task_cwd=str(tmp_path))
+        if not pending_targets:  # pragma: no cover - fail-closed platform fallback
+            pytest.skip("dirfd/no-follow receiver leases are unavailable")
+        timestamp = 2_000_000_000 + iteration
+        os.utime(target, ns=(timestamp, timestamp))
+        _attach_bash_filesystem_effects(
+            AgentMessage(
+                type="tool_result",
+                content="command completed with exit code 0",
+                data={"subtype": "tool_result", "exit_code": 0},
+            ),
+            pending_targets,
+        )
+
+    after = len(tuple(fd_directory.iterdir()))
+    assert after <= before + 1
+
+
+def test_bash_receiver_lease_fails_closed_without_dirfd_support(tmp_path, monkeypatch) -> None:
+    """Platforms without safe dirfd traversal do not emit command-text proof."""
+    target = tmp_path / "claimed.py"
+    target.write_text("value\n", encoding="utf-8")
+    call = AgentMessage(
+        type="tool",
+        content="Bash: touch claimed.py",
+        tool_name="Bash",
+        data={"tool_input": {"command": "touch claimed.py"}},
+    )
+    monkeypatch.setattr(os, "supports_dir_fd", set())
+
+    assert _pending_bash_filesystem_targets(call, task_cwd=str(tmp_path)) == ()
 
 
 def test_files_touched_allows_expanded_payload_with_literal_redirect_target(tmp_path) -> None:

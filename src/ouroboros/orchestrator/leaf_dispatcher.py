@@ -19,6 +19,7 @@ partial message list must remain visible for teardown.
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+import os
 from pathlib import Path
 import stat
 import time
@@ -67,54 +68,240 @@ class LeafDispatchState:
     stalled: bool = False
 
 
+@dataclass(slots=True)
+class _PendingBashTarget:
+    """Execution-span lease on one lexical shell receiver parent."""
+
+    parent_fd: int | None
+    leaf_name: str
+    reported_path: str
+    pre_fingerprint: tuple[int, int, int, int, int, int] | None
+
+
 def _pending_bash_filesystem_targets(
     message: AgentMessage,
     *,
     task_cwd: str | None,
-) -> tuple[tuple[str, str], ...]:
-    """Capture lexical Bash targets and their execution cwd before dispatch."""
+) -> tuple[_PendingBashTarget, ...]:
+    """Lease Bash receiver parents and capture pre-execution file identity."""
     if message.tool_name != "Bash" or _runtime_message_is_tool_completion(message):
         return ()
     effective_cwd = _runtime_message_effective_cwd(message, task_cwd=task_cwd)
     if effective_cwd is None:
         return ()
-    targets: list[tuple[str, str]] = []
+    targets: list[_PendingBashTarget] = []
     for command in _runtime_message_command_values(message):
         for target in _shell_command_mutation_targets(command):
-            candidate = Path(target)
-            absolute = candidate if candidate.is_absolute() else Path(effective_cwd) / candidate
-            targets.append((str(absolute.absolute()), target))
+            pending = _lease_bash_target(
+                target,
+                task_cwd=task_cwd,
+                effective_cwd=effective_cwd,
+            )
+            if pending is not None:
+                targets.append(pending)
     return tuple(targets)
+
+
+def _lease_bash_target(
+    target: str,
+    *,
+    task_cwd: str,
+    effective_cwd: str,
+) -> _PendingBashTarget | None:
+    """Open a no-follow dirfd chain that survives path-component replacement."""
+    parent_fd: int | None = None
+    try:
+        if (
+            not hasattr(os, "O_DIRECTORY")
+            or not hasattr(os, "O_NOFOLLOW")
+            or os.open not in os.supports_dir_fd
+            or os.stat not in os.supports_dir_fd
+            or os.stat not in os.supports_follow_symlinks
+        ):
+            return None
+        workspace = Path(os.path.abspath(task_cwd))
+        candidate = Path(target)
+        absolute = Path(
+            os.path.abspath(
+                candidate if candidate.is_absolute() else Path(effective_cwd) / candidate
+            )
+        )
+        relative = absolute.relative_to(workspace)
+        if not relative.parts or relative.name in {"", ".", ".."}:
+            return None
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        parent_fd = os.open(workspace, flags)
+        for part in relative.parts[:-1]:
+            if part in {"", ".", ".."}:
+                return None
+            next_fd = os.open(part, flags, dir_fd=parent_fd)
+            os.close(parent_fd)
+            parent_fd = next_fd
+        try:
+            pre = os.stat(relative.name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            pre_fingerprint = None
+        else:
+            pre_fingerprint = _stat_fingerprint(pre)
+        leased_fd = parent_fd
+        parent_fd = None
+        return _PendingBashTarget(
+            parent_fd=leased_fd,
+            leaf_name=relative.name,
+            reported_path=target,
+            pre_fingerprint=pre_fingerprint,
+        )
+    except (OSError, RuntimeError, ValueError):
+        return None
+    finally:
+        if parent_fd is not None:
+            try:
+                os.close(parent_fd)
+            except OSError:
+                pass
+
+
+def _stat_fingerprint(value: os.stat_result) -> tuple[int, int, int, int, int, int]:
+    return (
+        value.st_dev,
+        value.st_ino,
+        stat.S_IFMT(value.st_mode),
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+    )
 
 
 def _attach_bash_filesystem_effects(
     message: AgentMessage,
-    targets: tuple[tuple[str, str], ...],
+    targets: tuple[_PendingBashTarget, ...],
 ) -> AgentMessage:
-    """Attach immediate post-completion inode identities for regular targets."""
+    """Attach effects only when the leased receiver changed across execution."""
     effects: list[dict[str, object]] = []
-    for absolute_value, reported_path in targets:
-        try:
-            identity = Path(absolute_value).lstat()
-        except (OSError, RuntimeError, ValueError):
+    for target in targets:
+        parent_fd = target.parent_fd
+        if parent_fd is None:
             continue
-        effects.append(
-            {
-                "capture": "ouroboros.leaf-dispatch.v1",
-                "path": reported_path,
-                "absolute_path": absolute_value,
-                "st_dev": identity.st_dev,
-                "st_ino": identity.st_ino,
-                "st_mode": identity.st_mode,
-                "regular_file": stat.S_ISREG(identity.st_mode),
-            }
-        )
+        try:
+            try:
+                identity = os.stat(
+                    target.leaf_name,
+                    dir_fd=parent_fd,
+                    follow_symlinks=False,
+                )
+            except (OSError, RuntimeError, ValueError):
+                continue
+            if not stat.S_ISREG(identity.st_mode):
+                continue
+            post_fingerprint = _stat_fingerprint(identity)
+            if target.pre_fingerprint is not None:
+                pre_identity = target.pre_fingerprint[:3]
+                post_identity = post_fingerprint[:3]
+                if (
+                    pre_identity[2] != stat.S_IFREG
+                    or post_identity != pre_identity
+                    or post_fingerprint == target.pre_fingerprint
+                ):
+                    continue
+            effects.append(
+                {
+                    "capture": "ouroboros.leaf-dispatch.v1",
+                    "path": target.reported_path,
+                    "st_dev": identity.st_dev,
+                    "st_ino": identity.st_ino,
+                    "st_mode": identity.st_mode,
+                }
+            )
+        finally:
+            _close_pending_target(target)
     if not effects:
         return message
     return replace(
         message,
         data={**message.data, "filesystem_effects": effects},
     )
+
+
+def _close_pending_target(target: _PendingBashTarget) -> None:
+    fd = target.parent_fd
+    if fd is None:
+        return
+    target.parent_fd = None
+    try:
+        os.close(fd)
+    except OSError:
+        pass
+
+
+def _close_pending_targets(targets: tuple[_PendingBashTarget, ...]) -> None:
+    for target in targets:
+        _close_pending_target(target)
+
+
+class _BashFilesystemLeaseTracker:
+    """Own receiver leases across streamed Bash call/completion pairs."""
+
+    def __init__(self, *, task_cwd: str | None) -> None:
+        self._task_cwd = task_cwd
+        self._pending_by_id: dict[str, tuple[_PendingBashTarget, ...]] = {}
+        self._seen_call_ids: set[str] = set()
+        self._idless: tuple[_PendingBashTarget, ...] | None = None
+        self._idless_active = False
+
+    def __enter__(self) -> _BashFilesystemLeaseTracker:
+        return self
+
+    def __exit__(self, *_exc_info: object) -> None:
+        self.close()
+
+    def observe(self, message: AgentMessage) -> AgentMessage:
+        """Lease calls, attach completion effects, and reject ambiguous pairing."""
+        call_id = _runtime_message_tool_call_id(message)
+        if message.tool_name is not None and not _runtime_message_is_tool_completion(message):
+            targets = (
+                _pending_bash_filesystem_targets(message, task_cwd=self._task_cwd)
+                if message.tool_name == "Bash"
+                else ()
+            )
+            if call_id is not None:
+                if call_id in self._seen_call_ids:
+                    _close_pending_targets(self._pending_by_id.get(call_id, ()))
+                    _close_pending_targets(targets)
+                    self._pending_by_id[call_id] = ()
+                else:
+                    self._seen_call_ids.add(call_id)
+                    self._pending_by_id[call_id] = targets
+            elif not self._idless_active:
+                self._idless_active = True
+                self._idless = targets
+            else:
+                _close_pending_targets(self._idless or ())
+                _close_pending_targets(targets)
+                self._idless = ()
+            return message
+        if not _runtime_message_is_tool_completion(message):
+            return message
+        if call_id is not None:
+            targets = self._pending_by_id.pop(call_id, ())
+        else:
+            targets = self._idless or ()
+            self._idless = None
+            self._idless_active = False
+        if message.tool_name not in {None, "Bash"}:
+            _close_pending_targets(targets)
+            return message
+        return _attach_bash_filesystem_effects(message, targets) if targets else message
+
+    def close(self) -> None:
+        """Close all unmatched leases exactly once on every stream exit path."""
+        for targets in self._pending_by_id.values():
+            _close_pending_targets(targets)
+        self._pending_by_id.clear()
+        self._seen_call_ids.clear()
+        if self._idless is not None:
+            _close_pending_targets(self._idless)
+            self._idless = None
+        self._idless_active = False
 
 
 def _correlated_tool_result_name(
@@ -179,17 +366,18 @@ class LeafDispatcher:
         )
         lifecycle_emitted = False
         emitted_recovery_turn_ids: set[str] = set()
-        pending_bash_targets: dict[str, tuple[tuple[str, str], ...]] = {}
-        idless_bash_targets: tuple[tuple[str, str], ...] | None = None
         task_cwd = executor._task_cwd or executor._adapter.working_directory
 
         # Stall detection: CancelScope with resettable deadline (RC6)
         last_heartbeat = time.monotonic()
         exec_start = time.monotonic()
 
-        with anyio.CancelScope(
-            deadline=anyio.current_time() + STALL_TIMEOUT_SECONDS,
-        ) as stall_scope:
+        with (
+            _BashFilesystemLeaseTracker(task_cwd=task_cwd) as identity_tracker,
+            anyio.CancelScope(
+                deadline=anyio.current_time() + STALL_TIMEOUT_SECONDS,
+            ) as stall_scope,
+        ):
             async for message in executor._adapter.execute_task(
                 prompt=prompt,
                 tools=tools,
@@ -231,24 +419,7 @@ class LeafDispatcher:
                 if state.runtime_handle is not None and message.resume_handle is not None:
                     message = replace(message, resume_handle=state.runtime_handle)
 
-                message_call_id = _runtime_message_tool_call_id(message)
-                if message.tool_name == "Bash" and not _runtime_message_is_tool_completion(message):
-                    targets = _pending_bash_filesystem_targets(message, task_cwd=task_cwd)
-                    if message_call_id is not None:
-                        pending_bash_targets[message_call_id] = targets
-                    elif idless_bash_targets is None:
-                        idless_bash_targets = targets
-                    else:
-                        # Two id-less starts before completion are ambiguous.
-                        idless_bash_targets = ()
-                elif _runtime_message_is_tool_completion(message):
-                    if message_call_id is not None:
-                        targets = pending_bash_targets.pop(message_call_id, ())
-                    else:
-                        targets = idless_bash_targets or ()
-                        idless_bash_targets = None
-                    if targets:
-                        message = _attach_bash_filesystem_effects(message, targets)
+                message = identity_tracker.observe(message)
 
                 recovery_discontinuity = executor._runtime_recovery_discontinuity(
                     state.runtime_handle
