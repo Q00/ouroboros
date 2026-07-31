@@ -190,7 +190,20 @@ class InterviewRound(BaseModel):
         one classifier, still no consumer reading the marker.
         """
         if self.user_response is not None:
-            settled = classify_answer_provenance(self.user_response)
+            answer_for_classification = self.user_response
+            # PM interviews before #1823 decorated reframed answers after the
+            # provenance marker had already been supplied, producing
+            # ``PM answer: [from-code] ...``.  Recover that one canonical
+            # historical envelope using its paired question shape; accepting
+            # the wrapper globally would let arbitrary user prose redefine
+            # the marker grammar.
+            if (
+                self.question.startswith("[Original technical question: ")
+                and "\n[PM was asked (reframed): " in self.question
+                and answer_for_classification.startswith("PM answer: ")
+            ):
+                answer_for_classification = answer_for_classification.removeprefix("PM answer: ")
+            settled = classify_answer_provenance(answer_for_classification)
             if settled != self.provenance:
                 self.provenance = settled
         return self

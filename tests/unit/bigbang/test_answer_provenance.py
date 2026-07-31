@@ -116,6 +116,32 @@ def test_a_round_persisted_before_this_field_existed_is_still_classified() -> No
     assert observation.provenance == "observation"
 
 
+def test_legacy_reframed_pm_answer_recovers_observation_provenance() -> None:
+    """The old PM envelope put its label before the caller's marker."""
+    round_data = InterviewRound.model_validate(
+        {
+            "round_number": 1,
+            "question": (
+                "[Original technical question: Which retry policy?]\n"
+                "[PM was asked (reframed): What behavior exists today?]"
+            ),
+            "user_response": f"PM answer: [from-code] {OBSERVED_FACT}",
+        }
+    )
+
+    assert round_data.provenance == "observation"
+    restored = InterviewRound.model_validate(round_data.model_dump(mode="json"))
+    assert restored.provenance == "observation"
+
+    state = InterviewState(interview_id="legacy-pm", initial_context="goal", rounds=[restored])
+    assert extraction_rounds(state)[0].answer == WITHHELD_ANSWER_NOTE
+    distillation = build_requirement_distillation(state)
+    rendered = " ".join(
+        [*(c.text for c in distillation.candidates), *(e.text for e in distillation.evidence)]
+    )
+    assert OBSERVED_FACT not in rendered
+
+
 def test_an_unanswered_round_persisted_without_the_field_stays_user() -> None:
     revived = InterviewRound.model_validate({"round_number": 1, "question": "q"})
     assert revived.provenance == "user"

@@ -208,6 +208,22 @@ class TestPMDocumentGeneratorGenerate:
         assert "State question" not in user_msg
 
     @pytest.mark.asyncio
+    async def test_generate_withholds_observation_from_raw_qa_pairs(self):
+        adapter = _make_adapter()
+        generator = PMDocumentGenerator(llm_adapter=adapter)
+        observed = "competitor-secret-retry-policy"
+
+        result = await generator.generate(
+            _make_seed(),
+            qa_pairs=[("What exists today?", f"[from-research] {observed}")],
+        )
+
+        assert result.is_ok
+        user_msg = adapter.complete.call_args[0][0][1].content
+        assert observed not in user_msg
+        assert "observation withheld" in user_msg
+
+    @pytest.mark.asyncio
     async def test_generate_falls_back_to_template_on_llm_error(self):
         """Falls back to template-based generation when LLM fails."""
         adapter = _make_failing_adapter()
