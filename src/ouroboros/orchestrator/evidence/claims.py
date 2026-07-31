@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import ast
 from pathlib import Path, PurePosixPath
 import re
 import shlex
@@ -394,7 +393,6 @@ def _runtime_message_supports_file_reference(
     if message.tool_name == "Bash":
         return _bash_message_mutates_file_reference(
             message,
-            reference=reference,
             normalized_reference=normalized_reference,
             task_cwd=task_cwd,
             allow_bash_command_text=allow_bash_command_text,
@@ -415,7 +413,6 @@ def _runtime_message_supports_file_reference(
 def _bash_message_mutates_file_reference(
     message: AgentMessage,
     *,
-    reference: str,
     normalized_reference: str,
     task_cwd: str | None,
     allow_bash_command_text: bool,
@@ -425,7 +422,6 @@ def _bash_message_mutates_file_reference(
         return True
     return allow_bash_command_text and _bash_command_mutates_file_reference(
         message,
-        reference=reference,
         normalized_reference=normalized_reference,
         task_cwd=task_cwd,
     )
@@ -458,7 +454,6 @@ def _file_reference_pattern(normalized_reference: str) -> re.Pattern[str]:
 def _bash_command_mutates_file_reference(
     message: AgentMessage,
     *,
-    reference: str,
     normalized_reference: str,
     task_cwd: str | None,
 ) -> bool:
@@ -486,21 +481,20 @@ def _bash_command_mutates_file_reference(
             # mutation branch executed. Require structured file evidence
             # instead of interpreting control flow from a transcript string.
             continue
-        if _text_needs_shell_expansion(command):
-            # Parameter/command expansion can reconstruct an interpreter,
-            # ``-c`` flag, mutation primitive, or target after every lexical
-            # classifier below has run. Command text with dynamic shell
-            # semantics is therefore never standalone files_touched proof;
-            # require the adapter's structured file-change evidence instead.
-            continue
-        python_pathlib_match = _python_c_pathlib_write_reference_match(
+        python_command_match = _python_c_command_file_claim_match(
             command,
-            reference=reference,
             task_cwd=effective_cwd,
-            claim_cwd=task_cwd,
         )
-        if python_pathlib_match is not None:
-            return python_pathlib_match
+        if python_command_match is not None:
+            return python_command_match
+        if _text_needs_shell_expansion(command):
+            # Expansion in a payload does not weaken a literal shell output
+            # redirection: a successful shell necessarily opened that target.
+            # All other expanded forms remain non-authoritative because they
+            # can reconstruct the command, mutation primitive, or target.
+            if _has_literal_output_redirection(command, normalized_reference):
+                return True
+            continue
         if not _file_reference_pattern(normalized_reference).search(normalized_command):
             continue
         if re.search(rf"(^|[\s;&|])(?:\d?>|&>|>>|\d>>)\s*{quoted_reference}", normalized_command):
@@ -513,6 +507,32 @@ def _bash_command_mutates_file_reference(
             rf"{quoted_reference}(?=$|[\s;&|])",
             normalized_command,
         ):
+            return True
+    return False
+
+
+def _has_literal_output_redirection(command: str, normalized_reference: str) -> bool:
+    """Return whether shell syntax redirects output to the literal claim.
+
+    Tokenizing with punctuation awareness distinguishes real shell redirection
+    from ``> claimed.py`` text inside a quoted Python ``-c`` payload. Quotes
+    around the target are accepted, while an expanded target is not.
+    """
+    wrapped_body = _shell_command_body(command)
+    if wrapped_body is not None:
+        return _has_literal_output_redirection(wrapped_body, normalized_reference)
+    try:
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|<>")
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        tokens = list(lexer)
+    except (RuntimeError, ValueError):
+        return False
+    for index, token in enumerate(tokens[:-1]):
+        if token not in {">", ">>", "&>"}:
+            continue
+        target = tokens[index + 1]
+        if target.strip().lower() == normalized_reference:
             return True
     return False
 
@@ -588,40 +608,18 @@ def _path_has_symlink_component(path: Path) -> bool:
     return False
 
 
-def _python_c_pathlib_write_targets_reference(
+def _python_c_command_file_claim_match(
     command: str,
     *,
-    reference: str,
     task_cwd: str | None,
-    claim_cwd: str | None = None,
-) -> bool:
-    """Return True when a direct Python ``-c`` pathlib write targets the claim."""
-    return (
-        _python_c_pathlib_write_reference_match(
-            command,
-            reference=reference,
-            task_cwd=task_cwd,
-            claim_cwd=claim_cwd,
-        )
-        is True
-    )
-
-
-def _python_c_pathlib_write_reference_match(
-    command: str,
-    *,
-    reference: str,
-    task_cwd: str | None,
-    claim_cwd: str | None = None,
 ) -> bool | None:
-    """Classify Python ``-c`` pathlib writes as rejected or unrelated.
+    """Classify Python ``-c`` command text as rejected or unrelated.
 
-    ``None`` means the command is not a pathlib-write Python ``-c`` form and
-    other shell mutation evidence may still be considered. ``False`` is
-    authoritative: recognized Python/pathlib command text cannot safely prove a
-    historical filesystem mutation without execution-bound file evidence.
+    ``None`` means the command is not a recognized Python ``-c`` form and other
+    shell mutation evidence may still be considered. ``False`` is authoritative:
+    Python command text cannot safely prove a historical filesystem mutation
+    without execution-bound file evidence.
     """
-    del reference, claim_cwd
     if task_cwd is None:
         return None
     # Command text can never prove the historical identity of a pathlib
@@ -643,54 +641,17 @@ def _python_c_pathlib_write_reference_match(
         if _raw_command_mentions_python_c_pathlib(command) or _argv_mentions_python_c_pathlib(argv):
             return False
         return None
-    if len(argv) <= python_index + 2 or "-c" not in argv[python_index + 1 :]:
+    if "-c" not in argv[python_index + 1 :]:
         return None
     source_index = argv.index("-c", python_index + 1) + 1
     if len(argv) <= source_index:
-        return None
-    source = argv[source_index]
-    if not _source_mentions_pathlib(source):
-        return None
-    if (
-        python_index != 0
-        or source_index != 4
-        or len(argv) != 5
-        or argv[1] != "-I"
-        or argv[2] != "-S"
-        or _text_needs_shell_expansion(source)
-    ):
         return False
+    # Once a Python ``-c`` invocation is recognized, its remaining argv is
+    # Python data, not additional shell syntax. It must therefore be
+    # authoritative before generic ``touch``/redirection heuristics even when
+    # the source reconstructs pathlib without lexical ``pathlib``/``Path``
+    # signatures. Command text alone never proves its historical file target.
     return False
-
-
-def _pathlib_static_target_matches_claim(
-    reference: str,
-    target: str,
-    *,
-    task_cwd: str,
-    runtime_cwd: str,
-) -> bool:
-    """Match static pathlib targets lexically, without final-state symlink resolution."""
-    try:
-        claim_path = Path(reference.strip())
-        target_path = Path(target)
-    except (OSError, RuntimeError, ValueError):
-        return False
-    if not reference.strip() or claim_path.is_absolute() or ".." in claim_path.parts:
-        return False
-    if any(part == ".." for part in target_path.parts):
-        return False
-    try:
-        claim_base = Path(task_cwd).absolute()
-        runtime_base = Path(runtime_cwd).absolute()
-        claim_absolute = _normalize_absolute_path(claim_base / claim_path)
-        target_absolute = _normalize_absolute_path(
-            target_path if target_path.is_absolute() else runtime_base / target_path
-        )
-        target_absolute.relative_to(claim_base)
-    except (OSError, RuntimeError, ValueError):
-        return False
-    return target_absolute == claim_absolute
 
 
 def _normalize_absolute_path(path: Path) -> Path:
@@ -710,132 +671,6 @@ def _source_mentions_pathlib(source: str) -> bool:
 
 def _text_needs_shell_expansion(value: str) -> bool:
     return "$" in value or "`" in value
-
-
-def _pathlib_write_targets(tree: ast.AST) -> tuple[str, ...]:
-    """Extract static-proof pathlib writes from a Python ``-c`` module.
-
-    This intentionally accepts only inline top-level ``Path(...).write_*``
-    expressions. Aliases, assignments, variables, and guarded/nested blocks are
-    real Python patterns, but static transcript text cannot prove they executed
-    or still bind to ``pathlib.Path``. Those cases need runtime file-change
-    evidence instead.
-    """
-    targets: list[str] = []
-    path_imported = False
-    for node in getattr(tree, "body", ()):
-        # Static transcript evidence can only prove direct statements. Nested or
-        # guarded writes need runtime file-change evidence instead.
-        if _imports_pathlib_path(node):
-            path_imported = True
-            continue
-        if _binds_name(node, "Path"):
-            return ()
-        if not path_imported or not isinstance(node, ast.Expr):
-            return ()
-        call = node.value
-        if not isinstance(call, ast.Call):
-            return ()
-        if not isinstance(call.func, ast.Attribute):
-            return ()
-        if call.func.attr not in {"write_text", "write_bytes"}:
-            return ()
-        if _call_has_side_effecting_arguments(call):
-            return ()
-        target = _literal_pathlib_receiver(call.func.value)
-        if target is None:
-            return ()
-        targets.append(target)
-    return tuple(targets)
-
-
-def _call_has_side_effecting_arguments(call: ast.Call) -> bool:
-    try:
-        return any(
-            isinstance(
-                child, (ast.Call, ast.NamedExpr, ast.Lambda, ast.Await, ast.Yield, ast.YieldFrom)
-            )
-            for argument in (*call.args, *(keyword.value for keyword in call.keywords))
-            for child in ast.walk(argument)
-        )
-    except RecursionError:
-        return True
-
-
-def _imports_pathlib_path(node: ast.AST) -> bool:
-    return (
-        isinstance(node, ast.ImportFrom)
-        and node.module == "pathlib"
-        and any(alias.name == "Path" and alias.asname is None for alias in node.names)
-    )
-
-
-def _binds_name(node: ast.AST, name: str) -> bool:
-    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-        return node.name == name
-    if isinstance(node, ast.ImportFrom):
-        for alias in node.names:
-            bound_name = alias.asname or alias.name
-            if bound_name == name and not (node.module == "pathlib" and alias.name == "Path"):
-                return True
-        return False
-    if isinstance(node, ast.Import):
-        for alias in node.names:
-            bound_name = alias.asname or alias.name.split(".", maxsplit=1)[0]
-            if bound_name == name:
-                return True
-        return False
-    targets: tuple[ast.AST, ...] = ()
-    if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
-        targets = tuple(getattr(node, "targets", ())) or (node.target,)
-    elif isinstance(node, (ast.For, ast.AsyncFor)):
-        targets = (node.target,)
-    elif isinstance(node, ast.With):
-        targets = tuple(item.optional_vars for item in node.items if item.optional_vars is not None)
-    try:
-        return any(_target_binds_name(target, name) for target in targets)
-    except RecursionError:
-        return True
-
-
-def _target_binds_name(target: ast.AST, name: str) -> bool:
-    return any(
-        isinstance(child, ast.Name) and isinstance(child.ctx, ast.Store) and child.id == name
-        for child in ast.walk(target)
-    )
-
-
-def _literal_pathlib_receiver(node: ast.AST) -> str | None:
-    try:
-        if isinstance(node, ast.Call) and _is_path_constructor(node.func):
-            if not node.args or node.keywords:
-                return None
-            segments = tuple(_literal_path_segment(arg) for arg in node.args)
-            if any(segment is None for segment in segments):
-                return None
-            return str(PurePosixPath(*segments))
-        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
-            left = _literal_pathlib_receiver(node.left)
-            right = _literal_path_segment(node.right)
-            if left is None or right is None:
-                return None
-            return str(PurePosixPath(left) / right)
-        return None
-    except RecursionError:
-        return None
-
-
-def _literal_path_segment(node: ast.AST) -> str | None:
-    try:
-        if isinstance(node, ast.Constant) and isinstance(node.value, str) and node.value.strip():
-            return node.value
-        return None
-    except RecursionError:
-        return None
-
-
-def _is_path_constructor(node: ast.AST) -> bool:
-    return isinstance(node, ast.Name) and node.id == "Path"
 
 
 def _argv_mentions_python_c_pathlib(argv: list[str]) -> bool:
