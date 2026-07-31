@@ -3,7 +3,7 @@ name: module-size
 # Ratchets the size of `src/ouroboros` modules: a module already over the cap
 # may shrink but never grow, and a module under the cap may not cross it.
 #
-# Why this exists: per #1797, the 25 modules above 2,000 lines hold 34.4% of
+# Why this exists: per #1797, the 26 modules above 2,000 lines hold 35.3% of
 # all source, and nothing prevented them from growing further -- #1769 added
 # ~324 lines to `runner.py` while under review and no gate noticed. The
 # extraction work in #1797 is worth little if the modules re-inflate between
