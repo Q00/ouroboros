@@ -265,6 +265,22 @@ class TestExtractJsonPayload:
         assert extract_json_payload(stale_only) is None
         assert extract_json_payload(with_actual) == '{"actual": true}'
 
+    @pytest.mark.parametrize(
+        "literal_example",
+        [
+            '\t> ```json\n\t> {"stale": true}\n\t> ```',
+            '\t- ```json\n\t\t{"stale": true}\n\t\t```',
+        ],
+        ids=["leading-tab-quote", "leading-tab-list"],
+    )
+    def test_leading_tab_container_is_literal_example_and_releases_actual(
+        self, literal_example: str
+    ) -> None:
+        with_actual = f'{literal_example}\nActual: {{"actual": true}}'
+
+        assert extract_json_payload(literal_example) is None
+        assert extract_json_payload(with_actual) == '{"actual": true}'
+
     def test_json_in_code_fence(self):
         text = '```json\n{"score": 0.85}\n```'
         result = extract_json_payload(text)

@@ -30,6 +30,7 @@ class _LiteralFenceContainer:
 
     quote_depth: int = 0
     content_indent: int = 4
+    inner_container: _FenceContainer = _FenceContainer()
 
 
 _FENCE_MARKERS = ("`", "~")
@@ -206,9 +207,14 @@ def _list_prefix_indents(prefix: str) -> tuple[int | None, int | None]:
     position = 0
     while True:
         marker_start = position
-        for _ in range(3):
-            if marker_start >= len(prefix) or prefix[marker_start] not in " \t":
+        marker_indent = 0
+        while marker_start < len(prefix) and prefix[marker_start] in " \t":
+            next_indent = (
+                (marker_indent // 4 + 1) * 4 if prefix[marker_start] == "\t" else marker_indent + 1
+            )
+            if next_indent > 3:
                 break
+            marker_indent = next_indent
             marker_start += 1
         marker_end = _list_marker_end(prefix, marker_start)
         if marker_end is None or marker_end >= len(prefix):
@@ -426,9 +432,14 @@ def _next_blockquote_prefix_positions(text: str, positions: set[int]) -> set[int
     for position in positions:
         marker_positions = [position]
         cursor = position
-        for _ in range(3):
-            if cursor >= len(text) or text[cursor] not in " \t":
+        marker_indent = 0
+        while cursor < len(text) and text[cursor] in " \t":
+            next_indent = (
+                (marker_indent // 4 + 1) * 4 if text[cursor] == "\t" else marker_indent + 1
+            )
+            if next_indent > 3:
                 break
+            marker_indent = next_indent
             cursor += 1
             marker_positions.append(cursor)
         for marker_position in marker_positions:
@@ -459,8 +470,15 @@ def _literal_fence_containers(prefix: str) -> tuple[_LiteralFenceContainer, ...]
     while positions:
         for position in positions:
             remainder = prefix[position:]
-            if _is_code_indented_prefix(remainder):
-                containers.add(_LiteralFenceContainer(quote_depth=quote_depth))
+            code_content = _strip_indentation_columns(remainder, 4)
+            if code_content is not None:
+                for inner_container in _fence_containers(code_content):
+                    containers.add(
+                        _LiteralFenceContainer(
+                            quote_depth=quote_depth,
+                            inner_container=inner_container,
+                        )
+                    )
             list_indent = _list_literal_content_indent(remainder)
             if list_indent is not None:
                 containers.add(
@@ -476,14 +494,6 @@ def _literal_fence_containers(prefix: str) -> tuple[_LiteralFenceContainer, ...]
             containers,
             key=lambda container: (-container.quote_depth, container.content_indent),
         )
-    )
-
-
-def _is_code_indented_prefix(prefix: str) -> bool:
-    deindented_prefix = _strip_indentation_columns(prefix, 4)
-    return (
-        deindented_prefix is not None
-        and _PLAIN_FENCE_PREFIX.fullmatch(deindented_prefix) is not None
     )
 
 
@@ -504,7 +514,8 @@ def _is_indented_code_content_line(
     for remainder in remainders:
         if not remainder.strip():
             return True
-        if _strip_indentation_columns(remainder, container.content_indent) is not None:
+        stripped = _strip_indentation_columns(remainder, container.content_indent)
+        if stripped is not None and _container_line_remainders(stripped, container.inner_container):
             return True
     return False
 
@@ -517,7 +528,9 @@ def _literal_fence_prefix_matches(prefix: str, container: _LiteralFenceContainer
     )
     for remainder in remainders:
         stripped = _strip_indentation_columns(remainder, container.content_indent)
-        if stripped is not None and _PLAIN_FENCE_PREFIX.fullmatch(stripped) is not None:
+        if stripped is not None and _container_fence_prefix_matches(
+            stripped, container.inner_container
+        ):
             return True
     return False
 
