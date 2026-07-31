@@ -509,32 +509,17 @@ def execution(
     Displays execution metadata, progress, and optionally events.
     """
     try:
-        lifecycle = asyncio.run(
+        persisted = asyncio.run(
             _execution_events(
                 _configured_event_store_path(),
                 execution_id,
-                include_all=False,
+                include_all=True,
             )
         )
-        persisted = lifecycle
-        if events:
-            persisted = asyncio.run(
-                _execution_events(
-                    _configured_event_store_path(),
-                    execution_id,
-                    include_all=True,
-                )
-            )
     except Exception as exc:
         print_error(f"Execution status failed: {escape(str(exc))}")
         raise typer.Exit(_STATUS_RUN_EXIT_GENERIC_ERROR) from exc
-    latest_lifecycle = next(
-        (event for event in lifecycle if event.type == "execution.terminal"),
-        None,
-    ) or next(
-        (event for event in lifecycle if _root_execution_status(event) is not None),
-        None,
-    )
+    latest_lifecycle = _latest_execution_lifecycle(persisted)
     if latest_lifecycle is None:
         print_error(
             f"Execution status failed: no persisted execution found: {escape(execution_id)}"

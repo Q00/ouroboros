@@ -812,6 +812,58 @@ def test_execution_shows_persisted_details_and_events(monkeypatch, tmp_path: Pat
     assert "Would show" not in result.output
 
 
+def test_execution_events_uses_one_resolved_snapshot(monkeypatch, tmp_path: Path) -> None:
+    now = datetime.now(UTC)
+    running = BaseEvent(
+        type="workflow.progress.updated",
+        timestamp=now - timedelta(seconds=1),
+        aggregate_type="execution",
+        aggregate_id="exec_advancing",
+        data={"status": "running"},
+    )
+    failed = BaseEvent(
+        type="execution.terminal",
+        timestamp=now,
+        aggregate_type="execution",
+        aggregate_id="exec_advancing",
+        data={"status": "failed"},
+    )
+    path_reads = 0
+    event_reads = 0
+
+    def resolved_path() -> Path:
+        nonlocal path_reads
+        path_reads += 1
+        return tmp_path / f"events-{path_reads}.db"
+
+    async def advancing_events(
+        _db_path: Path,
+        _execution_id: str,
+        *,
+        include_all: bool,
+    ) -> list[BaseEvent]:
+        nonlocal event_reads
+        event_reads += 1
+        return [running] if event_reads == 1 else [failed, running]
+
+    monkeypatch.setattr(
+        "ouroboros.cli.commands.status._configured_event_store_path",
+        resolved_path,
+    )
+    monkeypatch.setattr(
+        "ouroboros.cli.commands.status._execution_events",
+        advancing_events,
+    )
+
+    result = runner.invoke(app, ["execution", "exec_advancing", "--events"])
+
+    header, event_table = result.output.split("Execution Events", maxsplit=1)
+    assert result.exit_code == 0
+    assert not ("running" in header and "failed" in event_table)
+    assert path_reads == 1
+    assert event_reads == 1
+
+
 def test_execution_unknown_id_exits_two(monkeypatch, tmp_path: Path) -> None:
     config_dir = tmp_path / "config"
     db_path = config_dir / "data" / "ouroboros.db"
