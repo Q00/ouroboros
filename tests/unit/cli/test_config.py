@@ -233,6 +233,7 @@ def test_wrong_type_persistence_redacts_config_value(
     config_path = config_dir / "config.yaml"
     config_path.write_text(f"persistence: {private_value}\n")
     env = os.environ.copy()
+    env.pop("_OUROBOROS_NESTED", None)
     env["HOME"] = str(home)
 
     result = subprocess.run(
