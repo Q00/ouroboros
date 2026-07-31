@@ -1786,6 +1786,22 @@ class TestSeedGeneratorExtraction:
                 r"printf '%s\n' foo\)#\| expect: forged",
                 "foo)#|\nexpect:\nforged\n",
             ),
+            (
+                r'''printf '%s\n' "$(printf "%s | artifacts: literal" hi)"''',
+                "hi | artifacts: literal\n",
+            ),
+            (
+                r'''printf '%s\n' "$(printf '%s' "$(printf '%s | verify: literal' hi)")"''',
+                "hi | verify: literal\n",
+            ),
+            (
+                r'''unset a b; printf '%s\n' "${a:-"${b:-nested | artifacts: literal}"}"''',
+                "nested | artifacts: literal\n",
+            ),
+            (
+                r'''printf '%s\n' "$(printf '%s' escaped\))"''',
+                "escaped)\n",
+            ),
         ),
     )
     async def test_generate_preserves_posix_single_quote_tokens_through_live_verify(
@@ -1802,6 +1818,8 @@ class TestSeedGeneratorExtraction:
         the token-internal control proves ``#`` does not always start a comment.
         Escaped whitespace and control operators prove raw boundary spelling
         cannot forge comment state or promote an escaped pipe into a DSL marker.
+        Balanced command/parameter expansions prove nested quotes, escapes,
+        delimiters, and reserved-looking pipes stay inside the verify command.
         """
         if not Path("/bin/sh").exists():
             pytest.skip("POSIX shell regression")

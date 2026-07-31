@@ -119,6 +119,65 @@ def _starts_posix_shell_comment(char: str, *, word_started: bool) -> bool:
     return char == "#" and not word_started
 
 
+def _posix_expansion_end(value: str, index: int) -> int | None:
+    """Return the end of one balanced ``$()``/``${}`` shell expansion."""
+    if index + 1 >= len(value) or value[index] != "$" or value[index + 1] not in "({":
+        return None
+    frames: list[tuple[str, str | None]] = [(")" if value[index + 1] == "(" else "}", None)]
+    quote: str | None = None
+    escaped = False
+    cursor = index + 2
+    while cursor < len(value):
+        char = value[cursor]
+        if quote == "'":
+            if char == "'":
+                quote = None
+            cursor += 1
+            continue
+        if escaped:
+            escaped = False
+            cursor += 1
+            continue
+        if char == "\\":
+            escaped = True
+            cursor += 1
+            continue
+        if quote == '"':
+            if char == '"':
+                quote = None
+                cursor += 1
+                continue
+            if char == "$" and cursor + 1 < len(value) and value[cursor + 1] in "({":
+                frames.append((")" if value[cursor + 1] == "(" else "}", quote))
+                quote = None
+                cursor += 2
+                continue
+            cursor += 1
+            continue
+        if char in {"'", '"'}:
+            quote = char
+            cursor += 1
+            continue
+        if char == "$" and cursor + 1 < len(value) and value[cursor + 1] in "({":
+            frames.append((")" if value[cursor + 1] == "(" else "}", quote))
+            quote = None
+            cursor += 2
+            continue
+        if char == "(":
+            frames.append((")", quote))
+            cursor += 1
+            continue
+        if char == frames[-1][0]:
+            _, return_quote = frames.pop()
+            quote = return_quote
+            cursor += 1
+            if not frames:
+                return cursor
+            continue
+        cursor += 1
+    return None
+
+
 def _scan_pipe_led_ac_field_fragment(
     value: str,
     pipe_index: int,
@@ -332,6 +391,23 @@ def _iter_outer_ac_field_markers(body: str) -> tuple[_ACFieldMarker, ...]:
                 shell_word_started = True
             escaped = True
             index += 1
+            continue
+        if (
+            structured_payload_started
+            and active_field == "verify"
+            and char == "$"
+            and index + 1 < len(body)
+            and body[index + 1] in "({"
+            and quote in {None, '"'}
+        ):
+            expansion_end = _posix_expansion_end(body, index)
+            if expansion_end is None:
+                # Reuse the existing fail-closed unterminated-contract path.
+                quote = quote or "$("
+                index = len(body)
+                continue
+            shell_word_started = True
+            index = expansion_end
             continue
         if quote is not None:
             if char == quote:
