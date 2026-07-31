@@ -419,6 +419,49 @@ def test_files_touched_rejects_fragment_quoted_python_fallback(tmp_path) -> None
     )
 
 
+def test_files_touched_rejects_dead_compound_mutation_branch(tmp_path) -> None:
+    """A successful compound command cannot prove an unexecuted write branch."""
+    claimed_file = tmp_path / "claimed.py"
+    other_file = tmp_path / "other.py"
+    claimed_file.write_text("VALUE = 1\n", encoding="utf-8")
+    other_file.write_text("VALUE = 2\n", encoding="utf-8")
+    source = "from pathlib import Path; getattr(Path('other.py'), 'write_' + 'text')('changed')"
+    python_command = shlex.join([str(Path(sys.executable).resolve()), "-I", "-S", "-c", source])
+    inner = f"false && touch claimed.py; {python_command}"
+    command = f"/bin/bash -c {shlex.quote(inner)}"
+
+    completed = subprocess.run(
+        command,
+        cwd=tmp_path,
+        shell=True,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0
+    assert claimed_file.read_text(encoding="utf-8") == "VALUE = 1\n"
+    assert other_file.read_text(encoding="utf-8") == "changed"
+
+    messages = (
+        AgentMessage(
+            type="tool",
+            content=f"Bash: {command}",
+            tool_name="Bash",
+            data={"tool_input": {"command": command}},
+        ),
+        AgentMessage(
+            type="tool_result",
+            content="command completed with exit code 0",
+            data={"subtype": "tool_result", "exit_code": 0},
+        ),
+    )
+    assert not _runtime_messages_support_file_claim(
+        "claimed.py",
+        messages,
+        task_cwd=str(tmp_path),
+    )
+
+
 def test_files_touched_treats_python_wrapper_transcript_text_as_inert_data(tmp_path) -> None:
     """Instruction-like command text is parsed as evidence data and never executed."""
     claimed_file = tmp_path / "claimed.py"

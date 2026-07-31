@@ -13,6 +13,7 @@ from ouroboros.orchestrator.evidence.common import _flatten_evidence_values
 from ouroboros.orchestrator.evidence.shell_parsing import (
     _has_trailing_output_filter_pipeline,
     _normalized_command_claim_aliases,
+    _shell_command_body,
     _single_command_after_safe_shell_preamble,
     _test_command_invocation,
     _test_command_invocation_allowing_output_plumbing,
@@ -480,6 +481,11 @@ def _bash_command_mutates_file_reference(
         normalized_command = command.strip().lower()
         if not normalized_command:
             continue
+        if _has_unquoted_compound_shell_control(command):
+            # A successful compound command does not prove that every textual
+            # mutation branch executed. Require structured file evidence
+            # instead of interpreting control flow from a transcript string.
+            continue
         python_pathlib_match = _python_c_pathlib_write_reference_match(
             command,
             reference=reference,
@@ -501,6 +507,41 @@ def _bash_command_mutates_file_reference(
             normalized_command,
         ):
             return True
+    return False
+
+
+def _has_unquoted_compound_shell_control(command: str) -> bool:
+    """Return True when command text contains execution control operators."""
+    wrapped_body = _shell_command_body(command)
+    if wrapped_body is not None:
+        return _has_unquoted_compound_shell_control(wrapped_body)
+    quote: str | None = None
+    escaped = False
+    for index, char in enumerate(command):
+        if escaped:
+            escaped = False
+            continue
+        if quote == "'":
+            if char == "'":
+                quote = None
+            continue
+        if char == "\\":
+            escaped = True
+            continue
+        if quote == '"':
+            if char == '"':
+                quote = None
+            continue
+        if char in {"'", '"'}:
+            quote = char
+            continue
+        if char in {"|", ";", "\n", "\r"}:
+            return True
+        if char == "&":
+            previous = command[index - 1] if index > 0 else ""
+            following = command[index + 1] if index + 1 < len(command) else ""
+            if previous not in {">", "<"} and following != ">":
+                return True
     return False
 
 
@@ -580,21 +621,19 @@ def _python_c_pathlib_write_reference_match(
     # receiver. Detect the Python source itself before shell tokenization so
     # executable quoting/concatenation (for example ``py"thon"``) cannot move
     # the same payload into generic shell mutation heuristics.
-    if _raw_command_mentions_python_c_pathlib_write(command):
+    if _raw_command_mentions_python_c_pathlib(command):
         return False
     try:
         argv = shlex.split(command)
     except ValueError:
-        if _raw_command_mentions_python_c_pathlib_write(command):
+        if _raw_command_mentions_python_c_pathlib(command):
             return False
         return None
     python_index = _python_c_argv_index(argv, task_cwd=task_cwd)
     if python_index is False:
         return False
     if python_index is None:
-        if _raw_command_mentions_python_c_pathlib_write(
-            command
-        ) or _argv_mentions_python_c_pathlib_write(argv):
+        if _raw_command_mentions_python_c_pathlib(command) or _argv_mentions_python_c_pathlib(argv):
             return False
         return None
     if len(argv) <= python_index + 2 or "-c" not in argv[python_index + 1 :]:
@@ -603,7 +642,7 @@ def _python_c_pathlib_write_reference_match(
     if len(argv) <= source_index:
         return None
     source = argv[source_index]
-    if not _source_mentions_pathlib_write(source):
+    if not _source_mentions_pathlib(source):
         return None
     if (
         python_index != 0
@@ -652,20 +691,14 @@ def _normalize_absolute_path(path: Path) -> Path:
     return Path(PurePosixPath(path).as_posix())
 
 
-def _raw_command_mentions_python_c_pathlib_write(command: str) -> bool:
-    return (
-        _source_mentions_pathlib_write(command)
-        and re.search(
-            r"\bpathlib\b|\bPath\s*\(",
-            command,
-            re.IGNORECASE,
-        )
-        is not None
+def _raw_command_mentions_python_c_pathlib(command: str) -> bool:
+    return re.search(r"(?:^|\s)-c(?:\s|$)", command) is not None and _source_mentions_pathlib(
+        command
     )
 
 
-def _source_mentions_pathlib_write(source: str) -> bool:
-    return re.search(r"\bwrite_(?:text|bytes)\b", source) is not None
+def _source_mentions_pathlib(source: str) -> bool:
+    return re.search(r"\bpathlib\b|\bPath\s*\(", source, re.IGNORECASE) is not None
 
 
 def _source_needs_shell_expansion(source: str) -> bool:
@@ -798,8 +831,8 @@ def _is_path_constructor(node: ast.AST) -> bool:
     return isinstance(node, ast.Name) and node.id == "Path"
 
 
-def _argv_mentions_python_c_pathlib_write(argv: list[str]) -> bool:
-    return any(_raw_command_mentions_python_c_pathlib_write(value) for value in argv)
+def _argv_mentions_python_c_pathlib(argv: list[str]) -> bool:
+    return any(_raw_command_mentions_python_c_pathlib(value) for value in argv)
 
 
 def _python_c_argv_index(argv: list[str], *, task_cwd: str) -> int | None | bool:
