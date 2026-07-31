@@ -259,6 +259,25 @@ class TestPolicyTightening:
 
         assert module.main(["--baseline-ref", ref]) == 0
 
+    def test_partial_reseed_fails(self, module, monkeypatch, tmp_path, capsys):
+        """A decrease must lock in all significant shrinkage, not retain slack."""
+        ref = _baseline_repo(tmp_path, {"src/ouroboros/god.py": 5000})
+        _write(tmp_path, "src/ouroboros/god.py", 4500)
+        _isolate(module, monkeypatch, tmp_path, {"src/ouroboros/god.py": 4700})
+
+        assert module.main(["--baseline-ref", ref]) == 1
+        err = capsys.readouterr().err
+        assert "Partial re-seeds preserve headroom" in err
+        assert '"src/ouroboros/god.py": 4500,' in err
+        assert "predecessor 5000, proposed 4700" in err
+
+    def test_exact_reseed_passes(self, module, monkeypatch, tmp_path):
+        ref = _baseline_repo(tmp_path, {"src/ouroboros/god.py": 5000})
+        _write(tmp_path, "src/ouroboros/god.py", 4500)
+        _isolate(module, monkeypatch, tmp_path, {"src/ouroboros/god.py": 4500})
+
+        assert module.main(["--baseline-ref", ref]) == 0
+
     def test_removing_an_entry_is_allowed(self, module, monkeypatch, tmp_path):
         ref = _baseline_repo(tmp_path, {"src/ouroboros/god.py": 5000})
         _write(tmp_path, "src/ouroboros/god.py", 1500)
@@ -416,6 +435,7 @@ def test_vanished_entry_fails_loud(module, monkeypatch, tmp_path, capsys):
     assert module.main([]) == 1
     err = capsys.readouterr().err
     assert "no longer exist" in err
+    assert "budget cannot be transferred" in err
     assert "gone: src/ouroboros/moved.py" in err
 
 

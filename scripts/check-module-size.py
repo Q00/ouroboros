@@ -408,6 +408,7 @@ def main(argv: list[str] | None = None) -> int:
     slack_raised: tuple[int, int] | None = None
     exclusions_added: list[str] = []
     scope_changes: list[tuple[str, str, str]] = []
+    baseline_policy: Policy | None = None
     if args.baseline_ref is not None:
         try:
             baseline = _baseline_policy(args.baseline_ref)
@@ -423,6 +424,7 @@ def main(argv: list[str] | None = None) -> int:
                 "gate's introducing commit; skipping the tightening check."
             )
         else:
+            baseline_policy = baseline
             (
                 added,
                 raised,
@@ -443,6 +445,7 @@ def main(argv: list[str] | None = None) -> int:
     over_cap: list[tuple[str, int]] = []
     over_budget: list[tuple[str, int, int]] = []
     needs_reseed: list[tuple[str, int, int]] = []
+    inexact_reseeds: list[tuple[str, int, int, int]] = []
     retired: list[tuple[str, int]] = []
 
     for rel, count in sorted(sizes.items()):
@@ -458,12 +461,34 @@ def main(argv: list[str] | None = None) -> int:
         elif budget - count > RESEED_SLACK:
             needs_reseed.append((rel, count, budget))
 
+    if baseline_policy is not None:
+        baseline_table = baseline_policy[0]
+        for rel, previous_budget in sorted(baseline_table.items()):
+            count = sizes.get(rel)
+            proposed_budget = GRANDFATHERED.get(rel)
+            if (
+                count is None
+                or proposed_budget is None
+                or count <= SOFT_CAP
+                or previous_budget - count <= RESEED_SLACK
+                or proposed_budget == count
+            ):
+                continue
+            inexact_reseeds.append((rel, count, previous_budget, proposed_budget))
+
+        # The predecessor comparison is stronger than the snapshot check: it
+        # also catches a partial decrease that leaves up to RESEED_SLACK lines
+        # available to regrow. Avoid printing two remediations for the same path.
+        inexact_paths = {rel for rel, *_ in inexact_reseeds}
+        needs_reseed = [item for item in needs_reseed if item[0] not in inexact_paths]
+
     if (
         not (
             vanished
             or over_cap
             or over_budget
             or needs_reseed
+            or inexact_reseeds
             or retired
             or added
             or raised
@@ -539,9 +564,10 @@ def main(argv: list[str] | None = None) -> int:
 
     if vanished:
         write(
-            "Grandfathered modules no longer exist. If you renamed, moved, or split\n"
-            "them, update GRANDFATHERED in scripts/check-module-size.py in the same PR\n"
-            "so the cap follows the code:\n"
+            "Grandfathered modules no longer exist. GRANDFATHERED is a closed set, so\n"
+            "their budget cannot be transferred to a renamed or moved path. Split or\n"
+            f"reduce every replacement module to {SOFT_CAP} lines or fewer, then remove\n"
+            "the stale entry from scripts/check-module-size.py in the same PR:\n"
         )
         for rel in vanished:
             write(f"  gone: {rel}\n")
@@ -574,6 +600,20 @@ def main(argv: list[str] | None = None) -> int:
         )
         for rel, count, budget in needs_reseed:
             write(f'    "{rel}": {count},   # was {budget}\n')
+        write("\n")
+
+    if inexact_reseeds:
+        write(
+            f"Grandfathered modules shrank by more than {RESEED_SLACK} lines relative to\n"
+            "the predecessor, but their replacement budgets do not exactly match the\n"
+            "measured sizes. Partial re-seeds preserve headroom that a later PR can spend;\n"
+            "use these exact GRANDFATHERED entries instead:\n"
+        )
+        for rel, count, previous_budget, proposed_budget in inexact_reseeds:
+            write(
+                f'    "{rel}": {count},   # predecessor {previous_budget}, '
+                f"proposed {proposed_budget}\n"
+            )
         write("\n")
 
     if retired:
