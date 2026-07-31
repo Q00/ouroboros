@@ -2535,6 +2535,73 @@ class TestCancellationSettlement:
         assert len(events) == 1
         await reopened.close()
 
+    @pytest.mark.parametrize("batch", [False, True], ids=["single", "batch"])
+    @pytest.mark.asyncio
+    async def test_close_fences_complete_retry_lifecycle(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        batch: bool,
+    ) -> None:
+        """A retrying write cannot escape close through its backoff gap."""
+        from sqlalchemy.exc import OperationalError
+
+        db_path = tmp_path / f"retry-close-{batch}.db"
+        store = EventStore(f"sqlite+aiosqlite:///{db_path}")
+        await store.initialize()
+        assert store._engine is not None
+
+        engine_type = type(store._engine)
+        original_begin = engine_type.begin
+        attempts = 0
+
+        class _LockedTransaction:
+            async def __aenter__(self):  # noqa: ANN204
+                raise OperationalError("INSERT", {}, Exception("database is locked"))
+
+            async def __aexit__(self, *_args: object) -> None:
+                return None
+
+        def flaky_begin(engine):  # noqa: ANN001, ANN202
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                return _LockedTransaction()
+            return original_begin(engine)
+
+        monkeypatch.setattr(engine_type, "begin", flaky_begin)
+        backoff_entered = asyncio.Event()
+        release_backoff = asyncio.Event()
+        original_sleep = asyncio.sleep
+
+        async def gated_sleep(delay: float) -> None:
+            if delay == 0.1 and not backoff_entered.is_set():
+                backoff_entered.set()
+                await release_backoff.wait()
+                return
+            await original_sleep(delay)
+
+        monkeypatch.setattr("ouroboros.persistence.event_store.asyncio.sleep", gated_sleep)
+        event = _make_event(aggregate_id=f"retry-close-{batch}")
+        write_task = asyncio.create_task(
+            store.append_batch([event]) if batch else store.append(event)
+        )
+        await asyncio.wait_for(backoff_entered.wait(), timeout=5)
+
+        close_task = asyncio.create_task(store.close())
+        await original_sleep(0)
+        assert not close_task.done(), "close escaped while the logical write was backing off"
+
+        release_backoff.set()
+        with pytest.raises(PersistenceError) as exc_info:
+            await asyncio.wait_for(write_task, timeout=5)
+        assert exc_info.value.operation == ("append_batch" if batch else "append_with_rowid")
+        await asyncio.wait_for(close_task, timeout=10)
+
+        await store.initialize()
+        assert await store.replay("test", f"retry-close-{batch}") == []
+        await store.close()
+
     @pytest.mark.asyncio
     async def test_append_started_during_close_is_refused(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path

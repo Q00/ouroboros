@@ -178,6 +178,36 @@ async def _await_sqlite_write_atomically[T](awaitable: Coroutine[Any, Any, T]) -
     return await _run_to_settlement(awaitable)
 
 
+async def _run_with_write_lifecycle[T](
+    coro: Coroutine[Any, Any, T],
+    *,
+    registry: set[asyncio.Task[Any]],
+    refuse_when: Callable[[], bool],
+    operation: str,
+) -> T:
+    """Keep a complete logical write registered across retries and backoff."""
+    if refuse_when():
+        coro.close()
+        raise PersistenceError(
+            "EventStore is closing; write refused.",
+            operation=operation,
+        )
+    task = asyncio.current_task()
+    if task is None:  # pragma: no cover - async functions always have a task here.
+        coro.close()
+        raise PersistenceError(
+            "EventStore write has no owning task.",
+            operation=operation,
+        )
+    already_registered = task in registry
+    registry.add(task)
+    try:
+        return await coro
+    finally:
+        if not already_registered:
+            registry.discard(task)
+
+
 def acceptance_generation_id_for_session(session_id: str, execution_id: str) -> str:
     """Return a durable B generation independent of A's live correlation."""
     if (
@@ -1396,6 +1426,23 @@ class EventStore:
         _skip_workflow_ir_guard: bool = False,
     ) -> int:
         """Append an event and return its exact SQLite rowid."""
+        return await _run_with_write_lifecycle(
+            self._append_with_rowid_registered(
+                event,
+                _skip_workflow_ir_guard=_skip_workflow_ir_guard,
+            ),
+            registry=self._settling_writes,
+            refuse_when=lambda: self._closing,
+            operation="append_with_rowid",
+        )
+
+    async def _append_with_rowid_registered(
+        self,
+        event: BaseEvent,
+        *,
+        _skip_workflow_ir_guard: bool = False,
+    ) -> int:
+        """Implement one registered append, including all retries and backoff."""
         if self._engine is None:
             raise PersistenceError(
                 "EventStore not initialized. Call initialize() first.",
@@ -1478,6 +1525,8 @@ class EventStore:
                     refuse_when=lambda: self._closing,
                     operation="append_with_rowid",
                 )
+            except PersistenceError:
+                raise
             except Exception as e:
                 if "database is locked" in str(e) and attempt < 2:
                     logger.warning(
@@ -1515,6 +1564,15 @@ class EventStore:
             PersistenceError: If the batch operation fails. No events
                              will be persisted if this is raised.
         """
+        await _run_with_write_lifecycle(
+            self._append_batch_registered(events),
+            registry=self._settling_writes,
+            refuse_when=lambda: self._closing,
+            operation="append_batch",
+        )
+
+    async def _append_batch_registered(self, events: list[BaseEvent]) -> None:
+        """Implement one registered batch, including all retries and backoff."""
         if self._engine is None:
             raise PersistenceError(
                 "EventStore not initialized. Call initialize() first.",
@@ -1606,6 +1664,8 @@ class EventStore:
                     operation="append_batch",
                 )
                 return
+            except PersistenceError:
+                raise
             except Exception as e:
                 if "database is locked" in str(e) and attempt < 2:
                     logger.warning(
