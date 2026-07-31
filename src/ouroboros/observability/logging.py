@@ -40,11 +40,14 @@ Usage:
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from enum import StrEnum
 import logging
 from logging.handlers import TimedRotatingFileHandler
 import os
 from pathlib import Path
+import sys
+from threading import RLock
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -93,6 +96,8 @@ def _close_root_handlers() -> None:
     """Detach and close all handlers currently attached to the root logger."""
     root_logger = logging.getLogger()
     for handler in root_logger.handlers[:]:
+        if isinstance(handler, _SynchronizedTimedRotatingFileHandler):
+            handler.retire()
         root_logger.removeHandler(handler)
         try:
             handler.flush()
@@ -160,7 +165,7 @@ def _setup_file_handler(config: LoggingConfig) -> TimedRotatingFileHandler | Non
         # Configure rotating file handler
         # - when="midnight" for daily rotation
         # - backupCount controls retention
-        handler = TimedRotatingFileHandler(
+        handler = _SynchronizedTimedRotatingFileHandler(
             filename=str(log_file),
             when="midnight",
             interval=1,
@@ -248,6 +253,46 @@ def _mask_dict_sensitive_data(data: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+@dataclass(frozen=True, slots=True)
+class _ApplicationCallsite:
+    """Application frame captured before entering the custom processor loop."""
+
+    filename: str
+    lineno: int
+    func_name: str
+
+
+_CALLSITE_EVENT_KEY = "_ouroboros_application_callsite"
+
+
+class _ApplicationCallsiteParameterAdder:
+    """Preserve sync callers while retaining structlog's async stack support."""
+
+    def __init__(self) -> None:
+        self._fallback = structlog.processors.CallsiteParameterAdder(
+            parameters=[
+                structlog.processors.CallsiteParameter.FILENAME,
+                structlog.processors.CallsiteParameter.LINENO,
+                structlog.processors.CallsiteParameter.FUNC_NAME,
+            ]
+        )
+
+    def __call__(
+        self,
+        logger: Any,
+        method_name: str,
+        event_dict: dict[str, Any],
+    ) -> dict[str, Any]:
+        callsite = event_dict.pop(_CALLSITE_EVENT_KEY, None)
+        if not isinstance(callsite, _ApplicationCallsite):
+            return self._fallback(logger, method_name, event_dict)
+
+        event_dict["filename"] = Path(callsite.filename).name
+        event_dict["lineno"] = callsite.lineno
+        event_dict["func_name"] = callsite.func_name
+        return event_dict
+
+
 def _get_shared_processors() -> list[Any]:
     """Get the shared processor chain for structlog.
 
@@ -268,12 +313,7 @@ def _get_shared_processors() -> list[Any]:
         # Add stack info for exceptions
         structlog.processors.StackInfoRenderer(),
         # Add caller info (file, line, function) - useful for debugging
-        structlog.processors.CallsiteParameterAdder(
-            parameters=[
-                structlog.processors.CallsiteParameter.FILENAME,
-                structlog.processors.CallsiteParameter.LINENO,
-            ]
-        ),
+        _ApplicationCallsiteParameterAdder(),
     ]
 
 
@@ -325,6 +365,158 @@ def _get_file_processors() -> list[Any]:
 _console_logging_enabled: bool = True
 
 
+@dataclass(frozen=True, slots=True)
+class _LoggingGeneration:
+    """One atomically published logging pipeline generation."""
+
+    min_level: int
+    # structlog.testing.capture_logs() temporarily mutates the configured list
+    # in place.  Sharing that exact container preserves structlog's public test
+    # hook; production transitions still publish a fresh list per generation.
+    processors: list[Any]
+    file_handler: TimedRotatingFileHandler | None
+
+
+# Emission holds this lock through handler.emit(), while configure/reset hold
+# it through sink publication and old-handler retirement. RLock is required so
+# a handler/setup hook that logs during a transition safely reaches the neutral
+# sink instead of deadlocking or reopening the retiring file.
+_sink_lock = RLock()
+_live_generation = _LoggingGeneration(
+    min_level=logging.INFO,
+    processors=_get_console_processors(LogMode.DEV),
+    file_handler=None,
+)
+
+
+_METHOD_LEVELS = {
+    "debug": logging.DEBUG,
+    "info": logging.INFO,
+    "msg": logging.INFO,
+    "warning": logging.WARNING,
+    "warn": logging.WARNING,
+    "error": logging.ERROR,
+    "exception": logging.ERROR,
+    "critical": logging.CRITICAL,
+    "fatal": logging.CRITICAL,
+}
+
+
+def _capture_sync_application_callsite() -> _ApplicationCallsite | None:
+    """Return the sync application frame outside the native structlog wrapper."""
+    try:
+        frame = sys._getframe(2)
+    except ValueError:  # pragma: no cover - CPython always has these frames here.
+        return None
+
+    while frame is not None:
+        module_name = str(frame.f_globals.get("__name__", ""))
+        if module_name == "structlog" or module_name.startswith("structlog."):
+            frame = frame.f_back
+            continue
+
+        # Native async methods execute _proxy_to_logger in an executor.  In
+        # that case structlog's CallsiteParameterAdder uses its preserved
+        # calling-stack context; substituting an executor frame would corrupt
+        # the already-correct async attribution.
+        if module_name == "threading" or module_name.startswith(
+            ("asyncio.", "concurrent.futures.")
+        ):
+            return None
+
+        return _ApplicationCallsite(
+            filename=frame.f_code.co_filename,
+            lineno=frame.f_lineno,
+            func_name=frame.f_code.co_name,
+        )
+
+    return None
+
+
+class _GenerationBoundLogger(
+    structlog.make_filtering_bound_logger(logging.NOTSET)  # type: ignore[misc]
+):
+    """Bind processors, filtering, and destination to one live generation."""
+
+    def _proxy_to_logger(
+        self,
+        method_name: str,
+        event: str | None = None,
+        **event_kw: Any,
+    ) -> Any:
+        # A lazy proxy can materialize immediately before a transition.  The
+        # wrapper class is deliberately stable and ignores its captured
+        # processor list; selecting the live generation under this lock keeps
+        # rendering, level filtering, and destination emission coherent.
+        with _sink_lock:
+            generation = _live_generation
+            if _METHOD_LEVELS.get(method_name, logging.INFO) < generation.min_level:
+                return None
+
+            event_dict: Any = self._context.copy()
+            event_dict.update(**event_kw)
+            if event is not None:
+                event_dict["event"] = event
+
+            # capture_logs() intentionally replaces the processor list.  Only
+            # attach the private frame marker when our consuming processor is
+            # present so the marker cannot leak into captured/public payloads.
+            if any(
+                isinstance(processor, _ApplicationCallsiteParameterAdder)
+                for processor in generation.processors
+            ):
+                event_dict[_CALLSITE_EVENT_KEY] = _capture_sync_application_callsite()
+
+            try:
+                for processor in generation.processors:
+                    event_dict = processor(self._logger, method_name, event_dict)
+
+                if isinstance(event_dict, (str, bytes, bytearray)):
+                    args, kwargs = (event_dict,), {}
+                elif isinstance(event_dict, tuple):
+                    args, kwargs = event_dict
+                elif isinstance(event_dict, dict):
+                    args, kwargs = (), event_dict
+                else:
+                    raise ValueError(
+                        "Last processor didn't return an appropriate value. "
+                        "Valid return values are a dict, a tuple of "
+                        "(args, kwargs), bytes, or a str."
+                    )
+
+                return getattr(self._logger, method_name)(*args, **kwargs)
+            except structlog.DropEvent:
+                return None
+
+    def is_enabled_for(self, level: int) -> bool:
+        """Return whether *level* is enabled in the live generation."""
+        with _sink_lock:
+            return level >= _live_generation.min_level
+
+    def get_effective_level(self) -> int:
+        """Return the live generation's effective level."""
+        with _sink_lock:
+            return _live_generation.min_level
+
+
+class _SynchronizedTimedRotatingFileHandler(TimedRotatingFileHandler):
+    """A project-owned root handler that cannot emit after retirement."""
+
+    _retired: bool = False
+
+    def handle(self, record: logging.LogRecord) -> bool:
+        """Serialize stdlib emission with generation retirement."""
+        with _sink_lock:
+            if self._retired:
+                return False
+            return super().handle(record)
+
+    def retire(self) -> None:
+        """Prevent already-selected calls from reopening this handler."""
+        with _sink_lock:
+            self._retired = True
+
+
 def set_console_logging(enabled: bool) -> None:
     """Enable or disable console log output.
 
@@ -332,7 +524,8 @@ def set_console_logging(enabled: bool) -> None:
         enabled: True to enable console logging, False to disable.
     """
     global _console_logging_enabled
-    _console_logging_enabled = enabled
+    with _sink_lock:
+        _console_logging_enabled = enabled
 
 
 def is_console_logging_enabled() -> bool:
@@ -341,23 +534,17 @@ def is_console_logging_enabled() -> bool:
     Returns:
         True if console logging is enabled.
     """
-    return _console_logging_enabled
+    with _sink_lock:
+        return _console_logging_enabled
 
 
 class _FileWritingPrintLogger:
     """Print logger that also writes to a file handler.
 
-    This logger writes to stdout (for console output) and optionally
-    to a file handler for persistent logging. Supports proper log levels.
+    This logger writes to stderr (for console output, keeping stdout reserved
+    for command output) and optionally to a file handler for persistent
+    logging. Supports proper log levels.
     """
-
-    def __init__(self, file_handler: TimedRotatingFileHandler | None = None) -> None:
-        """Initialize the file-writing print logger.
-
-        Args:
-            file_handler: Optional file handler for persistent logging.
-        """
-        self._file_handler = file_handler
 
     def _log(self, message: str, level: int = logging.INFO) -> None:
         """Log a message to console and file with proper level.
@@ -366,24 +553,30 @@ class _FileWritingPrintLogger:
             message: The message to log.
             level: The log level (e.g., logging.DEBUG, logging.INFO).
         """
-        import sys
 
-        # Print to stderr only if console logging is enabled
-        if _console_logging_enabled:
-            print(message, file=sys.stderr)
+        # Snapshot the complete sink exactly once and keep retirement fenced
+        # through emit(). Cached proxies therefore cannot observe a new level
+        # with an old handler, dereference a removed handler, or reopen a file
+        # that reset/reconfigure has just closed.
+        with _sink_lock:
+            generation = _live_generation
+            if level < generation.min_level:
+                return
 
-        # Write to file if handler exists
-        if self._file_handler:
-            record = logging.LogRecord(
-                name="ouroboros",
-                level=level,
-                pathname="",
-                lineno=0,
-                msg=message,
-                args=(),
-                exc_info=None,
-            )
-            self._file_handler.emit(record)
+            if _console_logging_enabled:
+                print(message, file=sys.stderr)
+
+            if generation.file_handler is not None:
+                record = logging.LogRecord(
+                    name="ouroboros",
+                    level=level,
+                    pathname="",
+                    lineno=0,
+                    msg=message,
+                    args=(),
+                    exc_info=None,
+                )
+                generation.file_handler.emit(record)
 
     def msg(self, message: str) -> None:
         """Log a message to console and file (default INFO level)."""
@@ -431,21 +624,13 @@ class _FileWritingPrintLogger:
 class _FileWritingPrintLoggerFactory:
     """Factory for creating file-writing print loggers."""
 
-    def __init__(self, file_handler: TimedRotatingFileHandler | None = None) -> None:
-        """Initialize the factory.
-
-        Args:
-            file_handler: Optional file handler for persistent logging.
-        """
-        self._file_handler = file_handler
-
     def __call__(self, *_args: Any) -> _FileWritingPrintLogger:
         """Create a new logger instance.
 
         Args:
             *_args: Ignored arguments (structlog may pass logger name).
         """
-        return _FileWritingPrintLogger(self._file_handler)
+        return _FileWritingPrintLogger()
 
 
 def configure_logging(config: LoggingConfig | None = None) -> None:
@@ -468,44 +653,49 @@ def configure_logging(config: LoggingConfig | None = None) -> None:
         # Or specify config explicitly
         configure_logging(LoggingConfig(mode=LogMode.PROD, max_log_days=14))
     """
-    global _configured, _current_config
+    global _configured, _current_config, _live_generation
 
     if config is None:
         config = LoggingConfig(mode=_get_mode_from_env())
 
-    _current_config = config
-
-    # Set up standard library logging
     log_level = _get_log_level(config.log_level)
-
-    # Configure root logger
-    root_logger = logging.getLogger()
-    root_logger.setLevel(log_level)
-
-    # Remove existing handlers to avoid duplicates on reconfigure
-    _close_root_handlers()
-
-    # Add file handler if enabled
-    file_handler = _setup_file_handler(config)
-    if file_handler:
-        root_logger.addHandler(file_handler)
-
-    # Get processors for console output
     processors = _get_console_processors(config.mode)
 
-    # Create logger factory that writes to both console and file
-    logger_factory = _FileWritingPrintLoggerFactory(file_handler)
+    with _sink_lock:
+        # Publish a handler-free transition generation before touching the old
+        # handler. Re-entrant logs from setup/flush/close remain observable on
+        # stderr but can never reopen or append to the retiring file.
+        _live_generation = _LoggingGeneration(
+            min_level=log_level,
+            processors=processors,
+            file_handler=None,
+        )
+        root_logger = logging.getLogger()
+        root_logger.setLevel(log_level)
+        _close_root_handlers()
 
-    # Configure structlog
-    structlog.configure(
-        processors=processors,
-        wrapper_class=structlog.make_filtering_bound_logger(log_level),
-        context_class=dict,
-        logger_factory=logger_factory,
-        cache_logger_on_first_use=True,
-    )
+        file_handler = _setup_file_handler(config)
+        if file_handler:
+            root_logger.addHandler(file_handler)
 
-    _configured = True
+        structlog.configure(
+            processors=processors,
+            wrapper_class=_GenerationBoundLogger,
+            context_class=dict,
+            logger_factory=_FileWritingPrintLoggerFactory(),
+            # The stable wrapper resolves filtering and processors from the live
+            # generation, so even explicitly bound loggers follow later
+            # configurations.  Avoiding proxy caching additionally keeps the
+            # surrounding structlog factory/context configuration replaceable.
+            cache_logger_on_first_use=False,
+        )
+        _live_generation = _LoggingGeneration(
+            min_level=log_level,
+            processors=processors,
+            file_handler=file_handler,
+        )
+        _current_config = config
+        _configured = True
 
 
 def get_logger(name: str | None = None) -> structlog.stdlib.BoundLogger:
@@ -525,10 +715,10 @@ def get_logger(name: str | None = None) -> structlog.stdlib.BoundLogger:
     """
     global _configured
 
-    if not _configured:
-        configure_logging()
-
-    return structlog.get_logger(name)
+    with _sink_lock:
+        if not _configured:
+            configure_logging()
+        return structlog.get_logger(name)
 
 
 def bind_context(**kwargs: Any) -> None:
@@ -593,7 +783,8 @@ def get_current_config() -> LoggingConfig | None:
     Returns:
         The current LoggingConfig or None if not configured.
     """
-    return _current_config
+    with _sink_lock:
+        return _current_config
 
 
 def is_configured() -> bool:
@@ -602,7 +793,8 @@ def is_configured() -> bool:
     Returns:
         True if configure_logging has been called.
     """
-    return _configured
+    with _sink_lock:
+        return _configured
 
 
 def reset_logging() -> None:
@@ -628,12 +820,12 @@ def reset_logging() -> None:
     stdout, which contaminates any CLI result parsed by a caller or
     asserted on by a later test.
 
-    So carry both halves of the contract across the reset: keep the
-    outgoing configuration's level, and keep writing to stderr. Preserving
-    the level rather than assuming the ``LoggingConfig`` default matters
-    when the outgoing configuration was quieter — resetting an
-    ``ERROR``-level process to ``INFO`` would be its own volume
-    regression. ``_configured`` stays false and ``_current_config`` stays
+    So carry both halves of the contract across the reset: keep writing to
+    stderr and never become louder than either INFO or the outgoing
+    configuration. Preserving a quieter outgoing level matters because
+    resetting an ``ERROR``-level process to ``INFO`` would be its own volume
+    regression; clamping a noisier DEBUG process to INFO keeps the neutral
+    baseline safe. ``_configured`` stays false and ``_current_config`` stays
     ``None``, so the next :func:`get_logger` still performs a full
     reconfiguration.
 
@@ -648,19 +840,30 @@ def reset_logging() -> None:
     :func:`set_console_logging` honored across a reset instead of silently
     re-enabling console output.
     """
-    global _configured, _current_config
-    # Read before clearing: the reset must not be louder than what it replaces.
-    outgoing_level = _get_log_level((_current_config or LoggingConfig()).log_level)
-    _configured = False
-    _current_config = None
-    _close_root_handlers()
-    # Clear any bound context
-    structlog.contextvars.clear_contextvars()
-    # Reset structlog configuration
-    structlog.reset_defaults()
-    structlog.configure(
-        wrapper_class=structlog.make_filtering_bound_logger(outgoing_level),
-        # No file handler: the outgoing one was just closed by
-        # _close_root_handlers(), and a reset must not hold a resource.
-        logger_factory=_FileWritingPrintLoggerFactory(None),
-    )
+    global _configured, _current_config, _live_generation
+    with _sink_lock:
+        # Read before clearing: the reset must not be louder than what it replaces.
+        if _current_config is None:
+            outgoing_level = _live_generation.min_level
+        else:
+            outgoing_level = _get_log_level(_current_config.log_level)
+        baseline_level = max(logging.INFO, outgoing_level)
+        _configured = False
+        _current_config = None
+        processors = _get_console_processors(LogMode.DEV)
+        _live_generation = _LoggingGeneration(
+            min_level=baseline_level,
+            processors=processors,
+            file_handler=None,
+        )
+        _close_root_handlers()
+        structlog.contextvars.clear_contextvars()
+        structlog.configure(
+            processors=processors,
+            wrapper_class=_GenerationBoundLogger,
+            context_class=dict,
+            # No file handler: the outgoing one was just closed by
+            # _close_root_handlers(), and a reset must not hold a resource.
+            logger_factory=_FileWritingPrintLoggerFactory(),
+            cache_logger_on_first_use=False,
+        )

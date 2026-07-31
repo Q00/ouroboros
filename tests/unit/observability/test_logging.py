@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+from threading import Event, Thread
 from typing import Any
 from unittest.mock import patch
 import warnings
@@ -16,6 +17,7 @@ import warnings
 import pytest
 import structlog
 
+import ouroboros.observability.logging as ouroboros_logging
 from ouroboros.observability.logging import (
     LoggingConfig,
     LogMode,
@@ -186,8 +188,9 @@ class TestConfigureLogging:
         """configure_logging falls back to console logging on file errors."""
         config = LoggingConfig(log_dir=temp_log_dir, enable_file_logging=True)
 
-        with patch(
-            "ouroboros.observability.logging.TimedRotatingFileHandler",
+        with patch.object(
+            ouroboros_logging._SynchronizedTimedRotatingFileHandler,
+            "__init__",
             side_effect=PermissionError("denied"),
         ):
             configure_logging(config)
@@ -472,6 +475,531 @@ class TestLogRotation:
 class TestResetLogging:
     """Test reset_logging function."""
 
+    @pytest.mark.asyncio
+    async def test_sync_and_async_records_preserve_application_callsite(
+        self,
+        capsys: Any,
+    ) -> None:
+        """The generation wrapper is never reported as the event origin."""
+        configure_logging(LoggingConfig(mode=LogMode.PROD, enable_file_logging=False))
+        logger = structlog.get_logger("callsite-generation")
+
+        def emit_sync() -> int:
+            expected_line = sys._getframe().f_lineno + 1
+            logger.info("sync-callsite")
+            return expected_line
+
+        async def emit_async() -> int:
+            expected_line = sys._getframe().f_lineno + 1
+            await logger.ainfo("async-callsite")
+            return expected_line
+
+        sync_line = emit_sync()
+        async_line = await emit_async()
+        payloads = [
+            json.loads(line) for line in capsys.readouterr().err.splitlines() if line.strip()
+        ]
+
+        assert [payload["filename"] for payload in payloads] == [
+            Path(__file__).name,
+            Path(__file__).name,
+        ]
+        assert [payload["lineno"] for payload in payloads] == [sync_line, async_line]
+        assert [payload["func_name"] for payload in payloads] == [
+            "emit_sync",
+            "emit_async",
+        ]
+
+    def test_stdlib_record_selected_before_reconfigure_cannot_reopen_old_handler(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """An already-selected root handler must observe retirement."""
+        old_dir = tmp_path / "old"
+        new_dir = tmp_path / "new"
+        configure_logging(LoggingConfig(log_dir=old_dir, enable_file_logging=True))
+        old_handler = logging.getLogger().handlers[0]
+        original_handle = old_handler.handle
+        selected = Event()
+        resume = Event()
+        failures: list[BaseException] = []
+
+        def delayed_handle(record: logging.LogRecord) -> bool:
+            selected.set()
+            if not resume.wait(timeout=5):
+                raise TimeoutError("test did not resume selected handler")
+            return original_handle(record)
+
+        old_handler.handle = delayed_handle  # type: ignore[method-assign]
+
+        def emit() -> None:
+            try:
+                logging.getLogger("stdlib.reconfigure.overlap").warning(
+                    "selected-before-reconfigure"
+                )
+            except BaseException as exc:  # pragma: no cover - asserted below
+                failures.append(exc)
+
+        worker = Thread(target=emit)
+        worker.start()
+        assert selected.wait(timeout=5)
+        configure_logging(LoggingConfig(log_dir=new_dir, enable_file_logging=True))
+        resume.set()
+        worker.join(timeout=5)
+
+        assert not worker.is_alive()
+        assert failures == []
+        assert "selected-before-reconfigure" not in (old_dir / "ouroboros.log").read_text(
+            encoding="utf-8"
+        )
+        assert old_handler.stream is None
+
+    def test_stdlib_record_selected_before_reset_cannot_reopen_old_handler(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Reset uses the same retirement fence as reconfiguration."""
+        configure_logging(LoggingConfig(log_dir=tmp_path, enable_file_logging=True))
+        old_handler = logging.getLogger().handlers[0]
+        original_handle = old_handler.handle
+        selected = Event()
+        resume = Event()
+
+        def delayed_handle(record: logging.LogRecord) -> bool:
+            selected.set()
+            assert resume.wait(timeout=5)
+            return original_handle(record)
+
+        old_handler.handle = delayed_handle  # type: ignore[method-assign]
+        worker = Thread(
+            target=logging.getLogger("stdlib.reset.overlap").warning,
+            args=("selected-before-reset",),
+        )
+        worker.start()
+        assert selected.wait(timeout=5)
+        reset_logging()
+        resume.set()
+        worker.join(timeout=5)
+
+        assert not worker.is_alive()
+        assert "selected-before-reset" not in (tmp_path / "ouroboros.log").read_text(
+            encoding="utf-8"
+        )
+        assert old_handler.stream is None
+
+    def test_structlog_pipeline_finishes_one_generation_before_reconfigure(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """An old DEV processor cannot render into the new PROD sink."""
+        old_dir = tmp_path / "old"
+        new_dir = tmp_path / "new"
+        processor_entered = Event()
+        resume_processor = Event()
+        transition_started = Event()
+        transition_done = Event()
+        original_processors = ouroboros_logging._get_console_processors
+
+        def pause_processor(
+            _logger: Any,
+            _method_name: str,
+            event_dict: dict[str, Any],
+        ) -> dict[str, Any]:
+            processor_entered.set()
+            assert resume_processor.wait(timeout=5)
+            return event_dict
+
+        old_processors = original_processors(LogMode.DEV)
+        old_processors.insert(-1, pause_processor)
+        with patch(
+            "ouroboros.observability.logging._get_console_processors",
+            return_value=old_processors,
+        ):
+            configure_logging(
+                LoggingConfig(
+                    mode=LogMode.DEV,
+                    log_dir=old_dir,
+                    enable_file_logging=True,
+                )
+            )
+
+        proxy = structlog.get_logger("pipeline.reconfigure.overlap")
+        emitting = Thread(target=proxy.info, args=("old-generation-record",))
+        emitting.start()
+        assert processor_entered.wait(timeout=5)
+
+        def reconfigure() -> None:
+            transition_started.set()
+            configure_logging(
+                LoggingConfig(
+                    mode=LogMode.PROD,
+                    log_dir=new_dir,
+                    enable_file_logging=True,
+                )
+            )
+            transition_done.set()
+
+        transition = Thread(target=reconfigure)
+        transition.start()
+        assert transition_started.wait(timeout=5)
+        assert not transition_done.wait(timeout=0.05)
+        resume_processor.set()
+        emitting.join(timeout=5)
+        transition.join(timeout=5)
+
+        assert not emitting.is_alive()
+        assert not transition.is_alive()
+        assert transition_done.is_set()
+        assert "old-generation-record" in (old_dir / "ouroboros.log").read_text(encoding="utf-8")
+        assert "old-generation-record" not in (new_dir / "ouroboros.log").read_text(
+            encoding="utf-8"
+        )
+
+    def test_structlog_pipeline_finishes_one_generation_before_reset(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Reset waits for processor and destination emission together."""
+        processor_entered = Event()
+        resume_processor = Event()
+        reset_started = Event()
+        reset_done = Event()
+        original_processors = ouroboros_logging._get_console_processors
+
+        def pause_processor(
+            _logger: Any,
+            _method_name: str,
+            event_dict: dict[str, Any],
+        ) -> dict[str, Any]:
+            processor_entered.set()
+            assert resume_processor.wait(timeout=5)
+            return event_dict
+
+        processors = original_processors(LogMode.DEV)
+        processors.insert(-1, pause_processor)
+        with patch(
+            "ouroboros.observability.logging._get_console_processors",
+            return_value=processors,
+        ):
+            configure_logging(LoggingConfig(log_dir=tmp_path))
+
+        proxy = structlog.get_logger("pipeline.reset.overlap")
+        emitting = Thread(target=proxy.info, args=("record-before-reset",))
+        emitting.start()
+        assert processor_entered.wait(timeout=5)
+
+        def reset() -> None:
+            reset_started.set()
+            reset_logging()
+            reset_done.set()
+
+        resetting = Thread(target=reset)
+        resetting.start()
+        assert reset_started.wait(timeout=5)
+        assert not reset_done.wait(timeout=0.05)
+        resume_processor.set()
+        emitting.join(timeout=5)
+        resetting.join(timeout=5)
+
+        assert not emitting.is_alive()
+        assert not resetting.is_alive()
+        assert reset_done.is_set()
+        assert "record-before-reset" in (tmp_path / "ouroboros.log").read_text(encoding="utf-8")
+
+    def test_debug_call_waiting_at_pipeline_boundary_uses_new_debug_generation(
+        self,
+        capsys: Any,
+    ) -> None:
+        """A relaxed transition cannot lose a call to a stale INFO wrapper."""
+        configure_logging(LoggingConfig(log_level="INFO", enable_file_logging=False))
+        proxy = structlog.get_logger("pipeline.level.overlap")
+        call_selected = Event()
+        resume_call = Event()
+        original_proxy = ouroboros_logging._GenerationBoundLogger._proxy_to_logger
+
+        def delayed_proxy(
+            logger: Any,
+            method_name: str,
+            event: str | None = None,
+            **event_kw: Any,
+        ) -> Any:
+            call_selected.set()
+            assert resume_call.wait(timeout=5)
+            return original_proxy(logger, method_name, event, **event_kw)
+
+        with patch.object(
+            ouroboros_logging._GenerationBoundLogger,
+            "_proxy_to_logger",
+            new=delayed_proxy,
+        ):
+            worker = Thread(target=proxy.debug, args=("debug-after-relaxation",))
+            worker.start()
+            assert call_selected.wait(timeout=5)
+            configure_logging(LoggingConfig(log_level="DEBUG", enable_file_logging=False))
+            resume_call.set()
+            worker.join(timeout=5)
+
+        assert not worker.is_alive()
+        assert "debug-after-relaxation" in capsys.readouterr().err
+
+    def test_reconfigure_reentrant_log_cannot_reopen_retiring_file(
+        self,
+        tmp_path: Path,
+        capsys: Any,
+    ) -> None:
+        old_dir = tmp_path / "old"
+        new_dir = tmp_path / "new"
+        configure_logging(LoggingConfig(log_dir=old_dir, enable_file_logging=True))
+        proxy = structlog.get_logger("reconfigure.overlap")
+        proxy.info("before-reconfigure")
+        old_file = old_dir / "ouroboros.log"
+        original_setup = ouroboros_logging._setup_file_handler
+
+        def setup_with_reentrant_log(
+            config: LoggingConfig,
+        ) -> Any:
+            proxy.info("during-reconfigure")
+            return original_setup(config)
+
+        with patch(
+            "ouroboros.observability.logging._setup_file_handler",
+            side_effect=setup_with_reentrant_log,
+        ):
+            configure_logging(LoggingConfig(log_dir=new_dir, enable_file_logging=True))
+
+        proxy.info("after-reconfigure")
+        captured = capsys.readouterr()
+        assert "during-reconfigure" in captured.err
+        assert "during-reconfigure" not in old_file.read_text(encoding="utf-8")
+        new_content = (new_dir / "ouroboros.log").read_text(encoding="utf-8")
+        assert "after-reconfigure" in new_content
+
+    def test_reset_reentrant_log_cannot_use_retiring_file(
+        self,
+        tmp_path: Path,
+        capsys: Any,
+    ) -> None:
+        configure_logging(LoggingConfig(log_dir=tmp_path, enable_file_logging=True))
+        proxy = structlog.get_logger("reset.overlap")
+        proxy.info("before-reset")
+        log_file = tmp_path / "ouroboros.log"
+        original_close = ouroboros_logging._close_root_handlers
+
+        def close_with_reentrant_log() -> None:
+            proxy.info("during-reset")
+            original_close()
+
+        with patch(
+            "ouroboros.observability.logging._close_root_handlers",
+            side_effect=close_with_reentrant_log,
+        ):
+            reset_logging()
+
+        captured = capsys.readouterr()
+        assert "during-reset" in captured.err
+        assert "during-reset" not in log_file.read_text(encoding="utf-8")
+
+    def test_reset_leaves_import_time_proxies_quiet_on_stdout(self, capsys: Any) -> None:
+        """#1794: reset must not restore structlog's print-everything defaults.
+
+        Modules that bind ``structlog.get_logger`` at import time keep logging
+        through whatever configuration reset leaves behind, and CLI tests
+        reserve stdout for command output — so the post-reset baseline must
+        filter below INFO and route to stderr, like a configured logger.
+        """
+        configure_logging(LoggingConfig(enable_file_logging=False))
+        reset_logging()
+
+        proxy = structlog.get_logger("import-time-proxy")
+        proxy.debug("debug-should-be-filtered")
+        proxy.info("info-should-go-to-stderr")
+
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert "debug-should-be-filtered" not in captured.err
+        assert "info-should-go-to-stderr" in captured.err
+
+    def test_cached_proxies_follow_more_permissive_reconfiguration(self, capsys: Any) -> None:
+        """#1794 round seven: relaxation must work too, not just restriction.
+
+        A proxy materialized under INFO must emit DEBUG after a DEBUG
+        reconfiguration — a frozen filtering wrapper would silently defeat an
+        operator's debug setting.
+        """
+        configure_logging(LoggingConfig(log_level="INFO", enable_file_logging=False))
+        proxy = structlog.get_logger("relax-proxy")
+        proxy.info("materialize-under-info")
+        capsys.readouterr()
+
+        reset_logging()
+        configure_logging(LoggingConfig(log_level="DEBUG", enable_file_logging=False))
+
+        proxy.debug("debug-after-relaxation")
+        captured = capsys.readouterr()
+        assert "debug-after-relaxation" in captured.err
+
+    def test_cached_proxies_follow_renderer_reconfiguration(self, capsys: Any) -> None:
+        """A DEV-cached proxy must render PROD (JSON) after reconfiguration."""
+        configure_logging(
+            LoggingConfig(mode=LogMode.DEV, log_level="INFO", enable_file_logging=False)
+        )
+        proxy = structlog.get_logger("renderer-proxy")
+        proxy.info("materialize-under-dev")
+        capsys.readouterr()
+
+        reset_logging()
+        configure_logging(
+            LoggingConfig(mode=LogMode.PROD, log_level="INFO", enable_file_logging=False)
+        )
+
+        proxy.info("render-as-json-now")
+        captured = capsys.readouterr()
+        assert '"event": "render-as-json-now"' in captured.err
+
+    def test_explicitly_bound_logger_follows_live_generation(self, capsys: Any) -> None:
+        """Binding context must not freeze the processor or filtering generation."""
+        configure_logging(
+            LoggingConfig(
+                mode=LogMode.DEV,
+                log_level="INFO",
+                enable_file_logging=False,
+            )
+        )
+        bound = structlog.get_logger("bound-generation").bind(component="worker")
+        bound.info("materialize-bound-under-dev")
+        capsys.readouterr()
+
+        configure_logging(
+            LoggingConfig(
+                mode=LogMode.PROD,
+                log_level="DEBUG",
+                enable_file_logging=False,
+            )
+        )
+        bound.debug("bound-follows-prod-debug")
+
+        payload = json.loads(capsys.readouterr().err)
+        assert payload["event"] == "bound-follows-prod-debug"
+        assert payload["component"] == "worker"
+
+    def test_structlog_capture_logs_observes_live_generation(self) -> None:
+        """The public structlog capture hook can replace processors in place."""
+        from structlog.testing import capture_logs
+
+        configure_logging(LoggingConfig(enable_file_logging=False))
+        bound = structlog.get_logger("capture-generation").bind(component="worker")
+
+        with capture_logs() as captured:
+            bound.warning("captured-through-live-generation")
+
+        assert captured == [
+            {
+                "component": "worker",
+                "event": "captured-through-live-generation",
+                "log_level": "warning",
+            }
+        ]
+
+    def test_cached_proxies_follow_reconfiguration_after_reset(
+        self, capsys: Any, tmp_path: Any
+    ) -> None:
+        """#1794 round six: reconfiguring must not revive stale cached sinks.
+
+        A proxy cached under DEBUG/file logging, after reset and an
+        INFO/no-file reconfiguration, must obey the NEW configuration — no
+        DEBUG output, no writes through the old (closed) file handler.
+        """
+        old_dir = tmp_path / "old-logs"
+        configure_logging(
+            LoggingConfig(
+                log_level="DEBUG",
+                enable_file_logging=True,
+                log_dir=str(old_dir),
+            )
+        )
+        proxy = structlog.get_logger("stale-proxy")
+        proxy.debug("materialize-under-debug-file")
+        old_files = list(old_dir.glob("*"))
+        sizes_before = {f: f.stat().st_size for f in old_files}
+        capsys.readouterr()
+
+        reset_logging()
+        configure_logging(LoggingConfig(log_level="INFO", enable_file_logging=False))
+
+        proxy.debug("stale-debug-must-not-emit")
+        proxy.info("stale-info-goes-to-current-sink")
+        captured = capsys.readouterr()
+        assert "stale-debug-must-not-emit" not in captured.err
+        assert "stale-debug-must-not-emit" not in captured.out
+        assert "stale-info-goes-to-current-sink" in captured.err
+        for f, size in sizes_before.items():
+            assert f.stat().st_size == size, "old file handler was written after reset"
+
+    def test_reset_baseline_governs_cached_pre_used_proxies(
+        self, capsys: Any, tmp_path: Any
+    ) -> None:
+        """#1794 round five: proxies cached before reset must obey the baseline.
+
+        With cache_logger_on_first_use, a proxy used under DEBUG/file logging
+        keeps its bound logger across reset; the baseline contract (never
+        below INFO, never the old file handler) must hold for it too.
+        """
+        configure_logging(
+            LoggingConfig(
+                log_level="DEBUG",
+                enable_file_logging=True,
+                log_dir=str(tmp_path),
+            )
+        )
+        proxy = structlog.get_logger("pre-used-proxy")
+        proxy.debug("materialize-cache")
+        log_files = list(tmp_path.glob("*.log*"))
+        sizes_before = {f: f.stat().st_size for f in log_files}
+        capsys.readouterr()
+
+        reset_logging()
+
+        proxy.debug("post-reset-debug-must-vanish")
+        proxy.info("post-reset-info-stderr-only")
+        captured = capsys.readouterr()
+        assert "post-reset-debug-must-vanish" not in captured.err
+        assert "post-reset-debug-must-vanish" not in captured.out
+        assert "post-reset-info-stderr-only" in captured.err
+        assert captured.out == ""
+        for f, size in sizes_before.items():
+            assert f.stat().st_size == size, "the old file handler was reopened"
+
+    def test_reset_baseline_survives_capture_teardown(self) -> None:
+        """The baseline must resolve stderr at call time, not at reset time.
+
+        Capturing the concrete stream during reset keeps a capsys/redirect
+        buffer past its teardown; the next raw structlog call then raises on
+        the closed file.
+        """
+        import contextlib
+        import io
+
+        configure_logging(LoggingConfig(enable_file_logging=False))
+        buffer = io.StringIO()
+        with contextlib.redirect_stderr(buffer):
+            reset_logging()
+        buffer.close()
+
+        proxy = structlog.get_logger("post-capture-proxy")
+        proxy.info("logged-after-capture-teardown")
+
+    def test_reset_baseline_honors_console_logging_toggle(self, capsys: Any) -> None:
+        configure_logging(LoggingConfig(enable_file_logging=False))
+        reset_logging()
+        set_console_logging(False)
+        try:
+            structlog.get_logger("muted-proxy").info("should-be-suppressed")
+            captured = capsys.readouterr()
+            assert "should-be-suppressed" not in captured.err
+            assert captured.out == ""
+        finally:
+            set_console_logging(True)
+
     def test_reset_clears_configured_state(self) -> None:
         """reset_logging clears configured state."""
         configure_logging()
@@ -560,6 +1088,32 @@ class TestResetLogging:
         captured = capsys.readouterr()
         assert "reset.info.must.stay.silent" not in captured.out
         assert "reset.info.must.stay.silent" not in captured.err
+
+    def test_repeated_reset_preserves_quiet_neutral_generation(self, capsys: Any) -> None:
+        """A second reset cannot relax an already-neutral ERROR generation."""
+        configure_logging(
+            LoggingConfig(
+                mode=LogMode.PROD,
+                enable_file_logging=False,
+                log_level="ERROR",
+            )
+        )
+        bound = structlog.get_logger("repeated-reset").bind(component="worker")
+
+        reset_logging()
+        bound.error("after-first-reset")
+        first = capsys.readouterr()
+        reset_logging()
+        bound.info("info-after-second-reset-must-stay-silent")
+        bound.error("after-second-reset")
+        second = capsys.readouterr()
+
+        assert first.out == second.out == ""
+        assert "after-first-reset" in first.err
+        assert "after-second-reset" in second.err
+        assert "info-after-second-reset-must-stay-silent" not in second.err
+        assert '"event":' not in first.err
+        assert '"event":' not in second.err
 
     def test_reset_resolves_the_stream_at_emit_time(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """The reset must not pin whatever ``sys.stderr`` happened to be.
