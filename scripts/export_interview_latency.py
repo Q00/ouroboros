@@ -19,7 +19,8 @@ import sys
 from typing import Any
 from urllib.parse import quote
 
-_DEFAULT_DB = Path.home() / ".ouroboros" / "ouroboros.db"
+from ouroboros.config.models import resolve_event_store_path
+
 _TIMING_FIELDS = (
     "total",
     "ambiguity_scoring",
@@ -181,8 +182,8 @@ def main() -> int:
     parser.add_argument(
         "--db",
         type=Path,
-        default=_DEFAULT_DB,
-        help="EventStore SQLite database (default: ~/.ouroboros/ouroboros.db).",
+        default=resolve_event_store_path(),
+        help="EventStore SQLite database (default: configured runtime database).",
     )
     parser.add_argument(
         "--interview-id",
