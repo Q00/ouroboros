@@ -791,7 +791,33 @@ Give brief personalized response (1-2 sentences) based on choice.
 
 ---
 
-### Step 3: Quick Reference
+### Step 3: Advanced Runtime Check
+
+Standalone Claude SDK setup intentionally does not register MCP 2. Do not
+inspect or mutate `~/.claude/mcp.json` as an onboarding health check.
+
+If the active runtime does not expose Ouroboros MCP tools, **AskUserQuestion**:
+```json
+{
+  "questions": [{
+    "question": "Advanced MCP workflows require a supported CLI-backed runtime. What would you like to do?",
+    "header": "Runtime",
+    "options": [
+      { "label": "Continue native (Recommended)", "description": "Use Claude-native interview, seed, evaluate, and unstuck workflows" },
+      { "label": "Show MCP setup", "description": "See supported Codex, OpenCode, Kiro, Copilot, or Hermes setup commands" }
+    ],
+    "multiSelect": false
+  }]
+}
+```
+- **Continue native**: Continue to Step 4
+- **Show MCP setup**: Explain `ouroboros setup --runtime <runtime>` for a
+  supported CLI-backed runtime. Do not register MCP in the standalone Claude
+  SDK profile. Then continue to Step 4.
+
+---
+
+### Step 4: Quick Reference
 
 ```
 Available Commands:

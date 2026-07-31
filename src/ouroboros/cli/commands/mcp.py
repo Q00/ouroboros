@@ -619,7 +619,6 @@ async def _run_mcp_server(
         # registers handlers with proper dependencies (event_store, llm_adapter, etc.).
         server = create_ouroboros_server(
             name="ouroboros-mcp",
-            version="1.0.0",
             event_store=event_store,
             brownfield_store=brownfield_store,
             runtime_backend=runtime_backend,
@@ -992,9 +991,11 @@ def serve(
     except ImportError as e:
         _stderr_console.print(f"[red]MCP dependencies not installed: {e}[/red]")
         _stderr_console.print(
-            "[blue]Fix for uv tool installs: uv tool install 'ouroboros-ai\\[mcp,claude]'\n"
-            "For pip/pipx installs: install 'ouroboros-ai\\[mcp,claude]' into the "
-            "environment that runs this server.[/blue]"
+            "[blue]Run MCP 2 in an isolated profile:\n"
+            "  uvx --from 'ouroboros-ai\\[mcp]' ouroboros mcp serve\n"
+            "or:\n"
+            "  pipx run --spec 'ouroboros-ai\\[mcp]' ouroboros mcp serve\n"
+            "Do not combine it with the MCP 1.x-based Claude SDK extra.[/blue]"
         )
         raise typer.Exit(1) from e
     except OSError as e:
@@ -1049,7 +1050,6 @@ def info(
     # Create server with all tools pre-registered
     server = create_ouroboros_server(
         name="ouroboros-mcp",
-        version="1.0.0",
         runtime_backend=runtime.value if runtime else None,
         llm_backend=llm_backend.value if llm_backend else None,
     )

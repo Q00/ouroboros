@@ -1,13 +1,14 @@
 """MCP Server adapter implementation.
 
 This module provides the MCPServerAdapter class that implements the MCPServer
-protocol using the MCP SDK (FastMCP). It handles tool registration, resource
+protocol using the MCP SDK v2 ``MCPServer``. It handles tool registration, resource
 handling, and server lifecycle.
 """
 
 from __future__ import annotations
 
 import asyncio
+import base64
 from collections.abc import Callable, Sequence
 import inspect
 import keyword
@@ -52,6 +53,155 @@ if TYPE_CHECKING:
 
 log = structlog.get_logger(__name__)
 
+try:  # Keep the core package importable when the optional MCP extra is absent.
+    from mcp.server import MCPServer as _SDKMCPServer
+except ImportError:  # pragma: no cover - exercised by packaging smoke tests.
+    _SDKMCPServer = None  # type: ignore[assignment,misc]
+
+
+if _SDKMCPServer is not None:
+
+    class _OuroborosSDKServer(_SDKMCPServer):  # type: ignore[misc,valid-type]
+        """Public SDK server specialized for Ouroboros's typed handler boundary.
+
+        MCPServer's decorator API derives schemas from Python signatures. Ouroboros
+        already owns canonical JSON Schema 2020-12 definitions, so deriving them a
+        second time would lose ``$defs``, composition keywords, output schemas, and
+        descriptor metadata. Overriding the public primitive methods keeps MCPServer
+        responsible for discovery, transports, request metadata, and response framing
+        while Ouroboros remains responsible for its application handlers.
+        """
+
+        def __init__(self, adapter: MCPServerAdapter, **kwargs: Any) -> None:
+            super().__init__(**kwargs)
+            self._ouroboros_adapter = adapter
+
+        async def list_tools(self) -> list[Any]:
+            from ouroboros.mcp.sdk_mapping import tool_to_sdk
+
+            return [
+                tool_to_sdk(definition) for definition in await self._ouroboros_adapter.list_tools()
+            ]
+
+        async def call_tool(
+            self,
+            name: str,
+            arguments: dict[str, Any],
+            context: Any = None,
+        ) -> Any:
+            del context
+            from jsonschema import Draft202012Validator
+
+            from ouroboros.mcp.sdk_mapping import tool_result_to_sdk
+
+            definition = next(
+                (item for item in await self._ouroboros_adapter.list_tools() if item.name == name),
+                None,
+            )
+            if definition is None:
+                raise RuntimeError(f"Tool not found: {name}")
+
+            # Accept the one historical wrapper shape at the application edge,
+            # but validate the normalized payload against the canonical schema.
+            if set(arguments) == {"kwargs"} and isinstance(arguments.get("kwargs"), dict):
+                arguments = arguments["kwargs"]
+            _validate_parameter_constraints(definition.parameters, arguments)
+            Draft202012Validator(definition.to_input_schema()).validate(arguments)
+
+            result = await self._ouroboros_adapter.call_tool(name, arguments)
+            if result.is_err:
+                raise RuntimeError(str(result.error))
+            value = result.value
+            if definition.output_schema is not None:
+                Draft202012Validator(definition.output_schema).validate(value.structured_content)
+            return tool_result_to_sdk(value)
+
+        async def list_resources(self) -> list[Any]:
+            from ouroboros.mcp.sdk_mapping import resource_to_sdk
+
+            return [
+                resource_to_sdk(definition)
+                for definition in await self._ouroboros_adapter.list_resources()
+            ]
+
+        async def read_resource(self, uri: Any, context: Any = None) -> list[Any]:
+            """Read through the typed adapter without losing content metadata."""
+            del context
+            from mcp.server.lowlevel.helper_types import ReadResourceContents
+
+            result = await self._ouroboros_adapter.read_resource(str(uri))
+            if result.is_err:
+                raise RuntimeError(str(result.error))
+            content = result.value
+            if content.text is not None and content.blob is not None:
+                raise ValueError("Resource content cannot contain both text and blob")
+            if content.blob is not None:
+                payload: str | bytes = base64.b64decode(content.blob, validate=True)
+            elif content.text is not None:
+                payload = content.text
+            else:
+                raise ValueError("Resource content requires text or blob")
+            return [
+                ReadResourceContents(
+                    content=payload,
+                    mime_type=content.mime_type,
+                    meta=content.meta or None,
+                )
+            ]
+
+        async def list_prompts(self) -> list[Any]:
+            from ouroboros.mcp.sdk_mapping import prompt_to_sdk
+
+            return [
+                prompt_to_sdk(definition)
+                for definition in await self._ouroboros_adapter.list_prompts()
+            ]
+
+        async def get_prompt(
+            self,
+            name: str,
+            arguments: dict[str, Any] | None = None,
+            context: Any = None,
+        ) -> Any:
+            """Render original wire argument names without Python identifier aliases."""
+            del context
+            from mcp.types import GetPromptResult, PromptMessage, TextContent
+
+            definitions = await self._ouroboros_adapter.list_prompts()
+            definition = next((item for item in definitions if item.name == name), None)
+            if definition is None:
+                raise RuntimeError(f"Prompt not found: {name}")
+            wire_arguments = arguments or {}
+            declared_names = {argument.name for argument in definition.arguments}
+            unknown_names = set(wire_arguments) - declared_names
+            if unknown_names:
+                raise ValueError(
+                    f"Unknown prompt arguments for {name}: {', '.join(sorted(unknown_names))}"
+                )
+            missing_names = {
+                argument.name
+                for argument in definition.arguments
+                if argument.required and argument.name not in wire_arguments
+            }
+            if missing_names:
+                raise ValueError(
+                    f"Missing required prompt arguments for {name}: "
+                    f"{', '.join(sorted(missing_names))}"
+                )
+            result = await self._ouroboros_adapter.get_prompt(
+                name,
+                {key: str(value) for key, value in wire_arguments.items()},
+            )
+            if result.is_err:
+                raise RuntimeError(str(result.error))
+            return GetPromptResult(
+                description=definition.description or None,
+                messages=[PromptMessage(role="user", content=TextContent(text=result.value))],
+            )
+
+else:  # pragma: no cover - construction is rejected before this sentinel is used.
+    _OuroborosSDKServer = None  # type: ignore[assignment,misc]
+
 VALID_TRANSPORTS: frozenset[str] = frozenset({"stdio", "sse", "streamable-http"})
 
 
@@ -76,20 +226,36 @@ def _safe_cwd() -> Path:
     return cwd
 
 
-def _to_fastmcp_tool_result(tool_result: MCPToolResult) -> Any:
+def _to_mcp_tool_result(tool_result: MCPToolResult) -> Any:
     """Convert internal tool results to MCP SDK results without dropping meta."""
     try:
-        from mcp.types import CallToolResult, TextContent
+        from ouroboros.mcp.sdk_mapping import tool_result_to_sdk
     except ImportError as exc:  # pragma: no cover - start() already checks this path.
         msg = "mcp package not installed. Install with: pip install 'ouroboros-ai[mcp]'"
         raise RuntimeError(msg) from exc
 
-    return CallToolResult(
-        content=[TextContent(type="text", text=tool_result.text_content)],
-        isError=tool_result.is_error,
-        _meta=tool_result.meta or None,
-        structuredContent=tool_result.structured_content,
-    )
+    return tool_result_to_sdk(tool_result)
+
+
+def _sdk_icon(value: dict[str, Any]) -> Any:
+    """Build a public SDK icon model at the optional-dependency boundary."""
+    from mcp.types import Icon
+
+    return Icon.model_validate(value)
+
+
+def _sdk_annotations(value: dict[str, Any] | None) -> Any:
+    """Build public SDK annotations without importing MCP in the core profile."""
+    if value is None:
+        return None
+    from mcp.types import Annotations
+
+    return Annotations.model_validate(value)
+
+
+# Kept as a compatibility alias for callers that imported this private helper
+# before the SDK v2 migration.
+_to_fastmcp_tool_result = _to_mcp_tool_result
 
 
 def _duration_ms(started_at: float) -> int:
@@ -167,7 +333,7 @@ def _extract_feedback_metadata_from_artifact(artifact: str) -> tuple[Any, ...]:
     return tuple(feedback_items)
 
 
-# Map MCPToolParameter types to Python annotations for FastMCP schema inference.
+# Map MCPToolParameter types to Python annotations for MCPServer schema inference.
 _TOOL_TYPE_MAP: dict[ToolInputType, type] = {
     ToolInputType.STRING: str,
     ToolInputType.INTEGER: int,
@@ -181,11 +347,11 @@ _TOOL_TYPE_MAP: dict[ToolInputType, type] = {
 def _build_tool_signature(parameters: tuple[MCPToolParameter, ...]) -> inspect.Signature:
     """Build an inspect.Signature from MCPToolParameter definitions.
 
-    FastMCP infers JSON schema from function signatures via inspect.signature().
+    MCPServer infers JSON schema from function signatures via inspect.signature().
     Using **kwargs produces a single "kwargs" parameter in the schema, which
     forces clients to wrap arguments as {"kwargs": {actual_args}}.
 
-    By setting __signature__ with explicit parameters, FastMCP generates the
+    By setting __signature__ with explicit parameters, MCPServer generates the
     correct schema and clients can send flat argument dicts.
     """
     signature, _ = _build_tool_signature_with_aliases(parameters)
@@ -287,6 +453,44 @@ def _build_tool_signature_with_aliases(
             )
 
     return inspect.Signature(parameters=sig_params), alias_to_original
+
+
+def _build_prompt_signature_with_aliases(
+    definition: MCPPromptDefinition,
+) -> tuple[inspect.Signature, dict[str, str]]:
+    """Build a prompt signature and its safe-name to wire-name mapping."""
+    parameters = []
+    aliases: dict[str, str] = {}
+    alias_counts: dict[str, int] = {}
+    for argument in definition.arguments:
+        parameter_name = _to_safe_signature_name(argument.name)
+        alias_count = alias_counts.get(parameter_name, 0) + 1
+        alias_counts[parameter_name] = alias_count
+        if alias_count > 1:
+            parameter_name = f"{parameter_name}_{alias_count}"
+        aliases[parameter_name] = argument.name
+
+        default: Any = inspect.Parameter.empty if argument.required else None
+        if argument.description:
+            default = Field(
+                default=... if argument.required else None,
+                description=argument.description,
+            )
+        parameters.append(
+            inspect.Parameter(
+                name=parameter_name,
+                kind=inspect.Parameter.KEYWORD_ONLY,
+                annotation=str,
+                default=default,
+            )
+        )
+    return inspect.Signature(parameters=parameters), aliases
+
+
+def _build_prompt_signature(definition: MCPPromptDefinition) -> inspect.Signature:
+    """Build the explicit string signature used for MCP prompt discovery."""
+    signature, _ = _build_prompt_signature_with_aliases(definition)
+    return signature
 
 
 def _validate_parameter_constraints(
@@ -662,7 +866,6 @@ class MCPServerAdapter:
     Example:
         server = MCPServerAdapter(
             name="ouroboros-mcp",
-            version="1.0.0",
         )
 
         # Register handlers
@@ -677,7 +880,7 @@ class MCPServerAdapter:
         self,
         *,
         name: str = "ouroboros-mcp",
-        version: str = "1.0.0",
+        version: str | None = None,
         instructions: str | None = None,
         auth_config: AuthConfig | None = None,
         rate_limit_config: RateLimitConfig | None = None,
@@ -693,6 +896,10 @@ class MCPServerAdapter:
             auth_config: Optional authentication configuration.
             rate_limit_config: Optional rate limiting configuration.
         """
+        if version is None:
+            from ouroboros import __version__
+
+            version = __version__
         self._name = name
         self._version = version
         self._instructions = instructions
@@ -1023,7 +1230,7 @@ class MCPServerAdapter:
         """Start serving MCP requests.
 
         This method blocks until the server is stopped.
-        Uses the MCP SDK's FastMCP server implementation.
+        Uses the MCP SDK v2's public ``MCPServer`` implementation.
 
         Args:
             transport: Transport type - "stdio", "sse", or "streamable-http"
@@ -1036,43 +1243,37 @@ class MCPServerAdapter:
         """
         transport = validate_transport(transport)
 
-        # FastMCP transport cannot provide credentials or client identity
+        # The SDK transport cannot provide credentials or client identity.
         if self._security.auth_config.method != AuthMethod.NONE:
             msg = (
-                f"FastMCP transport does not support authentication. "
+                f"MCPServer transport does not support authentication. "
                 f"Configured auth method: {self._security.auth_config.method.value}. "
-                f"All tool calls will be rejected. Use AuthMethod.NONE for FastMCP transports."
+                f"All tool calls will be rejected. Use AuthMethod.NONE for MCPServer transports."
             )
             raise ValueError(msg)
 
         if self._security.rate_limit_config.enabled:
             msg = (
-                "FastMCP transport does not support rate limiting "
+                "MCPServer transport does not support rate limiting "
                 "(requires client identity). Configured rate_limit_config.enabled=True "
-                "will have no effect. Disable rate limiting for FastMCP transports."
+                "will have no effect. Disable rate limiting for MCPServer transports."
             )
             raise ValueError(msg)
 
-        try:
-            from mcp.server.fastmcp import FastMCP
-        except ImportError as e:
+        if _SDKMCPServer is None:
             msg = "mcp package not installed. Install with: pip install 'ouroboros-ai[mcp]'"
-            raise ImportError(msg) from e
+            raise ImportError(msg)
 
-        # Pass host/port at construction time for network transports — FastMCP
-        # reads these from its internal settings, so the run_* method alone
-        # won't pick them up.
-        if transport in {"sse", "streamable-http"}:
-            self._mcp_server = FastMCP(
-                self._name,
-                instructions=self._instructions,
-                host=host,
-                port=port,
-            )
-        else:
-            self._mcp_server = FastMCP(self._name, instructions=self._instructions)
+        if _OuroborosSDKServer is None:  # pragma: no cover - mirrors import guard.
+            raise ImportError("MCP SDK server boundary unavailable")
+        self._mcp_server = _OuroborosSDKServer(
+            self,
+            name=self._name,
+            instructions=self._instructions,
+            version=self._version,
+        )
 
-        # Register tools with FastMCP
+        # Register tools with MCPServer.
         for _name, handler in self._tool_handlers.items():
             defn = handler.definition
 
@@ -1087,7 +1288,7 @@ class MCPServerAdapter:
                         raw_argument_keys=sorted(kwargs),
                     )
                     # Backward compat: unwrap nested kwargs from clients that
-                    # used the old schema where FastMCP inferred a single "kwargs" param.
+                    # used the old schema where the server inferred one "kwargs" param.
                     if (
                         "kwargs" in kwargs
                         and len(kwargs) == 1
@@ -1121,15 +1322,15 @@ class MCPServerAdapter:
                     )
 
                     # Route through call_tool() to enforce security checks.
-                    # FastMCP does not provide credentials, so:
+                    # MCPServer does not provide credentials, so:
                     # - Input validation is enforced
                     # - Auth/authorization will reject if any auth method configured
                     # - Rate limiting cannot apply (requires client_id)
                     result = await self.call_tool(h.definition.name, normalized_kwargs)
                     if result.is_ok:
-                        # Convert MCPToolResult to FastMCP format
+                        # Convert MCPToolResult to the SDK boundary type.
                         tool_result = result.value
-                        converted = _to_fastmcp_tool_result(tool_result)
+                        converted = _to_mcp_tool_result(tool_result)
                         log.info(
                             "mcp.server.fastmcp_tool_wrapper.return",
                             tool=h.definition.name,
@@ -1140,7 +1341,7 @@ class MCPServerAdapter:
                         )
                         return converted
                     else:
-                        # Raise so FastMCP returns a proper MCP error response
+                        # Raise so the SDK returns a proper MCP error response
                         # with isError: true, instead of a success with error text.
                         log.info(
                             "mcp.server.fastmcp_tool_wrapper.return",
@@ -1153,7 +1354,7 @@ class MCPServerAdapter:
                         )
                         raise RuntimeError(str(result.error))
 
-                # Set proper signature so FastMCP generates correct JSON schema
+                # Set a proper signature so MCPServer generates correct JSON schema
                 # instead of a single "kwargs" parameter.
                 tool_wrapper.__signature__ = _build_tool_signature(h.definition.parameters)
                 return tool_wrapper
@@ -1164,32 +1365,58 @@ class MCPServerAdapter:
                 description=defn.description,
             )(wrapper)
 
-        # Register resources with FastMCP
+        # Register resources with MCPServer.
         for uri, res_handler in self._resource_handlers.items():
+            resource_definition = next(
+                definition for definition in res_handler.definitions if definition.uri == uri
+            )
 
             def _make_resource_wrapper(h: ResourceHandler, resource_uri: str) -> Any:
-                async def resource_wrapper() -> str:
+                async def resource_wrapper() -> str | bytes:
                     result = await h.handle(resource_uri)
                     if result.is_ok:
                         content = result.value
-                        return content.text or ""
+                        if content.text is not None and content.blob is not None:
+                            raise ValueError("Resource content cannot contain both text and blob")
+                        if content.blob is not None:
+                            return base64.b64decode(content.blob, validate=True)
+                        if content.text is not None:
+                            return content.text
+                        raise ValueError("Resource content requires text or blob")
                     else:
                         raise RuntimeError(str(result.error))
 
                 return resource_wrapper
 
             wrapper = _make_resource_wrapper(res_handler, uri)
-            self._mcp_server.resource(uri)(wrapper)
+            self._mcp_server.resource(
+                uri,
+                name=resource_definition.name,
+                title=resource_definition.title,
+                description=resource_definition.description,
+                mime_type=resource_definition.mime_type,
+                icons=[_sdk_icon(icon) for icon in resource_definition.icons] or None,
+                annotations=_sdk_annotations(resource_definition.annotations),
+                meta=resource_definition.meta or None,
+            )(wrapper)
 
             if _is_single_segment_resource_uri(uri):
 
                 def _make_resource_template_wrapper(h: ResourceHandler, base_uri: str) -> Any:
-                    async def resource_template_wrapper(resource_id: str) -> str:
+                    async def resource_template_wrapper(resource_id: str) -> str | bytes:
                         resource_uri = f"{base_uri}/{resource_id}"
                         result = await h.handle(resource_uri)
                         if result.is_ok:
                             content = result.value
-                            return content.text or ""
+                            if content.text is not None and content.blob is not None:
+                                raise ValueError(
+                                    "Resource content cannot contain both text and blob"
+                                )
+                            if content.blob is not None:
+                                return base64.b64decode(content.blob, validate=True)
+                            if content.text is not None:
+                                return content.text
+                            raise ValueError("Resource content requires text or blob")
                         else:
                             raise RuntimeError(str(result.error))
 
@@ -1197,7 +1424,50 @@ class MCPServerAdapter:
 
                 template = f"{uri}/{{resource_id}}"
                 template_wrapper = _make_resource_template_wrapper(res_handler, uri)
-                self._mcp_server.resource(template)(template_wrapper)
+                self._mcp_server.resource(
+                    template,
+                    name=resource_definition.name,
+                    title=resource_definition.title,
+                    description=resource_definition.description,
+                    mime_type=resource_definition.mime_type,
+                    icons=[_sdk_icon(icon) for icon in resource_definition.icons] or None,
+                    annotations=_sdk_annotations(resource_definition.annotations),
+                    meta=resource_definition.meta or None,
+                )(template_wrapper)
+
+        # Prompts are first-class discoverable MCP primitives in v2. Register
+        # them alongside tools/resources instead of exposing them only through
+        # the adapter's local API.
+        for _name, prompt_handler in self._prompt_handlers.items():
+            prompt_definition = prompt_handler.definition
+
+            def _make_prompt_wrapper(h: PromptHandler) -> Any:
+                async def prompt_wrapper(**kwargs: str) -> str:
+                    _, alias_to_original = _build_prompt_signature_with_aliases(h.definition)
+                    arguments = {
+                        alias_to_original.get(name, name): value
+                        for name, value in kwargs.items()
+                        if value is not None
+                    }
+                    result = await h.handle(arguments)
+                    if result.is_ok:
+                        return result.value
+                    raise RuntimeError(str(result.error))
+
+                prompt_wrapper.__signature__ = _build_prompt_signature(h.definition)
+                prompt_wrapper.__annotations__ = {
+                    **dict.fromkeys(prompt_wrapper.__signature__.parameters, str),
+                    "return": str,
+                }
+                return prompt_wrapper
+
+            prompt_wrapper = _make_prompt_wrapper(prompt_handler)
+            self._mcp_server.prompt(
+                name=prompt_definition.name,
+                title=prompt_definition.title,
+                description=prompt_definition.description,
+                icons=[_sdk_icon(icon) for icon in prompt_definition.icons] or None,
+            )(prompt_wrapper)
 
         log.info(
             "mcp.server.starting",
@@ -1225,9 +1495,13 @@ class MCPServerAdapter:
         # Run the server with the appropriate transport
         try:
             if transport == "sse":
-                await self._mcp_server.run_sse_async()
+                await self._mcp_server.run_sse_async(host=host, port=port)
             elif transport == "streamable-http":
-                await self._mcp_server.run_streamable_http_async()
+                await self._mcp_server.run_streamable_http_async(
+                    host=host,
+                    port=port,
+                    stateless_http=True,
+                )
             else:
                 await self._mcp_server.run_stdio_async()
         except BaseException as exc:
@@ -1353,7 +1627,7 @@ class MCPServerAdapter:
 def create_ouroboros_server(
     *,
     name: str = "ouroboros-mcp",
-    version: str = "1.0.0",
+    version: str | None = None,
     instructions: str | None = None,
     auth_config: AuthConfig | None = None,
     rate_limit_config: RateLimitConfig | None = None,
@@ -2094,9 +2368,12 @@ def create_ouroboros_server(
         agent_runtime_backend=execute_runtime_backend,
         opencode_mode=opencode_mode,
     )
+    # No shared-adapter injection for interview handlers: the injected stage
+    # adapter has no strict MCP isolation, and ``self.llm_adapter or ...``
+    # would bypass the handler's own strict factory (#765, #1768). Injection
+    # remains available for tests and custom wiring only.
     interview = InterviewHandler(
         event_store=event_store,
-        llm_adapter=llm_adapter,
         llm_backend=interview_llm_backend,
         agent_runtime_backend=interview_runtime_backend,
         opencode_mode=opencode_mode,
@@ -2190,7 +2467,6 @@ def create_ouroboros_server(
         InterviewHandler(
             interview_engine=interview_engine,
             event_store=event_store,
-            llm_adapter=llm_adapter,
             llm_backend=interview_llm_backend,
             agent_runtime_backend=interview_runtime_backend,
             opencode_mode=opencode_mode,
@@ -2198,7 +2474,6 @@ def create_ouroboros_server(
         ),
         PMInterviewHandler(
             data_dir=state_dir_path,
-            llm_adapter=llm_adapter,
             llm_backend=interview_llm_backend,
             event_store=event_store,
             agent_runtime_backend=interview_runtime_backend,
@@ -2328,7 +2603,7 @@ def create_ouroboros_server(
     log.info(
         "mcp.server.composition_root_complete",
         name=name,
-        version=version,
+        version=server.info.version,
         tools_registered=len(tool_handlers),
         resources_registered=len(resource_handlers),
         tool_names=[h.definition.name for h in tool_handlers],

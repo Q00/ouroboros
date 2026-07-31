@@ -389,7 +389,33 @@ Give brief personalized response (1-2 sentences) based on choice.
 
 ---
 
-### Step 3: Quick Reference
+### Step 3: Advanced Runtime Check
+
+Standalone Claude SDK setup intentionally does not register MCP 2. Do not
+inspect or mutate `~/.claude/mcp.json` as an onboarding health check.
+
+If the active runtime does not expose Ouroboros MCP tools, **AskUserQuestion**:
+```json
+{
+  "questions": [{
+    "question": "Advanced MCP workflows require a supported CLI-backed runtime. What would you like to do?",
+    "header": "Runtime",
+    "options": [
+      { "label": "Continue native (Recommended)", "description": "Use Claude-native interview, seed, evaluate, and unstuck workflows" },
+      { "label": "Show MCP setup", "description": "See supported Codex, OpenCode, Kiro, Copilot, or Hermes setup commands" }
+    ],
+    "multiSelect": false
+  }]
+}
+```
+- **Continue native**: Continue to Step 4
+- **Show MCP setup**: Explain `ouroboros setup --runtime <runtime>` for a
+  supported CLI-backed runtime. Do not register MCP in the standalone Claude
+  SDK profile. Then continue to Step 4.
+
+---
+
+### Step 4: Quick Reference
 
 ```
 Available Commands:
@@ -402,6 +428,7 @@ Available Commands:
 | ooo run         | Execute with visual TUI          |
 | ooo evaluate    | 3-stage verification             |
 | ooo unstuck     | Lateral thinking when stuck      |
+| ooo config      | Settings GUI: agents & models    |
 | ooo help        | Full command reference           |
 +---------------------------------------------------+
 ```
@@ -551,3 +578,13 @@ READY TO BUILD:
   "star_asked": true
 }
 ```
+
+## RFC #1392 State Breadcrumb Footer
+
+Your final response MUST end with exactly one breadcrumb footer line:
+
+```
+◆ <current state> → next: <recommended action>
+```
+
+Derive `<current state>` from live session state via `ouroboros_session_status` when that MCP projection is available; otherwise derive it from this skill's actual outcome. Never use a linear `Step N of M` footer because Ouroboros is an evolutionary loop. When the next action is genuinely a choice, list 2-3 honest options in the `next:` clause. The breadcrumb line must be the last line of the response.

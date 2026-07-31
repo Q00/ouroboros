@@ -57,6 +57,16 @@ class TestBrownfieldContextFromCwd:
         assert ctx.context_references[0].path == str(tmp_path)
         assert ctx.context_references[0].role == "primary"
 
+    def test_brownfield_when_git_directory_present(self, tmp_path: Path) -> None:
+        (tmp_path / ".git").mkdir()
+        ctx = brownfield_context_from_cwd(tmp_path)
+        assert ctx.project_type == "brownfield"
+
+    def test_brownfield_when_git_file_present(self, tmp_path: Path) -> None:
+        (tmp_path / ".git").write_text("gitdir: /tmp/example.git\n", encoding="utf-8")
+        ctx = brownfield_context_from_cwd(tmp_path)
+        assert ctx.project_type == "brownfield"
+
     def test_none_cwd_is_greenfield(self) -> None:
         assert brownfield_context_from_cwd(None).project_type == "greenfield"
 

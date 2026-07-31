@@ -1184,14 +1184,21 @@ class SessionRepository:
     async def reconstruct_session(
         self,
         session_id: str,
+        *,
+        strict_related_events: bool = False,
     ) -> Result[SessionTracker, PersistenceError]:
         """Reconstruct session state from events.
 
         Replays all events for the session to rebuild the current state.
-        This is used for session resumption.
+        This is used for session resumption. Read-only projections that must
+        never publish a status from incomplete history can require the related
+        execution-event read to succeed; ordinary resume retains the existing
+        best-effort compatibility behavior.
 
         Args:
             session_id: Session to reconstruct.
+            strict_related_events: Fail reconstruction when the complete
+                related execution-event stream cannot be read or represented.
 
         Returns:
             Result containing reconstructed SessionTracker.
@@ -1246,14 +1253,22 @@ class SessionRepository:
                         execution_id=execution_id or None,
                         limit=None,
                     )
-                    if isinstance(related_events, list) and related_events:
+                    if not isinstance(related_events, list):
+                        if strict_related_events:
+                            raise TypeError("related event query did not return a list")
+                        related_events = []
+                    if related_events:
                         all_events = self._merge_event_streams(events, related_events)
                 except Exception:
+                    if strict_related_events:
+                        raise
                     log.warning(
                         "orchestrator.session.related_event_query_failed",
                         session_id=session_id,
                         execution_id=execution_id,
                     )
+            elif strict_related_events:
+                raise RuntimeError("related event query is unavailable")
 
             # Replay subsequent events
             messages_processed = 0

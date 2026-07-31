@@ -12,6 +12,7 @@ Also provides brownfield repository management subcommands:
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass
@@ -63,6 +64,7 @@ from ouroboros.config._model_defaults import (
     DEFAULT_SONNET_MODEL,
     recognized_shipped_defaults,
 )
+from ouroboros.core.errors import ConfigError
 from ouroboros.persistence.brownfield import BrownfieldStore
 
 
@@ -83,88 +85,102 @@ def _build_uvx_mcp_args(package_spec: str) -> list[str]:
 
 
 def _detect_mcp_entry(*, package_spec: str = "ouroboros-ai[mcp]") -> dict[str, object] | None:
-    """Build the correct MCP entry based on how ouroboros is installed.
+    """Build an isolated MCP 2 launcher entry.
 
-    Priority: uvx > ouroboros binary > python3 -m ouroboros (verified).
-    Returns None if no working method is found.
+    Direct ``ouroboros`` and ``python -m`` fallbacks are deliberately excluded:
+    their environments may contain the Claude SDK's MCP 1.x dependency or no
+    MCP extra at all. ``uvx`` and ``pipx run`` both create a package-isolated
+    process whose ``[mcp]`` extra is known to contain MCP 2.
     Matches the contract in install.sh and skills/setup/SKILL.md.
     """
     if shutil.which("uvx"):
         return {"command": "uvx", "args": _build_uvx_mcp_args(package_spec)}
-    if shutil.which("ouroboros"):
-        return {"command": "ouroboros", "args": ["mcp", "serve"]}
-    # Only use python3 fallback if ouroboros is actually importable
-    import subprocess
+    if shutil.which("pipx"):
+        return {
+            "command": "pipx",
+            "args": ["run", "--spec", package_spec, "ouroboros", "mcp", "serve"],
+        }
+    return None
 
+
+type _PersistentFileState = tuple[bool, str, int]
+
+
+def _capture_persistent_file(path: Path) -> _PersistentFileState:
+    """Capture enough state to restore one setup-managed text file."""
+    if not path.exists():
+        return (False, "", 0o644)
+    return (True, path.read_text(encoding="utf-8"), path.stat().st_mode & 0o777)
+
+
+def _restore_persistent_file(path: Path, state: _PersistentFileState) -> None:
+    """Restore a file snapshot after a multi-file setup transaction fails."""
+    existed, content, mode = state
+    if existed:
+        _atomic_write_text(path, content, mode=mode)
+    else:
+        path.unlink(missing_ok=True)
+
+
+def _rollback_persistent_files(
+    snapshots: tuple[tuple[Path, _PersistentFileState], ...],
+) -> None:
+    """Best-effort rollback for files changed during runtime activation."""
+    failures: list[str] = []
+    for path, state in reversed(snapshots):
+        try:
+            _restore_persistent_file(path, state)
+        except OSError as exc:
+            failures.append(f"{path}: {exc}")
+    if failures:
+        print_warning("Setup rollback was incomplete: " + "; ".join(failures))
+
+
+def _commit_runtime_activation(
+    *,
+    runtime_name: str,
+    host_path: Path,
+    config_path: Path,
+    config_was_missing: bool,
+    runtime_content: str,
+    register_host: Callable[[], bool],
+    create_defaults: Callable[[Path], object],
+) -> bool:
+    """Commit host registration and runtime files as one recoverable unit."""
+    credentials_path = config_path.parent / "credentials.yaml"
+    snapshots: tuple[tuple[Path, _PersistentFileState], ...] = ()
     try:
-        subprocess.run(
-            ["python3", "-c", "import ouroboros"],
-            capture_output=True,
-            timeout=10,
-            check=True,
+        snapshots = (
+            (host_path, _capture_persistent_file(host_path)),
+            (config_path, _capture_persistent_file(config_path)),
+            (credentials_path, _capture_persistent_file(credentials_path)),
         )
-    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
-        return None
-    return {"command": "python3", "args": ["-m", "ouroboros", "mcp", "serve"]}
+        if not register_host():
+            _rollback_persistent_files(snapshots)
+            print_error(f"{runtime_name} setup aborted without changing persistent configuration.")
+            return False
+        if config_was_missing:
+            create_defaults(config_path.parent)
+        _atomic_write_text(config_path, runtime_content)
+    except (OSError, ConfigError) as exc:
+        _rollback_persistent_files(snapshots)
+        print_error(f"{runtime_name} setup could not commit runtime configuration: {exc}")
+        return False
+    return True
 
 
 def _ensure_claude_mcp_entry() -> None:
-    """Ensure ~/.claude/mcp.json has a correct ouroboros MCP entry.
+    """Fail closed for the standalone Claude SDK profile.
 
-    Creates the entry if missing (detecting install method), updates stale
-    uvx args (e.g. ouroboros-ai without [claude] extras), and removes the
-    legacy timeout key.  Skips the file write when nothing changed.
+    Kept as a compatibility shim for callers from older plugin artifacts. The
+    current Claude Agent SDK requires MCP 1.x, while the Ouroboros protocol
+    server requires MCP 2 and cannot load that configured backend from its
+    isolated process. Never mutate user-owned Claude MCP configuration here.
     """
-    mcp_config_path = Path.home() / ".claude" / "mcp.json"
-    mcp_config_path.parent.mkdir(parents=True, exist_ok=True)
-
-    mcp_data: dict = {}
-    if mcp_config_path.exists():
-        mcp_data = json.loads(mcp_config_path.read_text())
-
-    mcp_data.setdefault("mcpServers", {})
-
-    existing = mcp_data["mcpServers"].get("ouroboros")
-    detected = _detect_mcp_entry(package_spec="ouroboros-ai[mcp,claude]")
-    needs_write = False
-
-    if existing is None:
-        if detected is None:
-            print_warning(
-                "Cannot register MCP server: no working ouroboros installation found.\n"
-                "Install with: curl -LsSf https://astral.sh/uv/install.sh | sh"
-            )
-            return
-        mcp_data["mcpServers"]["ouroboros"] = detected
-        needs_write = True
-        print_success("Registered MCP server in ~/.claude/mcp.json")
-    else:
-        # Remove legacy timeout key
-        if "timeout" in existing:
-            del existing["timeout"]
-            needs_write = True
-            print_info("Removed legacy MCP timeout override.")
-
-        # Update entry to match currently detected install method, but only
-        # for known standard commands. Custom entries (docker, nix, etc.) are
-        # left untouched so we don't break user-managed configurations.
-        _KNOWN_COMMANDS = {"uvx", "ouroboros", "python3", "python"}
-        if detected is not None and existing.get("command") in _KNOWN_COMMANDS:
-            if (
-                existing.get("command") != detected["command"]
-                or existing.get("args") != detected["args"]
-            ):
-                existing["command"] = detected["command"]
-                existing["args"] = detected["args"]
-                needs_write = True
-                print_info("Updated MCP server entry to match current install method.")
-
-        if not needs_write:
-            print_info("MCP server already registered.")
-
-    if needs_write:
-        with mcp_config_path.open("w") as f:
-            json.dump(mcp_data, f, indent=2)
+    print_warning(
+        "Skipped Ouroboros MCP registration for the standalone Claude SDK profile. "
+        "Use a supported CLI-backed runtime setup for the isolated MCP 2 server."
+    )
 
 
 app = typer.Typer(
@@ -2925,8 +2941,16 @@ def _install_runtime_instruction_artifact(backend: str, **kwargs: object) -> Non
     print_success(f"Installed {backend.title()} instruction guide → {artifact.path}")
 
 
-def _register_hermes_mcp_server() -> None:
+def _register_hermes_mcp_server(*, detected: dict[str, object] | None = None) -> bool:
     """Register the Ouroboros MCP hookup in ~/.hermes/config.yaml."""
+    detected = detected or _detect_mcp_entry()
+    if detected is None:
+        print_error(
+            "Cannot register Hermes MCP server without an isolated launcher. "
+            "Install uv/uvx or pipx, then re-run setup."
+        )
+        return False
+
     hermes_config = Path.home() / ".hermes" / "config.yaml"
     hermes_config.parent.mkdir(parents=True, exist_ok=True)
 
@@ -2936,7 +2960,7 @@ def _register_hermes_mcp_server() -> None:
             loaded_config = yaml.safe_load(hermes_config.read_text(encoding="utf-8"))
         except Exception:
             print_error(f"Could not parse {hermes_config} — skipping MCP registration.")
-            return
+            return False
         if loaded_config is None:
             config_data = {}
         elif isinstance(loaded_config, dict):
@@ -2951,36 +2975,42 @@ def _register_hermes_mcp_server() -> None:
             print_warning(f"{hermes_config} 'mcp_servers' section is not a mapping — resetting.")
         config_data["mcp_servers"] = {}
 
-    # Use UVX install by default for robustness
-    detected = _detect_mcp_entry()
-    if detected is None:
-        print_warning("Cannot register Hermes MCP server: no working Ouroboros installation found.")
-        return
-
     config_data["mcp_servers"]["ouroboros"] = {
         "command": detected["command"],
         "args": detected["args"],
         "enabled": True,
     }
 
-    with hermes_config.open("w", encoding="utf-8") as f:
-        yaml.dump(config_data, f, default_flow_style=False, sort_keys=False)
+    _atomic_write_text(
+        hermes_config,
+        yaml.safe_dump(config_data, default_flow_style=False, sort_keys=False),
+    )
 
     print_success(f"Registered Ouroboros MCP server in {hermes_config}")
+    return True
 
 
-def _setup_hermes(hermes_path: str) -> None:
+def _setup_hermes(hermes_path: str) -> bool:
     """Configure Ouroboros for the Hermes runtime."""
     from ouroboros.config.loader import create_default_config, ensure_config_dir
+    from ouroboros.config.models import get_default_config
+
+    detected = _detect_mcp_entry()
+    if detected is None:
+        print_error(
+            "Hermes setup requires an isolated MCP 2 launcher. "
+            "Install uv/uvx or pipx, then re-run setup."
+        )
+        return False
 
     config_dir = ensure_config_dir()
     config_path = config_dir / "config.yaml"
+    config_was_missing = not config_path.exists()
 
-    if config_path.exists():
+    if not config_was_missing:
         config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
     else:
-        create_default_config(config_dir)
-        config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        config_dict = get_default_config().model_dump(mode="json")
 
     if not isinstance(config_dict, dict):
         print_warning("~/.ouroboros/config.yaml top-level is not a mapping — resetting.")
@@ -2995,54 +3025,35 @@ def _setup_hermes(hermes_path: str) -> None:
     orch["runtime_backend"] = "hermes"
     orch["hermes_cli_path"] = hermes_path
 
-    with config_path.open("w", encoding="utf-8") as f:
-        yaml.dump(config_dict, f, default_flow_style=False, sort_keys=False)
+    if not _commit_runtime_activation(
+        runtime_name="Hermes",
+        host_path=Path.home() / ".hermes" / "config.yaml",
+        config_path=config_path,
+        config_was_missing=config_was_missing,
+        runtime_content=yaml.safe_dump(
+            config_dict,
+            default_flow_style=False,
+            sort_keys=False,
+        ),
+        register_host=lambda: _register_hermes_mcp_server(detected=detected),
+        create_defaults=create_default_config,
+    ):
+        return False
 
     print_success(f"Configured Hermes runtime (CLI: {hermes_path})")
     print_info(f"Config saved to: {config_path}")
 
     # Install Ouroboros skills for Hermes
     _install_hermes_artifacts()
-
-    # Register MCP server
-    _register_hermes_mcp_server()
+    return True
 
 
 def _detect_mcp_entry_for_kiro() -> dict[str, object] | None:
-    """Build an MCP command entry optimized for Kiro CLI.
-
-    Unlike ``_detect_mcp_entry`` (which prefers ``uvx`` for install-method
-    robustness), Kiro needs **fast cold-start** because its MCP init timeout
-    is shorter than ``uvx``'s first-time environment build can take. When the
-    ``ouroboros`` binary is already available (i.e. the user has done
-    ``pip install ouroboros-ai``), spawning it directly skips ``uvx``'s
-    dependency resolution and keeps startup under Kiro's init deadline.
-
-    Priority: ouroboros binary > uvx > python3 -m ouroboros.
-    """
-    if (ouroboros_bin := shutil.which("ouroboros")) is not None:
-        return {"command": ouroboros_bin, "args": ["mcp", "serve"]}
-    if shutil.which("uvx"):
-        return {
-            "command": "uvx",
-            "args": _build_uvx_mcp_args("ouroboros-ai[mcp,claude]"),
-        }
-    # python3 -m fallback: only valid if ouroboros is importable
-    import subprocess
-
-    try:
-        subprocess.run(
-            ["python3", "-c", "import ouroboros"],
-            capture_output=True,
-            timeout=10,
-            check=True,
-        )
-    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
-        return None
-    return {"command": "python3", "args": ["-m", "ouroboros", "mcp", "serve"]}
+    """Build Kiro's package-isolated MCP 2 launcher entry."""
+    return _detect_mcp_entry(package_spec="ouroboros-ai[mcp]")
 
 
-def _register_kiro_mcp_server() -> None:
+def _register_kiro_mcp_server(*, detected: dict[str, object] | None = None) -> bool:
     """Register the Ouroboros MCP hookup in ``~/.kiro/settings/mcp.json``.
 
     Mirrors ``_ensure_claude_mcp_entry`` (same detection and idempotency
@@ -3058,10 +3069,18 @@ def _register_kiro_mcp_server() -> None:
     Ouroboros MCP server pick Claude as default and fail when Claude is
     not configured.
 
-    Uses :func:`_detect_mcp_entry_for_kiro` which prefers the direct
-    ``ouroboros`` binary over ``uvx`` to stay within Kiro's MCP init
-    timeout.
+    Uses :func:`_detect_mcp_entry_for_kiro`, which only returns a package-
+    isolated MCP 2 launcher. Kiro should increase its first-start timeout
+    rather than silently binding a faster but incompatible global binary.
     """
+    detected = detected or _detect_mcp_entry_for_kiro()
+    if detected is None:
+        print_error(
+            "Cannot register Kiro MCP server without an isolated launcher. "
+            "Install uv/uvx or pipx, then re-run setup."
+        )
+        return False
+
     mcp_config_path = Path.home() / ".kiro" / "settings" / "mcp.json"
     mcp_config_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -3071,7 +3090,7 @@ def _register_kiro_mcp_server() -> None:
             mcp_data = json.loads(mcp_config_path.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
             print_error(f"Could not parse {mcp_config_path} — skipping Kiro MCP registration.")
-            return
+            return False
         if not isinstance(mcp_data, dict):
             print_warning(f"{mcp_config_path} top-level is not a mapping — resetting.")
             mcp_data = {}
@@ -3083,14 +3102,8 @@ def _register_kiro_mcp_server() -> None:
         servers = {}
         mcp_data["mcpServers"] = servers
 
-    detected = _detect_mcp_entry_for_kiro()
-    if detected is None:
-        print_warning("Cannot register Kiro MCP server: no working ouroboros installation found.")
-        return
-
-    # _KNOWN_COMMANDS also accepts an absolute-path match so that an entry
-    # previously written with the venv-resident ``ouroboros`` binary (detector
-    # priority 1 output) can still be upgraded on later setup runs.
+    # Known legacy direct commands are accepted only so setup can replace them
+    # with the current isolated launcher on the next run.
     target_env = {
         "OUROBOROS_RUNTIME": "kiro",
         "OUROBOROS_LLM_BACKEND": "kiro",
@@ -3119,7 +3132,7 @@ def _register_kiro_mcp_server() -> None:
         # setup-managed — the binary-first detector (_detect_mcp_entry_for_kiro)
         # writes absolute paths from venvs, and we want re-runs of setup to
         # be able to upgrade those entries.
-        _KNOWN_COMMANDS = {"uvx", "ouroboros", "python3", "python", "uv"}
+        _KNOWN_COMMANDS = {"uvx", "pipx", "ouroboros", "python3", "python", "uv"}
         existing_cmd = existing.get("command")
         is_setup_managed = existing_cmd in _KNOWN_COMMANDS or (
             isinstance(existing_cmd, str)
@@ -3152,11 +3165,11 @@ def _register_kiro_mcp_server() -> None:
             print_info("Kiro MCP entry already registered.")
 
     if needs_write:
-        with mcp_config_path.open("w", encoding="utf-8") as f:
-            json.dump(mcp_data, f, indent=2)
+        _atomic_write_text(mcp_config_path, json.dumps(mcp_data, indent=2) + "\n")
+    return True
 
 
-def _setup_kiro(kiro_path: str) -> None:
+def _setup_kiro(kiro_path: str) -> bool:
     """Configure Ouroboros for the Kiro CLI runtime.
 
     Writes ``~/.ouroboros/config.yaml`` with ``orchestrator.runtime_backend =
@@ -3166,19 +3179,28 @@ def _setup_kiro(kiro_path: str) -> None:
     hand-editing any config file.
     """
     from ouroboros.config.loader import create_default_config, ensure_config_dir
+    from ouroboros.config.models import get_default_config
+
+    detected = _detect_mcp_entry_for_kiro()
+    if detected is None:
+        print_error(
+            "Kiro setup requires an isolated MCP 2 launcher. "
+            "Install uv/uvx or pipx, then re-run setup."
+        )
+        return False
 
     config_dir = ensure_config_dir()
     config_path = config_dir / "config.yaml"
+    config_was_missing = not config_path.exists()
 
-    if config_path.exists():
+    if not config_was_missing:
         config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
     else:
-        create_default_config(config_dir)
-        config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        config_dict = get_default_config().model_dump(mode="json")
 
     if not isinstance(config_dict, dict):
         print_error("~/.ouroboros/config.yaml top-level is not a mapping — aborting Kiro setup.")
-        return
+        return False
 
     orch = config_dict.get("orchestrator")
     if not isinstance(orch, dict):
@@ -3193,23 +3215,43 @@ def _setup_kiro(kiro_path: str) -> None:
         config_dict["llm"] = llm
     llm["backend"] = "kiro"
 
-    with config_path.open("w", encoding="utf-8") as f:
-        yaml.dump(config_dict, f, default_flow_style=False, sort_keys=False)
+    if not _commit_runtime_activation(
+        runtime_name="Kiro",
+        host_path=Path.home() / ".kiro" / "settings" / "mcp.json",
+        config_path=config_path,
+        config_was_missing=config_was_missing,
+        runtime_content=yaml.safe_dump(
+            config_dict,
+            default_flow_style=False,
+            sort_keys=False,
+        ),
+        register_host=lambda: _register_kiro_mcp_server(detected=detected),
+        create_defaults=create_default_config,
+    ):
+        return False
 
     print_success(f"Configured Kiro runtime (CLI: {kiro_path})")
     print_info(f"Config saved to: {config_path}")
 
-    _register_kiro_mcp_server()
     _install_runtime_instruction_artifact("kiro")
+    return True
 
 
-def _register_copilot_mcp_server() -> None:
+def _register_copilot_mcp_server(*, detected: dict[str, object] | None = None) -> bool:
     """Register or refresh the Ouroboros MCP entry in ~/.copilot/mcp-config.json.
 
     Copilot CLI loads MCP servers from ``~/.copilot/mcp-config.json``. We add
     the Ouroboros server (built from whichever package install method we
     detect) and set the env so the MCP child uses the Copilot backend.
     """
+    detected = detected or _detect_mcp_entry(package_spec="ouroboros-ai[mcp]")
+    if detected is None:
+        print_error(
+            "Cannot register Copilot MCP server without an isolated launcher. "
+            "Install uv/uvx or pipx, then re-run setup."
+        )
+        return False
+
     mcp_path = Path.home() / ".copilot" / "mcp-config.json"
     mcp_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -3219,27 +3261,16 @@ def _register_copilot_mcp_server() -> None:
             data = json.loads(mcp_path.read_text(encoding="utf-8")) or {}
         except json.JSONDecodeError:
             print_warning("~/.copilot/mcp-config.json is not valid JSON — leaving it untouched.")
-            return
+            return False
 
     if not isinstance(data, dict):
         print_warning("~/.copilot/mcp-config.json top-level is not an object — skipping.")
-        return
+        return False
 
     servers = data.get("mcpServers")
     if not isinstance(servers, dict):
         servers = {}
         data["mcpServers"] = servers
-
-    detected = _detect_mcp_entry(package_spec="ouroboros-ai[mcp]")
-    if detected is None:
-        print_warning(
-            "Cannot register MCP server: no working ouroboros installation found.\n"
-            "Install with one of:\n"
-            "  pipx install 'ouroboros-ai[mcp]'\n"
-            "  uv tool install 'ouroboros-ai[mcp]'\n"
-            "  pip install 'ouroboros-ai[mcp]'"
-        )
-        return
 
     target_env = {
         "OUROBOROS_AGENT_RUNTIME": "copilot",
@@ -3263,7 +3294,7 @@ def _register_copilot_mcp_server() -> None:
         needs_write = True
         print_success(f"Registered MCP server in {mcp_path}")
     else:
-        _KNOWN_COMMANDS = {"uvx", "ouroboros", "python3", "python", "uv"}
+        _KNOWN_COMMANDS = {"uvx", "pipx", "ouroboros", "python3", "python", "uv"}
         existing_cmd = existing.get("command")
         is_setup_managed = existing_cmd in _KNOWN_COMMANDS or (
             isinstance(existing_cmd, str)
@@ -3291,7 +3322,8 @@ def _register_copilot_mcp_server() -> None:
             print_info("MCP server already registered for Copilot CLI.")
 
     if needs_write:
-        mcp_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        _atomic_write_text(mcp_path, json.dumps(data, indent=2) + "\n")
+    return True
 
 
 _COPILOT_DEFAULT_MODEL_TARGETS: tuple[tuple[str, str, str], ...] = (
@@ -3375,7 +3407,7 @@ def _is_shipped_default_roster(
     )
 
 
-def _setup_copilot(copilot_path: str, *, non_interactive: bool = False) -> None:
+def _setup_copilot(copilot_path: str, *, non_interactive: bool = False) -> bool:
     """Configure Ouroboros for the GitHub Copilot CLI runtime.
 
     Writes ``~/.ouroboros/config.yaml`` with ``orchestrator.runtime_backend =
@@ -3384,23 +3416,32 @@ def _setup_copilot(copilot_path: str, *, non_interactive: bool = False) -> None:
     registers the MCP server in ``~/.copilot/mcp-config.json``.
     """
     from ouroboros.config.loader import create_default_config, ensure_config_dir
+    from ouroboros.config.models import get_default_config
     from ouroboros.copilot.model_discovery import (
         list_copilot_models,
         used_fallback,
     )
 
+    detected = _detect_mcp_entry(package_spec="ouroboros-ai[mcp]")
+    if detected is None:
+        print_error(
+            "Copilot setup requires an isolated MCP 2 launcher. "
+            "Install uv/uvx or pipx, then re-run setup."
+        )
+        return False
+
     config_dir = ensure_config_dir()
     config_path = config_dir / "config.yaml"
+    config_was_missing = not config_path.exists()
 
-    if config_path.exists():
+    if not config_was_missing:
         config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
     else:
-        create_default_config(config_dir)
-        config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        config_dict = get_default_config().model_dump(mode="json")
 
     if not isinstance(config_dict, dict):
         print_error("~/.ouroboros/config.yaml top-level is not a mapping — aborting Copilot setup.")
-        return
+        return False
 
     # Live-discover available Copilot models. Falls back silently to a
     # bundled snapshot when the GitHub API is unreachable or unauthenticated.
@@ -3412,7 +3453,7 @@ def _setup_copilot(copilot_path: str, *, non_interactive: bool = False) -> None:
         )
     if not models:
         print_error("No Copilot models available; cannot pick a default.")
-        return
+        return False
 
     preferred_default = next(
         (m.id for m in models if m.id.startswith("claude-opus-4.6")),
@@ -3457,17 +3498,29 @@ def _setup_copilot(copilot_path: str, *, non_interactive: bool = False) -> None:
     except ValueError as exc:
         print_error(f"Invalid config.yaml structure: {exc}")
         print_info("Aborting Copilot setup without rewriting config.yaml.")
-        return
+        return False
 
-    with config_path.open("w", encoding="utf-8") as f:
-        yaml.dump(config_dict, f, default_flow_style=False, sort_keys=False)
+    if not _commit_runtime_activation(
+        runtime_name="Copilot",
+        host_path=Path.home() / ".copilot" / "mcp-config.json",
+        config_path=config_path,
+        config_was_missing=config_was_missing,
+        runtime_content=yaml.safe_dump(
+            config_dict,
+            default_flow_style=False,
+            sort_keys=False,
+        ),
+        register_host=lambda: _register_copilot_mcp_server(detected=detected),
+        create_defaults=create_default_config,
+    ):
+        return False
 
     print_success(f"Configured Copilot runtime (CLI: {copilot_path})")
     print_info(f"Default model: {chosen_model}")
     print_info(f"Config saved to: {config_path}")
 
-    _register_copilot_mcp_server()
     _install_runtime_instruction_artifact("copilot")
+    return True
 
 
 _PI_OOO_BRIDGE_FILENAME = "ouroboros-ooo-bridge.ts"
@@ -3921,8 +3974,18 @@ def _setup_claude(claude_path: str) -> None:
     with config_path.open("w") as f:
         yaml.dump(config_dict, f, default_flow_style=False, sort_keys=False)
 
-    # Register/fix MCP server in ~/.claude/mcp.json
-    _ensure_claude_mcp_entry()
+    # Do not register the isolated MCP 2 server with this Claude SDK profile.
+    # The persisted runtime and LLM backend below both require
+    # ``claude-agent-sdk`` (and therefore MCP 1.x), while the protocol server
+    # runs in an environment that intentionally excludes that SDK. Registering
+    # it here would create a server that boots but fails lazily on authoring and
+    # execution tools. A future CLI-only Claude LLM adapter can make this path
+    # available without weakening the dependency boundary.
+    print_warning(
+        "Skipped Ouroboros MCP registration for the standalone Claude SDK profile: "
+        "its MCP 1.x runtime cannot share the isolated MCP 2 server process. "
+        "Use a supported CLI-backed runtime setup to register the MCP server."
+    )
 
     print_success(f"Configured Claude Code runtime (CLI: {claude_path})")
     print_info(f"Config saved to: {config_path}")
@@ -3998,7 +4061,7 @@ def _ensure_opencode_mcp_entry() -> bool:
     if detected is None:
         print_warning(
             "Cannot register MCP server: no working ouroboros installation found.\n"
-            "Install with: pip install ouroboros-ai[all]"
+            "Install uv/uvx or pipx so setup can launch isolated ouroboros-ai[mcp]."
         )
         return False
 
@@ -4020,7 +4083,7 @@ def _ensure_opencode_mcp_entry() -> bool:
         # Update command only for known standard launchers. Custom entries
         # (docker, nix wrappers, etc.) are left untouched so we don't break
         # user-managed configurations — mirrors the Claude setup path.
-        _KNOWN_COMMANDS = {"ouroboros", "python3", "python", "uvx", "uv"}
+        _KNOWN_COMMANDS = {"ouroboros", "python3", "python", "uvx", "pipx", "uv"}
         existing_cmd = existing.get("command")
         # OpenCode expects command: string[]. If it's a bare string (hand-edited
         # or legacy), replace it unconditionally since it can't launch.
@@ -4089,24 +4152,19 @@ def _detect_opencode_mcp_command() -> dict[str, list[str]] | None:
     stale global binary and a newer uvx install use the newer one.
     """
     if shutil.which("uvx"):
-        return {"command": ["uvx", "--from", "ouroboros-ai[all]", "ouroboros", "mcp", "serve"]}
-    if shutil.which("ouroboros"):
-        return {"command": ["ouroboros", "mcp", "serve"]}
-    # Check if ouroboros is importable via python
-    import subprocess
-
-    python_path = shutil.which("python3") or shutil.which("python")
-    if python_path:
-        try:
-            subprocess.run(
-                [python_path, "-c", "import ouroboros"],
-                capture_output=True,
-                timeout=10,
-                check=True,
-            )
-            return {"command": [python_path, "-m", "ouroboros", "mcp", "serve"]}
-        except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
-            pass
+        return {"command": ["uvx", "--from", "ouroboros-ai[mcp]", "ouroboros", "mcp", "serve"]}
+    if shutil.which("pipx"):
+        return {
+            "command": [
+                "pipx",
+                "run",
+                "--spec",
+                "ouroboros-ai[mcp]",
+                "ouroboros",
+                "mcp",
+                "serve",
+            ]
+        }
     return None
 
 
@@ -4851,7 +4909,8 @@ def setup(
         if not hermes_path:
             print_error("Hermes CLI not found in PATH.")
             raise typer.Exit(1)
-        _setup_hermes(hermes_path)
+        if not _setup_hermes(hermes_path):
+            raise typer.Exit(1)
     elif selected in ("gemini", "gemini_cli"):
         gemini_path = available.get("gemini")
         if not gemini_path:
@@ -4871,7 +4930,8 @@ def setup(
                 "OUROBOROS_KIRO_CLI_PATH, or configure orchestrator.kiro_cli_path."
             )
             raise typer.Exit(1)
-        _setup_kiro(kiro_path)
+        if not _setup_kiro(kiro_path):
+            raise typer.Exit(1)
     elif selected in ("copilot", "copilot_cli"):
         copilot_path = available.get("copilot")
         if not copilot_path:
@@ -4881,7 +4941,8 @@ def setup(
                 "OUROBOROS_COPILOT_CLI_PATH, or configure orchestrator.copilot_cli_path."
             )
             raise typer.Exit(1)
-        _setup_copilot(copilot_path, non_interactive=non_interactive)
+        if not _setup_copilot(copilot_path, non_interactive=non_interactive):
+            raise typer.Exit(1)
     elif selected in ("pi", "pi_cli"):
         pi_path = available.get("pi")
         if not pi_path:

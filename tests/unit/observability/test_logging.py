@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
+import io
 import json
 import logging
 import os
 from pathlib import Path
+import sys
 import tempfile
 from typing import Any
 from unittest.mock import patch
 import warnings
 
 import pytest
+import structlog
 
 from ouroboros.observability.logging import (
     LoggingConfig,
@@ -498,6 +501,104 @@ class TestResetLogging:
 
         captured = capsys.readouterr()
         assert "test_value" not in captured.err
+
+    def test_reset_does_not_leave_the_process_louder_than_configured(self, capsys: Any) -> None:
+        """A reset must not re-enable debug output, least of all on stdout.
+
+        ``structlog.reset_defaults()`` alone restores the library defaults,
+        which emit every level through a ``PrintLogger`` bound to stdout.
+        Most modules bind their logger once at import time with a bare
+        ``structlog.get_logger``, so they never route through
+        :func:`get_logger` and never trigger the lazy reconfiguration that
+        clearing ``_configured`` sets up — they just keep logging through
+        whatever the reset left behind.
+
+        The observable damage is stdout contamination: ``ouroboros job
+        wait`` emits debug events, and its output is parsed by callers and
+        asserted on verbatim in ``tests/unit/cli``. Because a reset only
+        happens in tests, this surfaced as an order-dependent failure in
+        the full parallel suite rather than anywhere reproducible.
+        """
+        configure_logging(LoggingConfig(enable_file_logging=False))
+        reset_logging()
+
+        structlog.get_logger("reset.probe").debug("reset.debug.must.stay.silent")
+
+        captured = capsys.readouterr()
+        assert "reset.debug.must.stay.silent" not in captured.out
+        assert "reset.debug.must.stay.silent" not in captured.err
+
+    def test_reset_keeps_emitted_levels_off_stdout(self, capsys: Any) -> None:
+        """Whatever survives the level filter must still avoid stdout.
+
+        Filtering debug is only half the contract. structlog's default
+        ``PrintLoggerFactory`` writes to stdout, so an INFO record emitted
+        after a reset still lands in command output — the same
+        contamination as the debug case, one level up.
+        """
+        configure_logging(LoggingConfig(enable_file_logging=False))
+        reset_logging()
+
+        structlog.get_logger("reset.probe").info("reset.info.belongs.on.stderr")
+
+        captured = capsys.readouterr()
+        assert "reset.info.belongs.on.stderr" not in captured.out
+        assert "reset.info.belongs.on.stderr" in captured.err
+
+    def test_reset_preserves_a_quieter_configured_level(self, capsys: Any) -> None:
+        """Resetting an ERROR-level process must not restore it to INFO.
+
+        Assuming the ``LoggingConfig`` default on reset is a volume
+        regression in its own right for any process configured quieter
+        than INFO.
+        """
+        configure_logging(LoggingConfig(enable_file_logging=False, log_level="ERROR"))
+        reset_logging()
+
+        structlog.get_logger("reset.quiet.probe").info("reset.info.must.stay.silent")
+
+        captured = capsys.readouterr()
+        assert "reset.info.must.stay.silent" not in captured.out
+        assert "reset.info.must.stay.silent" not in captured.err
+
+    def test_reset_resolves_the_stream_at_emit_time(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The reset must not pin whatever ``sys.stderr`` happened to be.
+
+        A reset that runs under a capture fixture (``capsys``, or any
+        ``redirect_stderr``) would otherwise bind that fixture's buffer into
+        the global configuration and keep writing to it after teardown --
+        raising on a closed buffer, or silently swallowing later output.
+        Rebinding ``sys.stderr`` after the reset and asserting the new stream
+        receives the record is the direct proof that the lookup is late.
+        """
+        configure_logging(LoggingConfig(enable_file_logging=False, log_level="INFO"))
+        reset_logging()
+
+        replacement = io.StringIO()
+        monkeypatch.setattr(sys, "stderr", replacement)
+        structlog.get_logger("reset.stream.probe").info("reset.late.bound.stream")
+
+        assert "reset.late.bound.stream" in replacement.getvalue()
+
+    def test_reset_keeps_console_suppression(self, capsys: Any) -> None:
+        """``set_console_logging(False)`` must survive the reset.
+
+        Only ``_FileWritingPrintLogger`` consults ``_console_logging_enabled``.
+        Reconfiguring onto a plain ``structlog.PrintLoggerFactory`` would route
+        around that gate and silently re-enable console output for a process
+        that had asked for silence.
+        """
+        configure_logging(LoggingConfig(enable_file_logging=False, log_level="INFO"))
+        set_console_logging(False)
+        try:
+            reset_logging()
+            structlog.get_logger("reset.console.probe").info("reset.console.must.stay.off")
+
+            captured = capsys.readouterr()
+            assert "reset.console.must.stay.off" not in captured.out
+            assert "reset.console.must.stay.off" not in captured.err
+        finally:
+            set_console_logging(True)
 
 
 class TestIsConfigured:

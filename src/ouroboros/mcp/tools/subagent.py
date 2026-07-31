@@ -738,7 +738,7 @@ def build_subagent_result(
 
     The payload is serialized as JSON text in the content field so bridge
     clients can parse the ``_subagent`` key directly. ``meta`` is preserved
-    by the FastMCP adapter for structured clients, but content JSON remains
+    by the MCP SDK adapter for structured clients, but content JSON remains
     the compatibility surface for plugin bridge dispatch.
 
     Public-contract preservation (#442): when ``response_shape`` is provided,

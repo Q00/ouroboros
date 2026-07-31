@@ -201,8 +201,22 @@ async def test_productive_long_run_resets_material_progress_timeout(
 
 
 @pytest.mark.asyncio
-async def test_busy_run_without_material_progress_times_out() -> None:
-    """Activity alone does not count as material progress."""
+async def test_busy_run_without_material_progress_times_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Activity alone does not count as material progress.
+
+    Driven by the fake clock because the two thresholds otherwise race on
+    wall-clock time: the watchdog checks ``idle_timeout`` (1s by default
+    here) before ``no_material_progress_timeout``, and a poll loop starved
+    for a second under a loaded parallel CI run reaches the idle threshold
+    first. The generation is then cancelled for the wrong reason, which is
+    an assertion failure here and a misattributed timeout in production.
+    Advancing a fake clock only from inside the work coroutine orders the
+    thresholds by simulated time instead of by scheduler luck.
+    """
+    clock = _FakeMonotonicClock()
+    monkeypatch.setattr(watchdog_module, "time", SimpleNamespace(monotonic=clock))
     event_store = await _store()
     lineage_id = "lin-busy"
     execution_id = "exec-busy"
@@ -218,6 +232,10 @@ async def test_busy_run_without_material_progress_times_out() -> None:
         try:
             while True:
                 await asyncio.sleep(0.02)
+                # Each step both proves liveness (resetting idle) and fails
+                # to advance completion, so only the no-progress threshold
+                # can accumulate.
+                clock.advance(0.05)
                 await event_store.append(_workflow_progress(execution_id, completed_count=0))
         except asyncio.CancelledError:
             try:
@@ -266,7 +284,9 @@ async def test_busy_run_without_material_progress_times_out() -> None:
 
 
 @pytest.mark.asyncio
-async def test_no_progress_timeout_emits_retry_directive() -> None:
+async def test_no_progress_timeout_emits_retry_directive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Issue #578 directive-mapping contract.
 
     A ``no_material_progress_timeout`` is surfaced as a failed generation
@@ -283,7 +303,16 @@ async def test_no_progress_timeout_emits_retry_directive() -> None:
        on the lineage aggregate, with ``emitted_by="generation.watchdog"`` so
        projectors can attribute the directive to its source.
     3. ``is_terminal`` matches the directive (RETRY is non-terminal).
+
+    The idempotency key embeds the timeout kind, so this test only holds
+    while the *right* threshold fires. On wall-clock time it did not: a
+    starved poll loop in the parallel CI run tripped ``idle_timeout``
+    first and produced ``...:1:idle_timeout:reflecting``. The fake clock
+    makes the threshold ordering a property of the scenario rather than of
+    machine load.
     """
+    clock = _FakeMonotonicClock()
+    monkeypatch.setattr(watchdog_module, "time", SimpleNamespace(monotonic=clock))
     event_store = await _store()
     lineage_id = "lin-578-unstuck"
     execution_id = "exec-578-unstuck"
@@ -300,6 +329,7 @@ async def test_no_progress_timeout_emits_retry_directive() -> None:
         try:
             while True:
                 await asyncio.sleep(0.02)
+                clock.advance(0.05)
                 await event_store.append(_workflow_progress(execution_id, completed_count=0))
         except asyncio.CancelledError:
             raise
@@ -442,8 +472,19 @@ async def test_directive_emission_alphabet_matches_watchdog_raises(
 
 
 @pytest.mark.asyncio
-async def test_session_activity_resets_idle_timeout() -> None:
-    """Session aggregate tool/message events prove generation liveness."""
+async def test_session_activity_resets_idle_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Session aggregate tool/message events prove generation liveness.
+
+    Stepped against a fake clock instead of racing real ``asyncio.sleep``
+    calls against a 0.07s idle threshold. This test asserts the generation
+    stays *alive*, so under parallel CI load any scheduling hiccup longer
+    than the threshold failed it without anything being wrong — the
+    inverse of the no-progress tests, and the same underlying cause.
+    """
+    clock = _FakeMonotonicClock()
+    monkeypatch.setattr(watchdog_module, "time", SimpleNamespace(monotonic=clock))
     event_store = await _store()
     session_id = "session-active"
     execution_id = "exec-session-active"
@@ -454,14 +495,23 @@ async def test_session_activity_resets_idle_timeout() -> None:
         generation_no_progress_timeout_seconds=0,
     )
 
-    async def session_work() -> str:
-        await event_store.append(_session_started(session_id, execution_id))
-        for _ in range(4):
-            await asyncio.sleep(0.04)
-            await event_store.append(_session_tool_called(session_id))
-        return "done"
+    await watchdog.initialize_baseline()
+    await event_store.append(_session_started(session_id, execution_id))
+    await watchdog.poll()
 
-    assert await watchdog.watch(session_work()) == "done"
+    for _ in range(4):
+        clock.advance(0.06)
+        watchdog._raise_if_threshold_exceeded()
+
+        await event_store.append(_session_tool_called(session_id))
+        await watchdog.poll()
+
+        assert watchdog._last_event_type == "orchestrator.tool.called"
+
+    # Elapsed time is now several multiples of the idle threshold; only the
+    # per-event resets keep the generation alive.
+    clock.advance(0.06)
+    watchdog._raise_if_threshold_exceeded()
 
 
 @pytest.mark.asyncio
@@ -781,8 +831,18 @@ async def test_parent_cancellation_cancels_watched_generation() -> None:
 
 
 @pytest.mark.asyncio
-async def test_no_material_progress_timeout_emits_cancellation_mode() -> None:
-    """watchdog_decision event carries cancellation_mode after a no-progress timeout."""
+async def test_no_material_progress_timeout_emits_cancellation_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """watchdog_decision event carries cancellation_mode after a no-progress timeout.
+
+    Fake-clocked for the same reason as the other no-progress tests: the
+    asserted ``timeout_kind`` is only reachable when the no-progress
+    threshold beats the idle one, which wall-clock time does not
+    guarantee under parallel CI load.
+    """
+    clock = _FakeMonotonicClock()
+    monkeypatch.setattr(watchdog_module, "time", SimpleNamespace(monotonic=clock))
     event_store = await _store()
     lineage_id = "lin-cancel-mode"
     execution_id = "exec-cancel-mode"
@@ -797,6 +857,7 @@ async def test_no_material_progress_timeout_emits_cancellation_mode() -> None:
         try:
             while True:
                 await asyncio.sleep(0.02)
+                clock.advance(0.05)
                 await event_store.append(_workflow_progress(execution_id, completed_count=0))
         except asyncio.CancelledError:
             raise

@@ -94,7 +94,14 @@ def test_first_use_onboarding_has_host_specific_model_settings_handoffs() -> Non
     assert "previously completed welcome must never hide the setup gate" in claude_welcome
     assert "runtime_backend: claude" in claude_welcome
     assert '"ouroboros"' in claude_welcome
-    assert "Codex" not in claude_welcome
+    for codex_only_phrase in (
+        "CODEX_SETUP_REQUIRED",
+        "LEGACY_CODEX_MODEL_MIGRATION_REQUIRED",
+        "Use Codex default model",
+        "Codex 선택으로 전환하기",
+        "gpt-5 고정 유지하기",
+    ):
+        assert codex_only_phrase not in claude_welcome
 
     claude_setup = (repo_root / ".claude-plugin" / "skills" / "setup" / "SKILL.md").read_text(
         encoding="utf-8"

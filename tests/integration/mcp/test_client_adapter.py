@@ -5,10 +5,7 @@ mock MCP servers, testing the full flow of connection, tool calling,
 resource reading, and prompt handling.
 """
 
-from contextlib import asynccontextmanager
-import sys
-from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import patch
 
 import pytest
 
@@ -19,83 +16,30 @@ from ouroboros.mcp.types import (
 )
 
 from .conftest import (
+    MockMCPClient,
     MockMCPServerState,
-    create_mock_client_session_class,
+    create_mock_sdk_client_resources,
 )
-
-
-def create_mcp_module_mocks(server_state: MockMCPServerState):
-    """Create mock MCP SDK modules that can be injected into sys.modules.
-
-    This is necessary because the adapter imports MCP SDK inside _raw_connect,
-    so we need to provide mock modules before that import happens.
-
-    Args:
-        server_state: The mock server state to use.
-
-    Returns:
-        Tuple of (mock_mcp_module, mock_stdio_module, cleanup_func)
-    """
-    mock_session_class = create_mock_client_session_class(server_state)
-
-    @asynccontextmanager
-    async def mock_stdio_client(params: Any):
-        """Mock stdio_client context manager."""
-        read_stream = MagicMock()
-        write_stream = MagicMock()
-        yield (read_stream, write_stream)
-
-    # Create mock modules
-    mock_mcp = MagicMock()
-    mock_mcp.ClientSession = mock_session_class
-    mock_mcp.StdioServerParameters = MagicMock()
-
-    mock_mcp_client = MagicMock()
-    mock_mcp_client_stdio = MagicMock()
-    mock_mcp_client_stdio.stdio_client = mock_stdio_client
-
-    # Store original modules if they exist
-    original_mcp = sys.modules.get("mcp")
-    original_mcp_client = sys.modules.get("mcp.client")
-    original_mcp_client_stdio = sys.modules.get("mcp.client.stdio")
-
-    # Install mock modules
-    sys.modules["mcp"] = mock_mcp
-    sys.modules["mcp.client"] = mock_mcp_client
-    sys.modules["mcp.client.stdio"] = mock_mcp_client_stdio
-
-    def cleanup():
-        """Restore original modules."""
-        if original_mcp is not None:
-            sys.modules["mcp"] = original_mcp
-        else:
-            sys.modules.pop("mcp", None)
-        if original_mcp_client is not None:
-            sys.modules["mcp.client"] = original_mcp_client
-        else:
-            sys.modules.pop("mcp.client", None)
-        if original_mcp_client_stdio is not None:
-            sys.modules["mcp.client.stdio"] = original_mcp_client_stdio
-        else:
-            sys.modules.pop("mcp.client.stdio", None)
-
-    return mock_mcp, mock_mcp_client_stdio, cleanup
 
 
 @pytest.fixture
 def mcp_mocks(configured_mock_server: MockMCPServerState):
-    """Fixture that sets up MCP module mocks and cleans up after test."""
-    mock_mcp, mock_stdio, cleanup = create_mcp_module_mocks(configured_mock_server)
-    yield mock_mcp, mock_stdio
-    cleanup()
+    """Patch the adapter boundary with an in-memory SDK v2 client."""
+    with patch(
+        "ouroboros.mcp.client.adapter.build_sdk_client",
+        side_effect=lambda _config: create_mock_sdk_client_resources(configured_mock_server),
+    ) as build:
+        yield build
 
 
 @pytest.fixture
 def empty_mcp_mocks(mock_server_state: MockMCPServerState):
-    """Fixture for empty server mocks."""
-    mock_mcp, mock_stdio, cleanup = create_mcp_module_mocks(mock_server_state)
-    yield mock_mcp, mock_stdio
-    cleanup()
+    """Patch the adapter boundary with an empty SDK v2 server."""
+    with patch(
+        "ouroboros.mcp.client.adapter.build_sdk_client",
+        side_effect=lambda _config: create_mock_sdk_client_resources(mock_server_state),
+    ) as build:
+        yield build
 
 
 class TestMCPClientAdapterConnection:
@@ -423,24 +367,15 @@ class TestMCPClientAdapterRetry:
 
         connection_attempts = 0
 
-        @asynccontextmanager
-        async def failing_then_success_cm(*args: Any, **kwargs: Any):
-            nonlocal connection_attempts
-            connection_attempts += 1
-            if connection_attempts < 3:
-                raise ConnectionError("Transient failure")
-            # Return mock streams on success
-            yield (MagicMock(), MagicMock())
+        server_state = MockMCPServerState(name="retry-test")
 
-        mock_session = MagicMock()
-        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-        mock_session.__aexit__ = AsyncMock()
-        mock_session.initialize = AsyncMock(
-            return_value=MagicMock(
-                protocolVersion="1.0.0",
-                capabilities=MagicMock(tools=False, resources=False, prompts=False, logging=True),
-            )
-        )
+        class RetryingClient(MockMCPClient):
+            async def __aenter__(self) -> MockMCPClient:
+                nonlocal connection_attempts
+                connection_attempts += 1
+                if connection_attempts < 3:
+                    raise ConnectionError("Transient failure")
+                return await super().__aenter__()
 
         config = MCPServerConfig(
             name="retry-test",
@@ -448,44 +383,17 @@ class TestMCPClientAdapterRetry:
             command="test",
         )
 
-        # Create mock modules
-        mock_mcp = MagicMock()
-        mock_mcp.ClientSession = MagicMock(return_value=mock_session)
-        mock_mcp.StdioServerParameters = MagicMock()
+        from ouroboros.mcp.client.sdk_factory import SDKClientResources
 
-        mock_mcp_client_stdio = MagicMock()
-        mock_mcp_client_stdio.stdio_client = failing_then_success_cm
-
-        # Store original modules
-        original_mcp = sys.modules.get("mcp")
-        original_mcp_client = sys.modules.get("mcp.client")
-        original_mcp_client_stdio = sys.modules.get("mcp.client.stdio")
-
-        try:
-            # Install mock modules
-            sys.modules["mcp"] = mock_mcp
-            sys.modules["mcp.client"] = MagicMock()
-            sys.modules["mcp.client.stdio"] = mock_mcp_client_stdio
-
+        with patch(
+            "ouroboros.mcp.client.adapter.build_sdk_client",
+            side_effect=lambda _config: SDKClientResources(client=RetryingClient(server_state)),
+        ):
             async with adapter:
                 result = await adapter.connect(config)
 
                 assert result.is_ok
                 assert connection_attempts == 3
-        finally:
-            # Restore original modules
-            if original_mcp is not None:
-                sys.modules["mcp"] = original_mcp
-            else:
-                sys.modules.pop("mcp", None)
-            if original_mcp_client is not None:
-                sys.modules["mcp.client"] = original_mcp_client
-            else:
-                sys.modules.pop("mcp.client", None)
-            if original_mcp_client_stdio is not None:
-                sys.modules["mcp.client.stdio"] = original_mcp_client_stdio
-            else:
-                sys.modules.pop("mcp.client.stdio", None)
 
 
 class TestMCPClientAdapterCapabilities:
@@ -529,3 +437,44 @@ class TestMCPClientAdapterCapabilities:
             assert info.capabilities.tools is False
             assert info.capabilities.resources is False
             assert info.capabilities.prompts is False
+
+    @pytest.mark.asyncio
+    async def test_capability_snapshot_is_complete_and_deeply_immutable(
+        self,
+        mock_server_state: MockMCPServerState,
+        stdio_server_config: MCPServerConfig,
+    ) -> None:
+        """Negotiated v2 capability metadata survives beyond convenience flags."""
+        from mcp import types as sdk_types
+
+        from ouroboros.mcp.client.sdk_factory import SDKClientResources
+
+        client = MockMCPClient(mock_server_state)
+        client.server_capabilities = sdk_types.ServerCapabilities(
+            tools=sdk_types.ToolsCapability(list_changed=True),
+            completions=sdk_types.CompletionsCapability(),
+            tasks=sdk_types.ServerTasksCapability(cancel=sdk_types.TasksCancelCapability()),
+            experimental={"com.example/jobs": {"version": 2, "modes": ["shared"]}},
+        )
+
+        with patch(
+            "ouroboros.mcp.client.adapter.build_sdk_client",
+            return_value=SDKClientResources(client=client),
+        ):
+            adapter = MCPClientAdapter()
+            async with adapter:
+                result = await adapter.connect(stdio_server_config)
+                assert result.is_ok
+                snapshot = adapter.server_snapshot
+
+        assert snapshot is not None
+        capabilities = snapshot.capabilities
+        assert capabilities.tools is True
+        assert capabilities.completions is True
+        assert capabilities.tasks is True
+        assert capabilities.experimental is True
+        assert capabilities.details["tools"]["listChanged"] is True
+        assert capabilities.details["experimental"]["com.example/jobs"]["version"] == 2
+        assert capabilities.details["experimental"]["com.example/jobs"]["modes"] == ("shared",)
+        with pytest.raises(TypeError):
+            capabilities.details["tools"]["listChanged"] = False

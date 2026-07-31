@@ -83,7 +83,7 @@ def brownfield_context_from_cwd(cwd: str | Path | None) -> BrownfieldContext:
         from ouroboros.bigbang.explore import detect_brownfield
 
         root = Path(cwd).expanduser()
-        if not root.is_dir() or not detect_brownfield(root):
+        if not root.is_dir() or not ((root / ".git").exists() or detect_brownfield(root)):
             return BrownfieldContext()
         return BrownfieldContext(
             project_type="brownfield",

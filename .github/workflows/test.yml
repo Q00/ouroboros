@@ -37,11 +37,11 @@ jobs:
       - name: Install dependencies
         run: |
           if [[ "${{ matrix.python-version }}" == "3.14" ]]; then
-            echo "Installing dependency groups: dev"
-            uv sync --python "${{ matrix.python-version }}" --dev
+            echo "Installing dependency groups: dev + mcp-test"
+            uv sync --python "${{ matrix.python-version }}" --dev --group mcp-test
           else
-            echo "Installing dependency groups: dev + litellm-test"
-            uv sync --python "${{ matrix.python-version }}" --dev --group litellm-test
+            echo "Installing dependency groups: dev + mcp-test + litellm-test"
+            uv sync --python "${{ matrix.python-version }}" --dev --group mcp-test --group litellm-test
           fi
 
       - name: Check dependency consistency
@@ -51,6 +51,7 @@ jobs:
           import importlib.util
 
           print("litellm installed:", importlib.util.find_spec("litellm") is not None)
+          assert importlib.util.find_spec("mcp") is not None, "MCP test profile is missing"
           PY
           uv pip check
 

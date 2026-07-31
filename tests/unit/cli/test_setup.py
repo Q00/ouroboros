@@ -4219,8 +4219,15 @@ class TestCodexSetup:
 class TestClaudeSetup:
     """Tests for Claude-specific setup behavior."""
 
-    def test_setup_claude_removes_legacy_timeout_override(self, tmp_path: Path) -> None:
-        """Claude setup should no longer persist the legacy 600s MCP timeout."""
+    def test_legacy_claude_mcp_registration_shim_is_fail_closed(self, tmp_path: Path) -> None:
+        """Older plugin callers cannot reactivate the incompatible MCP path."""
+        with patch("pathlib.Path.home", return_value=tmp_path):
+            setup_cmd._ensure_claude_mcp_entry()
+
+        assert not (tmp_path / ".claude" / "mcp.json").exists()
+
+    def test_setup_claude_leaves_existing_mcp_entry_untouched(self, tmp_path: Path) -> None:
+        """The standalone Claude SDK profile must not mutate MCP wiring."""
         config_dir = tmp_path / ".ouroboros"
         config_dir.mkdir()
         config_path = config_dir / "config.yaml"
@@ -4257,50 +4264,27 @@ class TestClaudeSetup:
         claude_mcp = json.loads(claude_config.read_text(encoding="utf-8"))
         config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8"))
 
-        assert "timeout" not in claude_mcp["mcpServers"]["ouroboros"]
-        # Stale args (ouroboros-ai without [claude]) should be updated
-        assert claude_mcp["mcpServers"]["ouroboros"]["args"] == [
-            "--from",
-            "ouroboros-ai[mcp,claude]",
-            "ouroboros",
-            "mcp",
-            "serve",
-        ]
+        assert claude_mcp["mcpServers"]["ouroboros"]["timeout"] == 600
+        assert claude_mcp["mcpServers"]["ouroboros"]["command"] == "uvx"
         assert config_dict["orchestrator"]["runtime_backend"] == "claude"
         assert config_dict["llm"]["backend"] == "claude"
 
     @pytest.mark.parametrize(
-        "which_side_effect, expected_cmd, expected_args",
+        "which_side_effect",
         [
-            # uvx available → uvx entry with [claude] extras
-            (
-                lambda cmd: "/usr/local/bin/uvx" if cmd == "uvx" else None,
-                "uvx",
-                ["--from", "ouroboros-ai[mcp,claude]", "ouroboros", "mcp", "serve"],
-            ),
-            # no uvx, ouroboros binary available → binary entry
-            (
-                lambda cmd: "/usr/local/bin/ouroboros" if cmd == "ouroboros" else None,
-                "ouroboros",
-                ["mcp", "serve"],
-            ),
-            # no uvx, no binary → python3 -m fallback
-            (
-                lambda _cmd: None,
-                "python3",
-                ["-m", "ouroboros", "mcp", "serve"],
-            ),
+            # uvx available → isolated MCP 2 entry
+            (lambda cmd: "/usr/local/bin/uvx" if cmd == "uvx" else None,),
+            # no uvx → pipx provides another isolated package environment
+            (lambda cmd: "/usr/local/bin/pipx" if cmd == "pipx" else None,),
         ],
-        ids=["uvx", "pipx-binary", "pip-fallback"],
+        ids=["uvx", "pipx-isolated"],
     )
-    def test_setup_claude_creates_new_entry_per_install_method(
+    def test_setup_claude_does_not_create_mcp_entry(
         self,
         tmp_path: Path,
         which_side_effect,
-        expected_cmd: str,
-        expected_args: list[str],
     ) -> None:
-        """New MCP entry command/args should match the detected install method."""
+        """Even isolated launchers cannot satisfy the Claude SDK backend lazily."""
         config_dir = tmp_path / ".ouroboros"
         config_dir.mkdir()
         config_path = config_dir / "config.yaml"
@@ -4320,9 +4304,26 @@ class TestClaudeSetup:
             setup_cmd._setup_claude("/usr/local/bin/claude")
 
         claude_mcp = json.loads(claude_config.read_text(encoding="utf-8"))
-        entry = claude_mcp["mcpServers"]["ouroboros"]
-        assert entry["command"] == expected_cmd
-        assert entry["args"] == expected_args
+        assert "ouroboros" not in claude_mcp["mcpServers"]
+
+    def test_setup_claude_does_not_register_unisolated_binary(self, tmp_path: Path) -> None:
+        """Without uvx/pipx, setup must not reuse the Claude SDK environment."""
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text("{}", encoding="utf-8")
+        claude_config = tmp_path / ".claude" / "mcp.json"
+        claude_config.parent.mkdir()
+        claude_config.write_text(json.dumps({"mcpServers": {}}), encoding="utf-8")
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch("ouroboros.cli.commands.setup.shutil.which", return_value=None),
+        ):
+            setup_cmd._setup_claude("/usr/local/bin/claude")
+
+        data = json.loads(claude_config.read_text(encoding="utf-8"))
+        assert "ouroboros" not in data["mcpServers"]
 
     def test_setup_claude_preserves_custom_command(self, tmp_path: Path) -> None:
         """Custom (non-standard) MCP command should not be overwritten."""
@@ -4364,8 +4365,8 @@ class TestClaudeSetup:
         assert claude_mcp["mcpServers"]["ouroboros"]["command"] == "docker"
         assert claude_mcp["mcpServers"]["ouroboros"]["args"] == custom_args
 
-    def test_setup_claude_updates_stale_standard_entry(self, tmp_path: Path) -> None:
-        """Stale standard entry (e.g. python3) should be updated to detected method."""
+    def test_setup_claude_preserves_stale_standard_entry(self, tmp_path: Path) -> None:
+        """Claude setup owns runtime config, not pre-existing MCP registration."""
         config_dir = tmp_path / ".ouroboros"
         config_dir.mkdir()
         config_path = config_dir / "config.yaml"
@@ -4400,9 +4401,10 @@ class TestClaudeSetup:
             setup_cmd._setup_claude("/usr/local/bin/claude")
 
         claude_mcp = json.loads(claude_config.read_text(encoding="utf-8"))
-        # Should be updated from python3 to uvx
-        assert claude_mcp["mcpServers"]["ouroboros"]["command"] == "uvx"
-        assert "ouroboros-ai[mcp,claude]" in str(claude_mcp["mcpServers"]["ouroboros"]["args"])
+        assert claude_mcp["mcpServers"]["ouroboros"] == {
+            "command": "python3",
+            "args": ["-m", "ouroboros", "mcp", "serve"],
+        }
 
     def test_setup_claude_skips_write_when_args_already_current(self, tmp_path: Path) -> None:
         """No file write when args are already up to date."""
@@ -4411,7 +4413,7 @@ class TestClaudeSetup:
         config_path = config_dir / "config.yaml"
         config_path.write_text("{}", encoding="utf-8")
 
-        current_args = ["--from", "ouroboros-ai[mcp,claude]", "ouroboros", "mcp", "serve"]
+        current_args = ["--from", "ouroboros-ai[mcp]", "ouroboros", "mcp", "serve"]
         claude_dir = tmp_path / ".claude"
         claude_dir.mkdir()
         claude_config = claude_dir / "mcp.json"
@@ -4433,6 +4435,262 @@ class TestClaudeSetup:
 
         # File should not be rewritten when nothing changed
         assert claude_config.stat().st_mtime == mtime_before
+
+
+class TestIsolatedMCPLaunchers:
+    """MCP 2 registrations must never inherit an arbitrary host environment."""
+
+    def test_direct_binary_and_python_fallbacks_are_rejected(self) -> None:
+        def direct_only(command: str) -> str | None:
+            if command in {"ouroboros", "python", "python3"}:
+                return f"/usr/local/bin/{command}"
+            return None
+
+        with patch("ouroboros.cli.commands.setup.shutil.which", side_effect=direct_only):
+            assert setup_cmd._detect_mcp_entry() is None
+            assert setup_cmd._detect_mcp_entry_for_kiro() is None
+            assert setup_cmd._detect_opencode_mcp_command() is None
+
+    def test_pipx_is_the_isolated_fallback_for_all_host_configs(self) -> None:
+        with patch(
+            "ouroboros.cli.commands.setup.shutil.which",
+            side_effect=lambda command: "/usr/local/bin/pipx" if command == "pipx" else None,
+        ):
+            common = setup_cmd._detect_mcp_entry()
+            kiro = setup_cmd._detect_mcp_entry_for_kiro()
+            opencode = setup_cmd._detect_opencode_mcp_command()
+
+        expected_args = [
+            "run",
+            "--spec",
+            "ouroboros-ai[mcp]",
+            "ouroboros",
+            "mcp",
+            "serve",
+        ]
+        assert common == {
+            "command": "pipx",
+            "args": expected_args,
+        }
+        assert kiro == common
+        assert opencode == {"command": ["pipx", *expected_args]}
+
+    @pytest.mark.parametrize(
+        "register",
+        (
+            setup_cmd._register_hermes_mcp_server,
+            setup_cmd._register_kiro_mcp_server,
+            setup_cmd._register_copilot_mcp_server,
+        ),
+    )
+    def test_registration_without_isolated_launcher_is_fail_closed(
+        self,
+        register,
+        tmp_path: Path,
+    ) -> None:
+        """A pip-only PATH cannot create any host registration artifact."""
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.cli.commands.setup.shutil.which", return_value=None),
+        ):
+            assert register() is False
+
+        assert not (tmp_path / ".hermes").exists()
+        assert not (tmp_path / ".kiro").exists()
+        assert not (tmp_path / ".copilot").exists()
+
+    @pytest.mark.parametrize("runtime", ("hermes", "kiro", "copilot"))
+    def test_setup_without_isolated_launcher_preserves_runtime_config(
+        self,
+        runtime: str,
+        tmp_path: Path,
+    ) -> None:
+        """Activation failure occurs before any Ouroboros config write."""
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        original = "orchestrator:\n  runtime_backend: claude\nllm:\n  backend: claude_code\n"
+        config_path.write_text(original, encoding="utf-8")
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.cli.commands.setup.shutil.which", return_value=None),
+            patch("ouroboros.config.loader.ensure_config_dir") as ensure_config_dir,
+        ):
+            if runtime == "hermes":
+                result = setup_cmd._setup_hermes("/opt/bin/hermes")
+            elif runtime == "kiro":
+                result = setup_cmd._setup_kiro("/opt/bin/kiro-cli")
+            else:
+                result = setup_cmd._setup_copilot(
+                    "/opt/bin/copilot",
+                    non_interactive=True,
+                )
+
+        assert result is False
+        ensure_config_dir.assert_not_called()
+        assert config_path.read_text(encoding="utf-8") == original
+
+    @pytest.mark.parametrize("runtime", ("hermes", "kiro", "copilot"))
+    @pytest.mark.parametrize("host_existed", (True, False))
+    def test_runtime_setup_rolls_back_host_registration_when_config_commit_fails(
+        self,
+        runtime: str,
+        host_existed: bool,
+        tmp_path: Path,
+    ) -> None:
+        """Host registration and Ouroboros runtime config commit atomically."""
+        host_paths = {
+            "hermes": tmp_path / ".hermes" / "config.yaml",
+            "kiro": tmp_path / ".kiro" / "settings" / "mcp.json",
+            "copilot": tmp_path / ".copilot" / "mcp-config.json",
+        }
+        original_hosts = {
+            "hermes": "mcp_servers:\n  custom:\n    command: custom\n",
+            "kiro": '{"mcpServers":{"custom":{"command":"custom"}}}\n',
+            "copilot": '{"mcpServers":{"custom":{"command":"custom"}}}\n',
+        }
+        host_path = host_paths[runtime]
+        if host_existed:
+            host_path.parent.mkdir(parents=True)
+            host_path.write_text(original_hosts[runtime], encoding="utf-8")
+
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        original_config = "orchestrator:\n  runtime_backend: claude\nllm:\n  backend: claude_code\n"
+        config_path.write_text(original_config, encoding="utf-8")
+
+        real_atomic_write = setup_cmd._atomic_write_text
+        config_write_failed = False
+
+        def fail_first_runtime_config_write(
+            path: Path,
+            content: str,
+            *,
+            mode: int = 0o644,
+        ) -> None:
+            nonlocal config_write_failed
+            if path == config_path and not config_write_failed:
+                config_write_failed = True
+                raise OSError("simulated config commit failure")
+            real_atomic_write(path, content, mode=mode)
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch(
+                "ouroboros.cli.commands.setup._detect_mcp_entry",
+                return_value={
+                    "command": "uvx",
+                    "args": [
+                        "--from",
+                        "ouroboros-ai[mcp]",
+                        "ouroboros",
+                        "mcp",
+                        "serve",
+                    ],
+                },
+            ),
+            patch(
+                "ouroboros.cli.commands.setup._atomic_write_text",
+                side_effect=fail_first_runtime_config_write,
+            ),
+            patch(
+                "ouroboros.copilot.model_discovery.list_copilot_models",
+                return_value=TestCopilotSetup._stub_models(),
+            ),
+            patch("ouroboros.copilot.model_discovery.used_fallback", return_value=False),
+        ):
+            if runtime == "hermes":
+                result = setup_cmd._setup_hermes("/opt/bin/hermes")
+            elif runtime == "kiro":
+                result = setup_cmd._setup_kiro("/opt/bin/kiro-cli")
+            else:
+                result = setup_cmd._setup_copilot(
+                    "/opt/bin/copilot",
+                    non_interactive=True,
+                )
+
+        assert result is False
+        assert config_write_failed is True
+        assert config_path.read_text(encoding="utf-8") == original_config
+        if host_existed:
+            assert host_path.read_text(encoding="utf-8") == original_hosts[runtime]
+        else:
+            assert not host_path.exists()
+
+    @pytest.mark.parametrize("runtime", ("hermes", "kiro", "copilot"))
+    def test_runtime_setup_rolls_back_partial_default_config_creation(
+        self,
+        runtime: str,
+        tmp_path: Path,
+    ) -> None:
+        """A failing first-time config bootstrap cannot leave host state behind."""
+        host_paths = {
+            "hermes": tmp_path / ".hermes" / "config.yaml",
+            "kiro": tmp_path / ".kiro" / "settings" / "mcp.json",
+            "copilot": tmp_path / ".copilot" / "mcp-config.json",
+        }
+        original_hosts = {
+            "hermes": "mcp_servers:\n  custom:\n    command: custom\n",
+            "kiro": '{"mcpServers":{"custom":{"command":"custom"}}}\n',
+            "copilot": '{"mcpServers":{"custom":{"command":"custom"}}}\n',
+        }
+        host_path = host_paths[runtime]
+        host_path.parent.mkdir(parents=True)
+        host_path.write_text(original_hosts[runtime], encoding="utf-8")
+
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        credentials_path = config_dir / "credentials.yaml"
+
+        def fail_after_partial_default_creation(target_dir: Path) -> None:
+            (target_dir / "config.yaml").write_text("partial config", encoding="utf-8")
+            (target_dir / "credentials.yaml").write_text("partial credentials", encoding="utf-8")
+            raise OSError("simulated default config failure")
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch(
+                "ouroboros.config.loader.create_default_config",
+                side_effect=fail_after_partial_default_creation,
+            ),
+            patch(
+                "ouroboros.cli.commands.setup._detect_mcp_entry",
+                return_value={
+                    "command": "uvx",
+                    "args": [
+                        "--from",
+                        "ouroboros-ai[mcp]",
+                        "ouroboros",
+                        "mcp",
+                        "serve",
+                    ],
+                },
+            ),
+            patch(
+                "ouroboros.copilot.model_discovery.list_copilot_models",
+                return_value=TestCopilotSetup._stub_models(),
+            ),
+            patch("ouroboros.copilot.model_discovery.used_fallback", return_value=False),
+        ):
+            if runtime == "hermes":
+                result = setup_cmd._setup_hermes("/opt/bin/hermes")
+            elif runtime == "kiro":
+                result = setup_cmd._setup_kiro("/opt/bin/kiro-cli")
+            else:
+                result = setup_cmd._setup_copilot(
+                    "/opt/bin/copilot",
+                    non_interactive=True,
+                )
+
+        assert result is False
+        assert host_path.read_text(encoding="utf-8") == original_hosts[runtime]
+        assert not config_path.exists()
+        assert not credentials_path.exists()
 
 
 class TestHermesSetup:
@@ -4499,7 +4757,8 @@ class TestHermesSetup:
         assert config_dict["llm"]["backend"] == "codex"
         assert config_dict["llm"]["qa_model"] == "gpt-5.4"
         mock_install.assert_called_once_with()
-        mock_register.assert_called_once_with()
+        mock_register.assert_called_once()
+        assert mock_register.call_args.kwargs["detected"]["command"] in {"uvx", "pipx"}
 
     def test_setup_hermes_repairs_scalar_top_level_config(self, tmp_path: Path) -> None:
         """Hermes setup should recover from malformed scalar config.yaml contents."""
@@ -6435,7 +6694,7 @@ class TestGjcSetup:
         assert entry["command"] == "uvx"
         assert entry["args"] == [
             "--from",
-            "ouroboros-ai[mcp,claude]",
+            "ouroboros-ai[mcp]",
             "ouroboros",
             "mcp",
             "serve",
@@ -6537,7 +6796,7 @@ class TestGjcSetup:
                             "command": "uvx",
                             "args": [
                                 "--from",
-                                "ouroboros-ai[mcp,claude]",
+                                "ouroboros-ai[mcp]",
                                 "ouroboros",
                                 "mcp",
                                 "serve",
@@ -6595,7 +6854,8 @@ class TestGjcSetup:
         assert config["llm"]["backend"] == "kiro"
         # Unrelated keys preserved.
         assert config["llm"]["qa_model"] == "x"
-        mock_register.assert_called_once_with()
+        mock_register.assert_called_once()
+        assert mock_register.call_args.kwargs["detected"]["command"] in {"uvx", "pipx"}
 
     def test_setup_kiro_aborts_on_non_mapping_ouroboros_config(self, tmp_path: Path) -> None:
         """Kiro setup must not clobber malformed existing config.yaml contents."""
@@ -6671,6 +6931,24 @@ class TestGjcSetup:
         assert result.exit_code != 0
         assert "Kiro CLI not found" in result.output
 
+    def test_setup_cli_propagates_kiro_activation_failure(self, tmp_path: Path) -> None:
+        """A host-registration failure must become a non-zero CLI result."""
+        runner = CliRunner()
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch(
+                "ouroboros.cli.commands.setup._detect_runtimes",
+                return_value={"kiro": "/opt/bin/kiro-cli"},
+            ),
+            patch("ouroboros.cli.commands.setup._setup_kiro", return_value=False),
+        ):
+            result = runner.invoke(
+                setup_cmd.app,
+                ["--runtime", "kiro", "--non-interactive"],
+            )
+
+        assert result.exit_code == 1
+
 
 class TestCopilotSetup:
     """`_setup_copilot`, `_register_copilot_mcp_server`, and the CLI dispatcher.
@@ -6737,7 +7015,8 @@ class TestCopilotSetup:
         assert "### When a skill requires `run_lateral_review`" in guide_path.read_text(
             encoding="utf-8"
         )
-        mock_register.assert_called_once_with()
+        mock_register.assert_called_once()
+        assert mock_register.call_args.kwargs["detected"]["command"] in {"uvx", "pipx"}
 
     def test_setup_copilot_replaces_shipped_default_model_fields(self, tmp_path: Path) -> None:
         """Fresh/default configs should honor the model selected during setup."""

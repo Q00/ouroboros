@@ -41,10 +41,12 @@ Example: "AC: Tasks can be created | verify: python -m pytest tests/test_tasks.p
 - If the command has no distinctive stdout literal to assert, write `expect: NONE`. Exit-code 0 is already verified separately by the runner.
 
 **Granularity contract (read carefully):**
-- Produce **3-7** acceptance criteria. Each criterion is **one independently valuable, user-visible outcome** — not an implementation step.
-- Do **NOT** pre-decompose criteria into executable sub-tasks. Splitting work into atomic units is the execution engine's job at runtime; doing it here multiplies token cost with no benefit.
-- An AC that is a sub-step of a sibling AC (e.g. "create the model" + "add a field to the model") is a **defect**, equal in severity to a missing requirement. Merge such criteria into the outcome they serve.
-- If you draft more than 7, merge criteria that share a user-visible outcome **before responding**.
+
+An acceptance criterion names a **state of the finished work** that a user can see is true. An implementation step names a **means of reaching that state**. These are different categories, and only the first belongs here — deciding means is the execution engine's work at runtime, and it decides them better with the outcome in hand than with your guess at the path.
+
+So the question to ask of every criterion is what kind of thing it is. Read it beside its siblings: if it stands on its own as something a user would value, it is an outcome. If it is intelligible only as a move toward a sibling, it is that sibling's means wearing an outcome's clothes, and it belongs merged into the outcome it serves. Leaving a means in the criteria list is a defect equal in severity to a missing requirement — it commits the seed to a path before anyone has verified the path is the right one.
+
+How many criteria a goal has is a property of that goal, discovered by making this judgment.
 
 ### 4. ONTOLOGY
 The data structure/domain model for this work:

@@ -890,6 +890,58 @@ class TestSessionRepository:
         assert tracker.messages_processed == 1
 
     @pytest.mark.asyncio
+    async def test_reconstruct_session_strict_related_read_fails_closed(
+        self,
+        repository: SessionRepository,
+        mock_event_store: AsyncMock,
+    ) -> None:
+        start_event = MagicMock()
+        start_event.type = "orchestrator.session.started"
+        start_event.data = {
+            "execution_id": "exec_123",
+            "seed_id": "seed_456",
+            "start_time": datetime.now(UTC).isoformat(),
+        }
+        mock_event_store.replay.return_value = [start_event]
+        mock_event_store.query_session_related_events = AsyncMock(
+            side_effect=RuntimeError("related history unavailable")
+        )
+
+        compatible = await repository.reconstruct_session("sess_123")
+        strict = await repository.reconstruct_session(
+            "sess_123",
+            strict_related_events=True,
+        )
+
+        assert compatible.is_ok
+        assert strict.is_err
+        assert "related history unavailable" in str(strict.error)
+
+    @pytest.mark.asyncio
+    async def test_reconstruct_session_strict_rejects_invalid_related_result(
+        self,
+        repository: SessionRepository,
+        mock_event_store: AsyncMock,
+    ) -> None:
+        start_event = MagicMock()
+        start_event.type = "orchestrator.session.started"
+        start_event.data = {
+            "execution_id": "exec_123",
+            "seed_id": "seed_456",
+            "start_time": datetime.now(UTC).isoformat(),
+        }
+        mock_event_store.replay.return_value = [start_event]
+        mock_event_store.query_session_related_events = AsyncMock(return_value=(start_event,))
+
+        result = await repository.reconstruct_session(
+            "sess_123",
+            strict_related_events=True,
+        )
+
+        assert result.is_err
+        assert "related event query did not return a list" in str(result.error)
+
+    @pytest.mark.asyncio
     async def test_reconstruct_session_tolerates_invalid_start_time(
         self,
         repository: SessionRepository,
