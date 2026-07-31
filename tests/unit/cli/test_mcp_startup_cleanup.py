@@ -21,6 +21,7 @@ from ouroboros.orchestrator.session import (
     SessionStatus,
     SessionTracker,
 )
+from ouroboros.persistence.event_store import sqlite_database_url
 
 
 def _make_tracker(
@@ -329,6 +330,7 @@ class TestMCPStartupAutoCleanup:
             except asyncio.CancelledError:
                 cleanup_cancelled.set()
                 raise
+            raise AssertionError("cleanup wait returned unexpectedly")
 
         mock_repo.cancel_orphaned_sessions = AsyncMock(side_effect=slow_cleanup)
 
@@ -612,7 +614,7 @@ class TestMCPStartupAutoCleanup:
 
             await _run_mcp_server("localhost", 8080, "stdio", db_path="/tmp/test.db")
 
-        MockEventStore.assert_called_once_with("sqlite+aiosqlite:////tmp/test.db")
+        MockEventStore.assert_called_once_with(sqlite_database_url("/tmp/test.db"))
 
     @pytest.mark.asyncio
     async def test_default_db_path_uses_runtime_resolver(self, tmp_path) -> None:
@@ -646,7 +648,7 @@ class TestMCPStartupAutoCleanup:
 
             await _run_mcp_server("localhost", 8080, "stdio")
 
-        expected_url = f"sqlite+aiosqlite:///{resolved_db}"
+        expected_url = sqlite_database_url(resolved_db)
         assert mock_event_store.call_args_list[-1].args == (expected_url,)
         assert mock_brownfield_store.call_args_list[-1].args == (expected_url,)
 
