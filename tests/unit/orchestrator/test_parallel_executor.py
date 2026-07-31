@@ -169,8 +169,8 @@ def test_deliver_matching_uses_verifier_command_aliases() -> None:
         _trusted_python_c("from pathlib import Path; Path('src/generated.py').write_bytes(b'x')"),
     ),
 )
-def test_python_c_pathlib_static_proof_accepts_trusted_top_level_write(tmp_path, command) -> None:
-    """Static pathlib proof accepts direct writes through the trusted Python form."""
+def test_python_c_pathlib_static_proof_rejects_command_text_only_write(tmp_path, command) -> None:
+    """Python command text alone cannot prove historical filesystem identity."""
     generated = tmp_path / "src" / "generated.py"
     generated.parent.mkdir()
     generated.write_text("VALUE = 1\n", encoding="utf-8")
@@ -181,7 +181,7 @@ def test_python_c_pathlib_static_proof_accepts_trusted_top_level_write(tmp_path,
             reference="src/generated.py",
             task_cwd=str(tmp_path),
         )
-        is True
+        is False
     )
 
 
@@ -578,6 +578,80 @@ def test_files_touched_rejects_command_cwd_symlink_final_state_spoof(tmp_path) -
     )
 
 
+def test_files_touched_rejects_command_cwd_symlink_replaced_by_directory(tmp_path) -> None:
+    """A cwd symlink replaced by a real directory still lacks execution-time identity."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    run_path = tmp_path / "run"
+    try:
+        os.symlink(outside, run_path)
+        run_path.unlink()
+    except (OSError, NotImplementedError):  # pragma: no cover - unprivileged/Windows
+        pytest.skip("symlink creation not permitted in this environment")
+    run_path.mkdir()
+    claimed_file = run_path / "claimed.py"
+    claimed_file.write_text("VALUE = 1\n", encoding="utf-8")
+    command = _trusted_python_c("from pathlib import Path; Path('claimed.py').write_text('x')")
+    messages = (
+        AgentMessage(
+            type="tool",
+            content=f"Bash: {command}",
+            tool_name="Bash",
+            data={"tool_input": {"command": command, "cwd": "run"}},
+        ),
+        AgentMessage(
+            type="tool_result",
+            content="command completed with exit code 0",
+            data={"subtype": "tool_result", "exit_code": 0},
+        ),
+    )
+
+    assert (
+        _runtime_messages_support_file_claim(
+            "run/claimed.py",
+            messages,
+            task_cwd=str(tmp_path),
+        )
+        is False
+    )
+
+
+def test_files_touched_rejects_receiver_symlink_replaced_by_regular_file(tmp_path) -> None:
+    """The exact claimed receiver can be replaced after execution, so text fails closed."""
+    outside = tmp_path / "outside.py"
+    outside.write_text("VALUE = 1\n", encoding="utf-8")
+    claimed_file = tmp_path / "claimed.py"
+    try:
+        os.symlink(outside, claimed_file)
+        claimed_file.unlink()
+    except (OSError, NotImplementedError):  # pragma: no cover - unprivileged/Windows
+        pytest.skip("symlink creation not permitted in this environment")
+    claimed_file.write_text("VALUE = 2\n", encoding="utf-8")
+    command = _trusted_python_c("from pathlib import Path; Path('claimed.py').write_text('x')")
+    messages = (
+        AgentMessage(
+            type="tool",
+            content=f"Bash: {command}",
+            tool_name="Bash",
+            data={"tool_input": {"command": command}},
+        ),
+        AgentMessage(
+            type="tool_result",
+            content="command completed with exit code 0",
+            data={"subtype": "tool_result", "exit_code": 0},
+        ),
+    )
+
+    assert (
+        _runtime_messages_support_file_claim(
+            "claimed.py",
+            messages,
+            task_cwd=str(tmp_path),
+        )
+        is False
+    )
+
+
 def test_files_touched_rejects_pathlib_receiver_symlink_final_state_spoof(tmp_path) -> None:
     """A symlink retargeted after execution must not authenticate the old receiver."""
     claimed_file = tmp_path / "claimed.py"
@@ -616,8 +690,8 @@ def test_files_touched_rejects_pathlib_receiver_symlink_final_state_spoof(tmp_pa
     )
 
 
-def test_files_touched_accepts_production_shaped_goose_tool_output_success(tmp_path) -> None:
-    """Goose reports Bash start/output as runtime events rather than exit_code."""
+def test_files_touched_rejects_production_shaped_goose_command_text_only(tmp_path) -> None:
+    """Goose success correlation does not make command text a file proof."""
     generated_file = tmp_path / "src" / "generated.py"
     generated_file.parent.mkdir()
     generated_file.write_text("VALUE = 1\n", encoding="utf-8")
@@ -653,7 +727,7 @@ def test_files_touched_accepts_production_shaped_goose_tool_output_success(tmp_p
             messages,
             task_cwd=str(tmp_path),
         )
-        is True
+        is False
     )
 
 
@@ -3225,8 +3299,10 @@ def test_files_touched_rejects_unexecuted_python_c_pathlib_write(tmp_path) -> No
     )
 
 
-def test_files_touched_resolves_python_c_pathlib_against_command_cwd(tmp_path) -> None:
-    """Relative pathlib receivers bind to the actual structured command cwd."""
+def test_files_touched_rejects_python_c_pathlib_command_text_only_with_command_cwd(
+    tmp_path,
+) -> None:
+    """Command cwd cannot make Python command text prove file mutation."""
     workspace = tmp_path / "work"
     subdir = workspace / "subdir"
     subdir.mkdir(parents=True)
@@ -3245,7 +3321,7 @@ def test_files_touched_resolves_python_c_pathlib_against_command_cwd(tmp_path) -
         },
     )
 
-    assert _runtime_messages_support_file_claim(
+    assert not _runtime_messages_support_file_claim(
         "subdir/generated.py",
         (message,),
         task_cwd=str(workspace),
@@ -3302,8 +3378,8 @@ def test_files_touched_rejects_python_c_pathlib_command_cwd_outside_workspace(tm
         },
     ),
 )
-def test_files_touched_accepts_python_c_pathlib_goose_cmd_shapes(tmp_path, tool_input) -> None:
-    """Goose cmd string and argv list command shapes use the canonical extractor."""
+def test_files_touched_rejects_python_c_pathlib_goose_cmd_text_only(tmp_path, tool_input) -> None:
+    """Goose cmd string and argv list shapes still need separate file proof."""
     workspace = tmp_path / "work"
     workspace.mkdir()
     message = AgentMessage(
@@ -3313,7 +3389,7 @@ def test_files_touched_accepts_python_c_pathlib_goose_cmd_shapes(tmp_path, tool_
         data={"tool_input": tool_input, "exit_code": 0},
     )
 
-    assert _runtime_messages_support_file_claim(
+    assert not _runtime_messages_support_file_claim(
         "generated.py",
         (message,),
         task_cwd=str(workspace),
@@ -7529,10 +7605,8 @@ class TestParallelACExecutor:
         assert evidence_event.data["verifier_passed"] is False
 
     @pytest.mark.asyncio
-    async def test_fat_harness_verifier_allows_pathlib_write_to_claimed_file(
-        self, tmp_path
-    ) -> None:
-        """A direct Python pathlib write can prove the matching workspace file."""
+    async def test_fat_harness_verifier_rejects_pathlib_command_text_only(self, tmp_path) -> None:
+        """Python/pathlib command text alone is not execution-bound file proof."""
         generated_file = tmp_path / "src" / "generated.py"
         generated_file.parent.mkdir()
         generated_file.write_text("VALUE = 1\n", encoding="utf-8")
@@ -7597,14 +7671,15 @@ class TestParallelACExecutor:
             start_time=datetime.now(UTC),
         )
 
-        assert result.success is True
-        assert result.error is None
+        assert result.success is False
+        assert result.error is not None
+        assert "files_touched: src/generated.py" in result.error
         evidence_event = next(
             event
             for event in appended_events
             if event.type == "execution.ac.typed_evidence.observed"
         )
-        assert evidence_event.data["verifier_passed"] is True
+        assert evidence_event.data["verifier_passed"] is False
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -7624,10 +7699,10 @@ class TestParallelACExecutor:
             ),
         ),
     )
-    async def test_fat_harness_verifier_allows_equivalent_pathlib_receivers(
+    async def test_fat_harness_verifier_rejects_equivalent_pathlib_command_text_only(
         self, tmp_path, command_factory
     ) -> None:
-        """Equivalent pathlib receivers resolve through the workspace path matcher."""
+        """Equivalent pathlib spellings still need execution-bound file proof."""
         generated_file = tmp_path / "src" / "generated.py"
         generated_file.parent.mkdir()
         generated_file.write_text("VALUE = 1\n", encoding="utf-8")
@@ -7690,14 +7765,15 @@ class TestParallelACExecutor:
             start_time=datetime.now(UTC),
         )
 
-        assert result.success is True
-        assert result.error is None
+        assert result.success is False
+        assert result.error is not None
+        assert "files_touched: src/generated.py" in result.error
         evidence_event = next(
             event
             for event in appended_events
             if event.type == "execution.ac.typed_evidence.observed"
         )
-        assert evidence_event.data["verifier_passed"] is True
+        assert evidence_event.data["verifier_passed"] is False
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(

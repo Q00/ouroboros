@@ -566,12 +566,14 @@ def _python_c_pathlib_write_reference_match(
     task_cwd: str | None,
     claim_cwd: str | None = None,
 ) -> bool | None:
-    """Classify a Python ``-c`` pathlib write as matching, rejected, or unrelated.
+    """Classify Python ``-c`` pathlib writes as rejected or unrelated.
 
     ``None`` means the command is not a pathlib-write Python ``-c`` form and
     other shell mutation evidence may still be considered. ``False`` is
-    authoritative: a recognized pathlib write did not safely prove the claim.
+    authoritative: recognized Python/pathlib command text cannot safely prove a
+    historical filesystem mutation without execution-bound file evidence.
     """
+    del reference, claim_cwd
     if task_cwd is None:
         return None
     try:
@@ -606,22 +608,7 @@ def _python_c_pathlib_write_reference_match(
         or _source_needs_shell_expansion(source)
     ):
         return False
-    try:
-        tree = ast.parse(source)
-    except (MemoryError, RecursionError, SyntaxError, ValueError):
-        return False
-    targets = _pathlib_write_targets(tree)
-    if not targets:
-        return False
-    return any(
-        _pathlib_static_target_matches_claim(
-            reference,
-            target,
-            task_cwd=claim_cwd or task_cwd,
-            runtime_cwd=task_cwd,
-        )
-        for target in targets
-    )
+    return False
 
 
 def _pathlib_static_target_matches_claim(
