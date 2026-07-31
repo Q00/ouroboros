@@ -79,21 +79,50 @@ def _scan_scalar(text: str, index: int) -> tuple[str, int] | None:
     return text[start:index], index
 
 
+def _preceding_assignment_operator(text: str, index: int) -> str | None:
+    index -= 1
+    while index >= 0 and text[index] in " \t\f\v":
+        index -= 1
+    return text[index] if index >= 0 and text[index] in "=:" else None
+
+
+def _has_complete_scalar_terminator(text: str, index: int, operator: str | None) -> bool:
+    """Reject a scalar that is only the prefix of an assigned expression."""
+    index = _skip_inline_space(text, index)
+    if index >= len(text) or text[index] in "\r\n":
+        return True
+    if text[index] == "#":
+        return True
+    if operator == "=":
+        return text[index] == ";"
+    return text[index] in ",;)]}"
+
+
 def _extract_following_scalar(content: str, index: int) -> str:
     """Extract a direct, assigned, or parenthesized scalar at index."""
     index = _skip_inline_space(content, index)
     if index < len(content) and content[index] in "=:":
+        operator = content[index]
         scanned = _scan_scalar(content, index + 1)
-        return scanned[0] if scanned is not None else ""
+        if scanned is None:
+            return ""
+        value, end = scanned
+        return value if _has_complete_scalar_terminator(content, end, operator) else ""
     if index < len(content) and content[index] == "(":
         scanned = _scan_scalar(content, index + 1)
         if scanned is None:
             return ""
         value, end = scanned
         end = _skip_inline_space(content, end)
-        return value if end < len(content) and content[end] == ")" else ""
+        if end >= len(content) or content[end] != ")":
+            return ""
+        return value if _has_complete_scalar_terminator(content, end + 1, None) else ""
     scanned = _scan_scalar(content, index)
-    return scanned[0] if scanned is not None else ""
+    if scanned is None:
+        return ""
+    value, end = scanned
+    operator = _preceding_assignment_operator(content, index)
+    return value if _has_complete_scalar_terminator(content, end, operator) else ""
 
 
 @dataclass

@@ -17,6 +17,8 @@ class _FenceScanState(Enum):
 
 _FENCE_MARKERS = ("`", "~")
 _BLOCKQUOTE_FENCE_PREFIX = re.compile(r"^[ \t]{0,3}(?:>[ \t]?)+$")
+_PLAIN_FENCE_PREFIX = re.compile(r"^ {0,3}$")
+_INDENTED_CODE_PREFIX = re.compile(r"^(?: {4}| {0,3}\t)")
 
 
 def extract_json_payload(text: str) -> str | None:
@@ -40,7 +42,9 @@ def extract_json_payload(text: str) -> str | None:
         return None
 
     payloads = [
-        payload for segment in fallback_segments for payload in _extract_json_from_text(segment)
+        payload
+        for segment in fallback_segments
+        for payload in _extract_json_from_text(_exclude_indented_code_blocks(segment))
     ]
     return payloads[0] if len(payloads) == 1 else None
 
@@ -141,7 +145,7 @@ def _find_opening_fence(text: str, start: int) -> tuple[int, int, str, str | Non
         line_start = text.rfind("\n", 0, candidate) + 1
         prefix = text[line_start:candidate]
         quote_prefix = _blockquote_prefix(prefix)
-        if prefix.strip() == "" or quote_prefix is not None:
+        if _PLAIN_FENCE_PREFIX.fullmatch(prefix) is not None or quote_prefix is not None:
             return candidate, candidate_length, marker, quote_prefix
 
         pos = candidate + candidate_length
@@ -170,7 +174,9 @@ def _find_closing_fence(
         prefix = text[line_start:candidate]
         suffix = text[candidate + candidate_length : line_end]
         prefix_matches = (
-            prefix == quote_prefix if quote_prefix is not None else prefix.strip() == ""
+            prefix == quote_prefix
+            if quote_prefix is not None
+            else _PLAIN_FENCE_PREFIX.fullmatch(prefix) is not None
         )
         if candidate_length >= opener_length and prefix_matches and suffix.strip() == "":
             return candidate, candidate_length, line_start
@@ -194,6 +200,18 @@ def _decode_fenced_body(body: str, *, quote_prefix: str | None) -> str | None:
             return None
         decoded.append(line[len(quote_prefix) :])
     return "\n".join(decoded).strip()
+
+
+def _exclude_indented_code_blocks(text: str) -> str:
+    """Exclude Markdown indented-code lines from unfenced answer fallback.
+
+    A fence-looking line indented by four spaces (or a tab) is literal code,
+    not an authoritative fenced answer.  Its indented body must likewise not
+    compete with the model's actual top-level payload.
+    """
+    return "".join(
+        line for line in text.splitlines(keepends=True) if _INDENTED_CODE_PREFIX.match(line) is None
+    )
 
 
 def _extract_json_from_text(text: str) -> tuple[str, ...]:

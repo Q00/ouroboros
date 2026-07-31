@@ -219,6 +219,61 @@ class TestSpecVerifier:
         assert summary.failed_count == 0
 
     @pytest.mark.parametrize(
+        "source_value",
+        [
+            '"foo" + "bar"',
+            "'foo' 'bar'",
+            '"foo".strip()',
+            '"foo" // 2',
+        ],
+        ids=[
+            "binary-concatenation",
+            "implicit-concatenation",
+            "method-expression",
+            "floor-division-expression",
+        ],
+    )
+    def test_t1_constant_rejects_quoted_scalar_expression_prefix(self, source_value: str) -> None:
+        project = self._create_project({"config.py": f"NAME = {source_value}\n"})
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="Name should be foo",
+            tier=VerificationTier.T1_CONSTANT,
+            pattern=r"NAME\s*=\s*",
+            expected_value="foo",
+            file_hint="*.py",
+        )
+
+        summary = SpecVerifier(project_dir=project).verify_all(
+            (assertion,), agent_results={0: True}
+        )
+
+        assert summary.verified_count == 0
+        assert summary.failed_count == 1
+        assert summary.discrepancy_count == 1
+
+    @pytest.mark.parametrize(
+        "suffix",
+        ["", "   ", " # source comment", ";"],
+        ids=["line-end", "whitespace-line-end", "comment", "statement-terminator"],
+    )
+    def test_t1_constant_accepts_complete_quoted_scalar_terminator(self, suffix: str) -> None:
+        project = self._create_project({"config.py": f'NAME = "foo"{suffix}\n'})
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="Name should be foo",
+            tier=VerificationTier.T1_CONSTANT,
+            pattern=r"NAME\s*=\s*",
+            expected_value="foo",
+            file_hint="*.py",
+        )
+
+        summary = SpecVerifier(project_dir=project).verify_all((assertion,))
+
+        assert summary.verified_count == 1
+        assert summary.failed_count == 0
+
+    @pytest.mark.parametrize(
         ("source_value", "expected_value"),
         [
             (r"hello \"world\"", 'hello "world"'),
