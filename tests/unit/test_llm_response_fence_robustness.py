@@ -75,10 +75,15 @@ def _wrap(variant: str, payload: str) -> str:
     if variant == "pretty_raw_tabs":
         return json.dumps(json.loads(payload), indent="\t")
     if variant == "anthropic_prefill_pretty_blanklines":
-        pretty = json.dumps(json.loads(payload), indent=2).replace("\n", "\n\n", 1)
-        return f"{{Let me carefully evaluate this response.\n\n{pretty}\n\n"
+        pretty = json.dumps(json.loads(payload), indent=2).replace("\n", "\n \t\n", 1)
+        return f"{{Let me carefully evaluate this response.\n  \n{pretty}\n\t\n"
     if variant == "anthropic_prefill_crlf_trailing_blanks":
-        return f"{{I will analyze this response.\r\n\r\n{payload}\r\n\r\n"
+        return f"{{I will analyze this response.\r\n  \r\n{payload}\r\n\t\r\n"
+    if variant == "anthropic_prefill_ordinary_punctuation":
+        return (
+            "{Let me review the user's \"goal\": it isn't ambiguous; "
+            f"the `draft` [note] is prose.\n\n{payload}"
+        )
     if variant == "no_fence":
         return payload
     raise AssertionError(f"unknown variant: {variant}")
@@ -216,6 +221,7 @@ FENCE_VARIANTS = [
     "pretty_raw_tabs",
     "anthropic_prefill_pretty_blanklines",
     "anthropic_prefill_crlf_trailing_blanks",
+    "anthropic_prefill_ordinary_punctuation",
     "no_fence",
 ]
 

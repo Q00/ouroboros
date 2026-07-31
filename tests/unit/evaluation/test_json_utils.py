@@ -188,14 +188,14 @@ class TestExtractJsonPayload:
                 '  "outer": {',
                 '    "inner": true',
                 "  },",
-                "",
+                " \t",
                 '  "items": [1, 2]',
                 "}",
             ]
         )
         text = (
-            f"{{Let me carefully evaluate this response.{line_ending}{line_ending}"
-            f"{payload}{line_ending}{line_ending}"
+            f"{{Let me carefully evaluate this response.{line_ending}  {line_ending}"
+            f"{payload}{line_ending}\t{line_ending}"
         )
 
         assert extract_json_payload(text) == payload
@@ -204,6 +204,15 @@ class TestExtractJsonPayload:
         text = '{Let me compare the answers.\n\n{"a": 1}\n\n{"b": 2}'
 
         assert extract_json_payload(text) is None
+
+    def test_anthropic_prefill_allows_ordinary_prose_punctuation(self) -> None:
+        text = (
+            "{Let me review the user's \"goal\": it isn't ambiguous; "
+            "the `draft` [note] is prose.\n  \n"
+            '{"actual": true}'
+        )
+
+        assert extract_json_payload(text) == '{"actual": true}'
 
     @pytest.mark.parametrize(
         "prefix",

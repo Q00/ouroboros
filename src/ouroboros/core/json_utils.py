@@ -21,10 +21,7 @@ _PLAIN_FENCE_PREFIX = re.compile(r"^ {0,3}$")
 _INDENTED_CODE_PREFIX = re.compile(r"^(?: {4}| {0,3}\t)")
 _ANTHROPIC_PREFILL_PROSE = re.compile(r"^\{(?:Let me\s|I will analyze\s)")
 _ANTHROPIC_PREFILL_PREAMBLE = re.compile(r"^(?:Let me\s|I will analyze\s)")
-_SIMPLE_PROSE_PLACEHOLDER = re.compile(r"\{[A-Za-z_][A-Za-z0-9_.-]*\}")
-_STRUCTURED_PREAMBLE_LINE = re.compile(
-    r"^\s*(?:[A-Za-z_][A-Za-z0-9_-]*|\d+)\s*:\s*\S", re.MULTILINE
-)
+_PARAGRAPH_SEPARATOR = re.compile(r"\r?\n[ \t]*\r?\n")
 
 
 class _MalformedJsonBoundary(ValueError):
@@ -346,7 +343,7 @@ def _anthropic_prefill_payload(text: str, start: int) -> str | None:
         return None
 
     candidates: list[tuple[int, str]] = []
-    for separator in re.finditer(r"(?:\r?\n){2,}", text[start + 1 :]):
+    for separator in _PARAGRAPH_SEPARATOR.finditer(text[start + 1 :]):
         payload_start = start + 1 + separator.end()
         payload = text[payload_start:].strip()
         try:
@@ -371,18 +368,8 @@ def _anthropic_prefill_payload(text: str, start: int) -> str | None:
 
 
 def _is_historical_anthropic_preamble(preamble: str) -> bool:
-    """Accept only the two prose families demonstrated by the legacy corpus."""
-    if _ANTHROPIC_PREFILL_PREAMBLE.match(preamble) is None:
-        return False
-    if any(char in preamble for char in ('"', "'", "`", "[", "]")):
-        return False
-
-    without_placeholders = _SIMPLE_PROSE_PLACEHOLDER.sub("", preamble)
-    if "{" in without_placeholders or "}" in without_placeholders:
-        return False
-
-    first_line = preamble.splitlines()[0]
-    return ":" not in first_line and _STRUCTURED_PREAMBLE_LINE.search(preamble) is None
+    """Require a corpus-proven prose stem with genuine whitespace continuation."""
+    return _ANTHROPIC_PREFILL_PREAMBLE.match(preamble) is not None
 
 
 def _bracket_extract(text: str, start: int) -> str | None:
