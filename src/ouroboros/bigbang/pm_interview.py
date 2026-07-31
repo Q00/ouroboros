@@ -26,6 +26,7 @@ from typing import Any
 import structlog
 
 from ouroboros.bigbang.ambiguity import AmbiguityScorer
+from ouroboros.bigbang.answer_provenance import extraction_rounds
 from ouroboros.bigbang.brownfield import (
     load_brownfield_repos_as_dicts as _load_brownfield_dicts,
 )
@@ -1113,7 +1114,7 @@ class PMInterviewEngine:
                 )
             )
 
-        context = self._build_interview_context(state)
+        context = self._build_interview_context(state, withhold_observations=True)
 
         messages = [
             Message(role=MessageRole.SYSTEM, content=_EXTRACTION_SYSTEM_PROMPT),
@@ -1226,23 +1227,37 @@ class PMInterviewEngine:
     # Internal helpers
     # ──────────────────────────────────────────────────────────────
 
-    def _build_interview_context(self, state: InterviewState) -> str:
+    def _build_interview_context(
+        self, state: InterviewState, *, withhold_observations: bool = False
+    ) -> str:
         """Build interview context string from state.
 
         Args:
             state: Current interview state.
+            withhold_observations: Render observation answers as a fixed note
+                instead of their content. True only for the requirement
+                extraction prompt — the question classifier reads the same
+                context and has to see observations in full, since informing
+                the next question is what they were collected for (#1755).
 
         Returns:
             Formatted context string.
         """
         parts = [f"Initial Context: {prompt_safe_initial_context(state)}"]
 
-        for round_data in state.rounds:
-            if round_data.question == INITIAL_CONTEXT_SUMMARY_QUESTION:
+        # Question lines are unchanged either way: an observation reaching a
+        # later question is where it was collected to arrive.
+        if withhold_observations:
+            rendered = [(item.question, item.answer) for item in extraction_rounds(state)]
+        else:
+            rendered = [(item.question, item.user_response) for item in state.rounds]
+
+        for question, answer in rendered:
+            if question == INITIAL_CONTEXT_SUMMARY_QUESTION:
                 continue
-            parts.append(f"\nQ: {round_data.question}")
-            if round_data.user_response:
-                parts.append(f"A: {round_data.user_response}")
+            parts.append(f"\nQ: {question}")
+            if answer:
+                parts.append(f"A: {answer}")
 
         return "\n".join(parts)
 

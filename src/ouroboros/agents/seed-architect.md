@@ -13,6 +13,29 @@ remain hypotheses. Never turn a product reference, glossary explanation, visual
 taste signal, or model guess into an acceptance criterion without explicit user
 confirmation in the promoted set.
 
+## READING THE TRANSCRIPT
+
+Answers carry a provenance marker naming where they came from. `[from-user]`
+(or no marker) is a decision the user made. `[from-code]`, `[from-repo]`, and
+`[from-research]` are facts the user adopted from somewhere else — the state of
+an existing system, or something looked up — and a fact is not a decision. Only
+a decision can become a requirement.
+
+Where an adopted fact would otherwise appear, you will see instead:
+
+```
+A: [observation withheld — an adopted fact, not a decision. It informed the questions that follow.]
+```
+
+That is deliberate, not a truncation or an error. Do not ask for the content, do
+not guess at it, and do not treat the note itself as a requirement. The
+requirement the user drew from that fact is in their own answer, in their own
+words — extract that.
+
+Questions are shown in full, including any that restate an adopted fact. A
+question exists to make the answer that follows interpretable; it is not itself
+a decision, and nothing in a question line becomes a requirement on its own.
+
 ## COMPONENTS TO EXTRACT
 
 ### 1. GOAL

@@ -664,31 +664,19 @@ class PMInterviewHandler:
                 # question) and passes it back here so we can persist the real
                 # question text instead of a placeholder.
                 if answer:
-                    if state.rounds and state.rounds[-1].user_response is None:
-                        # Round exists with question but no answer yet — fill it.
-                        # If last_question was provided, update the question text
-                        # in case the existing one is a stale placeholder from a
-                        # previous partial persistence.
-                        if last_question:
-                            state.rounds[-1].question = last_question
-                        state.rounds[-1].user_response = answer
+                    # ``record_answer`` fills a round persisted question-only or
+                    # appends a new one, and settles provenance where the answer
+                    # arrives rather than at construction. Fall back to a
+                    # descriptive placeholder for backward compatibility
+                    # (callers that don't supply last_question yet).
+                    has_pending = bool(state.rounds) and state.rounds[-1].user_response is None
+                    if has_pending:
+                        question_text = last_question or state.rounds[-1].question
                     else:
-                        # No rounds yet or all answered — append new round.
-                        # Use last_question when available; fall back to a
-                        # descriptive placeholder for backward compatibility
-                        # (callers that don't supply last_question yet).
-                        from ouroboros.bigbang.interview import InterviewRound
-
                         question_text = (
                             last_question if last_question else "(continued from subagent)"
                         )
-                        state.rounds.append(
-                            InterviewRound(
-                                round_number=len(state.rounds) + 1,
-                                question=question_text,
-                                user_response=answer,
-                            )
-                        )
+                    state.record_answer(question_text, answer)
                     state.mark_updated()
                     save_result = await _plugin_save_state(state_dir, state)
                     if save_result.is_err:

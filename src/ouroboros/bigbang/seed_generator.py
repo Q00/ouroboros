@@ -23,6 +23,7 @@ import structlog
 import yaml
 
 from ouroboros.bigbang.ambiguity import AMBIGUITY_THRESHOLD, AmbiguityScore
+from ouroboros.bigbang.answer_provenance import extraction_rounds
 from ouroboros.bigbang.interview import (
     INITIAL_CONTEXT_SUMMARY_QUESTION,
     InterviewState,
@@ -1178,12 +1179,15 @@ EXIT_CONDITIONS: [{{"name": "<name>", "description": "<description>", "criteria"
             if rendered_paths:
                 parts.append(f"\nCodebase Paths: {rendered_paths}")
 
-        for round_data in state.rounds:
+        # Observation answers render as a fixed note instead of their content
+        # (#1755). Question lines are unchanged: an observation reaching a later
+        # question is where it was collected to arrive.
+        for round_data in extraction_rounds(state):
             if round_data.question == INITIAL_CONTEXT_SUMMARY_QUESTION:
                 continue
             parts.append(f"\nQ: {round_data.question}")
-            if round_data.user_response:
-                parts.append(f"A: {round_data.user_response}")
+            if round_data.answer:
+                parts.append(f"A: {round_data.answer}")
 
         return "\n".join(parts)
 
