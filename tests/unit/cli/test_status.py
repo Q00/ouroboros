@@ -423,9 +423,11 @@ def test_executions_allows_progress_after_same_aggregate_pause(
     assert "running" in detail_result.output
 
 
+@pytest.mark.parametrize("terminal_status", (" FAILED ", "\tFAILED\n"))
 def test_executions_normalizes_absorbing_terminal_status_whitespace(
     monkeypatch,
     tmp_path: Path,
+    terminal_status: str,
 ) -> None:
     config_dir = tmp_path / "config"
     db_path = config_dir / "data" / "ouroboros.db"
@@ -440,7 +442,7 @@ def test_executions_normalizes_absorbing_terminal_status_whitespace(
                 timestamp=now - timedelta(seconds=1),
                 aggregate_type="execution",
                 aggregate_id="exec_whitespace",
-                data={"session_id": "session_same", "status": " FAILED "},
+                data={"session_id": "session_same", "status": terminal_status},
             ),
             BaseEvent(
                 type="workflow.progress.updated",
