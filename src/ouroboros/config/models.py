@@ -846,8 +846,8 @@ def resolve_event_store_path(config_path: Path | None = None) -> Path:
 
     try:
         loaded = yaml.safe_load(config_path.read_text()) or {}
-    except (OSError, yaml.YAMLError) as exc:
-        raise ValueError(f"cannot read EventStore configuration {config_path}: {exc}") from exc
+    except (OSError, yaml.YAMLError):
+        raise ValueError("invalid EventStore configuration") from None
     if not isinstance(loaded, Mapping):
         raise ValueError(
             f"invalid config format in {config_path} "

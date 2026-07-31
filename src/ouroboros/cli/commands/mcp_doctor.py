@@ -318,7 +318,15 @@ def check_codex_oauth_auth() -> CheckResult:
 
 def check_event_store() -> CheckResult:
     """Check EventStore path existence and warn if it exceeds 500 MB."""
-    event_store_path = _EVENT_STORE_PATH or resolve_event_store_path()
+    try:
+        event_store_path = _EVENT_STORE_PATH or resolve_event_store_path()
+    except ValueError:
+        return CheckResult(
+            name="event_store",
+            status="fail",
+            message="Invalid EventStore configuration.",
+            remediation="Fix persistence.database_path in the Ouroboros configuration.",
+        )
     if not event_store_path.exists():
         return CheckResult(
             name="event_store",

@@ -27,6 +27,14 @@ app = typer.Typer(
 )
 
 
+def _resolve_event_store_path_or_exit() -> Path:
+    try:
+        return resolve_event_store_path()
+    except ValueError:
+        print_error("Invalid EventStore configuration.")
+        raise typer.Exit(1) from None
+
+
 @app.command(name="monitor")
 def monitor_command(
     db_path: Annotated[
@@ -51,7 +59,7 @@ def monitor_command(
     Starts a terminal UI that shows a list of all sessions found in the
     database. You can then select a session to monitor in real-time.
     """
-    resolved_db_path = db_path or resolve_event_store_path()
+    resolved_db_path = db_path or _resolve_event_store_path_or_exit()
     if backend == "slt":
         _run_slt_backend(resolved_db_path)
         return
@@ -158,7 +166,7 @@ def build_tui_open_launch(
 ) -> TUIOpenPlan:
     """Build the terminal-specific TUI launch plan."""
     resolved_cwd = (cwd or Path.cwd()).expanduser().resolve()
-    resolved_db_path = (db_path or resolve_event_store_path()).expanduser()
+    resolved_db_path = (db_path or _resolve_event_store_path_or_exit()).expanduser()
     monitor_argv = _monitor_argv(resolved_db_path)
     manual_command = _manual_command(resolved_cwd, monitor_argv)
 

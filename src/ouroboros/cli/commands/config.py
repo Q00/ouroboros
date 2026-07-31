@@ -98,13 +98,11 @@ def _load_config() -> tuple[dict, Path]:
         raise typer.Exit(1)
     try:
         data = yaml.safe_load(config_path.read_text()) or {}
-    except (yaml.YAMLError, OSError) as exc:
-        print_error(f"Cannot parse {config_path}: {exc}")
+    except (yaml.YAMLError, OSError):
+        print_error("Invalid YAML in configuration file.")
         raise typer.Exit(1) from None
     if not isinstance(data, dict):
-        print_error(
-            f"Invalid config format in {config_path} (expected mapping, got {type(data).__name__})"
-        )
+        print_error(f"Invalid config format (expected mapping, got {type(data).__name__})")
         raise typer.Exit(1)
 
     # Guard against sections that should be dicts but aren't (e.g. orchestrator: [])

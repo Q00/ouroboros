@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -139,6 +140,50 @@ class TestConfigShow:
         assert result.returncode == 1
         assert "persistence.database_path" in result.stdout
         assert "Traceback" not in result.stdout + result.stderr
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["config", "show", "--json"],
+        ["status", "executions"],
+        ["resume"],
+        ["tui", "open"],
+        ["mcp", "doctor", "--json"],
+        ["mcp", "serve", "--transport", "stdio"],
+    ],
+)
+def test_invalid_yaml_commands_redact_config_contents(tmp_path: Path, arguments: list[str]) -> None:
+    home = tmp_path / "home"
+    config_dir = home / ".ouroboros"
+    config_dir.mkdir(parents=True)
+    secret = "sk-super-secret"
+    (config_dir / "config.yaml").write_text(
+        f"persistence:\n  database_path: [\napi_key: {secret}: exposed\n"
+    )
+    env = os.environ.copy()
+    env["HOME"] = str(home)
+
+    result = subprocess.run(
+        [sys.executable, "-m", "ouroboros", *arguments],
+        stdin=subprocess.DEVNULL,
+        text=True,
+        capture_output=True,
+        check=False,
+        env=env,
+        timeout=10,
+    )
+    output = result.stdout + result.stderr
+
+    assert result.returncode != 0
+    assert secret not in output
+    assert "Traceback" not in output
+    if arguments[:2] == ["mcp", "doctor"]:
+        checks = json.loads(result.stdout)
+        event_store = next(check for check in checks if check["name"] == "event_store")
+        assert event_store["message"] == "Invalid EventStore configuration."
+    else:
+        assert str(home) not in output
 
 
 # ── config backend ───────────────────────────────────────────────
@@ -328,7 +373,7 @@ class TestConfigBackend:
         with patch("ouroboros.config.models.get_config_dir", return_value=tmp_path):
             result = runner.invoke(app, ["show"])
         assert result.exit_code == 1
-        assert "Cannot parse" in result.output
+        assert "Invalid YAML" in result.output
 
     def test_structurally_invalid_section_type(self, tmp_path: Path) -> None:
         """config commands should handle sections with wrong types (e.g. orchestrator: [])."""
