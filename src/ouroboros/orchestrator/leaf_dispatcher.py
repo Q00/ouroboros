@@ -19,6 +19,8 @@ partial message list must remain visible for teardown.
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from pathlib import Path
+import stat
 import time
 from typing import TYPE_CHECKING, Any
 
@@ -26,8 +28,11 @@ import anyio
 
 from ouroboros.orchestrator.adapter import AgentMessage, RuntimeHandle
 from ouroboros.orchestrator.evidence.claims import (
+    _runtime_message_command_values,
+    _runtime_message_effective_cwd,
     _runtime_message_is_tool_completion,
     _runtime_message_tool_call_id,
+    _shell_command_mutation_targets,
 )
 from ouroboros.orchestrator.evidence.runtime_metadata import (
     HEARTBEAT_INTERVAL_SECONDS,
@@ -60,6 +65,56 @@ class LeafDispatchState:
     final_message: str = ""
     success: bool = False
     stalled: bool = False
+
+
+def _pending_bash_filesystem_targets(
+    message: AgentMessage,
+    *,
+    task_cwd: str | None,
+) -> tuple[tuple[str, str], ...]:
+    """Capture lexical Bash targets and their execution cwd before dispatch."""
+    if message.tool_name != "Bash" or _runtime_message_is_tool_completion(message):
+        return ()
+    effective_cwd = _runtime_message_effective_cwd(message, task_cwd=task_cwd)
+    if effective_cwd is None:
+        return ()
+    targets: list[tuple[str, str]] = []
+    for command in _runtime_message_command_values(message):
+        for target in _shell_command_mutation_targets(command):
+            candidate = Path(target)
+            absolute = candidate if candidate.is_absolute() else Path(effective_cwd) / candidate
+            targets.append((str(absolute.absolute()), target))
+    return tuple(targets)
+
+
+def _attach_bash_filesystem_effects(
+    message: AgentMessage,
+    targets: tuple[tuple[str, str], ...],
+) -> AgentMessage:
+    """Attach immediate post-completion inode identities for regular targets."""
+    effects: list[dict[str, object]] = []
+    for absolute_value, reported_path in targets:
+        try:
+            identity = Path(absolute_value).lstat()
+        except (OSError, RuntimeError, ValueError):
+            continue
+        effects.append(
+            {
+                "capture": "ouroboros.leaf-dispatch.v1",
+                "path": reported_path,
+                "absolute_path": absolute_value,
+                "st_dev": identity.st_dev,
+                "st_ino": identity.st_ino,
+                "st_mode": identity.st_mode,
+                "regular_file": stat.S_ISREG(identity.st_mode),
+            }
+        )
+    if not effects:
+        return message
+    return replace(
+        message,
+        data={**message.data, "filesystem_effects": effects},
+    )
 
 
 def _correlated_tool_result_name(
@@ -124,6 +179,9 @@ class LeafDispatcher:
         )
         lifecycle_emitted = False
         emitted_recovery_turn_ids: set[str] = set()
+        pending_bash_targets: dict[str, tuple[tuple[str, str], ...]] = {}
+        idless_bash_targets: tuple[tuple[str, str], ...] | None = None
+        task_cwd = executor._task_cwd or executor._adapter.working_directory
 
         # Stall detection: CancelScope with resettable deadline (RC6)
         last_heartbeat = time.monotonic()
@@ -172,6 +230,25 @@ class LeafDispatcher:
                 )
                 if state.runtime_handle is not None and message.resume_handle is not None:
                     message = replace(message, resume_handle=state.runtime_handle)
+
+                message_call_id = _runtime_message_tool_call_id(message)
+                if message.tool_name == "Bash" and not _runtime_message_is_tool_completion(message):
+                    targets = _pending_bash_filesystem_targets(message, task_cwd=task_cwd)
+                    if message_call_id is not None:
+                        pending_bash_targets[message_call_id] = targets
+                    elif idless_bash_targets is None:
+                        idless_bash_targets = targets
+                    else:
+                        # Two id-less starts before completion are ambiguous.
+                        idless_bash_targets = ()
+                elif _runtime_message_is_tool_completion(message):
+                    if message_call_id is not None:
+                        targets = pending_bash_targets.pop(message_call_id, ())
+                    else:
+                        targets = idless_bash_targets or ()
+                        idless_bash_targets = None
+                    if targets:
+                        message = _attach_bash_filesystem_effects(message, targets)
 
                 recovery_discontinuity = executor._runtime_recovery_discontinuity(
                     state.runtime_handle

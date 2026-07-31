@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path, PurePosixPath
 import re
 import shlex
+import stat
 import sys
 
 from ouroboros.orchestrator.adapter import AgentMessage
@@ -397,6 +398,8 @@ def _runtime_message_supports_file_reference(
             normalized_reference=normalized_reference,
             task_cwd=task_cwd,
             allow_bash_command_text=allow_bash_command_text,
+            messages=messages,
+            index=index,
         ) and _runtime_message_has_success_evidence(message, messages=messages, index=index)
     if message.tool_name in {"Edit", "Write", "NotebookEdit"}:
         return _runtime_message_has_success_evidence(
@@ -418,6 +421,8 @@ def _bash_message_mutates_file_reference(
     normalized_reference: str,
     task_cwd: str | None,
     allow_bash_command_text: bool,
+    messages: tuple[AgentMessage, ...],
+    index: int,
 ) -> bool:
     text = _runtime_message_file_proof_text(message)
     if text and _text_supports_file_mutation_reference(text, normalized_reference):
@@ -426,6 +431,8 @@ def _bash_message_mutates_file_reference(
         message,
         reference=reference,
         task_cwd=task_cwd,
+        messages=messages,
+        index=index,
     )
 
 
@@ -458,6 +465,8 @@ def _bash_command_mutates_file_reference(
     *,
     reference: str,
     task_cwd: str | None,
+    messages: tuple[AgentMessage, ...],
+    index: int,
 ) -> bool:
     """Return True for explicit shell writes to the referenced file.
 
@@ -472,6 +481,17 @@ def _bash_command_mutates_file_reference(
         return False
     effective_cwd = _runtime_message_effective_cwd(message, task_cwd=task_cwd)
     if task_cwd is not None and effective_cwd is None:
+        return False
+    if not _runtime_message_has_stable_file_identity(
+        message,
+        reference=reference,
+        task_cwd=task_cwd,
+        effective_cwd=effective_cwd,
+        messages=messages,
+        index=index,
+    ):
+        # Command text and a zero exit status do not bind the receiver inode at
+        # execution time. A symlink may have been replaced before verification.
         return False
     for command in _runtime_message_command_values(message):
         if not command.strip():
@@ -509,6 +529,90 @@ def _bash_command_mutates_file_reference(
         ):
             return True
     return False
+
+
+def _runtime_message_has_stable_file_identity(
+    message: AgentMessage,
+    *,
+    reference: str,
+    task_cwd: str | None,
+    effective_cwd: str | None,
+    messages: tuple[AgentMessage, ...],
+    index: int,
+) -> bool:
+    """Verify adapter-recorded execution-time identity against the current file."""
+    if task_cwd is None or effective_cwd is None:
+        return False
+    for evidence_message in _runtime_message_correlated_completions(message, messages, index):
+        effects = evidence_message.data.get("filesystem_effects")
+        if not isinstance(effects, (list, tuple)):
+            continue
+        for effect in effects:
+            if not isinstance(effect, dict):
+                continue
+            path = effect.get("path")
+            device = effect.get("st_dev")
+            inode = effect.get("st_ino")
+            mode = effect.get("st_mode")
+            if (
+                effect.get("capture") != "ouroboros.leaf-dispatch.v1"
+                or not isinstance(path, str)
+                or isinstance(device, bool)
+                or not isinstance(device, int)
+                or isinstance(inode, bool)
+                or not isinstance(inode, int)
+                or isinstance(mode, bool)
+                or not isinstance(mode, int)
+                or not stat.S_ISREG(mode)
+                or not _file_claim_matches_runtime_path(
+                    reference,
+                    path,
+                    task_cwd=task_cwd,
+                    runtime_cwd=effective_cwd,
+                )
+            ):
+                continue
+            try:
+                candidate = Path(path)
+                absolute = candidate if candidate.is_absolute() else Path(effective_cwd) / candidate
+                current = absolute.lstat()
+            except (OSError, RuntimeError, ValueError):
+                continue
+            if (
+                stat.S_ISREG(current.st_mode)
+                and current.st_dev == device
+                and current.st_ino == inode
+                and stat.S_IFMT(current.st_mode) == stat.S_IFMT(mode)
+            ):
+                return True
+    return False
+
+
+def _runtime_message_correlated_completions(
+    message: AgentMessage,
+    messages: tuple[AgentMessage, ...],
+    index: int,
+) -> tuple[AgentMessage, ...]:
+    """Return only unambiguous completion messages correlated to a call."""
+    call_id = _runtime_message_tool_call_id(message)
+    if call_id is not None:
+        completions = tuple(
+            candidate
+            for candidate in messages[index + 1 :]
+            if _runtime_message_is_tool_completion(candidate)
+            and _runtime_message_tool_call_id(candidate) == call_id
+        )
+        return completions if len(completions) == 1 else ()
+    for candidate in messages[index + 1 :]:
+        if _runtime_message_is_tool_completion(candidate):
+            if _runtime_message_tool_call_id(candidate) is None and (
+                candidate.tool_name is None or candidate.tool_name == message.tool_name
+            ):
+                return (candidate,)
+            break
+        if candidate.tool_name is not None:
+            break
+    return ()
 
 
 def _shell_command_targets_file_claim(
@@ -560,7 +664,11 @@ def _shell_command_mutation_targets(
     else:
         return ()
     try:
-        lexer = shlex.shlex(candidate, posix=True, punctuation_chars=";&|<>")
+        lexer = shlex.shlex(
+            _mask_quoted_output_operators(candidate),
+            posix=True,
+            punctuation_chars=";&|<>",
+        )
         lexer.whitespace_split = True
         lexer.commenters = ""
         tokens = list(lexer)
@@ -604,6 +712,31 @@ def _shell_command_mutation_targets(
         if candidates:
             targets.append(candidates[-1])
     return tuple(targets)
+
+
+def _mask_quoted_output_operators(command: str) -> str:
+    """Mask quoted or escaped ``>`` bytes before punctuation tokenization."""
+    quote: str | None = None
+    escaped = False
+    masked: list[str] = []
+    for char in command:
+        if escaped:
+            masked.append("\uf000" if char == ">" else char)
+            escaped = False
+            continue
+        if quote != "'" and char == "\\":
+            masked.append(char)
+            escaped = True
+            continue
+        if char in {"'", '"'}:
+            if quote is None:
+                quote = char
+            elif quote == char:
+                quote = None
+            masked.append(char)
+            continue
+        masked.append("\uf000" if char == ">" and quote is not None else char)
+    return "".join(masked)
 
 
 def _has_unquoted_compound_shell_control(command: str) -> bool:
@@ -769,17 +902,79 @@ def _argv_mentions_python_c_pathlib(argv: list[str]) -> bool:
 
 
 def _python_c_argv_index(argv: list[str], *, task_cwd: str) -> int | None | bool:
-    for index, value in enumerate(argv):
-        executable = Path(value).name.lower()
-        if executable in {"python", "python3"} or re.fullmatch(r"python3\.\d+", executable):
-            if "-c" not in argv[index + 1 :]:
-                return None
-            if index != 0:
-                return False
-            return index if _trusted_python_executable(value, task_cwd=task_cwd) else False
-        if "=" not in value:
+    index = 0
+    while index < len(argv) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", argv[index]):
+        index += 1
+    if index >= len(argv):
+        return None
+    if Path(argv[index]).name.lower() == "env":
+        if not _trusted_env_executable(argv[index]):
             return None
-    return None
+        index = _env_command_index(argv, index + 1)
+        if index is None:
+            return None
+    executable = Path(argv[index]).name.lower()
+    if (
+        executable not in {"python", "python3"}
+        and re.fullmatch(r"python3\.\d+", executable) is None
+    ):
+        return None
+    if not _python_invocation_uses_c(argv, python_index=index):
+        return None
+    return index if _trusted_python_executable(argv[index], task_cwd=task_cwd) else False
+
+
+def _trusted_env_executable(value: str) -> bool:
+    """Accept only the immutable system ``env`` executable wrapper."""
+    try:
+        candidate = Path(value)
+        if not candidate.is_absolute() or candidate.is_symlink():
+            return False
+        resolved = candidate.resolve()
+        return any(
+            system_env.exists() and resolved == system_env.resolve()
+            for system_env in (Path("/usr/bin/env"), Path("/bin/env"))
+        )
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
+def _env_command_index(argv: list[str], index: int) -> int | None:
+    """Return the wrapped executable position for a narrow system-env prefix."""
+    while index < len(argv):
+        value = argv[index]
+        if value == "--":
+            index += 1
+            break
+        if value in {"-i", "--ignore-environment"} or re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", value):
+            index += 1
+            continue
+        if value in {"-u", "--unset"}:
+            index += 2
+            continue
+        if value.startswith("--unset="):
+            index += 1
+            continue
+        if value.startswith("-"):
+            return None
+        break
+    return index if index < len(argv) else None
+
+
+def _python_invocation_uses_c(argv: list[str], *, python_index: int) -> bool:
+    """Return whether ``-c`` occurs in Python's option prefix, before a script."""
+    index = python_index + 1
+    while index < len(argv):
+        value = argv[index]
+        if value == "-c":
+            return True
+        if value in {"--", "-m"} or not value.startswith("-"):
+            return False
+        if value in {"-W", "-X"}:
+            index += 2
+            continue
+        index += 1
+    return False
 
 
 def _trusted_python_executable(value: str, *, task_cwd: str) -> bool:

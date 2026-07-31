@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import shlex
+import stat
 import subprocess
 import sys
 from types import SimpleNamespace
@@ -49,13 +50,18 @@ from ouroboros.orchestrator.dependency_analyzer import ACNode, DependencyGraph
 from ouroboros.orchestrator.evidence.claims import (
     _python_c_command_file_claim_match,
     _runtime_messages_support_file_claim,
+    _shell_command_mutation_targets,
 )
 from ouroboros.orchestrator.evidence_schema import EvidenceRecord, ValidationResult
 from ouroboros.orchestrator.execution_runtime_scope import (
     ExecutionNodeIdentity,
     build_level_coordinator_runtime_scope,
 )
-from ouroboros.orchestrator.leaf_dispatcher import _correlated_tool_result_name
+from ouroboros.orchestrator.leaf_dispatcher import (
+    _attach_bash_filesystem_effects,
+    _correlated_tool_result_name,
+    _pending_bash_filesystem_targets,
+)
 from ouroboros.orchestrator.level_context import ACContextSummary, LevelContext
 from ouroboros.orchestrator.parallel_executor import (
     MAX_STALL_RETRIES,
@@ -85,6 +91,17 @@ from tests.unit.orchestrator.parallel_executor_test_support import ProcessLocalT
 
 def _trusted_python_c(source: str) -> str:
     return shlex.join([str(Path(sys.executable).resolve()), "-I", "-S", "-c", source])
+
+
+def _filesystem_effect(path: Path, *, reported_path: str) -> dict[str, object]:
+    identity = path.lstat()
+    return {
+        "capture": "ouroboros.leaf-dispatch.v1",
+        "path": reported_path,
+        "st_dev": identity.st_dev,
+        "st_ino": identity.st_ino,
+        "st_mode": identity.st_mode,
+    }
 
 
 def _trusted_preflight_split(
@@ -207,6 +224,7 @@ def test_files_touched_rejects_reconstructed_pathlib_with_inert_touch_argv(tmp_p
     assert completed.returncode == 0
     assert claimed_file.read_text(encoding="utf-8") == "original\n"
     assert other_file.read_text(encoding="utf-8") == "changed"
+    assert _shell_command_mutation_targets(command) == ()
     messages = (
         AgentMessage(
             type="tool",
@@ -270,19 +288,30 @@ def test_files_touched_rejects_wrapped_reconstructed_pathlib_with_inert_touch_ar
     )
 
 
-def test_files_touched_allows_expanded_payload_with_literal_redirect_target(tmp_path) -> None:
-    """Payload expansion preserves direct proof from a literal output target."""
-    command = "printf '%s\\n' \"$VALUE\" > claimed.py"
-    completed = subprocess.run(  # noqa: S602
-        command,
-        cwd=tmp_path,
-        shell=True,
-        check=False,
-        env={**os.environ, "VALUE": "expanded"},
+def test_files_touched_rejects_env_python_quoted_redirection_argv(tmp_path) -> None:
+    """System ``env`` cannot expose a quoted Python argv value as redirection."""
+    claimed_file = tmp_path / "claimed.py"
+    other_file = tmp_path / "other.py"
+    claimed_file.write_text("original\n", encoding="utf-8")
+    command = shlex.join(
+        [
+            "/usr/bin/env",
+            str(Path(sys.executable).resolve()),
+            "-I",
+            "-S",
+            "-c",
+            "getattr(__import__('path' 'lib'), 'Pa' 'th')('other.py').write_text('changed')",
+            ">",
+            "claimed.py",
+        ]
     )
 
+    completed = subprocess.run(command, cwd=tmp_path, shell=True, check=False)  # noqa: S602
+
     assert completed.returncode == 0
-    assert (tmp_path / "claimed.py").read_text(encoding="utf-8") == "expanded\n"
+    assert claimed_file.read_text(encoding="utf-8") == "original\n"
+    assert other_file.read_text(encoding="utf-8") == "changed"
+    assert _shell_command_mutation_targets(command) == ()
     messages = (
         AgentMessage(
             type="tool",
@@ -295,6 +324,87 @@ def test_files_touched_allows_expanded_payload_with_literal_redirect_target(tmp_
             content="command completed with exit code 0",
             data={"subtype": "tool_result", "exit_code": 0},
         ),
+    )
+    assert not _runtime_messages_support_file_claim(
+        "claimed.py",
+        messages,
+        task_cwd=str(tmp_path),
+    )
+
+
+def test_files_touched_rejects_shell_receiver_symlink_replaced_after_execution(tmp_path) -> None:
+    """Recorded symlink identity cannot authenticate a later regular file."""
+    outside = tmp_path.parent / f"{tmp_path.name}-outside.py"
+    claimed_file = tmp_path / "claimed.py"
+    outside.write_text("outside\n", encoding="utf-8")
+    try:
+        os.symlink(outside, claimed_file)
+    except (OSError, NotImplementedError):  # pragma: no cover - unprivileged/Windows
+        pytest.skip("symlink creation not permitted in this environment")
+    command = "touch claimed.py"
+    call = AgentMessage(
+        type="tool",
+        content=f"Bash: {command}",
+        tool_name="Bash",
+        data={"tool_input": {"command": command}},
+    )
+    pending_targets = _pending_bash_filesystem_targets(call, task_cwd=str(tmp_path))
+
+    completed = subprocess.run(command, cwd=tmp_path, shell=True, check=False)  # noqa: S602
+    result = _attach_bash_filesystem_effects(
+        AgentMessage(
+            type="tool_result",
+            content="command completed with exit code 0",
+            data={"subtype": "tool_result", "exit_code": 0},
+        ),
+        pending_targets,
+    )
+    claimed_file.unlink()
+    claimed_file.write_text("replacement\n", encoding="utf-8")
+
+    assert completed.returncode == 0
+    effects = result.data["filesystem_effects"]
+    assert isinstance(effects, list)
+    assert stat.S_ISLNK(int(effects[0]["st_mode"]))
+    messages = (call, result)
+    assert not _runtime_messages_support_file_claim(
+        "claimed.py",
+        messages,
+        task_cwd=str(tmp_path),
+    )
+
+
+def test_files_touched_allows_expanded_payload_with_literal_redirect_target(tmp_path) -> None:
+    """Payload expansion preserves direct proof from a literal output target."""
+    command = "printf '%s\\n' \"$VALUE\" > claimed.py"
+    call = AgentMessage(
+        type="tool",
+        content=f"Bash: {command}",
+        tool_name="Bash",
+        data={"tool_input": {"command": command}},
+    )
+    pending_targets = _pending_bash_filesystem_targets(call, task_cwd=str(tmp_path))
+    completed = subprocess.run(  # noqa: S602
+        command,
+        cwd=tmp_path,
+        shell=True,
+        check=False,
+        env={**os.environ, "VALUE": "expanded"},
+    )
+
+    assert completed.returncode == 0
+    assert (tmp_path / "claimed.py").read_text(encoding="utf-8") == "expanded\n"
+    result = _attach_bash_filesystem_effects(
+        AgentMessage(
+            type="tool_result",
+            content="command completed with exit code 0",
+            data={"subtype": "tool_result", "exit_code": 0},
+        ),
+        pending_targets,
+    )
+    messages = (
+        call,
+        result,
     )
     assert (
         _runtime_messages_support_file_claim("claimed.py", messages, task_cwd=str(tmp_path)) is True
@@ -324,7 +434,16 @@ def test_files_touched_resolves_shell_target_from_recorded_command_cwd(tmp_path)
         AgentMessage(
             type="tool_result",
             content="command completed with exit code 0",
-            data={"subtype": "tool_result", "exit_code": 0},
+            data={
+                "subtype": "tool_result",
+                "exit_code": 0,
+                "filesystem_effects": [
+                    _filesystem_effect(
+                        command_cwd / "claimed.py",
+                        reported_path="claimed.py",
+                    )
+                ],
+            },
         ),
     )
     assert not _runtime_messages_support_file_claim(
@@ -359,7 +478,13 @@ def test_files_touched_allows_non_c_python_literal_redirect(tmp_path) -> None:
         AgentMessage(
             type="tool_result",
             content="command completed with exit code 0",
-            data={"subtype": "tool_result", "exit_code": 0},
+            data={
+                "subtype": "tool_result",
+                "exit_code": 0,
+                "filesystem_effects": [
+                    _filesystem_effect(tmp_path / "claimed.py", reported_path="claimed.py")
+                ],
+            },
         ),
     )
     assert _runtime_messages_support_file_claim(
@@ -7808,7 +7933,16 @@ class TestParallelACExecutor:
                     AgentMessage(
                         type="tool_result",
                         content="command completed with exit code 0",
-                        data={"subtype": "tool_result", "exit_code": 0},
+                        data={
+                            "subtype": "tool_result",
+                            "exit_code": 0,
+                            "filesystem_effects": [
+                                _filesystem_effect(
+                                    generated_file,
+                                    reported_path="src/generated.py",
+                                )
+                            ],
+                        },
                     ),
                     AgentMessage(
                         type="tool",
