@@ -805,7 +805,10 @@ def _trusted_python_executable(value: str, *, task_cwd: str) -> bool:
         if not path.is_absolute():
             return False
         candidate = path if path.is_absolute() else Path(task_cwd) / path
-        return candidate.resolve() == Path(sys.executable).resolve()
+        verifier_executable = Path(sys.executable)
+        if _normalize_absolute_path(candidate) != _normalize_absolute_path(verifier_executable):
+            return False
+        return candidate.resolve() == verifier_executable.resolve()
     except (OSError, RuntimeError, ValueError):
         return False
 

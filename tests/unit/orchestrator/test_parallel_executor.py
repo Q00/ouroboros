@@ -168,8 +168,8 @@ def test_deliver_matching_uses_verifier_command_aliases() -> None:
         _trusted_python_c("from pathlib import Path; Path('src/generated.py').write_bytes(b'x')"),
     ),
 )
-def test_python_c_pathlib_static_proof_accepts_direct_top_level_write(tmp_path, command) -> None:
-    """Static pathlib proof accepts only direct top-level pathlib writes."""
+def test_python_c_pathlib_static_proof_accepts_trusted_top_level_write(tmp_path, command) -> None:
+    """Static pathlib proof accepts direct writes through the trusted Python form."""
     generated = tmp_path / "src" / "generated.py"
     generated.parent.mkdir()
     generated.write_text("VALUE = 1\n", encoding="utf-8")
@@ -443,6 +443,48 @@ def test_files_touched_rejects_relative_python_executable_even_when_final_state_
     assert (
         _runtime_messages_support_file_claim(
             "runner/claimed.py",
+            messages,
+            task_cwd=str(tmp_path),
+        )
+        is False
+    )
+
+
+def test_files_touched_rejects_absolute_python_symlink_final_state_spoof(tmp_path) -> None:
+    """An arbitrary absolute symlink cannot authenticate an earlier executable."""
+    claimed_file = tmp_path / "claimed.py"
+    claimed_file.write_text("VALUE = 1\n", encoding="utf-8")
+    fake_python = tmp_path / "python3"
+    try:
+        os.symlink(sys.executable, fake_python)
+    except (OSError, NotImplementedError):  # pragma: no cover - unprivileged/Windows
+        pytest.skip("symlink creation not permitted in this environment")
+    command = shlex.join(
+        [
+            str(fake_python),
+            "-I",
+            "-S",
+            "-c",
+            "from pathlib import Path; Path('claimed.py').write_text('x')",
+        ]
+    )
+    messages = (
+        AgentMessage(
+            type="tool",
+            content=f"Bash: {command}",
+            tool_name="Bash",
+            data={"tool_input": {"command": command}},
+        ),
+        AgentMessage(
+            type="tool_result",
+            content="command completed with exit code 0",
+            data={"subtype": "tool_result", "exit_code": 0},
+        ),
+    )
+
+    assert (
+        _runtime_messages_support_file_claim(
+            "claimed.py",
             messages,
             task_cwd=str(tmp_path),
         )
