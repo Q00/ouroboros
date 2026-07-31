@@ -39,11 +39,17 @@ def _allow_mocked_precreated_durable_state(runner: OrchestratorRunner) -> None:
 
 
 @pytest.fixture
-def mock_adapter() -> MagicMock:
+def mock_adapter(tmp_path) -> MagicMock:
     """Create a mock Claude agent adapter."""
+    project = tmp_path / "project"
+    project.mkdir()
     adapter = MagicMock()
     adapter.runtime_backend = "opencode"
-    adapter.working_directory = "/tmp/project"
+    # A shared /tmp/project is order-dependent: unrelated worktree tests can
+    # leave topology there and make this cancellation unit fail before it ever
+    # reaches the cancellation boundary. Give every test an isolated, valid
+    # local project identity instead.
+    adapter.working_directory = str(project)
     adapter.permission_mode = "acceptEdits"
     return adapter
 
