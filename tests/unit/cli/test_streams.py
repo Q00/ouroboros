@@ -6,6 +6,7 @@ from io import StringIO
 import sys
 from typing import Any
 
+from typer.main import get_command
 from typer.testing import CliRunner
 
 from ouroboros.cli import streams
@@ -29,6 +30,12 @@ class _ReconfigurableStream(StringIO):
         if self.fail:
             raise ValueError("detached")
         self._encoding = kwargs["encoding"]
+
+
+class _EncodingOnlyStream(_ReconfigurableStream):
+    def reconfigure(self, *, encoding: str) -> None:
+        self.calls.append({"encoding": encoding})
+        self._encoding = encoding
 
 
 def test_legacy_windows_streams_are_reconfigured_in_place(monkeypatch: Any) -> None:
@@ -86,3 +93,14 @@ def test_cli_runner_captures_eager_version_output_on_windows(monkeypatch: Any) -
 
     assert result.exit_code == 0
     assert "Ouroboros" in result.stdout
+
+
+def test_root_entry_tolerates_host_reconfigure_signature(monkeypatch: Any) -> None:
+    """A narrower embedded stream API cannot abort Click before dispatch."""
+    stdout = _EncodingOnlyStream("cp949")
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(sys, "stdout", stdout)
+
+    get_command(app).main(args=["--version"], prog_name="ouroboros", standalone_mode=False)
+
+    assert "Ouroboros" in stdout.getvalue()

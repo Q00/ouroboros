@@ -26,7 +26,7 @@ def _normalize_stream(stream: Any) -> None:
         return
     try:
         reconfigure(encoding="utf-8", errors="replace")
-    except (AttributeError, OSError, ValueError):
+    except (AttributeError, OSError, TypeError, ValueError):
         # Captured, embedded, or already-detached streams may expose a
         # non-functional reconfigure method. Preserve their ownership and let
         # the host decide how output is encoded.
