@@ -164,6 +164,9 @@ MALFORMED_UNFENCED_WRAPPERS = [
     "Analysis: {draft: stale <payload>",
     'Analysis: {"draft[key]": <payload>',
     "Analysis: {draft: '}', payload: <payload>}",
+    "{'draft': stale\n\n<payload>",
+    "{0: stale\n\n<payload>",
+    "{Analysis: stale\n\n<payload>",
 ]
 
 

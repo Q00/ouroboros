@@ -19,6 +19,7 @@ _FENCE_MARKERS = ("`", "~")
 _BLOCKQUOTE_FENCE_PREFIX = re.compile(r"^[ \t]{0,3}(?:>[ \t]?)+$")
 _PLAIN_FENCE_PREFIX = re.compile(r"^ {0,3}$")
 _INDENTED_CODE_PREFIX = re.compile(r"^(?: {4}| {0,3}\t)")
+_ANTHROPIC_PREFILL_PROSE = re.compile(r"^\{(?:Let me\b|I will analyze\b)")
 
 
 class _MalformedJsonBoundary(ValueError):
@@ -336,7 +337,7 @@ def _extract_json_from_text(text: str) -> tuple[str, ...]:
 
 def _anthropic_prefill_payload(text: str, start: int) -> str | None:
     """Recover the documented ``{<prose>\n\n<JSON>`` adapter failure only."""
-    if start != 0 or not text.startswith("{"):
+    if start != 0 or _ANTHROPIC_PREFILL_PROSE.match(text) is None:
         return None
 
     separators = tuple(re.finditer(r"(?:\r?\n){2,}", text[start + 1 :]))

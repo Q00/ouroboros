@@ -265,6 +265,16 @@ class TestExtractJsonPayload:
     def test_unclosed_human_heading_is_not_anthropic_prefill(self) -> None:
         assert extract_json_payload('{Analysis: {"actual": true}') is None
 
+    @pytest.mark.parametrize(
+        "prefix",
+        ["{'draft': stale", "{0: stale", "{Analysis: stale"],
+        ids=["single-quoted-key", "numeric-key", "arbitrary-heading"],
+    )
+    def test_blank_line_does_not_turn_wrapper_into_anthropic_prefill(self, prefix: str) -> None:
+        text = f'{prefix}\n\n{{"stale": true}}'
+
+        assert extract_json_payload(text) is None
+
     def test_balanced_invalid_wrapper_preserves_later_independent_payload(self) -> None:
         text = 'Analysis: {draft: {"stale": true}} Actual: {"valid": true}'
 
