@@ -881,7 +881,7 @@ class TestEvolveStepErrors:
         assert "longer than 255 filesystem bytes" in str(result.error).lower()
 
     @pytest.mark.asyncio
-    async def test_interrupted_replay_reports_invalid_fallback_seed(self) -> None:
+    async def test_interrupted_replay_reports_invalid_interrupted_seed(self) -> None:
         store = await create_event_store()
         seed = make_seed()
         persisted = seed.to_dict()
@@ -915,8 +915,47 @@ class TestEvolveStepErrors:
         result = await make_loop(store).evolve_step("lin_invalid_fallback")
 
         assert result.is_err
-        assert "failed to reconstruct fallback seed from seed_json" in str(result.error).lower()
+        assert "failed to reconstruct interrupted seed from seed_json" in str(result.error).lower()
         assert "longer than 255 filesystem bytes" in str(result.error).lower()
+
+    @pytest.mark.asyncio
+    async def test_invalid_interrupted_seed_never_rolls_back_or_redispatches(self) -> None:
+        store = await create_event_store()
+        seed = make_seed()
+        invalid = seed.to_dict()
+        invalid["acceptance_criteria"] = [
+            {
+                "description": "Invalid interrupted contract",
+                "expected_artifacts": ["a" * 256],
+            }
+        ]
+        await store.append(lineage_created("lin_no_rollback", seed.goal))
+        await store.append(
+            lineage_generation_completed(
+                "lin_no_rollback",
+                generation_number=1,
+                seed_id=seed.metadata.seed_id,
+                ontology_snapshot=seed.ontology_schema.model_dump(mode="json"),
+                seed_json=json.dumps(seed.to_dict()),
+            )
+        )
+        await store.append(lineage_generation_started("lin_no_rollback", 2, "wondering"))
+        await store.append(
+            lineage_generation_interrupted(
+                "lin_no_rollback",
+                2,
+                last_completed_phase="wondering",
+                seed_json=json.dumps(invalid),
+            )
+        )
+        loop = make_loop(store)
+        loop._run_generation = AsyncMock()
+
+        result = await loop.evolve_step("lin_no_rollback")
+
+        assert result.is_err
+        assert "failed to reconstruct interrupted seed" in str(result.error).lower()
+        loop._run_generation.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_failed_generation_returns_failed_action(self) -> None:

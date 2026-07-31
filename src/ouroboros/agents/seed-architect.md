@@ -31,6 +31,7 @@ Format: exactly one non-empty, single-line JSON array. Every object contains
 exactly `description`, `verify`, `artifacts`, and `expect`. `artifacts` is a JSON
 array of paths or the string `NONE`; the other contract fields are strings.
 Example: `[{"description":"Tasks can be created","verify":"python -m pytest tests/test_tasks.py -q","artifacts":"NONE","expect":"NONE"}]`
+Multi-artifact example: `[{"description":"Build outputs exist","verify":"NONE","artifacts":["dist/app","docs/User Guide.md"],"expect":"NONE"}]`
 
 `verify` / `verify_command` semantics:
 - Use exactly one single-line shell command.
@@ -39,7 +40,8 @@ Example: `[{"description":"Tasks can be created","verify":"python -m pytest test
 
 `artifacts` / `expected_artifacts` semantics:
 - Every entry is an exact portable file or directory path relative to the run workspace. The runner resolves each entry literally and requires it to exist.
-- Separate multiple entries with comma+space, for example `artifacts: dist/app, docs/User Guide.md`.
+- Encode multiple entries as one JSON array, for example
+  `"artifacts":["dist/app","docs/User Guide.md"]`.
 - Do not put commas or backslashes inside artifact paths.
 - NEVER use a descriptive label such as `schema v2 outputs` or `user approval record` as an artifact path.
 - Prefix a top-level file or directory containing spaces with `./`, for example `./Build Outputs`; nested paths such as `docs/User Guide.md` are already explicit.

@@ -3196,6 +3196,16 @@ class TestAcceptanceCriteriaGranularityContract:
         parsed = generator._parse_extraction_response(response)
         assert parsed["acceptance_criteria"]
 
+        multi_example = next(
+            line.removeprefix("Multi-artifact example: `").removesuffix("`")
+            for line in system_prompt.splitlines()
+            if line.startswith("Multi-artifact example: `")
+        )
+        multi_response = create_valid_extraction_response(acceptance_criteria=multi_example)
+        multi_parsed = generator._parse_extraction_response(multi_response)
+        (criterion,) = multi_parsed["acceptance_criteria"]
+        assert criterion.expected_artifacts == ("dist/app", "docs/User Guide.md")
+
 
 class TestObjectArrayExtractionContract:
     """#1729 slice 2: EVALUATION_PRINCIPLES / EXIT_CONDITIONS as JSON object arrays.
