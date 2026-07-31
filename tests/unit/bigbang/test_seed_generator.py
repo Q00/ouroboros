@@ -842,6 +842,16 @@ class TestSeedGeneratorExtraction:
             '[{"description":"x","verify":1,"artifacts":"NONE","expect":"NONE"}]',
             '[{"description":"x","verify":"true","artifacts":"out.txt","expect":"NONE"}]',
             '[{"description":"x","verify":"cat <<EOF","artifacts":"NONE","expect":"NONE"}]',
+            json.dumps(
+                [
+                    {
+                        "description": "x",
+                        "verify": 'printf "%s" "`unterminated"',
+                        "artifacts": "NONE",
+                        "expect": "NONE",
+                    }
+                ]
+            ),
             '[{"description":"x","verify":"true","artifacts":["../out.txt"],"expect":"NONE"}]',
         ),
     )
@@ -853,6 +863,42 @@ class TestSeedGeneratorExtraction:
 
         with pytest.raises(ValueError):
             generator._parse_extraction_response(response)
+
+    @pytest.mark.parametrize("malformed_kind", ("missing", "empty", "duplicate"))
+    @pytest.mark.asyncio
+    async def test_generate_rejects_required_acceptance_criteria_shape_on_both_attempts(
+        self, malformed_kind: str
+    ) -> None:
+        response = create_valid_extraction_response(
+            acceptance_criteria="[]" if malformed_kind == "empty" else "Outcome exists"
+        )
+        if malformed_kind == "missing":
+            response = "\n".join(
+                line
+                for line in response.splitlines()
+                if not line.startswith("ACCEPTANCE_CRITERIA:")
+            )
+        elif malformed_kind == "duplicate":
+            acceptance_line = next(
+                line for line in response.splitlines() if line.startswith("ACCEPTANCE_CRITERIA:")
+            )
+            response = response.replace(acceptance_line, f"{acceptance_line}\n{acceptance_line}")
+
+        mock_adapter = AsyncMock()
+        mock_adapter.complete = AsyncMock(
+            side_effect=[
+                Result.ok(create_mock_completion_response(response)),
+                Result.ok(create_mock_completion_response(response)),
+            ]
+        )
+        generator = SeedGenerator(llm_adapter=mock_adapter)
+
+        result = await generator.generate(
+            create_interview_state_with_rounds(), create_low_ambiguity_score()
+        )
+
+        assert result.is_err
+        assert mock_adapter.complete.await_count == 2
 
     @pytest.mark.parametrize("verify_command", _ADJACENT_SINGLE_QUOTED_VERIFY_COMMANDS)
     def test_acceptance_contract_parser_preserves_adjacent_single_quoted_payloads(
@@ -1879,6 +1925,14 @@ class TestSeedGeneratorExtraction:
                 "f() { printf '%s\\n' 'function | verify: literal'; }; f",
                 "function | verify: literal\n",
             ),
+            ("python -c 'print(1 << 2)'", "4\n"),
+            ("printf '%s\\n' 'ordinary << comparison text'", "ordinary << comparison text\n"),
+            (
+                '''printf "%s\\n" "$(python -c 'print(1 << 2)')"''',
+                "4\n",
+            ),
+            (r'''printf '%s\n' "plain <<EOF"''', "plain <<EOF\n"),
+            (r'''printf '%s\n' "\`literal <<EOF"''', "`literal <<EOF\n"),
         ),
     )
     async def test_generate_preserves_posix_single_quote_tokens_through_live_verify(
@@ -2068,17 +2122,41 @@ class TestSeedGeneratorExtraction:
             assert second.output_assertion == "5 passed"
 
     @pytest.mark.asyncio
-    async def test_generate_retries_when_verify_command_uses_heredoc(self) -> None:
+    @pytest.mark.parametrize(
+        "heredoc_command",
+        (
+            r"cat <<\EOF",
+            r"cat <<-\EOF",
+            'cat <<E"OF"',
+            "cat <<'E'OF",
+            r'''printf '%s' "`cat <<\EOF`"''',
+        ),
+    )
+    async def test_generate_retries_when_verify_command_uses_heredoc(
+        self, heredoc_command: str
+    ) -> None:
         """Single-line AC contracts must reject heredoc commands before Seed build."""
+        syntax = subprocess.run(
+            ["/bin/sh", "-n", "-c", heredoc_command],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        assert syntax.returncode == 0, syntax.stderr
         mock_adapter = AsyncMock()
         state = create_interview_state_with_rounds()
         low_ambiguity = create_low_ambiguity_score()
 
         bad_response = create_valid_extraction_response(
-            acceptance_criteria=(
-                "\n"
-                "AC: Import check prints OK | verify: python - <<'PY' | "
-                "artifacts: hello.py | expect: OK\n"
+            acceptance_criteria=json.dumps(
+                [
+                    {
+                        "description": "Import check prints OK",
+                        "verify": heredoc_command,
+                        "artifacts": ["hello.py"],
+                        "expect": "NONE",
+                    }
+                ]
             )
         )
         repaired_response = create_valid_extraction_response(
@@ -2110,8 +2188,39 @@ class TestSeedGeneratorExtraction:
             (criterion,) = result.value.acceptance_criteria
             assert isinstance(criterion, AcceptanceCriterionSpec)
             assert criterion.verify_command is not None
-            assert "<<'PY'" not in criterion.verify_command
             assert "python -c" in criterion.verify_command
+
+    @pytest.mark.asyncio
+    async def test_generate_rejects_heredoc_on_initial_and_retry_extraction(self) -> None:
+        mock_adapter = AsyncMock()
+        bad_responses = [
+            create_valid_extraction_response(
+                acceptance_criteria=json.dumps(
+                    [
+                        {
+                            "description": "Output exists",
+                            "verify": command,
+                            "artifacts": "NONE",
+                            "expect": "NONE",
+                        }
+                    ]
+                )
+            )
+            for command in (r"cat <<\EOF", r"cat <<-\EOF")
+        ]
+        mock_adapter.complete = AsyncMock(
+            side_effect=[
+                Result.ok(create_mock_completion_response(response)) for response in bad_responses
+            ]
+        )
+        generator = SeedGenerator(llm_adapter=mock_adapter)
+
+        result = await generator.generate(
+            create_interview_state_with_rounds(), create_low_ambiguity_score()
+        )
+
+        assert result.is_err
+        assert mock_adapter.complete.await_count == 2
 
     @pytest.mark.asyncio
     async def test_generate_extracts_ontology_schema(self) -> None:

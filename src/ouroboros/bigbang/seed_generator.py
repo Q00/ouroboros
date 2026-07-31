@@ -61,7 +61,6 @@ _MAX_EXTRACTION_RETRIES = 1
 _AC_RESERVED_FIELD_NAMES = ("verify", "artifacts", "expect")
 _AC_FIELD_NAME_OBFUSCATORS = frozenset({"'", '"', "\\"})
 _WORD_APOSTROPHE_SUFFIXES = frozenset({"d", "ll", "m", "re", "s", "t", "ve"})
-_UNSUPPORTED_VERIFY_HEREDOC_RE = re.compile(r"<<-?\s*['\"]?[A-Za-z_][\w-]*['\"]?")
 
 
 @dataclass(frozen=True)
@@ -1019,6 +1018,8 @@ def _parse_extracted_acceptance_criteria(raw_value: object) -> tuple[AcceptanceC
         raise ValueError(f"{field_label} must be a valid JSON array of objects: {exc}") from exc
     if not isinstance(decoded, list):
         raise ValueError(f"{field_label} must be a JSON array of objects")
+    if not decoded:
+        raise ValueError(f"{field_label} must contain at least one acceptance criterion")
 
     required_keys = {"description", "verify", "artifacts", "expect"}
     criteria: list[AcceptanceCriterionSpec] = []
@@ -1120,8 +1121,125 @@ def _parse_acceptance_criterion_contract(line: str) -> AcceptanceCriterionSpec |
 def _unsupported_verify_command_reason(command: str) -> str | None:
     if "\n" in command or "\r" in command:
         return "verify_command must be a single-line command"
-    if _UNSUPPORTED_VERIFY_HEREDOC_RE.search(command):
+    if _contains_posix_heredoc_operator(command):
         return "verify_command uses heredoc/multiline shell syntax; use python -c or pytest instead"
+    return None
+
+
+def _contains_posix_heredoc_operator(command: str) -> bool:
+    """Return whether shell code contains an active ``<<``/``<<-`` operator.
+
+    The delimiter is a POSIX shell word, so quoting may be backslash-based or
+    fragmented (``<<\\EOF``, ``<<E"OF"``). Looking for a delimiter spelling
+    with one regex is therefore bypassable. Instead, recognize the operator
+    in shell lexical context: quoted strings, comments, parameter expansion,
+    and arithmetic expansion cannot introduce a heredoc operator themselves.
+    Ordinary comparison text embedded in those contexts remains valid.
+    """
+    quote: str | None = None
+    escaped = False
+    word_started = False
+    index = 0
+    while index < len(command):
+        char = command[index]
+        if quote == "'":
+            if char == "'":
+                quote = None
+            index += 1
+            continue
+        if escaped:
+            escaped = False
+            word_started = True
+            index += 1
+            continue
+        if char == "\\":
+            escaped = True
+            index += 1
+            continue
+        if quote == '"':
+            if char == '"':
+                quote = None
+                index += 1
+                continue
+            if (
+                char == "$"
+                and command.startswith("$(", index)
+                and not command.startswith("$((", index)
+            ):
+                expansion_end = _posix_expansion_end(command, index)
+                if expansion_end is not None:
+                    if _contains_posix_heredoc_operator(command[index + 2 : expansion_end - 1]):
+                        return True
+                    index = expansion_end
+                    continue
+            if char == "`":
+                substitution_end = _posix_backtick_substitution_end(command, index)
+                if substitution_end is None:
+                    return True
+                if _contains_posix_heredoc_operator(command[index + 1 : substitution_end - 1]):
+                    return True
+                index = substitution_end
+                continue
+            index += 1
+            continue
+        if char in {"'", '"'}:
+            quote = char
+            word_started = True
+            index += 1
+            continue
+        if char == "`":
+            substitution_end = _posix_backtick_substitution_end(command, index)
+            if substitution_end is None:
+                return True
+            if _contains_posix_heredoc_operator(command[index + 1 : substitution_end - 1]):
+                return True
+            word_started = True
+            index = substitution_end
+            continue
+        if char == "#" and not word_started:
+            return False
+        if char == "$" and index + 1 < len(command):
+            is_parameter = command[index + 1] == "{"
+            is_arithmetic = command.startswith("$((", index)
+            if is_parameter or is_arithmetic:
+                expansion_end = _posix_expansion_end(command, index)
+                if expansion_end is not None:
+                    word_started = True
+                    index = expansion_end
+                    continue
+            if command[index + 1] == "(":
+                expansion_end = _posix_expansion_end(command, index)
+                if expansion_end is not None:
+                    if _contains_posix_heredoc_operator(command[index + 2 : expansion_end - 1]):
+                        return True
+                    word_started = True
+                    index = expansion_end
+                    continue
+        if char == "<" and index + 1 < len(command) and command[index + 1] == "<":
+            return True
+        if char.isspace() or char in ";|&()<>":
+            word_started = False
+        else:
+            word_started = True
+        index += 1
+    return False
+
+
+def _posix_backtick_substitution_end(value: str, index: int) -> int | None:
+    """Return just past the next unescaped legacy command-substitution backtick."""
+    if index >= len(value) or value[index] != "`":
+        return None
+    escaped = False
+    cursor = index + 1
+    while cursor < len(value):
+        char = value[cursor]
+        if escaped:
+            escaped = False
+        elif char == "\\":
+            escaped = True
+        elif char == "`":
+            return cursor + 1
+        cursor += 1
     return None
 
 
@@ -1557,6 +1675,7 @@ Please try again. Extract requirements from this interview:
 You MUST respond with ONLY the following format, one field per line, no other text:
 
 ACCEPTANCE_CRITERIA rule: an acceptance criterion names a state of the finished work that a user can see is true; an implementation step names a means of reaching that state. Only the first belongs here — deciding means is the execution engine's work at runtime. A criterion intelligible only as a move toward a sibling is that sibling's means and belongs merged into the outcome it serves. How many criteria a goal has is discovered by that judgment.
+ACCEPTANCE_CRITERIA JSON rule: emit exactly one `ACCEPTANCE_CRITERIA:` field containing a non-empty single-line JSON array. Every object must contain exactly `description`, `verify`, `artifacts`, and `expect`; do not omit fields or add aliases.
 ACCEPTANCE_CRITERIA verify rule: `verify` must be one complete single-line shell command. Never use heredoc or multiline syntax (`<<`, `<<'PY'`, `cat <<EOF`, line-continuation scripts); use `python -c "..."`, `python3 -c "..."`, or `python -m pytest -q` instead.
 ACCEPTANCE_CRITERIA artifacts rule: `artifacts` must be a JSON array of exact portable file or directory paths relative to the run workspace, or the string `NONE`. The runner resolves every path literally and requires it to exist. Prefix a top-level path containing spaces with `./`. Never use a descriptive label.
 ACCEPTANCE_CRITERIA expect rule: `expect` is ONLY a literal string printed verbatim in the combined stdout and stderr of `verify`, such as `OK` or `5 passed`. Use `expect: NONE` for exit-code/status conditions like `exit code 0`, `success`, `passed`, or `no errors`; exit-code 0 is already verified separately.
@@ -1666,6 +1785,7 @@ EXIT_CONDITIONS: [{{"name": "<name>", "description": "<description>", "criteria"
 Respond ONLY with the structured format below. Do NOT add explanations, questions, commentary, or prose. Do NOT wrap in markdown code blocks.
 
 ACCEPTANCE_CRITERIA rule: an acceptance criterion names a state of the finished work that a user can see is true; an implementation step names a means of reaching that state. Only the first belongs here — deciding means is the execution engine's work at runtime. Read each criterion beside its siblings and ask which kind it is: one that stands on its own as something a user would value is an outcome, while one intelligible only as a move toward a sibling is that sibling's means and belongs merged into the outcome it serves. Leaving a means in the list is a defect as severe as a missing requirement, because it commits the seed to a path no one has verified. How many criteria a goal has is discovered by making this judgment.
+ACCEPTANCE_CRITERIA JSON rule: emit exactly one `ACCEPTANCE_CRITERIA:` field containing a non-empty single-line JSON array. Every object must contain exactly `description`, `verify`, `artifacts`, and `expect`; do not omit fields or add aliases.
 ACCEPTANCE_CRITERIA verify rule: `verify` must be one complete single-line shell command. Never use heredoc or multiline syntax (`<<`, `<<'PY'`, `cat <<EOF`, line-continuation scripts); use `python -c "..."`, `python3 -c "..."`, or `python -m pytest -q` instead.
 ACCEPTANCE_CRITERIA artifacts rule: `artifacts` must be a JSON array of exact portable file or directory paths relative to the run workspace, or the string `NONE`. The runner resolves every path literally and requires it to exist. Prefix a top-level path containing spaces with `./`. Never use a descriptive label.
 ACCEPTANCE_CRITERIA expect rule: `expect` is ONLY a literal string printed verbatim in the combined stdout and stderr of `verify`, such as `OK` or `5 passed`. Use `expect: NONE` for exit-code/status conditions like `exit code 0`, `success`, `passed`, or `no errors`; exit-code 0 is already verified separately.
@@ -1739,6 +1859,7 @@ EXIT_CONDITIONS: [{{"name": "<name>", "description": "<description>", "criteria"
         cleaned = self._preprocess_response(response)
         lines = cleaned.strip().split("\n")
         requirements: dict[str, Any] = {}
+        acceptance_criteria_count = 0
 
         for line in lines:
             line = line.strip()
@@ -1750,16 +1871,21 @@ EXIT_CONDITIONS: [{{"name": "<name>", "description": "<description>", "criteria"
                 if line.startswith(prefix):
                     key = prefix[:-1].lower()  # Remove colon and lowercase
                     value = line[len(prefix) :].strip()
+                    if key == "acceptance_criteria":
+                        acceptance_criteria_count += 1
+                        if acceptance_criteria_count > 1:
+                            raise ValueError("Duplicate top-level ACCEPTANCE_CRITERIA field")
                     requirements[key] = value
                     matched_prefix = True
                     break
             if matched_prefix:
                 continue
 
-        if "acceptance_criteria" in requirements:
-            requirements["acceptance_criteria"] = _parse_extracted_acceptance_criteria(
-                requirements["acceptance_criteria"]
-            )
+        if "acceptance_criteria" not in requirements:
+            raise ValueError("Missing required field: acceptance_criteria")
+        requirements["acceptance_criteria"] = _parse_extracted_acceptance_criteria(
+            requirements["acceptance_criteria"]
+        )
 
         # Validate required fields
         required_fields = [
