@@ -1756,6 +1756,12 @@ class TestSeedGeneratorExtraction:
                 "foore| artifacts: literal\n",
             ),
             (r"printf '%s\n' foo're' | grep -Fx foore", "foore\n"),
+            ("true # don't care", ""),
+            ("true;# user's note", ""),
+            (
+                r"printf '%s\n' foo#don't' | grep -Fx 'foo#dont'",
+                "foo#dont\n",
+            ),
         ),
     )
     async def test_generate_preserves_posix_single_quote_tokens_through_live_verify(
@@ -1768,6 +1774,8 @@ class TestSeedGeneratorExtraction:
         These expand the markdown-truncated review examples into complete
         commands: one ends a single-quoted value with a literal backslash; the
         other begins an adjacent quoted segment with contraction-like ``re``.
+        Comment forms prove apostrophes are inert after a token-boundary ``#``;
+        the token-internal control proves ``#`` does not always start a comment.
         """
         if not Path("/bin/sh").exists():
             pytest.skip("POSIX shell regression")

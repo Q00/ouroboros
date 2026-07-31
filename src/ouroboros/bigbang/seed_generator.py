@@ -114,6 +114,16 @@ def _is_word_apostrophe(value: str, index: int, *, shell_context: bool = False) 
     return value.find("'", index + 1) < 0
 
 
+def _starts_posix_shell_comment(value: str, index: int) -> bool:
+    """Return whether ``#`` begins an unquoted POSIX shell comment token."""
+    if value[index] != "#":
+        return False
+    if index == 0:
+        return True
+    previous = value[index - 1]
+    return previous.isspace() or previous in ";&|()"
+
+
 def _scan_pipe_led_ac_field_fragment(
     value: str,
     pipe_index: int,
@@ -280,9 +290,20 @@ def _iter_outer_ac_field_markers(body: str) -> tuple[_ACFieldMarker, ...]:
     structured_payload_started = False
     active_field: str | None = None
     escaped = False
+    unquoted_comment = False
     index = 0
     while index < len(body):
         char = body[index]
+        if unquoted_comment:
+            fragment = _scan_pipe_led_ac_field_fragment(body, index) if char == "|" else None
+            if fragment is None or not fragment.has_colon or not fragment.canonical:
+                index += 1
+                continue
+            # The AC extraction DSL terminates the verify substring before it
+            # reaches the shell. Its canonical outer marker therefore ends
+            # scanner comment state even though an untrimmed shell line would
+            # treat the same bytes as comment text.
+            unquoted_comment = False
         if quote == "'":
             # POSIX single quotes make every enclosed character literal.
             # In particular, a backslash cannot escape the closing quote.
@@ -322,6 +343,15 @@ def _iter_outer_ac_field_markers(body: str) -> tuple[_ACFieldMarker, ...]:
                         )
                 quote = None
                 quote_start = None
+            index += 1
+            continue
+        if (
+            structured_payload_started
+            and active_field == "verify"
+            and char == "#"
+            and _starts_posix_shell_comment(body, index)
+        ):
+            unquoted_comment = True
             index += 1
             continue
         if char in {"'", '"'} and not (
