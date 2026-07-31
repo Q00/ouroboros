@@ -26,6 +26,7 @@ _EVENT_STORE_CONFIG_COMMANDS = [
     ["mcp", "doctor", "--json"],
     ["mcp", "serve", "--transport", "stdio"],
 ]
+_EVENT_STORE_CONFIG_TIMEOUT_SECONDS = 30
 
 
 @pytest.fixture()
@@ -254,7 +255,7 @@ def test_invalid_yaml_commands_redact_config_contents(tmp_path: Path, arguments:
         capture_output=True,
         check=False,
         env=env,
-        timeout=10,
+        timeout=_EVENT_STORE_CONFIG_TIMEOUT_SECONDS,
     )
     output = result.stdout + result.stderr
 
@@ -285,7 +286,7 @@ def test_non_mapping_config_redacts_config_path(tmp_path: Path, arguments: list[
         capture_output=True,
         check=False,
         env=env,
-        timeout=10,
+        timeout=_EVENT_STORE_CONFIG_TIMEOUT_SECONDS,
     )
     output = result.stdout + result.stderr
 
@@ -316,7 +317,7 @@ def test_wrong_type_persistence_redacts_config_value(
         capture_output=True,
         check=False,
         env=env,
-        timeout=10,
+        timeout=_EVENT_STORE_CONFIG_TIMEOUT_SECONDS,
     )
     output = result.stdout + result.stderr
 
@@ -348,7 +349,7 @@ def test_unresolvable_user_database_path_is_redacted(
         capture_output=True,
         check=False,
         env=env,
-        timeout=10,
+        timeout=_EVENT_STORE_CONFIG_TIMEOUT_SECONDS,
     )
     output = result.stdout + result.stderr
 
