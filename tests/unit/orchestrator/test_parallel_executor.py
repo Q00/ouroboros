@@ -427,10 +427,14 @@ def test_files_touched_rejects_python_c_quoted_or_escaped_redirect_argv(
     )
 
 
-def test_files_touched_rejects_python_c_redirection_inside_shell_comment(tmp_path) -> None:
+@pytest.mark.parametrize("comment_prefix", (" ", " \\\n"))
+def test_files_touched_rejects_python_c_redirection_inside_shell_comment(
+    tmp_path,
+    comment_prefix,
+) -> None:
     """A comment cannot turn a Python-internal write into shell receiver proof."""
     source = "from pathlib import Path; Path('claimed.py').write_text('internal')"
-    command = f"{_trusted_python_c(source)} # > claimed.py"
+    command = f"{_trusted_python_c(source)}{comment_prefix}# > claimed.py"
     call = AgentMessage(
         type="tool",
         content=f"Bash: {command}",
@@ -461,6 +465,14 @@ def test_files_touched_rejects_python_c_redirection_inside_shell_comment(tmp_pat
         (observed_call, observed_completion),
         task_cwd=str(tmp_path),
     )
+
+
+def test_shell_comment_parser_rejects_redirect_after_backslash_crlf() -> None:
+    """Non-POSIX CRLF continuation remains fail-closed for receiver discovery."""
+    source = "from pathlib import Path; Path('claimed.py').write_text('internal')"
+    command = f"{_trusted_python_c(source)} \\\r\n# > claimed.py"
+
+    assert _shell_command_mutation_targets(command, redirections_only=True) == ()
 
 
 @pytest.mark.parametrize(

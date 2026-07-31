@@ -750,33 +750,46 @@ def _strip_unquoted_shell_comment(command: str) -> str:
     quote: str | None = None
     escaped = False
     at_word_start = True
-    for index, char in enumerate(command):
+    uncommented: list[str] = []
+    for char in command:
         if escaped:
             escaped = False
+            if char == "\n":
+                # A POSIX backslash-LF continuation is removed before token
+                # recognition.  It therefore cannot turn a preceding word
+                # boundary into token-internal state before a following '#'.
+                uncommented.pop()
+                continue
+            uncommented.append(char)
             at_word_start = False
             continue
         if quote == "'":
+            uncommented.append(char)
             if char == "'":
                 quote = None
             continue
         if char == "\\":
+            uncommented.append(char)
             escaped = True
             continue
         if quote == '"':
+            uncommented.append(char)
             if char == '"':
                 quote = None
             continue
         if char in {"'", '"'}:
+            uncommented.append(char)
             quote = char
             at_word_start = False
             continue
         if char == "#" and at_word_start:
-            return command[:index]
+            return "".join(uncommented)
+        uncommented.append(char)
         if char.isspace() or char in ";&|()<>":
             at_word_start = True
         else:
             at_word_start = False
-    return command
+    return "".join(uncommented)
 
 
 def _mask_quoted_output_operators(command: str) -> str:
