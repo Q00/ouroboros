@@ -186,6 +186,31 @@ def test_invalid_yaml_commands_redact_config_contents(tmp_path: Path, arguments:
         assert str(home) not in output
 
 
+@pytest.mark.parametrize("arguments", [["status", "executions"], ["resume"]])
+def test_non_mapping_config_redacts_config_path(tmp_path: Path, arguments: list[str]) -> None:
+    home = tmp_path / "home"
+    config_dir = home / ".ouroboros"
+    config_dir.mkdir(parents=True)
+    (config_dir / "config.yaml").write_text("- not-a-mapping\n")
+    env = os.environ.copy()
+    env["HOME"] = str(home)
+
+    result = subprocess.run(
+        [sys.executable, "-m", "ouroboros", *arguments],
+        stdin=subprocess.DEVNULL,
+        text=True,
+        capture_output=True,
+        check=False,
+        env=env,
+        timeout=10,
+    )
+    output = result.stdout + result.stderr
+
+    assert result.returncode != 0
+    assert str(home) not in output
+    assert "Traceback" not in output
+
+
 # ── config backend ───────────────────────────────────────────────
 
 

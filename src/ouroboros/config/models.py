@@ -849,8 +849,5 @@ def resolve_event_store_path(config_path: Path | None = None) -> Path:
     except (OSError, yaml.YAMLError):
         raise ValueError("invalid EventStore configuration") from None
     if not isinstance(loaded, Mapping):
-        raise ValueError(
-            f"invalid config format in {config_path} "
-            f"(expected mapping, got {type(loaded).__name__})"
-        )
+        raise ValueError("invalid EventStore configuration")
     return event_store_path_from_config(loaded, config_path)
