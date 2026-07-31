@@ -11,6 +11,8 @@ proof.
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from ouroboros.bigbang.answer_provenance import (
@@ -18,12 +20,13 @@ from ouroboros.bigbang.answer_provenance import (
     classify_answer_provenance,
     extraction_rounds,
 )
-from ouroboros.bigbang.interview import InterviewRound, InterviewState
+from ouroboros.bigbang.interview import InterviewRound, InterviewState, InterviewStatus
 from ouroboros.bigbang.pm_document import PMDocumentGenerator
 from ouroboros.bigbang.pm_interview import PMInterviewEngine
 from ouroboros.bigbang.pm_seed import PMSeed
 from ouroboros.bigbang.requirement_distillation import build_requirement_distillation
 from ouroboros.bigbang.seed_generator import SeedGenerator
+from ouroboros.core.requirement_candidate import ConfirmationAuthority
 from ouroboros.mcp.tools.authoring_handlers import _format_interview_transcript
 
 # Carried only by the observation's answer. This is what must disappear.
@@ -272,3 +275,107 @@ def test_the_pm_question_classifier_is_not_withheld() -> None:
 
     assert OBSERVED_FACT in rendered
     assert WITHHELD_ANSWER_NOTE not in rendered
+
+
+# ---------------------------------------------------------------------------
+# Reference contrasts: a fact cannot stand in for the user's confirmation
+# ---------------------------------------------------------------------------
+#
+# "Make it like Stripe" does not say what to copy and what to drop, so the
+# interview asks a contrast question and holds a required `contrast-required`
+# candidate at UNKNOWN / authority NONE until the user answers it. Answering
+# that question with a fact *about* Stripe used to resolve it — a fact conferring
+# a confirmation, which is this issue's defect expressed in the reference lane.
+#
+# It no longer does, so an interview whose only contrast answer is an adopted
+# fact is refused. That refusal is the pre-existing reference gate no longer
+# being satisfied falsely, not a new gate this rule adds.
+
+CONTRAST_QUESTION = (
+    "Reference `Stripe`\nWhat should this project copy or avoid from that reference?"
+)
+CONTRAST_FACT = "[from-code] Stripe uses a hosted payment page"
+
+
+def _reference_state(contrast_answer: str) -> InterviewState:
+    from ouroboros.interview_adapters import (
+        ReferenceContrastResolution,
+        ReferenceCue,
+        ReferenceResolutionStatus,
+    )
+    from ouroboros.interview_adapters.models import ReferenceOrigin
+
+    state = InterviewState(interview_id="iv-ref", initial_context="Build a Stripe-like checkout")
+    state.reference_cues = (
+        ReferenceCue(reference_id="stripe", label="Stripe", origin=ReferenceOrigin.USER_TEXT),
+    )
+    state.reference_resolutions = (
+        ReferenceContrastResolution(
+            reference_id="stripe",
+            status=ReferenceResolutionStatus.RESOLVED,
+            asked_question=CONTRAST_QUESTION,
+            answer=contrast_answer,
+        ),
+    )
+    state.record_answer(CONTRAST_QUESTION, contrast_answer)
+    state.record_answer("How many retries?", USER_DECISION)
+    state.status = InterviewStatus.COMPLETED
+    return state
+
+
+def test_a_fact_does_not_resolve_a_reference_contrast() -> None:
+    distillation = build_requirement_distillation(_reference_state(CONTRAST_FACT))
+
+    unresolved = [
+        candidate
+        for candidate in distillation.candidates
+        if candidate.candidate_id.endswith(":contrast-required")
+    ]
+    assert unresolved, "the contrast requirement must survive an observation answer"
+    assert unresolved[0].confirmation_authority is ConfirmationAuthority.NONE
+    assert CONTRAST_FACT.removeprefix("[from-code] ") not in " ".join(
+        candidate.text for candidate in distillation.candidates
+    )
+
+
+def test_a_user_decided_contrast_still_resolves() -> None:
+    """The gate is not simply always closed — a real decision opens it."""
+    distillation = build_requirement_distillation(
+        _reference_state("Copy the hosted page, avoid their embedded form")
+    )
+
+    assert not [
+        candidate
+        for candidate in distillation.candidates
+        if candidate.candidate_id.endswith(":contrast-required")
+        and candidate.confirmation_authority is ConfirmationAuthority.NONE
+    ]
+
+
+def test_an_unconfirmed_contrast_is_refused_as_a_typed_result_not_a_crash() -> None:
+    from ouroboros.bigbang.ambiguity import AmbiguityScore, ComponentScore, ScoreBreakdown
+
+    breakdown = ScoreBreakdown(
+        **{
+            name: ComponentScore(name=name, clarity_score=0.9, weight=0.25, justification="t")
+            for name in ScoreBreakdown.model_fields
+        }
+    )
+    score = AmbiguityScore(overall_score=0.15, breakdown=breakdown)
+
+    result = asyncio.run(
+        SeedGenerator(llm_adapter=None).generate(_reference_state(CONTRAST_FACT), score)
+    )
+
+    assert result.is_err
+    assert "reopened" in str(result.error)
+    blockers = result.error.details["blockers"]
+    assert any(item["code"] == "reference_confirmation_required" for item in blockers)
+
+
+def test_the_user_decision_still_renders_even_when_the_contrast_is_unconfirmed() -> None:
+    """The decision is not what is blocked — a missing confirmation is."""
+    rendered = _dev_seed_context(_reference_state(CONTRAST_FACT))
+
+    assert USER_DECISION in rendered
+    assert WITHHELD_ANSWER_NOTE in rendered
