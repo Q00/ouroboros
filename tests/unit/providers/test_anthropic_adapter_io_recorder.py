@@ -16,6 +16,7 @@ import pytest
 
 from ouroboros.core.errors import ProviderError
 from ouroboros.core.json_utils import extract_json_payload
+from ouroboros.core.security import MAX_LLM_RESPONSE_LENGTH
 from ouroboros.events.base import BaseEvent
 from ouroboros.events.io_recorder import IOJournalRecorder, use_io_journal_recorder
 from ouroboros.providers.anthropic_adapter import (
@@ -125,6 +126,15 @@ def _parse_prefill_content(content: str) -> str:
     return _parse_content(content, json_prefill=True)
 
 
+def _oversized_prefill_suffix() -> str:
+    prefix_start = '"payload": "'
+    prefix_end = '"}'
+    padding = "x" * (MAX_LLM_RESPONSE_LENGTH - len(prefix_start) - len(prefix_end))
+    valid_at_limit = f"{prefix_start}{padding}{prefix_end}"
+    assert len(valid_at_limit) == MAX_LLM_RESPONSE_LENGTH
+    return valid_at_limit + "TRAILING"
+
+
 class TestJsonPrefillResponseBoundary:
     def test_valid_object_continuation_restores_synthetic_opener(self) -> None:
         continuation = '"ok": true, "nested": {"value": 1}}'
@@ -132,6 +142,20 @@ class TestJsonPrefillResponseBoundary:
         normalized = _parse_prefill_content(continuation)
 
         assert normalized == '{"ok": true, "nested": {"value": 1}}'
+
+    def test_oversized_suffix_is_rejected_before_truncation_can_make_it_valid(self) -> None:
+        with pytest.raises(ProviderError, match="safe length boundary") as exc_info:
+            _parse_prefill_content(_oversized_prefill_suffix())
+
+        assert exc_info.value.details["error_type"] == "invalid_json_prefill_response_length"
+        assert exc_info.value.details["original_length"] > MAX_LLM_RESPONSE_LENGTH
+
+    def test_oversized_response_without_prefill_keeps_legacy_clamp(self) -> None:
+        content = "x" * (MAX_LLM_RESPONSE_LENGTH + 7)
+
+        normalized = _parse_content(content, json_prefill=False)
+
+        assert normalized == content[:MAX_LLM_RESPONSE_LENGTH]
 
     def test_malformed_quoted_key_continuation_keeps_opener_and_fails_closed(self) -> None:
         continuation = '  "draft": {"stale": true}'
@@ -278,6 +302,60 @@ async def test_invalid_prefill_response_cannot_reach_downstream_consumer(
     assert result.is_err
     assert result.error.details["error_type"] == "invalid_json_prefill_response"
     downstream_consumer.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("with_recorder", [False, True], ids=["plain", "recorder"])
+async def test_complete_rejects_oversized_prefill_before_content_mutation(
+    with_recorder: bool,
+) -> None:
+    store = _FakeEventStore()
+    recorder = (
+        IOJournalRecorder(
+            event_store=store,
+            target_type="execution",
+            target_id="exec_oversized_prefill",
+        )
+        if with_recorder
+        else None
+    )
+    adapter = AnthropicAdapter(api_key="dummy", io_recorder=recorder)
+    text_block = MagicMock(type="text", text=_oversized_prefill_suffix())
+    response = _StubAnthropicResponse(
+        content=[text_block],
+        model="claude-sonnet-4-6",
+        stop_reason="end_turn",
+        usage=MagicMock(input_tokens=1, output_tokens=1),
+    )
+    fake_client = MagicMock()
+    fake_client.messages.create = AsyncMock(return_value=response)
+    adapter._client = fake_client
+    downstream_consumer = MagicMock()
+
+    result = await adapter.complete(
+        messages=[Message(role=MessageRole.USER, content="return JSON")],
+        config=CompletionConfig(
+            model="claude-sonnet-4-6",
+            response_format={"type": "json_object"},
+        ),
+    )
+    if result.is_ok:
+        downstream_consumer(result.value.content)
+
+    assert result.is_err
+    assert result.error.details["error_type"] == "invalid_json_prefill_response_length"
+    downstream_consumer.assert_not_called()
+    if with_recorder:
+        assert [event.type for event in store.appended] == [
+            "llm.call.requested",
+            "llm.call.returned",
+        ]
+        returned = store.appended[1]
+        assert returned.data["is_error"] is True
+        assert returned.data["error_kind"] == "ProviderError"
+        assert "completion_hash" not in returned.data
+    else:
+        assert store.appended == []
 
 
 @pytest.mark.asyncio

@@ -363,8 +363,25 @@ class AnthropicAdapter:
         # Security: Validate response length *before* prepending the JSON
         # prefill character. Truncating after prepend would cut the JSON
         # mid-object, producing silently broken output.
-        is_valid, _ = InputValidator.validate_llm_response(content)
+        is_valid, validation_error = InputValidator.validate_llm_response(content)
         if not is_valid:
+            if json_prefill:
+                log.warning(
+                    "anthropic.response.rejected_prefill_length",
+                    model=model,
+                    original_length=len(content),
+                    max_length=MAX_LLM_RESPONSE_LENGTH,
+                )
+                raise ProviderError(
+                    "Anthropic JSON prefill response exceeded the safe length boundary",
+                    provider="anthropic",
+                    details={
+                        "error_type": "invalid_json_prefill_response_length",
+                        "validation_error": validation_error,
+                        "original_length": len(content),
+                        "max_length": MAX_LLM_RESPONSE_LENGTH,
+                    },
+                )
             log.warning(
                 "anthropic.response.truncated",
                 model=model,
