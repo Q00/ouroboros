@@ -576,6 +576,12 @@ def _python_c_pathlib_write_reference_match(
     del reference, claim_cwd
     if task_cwd is None:
         return None
+    # Command text can never prove the historical identity of a pathlib
+    # receiver. Detect the Python source itself before shell tokenization so
+    # executable quoting/concatenation (for example ``py"thon"``) cannot move
+    # the same payload into generic shell mutation heuristics.
+    if _raw_command_mentions_python_c_pathlib_write(command):
+        return False
     try:
         argv = shlex.split(command)
     except ValueError:
@@ -647,13 +653,15 @@ def _normalize_absolute_path(path: Path) -> Path:
 
 
 def _raw_command_mentions_python_c_pathlib_write(command: str) -> bool:
-    return re.search(
-        r"(?:^|[\s'\";|&])[\w./-]*python(?:3(?:\.\d+)?)?"
-        r"['\"]?"
-        r"(?:\s+-(?!c\b)\S+)*\s+-c\b",
-        command,
-        re.IGNORECASE,
-    ) is not None and _source_mentions_pathlib_write(command)
+    return (
+        _source_mentions_pathlib_write(command)
+        and re.search(
+            r"\bpathlib\b|\bPath\s*\(",
+            command,
+            re.IGNORECASE,
+        )
+        is not None
+    )
 
 
 def _source_mentions_pathlib_write(source: str) -> bool:

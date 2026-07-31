@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import shlex
+import subprocess
 import sys
 from types import SimpleNamespace
 from typing import Any
@@ -366,6 +367,51 @@ def test_files_touched_rejects_shell_quoted_absolute_python_fallback(tmp_path) -
         ),
     )
 
+    assert not _runtime_messages_support_file_claim(
+        "claimed.py",
+        messages,
+        task_cwd=str(tmp_path),
+    )
+
+
+def test_files_touched_rejects_fragment_quoted_python_fallback(tmp_path) -> None:
+    """Shell-concatenated interpreter spelling cannot reach generic touch matching."""
+    claimed_file = tmp_path / "claimed.py"
+    other_file = tmp_path / "other.py"
+    claimed_file.write_text("VALUE = 1\n", encoding="utf-8")
+    other_file.write_text("VALUE = 2\n", encoding="utf-8")
+    source = "from pathlib import Path; # touch claimed.py\nPath('other.py').write_text('changed')"
+    executable = str(Path(sys.executable).resolve())
+    fragmented_executable = executable.replace("python", 'py"thon"', 1)
+    assert fragmented_executable != executable
+    inner = f"{fragmented_executable} -c {shlex.quote(source)}"
+    command = f"/bin/bash -c {shlex.quote(inner)}"
+
+    completed = subprocess.run(
+        command,
+        cwd=tmp_path,
+        shell=True,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0
+    assert claimed_file.read_text(encoding="utf-8") == "VALUE = 1\n"
+    assert other_file.read_text(encoding="utf-8") == "changed"
+
+    messages = (
+        AgentMessage(
+            type="tool",
+            content=f"Bash: {command}",
+            tool_name="Bash",
+            data={"tool_input": {"command": command}},
+        ),
+        AgentMessage(
+            type="tool_result",
+            content="command completed with exit code 0",
+            data={"subtype": "tool_result", "exit_code": 0},
+        ),
+    )
     assert not _runtime_messages_support_file_claim(
         "claimed.py",
         messages,
