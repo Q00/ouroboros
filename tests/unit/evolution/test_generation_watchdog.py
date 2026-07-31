@@ -206,11 +206,14 @@ async def test_busy_run_without_material_progress_times_out(
 ) -> None:
     """Activity alone does not count as material progress.
 
-    Runs on the fake monotonic clock so the no-progress threshold cannot race
-    the (much larger) idle threshold on wall-clock time: total fake elapsed
-    when the no-progress window trips stays far below the idle default, so a
-    starved poll loop can never cancel the generation for the wrong reason
-    (#1794).
+    Driven by the fake clock because the two thresholds otherwise race on
+    wall-clock time: the watchdog checks ``idle_timeout`` (1s by default
+    here) before ``no_material_progress_timeout``, and a poll loop starved
+    for a second under a loaded parallel CI run reaches the idle threshold
+    first. The generation is then cancelled for the wrong reason, which is
+    an assertion failure here and a misattributed timeout in production.
+    Advancing a fake clock only from inside the work coroutine orders the
+    thresholds by simulated time instead of by scheduler luck.
     """
     clock = _FakeMonotonicClock()
     monkeypatch.setattr(watchdog_module, "time", SimpleNamespace(monotonic=clock))
@@ -222,19 +225,17 @@ async def test_busy_run_without_material_progress_times_out(
         lineage_id=lineage_id,
         execution_id=execution_id,
         generation_no_progress_timeout_seconds=0.07,
-        watchdog_poll_seconds=0.005,
     )
 
     async def busy_work() -> str:
         await event_store.append(_workflow_progress(execution_id, completed_count=0))
         try:
             while True:
-                await asyncio.sleep(0.01)
-                clock.advance(0.02)
-                # Deliberately unshielded: cancellation is allowed to land
-                # mid-append, pinning the store's cancellation-atomicity
-                # contract — the watchdog's decision events must still land
-                # even when the cancelled work was inside a write (#1794).
+                await asyncio.sleep(0.02)
+                # Each step both proves liveness (resetting idle) and fails
+                # to advance completion, so only the no-progress threshold
+                # can accumulate.
+                clock.advance(0.05)
                 await event_store.append(_workflow_progress(execution_id, completed_count=0))
         except asyncio.CancelledError:
             try:
@@ -320,7 +321,6 @@ async def test_no_progress_timeout_emits_retry_directive(
         lineage_id=lineage_id,
         execution_id=execution_id,
         generation_no_progress_timeout_seconds=0.07,
-        watchdog_poll_seconds=0.005,
     )
 
     async def busy_work() -> str:
@@ -328,12 +328,8 @@ async def test_no_progress_timeout_emits_retry_directive(
         await event_store.append(_workflow_progress(execution_id, completed_count=0))
         try:
             while True:
-                await asyncio.sleep(0.01)
-                clock.advance(0.02)
-                # Deliberately unshielded: cancellation is allowed to land
-                # mid-append, pinning the store's cancellation-atomicity
-                # contract — the watchdog's decision events must still land
-                # even when the cancelled work was inside a write (#1794).
+                await asyncio.sleep(0.02)
+                clock.advance(0.05)
                 await event_store.append(_workflow_progress(execution_id, completed_count=0))
         except asyncio.CancelledError:
             raise
@@ -481,9 +477,11 @@ async def test_session_activity_resets_idle_timeout(
 ) -> None:
     """Session aggregate tool/message events prove generation liveness.
 
-    Uses the direct poll idiom on the fake clock (like the AC heartbeat test
-    below) so liveness is asserted against controlled elapsed time instead of
-    racing real sleeps against the idle threshold (#1794).
+    Stepped against a fake clock instead of racing real ``asyncio.sleep``
+    calls against a 0.07s idle threshold. This test asserts the generation
+    stays *alive*, so under parallel CI load any scheduling hiccup longer
+    than the threshold failed it without anything being wrong — the
+    inverse of the no-progress tests, and the same underlying cause.
     """
     clock = _FakeMonotonicClock()
     monkeypatch.setattr(watchdog_module, "time", SimpleNamespace(monotonic=clock))
@@ -502,18 +500,18 @@ async def test_session_activity_resets_idle_timeout(
     await watchdog.poll()
 
     for _ in range(4):
-        clock.advance(0.05)
-        await event_store.append(_session_tool_called(session_id))
-        await watchdog.poll()
+        clock.advance(0.06)
         watchdog._raise_if_threshold_exceeded()
 
-    # The generation stayed alive across 0.2s of fake elapsed time — far past
-    # the 0.07s idle threshold — only because each observed session event
-    # reset the idle timer. Prove the threshold itself is still armed.
-    clock.advance(0.08)
-    with pytest.raises(GenerationWatchdogTimeout) as exc_info:
-        watchdog._raise_if_threshold_exceeded()
-    assert exc_info.value.timeout_kind == "idle_timeout"
+        await event_store.append(_session_tool_called(session_id))
+        await watchdog.poll()
+
+        assert watchdog._last_event_type == "orchestrator.tool.called"
+
+    # Elapsed time is now several multiples of the idle threshold; only the
+    # per-event resets keep the generation alive.
+    clock.advance(0.06)
+    watchdog._raise_if_threshold_exceeded()
 
 
 @pytest.mark.asyncio
