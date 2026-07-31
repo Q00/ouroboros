@@ -486,6 +486,13 @@ def _bash_command_mutates_file_reference(
             # mutation branch executed. Require structured file evidence
             # instead of interpreting control flow from a transcript string.
             continue
+        if _text_needs_shell_expansion(command):
+            # Parameter/command expansion can reconstruct an interpreter,
+            # ``-c`` flag, mutation primitive, or target after every lexical
+            # classifier below has run. Command text with dynamic shell
+            # semantics is therefore never standalone files_touched proof;
+            # require the adapter's structured file-change evidence instead.
+            continue
         python_pathlib_match = _python_c_pathlib_write_reference_match(
             command,
             reference=reference,
@@ -650,7 +657,7 @@ def _python_c_pathlib_write_reference_match(
         or len(argv) != 5
         or argv[1] != "-I"
         or argv[2] != "-S"
-        or _source_needs_shell_expansion(source)
+        or _text_needs_shell_expansion(source)
     ):
         return False
     return False
@@ -701,8 +708,8 @@ def _source_mentions_pathlib(source: str) -> bool:
     return re.search(r"\bpathlib\b|\bPath\s*\(", source, re.IGNORECASE) is not None
 
 
-def _source_needs_shell_expansion(source: str) -> bool:
-    return "$" in source or "`" in source
+def _text_needs_shell_expansion(value: str) -> bool:
+    return "$" in value or "`" in value
 
 
 def _pathlib_write_targets(tree: ast.AST) -> tuple[str, ...]:
