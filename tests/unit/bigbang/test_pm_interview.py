@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 import yaml
 
+from ouroboros.bigbang.answer_provenance import WITHHELD_ANSWER_NOTE, extraction_rounds
 from ouroboros.bigbang.interview import (
     INITIAL_CONTEXT_SUMMARY_QUESTION,
     InterviewEngine,
@@ -1245,10 +1246,36 @@ class TestRecordResponse:
         assert "[Original technical question:" in recorded_question
         assert "[PM was asked (reframed):" in recorded_question
 
-        # The inner engine should have received the bundled response
+        # The answer stays byte-for-byte intact; its role is already expressed
+        # by the round's answer slot and leading provenance markers must remain
+        # at the beginning.
         recorded_response = state.rounds[0].user_response
-        assert "PM answer:" in recorded_response
-        assert "structured data with lots of relationships" in recorded_response
+        assert recorded_response == "We need structured data with lots of relationships"
+
+    @pytest.mark.asyncio
+    async def test_reframed_observation_keeps_provenance_across_reload(
+        self, tmp_path: Path
+    ) -> None:
+        adapter = _make_adapter()
+        engine = _make_engine(adapter, tmp_path)
+        original_q = "Which retry policy is implemented?"
+        reframed_q = "What retry behavior exists today?"
+        observed = "[from-code] three retries are hardcoded"
+        engine._reframe_map[reframed_q] = original_q
+        state = InterviewState(interview_id="test_provenance", initial_context="Improve retries")
+
+        result = await engine.record_response(state, observed, reframed_q)
+
+        assert result.is_ok
+        assert state.rounds[0].user_response == observed
+        assert state.rounds[0].provenance == "observation"
+        projected = extraction_rounds(state)
+        assert projected[0].answer == WITHHELD_ANSWER_NOTE
+        assert "three retries" not in (projected[0].answer or "")
+
+        restored = InterviewState.model_validate(state.model_dump(mode="json"))
+        assert restored.rounds[0].provenance == "observation"
+        assert extraction_rounds(restored)[0].answer == WITHHELD_ANSWER_NOTE
 
     @pytest.mark.asyncio
     async def test_reframe_map_cleared_after_recording(self, tmp_path: Path) -> None:
@@ -1339,8 +1366,7 @@ class TestRecordResponse:
         round_data = state.rounds[0]
         assert dev_q in round_data.question
         assert reframed_q in round_data.question
-        assert "PM answer:" in round_data.user_response
-        assert "Structured relational data" in round_data.user_response
+        assert round_data.user_response == "Structured relational data"
 
         # Reframe map should be consumed
         assert reframed_q not in engine._reframe_map
