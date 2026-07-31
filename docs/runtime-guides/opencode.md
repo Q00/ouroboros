@@ -361,7 +361,7 @@ This is normal when using the orchestrator runtime backends. The warning refers 
 
 ### "EventStore not initialized"
 
-The database will be created automatically at `~/.ouroboros/ouroboros.db`.
+The database will be created automatically at the active path shown by `ouroboros config show`.
 
 ## Cost
 

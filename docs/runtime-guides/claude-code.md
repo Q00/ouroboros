@@ -117,7 +117,7 @@ uv run ouroboros run workflow --orchestrator seed.yaml
 
 ### "EventStore not initialized"
 
-The database will be created automatically at `~/.ouroboros/ouroboros.db`.
+The database will be created automatically at the active path shown by `ouroboros config show`.
 
 ## Cost
 

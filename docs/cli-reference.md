@@ -97,7 +97,7 @@ ouroboros job events JOB_ID --since 0 --limit 100
 ```
 
 `ouroboros job events` is the low-cost external observability surface for
-dashboards and schedulers. It opens `~/.ouroboros/ouroboros.db` read-only,
+dashboards and schedulers. It opens the configured runtime EventStore read-only,
 does not create schema or write WAL/checkpoint state, and prints cursor-paged
 JSON for the job aggregate. Pass the returned `cursor` back as `--since` on
 the next poll.

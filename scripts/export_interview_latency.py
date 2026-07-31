@@ -182,7 +182,7 @@ def main() -> int:
     parser.add_argument(
         "--db",
         type=Path,
-        default=resolve_event_store_path(),
+        default=None,
         help="EventStore SQLite database (default: configured runtime database).",
     )
     parser.add_argument(
@@ -191,7 +191,11 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    db_path = args.db.expanduser()
+    try:
+        db_path = (args.db if args.db is not None else resolve_event_store_path()).expanduser()
+    except ValueError as exc:
+        print(f"export_interview_latency: invalid EventStore configuration ({exc})", file=sys.stderr)
+        return 2
     if not db_path.is_file():
         print("export_interview_latency: EventStore database not found", file=sys.stderr)
         return 2

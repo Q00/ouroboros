@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 import sqlite3
 import subprocess
@@ -49,12 +50,29 @@ def _insert_event(
     )
 
 
-def _run_exporter(db_path: Path, *args: str) -> subprocess.CompletedProcess[str]:
+def _run_exporter(
+    db_path: Path,
+    *args: str,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [sys.executable, str(SCRIPT), "--db", str(db_path), *args],
         text=True,
         capture_output=True,
         check=False,
+        env=env,
+    )
+
+
+def _run_exporter_default(home: Path) -> subprocess.CompletedProcess[str]:
+    env = os.environ.copy()
+    env["HOME"] = str(home)
+    return subprocess.run(
+        [sys.executable, str(SCRIPT)],
+        text=True,
+        capture_output=True,
+        check=False,
+        env=env,
     )
 
 
@@ -218,6 +236,39 @@ def test_exporter_fails_cleanly_when_database_is_missing(tmp_path: Path) -> None
     result = _run_exporter(tmp_path / "missing.db")
 
     assert result.returncode == 2
+
+
+def test_exporter_uses_configured_default_database(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    config_dir = home / ".ouroboros"
+    db_path = config_dir / "data" / "events.db"
+    db_path.parent.mkdir(parents=True)
+    (config_dir / "config.yaml").write_text(
+        "persistence:\n  database_path: data/events.db\n"
+    )
+    with _create_event_store(db_path):
+        pass
+
+    result = _run_exporter_default(home)
+
+    assert result.returncode == 0
+    assert "no timed interview events found" in result.stderr
+    assert "database not found" not in result.stderr
+
+
+def test_explicit_database_bypasses_invalid_config(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    config_dir = home / ".ouroboros"
+    config_dir.mkdir(parents=True)
+    (config_dir / "config.yaml").write_text("persistence: []\n")
+    env = os.environ.copy()
+    env["HOME"] = str(home)
+
+    result = _run_exporter(tmp_path / "missing.db", env=env)
+
+    assert result.returncode == 2
+    assert "database not found" in result.stderr
+    assert "invalid EventStore configuration" not in result.stderr
     assert result.stdout == ""
     assert "database not found" in result.stderr
     assert str(tmp_path) not in result.stderr
