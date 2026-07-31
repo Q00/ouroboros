@@ -152,6 +152,10 @@ def _wrap_invalid_supported_fence_with_nested_payload(fence_info: str, nested_pa
     return f"```{fence_info}\ninvalid wrapper {nested_payload}\n```"
 
 
+def _wrap_unfenced_example_then_actual(example_payload: str, actual_payload: str) -> str:
+    return f"For example: {example_payload}\nActual answer: {actual_payload}"
+
+
 # ``prose_prefix_fence`` and ``fence_trailing_prose`` are the two variants the
 # old heuristic got wrong; the remaining variants preserve plain, bare, and
 # longer supported-fence behavior.
@@ -233,6 +237,28 @@ class TestWonderFenceRobustness:
 
         out = WonderEngine(llm_adapter=AsyncMock(), model="test")._parse_response(
             _wrap_invalid_supported_fence_with_nested_payload(fence_info, stale_payload),
+            _seed(),
+        )
+
+        assert out.reasoning.startswith("Parse error, using seed-scoped fallback")
+        assert out.questions == (
+            "What assumptions remain untested for goal: Build a login system?",
+        )
+
+    def test_unfenced_example_before_actual_answer_fails_closed(self) -> None:
+        example_payload = json.dumps(
+            {"questions": [], "should_continue": False, "reasoning": "stale example"}
+        )
+        actual_payload = json.dumps(
+            {
+                "questions": [{"question": "actual token question", "kind": "gap"}],
+                "should_continue": True,
+                "reasoning": "actual answer",
+            }
+        )
+
+        out = WonderEngine(llm_adapter=AsyncMock(), model="test")._parse_response(
+            _wrap_unfenced_example_then_actual(example_payload, actual_payload),
             _seed(),
         )
 
@@ -491,6 +517,49 @@ class TestReflectFenceRobustness:
                 content=_wrap_invalid_supported_fence_with_nested_payload(
                     fence_info, stale_payload
                 ),
+                model="test",
+                usage=UsageInfo(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+            )
+        )
+
+        result = await ReflectEngine(llm_adapter=adapter, model="test").reflect(
+            current_seed=_seed(1),
+            execution_output="",
+            evaluation_summary=EvaluationSummary(
+                final_approved=False,
+                highest_stage_passed=1,
+                score=0.0,
+                ac_results=(),
+            ),
+            wonder_output=WonderOutput(questions=("What handles token refresh?",)),
+            lineage=OntologyLineage(lineage_id="lineage", goal="Build a login system"),
+        )
+
+        assert result.is_err
+        assert "failed to parse" in result.error.message.lower()
+
+    @pytest.mark.asyncio
+    async def test_unfenced_example_before_actual_answer_returns_parse_error(self) -> None:
+        example_payload = json.dumps(
+            {
+                "refined_goal": "Stale example",
+                "refined_constraints": ["stale"],
+                "ontology_mutations": [],
+                "reasoning": "stale reflect",
+            }
+        )
+        actual_payload = json.dumps(
+            {
+                "refined_goal": "Build a login system with refresh-token clarity",
+                "refined_constraints": ["Must use OAuth"],
+                "ontology_mutations": [],
+                "reasoning": "actual reflect",
+            }
+        )
+        adapter = AsyncMock()
+        adapter.complete.return_value = Result.ok(
+            CompletionResponse(
+                content=_wrap_unfenced_example_then_actual(example_payload, actual_payload),
                 model="test",
                 usage=UsageInfo(prompt_tokens=1, completion_tokens=1, total_tokens=2),
             )
@@ -805,6 +874,35 @@ class TestAssertionExtractorFenceRobustness:
 
         assertions = AssertionExtractor(llm_adapter=AsyncMock())._parse_response(
             _wrap_invalid_supported_fence_with_nested_payload(fence_info, stale_payload),
+            ("AC number 1",),
+        )
+
+        assert assertions == ()
+
+    def test_unfenced_example_before_actual_answer_returns_empty(self) -> None:
+        example_payload = json.dumps(
+            [
+                {
+                    "ac_index": 0,
+                    "tier": "t4_unverifiable",
+                    "pattern": "",
+                    "description": "stale example",
+                }
+            ]
+        )
+        actual_payload = json.dumps(
+            [
+                {
+                    "ac_index": 0,
+                    "tier": "t4_unverifiable",
+                    "pattern": "",
+                    "description": "actual assertion",
+                }
+            ]
+        )
+
+        assertions = AssertionExtractor(llm_adapter=AsyncMock())._parse_response(
+            _wrap_unfenced_example_then_actual(example_payload, actual_payload),
             ("AC number 1",),
         )
 

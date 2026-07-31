@@ -148,11 +148,21 @@ class TestExtractJsonPayload:
         assert result is not None
         assert '"score": 0.88' in result
 
-    def test_multiple_json_objects_returns_first_valid(self):
+    def test_multiple_unfenced_json_objects_fail_closed(self):
         text = 'prefix {"a": 1} middle {"b": 2} suffix'
-        result = extract_json_payload(text)
-        assert result is not None
-        assert '"a": 1' in result
+        assert extract_json_payload(text) is None
+
+    def test_blockquoted_json_fence_strips_exact_quote_prefix(self) -> None:
+        text = '> ```json\n> {"questions": [], "should_continue": false}\n> ```'
+        assert extract_json_payload(text) == '{"questions": [], "should_continue": false}'
+
+    def test_blockquoted_json_fence_rejects_unquoted_body_line(self) -> None:
+        text = '> ```json\n{"actual": true}\n> ```\nLater: {"stale": true}'
+        assert extract_json_payload(text) is None
+
+    def test_blockquoted_json_fence_requires_matching_closer_prefix(self) -> None:
+        text = '> ```json\n> {"actual": true}\n>> ```\nLater: {"stale": true}'
+        assert extract_json_payload(text) is None
 
     def test_invalid_json_with_valid_later(self):
         """First brace-balanced block is not valid JSON, second is."""
@@ -231,18 +241,13 @@ class TestExtractJsonArray:
         assert result.startswith("[")
         assert '"score": 0.9' in result
 
-    def test_object_before_array_returns_object(self):
-        """When both object and array exist, return whichever comes first."""
+    def test_object_before_array_is_ambiguous(self):
         text = '{"first": true} [1, 2, 3]'
-        result = extract_json_payload(text)
-        assert result is not None
-        assert '"first": true' in result
+        assert extract_json_payload(text) is None
 
-    def test_array_before_object_returns_array(self):
+    def test_array_before_object_is_ambiguous(self):
         text = '[1, 2] {"second": true}'
-        result = extract_json_payload(text)
-        assert result is not None
-        assert result == "[1, 2]"
+        assert extract_json_payload(text) is None
 
     def test_empty_array(self):
         text = "prefix [] suffix"

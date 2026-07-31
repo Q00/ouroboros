@@ -20,11 +20,12 @@ _BLOCKQUOTE_FENCE_PREFIX = re.compile(r"^[ \t]{0,3}(?:>[ \t]?)+$")
 
 
 def extract_json_payload(text: str) -> str | None:
-    """Extract the first valid JSON object or array from text.
+    """Extract one authoritative JSON object or array from text.
 
-    Tries each ``{`` or ``[`` position via bracket-depth counting and
-    validates with ``json.loads``.  This handles LLM responses that
-    contain prose before the actual JSON payload.
+    A supported JSON fence is an explicit answer boundary and wins over
+    surrounding prose.  Without such a fence, exactly one valid payload must
+    exist; multiple payloads are ambiguous and fail closed rather than letting
+    an earlier example become authoritative.
 
     Args:
         text: Raw text potentially containing a JSON object or array
@@ -38,11 +39,10 @@ def extract_json_payload(text: str) -> str | None:
     if fence_state is _FenceScanState.MALFORMED:
         return None
 
-    for segment in fallback_segments:
-        payload = _extract_first_json_from_text(segment)
-        if payload is not None:
-            return payload
-    return None
+    payloads = [
+        payload for segment in fallback_segments for payload in _extract_json_from_text(segment)
+    ]
+    return payloads[0] if len(payloads) == 1 else None
 
 
 def _extract_fenced_json_payload(
@@ -57,7 +57,7 @@ def _extract_fenced_json_payload(
             fallback_parts.append(text[fence_start:])
             return (_FenceScanState.NO_FENCE, None, tuple(fallback_parts))
 
-        opener, opener_length, marker = opening
+        opener, opener_length, marker, quote_prefix = opening
         info_start = opener + opener_length
         line_end = text.find("\n", info_start)
         if line_end == -1:
@@ -65,21 +65,38 @@ def _extract_fenced_json_payload(
 
         info = text[info_start:line_end].strip().lower()
         if info not in ("", "json"):
-            closing = _find_closing_fence(text, line_end + 1, opener_length, marker)
+            closing = _find_closing_fence(
+                text,
+                line_end + 1,
+                opener_length,
+                marker,
+                quote_prefix=quote_prefix,
+            )
             if closing is None:
                 return (_FenceScanState.MALFORMED, None, ())
-            closing_start, closing_length = closing
+            closing_start, closing_length, _ = closing
             fallback_parts.append(text[fence_start:opener])
             fence_start = closing_start + closing_length
             continue
 
         body_start = line_end + 1
-        closing = _find_closing_fence(text, body_start, opener_length, marker)
+        closing = _find_closing_fence(
+            text,
+            body_start,
+            opener_length,
+            marker,
+            quote_prefix=quote_prefix,
+        )
         if closing is None:
             return (_FenceScanState.MALFORMED, None, ())
-        closing_start, _ = closing
+        _, _, closing_line_start = closing
 
-        body = text[body_start:closing_start].strip()
+        body = _decode_fenced_body(
+            text[body_start:closing_line_start],
+            quote_prefix=quote_prefix,
+        )
+        if body is None:
+            return (_FenceScanState.MALFORMED, None, ())
         try:
             parsed = json.loads(body)
         except (json.JSONDecodeError, ValueError):
@@ -99,7 +116,7 @@ def _fence_run_length(text: str, start: int, marker: str) -> int:
     return end - start
 
 
-def _find_opening_fence(text: str, start: int) -> tuple[int, int, str] | None:
+def _find_opening_fence(text: str, start: int) -> tuple[int, int, str, str | None] | None:
     """Return the next line-start backtick or tilde fence."""
     pos = start
     while True:
@@ -115,8 +132,9 @@ def _find_opening_fence(text: str, start: int) -> tuple[int, int, str] | None:
         candidate_length = _fence_run_length(text, candidate, marker)
         line_start = text.rfind("\n", 0, candidate) + 1
         prefix = text[line_start:candidate]
-        if _is_fence_line_prefix(prefix):
-            return candidate, candidate_length, marker
+        quote_prefix = _blockquote_prefix(prefix)
+        if prefix.strip() == "" or quote_prefix is not None:
+            return candidate, candidate_length, marker, quote_prefix
 
         pos = candidate + candidate_length
 
@@ -126,7 +144,9 @@ def _find_closing_fence(
     start: int,
     opener_length: int,
     marker: str,
-) -> tuple[int, int] | None:
+    *,
+    quote_prefix: str | None,
+) -> tuple[int, int, int] | None:
     """Return a clean same-marker fence at least as long as the opener."""
     pos = start
     while True:
@@ -141,28 +161,42 @@ def _find_closing_fence(
             line_end = len(text)
         prefix = text[line_start:candidate]
         suffix = text[candidate + candidate_length : line_end]
-        if (
-            candidate_length >= opener_length
-            and _is_fence_line_prefix(prefix)
-            and suffix.strip() == ""
-        ):
-            return candidate, candidate_length
+        prefix_matches = (
+            prefix == quote_prefix if quote_prefix is not None else prefix.strip() == ""
+        )
+        if candidate_length >= opener_length and prefix_matches and suffix.strip() == "":
+            return candidate, candidate_length, line_start
 
         pos = candidate + candidate_length
 
 
-def _is_fence_line_prefix(prefix: str) -> bool:
-    """Accept plain or Markdown-blockquoted fence line prefixes."""
-    return prefix.strip() == "" or _BLOCKQUOTE_FENCE_PREFIX.fullmatch(prefix) is not None
+def _blockquote_prefix(prefix: str) -> str | None:
+    """Return the exact Markdown quote prefix used by a fence line."""
+    return prefix if _BLOCKQUOTE_FENCE_PREFIX.fullmatch(prefix) is not None else None
 
 
-def _extract_first_json_from_text(text: str) -> str | None:
+def _decode_fenced_body(body: str, *, quote_prefix: str | None) -> str | None:
+    """Strip one fence's exact quote prefix from every quoted body line."""
+    if quote_prefix is None:
+        return body.strip()
+
+    decoded: list[str] = []
+    for line in body.splitlines():
+        if not line.startswith(quote_prefix):
+            return None
+        decoded.append(line[len(quote_prefix) :])
+    return "\n".join(decoded).strip()
+
+
+def _extract_json_from_text(text: str) -> tuple[str, ...]:
+    """Return non-overlapping valid JSON payloads found in prose."""
+    payloads: list[str] = []
     pos = 0
     while True:
         obj_start = text.find("{", pos)
         arr_start = text.find("[", pos)
         if obj_start == -1 and arr_start == -1:
-            return None
+            return tuple(payloads)
         if obj_start == -1:
             start = arr_start
         elif arr_start == -1:
@@ -174,9 +208,12 @@ def _extract_first_json_from_text(text: str) -> str | None:
         if candidate is not None:
             try:
                 json.loads(candidate)
-                return candidate
             except (json.JSONDecodeError, ValueError):
                 pass
+            else:
+                payloads.append(candidate)
+                pos = start + len(candidate)
+                continue
         pos = start + 1
 
 
