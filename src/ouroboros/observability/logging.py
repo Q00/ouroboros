@@ -96,6 +96,8 @@ def _close_root_handlers() -> None:
     """Detach and close all handlers currently attached to the root logger."""
     root_logger = logging.getLogger()
     for handler in root_logger.handlers[:]:
+        if isinstance(handler, _SynchronizedTimedRotatingFileHandler):
+            handler.retire()
         root_logger.removeHandler(handler)
         try:
             handler.flush()
@@ -163,7 +165,7 @@ def _setup_file_handler(config: LoggingConfig) -> TimedRotatingFileHandler | Non
         # Configure rotating file handler
         # - when="midnight" for daily rotation
         # - backupCount controls retention
-        handler = TimedRotatingFileHandler(
+        handler = _SynchronizedTimedRotatingFileHandler(
             filename=str(log_file),
             when="midnight",
             interval=1,
@@ -329,10 +331,11 @@ _console_logging_enabled: bool = True
 
 
 @dataclass(frozen=True, slots=True)
-class _LiveSink:
-    """One atomically published logging destination generation."""
+class _LoggingGeneration:
+    """One atomically published logging pipeline generation."""
 
     min_level: int
+    processors: tuple[Any, ...]
     file_handler: TimedRotatingFileHandler | None
 
 
@@ -341,7 +344,99 @@ class _LiveSink:
 # a handler/setup hook that logs during a transition safely reaches the neutral
 # sink instead of deadlocking or reopening the retiring file.
 _sink_lock = RLock()
-_live_sink = _LiveSink(min_level=logging.INFO, file_handler=None)
+_live_generation = _LoggingGeneration(
+    min_level=logging.INFO,
+    processors=tuple(_get_console_processors(LogMode.DEV)),
+    file_handler=None,
+)
+
+
+_METHOD_LEVELS = {
+    "debug": logging.DEBUG,
+    "info": logging.INFO,
+    "msg": logging.INFO,
+    "warning": logging.WARNING,
+    "warn": logging.WARNING,
+    "error": logging.ERROR,
+    "exception": logging.ERROR,
+    "critical": logging.CRITICAL,
+    "fatal": logging.CRITICAL,
+}
+
+
+class _GenerationBoundLogger(
+    structlog.make_filtering_bound_logger(logging.NOTSET)  # type: ignore[misc]
+):
+    """Bind processors, filtering, and destination to one live generation."""
+
+    def _proxy_to_logger(
+        self,
+        method_name: str,
+        event: str | None = None,
+        **event_kw: Any,
+    ) -> Any:
+        # A lazy proxy can materialize immediately before a transition.  The
+        # wrapper class is deliberately stable and ignores its captured
+        # processor list; selecting the live generation under this lock keeps
+        # rendering, level filtering, and destination emission coherent.
+        with _sink_lock:
+            generation = _live_generation
+            if _METHOD_LEVELS.get(method_name, logging.INFO) < generation.min_level:
+                return None
+
+            event_dict: Any = self._context.copy()
+            event_dict.update(**event_kw)
+            if event is not None:
+                event_dict["event"] = event
+
+            try:
+                for processor in generation.processors:
+                    event_dict = processor(self._logger, method_name, event_dict)
+
+                if isinstance(event_dict, (str, bytes, bytearray)):
+                    args, kwargs = (event_dict,), {}
+                elif isinstance(event_dict, tuple):
+                    args, kwargs = event_dict
+                elif isinstance(event_dict, dict):
+                    args, kwargs = (), event_dict
+                else:
+                    raise ValueError(
+                        "Last processor didn't return an appropriate value. "
+                        "Valid return values are a dict, a tuple of "
+                        "(args, kwargs), bytes, or a str."
+                    )
+
+                return getattr(self._logger, method_name)(*args, **kwargs)
+            except structlog.DropEvent:
+                return None
+
+    def is_enabled_for(self, level: int) -> bool:
+        """Return whether *level* is enabled in the live generation."""
+        with _sink_lock:
+            return level >= _live_generation.min_level
+
+    def get_effective_level(self) -> int:
+        """Return the live generation's effective level."""
+        with _sink_lock:
+            return _live_generation.min_level
+
+
+class _SynchronizedTimedRotatingFileHandler(TimedRotatingFileHandler):
+    """A project-owned root handler that cannot emit after retirement."""
+
+    _retired: bool = False
+
+    def handle(self, record: logging.LogRecord) -> bool:
+        """Serialize stdlib emission with generation retirement."""
+        with _sink_lock:
+            if self._retired:
+                return False
+            return super().handle(record)
+
+    def retire(self) -> None:
+        """Prevent already-selected calls from reopening this handler."""
+        with _sink_lock:
+            self._retired = True
 
 
 def set_console_logging(enabled: bool) -> None:
@@ -386,14 +481,14 @@ class _FileWritingPrintLogger:
         # with an old handler, dereference a removed handler, or reopen a file
         # that reset/reconfigure has just closed.
         with _sink_lock:
-            sink = _live_sink
-            if level < sink.min_level:
+            generation = _live_generation
+            if level < generation.min_level:
                 return
 
             if _console_logging_enabled:
                 print(message, file=sys.stderr)
 
-            if sink.file_handler is not None:
+            if generation.file_handler is not None:
                 record = logging.LogRecord(
                     name="ouroboros",
                     level=level,
@@ -403,7 +498,7 @@ class _FileWritingPrintLogger:
                     args=(),
                     exc_info=None,
                 )
-                sink.file_handler.emit(record)
+                generation.file_handler.emit(record)
 
     def msg(self, message: str) -> None:
         """Log a message to console and file (default INFO level)."""
@@ -480,19 +575,23 @@ def configure_logging(config: LoggingConfig | None = None) -> None:
         # Or specify config explicitly
         configure_logging(LoggingConfig(mode=LogMode.PROD, max_log_days=14))
     """
-    global _configured, _current_config, _live_sink
+    global _configured, _current_config, _live_generation
 
     if config is None:
         config = LoggingConfig(mode=_get_mode_from_env())
 
     log_level = _get_log_level(config.log_level)
-    processors = _get_console_processors(config.mode)
+    processors = tuple(_get_console_processors(config.mode))
 
     with _sink_lock:
         # Publish a handler-free transition generation before touching the old
         # handler. Re-entrant logs from setup/flush/close remain observable on
         # stderr but can never reopen or append to the retiring file.
-        _live_sink = _LiveSink(min_level=log_level, file_handler=None)
+        _live_generation = _LoggingGeneration(
+            min_level=log_level,
+            processors=processors,
+            file_handler=None,
+        )
         root_logger = logging.getLogger()
         root_logger.setLevel(log_level)
         _close_root_handlers()
@@ -503,20 +602,20 @@ def configure_logging(config: LoggingConfig | None = None) -> None:
 
         structlog.configure(
             processors=processors,
-            wrapper_class=structlog.make_filtering_bound_logger(log_level),
+            wrapper_class=_GenerationBoundLogger,
             context_class=dict,
             logger_factory=_FileWritingPrintLoggerFactory(),
-            # Never cache bound loggers: a cached wrapper freezes filtering and
-            # processors, so proxies materialized under one configuration would
-            # ignore later ones in BOTH directions — a stale INFO wrapper defeats
-            # an operator's DEBUG setting, and a stale DEV renderer defeats PROD
-            # output contracts (#1794 round seven). Known limitation: a logger
-            # materialized explicitly via ``get_logger().bind(...)`` snapshots the
-            # processor chain at bind time and will not follow reconfiguration —
-            # keep module-level loggers as bare lazy proxies.
+            # The stable wrapper resolves filtering and processors from the live
+            # generation, so even explicitly bound loggers follow later
+            # configurations.  Avoiding proxy caching additionally keeps the
+            # surrounding structlog factory/context configuration replaceable.
             cache_logger_on_first_use=False,
         )
-        _live_sink = _LiveSink(min_level=log_level, file_handler=file_handler)
+        _live_generation = _LoggingGeneration(
+            min_level=log_level,
+            processors=processors,
+            file_handler=file_handler,
+        )
         _current_config = config
         _configured = True
 
@@ -663,19 +762,25 @@ def reset_logging() -> None:
     :func:`set_console_logging` honored across a reset instead of silently
     re-enabling console output.
     """
-    global _configured, _current_config, _live_sink
+    global _configured, _current_config, _live_generation
     with _sink_lock:
         # Read before clearing: the reset must not be louder than what it replaces.
         outgoing_level = _get_log_level((_current_config or LoggingConfig()).log_level)
         baseline_level = max(logging.INFO, outgoing_level)
         _configured = False
         _current_config = None
-        _live_sink = _LiveSink(min_level=baseline_level, file_handler=None)
+        processors = tuple(_get_console_processors(LogMode.DEV))
+        _live_generation = _LoggingGeneration(
+            min_level=baseline_level,
+            processors=processors,
+            file_handler=None,
+        )
         _close_root_handlers()
         structlog.contextvars.clear_contextvars()
-        structlog.reset_defaults()
         structlog.configure(
-            wrapper_class=structlog.make_filtering_bound_logger(baseline_level),
+            processors=processors,
+            wrapper_class=_GenerationBoundLogger,
+            context_class=dict,
             # No file handler: the outgoing one was just closed by
             # _close_root_handlers(), and a reset must not hold a resource.
             logger_factory=_FileWritingPrintLoggerFactory(),

@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+from threading import Event, Thread
 from typing import Any
 from unittest.mock import patch
 import warnings
@@ -187,8 +188,9 @@ class TestConfigureLogging:
         """configure_logging falls back to console logging on file errors."""
         config = LoggingConfig(log_dir=temp_log_dir, enable_file_logging=True)
 
-        with patch(
-            "ouroboros.observability.logging.TimedRotatingFileHandler",
+        with patch.object(
+            ouroboros_logging._SynchronizedTimedRotatingFileHandler,
+            "__init__",
             side_effect=PermissionError("denied"),
         ):
             configure_logging(config)
@@ -473,6 +475,238 @@ class TestLogRotation:
 class TestResetLogging:
     """Test reset_logging function."""
 
+    def test_stdlib_record_selected_before_reconfigure_cannot_reopen_old_handler(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """An already-selected root handler must observe retirement."""
+        old_dir = tmp_path / "old"
+        new_dir = tmp_path / "new"
+        configure_logging(LoggingConfig(log_dir=old_dir, enable_file_logging=True))
+        old_handler = logging.getLogger().handlers[0]
+        original_handle = old_handler.handle
+        selected = Event()
+        resume = Event()
+        failures: list[BaseException] = []
+
+        def delayed_handle(record: logging.LogRecord) -> bool:
+            selected.set()
+            if not resume.wait(timeout=5):
+                raise TimeoutError("test did not resume selected handler")
+            return original_handle(record)
+
+        old_handler.handle = delayed_handle  # type: ignore[method-assign]
+
+        def emit() -> None:
+            try:
+                logging.getLogger("stdlib.reconfigure.overlap").warning(
+                    "selected-before-reconfigure"
+                )
+            except BaseException as exc:  # pragma: no cover - asserted below
+                failures.append(exc)
+
+        worker = Thread(target=emit)
+        worker.start()
+        assert selected.wait(timeout=5)
+        configure_logging(LoggingConfig(log_dir=new_dir, enable_file_logging=True))
+        resume.set()
+        worker.join(timeout=5)
+
+        assert not worker.is_alive()
+        assert failures == []
+        assert "selected-before-reconfigure" not in (old_dir / "ouroboros.log").read_text(
+            encoding="utf-8"
+        )
+        assert old_handler.stream is None
+
+    def test_stdlib_record_selected_before_reset_cannot_reopen_old_handler(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Reset uses the same retirement fence as reconfiguration."""
+        configure_logging(LoggingConfig(log_dir=tmp_path, enable_file_logging=True))
+        old_handler = logging.getLogger().handlers[0]
+        original_handle = old_handler.handle
+        selected = Event()
+        resume = Event()
+
+        def delayed_handle(record: logging.LogRecord) -> bool:
+            selected.set()
+            assert resume.wait(timeout=5)
+            return original_handle(record)
+
+        old_handler.handle = delayed_handle  # type: ignore[method-assign]
+        worker = Thread(
+            target=logging.getLogger("stdlib.reset.overlap").warning,
+            args=("selected-before-reset",),
+        )
+        worker.start()
+        assert selected.wait(timeout=5)
+        reset_logging()
+        resume.set()
+        worker.join(timeout=5)
+
+        assert not worker.is_alive()
+        assert "selected-before-reset" not in (tmp_path / "ouroboros.log").read_text(
+            encoding="utf-8"
+        )
+        assert old_handler.stream is None
+
+    def test_structlog_pipeline_finishes_one_generation_before_reconfigure(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """An old DEV processor cannot render into the new PROD sink."""
+        old_dir = tmp_path / "old"
+        new_dir = tmp_path / "new"
+        processor_entered = Event()
+        resume_processor = Event()
+        transition_started = Event()
+        transition_done = Event()
+        original_processors = ouroboros_logging._get_console_processors
+
+        def pause_processor(
+            _logger: Any,
+            _method_name: str,
+            event_dict: dict[str, Any],
+        ) -> dict[str, Any]:
+            processor_entered.set()
+            assert resume_processor.wait(timeout=5)
+            return event_dict
+
+        old_processors = original_processors(LogMode.DEV)
+        old_processors.insert(-1, pause_processor)
+        with patch(
+            "ouroboros.observability.logging._get_console_processors",
+            return_value=old_processors,
+        ):
+            configure_logging(
+                LoggingConfig(
+                    mode=LogMode.DEV,
+                    log_dir=old_dir,
+                    enable_file_logging=True,
+                )
+            )
+
+        proxy = structlog.get_logger("pipeline.reconfigure.overlap")
+        emitting = Thread(target=proxy.info, args=("old-generation-record",))
+        emitting.start()
+        assert processor_entered.wait(timeout=5)
+
+        def reconfigure() -> None:
+            transition_started.set()
+            configure_logging(
+                LoggingConfig(
+                    mode=LogMode.PROD,
+                    log_dir=new_dir,
+                    enable_file_logging=True,
+                )
+            )
+            transition_done.set()
+
+        transition = Thread(target=reconfigure)
+        transition.start()
+        assert transition_started.wait(timeout=5)
+        assert not transition_done.wait(timeout=0.05)
+        resume_processor.set()
+        emitting.join(timeout=5)
+        transition.join(timeout=5)
+
+        assert not emitting.is_alive()
+        assert not transition.is_alive()
+        assert transition_done.is_set()
+        assert "old-generation-record" in (old_dir / "ouroboros.log").read_text(encoding="utf-8")
+        assert "old-generation-record" not in (new_dir / "ouroboros.log").read_text(
+            encoding="utf-8"
+        )
+
+    def test_structlog_pipeline_finishes_one_generation_before_reset(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Reset waits for processor and destination emission together."""
+        processor_entered = Event()
+        resume_processor = Event()
+        reset_started = Event()
+        reset_done = Event()
+        original_processors = ouroboros_logging._get_console_processors
+
+        def pause_processor(
+            _logger: Any,
+            _method_name: str,
+            event_dict: dict[str, Any],
+        ) -> dict[str, Any]:
+            processor_entered.set()
+            assert resume_processor.wait(timeout=5)
+            return event_dict
+
+        processors = original_processors(LogMode.DEV)
+        processors.insert(-1, pause_processor)
+        with patch(
+            "ouroboros.observability.logging._get_console_processors",
+            return_value=processors,
+        ):
+            configure_logging(LoggingConfig(log_dir=tmp_path))
+
+        proxy = structlog.get_logger("pipeline.reset.overlap")
+        emitting = Thread(target=proxy.info, args=("record-before-reset",))
+        emitting.start()
+        assert processor_entered.wait(timeout=5)
+
+        def reset() -> None:
+            reset_started.set()
+            reset_logging()
+            reset_done.set()
+
+        resetting = Thread(target=reset)
+        resetting.start()
+        assert reset_started.wait(timeout=5)
+        assert not reset_done.wait(timeout=0.05)
+        resume_processor.set()
+        emitting.join(timeout=5)
+        resetting.join(timeout=5)
+
+        assert not emitting.is_alive()
+        assert not resetting.is_alive()
+        assert reset_done.is_set()
+        assert "record-before-reset" in (tmp_path / "ouroboros.log").read_text(encoding="utf-8")
+
+    def test_debug_call_waiting_at_pipeline_boundary_uses_new_debug_generation(
+        self,
+        capsys: Any,
+    ) -> None:
+        """A relaxed transition cannot lose a call to a stale INFO wrapper."""
+        configure_logging(LoggingConfig(log_level="INFO", enable_file_logging=False))
+        proxy = structlog.get_logger("pipeline.level.overlap")
+        call_selected = Event()
+        resume_call = Event()
+        original_proxy = ouroboros_logging._GenerationBoundLogger._proxy_to_logger
+
+        def delayed_proxy(
+            logger: Any,
+            method_name: str,
+            event: str | None = None,
+            **event_kw: Any,
+        ) -> Any:
+            call_selected.set()
+            assert resume_call.wait(timeout=5)
+            return original_proxy(logger, method_name, event, **event_kw)
+
+        with patch.object(
+            ouroboros_logging._GenerationBoundLogger,
+            "_proxy_to_logger",
+            new=delayed_proxy,
+        ):
+            worker = Thread(target=proxy.debug, args=("debug-after-relaxation",))
+            worker.start()
+            assert call_selected.wait(timeout=5)
+            configure_logging(LoggingConfig(log_level="DEBUG", enable_file_logging=False))
+            resume_call.set()
+            worker.join(timeout=5)
+
+        assert not worker.is_alive()
+        assert "debug-after-relaxation" in capsys.readouterr().err
+
     def test_reconfigure_reentrant_log_cannot_reopen_retiring_file(
         self,
         tmp_path: Path,
@@ -586,6 +820,32 @@ class TestResetLogging:
         proxy.info("render-as-json-now")
         captured = capsys.readouterr()
         assert '"event": "render-as-json-now"' in captured.err
+
+    def test_explicitly_bound_logger_follows_live_generation(self, capsys: Any) -> None:
+        """Binding context must not freeze the processor or filtering generation."""
+        configure_logging(
+            LoggingConfig(
+                mode=LogMode.DEV,
+                log_level="INFO",
+                enable_file_logging=False,
+            )
+        )
+        bound = structlog.get_logger("bound-generation").bind(component="worker")
+        bound.info("materialize-bound-under-dev")
+        capsys.readouterr()
+
+        configure_logging(
+            LoggingConfig(
+                mode=LogMode.PROD,
+                log_level="DEBUG",
+                enable_file_logging=False,
+            )
+        )
+        bound.debug("bound-follows-prod-debug")
+
+        payload = json.loads(capsys.readouterr().err)
+        assert payload["event"] == "bound-follows-prod-debug"
+        assert payload["component"] == "worker"
 
     def test_cached_proxies_follow_reconfiguration_after_reset(
         self, capsys: Any, tmp_path: Any
