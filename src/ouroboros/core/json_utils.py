@@ -35,6 +35,7 @@ class _LiteralFenceContainer:
 
 _FENCE_MARKERS = ("`", "~")
 _PLAIN_FENCE_PREFIX = re.compile(r"^ {0,3}$")
+_HTML_COMMENT = re.compile(r"<!---?>|<!--(?:[^-]|-[^-]|--[^>])*-->")
 
 
 class _MalformedJsonBoundary(ValueError):
@@ -619,8 +620,9 @@ def _markdown_non_answer_ranges(text: str) -> tuple[tuple[int, int], ...]:
 
     Code-span delimiters close only on an equal-length backtick run, matching
     CommonMark's variable-delimiter rule.  An unmatched run remains ordinary
-    prose so it cannot hide a later answer.  HTML comments, including an
-    unclosed comment through EOF, are non-rendered context.
+    prose so it cannot hide a later answer.  HTML comments use CommonMark's
+    complete inline grammar, including its two short empty-comment forms;
+    escaped, malformed, and unclosed openers remain ordinary text.
     """
     ranges: list[tuple[int, int]] = []
     position = 0
@@ -631,10 +633,15 @@ def _markdown_non_answer_ranges(text: str) -> tuple[tuple[int, int], ...]:
             break
 
         if comment_start != -1 and (code_start == -1 or comment_start < code_start):
-            comment_end = text.find("-->", comment_start + 4)
-            end = len(text) if comment_end == -1 else comment_end + 3
-            ranges.append((comment_start, end))
-            position = end
+            if _is_backslash_escaped(text, comment_start):
+                position = comment_start + 4
+                continue
+            comment = _HTML_COMMENT.match(text, comment_start)
+            if comment is None:
+                position = comment_start + 4
+                continue
+            ranges.append(comment.span())
+            position = comment.end()
             continue
 
         assert code_start != -1

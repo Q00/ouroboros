@@ -351,6 +351,27 @@ class TestExtractJsonPayload:
         assert extract_json_payload(non_answer) is None
         assert extract_json_payload(with_actual) == '{"actual": true}'
 
+    def test_escaped_html_comment_opener_keeps_both_payloads_ambiguous(self) -> None:
+        text = r'\<!-- {"actual": true} --> Later: {"stale": true}'
+
+        assert extract_json_payload(text) is None
+
+    @pytest.mark.parametrize("comment", ["<!-->", "<!--->"])
+    def test_short_html_comment_releases_actual(self, comment: str) -> None:
+        assert (
+            extract_json_payload(f'Example: {comment} Actual: {{"actual": true}}')
+            == '{"actual": true}'
+        )
+
+    def test_unclosed_html_comment_opener_remains_ordinary_text(self) -> None:
+        assert extract_json_payload('Example: <!-- {"actual": true}') == '{"actual": true}'
+
+    def test_malformed_html_comment_remains_ordinary_text(self) -> None:
+        assert (
+            extract_json_payload('Example: <!-- ---> Actual: {"actual": true}')
+            == '{"actual": true}'
+        )
+
     def test_inline_tildes_do_not_suppress_prose_json_fallback(self) -> None:
         text = 'Use ~~~ as prose, then {"actual": true}'
         assert extract_json_payload(text) == '{"actual": true}'

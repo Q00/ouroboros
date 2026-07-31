@@ -354,6 +354,7 @@ def _wrap_leading_tab_container_literal_example(
 
 
 RAW_NON_ANSWER_CONTEXTS = ("code-span", "double-code-span", "long-code-span", "comment")
+HTML_COMMENT_GRAMMAR_CASES = ("escaped", "short", "short-dash", "unclosed", "malformed")
 
 
 def _wrap_raw_non_answer_context(context: str, stale_payload: str, actual_payload: str = "") -> str:
@@ -370,6 +371,20 @@ def _wrap_raw_non_answer_context(context: str, stale_payload: str, actual_payloa
     if actual_payload:
         text += f"\nActual: {actual_payload}"
     return text
+
+
+def _wrap_html_comment_grammar_case(case: str, actual_payload: str, stale_payload: str) -> str:
+    if case == "escaped":
+        return f"\\<!-- {actual_payload} --> Later: {stale_payload}"
+    if case == "short":
+        return f"Example: <!--> Actual: {actual_payload}"
+    if case == "short-dash":
+        return f"Example: <!---> Actual: {actual_payload}"
+    if case == "unclosed":
+        return f"Example: <!-- {actual_payload}"
+    if case == "malformed":
+        return f"Example: <!-- ---> Actual: {actual_payload}"
+    raise AssertionError(f"unknown HTML comment grammar case: {case}")
 
 
 async def _reflect_wrapped_content(content: str):
@@ -853,6 +868,30 @@ class TestWonderFenceRobustness:
         assert stale_only.reasoning.startswith("Parse error, using seed-scoped fallback")
         assert actual.reasoning == "ACTUAL_WONDER"
         assert actual.questions == ("actual?",)
+
+    @pytest.mark.parametrize("case", HTML_COMMENT_GRAMMAR_CASES)
+    def test_html_comment_grammar_preserves_authoritative_boundaries(self, case: str) -> None:
+        stale_payload = json.dumps(
+            {"questions": [], "should_continue": False, "reasoning": "STALE_WONDER"}
+        )
+        actual_payload = json.dumps(
+            {
+                "questions": [{"question": "actual?", "kind": "gap"}],
+                "should_continue": True,
+                "reasoning": "ACTUAL_WONDER",
+            }
+        )
+
+        result = WonderEngine(llm_adapter=AsyncMock(), model="test")._parse_response(
+            _wrap_html_comment_grammar_case(case, actual_payload, stale_payload),
+            _seed(),
+        )
+
+        if case == "escaped":
+            assert result.reasoning.startswith("Parse error, using seed-scoped fallback")
+        else:
+            assert result.reasoning == "ACTUAL_WONDER"
+            assert result.questions == ("actual?",)
 
     def test_eight_space_pseudo_closer_does_not_release_nested_example(self) -> None:
         stale_payload = json.dumps(
@@ -1408,6 +1447,37 @@ class TestReflectFenceRobustness:
         assert actual.is_ok
         assert actual.value.reasoning == "ACTUAL_REFLECT"
         assert actual.value.refined_goal == "ACTUAL_GOAL"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("case", HTML_COMMENT_GRAMMAR_CASES)
+    async def test_html_comment_grammar_preserves_authoritative_boundaries(self, case: str) -> None:
+        stale_payload = json.dumps(
+            {
+                "refined_goal": "STALE_GOAL",
+                "refined_constraints": ["stale"],
+                "ontology_mutations": [],
+                "reasoning": "STALE_REFLECT",
+            }
+        )
+        actual_payload = json.dumps(
+            {
+                "refined_goal": "ACTUAL_GOAL",
+                "refined_constraints": ["actual"],
+                "ontology_mutations": [],
+                "reasoning": "ACTUAL_REFLECT",
+            }
+        )
+
+        result = await _reflect_wrapped_content(
+            _wrap_html_comment_grammar_case(case, actual_payload, stale_payload)
+        )
+
+        if case == "escaped":
+            assert result.is_err
+        else:
+            assert result.is_ok
+            assert result.value.reasoning == "ACTUAL_REFLECT"
+            assert result.value.refined_goal == "ACTUAL_GOAL"
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("prefixes", QUOTED_LIST_FENCE_VARIANTS)
@@ -2401,6 +2471,40 @@ class TestAssertionExtractorFenceRobustness:
         assert stale_only == ()
         assert len(actual) == 1
         assert actual[0].description == "ACTUAL_ASSERTION"
+
+    @pytest.mark.parametrize("case", HTML_COMMENT_GRAMMAR_CASES)
+    def test_html_comment_grammar_preserves_authoritative_boundaries(self, case: str) -> None:
+        stale_payload = json.dumps(
+            [
+                {
+                    "ac_index": 0,
+                    "tier": "t4_unverifiable",
+                    "pattern": "",
+                    "description": "STALE_ASSERTION",
+                }
+            ]
+        )
+        actual_payload = json.dumps(
+            [
+                {
+                    "ac_index": 0,
+                    "tier": "t4_unverifiable",
+                    "pattern": "",
+                    "description": "ACTUAL_ASSERTION",
+                }
+            ]
+        )
+
+        result = AssertionExtractor(llm_adapter=AsyncMock())._parse_response(
+            _wrap_html_comment_grammar_case(case, actual_payload, stale_payload),
+            ("AC number 1",),
+        )
+
+        if case == "escaped":
+            assert result == ()
+        else:
+            assert len(result) == 1
+            assert result[0].description == "ACTUAL_ASSERTION"
 
     @pytest.mark.parametrize("fence_info", ["json", ""])
     def test_supported_fence_rejects_invalid_body_with_stale_nested_json(
