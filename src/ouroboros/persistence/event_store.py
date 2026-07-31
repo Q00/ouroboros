@@ -2073,8 +2073,19 @@ class EventStore:
                 )
             preferred_conditions.append(preferred_condition)
         priority = case((or_(*preferred_conditions), 0), else_=1) if preferred_conditions else 0
+        raw_session_id = func.json_extract(events_table.c.payload, "$.session_id")
+        normalized_session_id = func.nullif(
+            func.trim(raw_session_id, _PYTHON_STRIP_WHITESPACE),
+            "",
+        )
         session_key = func.coalesce(
-            func.json_extract(events_table.c.payload, "$.session_id"),
+            case(
+                (
+                    func.json_type(events_table.c.payload, "$.session_id") == "text",
+                    normalized_session_id,
+                ),
+                else_=None,
+            ),
             events_table.c.aggregate_id,
         )
         session_rank = (

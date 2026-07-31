@@ -464,6 +464,52 @@ def test_executions_normalizes_absorbing_terminal_status_whitespace(
     assert "failed" in detail_result.output
 
 
+@pytest.mark.parametrize(
+    ("terminal_session_id", "progress_session_id"),
+    ((" session_same ", "session_same"), ("", None)),
+)
+def test_executions_normalizes_session_ids_before_lifecycle_preselection(
+    monkeypatch,
+    tmp_path: Path,
+    terminal_session_id: str,
+    progress_session_id: str | None,
+) -> None:
+    config_dir = tmp_path / "config"
+    db_path = config_dir / "data" / "ouroboros.db"
+    db_path.parent.mkdir(parents=True)
+    _write_config(config_dir)
+    now = datetime.now(UTC)
+    progress_data = {"session_id": progress_session_id} if progress_session_id is not None else {}
+    _write_execution_events(
+        db_path,
+        (
+            BaseEvent(
+                type="execution.terminal",
+                timestamp=now - timedelta(seconds=1),
+                aggregate_type="execution",
+                aggregate_id="exec_session_normalization",
+                data={"session_id": terminal_session_id, "status": "failed"},
+            ),
+            BaseEvent(
+                type="workflow.progress.updated",
+                timestamp=now,
+                aggregate_type="execution",
+                aggregate_id="exec_session_normalization",
+                data=progress_data,
+            ),
+        ),
+    )
+    monkeypatch.setattr("ouroboros.config.models.get_config_dir", lambda: config_dir)
+
+    list_result = runner.invoke(app, ["executions"])
+    detail_result = runner.invoke(app, ["execution", "exec_session_normalization"])
+
+    assert list_result.exit_code == 0
+    assert "failed" in list_result.output
+    assert detail_result.exit_code == 0
+    assert "failed" in detail_result.output
+
+
 def test_executions_prefers_newer_session_for_shared_execution_id(
     monkeypatch, tmp_path: Path
 ) -> None:
