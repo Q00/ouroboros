@@ -1687,12 +1687,7 @@ async def test_dynamic_runtime_does_not_reopen_captured_executor_entry_roots(
         trace=parallel_executor_module.DecompositionTraceSummary(summary="bounded evidence"),
     )
 
-    assert result == (
-        parallel_executor_module.BounceCause.UNKNOWN,
-        "Bounce classifier returned no admissible cause.",
-        (),
-        False,
-    )
+    assert result == (parallel_executor_module.BounceCause.UNKNOWN, False)
     assert injected is False
 
 

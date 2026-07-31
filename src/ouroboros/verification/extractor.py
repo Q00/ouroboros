@@ -255,6 +255,6 @@ def _is_usable_regex_pattern(pattern: str) -> bool:
         return False
     try:
         re.compile(pattern)
-    except re.error:
+    except (re.error, OverflowError):
         return False
     return True

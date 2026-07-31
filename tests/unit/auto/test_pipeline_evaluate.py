@@ -14,7 +14,7 @@ from typing import Any
 
 import pytest
 
-from ouroboros.auto.adapters import EvaluateResult, HandlerEvaluator
+from ouroboros.auto.adapters import EvaluateResult, HandlerEvaluator, HandlerSeedQAEvaluator
 from ouroboros.auto.grading import GradeResult, SeedGrade
 from ouroboros.auto.interview_driver import AutoInterviewResult
 from ouroboros.auto.pipeline import AutoPipeline
@@ -607,6 +607,28 @@ async def test_handler_evaluator_builds_quality_bar_from_seed_ac() -> None:
     assert args["pass_threshold"] == 0.80
     assert args["seed_content"]  # non-empty seed yaml
     assert args["artifact"] == "stdout: ok\nexit_code: 0"
+
+
+@pytest.mark.asyncio
+async def test_handler_seed_qa_enforces_semantic_ac_granularity() -> None:
+    """The production Auto Seed-QA payload rejects implementation means while
+    preserving genuinely independent outcomes instead of applying a count proxy."""
+    stub = _StubQAHandler()
+    evaluator = HandlerSeedQAEvaluator(stub)
+
+    result = await evaluator(_build_seed(), {"goal": "Build a CLI"})
+
+    assert result.passed is True
+    args = stub.last_arguments
+    assert args is not None
+    quality_bar = args["quality_bar"].lower()
+    assert "observable state of the finished work" in quality_bar
+    assert "not an implementation means" in quality_bar
+    assert "step toward a sibling's outcome" in quality_bar
+    assert "preserve legitimately independent observable outcomes" in quality_bar
+    assert "criterion-count target" in quality_bar
+    assert args["artifact_type"] == "document"
+    assert args["pass_threshold"] == 0.80
 
 
 @pytest.mark.asyncio

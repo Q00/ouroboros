@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
@@ -11,6 +12,8 @@ import pytest
 
 from ouroboros.orchestrator.adapter import AgentMessage, ParamSupport, RuntimeHandle
 from ouroboros.orchestrator.pi_runtime import PiRuntime
+
+_EXPECTED_CWD = str(Path("/tmp/project").resolve())
 
 
 class _FakeStream:
@@ -175,7 +178,7 @@ def test_build_runtime_handle_from_session_header() -> None:
     assert handle.backend == "pi"
     assert handle.kind == "agent_runtime"
     assert handle.native_session_id == "session-1"
-    assert handle.cwd == "/tmp/project"
+    assert handle.cwd == _EXPECTED_CWD
     assert handle.approval_mode == "acceptEdits"
 
 
@@ -414,7 +417,7 @@ def test_runtime_factory_constructs_pi_runtime() -> None:
 
     assert isinstance(runtime, PiRuntime)
     assert runtime.runtime_backend == "pi"
-    assert runtime.working_directory == "/tmp/project"
+    assert runtime.working_directory == _EXPECTED_CWD
 
 
 def test_runtime_factory_passes_pi_stream_timeout_overrides() -> None:

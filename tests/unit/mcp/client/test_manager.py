@@ -2,6 +2,8 @@
 
 import asyncio
 
+import pytest
+
 from ouroboros.core.types import Result
 from ouroboros.mcp.client.manager import (
     ConnectionState,
@@ -13,9 +15,12 @@ from ouroboros.mcp.types import (
     ContentType,
     MCPCapabilities,
     MCPContentItem,
+    MCPPeerIdentity,
     MCPResourceContent,
+    MCPResourceDefinition,
     MCPServerConfig,
     MCPServerInfo,
+    MCPServerSnapshot,
     MCPToolDefinition,
     MCPToolResult,
     TransportType,
@@ -59,6 +64,91 @@ class _HealthAdapter:
         return self.result
 
 
+class _DiscoveryAdapter:
+    """Controllable adapter for connection/discovery race tests."""
+
+    def __init__(self) -> None:
+        self.discovery_started = asyncio.Event()
+        self.release_discovery = asyncio.Event()
+        self.is_connected = False
+        self.disconnect_calls = 0
+        self.server_snapshot = None
+
+    async def connect(self, config):
+        self.is_connected = True
+        return Result.ok(
+            MCPServerInfo(
+                name=config.name,
+                version="1.0.0",
+                capabilities=MCPCapabilities(tools=True, resources=True),
+            )
+        )
+
+    async def list_tools(self):
+        self.discovery_started.set()
+        await self.release_discovery.wait()
+        return Result.ok((MCPToolDefinition(name="discovered", description=""),))
+
+    async def list_resources(self):
+        return Result.ok(())
+
+    async def disconnect(self):
+        self.disconnect_calls += 1
+        self.is_connected = False
+        return Result.ok(None)
+
+
+class _ImmutableSnapshotAdapter:
+    """Adapter returning nested mutable models for manager-freeze coverage."""
+
+    is_connected = True
+
+    def __init__(self) -> None:
+        self.server_snapshot = MCPServerSnapshot(
+            identity=MCPPeerIdentity(
+                name="fixture",
+                application_version="1",
+                icons=({"src": "fixture.svg", "sizes": ["any"]},),
+                details={"icons": [{"src": "fixture.svg", "sizes": ["any"]}]},
+            ),
+            protocol_version="2026-07-28",
+            supported_protocol_versions=("2026-07-28",),
+            capabilities=MCPCapabilities(tools=True, details={"tools": {"listChanged": True}}),
+            extensions={"vendor": {"flag": True}},
+            meta={"trace": {"id": "fixture"}},
+            discovery_details={"capabilities": {"tools": {"listChanged": True}}},
+        )
+
+    async def connect(self, config):
+        return Result.ok(MCPServerInfo(name=config.name))
+
+    async def list_tools(self):
+        return Result.ok(
+            (
+                MCPToolDefinition(
+                    name="nested",
+                    description="",
+                    input_schema={
+                        "type": "object",
+                        "properties": {"path": {"type": "string"}},
+                    },
+                    meta={"vendor": {"stable": True}},
+                ),
+            )
+        )
+
+    async def list_resources(self):
+        return Result.ok(
+            (
+                MCPResourceDefinition(
+                    uri="fixture://resource",
+                    name="resource",
+                    meta={"cache": {"scope": "private"}},
+                ),
+            )
+        )
+
+
 class TestConnectionState:
     """Test ConnectionState enum."""
 
@@ -92,6 +182,59 @@ class TestMCPClientManager:
 
         assert result.is_ok
         assert "test-server" in manager.servers
+
+    async def test_public_snapshot_deeply_freezes_manager_owned_state(self) -> None:
+        """Snapshot mutation cannot alter reconnect config or discovery caches."""
+        manager = MCPClientManager()
+        config = MCPServerConfig(
+            name="immutable",
+            transport=TransportType.STDIO,
+            command="test-cmd",
+            env={"TOKEN": "safe"},
+            headers={"X-Test": "safe"},
+        )
+        assert (await manager.add_server(config)).is_ok
+
+        # The caller-owned input is detached at registration time.
+        config.env["TOKEN"] = "caller-mutated"
+        registered = manager._connections[config.name]
+        adapter = _ImmutableSnapshotAdapter()
+        manager._connections[config.name] = ServerConnection(
+            config=registered.config,
+            adapter=adapter,  # type: ignore[arg-type]
+        )
+        assert (await manager.connect(config.name)).is_ok
+
+        snapshot = manager.get_connection_snapshot(config.name)
+        assert snapshot is not None
+        assert not hasattr(snapshot, "adapter")
+        assert snapshot.config.env["TOKEN"] == "safe"
+        with pytest.raises(TypeError):
+            snapshot.config.env["TOKEN"] = "snapshot-mutated"
+        with pytest.raises(TypeError):
+            snapshot.config.headers["X-Test"] = "snapshot-mutated"
+        with pytest.raises(TypeError):
+            snapshot.tools[0].input_schema["properties"]["path"]["type"] = "number"  # type: ignore[index]
+        with pytest.raises(TypeError):
+            snapshot.tools[0].meta["vendor"]["stable"] = False  # type: ignore[index]
+        with pytest.raises(TypeError):
+            snapshot.resources[0].meta["cache"]["scope"] = "public"  # type: ignore[index]
+        assert snapshot.server_snapshot is not None
+        with pytest.raises(TypeError):
+            snapshot.server_snapshot.extensions["vendor"]["flag"] = False
+        assert snapshot.server_snapshot.identity is not None
+        with pytest.raises(TypeError):
+            snapshot.server_snapshot.identity.icons[0]["sizes"] = ()
+        with pytest.raises(TypeError):
+            snapshot.server_snapshot.identity.details["icons"][0]["src"] = "mutated.svg"
+        with pytest.raises(TypeError):
+            snapshot.server_snapshot.meta["trace"]["id"] = "mutated"
+        with pytest.raises(TypeError):
+            snapshot.server_snapshot.discovery_details["capabilities"]["tools"] = {}
+
+        internal = manager._connections[config.name]
+        assert internal.config.env["TOKEN"] == "safe"
+        assert internal.tools[0].input_schema["properties"]["path"]["type"] == "string"  # type: ignore[index]
 
     async def test_add_duplicate_server_fails(self) -> None:
         """Adding duplicate server name fails."""
@@ -151,6 +294,88 @@ class TestMCPClientManager:
         state = manager.get_connection_state("test-server")
 
         assert state == ConnectionState.DISCONNECTED
+
+    async def test_discovery_does_not_hold_global_manager_lock(self) -> None:
+        """A slow server discovery does not block unrelated manager mutations."""
+        manager = MCPClientManager()
+        config = MCPServerConfig(
+            name="slow-server",
+            transport=TransportType.STDIO,
+            command="test-cmd",
+        )
+        adapter = _DiscoveryAdapter()
+        manager._connections[config.name] = ServerConnection(config=config, adapter=adapter)  # type: ignore[arg-type]
+
+        connect_task = asyncio.create_task(manager.connect(config.name))
+        await adapter.discovery_started.wait()
+
+        unrelated = MCPServerConfig(
+            name="unrelated",
+            transport=TransportType.STDIO,
+            command="test-cmd",
+        )
+        add_result = await asyncio.wait_for(manager.add_server(unrelated), timeout=0.1)
+        assert add_result.is_ok
+
+        adapter.release_discovery.set()
+        assert (await connect_task).is_ok
+
+    async def test_disconnect_supersedes_in_flight_discovery_snapshot(self) -> None:
+        """Late discovery cannot overwrite a newer disconnected generation."""
+        manager = MCPClientManager()
+        config = MCPServerConfig(
+            name="race-server",
+            transport=TransportType.STDIO,
+            command="test-cmd",
+        )
+        adapter = _DiscoveryAdapter()
+        manager._connections[config.name] = ServerConnection(config=config, adapter=adapter)  # type: ignore[arg-type]
+
+        connect_task = asyncio.create_task(manager.connect(config.name))
+        await adapter.discovery_started.wait()
+        connecting = manager.get_connection_snapshot(config.name)
+        assert connecting is not None
+        assert connecting.generation == 1
+
+        disconnect_result = await manager.disconnect(config.name)
+        assert disconnect_result.is_ok
+        disconnected = manager.get_connection_snapshot(config.name)
+        assert disconnected is not None
+        assert disconnected.generation == 2
+        assert disconnected.state == ConnectionState.DISCONNECTED
+
+        adapter.release_discovery.set()
+        assert (await connect_task).is_err
+        current = manager.get_connection_snapshot(config.name)
+        assert current is not None
+        assert current.generation == disconnected.generation
+        assert current.state == disconnected.state
+        assert adapter.disconnect_calls == 2
+
+    async def test_remove_and_readd_rejects_old_connection_snapshot(self) -> None:
+        """Late discovery from a removed adapter cannot resurrect or replace a server."""
+        manager = MCPClientManager()
+        config = MCPServerConfig(
+            name="reused-name",
+            transport=TransportType.STDIO,
+            command="test-cmd",
+        )
+        adapter = _DiscoveryAdapter()
+        manager._connections[config.name] = ServerConnection(config=config, adapter=adapter)  # type: ignore[arg-type]
+
+        connect_task = asyncio.create_task(manager.connect(config.name))
+        await adapter.discovery_started.wait()
+        assert (await manager.remove_server(config.name)).is_ok
+        assert (await manager.add_server(config)).is_ok
+        replacement = manager.get_connection_snapshot(config.name)
+
+        adapter.release_discovery.set()
+        assert (await connect_task).is_err
+        assert manager.get_connection_snapshot(config.name) == replacement
+        assert replacement is not None
+        assert replacement.state == ConnectionState.DISCONNECTED
+        assert manager._connections[config.name].adapter is not adapter
+        assert adapter.disconnect_calls == 2
 
     def test_find_tool_server_not_found(self) -> None:
         """find_tool_server returns None when tool not found."""

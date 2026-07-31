@@ -11,6 +11,7 @@ from ouroboros.mcp.types import (
     MCPRequest,
     MCPResourceContent,
     MCPResourceDefinition,
+    MCPResourceResult,
     MCPResponse,
     MCPResponseError,
     MCPServerConfig,
@@ -546,6 +547,31 @@ class TestMCPToolDefinition:
         assert "count" not in schema["required"]
         assert schema["properties"]["count"]["default"] == 1
 
+    def test_canonical_schema_preserves_json_schema_2020_12(self) -> None:
+        """Canonical schemas retain composition, references, and extensions."""
+        schema = {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "$defs": {"identifier": {"type": "string", "pattern": "^[a-z]+$"}},
+            "type": "object",
+            "properties": {"id": {"$ref": "#/$defs/identifier"}},
+            "allOf": [{"unevaluatedProperties": False}],
+            "x-ouroboros-mode": {"strict": True},
+        }
+        output_schema = {"oneOf": [{"type": "string"}, {"type": "null"}]}
+        definition = MCPToolDefinition(
+            name="schema_tool",
+            description="Full schema",
+            input_schema=schema,
+            output_schema=output_schema,
+        )
+
+        assert definition.to_input_schema() == schema
+        assert definition.output_schema == output_schema
+
+        # The compatibility method returns a detached copy.
+        definition.to_input_schema()["type"] = "array"
+        assert definition.input_schema == schema
+
 
 class TestMCPToolResult:
     """Test MCPToolResult dataclass."""
@@ -566,6 +592,27 @@ class TestMCPToolResult:
         result = MCPToolResult()
         assert result.text_content == ""
         assert result.is_error is False
+        assert result.result_type == "complete"
+
+    @pytest.mark.parametrize(
+        "structured_content",
+        [
+            {"answer": [1, True, None]},
+            ["item", 2],
+            "plain value",
+            3.5,
+            True,
+            None,
+        ],
+    )
+    def test_structured_content_accepts_every_json_value(self, structured_content) -> None:
+        """Structured tool content is not restricted to JSON objects."""
+        result = MCPToolResult(
+            structured_content=structured_content,
+            result_type="input_required",
+        )
+        assert result.structured_content == structured_content
+        assert result.result_type == "input_required"
 
 
 class TestMCPContentItem:
@@ -623,6 +670,20 @@ class TestMCPResourceContent:
             mime_type="application/octet-stream",
         )
         assert content.blob == "base64data"
+
+    def test_ordered_resource_result_has_first_content_compatibility_view(self) -> None:
+        """A read result retains all contents and exposes the legacy first item."""
+        first = MCPResourceContent(uri="test://one", text="one")
+        second = MCPResourceContent(uri="test://two", blob="dHdv")
+        result = MCPResourceResult(
+            contents=(first, second),
+            ttl_ms=1200,
+            cache_scope="public",
+        )
+
+        assert result.contents == (first, second)
+        assert result.first_content is first
+        assert MCPResourceResult().first_content is None
 
 
 class TestMCPCapabilities:

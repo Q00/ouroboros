@@ -183,6 +183,10 @@ class TestExtractJsonPayload:
         text = '```python\nEXAMPLE = {"stale": true}\n```\nActual: {"actual": true}'
         assert extract_json_payload(text) == '{"actual": true}'
 
+    def test_fallback_excludes_blockquoted_unsupported_fence_body(self) -> None:
+        text = '> ```python\n> EXAMPLE = {"stale": true}\n> ```\nActual: {"actual": true}'
+        assert extract_json_payload(text) == '{"actual": true}'
+
     def test_fallback_excludes_well_formed_unsupported_tilde_fence_body(self) -> None:
         text = '~~~python\nEXAMPLE = {"stale": true}\n~~~\nActual: {"actual": true}'
         assert extract_json_payload(text) == '{"actual": true}'

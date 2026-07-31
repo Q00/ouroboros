@@ -70,6 +70,27 @@ def test_builds_pi_json_command_omits_default_model_sentinel() -> None:
     assert command == ["/tmp/pi", "--mode", "json", "Hello Pi"]
 
 
+def test_pi_model_failure_diagnostics_do_not_claim_codex_remediation() -> None:
+    """Pi inherits subprocess plumbing, not Codex App/CLI diagnostics."""
+    adapter = PiLLMAdapter(cli_path="/tmp/pi", cwd="/tmp/project")
+
+    details = adapter._codex_failure_details(
+        returncode=1,
+        session_id=None,
+        stderr="Model not found",
+        stdout_errors=[],
+        message="Model not found",
+        cli_path="/tmp/pi",
+    )
+
+    assert details == {
+        "returncode": 1,
+        "session_id": None,
+        "stderr": "Model not found",
+        "stdout_errors": [],
+    }
+
+
 def test_extracts_pi_session_and_streaming_delta() -> None:
     adapter = PiLLMAdapter(cli_path="/tmp/pi", cwd="/tmp/project")
 

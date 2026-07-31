@@ -141,17 +141,15 @@ class TestResourceCleanup:
         mock_bridge.close.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_disconnect_cleans_transport_cm(self):
+    async def test_disconnect_cleans_high_level_client(self):
         from ouroboros.mcp.client.adapter import MCPClientAdapter
 
         adapter = MCPClientAdapter()
-        adapter._session = MagicMock()
-        adapter._session.__aexit__ = AsyncMock()
         adapter._config = MagicMock(name="test")
-        mock_cm = MagicMock()
-        mock_cm.__aexit__ = AsyncMock()
-        adapter._transport_cm = mock_cm
+        mock_client = MagicMock()
+        mock_client.__aexit__ = AsyncMock()
+        adapter._client = mock_client
         result = await adapter.disconnect()
         assert result.is_ok
-        mock_cm.__aexit__.assert_called_once()
-        assert adapter._transport_cm is None
+        mock_client.__aexit__.assert_awaited_once_with(None, None, None)
+        assert adapter._client is None

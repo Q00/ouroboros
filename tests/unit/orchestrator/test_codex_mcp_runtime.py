@@ -10,6 +10,7 @@ from ouroboros.core.types import Result
 from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
 from ouroboros.orchestrator import codex_mcp_runtime as codex_mod
 from ouroboros.orchestrator.adapter import (
+    WORKER_CWD_UNAVAILABLE_MESSAGE,
     ParamSupport,
     SubagentOrchestration,
     is_leader_driven_worker,
@@ -89,6 +90,90 @@ class TestRuntimeWiring:
         rt = build_codex_mcp_worker_runtime(cwd=tmp_path)
 
         assert rt.working_directory == str(tmp_path)
+
+    @pytest.mark.asyncio
+    async def test_relative_cwd_is_resolved_before_spawn(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        launch_cwd = tmp_path / "launch"
+        workspace = launch_cwd / "workspace"
+        later_cwd = tmp_path / "later"
+        workspace.mkdir(parents=True)
+        later_cwd.mkdir()
+        monkeypatch.chdir(launch_cwd)
+        runtime = build_codex_mcp_worker_runtime(cwd="workspace")
+        observed: list[str | None] = []
+
+        async def fake_spawn(**kwargs) -> WorkerTurn:
+            observed.append(kwargs["cwd"])
+            return WorkerTurn(text="ok", session_id="thread-1")
+
+        runtime._transport.spawn = fake_spawn  # type: ignore[method-assign]
+        monkeypatch.chdir(later_cwd)
+        _ = [message async for message in runtime.execute_task("run")]
+
+        assert runtime.working_directory == str(workspace)
+        assert observed == [str(workspace)]
+
+    def test_omitted_cwd_survives_unavailable_process_cwd(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        def unavailable_cwd() -> str:
+            raise FileNotFoundError
+
+        monkeypatch.setattr("ouroboros.orchestrator.adapter.os.getcwd", unavailable_cwd)
+
+        assert build_codex_mcp_worker_runtime().working_directory is None
+
+    @pytest.mark.asyncio
+    async def test_unresolved_cwd_fails_before_later_process_cwd_or_transport(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        calls: list[int] = []
+
+        def moving_cwd() -> str:
+            calls.append(len(calls))
+            if len(calls) == 1:
+                raise FileNotFoundError
+            return str(tmp_path / "unselected-later-cwd")
+
+        monkeypatch.setattr("ouroboros.orchestrator.adapter.os.getcwd", moving_cwd)
+        runtime = build_codex_mcp_worker_runtime()
+
+        async def unexpected_spawn(**_kwargs) -> WorkerTurn:
+            raise AssertionError("transport must not run without a resolved cwd")
+
+        runtime._transport.spawn = unexpected_spawn  # type: ignore[method-assign]
+        messages = [message async for message in runtime.execute_task("must not run")]
+
+        assert len(messages) == 1
+        assert messages[0].data["error_type"] == "WorkerCwdUnavailable"
+        assert calls == [0]
+
+    @pytest.mark.asyncio
+    async def test_transport_rejects_none_cwd_before_mcp_actor(self, monkeypatch) -> None:
+        def unexpected_actor(*_args, **_kwargs):
+            raise AssertionError("MCP actor must not be created without a resolved cwd")
+
+        monkeypatch.setattr(codex_mod, "MCPSessionActor", unexpected_actor)
+        transport = CodexMcpWorkerTransport(cli_path="codex")
+
+        turn = await transport.spawn(
+            prompt="must not run",
+            system_prompt=None,
+            cwd=None,
+            permission_mode=None,
+            model=None,
+            reasoning_effort=None,
+        )
+
+        assert turn.is_error
+        assert turn.error == WORKER_CWD_UNAVAILABLE_MESSAGE
 
     def test_exposes_effective_cli_path(self) -> None:
         rt = build_codex_mcp_worker_runtime(cli_path="/tmp/codex", cwd="/tmp")
@@ -194,7 +279,7 @@ class TestRecursionHardening:
         await transport.spawn(
             prompt="go",
             system_prompt=None,
-            cwd=None,
+            cwd="/tmp",
             permission_mode=None,
             model=None,
             reasoning_effort="high",
@@ -212,7 +297,7 @@ class TestRecursionHardening:
         await transport.spawn(
             prompt="go",
             system_prompt=None,
-            cwd=None,
+            cwd="/tmp",
             permission_mode=None,
             model=None,
             reasoning_effort=None,

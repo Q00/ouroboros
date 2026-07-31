@@ -32,7 +32,7 @@ os.environ["OUROBOROS_DASHBOARD"] = "0"
 # build the default ``EventStore`` DB path via ``expanduser``). ``$HOME`` is the
 # single chokepoint both go through — ``Path.home()`` calls ``expanduser("~")``
 # internally — so redirecting ``$HOME`` isolates config, the default DB, logs,
-# and import-time constants (e.g. ``tui.DEFAULT_DB_PATH``) in one move, and
+# and dynamically resolved CLI persistence defaults in one move, and
 # subprocesses spawned by tests inherit the isolated home instead of the real
 # one. We set it at conftest import — *before* collection — so it also covers
 # effects the per-test fixture cannot reach (module-level constants, a logging

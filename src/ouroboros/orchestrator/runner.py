@@ -53,6 +53,18 @@ from ouroboros.core.execution_preferences import (
     execution_preferences_from_contract,
     resolve_execution_preferences,
 )
+from ouroboros.core.project_identity import (
+    ManagedProjectOwnershipError,
+    ManagedProjectScopeError,
+    ProjectIdentity,
+    ProjectIdentityError,
+    ProjectIdentityUnavailableError,
+    active_publication_evidence_sink,
+    publication_evidence_sink,
+    resolve_managed_project_identity,
+    resolve_project_identity,
+    resolve_project_identity_for_publication,
+)
 from ouroboros.core.seed import AcceptanceCriterionSpec, ac_text, ac_texts
 from ouroboros.core.seed_contract import SeedContract
 from ouroboros.core.seed_contract_prompt import (
@@ -69,6 +81,7 @@ from ouroboros.orchestrator.adapter import (
     AgentRuntime,
     ParamSupport,
     RuntimeHandle,
+    resolve_worker_cwd,
 )
 from ouroboros.orchestrator.backend_limits import (
     BackendConcurrencyLimits,
@@ -121,6 +134,7 @@ from ouroboros.orchestrator.execution_authority import (
     constructor_model_contract,
     request_process_local_cancellation,
     runtime_effect_capabilities_contract,
+    runtime_execution_identity_contract,
     runtime_execution_proves_effective_model,
     valid_constructor_model_contract,
     valid_process_local_authority_contract,
@@ -251,6 +265,15 @@ def _mapping_has_exact_keys(value: object, expected: frozenset[str]) -> bool:
             return False
         seen.add(key)
     return False
+
+
+class _UnresolvedProjectIdentity:
+    """Sentinel type separating omitted resolution from resolved absence."""
+
+    __slots__ = ()
+
+
+_UNRESOLVED_PROJECT_IDENTITY = _UnresolvedProjectIdentity()
 
 
 @dataclass(frozen=True, slots=True)
@@ -754,6 +777,7 @@ PRE_RESOLVED_EFFECT_INPUTS_EXECUTION_CONTRACT_VERSION = 6
 PRE_DURABLE_PAUSE_POLICY_EXECUTION_CONTRACT_VERSION = 7
 PRE_RUNTIME_EFFECT_CAPABILITIES_EXECUTION_CONTRACT_VERSION = 8
 FRUGALITY_PROOF_PROTOCOL_VERSION = 1
+_MISSING = object()
 EXECUTION_CONTRACT_PROGRESS_KEY = "execution_contract"
 FORCED_EXECUTION_PERMISSION_MODE = "bypassPermissions"
 
@@ -862,7 +886,7 @@ class OrchestratorRunner:
         mcp_tool_prefix: str = "",
         debug: bool = False,
         enable_decomposition: bool = True,
-        decomposition_mode: Literal["preflight", "bounce_only", "off"] | None = None,
+        decomposition_mode: Literal["bounce_only", "off"] | None = None,
         inherited_runtime_handle: RuntimeHandle | None = None,
         inherited_tools: list[str] | None = None,
         task_cwd: str | None = None,
@@ -892,6 +916,8 @@ class OrchestratorRunner:
             decomposition_mode: Optional decomposition mode override. When omitted,
                 the runner uses ``execution.decomposition_mode`` from config.
                 ``enable_decomposition=False`` forces the effective mode to ``off``.
+                Legacy config files are migrated while loading; direct preflight
+                overrides are rejected instead of authorizing a provider effect.
             inherited_runtime_handle: Optional parent Claude runtime handle for
                         delegated child executions that should fork a session.
             inherited_tools: Optional effective tool set inherited from a
@@ -922,6 +948,13 @@ class OrchestratorRunner:
                 bounded signals to exact active AC attempts.
         """
         self._adapter = adapter
+        adapter_cwd = adapter.working_directory
+        self._adapter_launch_cwd = adapter_cwd
+        self._resolved_adapter_launch_cwd = (
+            resolve_worker_cwd(adapter_cwd)
+            if isinstance(adapter_cwd, str) and adapter_cwd
+            else None
+        )
         self._forced_permission_mode = self._force_adapter_permission_mode(adapter)
         self._event_store = event_store
         self._checkpoint_store = checkpoint_store
@@ -935,7 +968,7 @@ class OrchestratorRunner:
             inherited_runtime_handle
         )
         self._inherited_tools = list(inherited_tools) if inherited_tools else None
-        self._task_cwd = task_cwd
+        self._task_cwd = resolve_worker_cwd(task_cwd) if task_cwd else None
         self._task_workspace_value: TaskWorkspace | None = None
         self._task_workspace_lock_held = False
         self._task_workspace = task_workspace
@@ -954,7 +987,7 @@ class OrchestratorRunner:
         # Effort-first investment dial (RFC #1405): base level for the runner's own
         # direct execution paths (single-AC / resume), which call execute_task
         # without going through ParallelACExecutor. Resolved once; None ⇒ dormant.
-        from ouroboros.config import get_agent_reasoning_effort
+        from ouroboros.config import get_agent_reasoning_effort, get_execution_model
 
         self._reasoning_effort = get_agent_reasoning_effort()
         # Model-tier investment router (the frugality sibling of reasoning_effort),
@@ -969,13 +1002,29 @@ class OrchestratorRunner:
             "false",
         }
         # An explicit user model pin disables routing (routing must never override
-        # it). The DEFAULT sonnet pin that execution_handlers/run.py pass to
-        # create_agent_runtime is a SHIPPED default, not a user pin — only the env
-        # var counts here.
-        _model_pin_env = os.environ.get("OUROBOROS_EXECUTION_MODEL")
-        _model_pin = _model_pin_env.strip() or None if _model_pin_env else None
+        # it). The DEFAULT sonnet fallback that execution_handlers/run.py pass to
+        # create_agent_runtime is a shipped default, not a user pin; explicit
+        # environment or persisted Execute-stage pins both count here.
+        _model_pin = get_execution_model()
         self._model_routing_disabled = _model_routing_disabled
         self._model_pin = _model_pin
+        _runtime_backend = str(getattr(adapter, "runtime_backend", "")).strip().lower()
+        _model_routing_explicit = bool(
+            _model_routing_env is not None and _model_routing_env.strip()
+        )
+        # ``None`` from get_execution_model() is not merely an absent pin for
+        # Codex: it is the user's explicit "follow the model selected in Codex"
+        # choice.  A tier router would turn that sentinel into an OpenAI tier
+        # model and emit ``codex exec --model ...``, silently overriding Codex.
+        # Keep routing dormant for that automatic Codex path.  Explicit pins,
+        # explicit tier requests, and an explicit routing policy retain the
+        # advanced-routing behavior.
+        _codex_automatic_model_selection = (
+            _runtime_backend in {"codex_cli", "codex_mcp"}
+            and _model_pin is None
+            and base_model_tier is None
+            and not _model_routing_explicit
+        )
         # Resume normally restores the run's persisted resolved router. These are
         # the existing user-facing controls that explicitly request a different
         # contract for this invocation, so only they may replace it.
@@ -1023,16 +1072,18 @@ class OrchestratorRunner:
         self._cross_harness_redispatch_enabled = get_cross_harness_redispatch_enabled()
         self._context_pack_enabled = get_context_pack_enabled()
         self._project_guidance_ids = tuple(_execution_config.project_guidance)
-        self._decomposition_mode: Literal["preflight", "bounce_only", "off"] = (
-            "off"
-            if not enable_decomposition
-            else (
-                _execution_config.decomposition_mode
-                if decomposition_mode is None
-                else decomposition_mode
-            )
+        configured_decomposition_mode = (
+            _execution_config.decomposition_mode
+            if decomposition_mode is None
+            else decomposition_mode
         )
-        if not _model_routing_disabled:
+        if configured_decomposition_mode not in {"bounce_only", "off"}:
+            msg = f"Unsupported decomposition_mode: {configured_decomposition_mode!r}"
+            raise ValueError(msg)
+        self._decomposition_mode: Literal["bounce_only", "off"] = (
+            "off" if not enable_decomposition else configured_decomposition_mode
+        )
+        if not _model_routing_disabled and not _codex_automatic_model_selection:
             from ouroboros.orchestrator.model_routing import build_model_router
 
             self._model_router = build_model_router(
@@ -3156,16 +3207,63 @@ class OrchestratorRunner:
             "task_cwd": self._task_workspace.effective_cwd,
         }
 
-    def _effective_cwd(self, runtime_handle: RuntimeHandle | None = None) -> str | None:
-        """Resolve the effective cwd for persisted runtime metadata."""
-        if self._task_cwd:
-            return self._task_cwd
-        if self._task_workspace is not None:
-            return self._task_workspace.effective_cwd
-        if runtime_handle is not None and runtime_handle.cwd:
-            return runtime_handle.cwd
+    def _provider_cwd(self) -> str | None:
+        """Return the one cwd value retained by the provider runtime."""
         cwd = self._adapter.working_directory
-        return cwd if isinstance(cwd, str) and cwd else None
+        if cwd == self._adapter_launch_cwd:
+            return self._resolved_adapter_launch_cwd
+        return resolve_worker_cwd(cwd) if isinstance(cwd, str) and cwd else None
+
+    def _effective_cwd(self, runtime_handle: RuntimeHandle | None = None) -> str | None:
+        """Return one cwd shared by publication, handles, and provider effects."""
+        provider_cwd = self._provider_cwd()
+        workspace_cwd = (
+            resolve_worker_cwd(self._task_workspace.effective_cwd)
+            if self._task_workspace is not None
+            else None
+        )
+        if (
+            self._task_cwd is not None
+            and workspace_cwd is not None
+            and self._task_cwd != workspace_cwd
+        ):
+            raise OrchestratorError(
+                message="Explicit task cwd does not match the managed workspace",
+                details={
+                    "invalid": "runtime_cwd",
+                    "selected_cwd": self._task_cwd,
+                    "workspace_cwd": workspace_cwd,
+                    "resume_blocked": "runtime_cwd_mismatch",
+                },
+            )
+        selected_cwd = self._task_cwd or workspace_cwd
+        handle_cwd = (
+            resolve_worker_cwd(runtime_handle.cwd)
+            if runtime_handle is not None and runtime_handle.cwd
+            else None
+        )
+        if selected_cwd is not None and handle_cwd is not None and selected_cwd != handle_cwd:
+            raise OrchestratorError(
+                message="Runtime handle does not own the selected task cwd",
+                details={
+                    "invalid": "runtime_cwd",
+                    "selected_cwd": selected_cwd,
+                    "handle_cwd": handle_cwd,
+                    "resume_blocked": "runtime_cwd_mismatch",
+                },
+            )
+        required_cwd = selected_cwd or handle_cwd
+        if required_cwd is not None and provider_cwd != required_cwd:
+            raise OrchestratorError(
+                message="Provider runtime does not own the selected task cwd",
+                details={
+                    "invalid": "runtime_cwd",
+                    "selected_cwd": required_cwd,
+                    "provider_cwd": provider_cwd,
+                    "resume_blocked": "runtime_cwd_mismatch",
+                },
+            )
+        return required_cwd or provider_cwd
 
     @staticmethod
     def _canonical_path(value: str) -> str:
@@ -3173,42 +3271,142 @@ class OrchestratorRunner:
         return str(Path(value).expanduser().resolve(strict=False))
 
     @classmethod
-    def _task_workspace_identity(cls, workspace: TaskWorkspace) -> dict[str, str]:
-        """Return the stable source identity encoded by a managed workspace."""
-        project_root = cls._canonical_path(workspace.repo_root)
-        original_cwd = cls._canonical_path(workspace.original_cwd)
+    def _task_workspace_project_identity(cls, workspace: TaskWorkspace) -> ProjectIdentity:
+        """Resolve a managed worktree against its durable source checkout."""
         try:
-            relative_workspace = Path(original_cwd).relative_to(project_root)
-            workspace_path = relative_workspace.as_posix() or "."
-        except ValueError:
-            # Corrupted/legacy workspace metadata must not collapse onto a
-            # broad identity. Keep the canonical absolute source cwd instead.
-            workspace_path = original_cwd
+            return resolve_managed_project_identity(
+                workspace.effective_cwd,
+                source_root=workspace.repo_root,
+                source_workspace=workspace.original_cwd,
+                worktree_root=workspace.worktree_path,
+            )
+        except ManagedProjectScopeError as exc:
+            raise OrchestratorError(
+                message="Managed source and execution workspace scopes do not match",
+                details={
+                    "invalid": "runtime_cwd",
+                    "source_cwd": exc.source_workspace,
+                    "execution_cwd": exc.execution_workspace,
+                    "resume_blocked": "runtime_cwd_mismatch",
+                },
+            ) from exc
+        except ManagedProjectOwnershipError as exc:
+            raise OrchestratorError(
+                message="Managed worktree does not belong to its source project",
+                details={
+                    "invalid": "project_identity",
+                    "source_identity": exc.source_identity.to_workspace_data(),
+                    "execution_identity": exc.execution_identity.to_workspace_data(),
+                    "resume_blocked": "project_identity_mismatch",
+                },
+            ) from exc
+
+    @classmethod
+    def _legacy_task_workspace_identity(cls, workspace: TaskWorkspace) -> dict[str, str]:
+        """Reproduce the pre-anchor managed-workspace representation exactly."""
+        project_root = Path(cls._canonical_path(workspace.repo_root))
+        source_workspace = Path(cls._canonical_path(workspace.original_cwd))
+        try:
+            workspace_path = source_workspace.relative_to(project_root).as_posix() or "."
+        except ValueError as exc:
+            raise OrchestratorError(
+                message="Cannot resume from an invalid historical task workspace",
+                details={"invalid": "legacy_task_workspace"},
+            ) from exc
         return {
-            "project_root": project_root,
+            "project_root": str(project_root),
             "workspace_path": workspace_path,
         }
+
+    @staticmethod
+    def _project_identity_error(exc: ProjectIdentityError) -> OrchestratorError:
+        """Normalize resolver failures at the orchestration lifecycle boundary."""
+        details: dict[str, Any] = {"invalid": "project_identity", "cause": str(exc)}
+        if isinstance(exc, ProjectIdentityUnavailableError):
+            details.update(
+                resume_blocked="project_identity_unavailable",
+                retryable=True,
+            )
+        return OrchestratorError(message="Cannot resolve project identity", details=details)
+
+    def _project_identity(self) -> ProjectIdentity | None:
+        """Return the single canonical identity shared by event and contract."""
+        try:
+            if self._task_workspace is not None:
+                self._effective_cwd()
+                return self._task_workspace_project_identity(self._task_workspace)
+            effective_cwd = self._effective_cwd()
+            if not isinstance(effective_cwd, str) or not effective_cwd.strip():
+                return None
+            if active_publication_evidence_sink() is None:
+                return resolve_project_identity(effective_cwd)
+            identity, _evidence = resolve_project_identity_for_publication(effective_cwd)
+            return identity
+        except ProjectIdentityError as exc:
+            raise self._project_identity_error(exc) from exc
 
     def _proof_workspace_identity(self) -> dict[str, str] | None:
         """Return the stable project + source-workspace identity for this run.
 
         Managed task worktrees have a different checkout path for every session,
         so cohort identity is anchored to their persisted source repository and
-        source-relative cwd. Non-worktree callers use their canonical effective
-        cwd as a conservative project/workspace identity; this may split cohorts
-        launched from different subdirectories, but can never mix projects.
+        source-relative cwd. Direct Git callers resolve the nearest checkout,
+        preserve a relative workspace scope, and join provable linked worktrees
+        to their primary source root. Non-Git callers retain the conservative
+        canonical effective-cwd identity.
         """
-        if self._task_workspace is not None:
-            return self._task_workspace_identity(self._task_workspace)
+        return self._resolved_proof_workspace_identity(self._project_identity())
 
+    @staticmethod
+    def _resolved_proof_workspace_identity(
+        project_identity: ProjectIdentity | None,
+    ) -> dict[str, str] | None:
+        """Project one already-resolved identity without another resolver call."""
+        return project_identity.to_workspace_data() if project_identity is not None else None
+
+    def _legacy_proof_workspace_identity(self) -> dict[str, str] | None:
+        """Reproduce the pre-Project-Map V1 nested workspace representation."""
+        if self._task_workspace is not None:
+            return self._legacy_task_workspace_identity(self._task_workspace)
         effective_cwd = self._effective_cwd()
         if not isinstance(effective_cwd, str) or not effective_cwd.strip():
             return None
-        canonical_cwd = self._canonical_path(effective_cwd)
         return {
-            "project_root": canonical_cwd,
+            "project_root": self._canonical_path(effective_cwd),
             "workspace_path": ".",
         }
+
+    @staticmethod
+    def _project_start_identity(
+        progress: Mapping[str, Any],
+    ) -> tuple[bool, ProjectIdentity | None]:
+        """Parse the all-or-none immutable Project Map session anchor."""
+        raw_start_identity = progress.get(SESSION_START_IDENTITY_PROGRESS_KEY)
+        if not isinstance(raw_start_identity, Mapping):
+            return False, None
+        project_keys = frozenset({"project_id", "project_root", "workspace_path"})
+        present_keys = {key for key in project_keys if key in raw_start_identity}
+        if not present_keys:
+            return False, None
+        if present_keys != project_keys:
+            raise OrchestratorError(
+                message="Cannot resume with a partial project identity anchor",
+                details={"invalid": "project_identity_anchor"},
+            )
+        try:
+            identity = ProjectIdentity(
+                project_id=raw_start_identity["project_id"],
+                project_root=raw_start_identity["project_root"],
+                workspace_path=raw_start_identity["workspace_path"],
+            )
+        except ProjectIdentityUnavailableError as exc:
+            raise OrchestratorRunner._project_identity_error(exc) from exc
+        except (KeyError, TypeError, ValueError) as exc:
+            raise OrchestratorError(
+                message="Cannot resume with an invalid project identity anchor",
+                details={"invalid": "project_identity_anchor"},
+            ) from exc
+        return True, identity
 
     @classmethod
     def _task_resume_workspace_identity(cls, workspace: TaskWorkspace) -> dict[str, str]:
@@ -3832,7 +4030,7 @@ class OrchestratorRunner:
             and 1 <= effective_workers <= max_workers
             and effective_workers == expected_effective_workers
             and isinstance(mode, str)
-            and mode in {"preflight", "bounce_only", "off"}
+            and mode in {"bounce_only", "off"}
             and (value.get("enable_decomposition") is True or mode == "off")
             and isinstance(backend, str)
             and bool(backend)
@@ -3841,6 +4039,25 @@ class OrchestratorRunner:
             and 1 <= usage_limit_pause_seconds <= MAX_USAGE_LIMIT_PAUSE_SECONDS
             and valid_runtime_effect_capabilities_contract(value.get("runtime_effect_capabilities"))
         )
+
+    @staticmethod
+    def _valid_legacy_preflight_execution_semantics_contract(value: object) -> bool:
+        """Recognize only the retired current-schema preflight snapshot.
+
+        The migration changes one authority bit (``preflight`` to
+        ``bounce_only``); every other effect-bearing field must already satisfy
+        the exact current schema.  This helper never feeds a live constructor.
+        """
+
+        if (
+            not isinstance(value, Mapping)
+            or value.get("decomposition_mode") != "preflight"
+            or value.get("enable_decomposition") is not True
+        ):
+            return False
+        migrated = dict(value)
+        migrated["decomposition_mode"] = "bounce_only"
+        return OrchestratorRunner._valid_execution_semantics_contract(migrated)
 
     def _execution_semantics_snapshot(
         self,
@@ -3898,15 +4115,69 @@ class OrchestratorRunner:
         """Return whether a persisted constructor-model contract is canonical."""
         return valid_constructor_model_contract(value)
 
-    def _runtime_execution_identity_contract(self) -> dict[str, Any]:
-        """Return no cross-process identity for a legacy dynamic runtime.
+    def _runtime_execution_identity_contract(
+        self,
+        runtime_handle: RuntimeHandle | None = None,
+    ) -> dict[str, Any]:
+        """Return the adapter's canonical execution identity for resume."""
+        # Foundation A process-local authority intentionally does not ask
+        # arbitrary runtime providers for a portable identity.  The durable
+        # identity contract added for native CLI runtimes is only trustworthy
+        # for Ouroboros-owned process runtimes that define the fingerprinting
+        # surface; test doubles and legacy/custom adapters remain process-local.
+        from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime
+        from ouroboros.orchestrator.copilot_cli_runtime import CopilotCliRuntime
+        from ouroboros.orchestrator.gemini_cli_runtime import GeminiCLIRuntime
+        from ouroboros.orchestrator.goose_runtime import GooseCliRuntime
+        from ouroboros.orchestrator.grok_cli_runtime import GrokCliRuntime
 
-        Foundation A intentionally does not execute a runtime-owned identity
-        provider here.  That provider may itself resolve mutable helpers,
-        profile files, handler caches, or launcher state.  A live
-        process-local generation below controls same-process resume instead.
-        """
-        return {"version": 1, "observed": False}
+        trusted_runtime_types = (
+            CodexCliRuntime,
+            CopilotCliRuntime,
+            GeminiCLIRuntime,
+            GooseCliRuntime,
+            GrokCliRuntime,
+        )
+        if type(self._adapter) not in trusted_runtime_types:
+            return {"version": 1, "observed": False}
+        if getattr(self._adapter, "_skills_dir", None) is not None:
+            return {"version": 1, "observed": False}
+        dispatcher = getattr(self._adapter, "_skill_dispatcher", None)
+        if dispatcher is not None and not self._runtime_skill_dispatcher_is_portable(dispatcher):
+            return {"version": 1, "observed": False}
+        if runtime_handle is None:
+            return dict(runtime_execution_identity_contract(self._adapter))
+        provider = object.__getattribute__(self._adapter, "execution_identity_contract")
+        identity = provider(runtime_handle)
+        if not isinstance(identity, Mapping):
+            raise ValueError("runtime execution identity contract is not a mapping")
+        normalized = dict(identity)
+        if not normalized:
+            return {"version": 1, "observed": False}
+        return {"version": 1, "observed": True, "identity": normalized}
+
+    @staticmethod
+    def _runtime_skill_dispatcher_is_portable(dispatcher: object) -> bool:
+        """Return True for packaged dispatchers that expose stable identity."""
+        from ouroboros.orchestrator.command_dispatcher import CodexCommandDispatcher
+
+        owner = getattr(dispatcher, "__self__", None)
+        if (
+            type(owner) is not CodexCommandDispatcher
+            or getattr(dispatcher, "__func__", None) is not CodexCommandDispatcher.dispatch
+        ):
+            return False
+        stable_identity = getattr(owner, "stable_identity_contract", None)
+        if not callable(stable_identity):
+            return False
+        try:
+            identity = stable_identity()
+        except Exception:
+            return False
+        return (
+            isinstance(identity, Mapping)
+            and identity.get("kind") == "ouroboros_codex_command_dispatcher_v1"
+        )
 
     @staticmethod
     def _valid_runtime_execution_identity_contract(value: object) -> bool:
@@ -5117,6 +5388,19 @@ class OrchestratorRunner:
             )
         )
 
+    @staticmethod
+    def _runtime_execution_authorizes_automatic_codex_resume(_value: object) -> bool:
+        """Return whether an unpinned Codex default may resume portably.
+
+        It may not. Codex App/CLI can select a concrete model outside files that
+        Ouroboros can observe. Config/profile fingerprints are still useful drift
+        evidence, but they do not prove which model served the original run.
+        Until Codex exposes that concrete selection, durable resume must require
+        a pinned/observed model, native per-call routing, or process-local
+        authority from a prepared live execution.
+        """
+        return False
+
     def _validate_resume_handle_execution_identity(
         self,
         runtime_handle: RuntimeHandle | None,
@@ -5395,6 +5679,10 @@ class OrchestratorRunner:
         seed_fingerprint: str | None = None,
         authority_generation: _ProcessLocalAuthorityGeneration | None = None,
         execution_inputs_contract: Mapping[str, Any] | None = None,
+        project_identity: ProjectIdentity | None | _UnresolvedProjectIdentity = (
+            _UNRESOLVED_PROJECT_IDENTITY
+        ),
+        runtime_handle: RuntimeHandle | None = None,
     ) -> dict[str, Any]:
         """Build the durable resolved inputs shared by resume and proof cohorting."""
         from ouroboros.orchestrator.model_routing import serialize_model_router
@@ -5431,8 +5719,14 @@ class OrchestratorRunner:
             effort=self._reasoning_effort,
         )
         routing_contract["route_compat"] = serialize_route_compat_contract(route_projection)
+        # This base effort reaches both direct runner dispatches and the
+        # parallel executor. Persist it beside model routing so a config/env
+        # change cannot silently alter ``model_reasoning_effort`` on resume.
+        routing_contract["base_reasoning_effort"] = self._reasoning_effort
         routing_contract["constructor_model"] = self._constructor_model_contract()
-        routing_contract["runtime_execution"] = self._runtime_execution_identity_contract()
+        routing_contract["runtime_execution"] = self._runtime_execution_identity_contract(
+            runtime_handle
+        )
         routing_contract["runtime_backend"] = self._runtime_backend_contract()
         routing_contract["llm_backend"] = self._llm_backend_contract()
         routing_contract["permission_mode"] = self._permission_mode_contract()
@@ -5444,7 +5738,12 @@ class OrchestratorRunner:
             ),
             "execution_inputs_fingerprint": self._execution_inputs_fingerprint(execution_inputs),
         }
-        workspace_identity = self._proof_workspace_identity()
+        resolved_project_identity = (
+            self._project_identity()
+            if isinstance(project_identity, _UnresolvedProjectIdentity)
+            else project_identity
+        )
+        workspace_identity = self._resolved_proof_workspace_identity(resolved_project_identity)
         if workspace_identity is not None:
             proof_contract.update(workspace_identity)
         resolved_seed_fingerprint = seed_fingerprint
@@ -5481,6 +5780,28 @@ class OrchestratorRunner:
         if frozenset(contract) != EXECUTION_CONTRACT_V9_TOP_LEVEL_KEYS:
             raise AssertionError("execution contract v9 builder emitted a non-canonical shape")
         return contract
+
+    def _build_new_session_contract(
+        self,
+        *,
+        seed: Seed,
+        authority_generation: _ProcessLocalAuthorityGeneration,
+        runtime_handle: RuntimeHandle | None = None,
+    ) -> tuple[dict[str, Any], ProjectIdentity]:
+        """Resolve one project identity and bind it to both publication surfaces."""
+        project_identity = self._project_identity()
+        if project_identity is None:
+            raise OrchestratorError(
+                message="Cannot start a session without a resolved project identity",
+                details={"invalid": "project_identity"},
+            )
+        contract = self._build_execution_contract(
+            seed=seed,
+            authority_generation=authority_generation,
+            project_identity=project_identity,
+            runtime_handle=runtime_handle,
+        )
+        return contract, project_identity
 
     async def _emit_run_configuration_resolved(
         self,
@@ -5943,6 +6264,7 @@ class OrchestratorRunner:
         authority_generation: _ProcessLocalAuthorityGeneration | None = None,
         require_bound_execution_inputs: bool = True,
         prepared_live_execution: bool = False,
+        runtime_handle: RuntimeHandle | None = None,
     ) -> bool:
         """Restore the persisted router unless this invocation explicitly overrides it.
 
@@ -6012,6 +6334,7 @@ class OrchestratorRunner:
         raw_routing = raw_contract.get("model_routing")
         raw_resume = raw_contract.get("resume")
         raw_preferences = raw_contract.get("execution_preferences")
+        preferences_migrated = "execution_preferences" not in raw_contract
         raw_execution_semantics = raw_contract.get("execution_semantics")
         raw_execution_inputs = raw_contract.get("execution_inputs")
         raw_authority = raw_contract.get("foundation_a_authority")
@@ -6027,6 +6350,33 @@ class OrchestratorRunner:
                     "missing": "frugality_proof, model_routing, resume, or foundation_a_authority"
                 },
             )
+
+        migrate_preflight_contract = self._valid_legacy_preflight_execution_semantics_contract(
+            raw_execution_semantics
+        )
+        if migrate_preflight_contract:
+            persisted_legacy_fingerprint = raw_proof.get("execution_semantics_fingerprint")
+            if not isinstance(
+                persisted_legacy_fingerprint, str
+            ) or persisted_legacy_fingerprint != self._execution_semantics_fingerprint(
+                raw_execution_semantics
+            ):
+                raise OrchestratorError(
+                    message="Cannot resume with an invalid legacy preflight contract",
+                    details={"invalid": "execution_semantics_fingerprint"},
+                )
+            migrated_contract = deepcopy(dict(raw_contract))
+            migrated_semantics = migrated_contract["execution_semantics"]
+            migrated_proof = migrated_contract["frugality_proof"]
+            assert isinstance(migrated_semantics, dict)
+            assert isinstance(migrated_proof, dict)
+            migrated_semantics["decomposition_mode"] = "bounce_only"
+            migrated_proof["execution_semantics_fingerprint"] = (
+                self._execution_semantics_fingerprint(migrated_semantics)
+            )
+            raw_contract = migrated_contract
+            raw_proof = migrated_proof
+            raw_execution_semantics = migrated_semantics
 
         # Version 2 predates effort/Route B fields; version 3 predates the
         # independent requested-tier field; version 4 predates the complete
@@ -6075,7 +6425,19 @@ class OrchestratorRunner:
         persisted_reasoning_effort = (
             self._reasoning_effort if migrate_v2_contract else raw_routing.get("reasoning_effort")
         )
+        persisted_base_reasoning_effort = raw_routing.get("base_reasoning_effort", _MISSING)
         persisted_resume_workspace = raw_resume.get("workspace")
+        base_reasoning_effort_missing = persisted_base_reasoning_effort is _MISSING
+        if base_reasoning_effort_missing and not migrate_v2_contract:
+            # Pre-base-effort contracts already persisted the same dispatch effort
+            # under model_routing.reasoning_effort.  Treat that value as the
+            # historical base effort instead of rejecting otherwise valid v9
+            # checkpoints.
+            persisted_base_reasoning_effort = persisted_reasoning_effort
+        valid_base_reasoning_effort = (persisted_base_reasoning_effort is None) or (
+            isinstance(persisted_base_reasoning_effort, str)
+            and persisted_base_reasoning_effort in {"low", "medium", "high", "xhigh"}
+        )
         valid_seed_fingerprint = (
             isinstance(persisted_seed_fingerprint, str)
             and len(persisted_seed_fingerprint) == 64
@@ -6161,6 +6523,7 @@ class OrchestratorRunner:
                 or prepared_live_execution
                 and persisted_resume_workspace is None
             )
+            or not valid_base_reasoning_effort
         ):
             raise OrchestratorError(
                 message="Cannot resume with an invalid execution contract",
@@ -6186,10 +6549,19 @@ class OrchestratorRunner:
                 },
             )
 
+        if persisted_base_reasoning_effort != self._reasoning_effort:
+            raise OrchestratorError(
+                message="Cannot resume with a different reasoning effort",
+                details={
+                    "persisted_base_reasoning_effort": persisted_base_reasoning_effort,
+                    "current_base_reasoning_effort": self._reasoning_effort,
+                    "hint": "Start a new session after changing reasoning effort.",
+                },
+            )
+
         current_seed_fingerprint = (
             self._seed_semantics_fingerprint(seed) if seed is not None else None
         )
-        active_workspace = self._proof_workspace_identity()
         persisted_workspace = (
             None
             if persisted_project_root is None and persisted_workspace_path is None
@@ -6198,6 +6570,36 @@ class OrchestratorRunner:
                 "workspace_path": persisted_workspace_path,
             }
         )
+        has_project_anchor, start_project_identity = self._project_start_identity(progress)
+        if has_project_anchor:
+            assert start_project_identity is not None
+            active_project_identity = self._project_identity()
+            if (
+                persisted_workspace != start_project_identity.to_workspace_data()
+                or active_project_identity != start_project_identity
+            ):
+                raise OrchestratorError(
+                    message="Cannot resume with conflicting project identity",
+                    details={
+                        "persisted_workspace": persisted_workspace,
+                        "start_project_identity": start_project_identity.to_event_data(),
+                        "current_project_identity": (
+                            active_project_identity.to_event_data()
+                            if active_project_identity is not None
+                            else None
+                        ),
+                    },
+                )
+            active_workspace = active_project_identity.to_workspace_data()
+        else:
+            # Historical v9 session starts predate the additive project anchor.
+            # Preserve their exact direct-cwd representation rather than
+            # rewriting durable resume authority under the new resolver.
+            active_workspace = (
+                self._proof_workspace_identity()
+                if prepared_live_execution
+                else self._legacy_proof_workspace_identity()
+            )
         if active_workspace != persisted_workspace:
             raise OrchestratorError(
                 message="Cannot resume from a different project workspace",
@@ -6207,6 +6609,21 @@ class OrchestratorRunner:
                     "hint": "Resume from the original project/workspace.",
                 },
             )
+        replacement_project_identity = start_project_identity
+        if replacement_project_identity is None and persisted_workspace is not None:
+            # A pre-anchor session owns its historical proof representation in
+            # the persisted contract.  Rebuilding for a routing override must
+            # carry that representation forward; recomputing under the current
+            # resolver would make the following resume disagree with the
+            # immutable, still-unanchored start event.
+            try:
+                replacement_project_identity = ProjectIdentity.from_root(
+                    persisted_workspace["project_root"],
+                    workspace_path=persisted_workspace["workspace_path"],
+                    require_exists=True,
+                )
+            except ProjectIdentityError as exc:
+                raise self._project_identity_error(exc) from exc
         active_resume_workspace = self._resume_workspace_identity()
         normalized_persisted_resume_workspace = (
             dict(persisted_resume_workspace)
@@ -6278,7 +6695,7 @@ class OrchestratorRunner:
                     ),
                 },
             )
-        current_runtime_execution = self._runtime_execution_identity_contract()
+        current_runtime_execution = self._runtime_execution_identity_contract(runtime_handle)
         if persisted_runtime_execution != current_runtime_execution:
             raise OrchestratorError(
                 message="Cannot resume with a different runtime execution profile",
@@ -6407,17 +6824,22 @@ class OrchestratorRunner:
         effective_model_observed = self._runtime_execution_proves_effective_model(
             persisted_runtime_execution
         )
-        process_local_authority = valid_process_local_authority_contract(
-            raw_contract.get("foundation_a_authority")
+        process_local_authority = (
+            prepared_live_execution
+            and valid_process_local_authority_contract(raw_contract.get("foundation_a_authority"))
         )
         model_override_support = getattr(
             getattr(self._adapter, "capabilities", None),
             "model_override_support",
             ParamSupport.IGNORED,
         )
+        automatic_codex_default_authorized = (
+            self._runtime_execution_authorizes_automatic_codex_resume(persisted_runtime_execution)
+        )
         if (
             constructor_model_value is None
             and not effective_model_observed
+            and not automatic_codex_default_authorized
             and not (restored_router is not None and model_override_support is ParamSupport.NATIVE)
             and not process_local_authority
         ):
@@ -6431,6 +6853,7 @@ class OrchestratorRunner:
                         restored_router is not None
                         and model_override_support is ParamSupport.NATIVE
                     ),
+                    "automatic_codex_default_authorized": automatic_codex_default_authorized,
                     "hint": ("Pin the original runtime model/profile, or start a new session."),
                 },
             )
@@ -6467,6 +6890,8 @@ class OrchestratorRunner:
                 seed_fingerprint=(persisted_seed_fingerprint if valid_seed_fingerprint else None),
                 authority_generation=authority_generation,
                 execution_inputs_contract=normalized_execution_inputs,
+                project_identity=replacement_project_identity,
+                runtime_handle=runtime_handle,
             )
             # Only the public resume path reaches this branch with a live,
             # registry-issued generation.  Preserve the persisted diagnostics
@@ -6484,15 +6909,32 @@ class OrchestratorRunner:
                 seed=seed,
                 seed_fingerprint=(persisted_seed_fingerprint if valid_seed_fingerprint else None),
                 authority_generation=authority_generation,
+                project_identity=replacement_project_identity,
+                runtime_handle=runtime_handle,
             )
             if authority_generation is None:
                 replacement["foundation_a_authority"] = dict(raw_contract["foundation_a_authority"])
             self._execution_contract = replacement
             return True
+        if migrate_preflight_contract:
+            self._execution_contract = dict(raw_contract)
+            return True
         # Preserve the exact persisted proof identity alongside the restored
         # router. Recomputing it from a resumed throwaway worktree would make the
         # same execution appear to be a different experiment.
         self._execution_contract = dict(raw_contract)
+        if preferences_migrated or base_reasoning_effort_missing:
+            self._execution_contract["execution_preferences"] = (
+                persisted_preferences.to_contract_data()
+            )
+            migrated_routing = dict(raw_routing)
+            if base_reasoning_effort_missing:
+                migrated_routing["base_reasoning_effort"] = persisted_base_reasoning_effort
+            self._execution_contract["model_routing"] = migrated_routing
+            migrated_proof = dict(raw_proof)
+            migrated_proof["routing_fingerprint"] = self._routing_fingerprint(migrated_routing)
+            self._execution_contract["frugality_proof"] = migrated_proof
+            return True
         return False
 
     def _restore_execution_contract_snapshot(
@@ -6503,6 +6945,7 @@ class OrchestratorRunner:
         authority_generation: _ProcessLocalAuthorityGeneration | None = None,
         require_bound_execution_inputs: bool = True,
         prepared_live_execution: bool = False,
+        runtime_handle: RuntimeHandle | None = None,
     ) -> tuple[bool, dict[str, Any]]:
         """Restore and return one immutable invocation-local contract snapshot.
 
@@ -6518,6 +6961,7 @@ class OrchestratorRunner:
                 authority_generation=authority_generation,
                 require_bound_execution_inputs=require_bound_execution_inputs,
                 prepared_live_execution=prepared_live_execution,
+                runtime_handle=runtime_handle,
             )
             if not isinstance(self._execution_contract, Mapping):
                 raise OrchestratorError(
@@ -8224,7 +8668,23 @@ class OrchestratorRunner:
 
         This allows callers such as MCP handlers to return stable tracking IDs
         immediately and then start the actual runtime work asynchronously.
+
+        Contract construction captures the resolver's repo-local input
+        closure, and the publication boundary revalidates from that evidence
+        by metadata alone when nothing observable changed — escalating to the
+        full re-resolution (probe included) otherwise (#1796 L2).
         """
+        with publication_evidence_sink():
+            return await self._prepare_session_scoped(
+                seed, execution_id=execution_id, session_id=session_id
+            )
+
+    async def _prepare_session_scoped(
+        self,
+        seed: Seed,
+        execution_id: str | None = None,
+        session_id: str | None = None,
+    ) -> Result[SessionTracker, OrchestratorError]:
         exec_id = execution_id or f"exec_{uuid4().hex[:12]}"
         resolved_session_id = session_id or f"orch_{uuid4().hex[:12]}"
         self._execution_guidance = None
@@ -8270,12 +8730,38 @@ class OrchestratorRunner:
                 )
 
         try:
-            execution_contract = await asyncio.to_thread(
-                self._build_execution_contract,
+            execution_contract, project_identity = await asyncio.to_thread(
+                self._build_new_session_contract,
                 seed=seed,
                 authority_generation=authority_generation,
+                runtime_handle=self._inherited_runtime_handle,
             )
             self._execution_guidance_delivery_mode()
+            create_session_kwargs: dict[str, Any] = {
+                "execution_id": exec_id,
+                "seed_id": seed.metadata.seed_id,
+                "session_id": resolved_session_id,
+                "seed_goal": seed.goal,
+                "runtime_backend": getattr(self._adapter, "runtime_backend", None),
+                "llm_backend": getattr(self._adapter, "llm_backend", None),
+                "execution_contract": execution_contract,
+                "project_identity": project_identity,
+                "project_workspace": self._effective_cwd(),
+            }
+            if self._task_workspace is not None:
+                create_session_kwargs["project_task_workspace"] = self._task_workspace
+            try:
+                if (
+                    "acceptance_root_indices"
+                    in inspect.signature(self._session_repo.create_session).parameters
+                ):
+                    create_session_kwargs["acceptance_root_indices"] = range(
+                        len(seed.acceptance_criteria)
+                    )
+            except (TypeError, ValueError):
+                # Legacy/mock repositories may not expose an inspectable signature;
+                # the durable SessionRepository path always does.
+                pass
             # Establish the exact capability and PID liveness lease before any
             # durable RUNNING tracker can be reconstructed by an observer. The
             # resolved session id is allocated locally for that purpose rather
@@ -8314,28 +8800,6 @@ class OrchestratorRunner:
             raise
         self._task_workspace_reservations.discard(authority_generation)
         self._execution_contract = execution_contract
-
-        create_session_kwargs: dict[str, Any] = {
-            "execution_id": exec_id,
-            "seed_id": seed.metadata.seed_id,
-            "session_id": resolved_session_id,
-            "seed_goal": seed.goal,
-            "runtime_backend": getattr(self._adapter, "runtime_backend", None),
-            "llm_backend": getattr(self._adapter, "llm_backend", None),
-            "execution_contract": execution_contract,
-        }
-        try:
-            if (
-                "acceptance_root_indices"
-                in inspect.signature(self._session_repo.create_session).parameters
-            ):
-                create_session_kwargs["acceptance_root_indices"] = range(
-                    len(seed.acceptance_criteria)
-                )
-        except (TypeError, ValueError):
-            # Legacy/mock repositories may not expose an inspectable signature;
-            # the durable SessionRepository path always does.
-            pass
         try:
             session_result = await self._session_repo.create_session(**create_session_kwargs)
         except asyncio.CancelledError:
@@ -8706,13 +9170,20 @@ class OrchestratorRunner:
             return Result.err(durable_status_error)
 
         try:
-            authenticated_contract = self._authenticate_process_local_prepared_contract(
+            caller_contract = self._authenticate_process_local_prepared_contract(
                 session_id=tracker.session_id,
                 execution_id=tracker.execution_id,
                 generation=authority_generation,
                 execution_contract=raw_contract,
             )
-            if authenticated_contract is None:
+            durable_progress = deepcopy(dict(durable_tracker.progress))
+            durable_contract = self._authenticate_process_local_prepared_contract(
+                session_id=tracker.session_id,
+                execution_id=tracker.execution_id,
+                generation=authority_generation,
+                execution_contract=durable_progress.get(EXECUTION_CONTRACT_PROGRESS_KEY),
+            )
+            if caller_contract is None or durable_contract is None:
                 raise OrchestratorError(
                     message=(
                         "Caller-supplied execution contract does not match the "
@@ -8724,9 +9195,10 @@ class OrchestratorRunner:
                         "resume_blocked": "prepared_execution_contract_mismatch",
                     },
                 )
+            durable_progress[EXECUTION_CONTRACT_PROGRESS_KEY] = durable_contract
             contract_changed, validated_contract = await asyncio.to_thread(
                 self._restore_execution_contract_snapshot,
-                {EXECUTION_CONTRACT_PROGRESS_KEY: authenticated_contract},
+                durable_progress,
                 seed=seed,
                 authority_generation=authority_generation,
                 require_bound_execution_inputs=False,
@@ -8767,6 +9239,12 @@ class OrchestratorRunner:
             )
             if cancellation_result is not None:
                 return cancellation_result
+            if exc.details.get("resume_blocked") == "project_identity_unavailable":
+                self._preserve_process_local_owner_for_retry(
+                    session_id=tracker.session_id,
+                    execution_id=tracker.execution_id,
+                )
+                return Result.err(exc)
             _, persistence_pending = await self._persist_failure_and_cleanup(
                 session_id=tracker.session_id,
                 execution_id=tracker.execution_id,
@@ -10672,11 +11150,16 @@ class OrchestratorRunner:
             )
 
         try:
+            runtime_handle = self._deserialize_runtime_handle(tracker.progress)
+            runtime_handle = self._force_runtime_handle_permission(runtime_handle)
+            self._validate_runtime_handle_backend(runtime_handle)
+            self._validate_bound_runtime_resume_identity(tracker.progress, runtime_handle)
             execution_contract_changed, execution_contract = await asyncio.to_thread(
                 self._restore_execution_contract_snapshot,
                 tracker.progress,
                 seed=seed,
                 authority_generation=authority_generation,
+                runtime_handle=runtime_handle,
             )
             execution_semantics = self._execution_semantics_snapshot(execution_contract)
             self._execution_guidance_delivery_mode()
@@ -10714,6 +11197,12 @@ class OrchestratorRunner:
             )
             if cancellation_result is not None:
                 return cancellation_result
+            if exc.details.get("resume_blocked") == "project_identity_unavailable":
+                self._preserve_process_local_owner_for_retry(
+                    session_id=session_id,
+                    execution_id=tracker.execution_id,
+                )
+                return Result.err(exc)
             _, persistence_pending = await self._persist_failure_and_cleanup(
                 session_id=session_id,
                 execution_id=tracker.execution_id,
@@ -10798,11 +11287,6 @@ class OrchestratorRunner:
 
 Note: This is a resumed session. Please continue from where execution was interrupted.
 """
-            # Get runtime resume state if stored
-            runtime_handle = self._deserialize_runtime_handle(tracker.progress)
-            runtime_handle = self._force_runtime_handle_permission(runtime_handle)
-            self._validate_runtime_handle_backend(runtime_handle)
-            self._validate_bound_runtime_resume_identity(tracker.progress, runtime_handle)
             self._validate_resume_handle_execution_identity(runtime_handle)
             if self._task_workspace is not None and "workspace" not in tracker.progress:
                 await self._persist_session_progress(

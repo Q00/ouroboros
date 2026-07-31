@@ -2,6 +2,8 @@
 
 from unittest.mock import MagicMock
 
+from rich.text import Text
+
 from ouroboros.tui.widgets.ac_progress import ACProgressItem, ACProgressWidget
 from ouroboros.tui.widgets.ac_tree import ACTreeWidget
 from ouroboros.tui.widgets.phase_progress import PhaseIndicator, PhaseProgressWidget
@@ -378,7 +380,7 @@ class TestACTreeWidget:
         label = widget._format_node_label(node_data)
 
         assert "..." in label
-        assert long_content[:50] in label
+        assert Text.from_markup(label).cell_len <= 54
 
     def test_mark_node_atomic(self) -> None:
         """Test marking a node as atomic."""

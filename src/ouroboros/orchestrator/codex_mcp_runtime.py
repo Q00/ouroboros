@@ -34,6 +34,7 @@ from ouroboros.codex.cli_policy import build_codex_child_env, resolve_codex_cli_
 from ouroboros.config import get_codex_cli_path
 from ouroboros.mcp.types import MCPServerConfig, TransportType
 from ouroboros.observability.logging import get_logger
+from ouroboros.orchestrator.adapter import WORKER_CWD_UNAVAILABLE_MESSAGE
 from ouroboros.orchestrator.codex_mcp_session_pool import (
     DEFAULT_SESSION_IDLE_TIMEOUT,
     MCPSessionActor,
@@ -44,6 +45,7 @@ from ouroboros.orchestrator.codex_session_index import (
 )
 from ouroboros.orchestrator.worker_runtime import (
     LeaderDrivenWorkerRuntime,
+    ResolvedWorkerCwd,
     WorkerTurn,
 )
 
@@ -186,6 +188,12 @@ class CodexMcpWorkerTransport:
         fork_from_session_id: str | None = None,
         label: str | None = None,
     ) -> WorkerTurn:
+        if cwd is None:
+            return WorkerTurn(
+                text="",
+                is_error=True,
+                error=WORKER_CWD_UNAVAILABLE_MESSAGE,
+            )
         # ``fork_from_session_id`` is intentionally ignored: a delegated host
         # session is the human's Claude conversation, which a codex mcp-server
         # cannot fork. The worker spawns a clean codex thread instead (no host
@@ -196,7 +204,7 @@ class CodexMcpWorkerTransport:
             "prompt": prompt,
             "sandbox": sandbox,
             "approval-policy": approval,
-            "cwd": cwd or os.getcwd(),
+            "cwd": cwd,
         }
         if system_prompt:
             # Native developer-role directive (not embedded in the user prompt).
@@ -280,7 +288,7 @@ class CodexMcpWorkerTransport:
 def build_codex_mcp_worker_runtime(
     *,
     cli_path: str | None = None,
-    cwd: str | os.PathLike[str] | None = None,
+    cwd: str | os.PathLike[str] | ResolvedWorkerCwd | None = None,
     permission_mode: str | None = None,
     model: str | None = None,
     llm_backend: str | None = None,
@@ -296,12 +304,11 @@ def build_codex_mcp_worker_runtime(
     (wired through :func:`runtime_factory.create_agent_runtime`) when you
     specifically want to open a worker in the Codex app. See codex_session_index.
     """
-    normalized_cwd = os.fspath(cwd) if cwd is not None else None
     return LeaderDrivenWorkerRuntime(
         transport=CodexMcpWorkerTransport(cli_path=cli_path, index_sessions=index_sessions),
         runtime_backend="codex_mcp",
         llm_backend=llm_backend or "codex",
-        cwd=normalized_cwd,
+        cwd=cwd,
         permission_mode=permission_mode,
         model=model,
         # A fresh ``codex`` call accepts model_reasoning_effort, but the warm

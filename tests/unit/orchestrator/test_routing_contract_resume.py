@@ -6,12 +6,20 @@ import copy
 from dataclasses import replace
 import json
 from pathlib import Path
+import subprocess
 import sys
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from ouroboros.config.models import EconomicsConfig, ModelConfig, TierConfig
+from ouroboros.config.models import (
+    EconomicsConfig,
+    ModelConfig,
+    OuroborosConfig,
+    TierConfig,
+    get_default_config,
+)
+from ouroboros.core.project_identity import ProjectIdentity, project_id_for_root
 from ouroboros.core.seed import OntologySchema, Seed, SeedMetadata
 from ouroboros.core.worktree import TaskWorkspace
 from ouroboros.events.base import BaseEvent
@@ -25,7 +33,10 @@ from ouroboros.orchestrator.adapter import (
     RuntimeHandle,
 )
 from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime
+from ouroboros.orchestrator.copilot_cli_runtime import CopilotCliRuntime
+from ouroboros.orchestrator.gemini_cli_runtime import GeminiCLIRuntime
 from ouroboros.orchestrator.goose_runtime import GooseCliRuntime
+from ouroboros.orchestrator.grok_cli_runtime import GrokCliRuntime
 from ouroboros.orchestrator.model_routing import (
     ModelRouter,
     deserialize_model_router,
@@ -39,11 +50,39 @@ from ouroboros.orchestrator.runner import (
     OrchestratorRunner,
     build_system_prompt,
 )
+from ouroboros.orchestrator.runtime_factory import create_agent_runtime
 from ouroboros.orchestrator.session import (
     SESSION_RUNTIME_IDENTITY_PROGRESS_KEY,
     SESSION_START_IDENTITY_PROGRESS_KEY,
     SessionRepository,
 )
+from ouroboros.orchestrator.zcode_cli_runtime import ZcodeCLIRuntime
+
+
+def _git(*args: str, cwd: Path | None = None) -> None:
+    subprocess.run(
+        ["git", *args],
+        cwd=cwd,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+def _init_git_repo(root: Path) -> None:
+    _git("init", "-q", str(root))
+    _git(
+        "-c",
+        "user.name=Routing Contract Test",
+        "-c",
+        "user.email=routing-contract@example.com",
+        "commit",
+        "-q",
+        "--allow-empty",
+        "-m",
+        "initial",
+        cwd=root,
+    )
 
 
 def _adapter(
@@ -62,12 +101,18 @@ def _adapter(
 
 def _runner(
     *,
-    cwd: str = "/tmp/project",
+    cwd: str | None = None,
     constructor_model: str | None = "constructor-sonnet",
     **kwargs,
 ) -> OrchestratorRunner:
+    task_workspace = kwargs.get("task_workspace")
+    resolved_cwd = (
+        cwd
+        or (task_workspace.effective_cwd if isinstance(task_workspace, TaskWorkspace) else None)
+        or "/tmp/project"
+    )
     return OrchestratorRunner(
-        _adapter(cwd, constructor_model=constructor_model),
+        _adapter(resolved_cwd, constructor_model=constructor_model),
         AsyncMock(),
         MagicMock(),
         **kwargs,
@@ -125,6 +170,20 @@ def _seed(*, goal: str = "Prove durable routing", criterion: str = "Routing surv
 
 
 def _workspace(*, durable_id: str, worktree_path: Path, repo_root: Path) -> TaskWorkspace:
+    if not (repo_root / ".git").exists():
+        _init_git_repo(repo_root)
+    (repo_root / "packages" / "app").mkdir(parents=True, exist_ok=True)
+    _git(
+        "worktree",
+        "add",
+        "-q",
+        "-b",
+        f"ooo/{durable_id}",
+        str(worktree_path),
+        "HEAD",
+        cwd=repo_root,
+    )
+    (worktree_path / "packages" / "app").mkdir(parents=True, exist_ok=True)
     return TaskWorkspace(
         durable_id=durable_id,
         repo_root=str(repo_root),
@@ -149,10 +208,24 @@ def _assert_process_local_runtime_contract(contract: dict[str, object]) -> None:
     assert isinstance(authority["correlation_id"], str)
 
 
+def _assert_runtime_identity_observed(contract: dict[str, object]) -> dict[str, object]:
+    routing = contract["model_routing"]
+    assert isinstance(routing, dict)
+    runtime_execution = routing["runtime_execution"]
+    assert isinstance(runtime_execution, dict)
+    assert runtime_execution["version"] == 1
+    assert runtime_execution["observed"] is True
+    identity = runtime_execution["identity"]
+    assert isinstance(identity, dict)
+    return identity
+
+
 @pytest.fixture(autouse=True)
 def _clear_model_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("OUROBOROS_MODEL_TIER_ROUTING", raising=False)
     monkeypatch.delenv("OUROBOROS_EXECUTION_MODEL", raising=False)
+    monkeypatch.setattr("ouroboros.config.get_execution_model", lambda: None)
+    monkeypatch.setattr("ouroboros.config.load_config", get_default_config)
 
 
 def test_router_contract_round_trips_custom_frontier_policy() -> None:
@@ -743,6 +816,34 @@ def test_current_execution_semantics_requires_complete_exact_population(field: s
         _runner()._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
 
 
+def test_current_execution_semantics_migrates_retired_preflight_authority_once() -> None:
+    persisted = copy.deepcopy(_runner()._build_execution_contract())
+    persisted["execution_semantics"]["decomposition_mode"] = "preflight"
+    persisted["frugality_proof"]["execution_semantics_fingerprint"] = (
+        OrchestratorRunner._execution_semantics_fingerprint(persisted["execution_semantics"])
+    )
+
+    resumed = _runner()
+    changed = resumed._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
+
+    assert changed is True
+    assert resumed._execution_contract is not None
+    migrated = resumed._execution_contract
+    assert migrated["execution_semantics"]["decomposition_mode"] == "bounce_only"
+    assert migrated["frugality_proof"]["execution_semantics_fingerprint"] == (
+        OrchestratorRunner._execution_semantics_fingerprint(migrated["execution_semantics"])
+    )
+    assert resumed._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: migrated}) is False
+
+
+def test_legacy_preflight_migration_rejects_unsealed_semantics() -> None:
+    persisted = copy.deepcopy(_runner()._build_execution_contract())
+    persisted["execution_semantics"]["decomposition_mode"] = "preflight"
+
+    with pytest.raises(OrchestratorError, match="invalid legacy preflight contract"):
+        _runner()._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
+
+
 @pytest.mark.parametrize(
     "field",
     [
@@ -895,7 +996,7 @@ def test_resume_rejects_base_reasoning_effort_transition(
     resumed = _runner()
     resumed._reasoning_effort = current_effort
 
-    with pytest.raises(OrchestratorError, match="changed route compatibility catalog"):
+    with pytest.raises(OrchestratorError, match="different reasoning effort"):
         resumed._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
 
 
@@ -924,8 +1025,101 @@ def test_dormant_model_routing_still_rejects_reasoning_effort_drift() -> None:
     resumed = _runner()
     resumed._reasoning_effort = "high"
 
-    with pytest.raises(OrchestratorError, match="changed reasoning-effort contract"):
+    with pytest.raises(OrchestratorError, match="different reasoning effort"):
         resumed._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
+
+
+def test_resume_rejects_changed_base_reasoning_effort(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The effort used to form each dispatch is part of resume identity."""
+    monkeypatch.setattr("ouroboros.config.get_agent_reasoning_effort", lambda: "low")
+    original = _runner()
+    persisted = original._build_execution_contract()
+
+    assert persisted["model_routing"]["base_reasoning_effort"] == "low"
+
+    monkeypatch.setattr("ouroboros.config.get_agent_reasoning_effort", lambda: "high")
+    resumed = _runner()
+    with pytest.raises(OrchestratorError, match="different reasoning effort"):
+        resumed._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: persisted})
+
+
+def test_legacy_contract_without_base_effort_migrates_dormant_effort() -> None:
+    """A missing base effort can be recovered from the persisted routing effort."""
+    original = _runner()
+    persisted = original._build_execution_contract()
+    legacy_routing = dict(persisted["model_routing"])
+    legacy_routing.pop("base_reasoning_effort")
+    legacy_contract = {
+        **persisted,
+        "model_routing": legacy_routing,
+        "frugality_proof": {
+            **persisted["frugality_proof"],
+            "routing_fingerprint": OrchestratorRunner._routing_fingerprint(legacy_routing),
+        },
+    }
+
+    resumed = _runner()
+    changed = resumed._restore_execution_contract(
+        {EXECUTION_CONTRACT_PROGRESS_KEY: legacy_contract}
+    )
+
+    assert changed is True
+    assert resumed._execution_contract is not None
+    assert resumed._execution_contract["model_routing"]["base_reasoning_effort"] is None
+
+
+def test_legacy_contract_without_base_effort_migrates_enabled_effort() -> None:
+    """An old contract's routing effort is the historical base effort."""
+    original = _runner()
+    original._reasoning_effort = "high"
+    persisted = original._build_execution_contract()
+    legacy_routing = dict(persisted["model_routing"])
+    legacy_routing.pop("base_reasoning_effort")
+    legacy_contract = {
+        **persisted,
+        "model_routing": legacy_routing,
+        "frugality_proof": {
+            **persisted["frugality_proof"],
+            "routing_fingerprint": OrchestratorRunner._routing_fingerprint(legacy_routing),
+        },
+    }
+
+    resumed = _runner()
+    resumed._reasoning_effort = "high"
+    changed = resumed._restore_execution_contract(
+        {EXECUTION_CONTRACT_PROGRESS_KEY: legacy_contract}
+    )
+
+    assert changed is True
+    assert resumed._execution_contract is not None
+    assert resumed._execution_contract["model_routing"]["base_reasoning_effort"] == "high"
+
+
+def test_legacy_contract_missing_base_effort_rejects_historical_high_to_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The migrated historical effort still protects against current drift."""
+    original = _runner()
+    original._reasoning_effort = "high"
+    persisted = original._build_execution_contract()
+    legacy_routing = dict(persisted["model_routing"])
+    legacy_routing.pop("base_reasoning_effort")
+    legacy_contract = {
+        **persisted,
+        "model_routing": legacy_routing,
+        "frugality_proof": {
+            **persisted["frugality_proof"],
+            "routing_fingerprint": OrchestratorRunner._routing_fingerprint(legacy_routing),
+        },
+    }
+
+    monkeypatch.setattr("ouroboros.config.get_agent_reasoning_effort", lambda: None)
+    resumed = _runner()
+    with pytest.raises(OrchestratorError, match="different reasoning effort"):
+        resumed._restore_execution_contract({EXECUTION_CONTRACT_PROGRESS_KEY: legacy_contract})
+    assert resumed._execution_contract is None
 
 
 def test_explicit_resume_tier_override_replaces_persisted_contract() -> None:
@@ -942,6 +1136,57 @@ def test_explicit_resume_tier_override_replaces_persisted_contract() -> None:
     assert resumed._model_router is not None
     assert resumed._model_router.base_tier == "standard"
     assert resumed._model_router.tier_models == _frontier_custom_router().tier_models
+
+
+def test_explicit_override_preserves_legacy_workspace_across_two_resumes(
+    tmp_path: Path,
+) -> None:
+    repo_root = tmp_path / "repo"
+    workspace = repo_root / "packages" / "app"
+    workspace.mkdir(parents=True)
+    _init_git_repo(repo_root)
+    original = _runner(cwd=str(workspace))
+    _use_frontier_custom_routing(original)
+    persisted = original._build_execution_contract(seed=_seed())
+    persisted["frugality_proof"]["project_root"] = str(workspace.resolve())
+    persisted["frugality_proof"]["workspace_path"] = "."
+    legacy_start = {
+        "execution_id": "legacy-routing-override",
+        "seed_id": "seed-routing-contract",
+    }
+
+    first_resume = _runner(cwd=str(workspace), base_model_tier="standard")
+    first_resume._route_economics = _frontier_custom_economics()
+    first_resume._model_router = _frontier_custom_router(base_tier="standard")
+    changed = first_resume._restore_execution_contract(
+        {
+            EXECUTION_CONTRACT_PROGRESS_KEY: persisted,
+            SESSION_START_IDENTITY_PROGRESS_KEY: legacy_start,
+        },
+        seed=_seed(),
+    )
+
+    assert changed is True
+    replacement = first_resume._execution_contract
+    assert replacement is not None
+    assert replacement["frugality_proof"]["project_root"] == str(workspace.resolve())
+    assert replacement["frugality_proof"]["workspace_path"] == "."
+
+    second_resume = _runner(cwd=str(workspace))
+    second_resume._route_economics = _frontier_custom_economics()
+    second_resume._model_router = _frontier_custom_router(base_tier="standard")
+    second_resume._requested_model_tier = "standard"
+
+    assert (
+        second_resume._restore_execution_contract(
+            {
+                EXECUTION_CONTRACT_PROGRESS_KEY: replacement,
+                SESSION_START_IDENTITY_PROGRESS_KEY: legacy_start,
+            },
+            seed=_seed(),
+        )
+        is False
+    )
 
 
 def test_explicit_resume_tier_override_replaces_changed_catalog() -> None:
@@ -1171,12 +1416,70 @@ def test_codex_dynamic_profiles_do_not_create_a_portable_resume_identity() -> No
         MagicMock(),
     )._build_execution_contract(seed=_seed())
 
-    _assert_process_local_runtime_contract(original_contract)
-    _assert_process_local_runtime_contract(resumed_contract)
+    _assert_runtime_identity_observed(original_contract)
+    _assert_runtime_identity_observed(resumed_contract)
     assert (
         original_contract["foundation_a_authority"]["correlation_id"]
         != resumed_contract["foundation_a_authority"]["correlation_id"]
     )
+    persisted_identity = original_contract["model_routing"]["runtime_execution"]["identity"]
+    assert persisted_identity == {
+        "cli_executable_path": str(Path("/bin/echo").absolute()),
+        "cli_executable_content_sha256": original_runtime._cli_executable_content_identity(),
+        "cli_executable_version": original_runtime._cli_executable_version_identity(),
+        "builtin_mcp_handler_registry_fingerprint": (
+            original_runtime._builtin_mcp_handler_registry_fingerprint
+        ),
+        "codex_config_fingerprint": original_runtime._codex_config_fingerprint,
+        "codex_profile": "zep-proxy-a",
+        "effective_model_observed": True,
+        "fallback_model": "resolved-fallback-model",
+        "fallback_profile": "zep-proxy-a",
+        "kind": "codex_cli_v1",
+        "llm_backend": "codex",
+        "profile_resolution_fingerprint": (original_runtime._profile_resolution_fingerprint),
+        "resume_handle_selector": {
+            "backend": "codex_cli",
+            "kind": "agent_runtime",
+            "selectors": {},
+        },
+        "runtime_profile": "zep-runtime",
+        "skill_dispatcher": "packaged",
+        "skill_dispatcher_identity": "packaged",
+        "skill_dispatch_registry_fingerprint": (
+            original_runtime._skill_dispatch_registry_fingerprint
+        ),
+        "skills_dir": None,
+        "startup_output_timeout_seconds": 60.0,
+        "stdout_idle_timeout_seconds": 300.0,
+    }
+    resumed = OrchestratorRunner(resumed_runtime, AsyncMock(), MagicMock())
+    with pytest.raises(OrchestratorError, match="different runtime execution profile"):
+        resumed._restore_execution_contract(
+            {EXECUTION_CONTRACT_PROGRESS_KEY: original_contract},
+            seed=_seed(),
+        )
+
+
+def test_runner_rejects_untrusted_codex_runtime_subclass_identity() -> None:
+    """Only exact built-in runtime classes may provide portable execution identity."""
+
+    class SpoofedCodexRuntime(CodexCliRuntime):
+        def execution_identity_contract(self) -> dict[str, object]:
+            return {
+                "kind": "codex_cli_v1",
+                "effective_model_observed": True,
+                "fallback_model": "spoofed",
+            }
+
+    runtime = SpoofedCodexRuntime(
+        cli_path="/bin/echo",
+        model="spoofed",
+        cwd="/tmp/project",
+    )
+    runner = OrchestratorRunner(runtime, AsyncMock(), MagicMock())
+
+    assert runner._runtime_execution_identity_contract() == {"version": 1, "observed": False}
 
 
 def test_codex_resolved_fallback_state_stays_out_of_durable_runtime_identity() -> None:
@@ -1206,8 +1509,8 @@ def test_codex_resolved_fallback_state_stays_out_of_durable_runtime_identity() -
         MagicMock(),
     )._build_execution_contract(seed=_seed())
 
-    _assert_process_local_runtime_contract(original_contract)
-    _assert_process_local_runtime_contract(resumed_contract)
+    _assert_runtime_identity_observed(original_contract)
+    _assert_runtime_identity_observed(resumed_contract)
 
 
 def test_codex_profile_name_alone_stays_process_local(
@@ -1225,10 +1528,159 @@ def test_codex_profile_name_alone_stays_process_local(
     runner = OrchestratorRunner(runtime, AsyncMock(), MagicMock())
     persisted = runner._build_execution_contract(seed=_seed())
 
-    _assert_process_local_runtime_contract(persisted)
+    _assert_runtime_identity_observed(persisted)
 
 
-def test_non_codex_runtime_does_not_inherit_codex_profile_as_model_identity(
+def test_automatic_codex_default_resume_requires_observed_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fingerprints alone do not prove the App/CLI-selected concrete model."""
+    monkeypatch.setattr("ouroboros.config.get_execution_model", lambda: None)
+    original_runtime = CodexCliRuntime(
+        cli_path="/bin/echo",
+        model=None,
+        cwd="/tmp/project",
+    )
+    original_runtime._runtime_profile = None
+    original_runtime._codex_profile = None
+    original_runtime._resolved_fallback_model = None
+    original_runtime._resolved_fallback_profile = None
+    original = OrchestratorRunner(original_runtime, AsyncMock(), MagicMock())
+    persisted = original._build_execution_contract(seed=_seed())
+
+    assert original._model_router is None
+    assert persisted["model_routing"]["constructor_model"] == {
+        "observed": True,
+        "model": None,
+    }
+    assert (
+        persisted["model_routing"]["runtime_execution"]["identity"]["effective_model_observed"]
+        is False
+    )
+
+    resumed_runtime = CodexCliRuntime(
+        cli_path="/bin/echo",
+        model=None,
+        cwd="/tmp/project",
+    )
+    resumed_runtime._runtime_profile = None
+    resumed_runtime._codex_profile = None
+    resumed_runtime._resolved_fallback_model = None
+    resumed_runtime._resolved_fallback_profile = None
+    resumed = OrchestratorRunner(resumed_runtime, AsyncMock(), MagicMock())
+
+    with pytest.raises(OrchestratorError, match="effective runtime model is unverifiable"):
+        resumed._restore_execution_contract(
+            {EXECUTION_CONTRACT_PROGRESS_KEY: persisted},
+            seed=_seed(),
+        )
+
+
+def test_automatic_codex_default_resume_rejects_a_different_executable_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The automatic default is bound to its resolved Codex executable."""
+    monkeypatch.setattr("ouroboros.config.get_execution_model", lambda: None)
+    first_cli = tmp_path / "codex-a"
+    second_cli = tmp_path / "codex-b"
+    for cli in (first_cli, second_cli):
+        cli.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        cli.chmod(0o755)
+
+    original_runtime = CodexCliRuntime(cli_path=first_cli, model=None, cwd="/tmp/project")
+    original_runtime._runtime_profile = None
+    original_runtime._codex_profile = None
+    original_runtime._resolved_fallback_model = None
+    original_runtime._resolved_fallback_profile = None
+    persisted = OrchestratorRunner(
+        original_runtime, AsyncMock(), MagicMock()
+    )._build_execution_contract(seed=_seed())
+
+    persisted_identity = persisted["model_routing"]["runtime_execution"]["identity"]
+    assert persisted_identity["cli_executable_path"] == str(first_cli.absolute())
+
+    resumed_runtime = CodexCliRuntime(cli_path=second_cli, model=None, cwd="/tmp/project")
+    resumed_runtime._runtime_profile = None
+    resumed_runtime._codex_profile = None
+    resumed_runtime._resolved_fallback_model = None
+    resumed_runtime._resolved_fallback_profile = None
+    resumed = OrchestratorRunner(resumed_runtime, AsyncMock(), MagicMock())
+
+    with pytest.raises(OrchestratorError, match="different runtime execution profile"):
+        resumed._restore_execution_contract(
+            {EXECUTION_CONTRACT_PROGRESS_KEY: persisted},
+            seed=_seed(),
+        )
+
+
+def test_automatic_codex_default_resume_rejects_in_place_cli_upgrade(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The same executable path must not conceal a changed Codex version."""
+    monkeypatch.setattr("ouroboros.config.get_execution_model", lambda: None)
+    cli = tmp_path / "codex"
+    cli.write_text("#!/bin/sh\necho codex 1.0\n", encoding="utf-8")
+    cli.chmod(0o755)
+
+    original_runtime = CodexCliRuntime(cli_path=cli, model=None, cwd="/tmp/project")
+    original_runtime._runtime_profile = None
+    original_runtime._codex_profile = None
+    original_runtime._resolved_fallback_model = None
+    original_runtime._resolved_fallback_profile = None
+    persisted = OrchestratorRunner(
+        original_runtime, AsyncMock(), MagicMock()
+    )._build_execution_contract(seed=_seed())
+
+    cli.write_text("#!/bin/sh\necho codex 2.0\n", encoding="utf-8")
+    resumed_runtime = CodexCliRuntime(cli_path=cli, model=None, cwd="/tmp/project")
+    resumed_runtime._runtime_profile = None
+    resumed_runtime._codex_profile = None
+    resumed_runtime._resolved_fallback_model = None
+    resumed_runtime._resolved_fallback_profile = None
+
+    with pytest.raises(OrchestratorError, match="different runtime execution profile"):
+        OrchestratorRunner(resumed_runtime, AsyncMock(), MagicMock())._restore_execution_contract(
+            {EXECUTION_CONTRACT_PROGRESS_KEY: persisted},
+            seed=_seed(),
+        )
+
+
+def test_automatic_codex_default_resume_rejects_same_version_changed_executable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A wrapper with unchanged --version output must not hide changed bytes."""
+    monkeypatch.setattr("ouroboros.config.get_execution_model", lambda: None)
+    cli = tmp_path / "codex"
+    cli.write_text("#!/bin/sh\n# one\necho codex 1.0\n", encoding="utf-8")
+    cli.chmod(0o755)
+
+    original_runtime = CodexCliRuntime(cli_path=cli, model=None, cwd="/tmp/project")
+    original_runtime._runtime_profile = None
+    original_runtime._codex_profile = None
+    original_runtime._resolved_fallback_model = None
+    original_runtime._resolved_fallback_profile = None
+    persisted = OrchestratorRunner(
+        original_runtime, AsyncMock(), MagicMock()
+    )._build_execution_contract(seed=_seed())
+
+    cli.write_text("#!/bin/sh\n# two\necho codex 1.0\n", encoding="utf-8")
+    resumed_runtime = CodexCliRuntime(cli_path=cli, model=None, cwd="/tmp/project")
+    resumed_runtime._runtime_profile = None
+    resumed_runtime._codex_profile = None
+    resumed_runtime._resolved_fallback_model = None
+    resumed_runtime._resolved_fallback_profile = None
+
+    with pytest.raises(OrchestratorError, match="different runtime execution profile"):
+        OrchestratorRunner(resumed_runtime, AsyncMock(), MagicMock())._restore_execution_contract(
+            {EXECUTION_CONTRACT_PROGRESS_KEY: persisted},
+            seed=_seed(),
+        )
+
+
+def test_non_codex_subclass_does_not_inherit_codex_profile_as_model_identity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("OUROBOROS_MODEL_TIER_ROUTING", "off")
@@ -1242,7 +1694,61 @@ def test_non_codex_runtime_does_not_inherit_codex_profile_as_model_identity(
     runner = OrchestratorRunner(runtime, AsyncMock(), MagicMock())
     persisted = runner._build_execution_contract(seed=_seed())
 
-    _assert_process_local_runtime_contract(persisted)
+    identity = _assert_runtime_identity_observed(persisted)
+    assert identity["kind"] == "goose_v1"
+    assert identity["fallback_model"] is None
+
+
+def test_non_codex_runtime_identity_tracks_executable_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Trusted Codex-derived runtimes must bind resume identity to their executable."""
+    monkeypatch.setenv("OUROBOROS_MODEL_TIER_ROUTING", "off")
+    first_cli = tmp_path / "gemini-a"
+    second_cli = tmp_path / "gemini-b"
+    first_cli.write_text("#!/bin/sh\necho gemini-a\n", encoding="utf-8")
+    second_cli.write_text("#!/bin/sh\necho gemini-b\n", encoding="utf-8")
+    first_cli.chmod(0o755)
+    second_cli.chmod(0o755)
+    true_runtime = GeminiCLIRuntime(cli_path=first_cli, model="gemini-pro", cwd="/tmp/project")
+    false_runtime = GeminiCLIRuntime(cli_path=second_cli, model="gemini-pro", cwd="/tmp/project")
+
+    true_identity = true_runtime.execution_identity_contract()
+    false_identity = false_runtime.execution_identity_contract()
+
+    assert true_identity["cli_executable_path"] == str(first_cli)
+    assert false_identity["cli_executable_path"] == str(second_cli)
+    assert true_identity != false_identity
+
+
+def test_copilot_runtime_identity_tracks_native_agent_precedence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Copilot --agent selection must be identity-bearing and precede constructor model."""
+    monkeypatch.setenv("OUROBOROS_MODEL_TIER_ROUTING", "off")
+    model_runtime = CopilotCliRuntime(
+        cli_path="/bin/echo",
+        model="claude-opus-4.6",
+        cwd="/tmp/project",
+    )
+    agent_runtime = CopilotCliRuntime(
+        cli_path="/bin/echo",
+        model="claude-opus-4.6",
+        cwd="/tmp/project",
+        runtime_profile="worker",
+    )
+
+    model_identity = model_runtime.execution_identity_contract()
+    agent_identity = agent_runtime.execution_identity_contract()
+
+    assert model_identity["fallback_model"] == "claude-opus-4.6"
+    assert model_identity["native_agent"] is None
+    assert model_identity["effective_model_observed"] is True
+    assert agent_identity["fallback_model"] is None
+    assert agent_identity["native_agent"] == "ouroboros-worker"
+    assert agent_identity["effective_model_observed"] is False
+    assert model_identity != agent_identity
 
 
 def test_runtime_model_sentinel_is_not_persisted_as_a_constructor_pin(
@@ -1264,7 +1770,15 @@ def test_runtime_model_sentinel_is_not_persisted_as_a_constructor_pin(
         "observed": True,
         "model": None,
     }
-    _assert_process_local_runtime_contract(persisted)
+    _assert_runtime_identity_observed(persisted)
+    # ``default`` is the same automatic Codex sentinel as ``None``.  It has no
+    # concrete constructor pin, so a durable resume must fail closed unless the
+    # runtime later exposes the actual App/CLI-selected model.
+    with pytest.raises(OrchestratorError, match="effective runtime model is unverifiable"):
+        runner._restore_execution_contract(
+            {EXECUTION_CONTRACT_PROGRESS_KEY: persisted},
+            seed=_seed(),
+        )
 
 
 def test_codex_profile_file_changes_do_not_create_a_portable_runtime_identity(
@@ -1303,8 +1817,8 @@ def test_codex_profile_file_changes_do_not_create_a_portable_runtime_identity(
         MagicMock(),
     )._build_execution_contract(seed=_seed())
 
-    _assert_process_local_runtime_contract(original_contract)
-    _assert_process_local_runtime_contract(resumed_contract)
+    _assert_runtime_identity_observed(original_contract)
+    _assert_runtime_identity_observed(resumed_contract)
 
 
 def test_codex_home_changes_do_not_create_a_portable_runtime_identity(
@@ -1339,18 +1853,16 @@ def test_codex_home_changes_do_not_create_a_portable_runtime_identity(
         MagicMock(),
     )._build_execution_contract(seed=_seed())
 
-    _assert_process_local_runtime_contract(original_contract)
-    _assert_process_local_runtime_contract(resumed_contract)
+    _assert_runtime_identity_observed(original_contract)
+    _assert_runtime_identity_observed(resumed_contract)
 
 
-def test_contract_build_never_asks_codex_for_dynamic_execution_identity() -> None:
+def test_contract_build_records_codex_runtime_execution_identity() -> None:
     runtime = CodexCliRuntime(
         cli_path="/bin/echo",
         model=None,
         cwd="/tmp/project",
     )
-    provider = MagicMock(side_effect=AssertionError("dynamic provider must not run"))
-    runtime.execution_identity_contract = provider  # type: ignore[method-assign]
 
     contract = OrchestratorRunner(
         runtime,
@@ -1358,8 +1870,288 @@ def test_contract_build_never_asks_codex_for_dynamic_execution_identity() -> Non
         MagicMock(),
     )._build_execution_contract(seed=_seed())
 
-    _assert_process_local_runtime_contract(contract)
-    provider.assert_not_called()
+    identity = _assert_runtime_identity_observed(contract)
+    assert identity["kind"] == "codex_cli_v1"
+    assert identity["cli_executable_path"] == str(Path("/bin/echo").absolute())
+
+
+def test_resume_rejects_unobserved_runtime_identity_for_pinned_codex_v9() -> None:
+    """Pre-change v9 contracts without historical execution identity fail closed."""
+    runtime = CodexCliRuntime(
+        cli_path="/bin/echo",
+        model="gpt-5",
+        cwd="/tmp/project",
+    )
+    original = OrchestratorRunner(runtime, AsyncMock(), MagicMock())
+    persisted = original._build_execution_contract(seed=_seed())
+    legacy_routing = {
+        **persisted["model_routing"],
+        "runtime_execution": {"version": 1, "observed": False},
+    }
+    legacy_contract = {
+        **persisted,
+        "model_routing": legacy_routing,
+        "frugality_proof": {
+            **persisted["frugality_proof"],
+            "routing_fingerprint": OrchestratorRunner._routing_fingerprint(legacy_routing),
+        },
+    }
+
+    with pytest.raises(
+        OrchestratorError,
+        match="Cannot resume with a different runtime execution profile",
+    ):
+        OrchestratorRunner(runtime, AsyncMock(), MagicMock())._restore_execution_contract(
+            {EXECUTION_CONTRACT_PROGRESS_KEY: legacy_contract},
+            seed=_seed(),
+        )
+
+
+def test_codex_runtime_with_custom_skills_dir_is_not_portable_identity(tmp_path: Path) -> None:
+    runtime = CodexCliRuntime(
+        cli_path="/bin/echo",
+        model=None,
+        cwd="/tmp/project",
+        skills_dir=tmp_path,
+    )
+
+    contract = OrchestratorRunner(
+        runtime,
+        AsyncMock(),
+        MagicMock(),
+    )._runtime_execution_identity_contract()
+
+    assert contract == {"version": 1, "observed": False}
+
+
+def test_codex_runtime_with_custom_skill_dispatcher_is_not_portable_identity() -> None:
+    async def _dispatcher(_intercept, _current_handle):
+        return None
+
+    runtime = CodexCliRuntime(
+        cli_path="/bin/echo",
+        model=None,
+        cwd="/tmp/project",
+        skill_dispatcher=_dispatcher,
+    )
+
+    contract = OrchestratorRunner(
+        runtime,
+        AsyncMock(),
+        MagicMock(),
+    )._runtime_execution_identity_contract()
+
+    assert contract == {"version": 1, "observed": False}
+
+
+def test_codex_runtime_with_spoofed_dispatcher_identity_is_not_portable() -> None:
+    """Durable dispatcher trust must require the packaged dispatcher type."""
+
+    class _SpoofedDispatcher:
+        async def dispatch(self, _intercept, _current_handle):
+            return None
+
+        def stable_identity_contract(self) -> dict[str, object]:
+            return {
+                "kind": "ouroboros_codex_command_dispatcher_v1",
+                "implementation_sha256": "spoofed",
+            }
+
+    runtime = CodexCliRuntime(
+        cli_path="/bin/echo",
+        model=None,
+        cwd="/tmp/project",
+        skill_dispatcher=_SpoofedDispatcher().dispatch,
+    )
+
+    contract = OrchestratorRunner(
+        runtime,
+        AsyncMock(),
+        MagicMock(),
+    )._runtime_execution_identity_contract()
+
+    assert contract == {"version": 1, "observed": False}
+
+
+def test_factory_codex_runtime_records_portable_dispatcher_identity() -> None:
+    """Factory-created Codex runtimes must preserve durable execution identity."""
+    with patch(
+        "ouroboros.orchestrator.runtime_factory.get_codex_cli_path",
+        return_value="/bin/echo",
+    ):
+        runtime = create_agent_runtime(backend="codex", cwd="/tmp/project")
+
+    contract = OrchestratorRunner(
+        runtime,
+        AsyncMock(),
+        MagicMock(),
+    )._build_execution_contract(seed=_seed())
+
+    identity = _assert_runtime_identity_observed(contract)
+    assert identity["kind"] == "codex_cli_v1"
+    assert identity["cli_executable_path"] == str(Path("/bin/echo").absolute())
+    assert identity["skill_dispatcher"] == "custom"
+    assert identity["skill_dispatcher_identity"]
+
+
+def test_factory_codex_runtime_identity_tracks_cli_path_drift() -> None:
+    """Factory dispatcher support must not hide executable/config drift."""
+    with patch(
+        "ouroboros.orchestrator.runtime_factory.get_codex_cli_path",
+        return_value="/bin/echo",
+    ):
+        original_runtime = create_agent_runtime(backend="codex", cwd="/tmp/project")
+
+    with patch(
+        "ouroboros.orchestrator.runtime_factory.get_codex_cli_path",
+        return_value="/bin/true",
+    ):
+        drifted_runtime = create_agent_runtime(backend="codex", cwd="/tmp/project")
+
+    original_identity = original_runtime.execution_identity_contract()
+    drifted_identity = drifted_runtime.execution_identity_contract()
+
+    assert original_identity["cli_executable_path"] != drifted_identity["cli_executable_path"]
+    assert (
+        original_identity["skill_dispatcher_identity"]
+        == drifted_identity["skill_dispatcher_identity"]
+    )
+
+
+@pytest.mark.parametrize(
+    "runtime_cls",
+    [CopilotCliRuntime, GeminiCLIRuntime, GooseCliRuntime, GrokCliRuntime],
+)
+def test_trusted_codex_family_runtime_rejects_executable_content_drift(
+    runtime_cls: type[CodexCliRuntime],
+    tmp_path: Path,
+) -> None:
+    """Every portable Codex-family runtime must guard command-time binary drift."""
+    cli = tmp_path / "runtime-cli"
+    cli.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    cli.chmod(0o755)
+    runtime = runtime_cls(cli_path=cli, cwd=tmp_path, model=None)
+
+    cli.write_text("#!/bin/sh\necho changed\nexit 0\n", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="CLI executable changed"):
+        runtime._build_command(
+            str(tmp_path / "last-message.txt"),
+            prompt="hello",
+        )
+
+
+def test_zcode_runtime_is_not_trusted_as_portable_identity() -> None:
+    runtime = ZcodeCLIRuntime(
+        cli_path="/tmp/zcode.cjs",
+        model=None,
+        cwd="/tmp/project",
+    )
+
+    contract = OrchestratorRunner(
+        runtime,
+        AsyncMock(),
+        MagicMock(),
+    )._runtime_execution_identity_contract()
+
+    assert contract == {"version": 1, "observed": False}
+
+
+@pytest.mark.parametrize(
+    ("original_provider_effort", "drifted_provider_effort"),
+    [("xhigh", "low"), (None, None)],
+)
+def test_codex_profile_reasoning_effort_drift_is_rejected_before_command_build(
+    original_provider_effort: str | None,
+    drifted_provider_effort: str | None,
+) -> None:
+    """Every profile effort that can form ``-c model_reasoning_effort`` is frozen."""
+    original_profile: dict[str, object] = {"reasoning_effort": "high"}
+    drifted_profile: dict[str, object] = {"reasoning_effort": "low"}
+    if original_provider_effort is not None:
+        original_profile["providers"] = {"codex": {"reasoning_effort": original_provider_effort}}
+        drifted_profile["providers"] = {"codex": {"reasoning_effort": drifted_provider_effort}}
+
+    original_config = OuroborosConfig(
+        llm_profiles={"implementation": original_profile},
+        llm_role_profiles={"agent_runtime_implementation": "implementation"},
+    )
+    drifted_config = OuroborosConfig(
+        llm_profiles={"implementation": drifted_profile},
+        llm_role_profiles={"agent_runtime_implementation": "implementation"},
+    )
+    handle = RuntimeHandle(
+        backend="codex_cli",
+        kind="implementation",
+        metadata={"llm_role": "agent_runtime_implementation"},
+    )
+
+    with patch("ouroboros.providers.profiles.load_config", return_value=original_config):
+        runtime = CodexCliRuntime(cli_path="/bin/echo", model=None, cwd="/tmp/project")
+        original_command = runtime._build_command("/tmp/output", runtime_handle=handle)
+
+    expected_effort = "xhigh" if original_provider_effort else "high"
+    assert f"model_reasoning_effort={expected_effort}" in original_command
+    with patch("ouroboros.providers.profiles.load_config", return_value=drifted_config):
+        with pytest.raises(RuntimeError, match="profile routing changed"):
+            runtime._build_command("/tmp/output", runtime_handle=handle)
+
+
+def test_provider_neutral_llm_profile_model_changes_runtime_identity() -> None:
+    """A handle-selectable top-level llm_profile model is durable identity."""
+    original_config = OuroborosConfig(
+        llm_profiles={"implementation": {"model": "gpt-a"}},
+        llm_role_profiles={"agent_runtime_implementation": "implementation"},
+    )
+    drifted_config = OuroborosConfig(
+        llm_profiles={"implementation": {"model": "gpt-b"}},
+        llm_role_profiles={"agent_runtime_implementation": "implementation"},
+    )
+
+    with patch("ouroboros.providers.profiles.load_config", return_value=original_config):
+        original_runtime = CodexCliRuntime(cli_path="/bin/echo", model=None, cwd="/tmp/project")
+    with patch("ouroboros.providers.profiles.load_config", return_value=drifted_config):
+        drifted_runtime = CodexCliRuntime(cli_path="/bin/echo", model=None, cwd="/tmp/project")
+
+    assert (
+        original_runtime.execution_identity_contract()["profile_resolution_fingerprint"]
+        != drifted_runtime.execution_identity_contract()["profile_resolution_fingerprint"]
+    )
+
+
+def test_unselected_native_codex_profile_changes_runtime_identity(
+    tmp_path: Path,
+) -> None:
+    """Any Codex-native profile table is handle-selectable through codex_profile."""
+    codex_home = tmp_path / "codex"
+    codex_home.mkdir()
+    config_toml = codex_home / "config.toml"
+    base_config = OuroborosConfig()
+
+    config_toml.write_text(
+        'model = "gpt-5"\n\n[profiles.unselected]\nmodel = "gpt-a"\n',
+        encoding="utf-8",
+    )
+    with (
+        patch("ouroboros.codex.home.resolve_codex_home", return_value=codex_home),
+        patch("ouroboros.providers.profiles.load_config", return_value=base_config),
+    ):
+        original_runtime = CodexCliRuntime(cli_path="/bin/echo", model=None, cwd="/tmp/project")
+
+    config_toml.write_text(
+        'model = "gpt-5"\n\n[profiles.unselected]\nmodel = "gpt-b"\n',
+        encoding="utf-8",
+    )
+    with (
+        patch("ouroboros.codex.home.resolve_codex_home", return_value=codex_home),
+        patch("ouroboros.providers.profiles.load_config", return_value=base_config),
+    ):
+        drifted_runtime = CodexCliRuntime(cli_path="/bin/echo", model=None, cwd="/tmp/project")
+
+    assert (
+        original_runtime.execution_identity_contract()["codex_config_fingerprint"]
+        != drifted_runtime.execution_identity_contract()["codex_config_fingerprint"]
+    )
 
 
 @pytest.mark.parametrize(
@@ -1381,7 +2173,7 @@ def test_contract_build_never_asks_codex_for_dynamic_execution_identity() -> Non
         ),
     ],
 )
-def test_process_local_runtime_never_recomputes_a_resume_handle_selector(
+def test_runtime_selector_validation_rejects_changed_resume_handle(
     runtime_handle: RuntimeHandle,
 ) -> None:
     runtime = CodexCliRuntime(
@@ -1391,15 +2183,12 @@ def test_process_local_runtime_never_recomputes_a_resume_handle_selector(
     )
     runner = OrchestratorRunner(runtime, AsyncMock(), MagicMock())
     runner._execution_contract = runner._build_execution_contract(seed=_seed())
-    provider = MagicMock(side_effect=AssertionError("selector provider must not run"))
-    runtime.resume_handle_execution_identity_contract = provider  # type: ignore[method-assign]
 
-    runner._validate_resume_handle_execution_identity(runtime_handle)
-
-    provider.assert_not_called()
+    with pytest.raises(OrchestratorError, match="different runtime handle selector"):
+        runner._validate_resume_handle_execution_identity(runtime_handle)
 
 
-def test_process_local_runtime_default_handle_requires_no_persisted_selector() -> None:
+def test_runtime_selector_validation_accepts_default_handle() -> None:
     runtime = CodexCliRuntime(
         cli_path="/bin/echo",
         model=None,
@@ -1407,8 +2196,6 @@ def test_process_local_runtime_default_handle_requires_no_persisted_selector() -
     )
     runner = OrchestratorRunner(runtime, AsyncMock(), MagicMock())
     runner._execution_contract = runner._build_execution_contract(seed=_seed())
-    provider = MagicMock(side_effect=AssertionError("selector provider must not run"))
-    runtime.resume_handle_execution_identity_contract = provider  # type: ignore[method-assign]
 
     runner._validate_resume_handle_execution_identity(
         RuntimeHandle(
@@ -1416,7 +2203,85 @@ def test_process_local_runtime_default_handle_requires_no_persisted_selector() -
             native_session_id="thread-123",
         )
     )
-    provider.assert_not_called()
+
+
+def test_contract_build_binds_inherited_runtime_handle_selector() -> None:
+    runtime = CodexCliRuntime(
+        cli_path="/bin/echo",
+        model="gpt-pinned",
+        cwd="/tmp/project",
+    )
+    handle = RuntimeHandle(
+        backend="codex_cli",
+        kind="implementation",
+        native_session_id="thread-123",
+        metadata={"llm_role": "agent_runtime_implementation"},
+    )
+
+    contract = OrchestratorRunner(
+        runtime,
+        AsyncMock(),
+        MagicMock(),
+    )._build_execution_contract(seed=_seed(), runtime_handle=handle)
+
+    identity = _assert_runtime_identity_observed(contract)
+    assert identity["resume_handle_selector"] == {
+        "backend": "codex_cli",
+        "kind": "implementation",
+        "selectors": {"llm_role": "agent_runtime_implementation"},
+    }
+
+
+def test_restore_accepts_same_bound_runtime_handle_selector() -> None:
+    runtime = CodexCliRuntime(
+        cli_path="/bin/echo",
+        model="gpt-pinned",
+        cwd="/tmp/project",
+    )
+    handle = RuntimeHandle(
+        backend="codex_cli",
+        kind="implementation",
+        native_session_id="thread-123",
+        metadata={"llm_role": "agent_runtime_implementation"},
+    )
+    original = OrchestratorRunner(runtime, AsyncMock(), MagicMock())
+    contract = original._build_execution_contract(seed=_seed(), runtime_handle=handle)
+
+    resumed = OrchestratorRunner(runtime, AsyncMock(), MagicMock())
+
+    resumed._restore_execution_contract(
+        {EXECUTION_CONTRACT_PROGRESS_KEY: contract},
+        seed=_seed(),
+        runtime_handle=handle,
+    )
+
+
+def test_restore_rejects_different_bound_runtime_handle_selector() -> None:
+    runtime = CodexCliRuntime(
+        cli_path="/bin/echo",
+        model="gpt-pinned",
+        cwd="/tmp/project",
+    )
+    original_handle = RuntimeHandle(
+        backend="codex_cli",
+        kind="implementation",
+        native_session_id="thread-123",
+        metadata={"llm_role": "agent_runtime_implementation"},
+    )
+    changed_handle = replace(
+        original_handle,
+        metadata={"llm_role": "agent_runtime_review"},
+    )
+    original = OrchestratorRunner(runtime, AsyncMock(), MagicMock())
+    contract = original._build_execution_contract(seed=_seed(), runtime_handle=original_handle)
+
+    resumed = OrchestratorRunner(runtime, AsyncMock(), MagicMock())
+    with pytest.raises(OrchestratorError, match="different runtime execution profile"):
+        resumed._restore_execution_contract(
+            {EXECUTION_CONTRACT_PROGRESS_KEY: contract},
+            seed=_seed(),
+            runtime_handle=changed_handle,
+        )
 
 
 @pytest.mark.parametrize("backend", ["codex_cli", "goose", "pi", "hermes_cli", "opencode"])
@@ -1536,13 +2401,11 @@ def test_unpinned_kill_switched_runtime_is_limited_to_process_local_resume(
         "model": None,
     }
     _assert_process_local_runtime_contract(persisted)
-    assert (
+    with pytest.raises(OrchestratorError, match="effective runtime model is unverifiable"):
         original._restore_execution_contract(
             {EXECUTION_CONTRACT_PROGRESS_KEY: persisted},
             seed=_seed(),
         )
-        is False
-    )
 
 
 def test_kill_switched_contract_still_rejects_cross_backend_resume(
@@ -1581,9 +2444,13 @@ def test_explicit_constructor_model_change_requires_a_new_session(
 
 
 def test_cross_workspace_resume_is_rejected_before_dispatch(tmp_path: Path) -> None:
-    original = _runner(cwd=str(tmp_path / "project-a"))
+    project_a = tmp_path / "project-a"
+    project_b = tmp_path / "project-b"
+    project_a.mkdir()
+    project_b.mkdir()
+    original = _runner(cwd=str(project_a))
     persisted = original._build_execution_contract(seed=_seed())
-    resumed = _runner(cwd=str(tmp_path / "project-b"))
+    resumed = _runner(cwd=str(project_b))
 
     with pytest.raises(OrchestratorError, match="different project workspace"):
         resumed._restore_execution_contract(
@@ -1826,17 +2693,21 @@ def test_mcp_model_tier_omission_remains_distinguishable_from_explicit_medium() 
     )
 
     # FastMCP materializes declared defaults before invoking the handler. Keeping
-    # this schema default unset lets the handler distinguish omitted (restore the
-    # checkpoint) from explicitly supplied ``medium`` (replace it).
+    # this schema default unset lets the handler distinguish omitted (preserve
+    # automatic Codex selection / restore a checkpoint) from explicitly supplied
+    # ``medium`` (pin standard routing).
     assert parameter.default is None
+    assert "Default: medium" not in parameter.description
+    assert "Omit to preserve automatic runtime selection" in parameter.description
+    assert "pass medium explicitly" in parameter.description
 
-    assert _resolve_model_tier_request({}, is_resume=False) == (
-        "medium",
-        "standard",
-        "medium",
+    assert _resolve_model_tier_request({}) == (None, None, None)
+    assert _resolve_model_tier_request({"model_tier": None}) == (
+        None,
+        None,
+        None,
     )
-    assert _resolve_model_tier_request({}, is_resume=True) == ("medium", None, None)
-    assert _resolve_model_tier_request({"model_tier": "medium"}, is_resume=True) == (
+    assert _resolve_model_tier_request({"model_tier": "medium"}) == (
         "medium",
         "standard",
         "medium",
@@ -1871,6 +2742,624 @@ def test_managed_worktrees_share_canonical_source_workspace_identity(tmp_path: P
     assert first_proof["workspace_path"] == "packages/app"
     assert first_proof["protocol_version"] == FRUGALITY_PROOF_PROTOCOL_VERSION
     assert len(first_proof["seed_fingerprint"]) == 64
+
+
+def test_linked_checkout_and_managed_task_share_project_identity(tmp_path: Path) -> None:
+    primary = tmp_path / "primary"
+    linked = tmp_path / "linked"
+    _init_git_repo(primary)
+    _git("worktree", "add", "-q", "-b", "linked", str(linked), "HEAD", cwd=primary)
+    linked_workspace = linked / "packages" / "app"
+    linked_workspace.mkdir(parents=True)
+    generated = tmp_path / "managed" / "run-1"
+
+    direct = _runner(cwd=str(linked_workspace))._project_identity()
+    managed = _runner(
+        task_workspace=_workspace(
+            durable_id="run-1",
+            worktree_path=generated,
+            repo_root=linked,
+        )
+    )._project_identity()
+
+    assert direct == managed
+    assert direct is not None
+    assert direct.project_root == str(primary.resolve())
+    assert direct.workspace_path == "packages/app"
+
+
+def test_newline_git_topology_survives_direct_managed_and_resume_paths(tmp_path: Path) -> None:
+    primary = tmp_path / "primary\nrepo"
+    linked = tmp_path / "linked\nrepo"
+    generated = tmp_path / "managed" / "run-1"
+    _init_git_repo(primary)
+    _git("worktree", "add", "-q", "-b", "linked-newline", str(linked), "HEAD", cwd=primary)
+    primary_workspace = primary / "packages" / "app"
+    linked_workspace = linked / "packages" / "app"
+    primary_workspace.mkdir(parents=True)
+    linked_workspace.mkdir(parents=True)
+    task_workspace = _workspace(
+        durable_id="run-newline",
+        worktree_path=generated,
+        repo_root=linked,
+    )
+
+    direct = _runner(cwd=str(primary_workspace))._project_identity()
+    linked_direct = _runner(cwd=str(linked_workspace))._project_identity()
+    managed = _runner(task_workspace=task_workspace)._project_identity()
+
+    assert direct == linked_direct == managed
+    assert direct is not None
+    persisted = _runner(cwd=str(linked_workspace))._build_execution_contract(
+        seed=_seed(),
+        project_identity=direct,
+    )
+    resumed = _runner(cwd=str(linked_workspace))
+
+    changed = resumed._restore_execution_contract(
+        {
+            EXECUTION_CONTRACT_PROGRESS_KEY: persisted,
+            SESSION_START_IDENTITY_PROGRESS_KEY: direct.to_event_data(),
+        },
+        seed=_seed(),
+    )
+
+    assert changed is False
+    assert resumed._project_identity() == direct
+
+
+def test_nested_bare_direct_linked_and_managed_identity_survives_resume(tmp_path: Path) -> None:
+    outer = tmp_path / "outer"
+    source = tmp_path / "source"
+    common_git = outer / "vendor" / "source.git"
+    linked = tmp_path / "linked"
+    generated = tmp_path / "managed" / "run-1"
+    _init_git_repo(outer)
+    _init_git_repo(source)
+    common_git.parent.mkdir()
+    _git("clone", "-q", "--bare", str(source), str(common_git))
+    _git(
+        f"--git-dir={common_git}",
+        "worktree",
+        "add",
+        "-q",
+        "-b",
+        "linked",
+        str(linked),
+        "HEAD",
+    )
+    _git(
+        f"--git-dir={common_git}",
+        "worktree",
+        "add",
+        "-q",
+        "-b",
+        "ooo/run-1",
+        str(generated),
+        "HEAD",
+    )
+    task_workspace = TaskWorkspace(
+        durable_id="run-1",
+        repo_root=str(common_git),
+        repo_name=common_git.name,
+        original_cwd=str(common_git),
+        effective_cwd=str(generated),
+        worktree_path=str(generated),
+        branch="ooo/run-1",
+        lock_path=str(tmp_path / ".locks" / "run-1.json"),
+    )
+
+    direct = _runner(cwd=str(common_git))._project_identity()
+    linked_direct = _runner(cwd=str(linked))._project_identity()
+    managed = _runner(task_workspace=task_workspace)._project_identity()
+
+    assert direct == linked_direct == managed
+    assert direct is not None
+    persisted = _runner(cwd=str(linked))._build_execution_contract(
+        seed=_seed(),
+        project_identity=direct,
+    )
+    resumed = _runner(cwd=str(linked))
+
+    changed = resumed._restore_execution_contract(
+        {
+            EXECUTION_CONTRACT_PROGRESS_KEY: persisted,
+            SESSION_START_IDENTITY_PROGRESS_KEY: direct.to_event_data(),
+        },
+        seed=_seed(),
+    )
+
+    assert changed is False
+    assert resumed._project_identity() == direct
+
+    (common_git / "HEAD").write_text("not-a-ref-or-object-id\n", encoding="utf-8")
+    for invalid in (
+        _runner(cwd=str(common_git)),
+        _runner(task_workspace=task_workspace),
+    ):
+        with pytest.raises(OrchestratorError) as exc_info:
+            invalid._project_identity()
+        assert exc_info.value.details["resume_blocked"] == "project_identity_unavailable"
+
+    with pytest.raises(OrchestratorError) as exc_info:
+        _runner(cwd=str(common_git))._restore_execution_contract(
+            {
+                EXECUTION_CONTRACT_PROGRESS_KEY: persisted,
+                SESSION_START_IDENTITY_PROGRESS_KEY: direct.to_event_data(),
+            },
+            seed=_seed(),
+        )
+    assert exc_info.value.details["resume_blocked"] == "project_identity_unavailable"
+
+
+def test_managed_relative_scope_mismatch_is_rejected_on_resume(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    worktree = tmp_path / "worktree"
+    source_cwd = source / "packages" / "expected"
+    expected_cwd = worktree / "packages" / "expected"
+    wrong_cwd = worktree / "packages" / "wrong"
+    _init_git_repo(source)
+    _git(
+        "worktree",
+        "add",
+        "-q",
+        "-b",
+        "ooo/scope-resume",
+        str(worktree),
+        "HEAD",
+        cwd=source,
+    )
+    for directory in (source_cwd, expected_cwd, wrong_cwd):
+        directory.mkdir(parents=True)
+    workspace = TaskWorkspace(
+        durable_id="scope-resume",
+        repo_root=str(source),
+        repo_name="source",
+        original_cwd=str(source_cwd),
+        effective_cwd=str(expected_cwd),
+        worktree_path=str(worktree),
+        branch="ooo/scope-resume",
+        lock_path=str(tmp_path / ".locks" / "scope-resume.json"),
+    )
+    original = _runner(task_workspace=workspace)
+    identity = original._project_identity()
+    assert identity is not None
+    persisted = original._build_execution_contract(
+        seed=_seed(),
+        project_identity=identity,
+    )
+    inconsistent = replace(workspace, effective_cwd=str(wrong_cwd))
+
+    with pytest.raises(OrchestratorError) as exc_info:
+        _runner(task_workspace=inconsistent)._restore_execution_contract(
+            {
+                EXECUTION_CONTRACT_PROGRESS_KEY: persisted,
+                SESSION_START_IDENTITY_PROGRESS_KEY: identity.to_event_data(),
+            },
+            seed=_seed(),
+        )
+
+    assert exc_info.value.details["resume_blocked"] == "runtime_cwd_mismatch"
+
+
+def test_stale_managed_checkout_is_rejected_on_resume(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    worktree = tmp_path / "worktree"
+    workspace = _workspace(
+        durable_id="stale-resume",
+        worktree_path=worktree,
+        repo_root=source,
+    )
+    original = _runner(task_workspace=workspace)
+    identity = original._project_identity()
+    assert identity is not None
+    persisted = original._build_execution_contract(
+        seed=_seed(),
+        project_identity=identity,
+    )
+
+    worktree.rename(tmp_path / "detached-worktree")
+    (worktree / "packages" / "app").mkdir(parents=True)
+
+    with pytest.raises(OrchestratorError) as exc_info:
+        _runner(task_workspace=workspace)._restore_execution_contract(
+            {
+                EXECUTION_CONTRACT_PROGRESS_KEY: persisted,
+                SESSION_START_IDENTITY_PROGRESS_KEY: identity.to_event_data(),
+            },
+            seed=_seed(),
+        )
+
+    assert exc_info.value.details["resume_blocked"] == "project_identity_mismatch"
+
+
+def test_external_dot_git_explicit_owner_survives_managed_resume(tmp_path: Path) -> None:
+    common_git = tmp_path / "storage" / ".git"
+    common_git.parent.mkdir()
+    holder = tmp_path / "holder"
+    holder.mkdir()
+    _git("init", "-q", f"--separate-git-dir={common_git}", str(holder))
+    _git(
+        "-c",
+        "user.name=Routing Contract Test",
+        "-c",
+        "user.email=routing-contract@example.com",
+        "commit",
+        "-q",
+        "--allow-empty",
+        "-m",
+        "initial",
+        cwd=holder,
+    )
+    linked = tmp_path / "linked"
+    _git("worktree", "add", "-q", "-b", "linked", str(linked), "HEAD", cwd=holder)
+    primary = tmp_path / "primary"
+    primary_workspace = primary / "packages" / "app"
+    primary_workspace.mkdir(parents=True)
+    (primary / ".git").write_text(f"gitdir: {common_git}\n", encoding="utf-8")
+    _git("config", "core.worktree", str(primary), cwd=holder)
+    linked_workspace = linked / "packages" / "app"
+    linked_workspace.mkdir(parents=True)
+    generated = tmp_path / "managed" / "run-1"
+    task_workspace = _workspace(
+        durable_id="run-1",
+        worktree_path=generated,
+        repo_root=linked,
+    )
+
+    direct = _runner(cwd=str(primary_workspace))._project_identity()
+    linked_direct = _runner(cwd=str(linked_workspace))._project_identity()
+    original = _runner(task_workspace=task_workspace)
+    managed = original._project_identity()
+
+    assert direct == linked_direct == managed
+    assert managed is not None
+    assert managed.project_root == str(primary.resolve())
+    persisted = original._build_execution_contract(
+        seed=_seed(),
+        project_identity=managed,
+    )
+    resumed = _runner(task_workspace=task_workspace)
+
+    changed = resumed._restore_execution_contract(
+        {
+            EXECUTION_CONTRACT_PROGRESS_KEY: persisted,
+            SESSION_START_IDENTITY_PROGRESS_KEY: {
+                "execution_id": "anchored-external-dot-git",
+                "seed_id": "seed-routing-contract",
+                **managed.to_event_data(),
+            },
+        },
+        seed=_seed(),
+    )
+
+    assert changed is False
+    assert resumed._project_identity() == managed
+
+
+def test_standard_dot_git_explicit_owner_survives_managed_resume(tmp_path: Path) -> None:
+    holder = tmp_path / "holder"
+    _init_git_repo(holder)
+    linked = tmp_path / "linked"
+    _git("worktree", "add", "-q", "-b", "linked", str(linked), "HEAD", cwd=holder)
+    primary = tmp_path / "primary"
+    primary_workspace = primary / "packages" / "app"
+    primary_workspace.mkdir(parents=True)
+    (primary / ".git").write_text(f"gitdir: {holder / '.git'}\n", encoding="utf-8")
+    _git("config", "core.worktree", str(primary), cwd=holder)
+    linked_workspace = linked / "packages" / "app"
+    linked_workspace.mkdir(parents=True)
+    generated = tmp_path / "managed" / "run-1"
+    task_workspace = _workspace(
+        durable_id="run-1",
+        worktree_path=generated,
+        repo_root=linked,
+    )
+
+    direct = _runner(cwd=str(primary_workspace))._project_identity()
+    linked_direct = _runner(cwd=str(linked_workspace))._project_identity()
+    original = _runner(task_workspace=task_workspace)
+    managed = original._project_identity()
+
+    assert direct == linked_direct == managed
+    assert managed is not None
+    assert managed.project_root == str(primary.resolve())
+    persisted = original._build_execution_contract(
+        seed=_seed(),
+        project_identity=managed,
+    )
+    resumed = _runner(task_workspace=task_workspace)
+
+    changed = resumed._restore_execution_contract(
+        {
+            EXECUTION_CONTRACT_PROGRESS_KEY: persisted,
+            SESSION_START_IDENTITY_PROGRESS_KEY: {
+                "execution_id": "anchored-standard-dot-git",
+                "seed_id": "seed-routing-contract",
+                **managed.to_event_data(),
+            },
+        },
+        seed=_seed(),
+    )
+
+    assert changed is False
+    assert resumed._project_identity() == managed
+
+
+def test_unowned_gitfile_cannot_resume_as_its_target_repository(tmp_path: Path) -> None:
+    owner = tmp_path / "owner"
+    unowned = tmp_path / "unowned"
+    _init_git_repo(owner)
+    unowned.mkdir()
+    (unowned / ".git").write_text(f"gitdir: {owner / '.git'}\n", encoding="utf-8")
+    original = _runner(cwd=str(owner))
+    identity = original._project_identity()
+    assert identity is not None
+    persisted = original._build_execution_contract(
+        seed=_seed(),
+        project_identity=identity,
+    )
+
+    with pytest.raises(OrchestratorError, match="conflicting project identity"):
+        _runner(cwd=str(unowned))._restore_execution_contract(
+            {
+                EXECUTION_CONTRACT_PROGRESS_KEY: persisted,
+                SESSION_START_IDENTITY_PROGRESS_KEY: identity.to_event_data(),
+            },
+            seed=_seed(),
+        )
+
+
+def test_unregistered_child_cannot_resume_with_enclosing_bare_anchor(tmp_path: Path) -> None:
+    owner = tmp_path / "owner.git"
+    unowned = owner / "unregistered"
+    workspace = unowned / "packages" / "app"
+    _git("init", "-q", "--bare", str(owner))
+    workspace.mkdir(parents=True)
+    (unowned / ".git").write_text(f"gitdir: {owner}\n", encoding="utf-8")
+    claimed = ProjectIdentity.from_root(
+        owner,
+        workspace_path="unregistered/packages/app",
+    )
+    persisted = _runner(cwd=str(workspace))._build_execution_contract(
+        seed=_seed(),
+        project_identity=claimed,
+    )
+
+    with pytest.raises(OrchestratorError, match="conflicting project identity"):
+        _runner(cwd=str(workspace))._restore_execution_contract(
+            {
+                EXECUTION_CONTRACT_PROGRESS_KEY: persisted,
+                SESSION_START_IDENTITY_PROGRESS_KEY: claimed.to_event_data(),
+            },
+            seed=_seed(),
+        )
+
+
+def test_pre_anchor_managed_linked_override_survives_two_resumes(tmp_path: Path) -> None:
+    primary = tmp_path / "primary"
+    linked = tmp_path / "linked"
+    _init_git_repo(primary)
+    _git("worktree", "add", "-q", "-b", "linked", str(linked), "HEAD", cwd=primary)
+    (linked / "packages" / "app").mkdir(parents=True)
+    generated = tmp_path / "managed" / "legacy-run"
+    task_workspace = _workspace(
+        durable_id="legacy-run",
+        worktree_path=generated,
+        repo_root=linked,
+    )
+    original = _runner(task_workspace=task_workspace)
+    _use_frontier_custom_routing(original)
+    persisted = original._build_execution_contract(seed=_seed())
+    persisted["frugality_proof"]["project_root"] = str(linked.resolve())
+    persisted["frugality_proof"]["workspace_path"] = "packages/app"
+    legacy_start = {
+        "execution_id": "legacy-managed-linked",
+        "seed_id": "seed-routing-contract",
+    }
+
+    first_resume = _runner(
+        task_workspace=task_workspace,
+        base_model_tier="standard",
+    )
+    first_resume._route_economics = _frontier_custom_economics()
+    first_resume._model_router = _frontier_custom_router(base_tier="standard")
+    assert first_resume._restore_execution_contract(
+        {
+            EXECUTION_CONTRACT_PROGRESS_KEY: persisted,
+            SESSION_START_IDENTITY_PROGRESS_KEY: legacy_start,
+        },
+        seed=_seed(),
+    )
+    replacement = first_resume._execution_contract
+    assert replacement is not None
+    assert replacement["frugality_proof"]["project_root"] == str(linked.resolve())
+    assert replacement["frugality_proof"]["workspace_path"] == "packages/app"
+
+    second_resume = _runner(task_workspace=task_workspace)
+    second_resume._route_economics = _frontier_custom_economics()
+    second_resume._model_router = _frontier_custom_router(base_tier="standard")
+    second_resume._requested_model_tier = "standard"
+
+    assert (
+        second_resume._restore_execution_contract(
+            {
+                EXECUTION_CONTRACT_PROGRESS_KEY: replacement,
+                SESSION_START_IDENTITY_PROGRESS_KEY: legacy_start,
+            },
+            seed=_seed(),
+        )
+        is False
+    )
+
+
+def test_direct_nested_checkout_uses_same_project_identity_contract(tmp_path: Path) -> None:
+    repo_root = tmp_path / "repo"
+    workspace = repo_root / "packages" / "app"
+    workspace.mkdir(parents=True)
+    _init_git_repo(repo_root)
+    runner = _runner(cwd=str(workspace))
+
+    identity = runner._project_identity()
+    proof = runner._build_execution_contract(
+        seed=_seed(),
+        project_identity=identity,
+    )["frugality_proof"]
+
+    assert identity is not None
+    assert identity.project_id == project_id_for_root(repo_root)
+    assert proof["project_root"] == identity.project_root
+    assert proof["workspace_path"] == identity.workspace_path == "packages/app"
+
+
+def test_pre_anchor_nested_contract_resumes_with_legacy_cwd_identity(tmp_path: Path) -> None:
+    repo_root = tmp_path / "repo"
+    workspace = repo_root / "packages" / "app"
+    workspace.mkdir(parents=True)
+    _init_git_repo(repo_root)
+    original = _runner(cwd=str(workspace))
+    persisted = original._build_execution_contract(seed=_seed())
+    persisted["frugality_proof"]["project_root"] = str(workspace.resolve())
+    persisted["frugality_proof"]["workspace_path"] = "."
+    resumed = _runner(cwd=str(workspace))
+
+    changed = resumed._restore_execution_contract(
+        {
+            EXECUTION_CONTRACT_PROGRESS_KEY: persisted,
+            SESSION_START_IDENTITY_PROGRESS_KEY: {
+                "execution_id": "legacy-exec",
+                "seed_id": "seed-routing-contract",
+            },
+        },
+        seed=_seed(),
+    )
+
+    assert changed is False
+
+
+def test_project_anchor_binds_nested_contract_and_current_workspace(tmp_path: Path) -> None:
+    repo_root = tmp_path / "repo"
+    workspace = repo_root / "packages" / "app"
+    workspace.mkdir(parents=True)
+    _init_git_repo(repo_root)
+    original = _runner(cwd=str(workspace))
+    identity = original._project_identity()
+    assert identity is not None
+    persisted = original._build_execution_contract(
+        seed=_seed(),
+        project_identity=identity,
+    )
+    resumed = _runner(cwd=str(workspace))
+
+    changed = resumed._restore_execution_contract(
+        {
+            EXECUTION_CONTRACT_PROGRESS_KEY: persisted,
+            SESSION_START_IDENTITY_PROGRESS_KEY: {
+                "execution_id": "anchored-exec",
+                "seed_id": "seed-routing-contract",
+                **identity.to_event_data(),
+            },
+        },
+        seed=_seed(),
+    )
+
+    assert changed is False
+
+
+@pytest.mark.parametrize(
+    "start_identity",
+    [
+        {"project_id": "project_0123456789abcdef0123456789abcdef"},
+        {
+            "project_id": "project_invalid",
+            "project_root": "/tmp/project",
+            "workspace_path": ".",
+        },
+    ],
+)
+def test_project_anchor_rejects_partial_or_invalid_identity(
+    start_identity: dict[str, str],
+) -> None:
+    runner = _runner()
+    persisted = runner._build_execution_contract(seed=_seed())
+
+    with pytest.raises(OrchestratorError, match="project identity anchor"):
+        runner._restore_execution_contract(
+            {
+                EXECUTION_CONTRACT_PROGRESS_KEY: persisted,
+                SESSION_START_IDENTITY_PROGRESS_KEY: start_identity,
+            },
+            seed=_seed(),
+        )
+
+
+def test_project_anchor_rejects_nested_contract_conflict(tmp_path: Path) -> None:
+    repo_root = tmp_path / "repo"
+    _init_git_repo(repo_root)
+    runner = _runner(cwd=str(repo_root))
+    identity = runner._project_identity()
+    assert identity is not None
+    persisted = runner._build_execution_contract(
+        seed=_seed(),
+        project_identity=identity,
+    )
+    persisted["frugality_proof"]["workspace_path"] = "packages/other"
+
+    with pytest.raises(OrchestratorError, match="conflicting project identity"):
+        runner._restore_execution_contract(
+            {
+                EXECUTION_CONTRACT_PROGRESS_KEY: persisted,
+                SESSION_START_IDENTITY_PROGRESS_KEY: identity.to_event_data(),
+            },
+            seed=_seed(),
+        )
+
+
+def test_project_anchor_rejects_current_project_change(tmp_path: Path) -> None:
+    first_root = tmp_path / "first"
+    second_root = tmp_path / "second"
+    _init_git_repo(first_root)
+    _init_git_repo(second_root)
+    original = _runner(cwd=str(first_root))
+    identity = original._project_identity()
+    assert identity is not None
+    persisted = original._build_execution_contract(
+        seed=_seed(),
+        project_identity=identity,
+    )
+    resumed = _runner(cwd=str(second_root))
+
+    with pytest.raises(OrchestratorError, match="conflicting project identity"):
+        resumed._restore_execution_contract(
+            {
+                EXECUTION_CONTRACT_PROGRESS_KEY: persisted,
+                SESSION_START_IDENTITY_PROGRESS_KEY: identity.to_event_data(),
+            },
+            seed=_seed(),
+        )
+
+
+def test_project_anchor_rejects_deleted_current_workspace(tmp_path: Path) -> None:
+    repo_root = tmp_path / "repo"
+    _init_git_repo(repo_root)
+    original = _runner(cwd=str(repo_root))
+    identity = original._project_identity()
+    assert identity is not None
+    persisted = original._build_execution_contract(
+        seed=_seed(),
+        project_identity=identity,
+    )
+    repo_root.rename(tmp_path / "moved-repo")
+    resumed = _runner(cwd=str(repo_root))
+
+    with pytest.raises(OrchestratorError, match="Cannot resolve project identity"):
+        resumed._restore_execution_contract(
+            {
+                EXECUTION_CONTRACT_PROGRESS_KEY: persisted,
+                SESSION_START_IDENTITY_PROGRESS_KEY: identity.to_event_data(),
+            },
+            seed=_seed(),
+        )
 
 
 @pytest.mark.asyncio
@@ -1942,6 +3431,44 @@ async def test_legacy_start_identity_survives_progress_replay() -> None:
         "runtime_backend": "claude",
         "llm_backend": "anthropic",
     }
+
+
+@pytest.mark.asyncio
+async def test_project_start_anchor_survives_progress_replay() -> None:
+    start = BaseEvent(
+        type="orchestrator.session.started",
+        aggregate_type="session",
+        aggregate_id="project-start-identity",
+        data={
+            "execution_id": "project-exec",
+            "seed_id": "seed-routing-contract",
+            "project_id": "project_0123456789abcdef0123456789abcdef",
+            "project_root": "/tmp/project",
+            "workspace_path": "packages/app",
+        },
+    )
+    overwrite_attempt = BaseEvent(
+        type="orchestrator.progress.updated",
+        aggregate_type="session",
+        aggregate_id="project-start-identity",
+        data={
+            "progress": {
+                SESSION_START_IDENTITY_PROGRESS_KEY: {
+                    "project_id": "project_tampered",
+                    "project_root": "/tmp/other",
+                    "workspace_path": ".",
+                }
+            }
+        },
+    )
+    store = AsyncMock()
+    store.replay.return_value = [start, overwrite_attempt]
+    store.query_session_related_events.return_value = []
+
+    result = await SessionRepository(store).reconstruct_session("project-start-identity")
+
+    assert result.is_ok
+    assert result.value.progress[SESSION_START_IDENTITY_PROGRESS_KEY] == start.data
 
 
 @pytest.mark.asyncio

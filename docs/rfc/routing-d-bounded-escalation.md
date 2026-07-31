@@ -51,21 +51,28 @@ For one route episode:
    cheapest eligible unattempted route.
 3. Rebuild and revalidate the exact admission at the provider boundary.
 4. Execute the route once.
-5. Persist the provisional attempt judgment.
-6. Classify a failed result and persist its `RouteObservation` plus the
-   deterministic escalation decision.
-7. Only after both durable writes succeed, execute exactly the next eligible
+5. Before route escalation, offer a failed atomic result once to the verified
+   bounce gate. Only evidence-backed `TOO_BIG` may leave the atomic route
+   episode and enter the durable composite owner.
+6. Otherwise persist the provisional attempt judgment and the failed result's
+   `RouteObservation` plus deterministic escalation decision.
+7. Only after both route writes succeed, execute exactly the next eligible
    route.
-8. Stop on provisional success, a `BLOCKED` failure, or route exhaustion.
+8. Stop on provisional success, a verified composite transition, a `BLOCKED`
+   failure, or route exhaustion.
 
-Every classified non-`BLOCKED` failure advances exactly one route in Kernel
-order. Routing D never retries the same route, skips an eligible route, loops
-back to an attempted route, or lets legacy retry-count, stall, bounce, or
-alternate-harness recovery preempt its finite route set.
+Every classified non-`BLOCKED` failure that remains atomic advances exactly one
+route in Kernel order. Routing D never retries the same route, skips an eligible
+route, loops back to an attempted route, or lets legacy retry-count, unverified
+bounce, stall, or alternate-harness recovery preempt its finite route set. The
+Verified-MECE transition is the sole exception: it changes the unit itself from
+an atomic route episode to a composite, whose completion/pause owner takes over
+before any successor route is admitted.
 
 | Attempt result | Routing D action |
 | --- | --- |
 | provisional success | persist `attempt_succeeded`; defer acceptance to Final Gate |
+| evidence-backed `TOO_BIG` + trustworthy Verified-MECE split | persist bounce and finalized decision; transfer to composite owner |
 | classified non-`BLOCKED` failure with a successor | persist decision; advance one route |
 | classified `BLOCKED` failure | explicit `BLOCKED`; human handoff |
 | no remaining eligible route | explicit `BLOCKED` with `routes_exhausted`; human handoff |
@@ -105,6 +112,27 @@ If either required write fails, no successor route may execute. The direct
 runner has no root-AC attempt record for its whole-Seed call, so its hard
 boundary is the durable route observation itself; that write must complete
 before a fresh successor session can start.
+
+The atomic-to-composite branch has a different, equally hard order:
+
+```text
+failed atomic result
+    └─► execution.decomposition.bounce_classified
+            └─► decomposition provider / independent attestation
+                    └─► execution.decomposition.decision_finalized
+                            └─► child provider effect
+```
+
+`decision_finalized` is replay authority, not telemetry. Parallel execution
+first replays canonical `bounce_classified` events chronologically and then
+restores the exact finalized event stream before checkpoints or route
+projections. A persisted `TOO_BIG` bounce without its final decision resumes the
+decomposer and independent attestation before any atomic or route provider
+effect. Every `BOUNCE` final must consume an earlier matching `TOO_BIG` phase. A
+checkpoint or composite completion/pause may confirm the same event-owned
+canonical decision but cannot mint, replace, or contradict it. A historical
+non-split `PREFLIGHT` decision may transition once to a new bounce decision after
+migration. No finalized live bounce decision can mutate.
 
 ## Resume and drift rules
 
@@ -371,13 +399,16 @@ total cap smaller than its producer domain.
 
 ## Parallel and direct scope
 
-Cheapest-first bounded routing applies to top-level atomic ACs. Decomposed
-children remain on legacy child routing until [#1466](https://github.com/Q00/ouroboros/issues/1466)
-provides live Verified-MECE trust. Cheapening untrusted children before that
-slice would let decomposition output expand dispatch authority prematurely.
+Cheapest-first bounded routing applies to top-level atomic ACs. The Verified-MECE
+live path from [#1466](https://github.com/Q00/ouroboros/issues/1466) can now grant a
+finalized child trust signal only after an evidence-backed `TOO_BIG` bounce,
+exact structural validation, fresh-session semantic attestation, and at most one
+repair. Untrusted splits never receive child cheapening.
 
-After #1466, explicitly trusted children can enter the same Admission Kernel and
-bounded escalation loop without changing the authority model.
+Decomposed children still use the legacy child retry path in this slice: they do
+not yet have a complete child-scoped durable route episode and replay owner.
+Verified-MECE establishes the prerequisite trust boundary; it does not silently
+expand Routing D's provider-effect authority.
 
 ## Seed/result and spend semantics
 
@@ -401,7 +432,7 @@ than silently retrying while the host is asked to inspect or intervene.
 
 ## Deferred roadmap
 
-- Verified-MECE child trust and live decomposition: #1466
+- Verified-MECE child trust and live decomposition: #1466 (implemented prerequisite)
 - shared cross-run projection: #1389
 - cross-run advisory memory
 - actual token/spend attribution and guardrails: #1396

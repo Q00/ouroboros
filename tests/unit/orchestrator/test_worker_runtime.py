@@ -8,10 +8,13 @@ No live CLI required — a fake transport stands in for codex/claude.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from ouroboros.orchestrator.adapter import (
     ParamSupport,
+    ResolvedWorkerCwd,
     RuntimeHandle,
     SubagentOrchestration,
     is_leader_driven_worker,
@@ -99,10 +102,91 @@ class TestCapabilities:
         rt = _runtime(_FakeTransport(spawn_turn=WorkerTurn(text="ok", session_id="s1")))
         assert rt.runtime_backend == "codex_mcp"
         assert rt.llm_backend == "codex"
-        assert rt.working_directory == "/tmp"
+        assert rt.working_directory == str(Path("/tmp").resolve())
 
 
 class TestSpawn:
+    @pytest.mark.parametrize(
+        "resume_handle",
+        [None, RuntimeHandle(backend="codex_mcp", native_session_id="s1")],
+        ids=["spawn", "resume"],
+    )
+    @pytest.mark.asyncio
+    async def test_unresolved_cwd_blocks_transport_before_spawn_or_resume(
+        self,
+        resume_handle: RuntimeHandle | None,
+    ) -> None:
+        transport = _FakeTransport(
+            spawn_turn=WorkerTurn(text="unexpected", session_id="s1"),
+            resume_turn=WorkerTurn(text="unexpected", session_id="s1"),
+        )
+        runtime = LeaderDrivenWorkerRuntime(
+            transport=transport,
+            runtime_backend="codex_mcp",
+            llm_backend="codex",
+            cwd=ResolvedWorkerCwd(None),
+        )
+
+        messages = [
+            message
+            async for message in runtime.execute_task(
+                "must not run",
+                resume_handle=resume_handle,
+            )
+        ]
+
+        assert len(messages) == 1
+        assert messages[0].is_error
+        assert messages[0].data["error_type"] == "WorkerCwdUnavailable"
+        assert transport.spawn_calls == []
+        assert transport.resume_calls == []
+
+        result = await runtime.execute_task_to_result(
+            "must not run",
+            resume_handle=resume_handle,
+        )
+        assert result.is_err
+        assert transport.spawn_calls == []
+        assert transport.resume_calls == []
+
+    @pytest.mark.asyncio
+    async def test_relative_cwd_is_stable_across_spawn_and_resume(
+        self,
+        tmp_path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        launch_cwd = tmp_path / "launch"
+        workspace = launch_cwd / "workspace"
+        later_cwd = tmp_path / "later"
+        workspace.mkdir(parents=True)
+        later_cwd.mkdir()
+        monkeypatch.chdir(launch_cwd)
+        transport = _FakeTransport(
+            spawn_turn=WorkerTurn(text="first", session_id="s1"),
+            resume_turn=WorkerTurn(text="second", session_id="s1"),
+        )
+        runtime = LeaderDrivenWorkerRuntime(
+            transport=transport,
+            runtime_backend="codex_mcp",
+            llm_backend="codex",
+            cwd="workspace",
+        )
+
+        first = [message async for message in runtime.execute_task("first")]
+        monkeypatch.chdir(later_cwd)
+        _ = [
+            message
+            async for message in runtime.execute_task(
+                "resume",
+                resume_handle=first[-1].resume_handle,
+            )
+        ]
+
+        assert runtime.working_directory == str(workspace)
+        assert transport.spawn_calls[0]["cwd"] == str(workspace)
+        assert first[-1].resume_handle.cwd == str(workspace)
+        assert len(transport.resume_calls) == 1
+
     @pytest.mark.asyncio
     async def test_spawn_yields_init_then_result_with_handle(self) -> None:
         t = _FakeTransport(spawn_turn=WorkerTurn(text="PONG", session_id="thread-1"))

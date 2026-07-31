@@ -608,10 +608,49 @@ def is_configured() -> bool:
 def reset_logging() -> None:
     """Reset logging configuration state.
 
-    This is primarily for testing purposes. It resets the module state
-    but does not reconfigure the loggers.
+    This is primarily for testing purposes. It clears the Ouroboros module
+    state and installs a neutral global structlog configuration in place of
+    the application one.
+
+    Neutral, not absent. ``structlog.reset_defaults()`` on its own restores
+    the *library* defaults, which emit every level — down to debug —
+    through a ``PrintLogger`` bound to stdout. A configured Ouroboros
+    logger filters at ``LoggingConfig.log_level`` and prints to stderr (see
+    ``_FileWritingPrintLogger._log``), so stdout stays reserved for command
+    output. Dropping to library defaults therefore makes the process both
+    louder and misdirected.
+
+    That gap is not self-healing. Most modules bind their logger once at
+    import time via a bare ``structlog.get_logger``, which never routes
+    through :func:`get_logger` and so never triggers the lazy
+    reconfiguration that clearing ``_configured`` sets up. Once those
+    proxies exist, a reset silently redirects the process's logging to
+    stdout, which contaminates any CLI result parsed by a caller or
+    asserted on by a later test.
+
+    So carry both halves of the contract across the reset: keep the
+    outgoing configuration's level, and keep writing to stderr. Preserving
+    the level rather than assuming the ``LoggingConfig`` default matters
+    when the outgoing configuration was quieter — resetting an
+    ``ERROR``-level process to ``INFO`` would be its own volume
+    regression. ``_configured`` stays false and ``_current_config`` stays
+    ``None``, so the next :func:`get_logger` still performs a full
+    reconfiguration.
+
+    The stream is carried by reusing the project's own factory with no file
+    handler, not by handing ``sys.stderr`` to ``structlog.PrintLoggerFactory``.
+    Two reasons, both of which a captured stream gets wrong.
+    ``_FileWritingPrintLogger._log`` resolves ``sys.stderr`` at emit time, so a
+    reset that runs while pytest's ``capsys`` is active cannot pin that
+    fixture's buffer into the global configuration and raise on a write after
+    its teardown. And that logger is the only one that consults
+    ``_console_logging_enabled``, so routing through it keeps
+    :func:`set_console_logging` honored across a reset instead of silently
+    re-enabling console output.
     """
     global _configured, _current_config
+    # Read before clearing: the reset must not be louder than what it replaces.
+    outgoing_level = _get_log_level((_current_config or LoggingConfig()).log_level)
     _configured = False
     _current_config = None
     _close_root_handlers()
@@ -619,3 +658,9 @@ def reset_logging() -> None:
     structlog.contextvars.clear_contextvars()
     # Reset structlog configuration
     structlog.reset_defaults()
+    structlog.configure(
+        wrapper_class=structlog.make_filtering_bound_logger(outgoing_level),
+        # No file handler: the outgoing one was just closed by
+        # _close_root_handlers(), and a reset must not hold a resource.
+        logger_factory=_FileWritingPrintLoggerFactory(None),
+    )

@@ -112,6 +112,29 @@ def test_app_bundle_unreadable_node_metadata_fails_closed(
         resolve_zcode_electron_node_path(cli_path)
 
 
+def test_app_bundle_non_utf8_node_metadata_fails_closed(tmp_path: Path) -> None:
+    cli_path, _ = _fake_electron_node_bundle(tmp_path)
+    cli_path.with_name(".node-bundle-meta.json").write_bytes(b'{"runtime":"\xff"}')
+
+    with pytest.raises(RuntimeError, match="invalid JSON"):
+        resolve_zcode_electron_node_path(cli_path)
+
+
+def test_app_bundle_json_recursion_failure_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cli_path, _ = _fake_electron_node_bundle(tmp_path)
+
+    def _raise_recursion(_payload: str) -> Any:
+        raise RecursionError("maximum JSON nesting exceeded")
+
+    monkeypatch.setattr(json, "loads", _raise_recursion)
+
+    with pytest.raises(RuntimeError, match="invalid JSON"):
+        resolve_zcode_electron_node_path(cli_path)
+
+
 def test_app_bundle_non_dictionary_plist_fails_closed(tmp_path: Path) -> None:
     cli_path, _ = _fake_electron_node_bundle(tmp_path)
     info_plist = cli_path.parents[2] / "Info.plist"
@@ -119,6 +142,46 @@ def test_app_bundle_non_dictionary_plist_fails_closed(tmp_path: Path) -> None:
         plistlib.dump(["not", "a", "dictionary"], stream)
 
     with pytest.raises(RuntimeError, match="must be a dictionary"):
+        resolve_zcode_electron_node_path(cli_path)
+
+
+def test_app_bundle_malformed_plist_xml_fails_closed(tmp_path: Path) -> None:
+    """Malformed plist XML surfaces the actionable RuntimeError, not a raw parser error."""
+    cli_path, _ = _fake_electron_node_bundle(tmp_path)
+    info_plist = cli_path.parents[2] / "Info.plist"
+    info_plist.write_bytes(b"<?xml version='1.0'?><plist><dict>")
+
+    with pytest.raises(RuntimeError, match="unreadable"):
+        resolve_zcode_electron_node_path(cli_path)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        b"<integer>nope</integer>",  # plistlib raises bare ValueError
+        b"<real>nope</real>",  # ValueError
+        b"<date>nope</date>",  # AttributeError — shares no base class with the above
+    ],
+)
+def test_app_bundle_semantically_invalid_plist_fails_closed(
+    tmp_path: Path,
+    payload: bytes,
+) -> None:
+    """Well-formed XML with bad typed values still fails closed.
+
+    These parse cleanly as XML, so ExpatError never fires; plistlib raises bare
+    ValueError/AttributeError while converting the element text. Enumerating parser
+    exception types keeps missing one, which is why the guard catches broadly.
+    """
+    cli_path, _ = _fake_electron_node_bundle(tmp_path)
+    info_plist = cli_path.parents[2] / "Info.plist"
+    info_plist.write_bytes(
+        b"<?xml version='1.0'?><plist version='1.0'><dict><key>a</key>"
+        + payload
+        + b"</dict></plist>"
+    )
+
+    with pytest.raises(RuntimeError, match="unreadable"):
         resolve_zcode_electron_node_path(cli_path)
 
 

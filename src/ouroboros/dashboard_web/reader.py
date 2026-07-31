@@ -1,6 +1,6 @@
 """Read-only tail of the EventStore SQLite file (stdlib ``sqlite3``).
 
-The EventStore is a plain SQLite DB (``~/.ouroboros/ouroboros.db`` by default); a
+The EventStore is a plain SQLite DB at the configured runtime path; a
 separate process can read it concurrently without touching the async writer. We
 open it strictly read-only (``mode=ro``) so the dashboard can NEVER corrupt a
 live run, and page by SQLite's implicit ``rowid`` — the same cursor dimension the
@@ -17,6 +17,8 @@ from pathlib import Path
 import sqlite3
 from typing import Any
 from urllib.parse import quote
+
+from ouroboros.config.models import resolve_event_store_path
 
 # Events relevant to the execution Kanban. Filtering at the SQL layer keeps the
 # tail cheap even on a mult-hundred-MB DB shared by many runs.
@@ -46,7 +48,7 @@ _RELEVANT_EVENT_TYPES: tuple[str, ...] = (
 
 def default_db_path() -> Path:
     """The EventStore path ``EventStore()`` uses when no URL is given."""
-    return Path.home() / ".ouroboros" / "ouroboros.db"
+    return resolve_event_store_path()
 
 
 def _connect_readonly(db_path: str | Path) -> sqlite3.Connection:

@@ -13,7 +13,6 @@ import errno
 import os
 from pathlib import Path
 import stat
-import tempfile
 from typing import IO
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -110,7 +109,7 @@ class TestSaveStateUsesThread:
         saved_path.write_text("original\n", encoding="utf-8")
 
         with (
-            patch("tempfile.mkstemp", wraps=tempfile.mkstemp) as mock_mkstemp,
+            patch("os.open", wraps=os.open) as mock_open,
             patch("os.fsync") as mock_fsync,
             patch("os.replace", side_effect=OSError("boom")),
         ):
@@ -118,8 +117,9 @@ class TestSaveStateUsesThread:
 
         assert result.is_err
         assert saved_path.read_text(encoding="utf-8") == "original\n"
-        assert mock_mkstemp.call_count == 1
-        assert mock_mkstemp.call_args.kwargs["dir"] == str(saved_path.parent)
+        temp_creations = [call for call in mock_open.call_args_list if call.args[1] & os.O_EXCL]
+        assert len(temp_creations) == 1
+        assert Path(temp_creations[0].args[0]).parent == saved_path.parent
         mock_fsync.assert_called_once()
         assert {path.name for path in saved_path.parent.iterdir()} == {
             saved_path.name,
@@ -132,16 +132,17 @@ class TestSaveStateUsesThread:
         state = _make_state()
         created_fds: list[int] = []
         created_paths: list[Path] = []
-        real_mkstemp = tempfile.mkstemp
+        real_open = os.open
 
-        def _recording_mkstemp(*args, **kwargs):
-            fd, name = real_mkstemp(*args, **kwargs)
-            created_fds.append(fd)
-            created_paths.append(Path(name))
-            return fd, name
+        def _recording_open(path, flags, *args, **kwargs):
+            fd = real_open(path, flags, *args, **kwargs)
+            if flags & os.O_EXCL:
+                created_fds.append(fd)
+                created_paths.append(Path(path))
+            return fd
 
         with (
-            patch("tempfile.mkstemp", side_effect=_recording_mkstemp),
+            patch("os.open", side_effect=_recording_open),
             patch("os.fdopen", side_effect=RuntimeError("fdopen failed")),
             pytest.raises(RuntimeError, match="fdopen failed"),
         ):
@@ -175,18 +176,24 @@ class TestSaveStateUsesThread:
         }
 
     @pytest.mark.asyncio
-    async def test_save_state_preserves_existing_mode(self, tmp_path) -> None:
+    async def test_save_state_narrows_an_existing_readable_mode(self, tmp_path) -> None:
+        """A transcript left readable by an older version is narrowed, not kept.
+
+        The mode is deliberately NOT preserved here. Preserving it is the usual
+        contract for an atomic write, and it is exactly what would carry a
+        group- or world-readable transcript forward forever. The transcript
+        holds confirmed data answers and lives indefinitely.
+        """
         engine = _make_engine(tmp_path)
         state = _make_state()
         saved_path = engine._state_file_path(state.interview_id)
         saved_path.write_text("original\n", encoding="utf-8")
         saved_path.chmod(0o640)
-        expected_mode = stat.S_IMODE(saved_path.stat().st_mode)
 
         result = await engine.save_state(state)
 
         assert result.is_ok
-        assert stat.S_IMODE(saved_path.stat().st_mode) == expected_mode
+        assert stat.S_IMODE(saved_path.stat().st_mode) == 0o600
 
     @pytest.mark.skipif(os.name != "posix", reason="directory fsync is POSIX-only")
     @pytest.mark.asyncio

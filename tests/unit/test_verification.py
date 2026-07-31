@@ -201,6 +201,27 @@ class TestSpecVerifier:
         assert summary.discrepancy_count == 1
         assert summary.reports[0].has_discrepancy
 
+    @pytest.mark.parametrize("actual_value", ["50", "15"])
+    def test_t1_constant_rejects_prefix_and_suffix_collisions(self, actual_value: str) -> None:
+        """Expected constants require exact extracted-value equality."""
+        project = self._create_project({"config.py": f"MAX_RETRIES = {actual_value}\n"})
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="MAX_RETRIES should be 5",
+            tier=VerificationTier.T1_CONSTANT,
+            pattern=r"MAX_RETRIES\s*",
+            expected_value="5",
+            file_hint="*.py",
+        )
+
+        summary = SpecVerifier(project_dir=project).verify_all(
+            (assertion,), agent_results={0: True}
+        )
+
+        assert summary.verified_count == 0
+        assert summary.failed_count == 1
+        assert summary.discrepancy_count == 1
+
     def test_t1_pattern_not_found(self) -> None:
         """T1: pattern not in any file → verification fails."""
         project = self._create_project(
@@ -429,6 +450,48 @@ class TestAssertionExtractor:
 
         assert result.is_ok
         assert result.value == ()
+
+    @pytest.mark.asyncio
+    async def test_overflowing_regex_assertion_rejected_before_verifier(self) -> None:
+        """Regex integer overflow follows the extractor's invalid-pattern fallback."""
+        payload = json.dumps(
+            [
+                {
+                    "ac_index": 0,
+                    "tier": "t1_constant",
+                    "pattern": "a{9999999999}",
+                    "expected_value": "5",
+                    "file_hint": "*.py",
+                    "description": "overflowing regex",
+                }
+            ]
+        )
+        extractor = self._make_extractor_content(payload)
+
+        result = await extractor.extract("seed_overflow_regex", ("constant is five",))
+
+        assert result.is_ok
+        assert result.value == ()
+
+    def test_overflowing_regex_fails_closed_in_verifier(self) -> None:
+        """Direct verifier callers cannot crash it with a regex overflow."""
+        project = TestSpecVerifier()._create_project({"config.py": "aaaa = 5\n"})
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="constant is five",
+            tier=VerificationTier.T1_CONSTANT,
+            pattern="a{9999999999}",
+            expected_value="5",
+            file_hint="*.py",
+        )
+
+        summary = SpecVerifier(project_dir=project).verify_all(
+            (assertion,), agent_results={0: True}
+        )
+
+        assert summary.verified_count == 0
+        assert summary.failed_count == 1
+        assert summary.discrepancy_count == 1
 
     @pytest.mark.asyncio
     async def test_wrapped_nonmatching_file_hint_fails_verification(self) -> None:

@@ -25,26 +25,21 @@ EVERY `ouroboros_pm_interview` call** below (idempotent — a no-op if already
 loaded). If the load ever returns no matching tool (and the tool is not already callable — an empty load for an already-exposed tool is an expected no-op, not absence), follow the not-found diagnosis
 below instead of retrying the failing call.
 
-If not found → **diagnose before telling user to run setup**:
+If not found → fail closed without inspecting or mutating
+`~/.claude/mcp.json`. Standalone Claude SDK setup requires MCP 1.x and cannot
+activate the Ouroboros MCP 2 server with its configured backend. Explain:
 
-1. Check if MCP is already configured:
-   ```bash
-   grep -q '"ouroboros"' ~/.claude/mcp.json 2>/dev/null && echo "CONFIGURED" || echo "NOT_CONFIGURED"
-   ```
+```
+The PM interview MCP tool is unavailable in this runtime.
 
-2. **If NOT_CONFIGURED** → tell user to run `ooo setup` first. Stop.
+Configure a supported CLI-backed host with:
+  ouroboros setup --runtime <codex|opencode|kiro|copilot|hermes>
 
-3. **If CONFIGURED** → MCP is registered but the server isn't connecting. Do NOT tell the user to run `ooo setup` again. Instead show:
-   ```
-   Ouroboros MCP is configured but not connected.
+Then restart that host and retry ooo pm. Do not combine the [claude] and [mcp]
+extras or add a direct Python MCP fallback.
+```
 
-   Try these steps in order:
-   1. Restart Claude Code (Cmd+Shift+P → "Reload Window" or close/reopen terminal)
-   2. Check MCP status: type /mcp in Claude Code
-   3. If ouroboros shows "error", try: ooo update
-   4. If still failing, re-run: ooo setup
-   ```
-   Stop.
+Stop.
 
 ### Step 2: Start Interview
 
@@ -68,6 +63,11 @@ After every MCP response, do these three things:
 
 Print the MCP content text to the user first.
 
+Tell users they do not need to invent speculative answers. If a question is
+unknown, stakeholder-dependent, too broad, or safer to decide later, route it
+through the existing assumptions / decide-later / deferred mechanisms instead
+of presenting it as a confirmed requirement.
+
 Then check: does `meta.ask_user_question` exist?
 
 - **YES** → Pass it directly to `AskUserQuestion`:
@@ -80,7 +80,9 @@ Then check: does `meta.ask_user_question` exist?
   - If `meta.skip_eligible == true`: add a skip option based on `meta.classification`:
     - `classification == "decide_later"` → add option `{"label": "Decide later", "description": "Skip — will be recorded as an open item in the PRD"}`
     - `classification == "deferred"` → add option `{"label": "Defer to dev", "description": "Skip — this technical decision will be deferred to the development phase"}`
-  - Generate 2-3 suggested answers as the other options.
+  - Generate 2-3 suggested answers as the other options. Include a non-speculative
+    uncertainty option when appropriate, such as `Not sure yet — record as an
+    assumption or decide-later item`.
 
 **C. Relay answer back:**
 
@@ -137,3 +139,13 @@ Next step:
   ooo interview <meta.pm_seed_path or meta.seed_path>
   ooo seed
 ```
+
+## RFC #1392 State Breadcrumb Footer
+
+Your final response MUST end with exactly one breadcrumb footer line:
+
+```
+◆ <current state> → next: <recommended action>
+```
+
+Derive `<current state>` from live session state via `ouroboros_session_status` when that MCP projection is available; otherwise derive it from this skill's actual outcome. Never use a linear `Step N of M` footer because Ouroboros is an evolutionary loop. When the next action is genuinely a choice, list 2-3 honest options in the `next:` clause. The breadcrumb line must be the last line of the response.

@@ -25,10 +25,13 @@ from ouroboros.observability.logging import get_logger
 from ouroboros.orchestrator.adapter import (
     AgentMessage,
     ParamSupport,
+    ResolvedWorkerCwd,
     RuntimeCapabilities,
     RuntimeHandle,
     SkillDispatchHandler,
     TaskResult,
+    resolve_worker_cwd,
+    worker_cwd_failure_message,
 )
 from ouroboros.orchestrator.skill_intercept import SkillInterceptor
 from ouroboros.providers.codex_cli_stream import (
@@ -75,7 +78,7 @@ class PiRuntime:
         cli_path: str | Path | None = None,
         permission_mode: str | None = None,
         model: str | None = None,
-        cwd: str | Path | None = None,
+        cwd: str | Path | ResolvedWorkerCwd | None = None,
         skills_dir: str | Path | None = None,
         skill_dispatcher: SkillDispatchHandler | None = None,
         llm_backend: str | None = None,
@@ -87,7 +90,7 @@ class PiRuntime:
         self._permission_mode_requested = permission_mode is not None
         self._permission_mode = permission_mode
         self._model = model
-        self._cwd = str(Path(cwd).expanduser()) if cwd is not None else os.getcwd()
+        self._cwd = resolve_worker_cwd(cwd)
         self._skill_dispatcher = skill_dispatcher
         self._llm_backend = llm_backend or self._default_llm_backend
         self._skills_dir = Path(skills_dir).expanduser() if skills_dir is not None else None
@@ -401,6 +404,15 @@ class PiRuntime:
         resume_handle: RuntimeHandle | None = None,
         resume_session_id: str | None = None,
     ) -> AsyncIterator[AgentMessage]:
+        cwd_failure = worker_cwd_failure_message(
+            self._cwd,
+            runtime_backend=self._runtime_backend,
+            resume_handle=resume_handle,
+        )
+        if cwd_failure is not None:
+            yield cwd_failure
+            return
+
         current_handle = resume_handle
         intercepted_messages = await self._interceptor.maybe_dispatch(prompt, current_handle)
         if intercepted_messages is not None:

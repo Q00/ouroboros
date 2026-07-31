@@ -18,7 +18,7 @@ import ouroboros.orchestrator.hermes_runtime as hermes_runtime_module
 from ouroboros.orchestrator.hermes_runtime import HermesCliRuntime, _parse_quiet_output
 from ouroboros.router import Resolved, ResolveRequest, SkillDispatchRouter
 
-_EXPECTED_CWD = str(Path("/tmp/project"))
+_EXPECTED_CWD = str(Path("/tmp/project").resolve())
 
 
 class _FakeStream:

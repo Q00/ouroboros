@@ -6,6 +6,7 @@ consensus, and QA evaluation stages.
 
 from enum import Enum
 import json
+import re
 
 
 class _FenceScanState(Enum):
@@ -15,6 +16,7 @@ class _FenceScanState(Enum):
 
 
 _FENCE_MARKERS = ("`", "~")
+_BLOCKQUOTE_FENCE_PREFIX = re.compile(r"^[ \t]{0,3}(?:>[ \t]?)+$")
 
 
 def extract_json_payload(text: str) -> str | None:
@@ -113,7 +115,7 @@ def _find_opening_fence(text: str, start: int) -> tuple[int, int, str] | None:
         candidate_length = _fence_run_length(text, candidate, marker)
         line_start = text.rfind("\n", 0, candidate) + 1
         prefix = text[line_start:candidate]
-        if prefix.strip() == "":
+        if _is_fence_line_prefix(prefix):
             return candidate, candidate_length, marker
 
         pos = candidate + candidate_length
@@ -139,10 +141,19 @@ def _find_closing_fence(
             line_end = len(text)
         prefix = text[line_start:candidate]
         suffix = text[candidate + candidate_length : line_end]
-        if candidate_length >= opener_length and prefix.strip() == "" and suffix.strip() == "":
+        if (
+            candidate_length >= opener_length
+            and _is_fence_line_prefix(prefix)
+            and suffix.strip() == ""
+        ):
             return candidate, candidate_length
 
         pos = candidate + candidate_length
+
+
+def _is_fence_line_prefix(prefix: str) -> bool:
+    """Accept plain or Markdown-blockquoted fence line prefixes."""
+    return prefix.strip() == "" or _BLOCKQUOTE_FENCE_PREFIX.fullmatch(prefix) is not None
 
 
 def _extract_first_json_from_text(text: str) -> str | None:

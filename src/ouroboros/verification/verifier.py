@@ -94,7 +94,7 @@ class SpecVerifier:
             return None
         try:
             return re.compile(pattern, flags)
-        except re.error as e:
+        except (re.error, OverflowError) as e:
             logger.warning("Invalid regex pattern: %s", e)
             return None
 
@@ -146,7 +146,7 @@ class SpecVerifier:
                 # Extract the value after the pattern
                 actual = self._extract_value_after_match(content, match)
                 if assertion.expected_value:
-                    verified = assertion.expected_value in actual
+                    verified = assertion.expected_value.strip() == actual.strip()
                     return SpecVerificationResult(
                         assertion=assertion,
                         verified=verified,
@@ -293,6 +293,14 @@ class SpecVerifier:
         paren_match = re.match(r'\s*\(\s*["\']?([^"\'\s,;)]+)["\']?\s*\)', rest)
         if paren_match:
             return paren_match.group(1)
+
+        # The assertion pattern may already consume the assignment delimiter
+        # (for example ``NAME\s*=\s*``). Extract the next scalar token rather
+        # than returning an arbitrary source suffix that only supported
+        # substring comparison.
+        direct_match = re.match(r'\s*["\']?([^"\'\s,;)\]}{]+)["\']?', rest)
+        if direct_match:
+            return direct_match.group(1)
 
         # Return first 50 chars of what follows
         return rest.strip()[:50]

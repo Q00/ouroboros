@@ -2862,11 +2862,12 @@ def test_pipeline_accepts_keyword_sees_closure_mode_on_production_signatures() -
     )
 
 
-def test_grade_gate_flags_over_fragmented_acceptance_criteria() -> None:
-    """A seed with >9 outcome criteria gets an *advisory* over-fragmentation
-    finding — the mirror of under-specification — that is visible but must NOT
-    block a runnable seed (frugality is goal-subordinate; we surface waste, we
-    do not halt on it)."""
+def test_grade_gate_does_not_judge_acceptance_criteria_by_count() -> None:
+    """Over-fragmentation is a judgment about the *relationship* between
+    criteria, which this deterministic gate cannot make. A count threshold only
+    ever proxied for it, and the proxy punished goals that genuinely have many
+    orthogonal outcomes. A seed whose criteria are all clean must therefore
+    grade A regardless of how many there are, with no count-based finding."""
     ledger = SeedDraftLedger.from_goal("Build a habit tracker")
     _fill_minimal_ready_ledger(ledger)
     ac = tuple(
@@ -2877,22 +2878,23 @@ def test_grade_gate_flags_over_fragmented_acceptance_criteria() -> None:
     result = GradeGate().grade_seed(seed, ledger=ledger)
 
     codes = {finding.code for finding in result.findings}
-    assert "over_fragmented_criteria" in codes
-    # Advisory contract: the finding must not flip the grade or block the run.
-    # All 10 ACs are otherwise clean (observable, non-vague), so the seed stays A.
+    assert "over_fragmented_criteria" not in codes
     assert result.grade == SeedGrade.A
     assert result.may_run
-    # And it must NOT be counted as an untestable finding (the code deliberately
-    # omits the "acceptance_criteria" substring): testability stays high.
     assert result.scores["testability"] >= 0.9
 
 
-def test_grade_gate_no_over_fragmentation_flag_for_normal_seed() -> None:
+def test_grade_gate_still_flags_unobservable_criteria_in_a_long_list() -> None:
+    """Dropping the count check must not weaken the checks the gate *can* make:
+    an unobservable criterion is still caught in a many-criterion seed."""
     ledger = SeedDraftLedger.from_goal("Build a habit tracker")
     _fill_minimal_ready_ledger(ledger)
-    seed = _seed(ac=("`habit list` prints stable stdout containing created habits",))
+    ac = tuple(
+        f"`habit step{i}` prints stable stdout containing step {i} result" for i in range(9)
+    ) + ("the tracker feels responsive",)
+    seed = _seed(ac=ac)
 
     result = GradeGate().grade_seed(seed, ledger=ledger)
 
     codes = {finding.code for finding in result.findings}
-    assert "over_fragmented_criteria" not in codes
+    assert "untestable_acceptance_criteria" in codes or "missing_success_contract" in codes

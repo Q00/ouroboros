@@ -75,10 +75,10 @@ Only sessions in `running` or `paused` status can be cancelled. Sessions that ar
 
 ## Fallback (No Database)
 
-If the event store database does not exist:
+If the configured runtime EventStore does not exist:
 
 ```
-No Ouroboros database found at ~/.ouroboros/ouroboros.db.
+No Ouroboros database found at the configured runtime path.
 Run an execution first with: /ouroboros:run
 ```
 

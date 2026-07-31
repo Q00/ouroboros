@@ -23,3 +23,21 @@ def truncate_head_tail(
         return text
 
     return text[:head] + separator + text[-tail:]
+
+
+_ELLIPSIS = "..."
+
+
+def truncate_with_ellipsis(value: str | None, *, limit: int) -> str | None:
+    """Trim *value* to *limit* characters, marking the cut with ``...``.
+
+    Used for bounded diagnostic previews -- MCP argument dumps and warning
+    logs -- where the point is to keep a line readable, not to preserve the
+    payload. ``None`` passes through so callers can trim optional fields
+    without a guard, and a value already within *limit* is returned unchanged.
+
+    The ellipsis is included in the budget: the result never exceeds *limit*.
+    """
+    if value is None or len(value) <= limit:
+        return value
+    return f"{value[: limit - len(_ELLIPSIS)]}{_ELLIPSIS}"

@@ -541,7 +541,7 @@ def test_build_command_includes_cwd_and_resume() -> None:
         resume_session_id="sess_resume_me",
     )
     assert "--cwd" in cmd
-    assert "/tmp" in cmd
+    assert str(Path("/tmp").resolve()) in cmd
     assert "--resume" in cmd
     assert "sess_resume_me" in cmd
 
