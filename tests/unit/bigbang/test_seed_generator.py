@@ -1,5 +1,6 @@
 """Unit tests for ouroboros.bigbang.seed_generator module."""
 
+import json
 from pathlib import Path
 import subprocess
 import tempfile
@@ -115,6 +116,42 @@ def create_valid_extraction_response(
     ),
 ) -> str:
     """Create a valid LLM extraction response string."""
+    if not acceptance_criteria.lstrip().startswith("["):
+        try:
+            if "AC:" in acceptance_criteria:
+                specs = [
+                    _parse_acceptance_criterion_contract(line.strip())
+                    for line in acceptance_criteria.splitlines()
+                    if line.strip()
+                ]
+                if any(spec is None for spec in specs):
+                    raise ValueError("invalid legacy AC fixture")
+                criteria_objects = [
+                    {
+                        "description": spec.description,
+                        "verify": spec.verify_command or "NONE",
+                        "artifacts": list(spec.expected_artifacts) or "NONE",
+                        "expect": spec.output_assertion or "NONE",
+                    }
+                    for spec in specs
+                    if spec is not None
+                ]
+            else:
+                criteria_objects = [
+                    {
+                        "description": description.strip(),
+                        "verify": "NONE",
+                        "artifacts": "NONE",
+                        "expect": "NONE",
+                    }
+                    for description in acceptance_criteria.split("|")
+                    if description.strip()
+                ]
+            acceptance_criteria = json.dumps(criteria_objects)
+        except ValueError:
+            # Negative fixtures intentionally feed malformed legacy extraction
+            # text so the production retry boundary can reject it.
+            pass
     return f"""GOAL: {goal}
 CONSTRAINTS: {constraints}
 ACCEPTANCE_CRITERIA: {acceptance_criteria}
@@ -747,10 +784,7 @@ class TestSeedGeneratorExtraction:
             acceptance_criteria = f"\n{acceptance_criteria}\n"
         response = create_valid_extraction_response(acceptance_criteria=acceptance_criteria)
 
-        with pytest.raises(
-            ValueError,
-            match=rf"Acceptance criterion continuation contains reserved {field_name} field",
-        ):
+        with pytest.raises(ValueError, match="JSON array of objects"):
             generator._parse_extraction_response(response)
 
     @pytest.mark.parametrize("representation", ("block", "inline"))
@@ -764,10 +798,7 @@ class TestSeedGeneratorExtraction:
             acceptance_criteria = f"\n{acceptance_criteria}\n"
         response = create_valid_extraction_response(acceptance_criteria=acceptance_criteria)
 
-        with pytest.raises(
-            ValueError,
-            match="Every nonempty ACCEPTANCE_CRITERIA line must start with AC:",
-        ):
+        with pytest.raises(ValueError, match="JSON array of objects"):
             generator._parse_extraction_response(response)
 
     def test_extraction_allows_reserved_marker_text_in_other_fields(self) -> None:
@@ -792,10 +823,36 @@ class TestSeedGeneratorExtraction:
 
         requirements = generator._parse_extraction_response(response)
 
-        assert requirements["acceptance_criteria"] == [
-            "AC: First output exists | verify: NONE | artifacts: first.txt | expect: NONE",
-            "AC: Second output exists | verify: NONE | artifacts: second.txt | expect: NONE",
-        ]
+        assert tuple(spec.description for spec in requirements["acceptance_criteria"]) == (
+            "First output exists",
+            "Second output exists",
+        )
+        assert tuple(spec.expected_artifacts for spec in requirements["acceptance_criteria"]) == (
+            ("first.txt",),
+            ("second.txt",),
+        )
+
+    @pytest.mark.parametrize(
+        "acceptance_criteria",
+        (
+            '[{"description":"x","verify":"true","artifacts":"NONE"}]',
+            '[{"description":"x","verify":"true","artifacts":"NONE","expect":"NONE","extra":true}]',
+            '[{"description":"x","description":"y","verify":"true",'
+            '"artifacts":"NONE","expect":"NONE"}]',
+            '[{"description":"x","verify":1,"artifacts":"NONE","expect":"NONE"}]',
+            '[{"description":"x","verify":"true","artifacts":"out.txt","expect":"NONE"}]',
+            '[{"description":"x","verify":"cat <<EOF","artifacts":"NONE","expect":"NONE"}]',
+            '[{"description":"x","verify":"true","artifacts":["../out.txt"],"expect":"NONE"}]',
+        ),
+    )
+    def test_extraction_rejects_invalid_acceptance_criteria_json_contract(
+        self, acceptance_criteria: str
+    ) -> None:
+        generator = SeedGenerator(llm_adapter=AsyncMock())
+        response = create_valid_extraction_response(acceptance_criteria=acceptance_criteria)
+
+        with pytest.raises(ValueError):
+            generator._parse_extraction_response(response)
 
     @pytest.mark.parametrize("verify_command", _ADJACENT_SINGLE_QUOTED_VERIFY_COMMANDS)
     def test_acceptance_contract_parser_preserves_adjacent_single_quoted_payloads(
@@ -1802,6 +1859,26 @@ class TestSeedGeneratorExtraction:
                 r'''printf '%s\n' "$(printf '%s' escaped\))"''',
                 "escaped)\n",
             ),
+            (
+                '''printf '%s\\n' "`printf "%s | artifacts: literal" hi`"''',
+                "hi | artifacts: literal\n",
+            ),
+            (
+                '''printf '%s\\n' "`printf '%s' "$(printf '%s | verify: literal' hi)"`"''',
+                "hi | verify: literal\n",
+            ),
+            (
+                '''printf '%s\\n' "`printf '%s' '\\`'`"''',
+                "`\n",
+            ),
+            (
+                "case x in x | artifacts:) printf '%s\\n' case-ok;; esac",
+                "case-ok\n",
+            ),
+            (
+                "f() { printf '%s\\n' 'function | verify: literal'; }; f",
+                "function | verify: literal\n",
+            ),
         ),
     )
     async def test_generate_preserves_posix_single_quote_tokens_through_live_verify(
@@ -1832,10 +1909,15 @@ class TestSeedGeneratorExtraction:
         assert syntax.returncode == 0, syntax.stderr
         mock_adapter = AsyncMock()
         extraction_response = create_valid_extraction_response(
-            acceptance_criteria=(
-                "\n"
-                "AC: POSIX shell quoting survives | "
-                f"verify: {verify_command} | artifacts: NONE | expect: NONE\n"
+            acceptance_criteria=json.dumps(
+                [
+                    {
+                        "description": "POSIX shell quoting survives",
+                        "verify": verify_command,
+                        "artifacts": "NONE",
+                        "expect": "NONE",
+                    }
+                ]
             )
         )
         mock_adapter.complete = AsyncMock(
@@ -2663,19 +2745,19 @@ class TestAcceptanceCriteriaGranularityContract:
             )
             prompt = generator._build_extraction_user_prompt("Q: goal?\nA: build a thing")
 
-        assert "ACCEPTANCE_CRITERIA:\nAC:" in prompt
-        assert "verify: <command or NONE>" in prompt
-        assert "artifacts: <comma+space-list or NONE>" in prompt
+        assert 'ACCEPTANCE_CRITERIA: [{"description":' in prompt
+        assert '"verify": "<single-line command or NONE>"' in prompt
+        assert '"artifacts": ["<path>"]' in prompt
         assert "heredoc" in prompt.lower()
         assert "python -c" in prompt
         assert "combined stdout and stderr" in prompt
-        assert "Do not put commas or backslashes inside paths" in prompt
+        assert "JSON array of exact portable file or directory paths" in prompt
         assert "top-level path containing spaces with `./`" in prompt
         assert "ACCEPTANCE_CRITERIA: <criterion 1> | <criterion 2>" not in prompt
 
         retry_prompt = generator._build_retry_prompt("Q: goal?", "bad", "parse error")
         assert "combined stdout and stderr" in retry_prompt
-        assert "Do not put commas or backslashes inside paths" in retry_prompt
+        assert "JSON array of exact portable file or directory paths" in retry_prompt
         assert "top-level path containing spaces with `./`" in retry_prompt
 
     def test_extraction_retry_prompt_carries_granularity_contract(self) -> None:

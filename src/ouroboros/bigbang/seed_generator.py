@@ -957,7 +957,15 @@ def _parse_acceptance_criteria_contracts(
 ) -> tuple[AcceptanceCriterionSpec | str, ...]:
     """Parse legacy AC prose or structured AC success-contract lines."""
     if isinstance(raw_value, list | tuple):
-        entries = tuple(str(item).strip() for item in raw_value if str(item).strip())
+        parsed_entries: list[AcceptanceCriterionSpec | str] = []
+        for item in raw_value:
+            if isinstance(item, AcceptanceCriterionSpec):
+                parsed_entries.append(item)
+                continue
+            text = str(item).strip()
+            if text:
+                parsed_entries.append(text)
+        entries = tuple(parsed_entries)
     elif isinstance(raw_value, str):
         text = raw_value.strip()
         if not text:
@@ -971,12 +979,109 @@ def _parse_acceptance_criteria_contracts(
 
     parsed: list[AcceptanceCriterionSpec | str] = []
     for entry in entries:
+        if isinstance(entry, AcceptanceCriterionSpec):
+            parsed.append(entry)
+            continue
         if not entry.startswith("AC:"):
             parsed.append(entry)
             continue
         spec = _parse_acceptance_criterion_contract(entry)
         parsed.append(spec if spec is not None else entry.removeprefix("AC:").strip())
     return tuple(parsed)
+
+
+def _reject_duplicate_json_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    """Build a JSON object while rejecting keys that would otherwise be lost."""
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"Duplicate JSON object key {key!r}")
+        result[key] = value
+    return result
+
+
+def _parse_extracted_acceptance_criteria(raw_value: object) -> tuple[AcceptanceCriterionSpec, ...]:
+    """Parse the lossless JSON acceptance-criteria extraction boundary."""
+    field_label = "ACCEPTANCE_CRITERIA"
+    if not isinstance(raw_value, str):
+        raise ValueError(f"{field_label} must be a single-line JSON array of objects")
+    text = raw_value.strip()
+    if not text or "\n" in text or "\r" in text:
+        raise ValueError(f"{field_label} must be a single-line JSON array of objects")
+    try:
+        decoded = json.loads(
+            text,
+            object_pairs_hook=_reject_duplicate_json_keys,
+            parse_int=_bounded_json_int,
+            parse_constant=_JsonNonFiniteToken,
+        )
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{field_label} must be a valid JSON array of objects: {exc}") from exc
+    if not isinstance(decoded, list):
+        raise ValueError(f"{field_label} must be a JSON array of objects")
+
+    required_keys = {"description", "verify", "artifacts", "expect"}
+    criteria: list[AcceptanceCriterionSpec] = []
+    for index, entry in enumerate(decoded, start=1):
+        if not isinstance(entry, dict):
+            raise ValueError(f"{field_label} entry {index} must be a JSON object")
+        keys = set(entry)
+        missing = required_keys - keys
+        extra = keys - required_keys
+        if missing:
+            raise ValueError(f"{field_label} entry {index} is missing fields: {sorted(missing)}")
+        if extra:
+            raise ValueError(f"{field_label} entry {index} has unknown fields: {sorted(extra)}")
+
+        description = entry["description"]
+        verify = entry["verify"]
+        artifacts = entry["artifacts"]
+        expect = entry["expect"]
+        if not isinstance(description, str) or not description.strip():
+            raise ValueError(f"{field_label} entry {index} description must be a non-empty string")
+        for key, value in (("verify", verify), ("expect", expect)):
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(
+                    f"{field_label} entry {index} {key} must be a non-empty string or NONE"
+                )
+        if isinstance(artifacts, str):
+            if artifacts.strip().upper() != "NONE":
+                raise ValueError(
+                    f"{field_label} entry {index} artifacts must be a JSON string array or NONE"
+                )
+            expected_artifacts: object = ()
+        elif isinstance(artifacts, list):
+            if any(not isinstance(item, str) or not item for item in artifacts):
+                raise ValueError(
+                    f"{field_label} entry {index} artifacts entries must be non-empty strings"
+                )
+            expected_artifacts = artifacts
+        else:
+            raise ValueError(
+                f"{field_label} entry {index} artifacts must be a JSON string array or NONE"
+            )
+        try:
+            criterion = AcceptanceCriterionSpec.model_validate(
+                {
+                    "description": description,
+                    "verify_command": verify,
+                    "expected_artifacts": expected_artifacts,
+                    "output_assertion": expect,
+                }
+            )
+        except PydanticValidationError as exc:
+            raise ValueError(f"Invalid {field_label} entry {index}: {exc}") from exc
+        reason = (
+            _unsupported_verify_command_reason(criterion.verify_command)
+            if criterion.verify_command
+            else None
+        )
+        if reason:
+            raise ValueError(
+                f"Unsupported verify_command in acceptance criterion {index}: {reason}"
+            )
+        criteria.append(criterion)
+    return tuple(criteria)
 
 
 def _parse_acceptance_criterion_contract(line: str) -> AcceptanceCriterionSpec | None:
@@ -1018,18 +1123,6 @@ def _unsupported_verify_command_reason(command: str) -> str | None:
     if _UNSUPPORTED_VERIFY_HEREDOC_RE.search(command):
         return "verify_command uses heredoc/multiline shell syntax; use python -c or pytest instead"
     return None
-
-
-def _validate_acceptance_criteria_contracts(raw_value: object) -> None:
-    for index, criterion in enumerate(_parse_acceptance_criteria_contracts(raw_value), start=1):
-        if not isinstance(criterion, AcceptanceCriterionSpec) or not criterion.verify_command:
-            continue
-        reason = _unsupported_verify_command_reason(criterion.verify_command)
-        if reason:
-            raise ValueError(
-                f"Unsupported verify_command in acceptance criterion {index}: {reason}. "
-                "The Seed AC format is one line; use a complete single-line command."
-            )
 
 
 @dataclass
@@ -1465,16 +1558,14 @@ You MUST respond with ONLY the following format, one field per line, no other te
 
 ACCEPTANCE_CRITERIA rule: an acceptance criterion names a state of the finished work that a user can see is true; an implementation step names a means of reaching that state. Only the first belongs here — deciding means is the execution engine's work at runtime. A criterion intelligible only as a move toward a sibling is that sibling's means and belongs merged into the outcome it serves. How many criteria a goal has is discovered by that judgment.
 ACCEPTANCE_CRITERIA verify rule: `verify` must be one complete single-line shell command. Never use heredoc or multiline syntax (`<<`, `<<'PY'`, `cat <<EOF`, line-continuation scripts); use `python -c "..."`, `python3 -c "..."`, or `python -m pytest -q` instead.
-ACCEPTANCE_CRITERIA artifacts rule: every `artifacts` entry must be an exact portable file or directory path relative to the run workspace; the runner resolves it literally and requires it to exist. Separate multiple entries with comma+space, for example `artifacts: dist/app, docs/User Guide.md`. Do not put commas or backslashes inside paths. Prefix a top-level path containing spaces with `./`. Never use a descriptive label. If no exact path is known, use `artifacts: NONE` and provide a concrete `verify` command instead.
+ACCEPTANCE_CRITERIA artifacts rule: `artifacts` must be a JSON array of exact portable file or directory paths relative to the run workspace, or the string `NONE`. The runner resolves every path literally and requires it to exist. Prefix a top-level path containing spaces with `./`. Never use a descriptive label.
 ACCEPTANCE_CRITERIA expect rule: `expect` is ONLY a literal string printed verbatim in the combined stdout and stderr of `verify`, such as `OK` or `5 passed`. Use `expect: NONE` for exit-code/status conditions like `exit code 0`, `success`, `passed`, or `no errors`; exit-code 0 is already verified separately.
 
 CONSTRAINTS rule: respond with one single-line JSON array of strings, e.g. ["<constraint 1>", "<constraint 2>"]. Constraint values may contain any characters, including literal | pipes; never use a bare pipe as the list separator.
 
 GOAL: <clear goal statement>
 CONSTRAINTS: ["<constraint 1>", "<constraint 2>", ...]
-ACCEPTANCE_CRITERIA:
-AC: <description> | verify: <command or NONE> | artifacts: <comma+space-list or NONE> | expect: <output assertion or NONE>
-AC: <description> | verify: <command or NONE> | artifacts: <comma+space-list or NONE> | expect: <output assertion or NONE>
+ACCEPTANCE_CRITERIA: [{{"description": "<observable outcome>", "verify": "<single-line command or NONE>", "artifacts": ["<path>"], "expect": "<literal output or NONE>"}}]
 ONTOLOGY_NAME: <name>
 ONTOLOGY_DESCRIPTION: <description>
 ONTOLOGY_FIELDS: [{{"name": "<name>", "type": "<string|number|boolean|array|object>", "description": "<description>"}}, ...]
@@ -1576,16 +1667,14 @@ Respond ONLY with the structured format below. Do NOT add explanations, question
 
 ACCEPTANCE_CRITERIA rule: an acceptance criterion names a state of the finished work that a user can see is true; an implementation step names a means of reaching that state. Only the first belongs here — deciding means is the execution engine's work at runtime. Read each criterion beside its siblings and ask which kind it is: one that stands on its own as something a user would value is an outcome, while one intelligible only as a move toward a sibling is that sibling's means and belongs merged into the outcome it serves. Leaving a means in the list is a defect as severe as a missing requirement, because it commits the seed to a path no one has verified. How many criteria a goal has is discovered by making this judgment.
 ACCEPTANCE_CRITERIA verify rule: `verify` must be one complete single-line shell command. Never use heredoc or multiline syntax (`<<`, `<<'PY'`, `cat <<EOF`, line-continuation scripts); use `python -c "..."`, `python3 -c "..."`, or `python -m pytest -q` instead.
-ACCEPTANCE_CRITERIA artifacts rule: every `artifacts` entry must be an exact portable file or directory path relative to the run workspace; the runner resolves it literally and requires it to exist. Separate multiple entries with comma+space, for example `artifacts: dist/app, docs/User Guide.md`. Do not put commas or backslashes inside paths. Prefix a top-level path containing spaces with `./`. Never use a descriptive label. If no exact path is known, use `artifacts: NONE` and provide a concrete `verify` command instead.
+ACCEPTANCE_CRITERIA artifacts rule: `artifacts` must be a JSON array of exact portable file or directory paths relative to the run workspace, or the string `NONE`. The runner resolves every path literally and requires it to exist. Prefix a top-level path containing spaces with `./`. Never use a descriptive label.
 ACCEPTANCE_CRITERIA expect rule: `expect` is ONLY a literal string printed verbatim in the combined stdout and stderr of `verify`, such as `OK` or `5 passed`. Use `expect: NONE` for exit-code/status conditions like `exit code 0`, `success`, `passed`, or `no errors`; exit-code 0 is already verified separately.
 
 CONSTRAINTS rule: respond with one single-line JSON array of strings, e.g. ["<constraint 1>", "<constraint 2>"]. Constraint values may contain any characters, including literal | pipes; never use a bare pipe as the list separator.
 
 GOAL: <clear goal statement>
 CONSTRAINTS: ["<constraint 1>", "<constraint 2>", ...]
-ACCEPTANCE_CRITERIA:
-AC: <description> | verify: <command or NONE> | artifacts: <comma+space-list or NONE> | expect: <output assertion or NONE>
-AC: <description> | verify: <command or NONE> | artifacts: <comma+space-list or NONE> | expect: <output assertion or NONE>
+ACCEPTANCE_CRITERIA: [{{"description": "<observable outcome>", "verify": "<single-line command or NONE>", "artifacts": ["<path>"], "expect": "<literal output or NONE>"}}]
 ONTOLOGY_NAME: <name>
 ONTOLOGY_DESCRIPTION: <description>
 ONTOLOGY_FIELDS: [{{"name": "<name>", "type": "<string|number|boolean|array|object>", "description": "<description>"}}, ...]
@@ -1651,9 +1740,6 @@ EXIT_CONDITIONS: [{{"name": "<name>", "description": "<description>", "criteria"
         lines = cleaned.strip().split("\n")
         requirements: dict[str, Any] = {}
 
-        current_multiline_key: str | None = None
-        multiline_values: dict[str, list[str]] = {}
-
         for line in lines:
             line = line.strip()
             if not line:
@@ -1664,39 +1750,16 @@ EXIT_CONDITIONS: [{{"name": "<name>", "description": "<description>", "criteria"
                 if line.startswith(prefix):
                     key = prefix[:-1].lower()  # Remove colon and lowercase
                     value = line[len(prefix) :].strip()
-                    if key == "acceptance_criteria":
-                        if not value or value.startswith("AC:"):
-                            current_multiline_key = key
-                            multiline_values.setdefault(key, [])
-                            if value:
-                                multiline_values[key].append(value)
-                        else:
-                            requirements[key] = value
-                            current_multiline_key = None
-                    else:
-                        requirements[key] = value
-                        current_multiline_key = None
+                    requirements[key] = value
                     matched_prefix = True
                     break
             if matched_prefix:
                 continue
-            if current_multiline_key == "acceptance_criteria":
-                if line.startswith("AC:"):
-                    multiline_values.setdefault(current_multiline_key, []).append(line)
-                    continue
-                continuation_marker = _find_pipe_led_ac_field_fragment(line)
-                if continuation_marker is not None:
-                    raise ValueError(
-                        "Acceptance criterion continuation contains reserved "
-                        f"{continuation_marker.name} field; every nonempty line must start with AC:"
-                    )
-                raise ValueError("Every nonempty ACCEPTANCE_CRITERIA line must start with AC:")
-
-        if multiline_values.get("acceptance_criteria"):
-            requirements["acceptance_criteria"] = multiline_values["acceptance_criteria"]
 
         if "acceptance_criteria" in requirements:
-            _validate_acceptance_criteria_contracts(requirements["acceptance_criteria"])
+            requirements["acceptance_criteria"] = _parse_extracted_acceptance_criteria(
+                requirements["acceptance_criteria"]
+            )
 
         # Validate required fields
         required_fields = [
