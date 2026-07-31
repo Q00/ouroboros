@@ -688,6 +688,7 @@ def _shell_command_mutation_targets(
         candidate = wrapped_body
     else:
         return ()
+    candidate = _strip_unquoted_shell_comment(candidate)
     try:
         lexer = shlex.shlex(
             _mask_quoted_output_operators(candidate),
@@ -739,6 +740,45 @@ def _shell_command_mutation_targets(
     return tuple(targets)
 
 
+def _strip_unquoted_shell_comment(command: str) -> str:
+    """Drop a real shell comment while preserving literal ``#`` bytes.
+
+    POSIX shells begin a comment only when an unquoted, unescaped ``#`` occurs
+    at the start of a word.  Quoted hashes, escaped hashes, and hashes embedded
+    in tokens such as ``foo#bar`` remain ordinary argv data.
+    """
+    quote: str | None = None
+    escaped = False
+    at_word_start = True
+    for index, char in enumerate(command):
+        if escaped:
+            escaped = False
+            at_word_start = False
+            continue
+        if quote == "'":
+            if char == "'":
+                quote = None
+            continue
+        if char == "\\":
+            escaped = True
+            continue
+        if quote == '"':
+            if char == '"':
+                quote = None
+            continue
+        if char in {"'", '"'}:
+            quote = char
+            at_word_start = False
+            continue
+        if char == "#" and at_word_start:
+            return command[:index]
+        if char.isspace() or char in ";&|()<>":
+            at_word_start = True
+        else:
+            at_word_start = False
+    return command
+
+
 def _mask_quoted_output_operators(command: str) -> str:
     """Mask quoted or escaped ``>`` bytes before punctuation tokenization."""
     quote: str | None = None
@@ -769,6 +809,7 @@ def _has_unquoted_compound_shell_control(command: str) -> bool:
     wrapped_body = _shell_command_body(command)
     if wrapped_body is not None:
         return _has_unquoted_compound_shell_control(wrapped_body)
+    command = _strip_unquoted_shell_comment(command)
     quote: str | None = None
     escaped = False
     for index, char in enumerate(command):

@@ -427,6 +427,82 @@ def test_files_touched_rejects_python_c_quoted_or_escaped_redirect_argv(
     )
 
 
+def test_files_touched_rejects_python_c_redirection_inside_shell_comment(tmp_path) -> None:
+    """A comment cannot turn a Python-internal write into shell receiver proof."""
+    source = "from pathlib import Path; Path('claimed.py').write_text('internal')"
+    command = f"{_trusted_python_c(source)} # > claimed.py"
+    call = AgentMessage(
+        type="tool",
+        content=f"Bash: {command}",
+        tool_name="Bash",
+        data={"tool_input": {"command": command}, "tool_call_id": "commented-redirect"},
+    )
+    completion = AgentMessage(
+        type="tool_result",
+        content="command completed with exit code 0",
+        data={
+            "subtype": "tool_result",
+            "exit_code": 0,
+            "tool_call_id": "commented-redirect",
+        },
+    )
+
+    with _BashFilesystemLeaseTracker(task_cwd=str(tmp_path)) as tracker:
+        observed_call = tracker.observe(call)
+        completed = subprocess.run(command, cwd=tmp_path, shell=True, check=False)  # noqa: S602
+        observed_completion = tracker.observe(completion)
+
+    assert completed.returncode == 0
+    assert (tmp_path / "claimed.py").read_text(encoding="utf-8") == "internal"
+    assert _shell_command_mutation_targets(command, redirections_only=True) == ()
+    assert "filesystem_effects" not in observed_completion.data
+    assert not _runtime_messages_support_file_claim(
+        "claimed.py",
+        (observed_call, observed_completion),
+        task_cwd=str(tmp_path),
+    )
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    (
+        ("printf '%s\\n' 'quoted # value' > claimed.py", "quoted # value\n"),
+        (r"printf '%s\n' escaped\#value > claimed.py", "escaped#value\n"),
+        ("printf '%s\\n' foo#bar > claimed.py", "foo#bar\n"),
+    ),
+)
+def test_files_touched_preserves_literal_hash_before_real_shell_redirect(
+    tmp_path,
+    command,
+    expected,
+) -> None:
+    """Quoted, escaped, and token-internal hashes remain ordinary argv data."""
+    call = AgentMessage(
+        type="tool",
+        content=f"Bash: {command}",
+        tool_name="Bash",
+        data={"tool_input": {"command": command}},
+    )
+    completion = AgentMessage(
+        type="tool_result",
+        content="command completed with exit code 0",
+        data={"subtype": "tool_result", "exit_code": 0},
+    )
+
+    with _BashFilesystemLeaseTracker(task_cwd=str(tmp_path)) as tracker:
+        observed_call = tracker.observe(call)
+        completed = subprocess.run(command, cwd=tmp_path, shell=True, check=False)  # noqa: S602
+        observed_completion = tracker.observe(completion)
+
+    assert completed.returncode == 0
+    assert (tmp_path / "claimed.py").read_text(encoding="utf-8") == expected
+    assert _runtime_messages_support_file_claim(
+        "claimed.py",
+        (observed_call, observed_completion),
+        task_cwd=str(tmp_path),
+    )
+
+
 def test_files_touched_rejects_shell_receiver_symlink_replaced_after_execution(tmp_path) -> None:
     """Recorded symlink identity cannot authenticate a later regular file."""
     outside = tmp_path.parent / f"{tmp_path.name}-outside.py"
