@@ -498,11 +498,16 @@ class EventStore:
                 ``initialize(create_schema=False)`` — this is the default when
                 ``read_only=True``. ``read_only`` is a no-op for non-SQLite URLs.
         """
+        self._configuration_error: ValueError | None = None
         if database_url is None:
-            from ouroboros.config.models import resolve_event_store_path
+            from ouroboros.config.models import get_config_dir, resolve_event_store_path
 
-            db_path = resolve_event_store_path()
-            if not read_only:
+            try:
+                db_path = resolve_event_store_path()
+            except ValueError as exc:
+                self._configuration_error = exc
+                db_path = get_config_dir() / "ouroboros.db"
+            if not read_only and self._configuration_error is None:
                 db_path.parent.mkdir(parents=True, exist_ok=True)
             database_url = f"sqlite+aiosqlite:///{db_path}"
 
@@ -636,6 +641,12 @@ class EventStore:
         shared database with normal connection-scoped transactions, and a
         keepalive connection anchors the database's lifetime.
         """
+        if self._configuration_error is not None:
+            raise PersistenceError(
+                "Invalid EventStore configuration.",
+                operation="initialize",
+            ) from self._configuration_error
+
         if create_schema is None:
             create_schema = not self._read_only
 

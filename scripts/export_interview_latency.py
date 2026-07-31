@@ -193,8 +193,8 @@ def main() -> int:
 
     try:
         db_path = (args.db if args.db is not None else resolve_event_store_path()).expanduser()
-    except ValueError as exc:
-        print(f"export_interview_latency: invalid EventStore configuration ({exc})", file=sys.stderr)
+    except ValueError:
+        print("export_interview_latency: invalid EventStore configuration", file=sys.stderr)
         return 2
     if not db_path.is_file():
         print("export_interview_latency: EventStore database not found", file=sys.stderr)

@@ -268,5 +268,23 @@ def test_explicit_database_bypasses_invalid_config(tmp_path: Path) -> None:
     assert "database not found" in result.stderr
     assert "invalid EventStore configuration" not in result.stderr
     assert result.stdout == ""
-    assert "database not found" in result.stderr
     assert str(tmp_path) not in result.stderr
+
+
+def test_invalid_config_error_redacts_secret_and_home_path(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    config_dir = home / ".ouroboros"
+    config_dir.mkdir(parents=True)
+    secret = "sk-super-secret"
+    (config_dir / "config.yaml").write_text(
+        f"persistence:\n  database_path: [\napi_key: {secret}: exposed\n"
+    )
+
+    result = _run_exporter_default(home)
+    output = result.stdout + result.stderr
+
+    assert result.returncode == 2
+    assert "invalid EventStore configuration" in result.stderr
+    assert secret not in output
+    assert str(home) not in output
+    assert "Traceback" not in output

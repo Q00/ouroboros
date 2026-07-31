@@ -130,6 +130,12 @@ def _load_config() -> tuple[dict, Path]:
             )
             raise typer.Exit(1)
 
+    try:
+        event_store_path_from_config(data, config_path)
+    except ValueError as exc:
+        print_error(str(exc))
+        raise typer.Exit(1) from None
+
     return data, config_path
 
 

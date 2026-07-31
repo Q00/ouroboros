@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
+import subprocess
+import sys
 from unittest.mock import patch
 
 import pytest
@@ -116,6 +119,26 @@ class TestConfigShow:
         assert result.exit_code == 0
         data = yaml.safe_load((config_dir / "config.yaml").read_text())
         assert _resolve_db_path(data, config_dir / "config.yaml") == str(legacy_db)
+
+    def test_show_invalid_database_path_exits_without_traceback(self, tmp_path: Path) -> None:
+        home = tmp_path / "home"
+        config_dir = home / ".ouroboros"
+        config_dir.mkdir(parents=True)
+        (config_dir / "config.yaml").write_text("persistence:\n  database_path:\n")
+        env = os.environ.copy()
+        env["HOME"] = str(home)
+
+        result = subprocess.run(
+            [sys.executable, "-m", "ouroboros", "config", "show", "--json"],
+            text=True,
+            capture_output=True,
+            check=False,
+            env=env,
+        )
+
+        assert result.returncode == 1
+        assert "persistence.database_path" in result.stdout
+        assert "Traceback" not in result.stdout + result.stderr
 
 
 # ── config backend ───────────────────────────────────────────────
