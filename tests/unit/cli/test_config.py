@@ -18,6 +18,15 @@ from ouroboros.config._model_defaults import DEFAULT_SONNET_MODEL
 
 runner = CliRunner(env={"COLUMNS": "200"})
 
+_EVENT_STORE_CONFIG_COMMANDS = [
+    ["config", "show", "--json"],
+    ["status", "executions"],
+    ["resume"],
+    ["tui", "open"],
+    ["mcp", "doctor", "--json"],
+    ["mcp", "serve", "--transport", "stdio"],
+]
+
 
 @pytest.fixture()
 def config_dir(tmp_path: Path) -> Path:
@@ -225,17 +234,7 @@ class TestConfigShow:
         assert execute["model_source"] == "automatic Codex selection"
 
 
-@pytest.mark.parametrize(
-    "arguments",
-    [
-        ["config", "show", "--json"],
-        ["status", "executions"],
-        ["resume"],
-        ["tui", "open"],
-        ["mcp", "doctor", "--json"],
-        ["mcp", "serve", "--transport", "stdio"],
-    ],
-)
+@pytest.mark.parametrize("arguments", _EVENT_STORE_CONFIG_COMMANDS)
 def test_invalid_yaml_commands_redact_config_contents(tmp_path: Path, arguments: list[str]) -> None:
     home = tmp_path / "home"
     config_dir = home / ".ouroboros"
@@ -295,17 +294,7 @@ def test_non_mapping_config_redacts_config_path(tmp_path: Path, arguments: list[
     assert "Traceback" not in output
 
 
-@pytest.mark.parametrize(
-    "arguments",
-    [
-        ["config", "show", "--json"],
-        ["status", "executions"],
-        ["resume"],
-        ["tui", "open"],
-        ["mcp", "doctor", "--json"],
-        ["mcp", "serve", "--transport", "stdio"],
-    ],
-)
+@pytest.mark.parametrize("arguments", _EVENT_STORE_CONFIG_COMMANDS)
 def test_wrong_type_persistence_redacts_config_value(
     tmp_path: Path,
     arguments: list[str],
@@ -333,6 +322,38 @@ def test_wrong_type_persistence_redacts_config_value(
 
     assert result.returncode != 0
     assert private_value not in output
+    assert str(config_path) not in output
+    assert "Traceback" not in output
+
+
+@pytest.mark.parametrize("arguments", _EVENT_STORE_CONFIG_COMMANDS)
+def test_unresolvable_user_database_path_is_redacted(
+    tmp_path: Path,
+    arguments: list[str],
+) -> None:
+    home = tmp_path / "home"
+    config_dir = home / ".ouroboros"
+    config_dir.mkdir(parents=True)
+    private_user = "ouroboros-user-that-must-not-exist-1817"
+    config_path = config_dir / "config.yaml"
+    config_path.write_text(f"persistence:\n  database_path: '~{private_user}/events.db'\n")
+    env = os.environ.copy()
+    env.pop("_OUROBOROS_NESTED", None)
+    env["HOME"] = str(home)
+
+    result = subprocess.run(
+        [sys.executable, "-m", "ouroboros", *arguments],
+        stdin=subprocess.DEVNULL,
+        text=True,
+        capture_output=True,
+        check=False,
+        env=env,
+        timeout=10,
+    )
+    output = result.stdout + result.stderr
+
+    assert result.returncode != 0
+    assert private_user not in output
     assert str(config_path) not in output
     assert "Traceback" not in output
 

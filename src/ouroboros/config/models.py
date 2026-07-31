@@ -851,10 +851,15 @@ def event_store_path_from_config(data: Mapping[str, Any], config_path: Path) -> 
     if not isinstance(configured, str) or not configured.strip():
         raise ValueError("config field 'persistence.database_path' must be a non-empty string")
 
-    configured_path = Path(configured).expanduser()
-    if not configured_path.is_absolute():
-        configured_path = config_path.parent / configured_path
-    if configured_path.exists() or not legacy_path.exists():
+    try:
+        configured_path = Path(configured).expanduser()
+        if not configured_path.is_absolute():
+            configured_path = config_path.parent / configured_path
+        configured_exists = configured_path.exists()
+        legacy_exists = legacy_path.exists()
+    except (OSError, RuntimeError, ValueError):
+        raise ValueError("invalid EventStore configuration") from None
+    if configured_exists or not legacy_exists:
         return configured_path
     return legacy_path
 

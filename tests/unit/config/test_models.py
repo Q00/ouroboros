@@ -538,6 +538,18 @@ def test_event_store_path_rejects_invalid_database_path(tmp_path, database_path)
         )
 
 
+def test_event_store_path_redacts_unknown_user_expansion(tmp_path) -> None:
+    private_user = "ouroboros-user-that-must-not-exist-1817"
+
+    with pytest.raises(ValueError, match="invalid EventStore configuration") as exc_info:
+        event_store_path_from_config(
+            {"persistence": {"database_path": f"~{private_user}/events.db"}},
+            tmp_path / "config.yaml",
+        )
+
+    assert private_user not in str(exc_info.value)
+
+
 def test_resolve_event_store_path_rejects_explicit_yaml_null(tmp_path) -> None:
     config_path = tmp_path / "config.yaml"
     config_path.write_text("persistence:\n  database_path:\n")
