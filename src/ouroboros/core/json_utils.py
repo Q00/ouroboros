@@ -19,7 +19,12 @@ _FENCE_MARKERS = ("`", "~")
 _BLOCKQUOTE_FENCE_PREFIX = re.compile(r"^[ \t]{0,3}(?:>[ \t]?)+$")
 _PLAIN_FENCE_PREFIX = re.compile(r"^ {0,3}$")
 _INDENTED_CODE_PREFIX = re.compile(r"^(?: {4}| {0,3}\t)")
-_ANTHROPIC_PREFILL_PROSE = re.compile(r"^\{(?:Let me\b|I will analyze\b)")
+_ANTHROPIC_PREFILL_PROSE = re.compile(r"^\{(?:Let me\s|I will analyze\s)")
+_ANTHROPIC_PREFILL_PREAMBLE = re.compile(r"^(?:Let me\s|I will analyze\s)")
+_SIMPLE_PROSE_PLACEHOLDER = re.compile(r"\{[A-Za-z_][A-Za-z0-9_.-]*\}")
+_STRUCTURED_PREAMBLE_LINE = re.compile(
+    r"^\s*(?:[A-Za-z_][A-Za-z0-9_-]*|\d+)\s*:\s*\S", re.MULTILINE
+)
 
 
 class _MalformedJsonBoundary(ValueError):
@@ -340,16 +345,44 @@ def _anthropic_prefill_payload(text: str, start: int) -> str | None:
     if start != 0 or _ANTHROPIC_PREFILL_PROSE.match(text) is None:
         return None
 
-    separators = tuple(re.finditer(r"(?:\r?\n){2,}", text[start + 1 :]))
-    if not separators:
+    candidates: list[tuple[int, str]] = []
+    for separator in re.finditer(r"(?:\r?\n){2,}", text[start + 1 :]):
+        payload_start = start + 1 + separator.end()
+        payload = text[payload_start:].strip()
+        try:
+            parsed = json.loads(payload)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if isinstance(parsed, dict | list):
+            candidates.append((payload_start, payload))
+
+    if len(candidates) != 1:
         return None
-    payload_start = start + 1 + separators[-1].end()
-    payload = text[payload_start:].strip()
+
+    payload_start, payload = candidates[0]
+    preamble = text[start + 1 : payload_start]
     try:
-        parsed = json.loads(payload)
-    except (json.JSONDecodeError, ValueError):
+        prior_payloads = _extract_json_from_text(preamble)
+    except _MalformedJsonBoundary:
         return None
-    return payload if isinstance(parsed, dict | list) else None
+    if prior_payloads or not _is_historical_anthropic_preamble(preamble):
+        return None
+    return payload
+
+
+def _is_historical_anthropic_preamble(preamble: str) -> bool:
+    """Accept only the two prose families demonstrated by the legacy corpus."""
+    if _ANTHROPIC_PREFILL_PREAMBLE.match(preamble) is None:
+        return False
+    if any(char in preamble for char in ('"', "'", "`", "[", "]")):
+        return False
+
+    without_placeholders = _SIMPLE_PROSE_PLACEHOLDER.sub("", preamble)
+    if "{" in without_placeholders or "}" in without_placeholders:
+        return False
+
+    first_line = preamble.splitlines()[0]
+    return ":" not in first_line and _STRUCTURED_PREAMBLE_LINE.search(preamble) is None
 
 
 def _bracket_extract(text: str, start: int) -> str | None:

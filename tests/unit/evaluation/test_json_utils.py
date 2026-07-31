@@ -178,6 +178,41 @@ class TestExtractJsonPayload:
         assert result is not None
         assert '"score": 0.88' in result
 
+    @pytest.mark.parametrize("line_ending", ["\n", "\r\n"], ids=["lf", "crlf"])
+    def test_anthropic_prefill_preserves_pretty_json_blank_lines_and_trailing_space(
+        self, line_ending: str
+    ) -> None:
+        payload = line_ending.join(
+            [
+                "{",
+                '  "outer": {',
+                '    "inner": true',
+                "  },",
+                "",
+                '  "items": [1, 2]',
+                "}",
+            ]
+        )
+        text = (
+            f"{{Let me carefully evaluate this response.{line_ending}{line_ending}"
+            f"{payload}{line_ending}{line_ending}"
+        )
+
+        assert extract_json_payload(text) == payload
+
+    def test_anthropic_prefill_rejects_multiple_paragraph_payloads(self) -> None:
+        text = '{Let me compare the answers.\n\n{"a": 1}\n\n{"b": 2}'
+
+        assert extract_json_payload(text) is None
+
+    @pytest.mark.parametrize(
+        "prefix",
+        ["{Let me-json", "{Let me:", '{Let me"draft', "{I will analyze[draft]"],
+        ids=["hyphen", "colon", "quote", "mixed-bracket"],
+    )
+    def test_anthropic_prefill_requires_natural_prose_preamble(self, prefix: str) -> None:
+        assert extract_json_payload(f'{prefix} stale\n\n{{"stale": true}}') is None
+
     def test_multiple_unfenced_json_objects_fail_closed(self):
         text = 'prefix {"a": 1} middle {"b": 2} suffix'
         assert extract_json_payload(text) is None

@@ -74,6 +74,11 @@ def _wrap(variant: str, payload: str) -> str:
         return json.dumps(json.loads(payload), indent=4)
     if variant == "pretty_raw_tabs":
         return json.dumps(json.loads(payload), indent="\t")
+    if variant == "anthropic_prefill_pretty_blanklines":
+        pretty = json.dumps(json.loads(payload), indent=2).replace("\n", "\n\n", 1)
+        return f"{{Let me carefully evaluate this response.\n\n{pretty}\n\n"
+    if variant == "anthropic_prefill_crlf_trailing_blanks":
+        return f"{{I will analyze this response.\r\n\r\n{payload}\r\n\r\n"
     if variant == "no_fence":
         return payload
     raise AssertionError(f"unknown variant: {variant}")
@@ -167,6 +172,11 @@ MALFORMED_UNFENCED_WRAPPERS = [
     "{'draft': stale\n\n<payload>",
     "{0: stale\n\n<payload>",
     "{Analysis: stale\n\n<payload>",
+    '{Let me think.\n\n{"example": true}\n\n<payload>',
+    "{Let me-json stale\n\n<payload>",
+    "{Let me: stale\n\n<payload>",
+    '{Let me"draft stale\n\n<payload>',
+    "{I will analyze[draft] stale\n\n<payload>",
 ]
 
 
@@ -204,6 +214,8 @@ FENCE_VARIANTS = [
     "inline_before_indented_crlf_fence",
     "pretty_raw_spaces",
     "pretty_raw_tabs",
+    "anthropic_prefill_pretty_blanklines",
+    "anthropic_prefill_crlf_trailing_blanks",
     "no_fence",
 ]
 
