@@ -70,6 +70,10 @@ def _wrap(variant: str, payload: str) -> str:
         return f"Use ``` as prose before the answer: {payload}"
     if variant == "inline_before_indented_crlf_fence":
         return f"Use ``` inline\r\n  ````json\r\n{payload}\r\n  ````"
+    if variant == "pretty_raw_spaces":
+        return json.dumps(json.loads(payload), indent=4)
+    if variant == "pretty_raw_tabs":
+        return json.dumps(json.loads(payload), indent="\t")
     if variant == "no_fence":
         return payload
     raise AssertionError(f"unknown variant: {variant}")
@@ -156,9 +160,11 @@ def _wrap_unfenced_example_then_actual(example_payload: str, actual_payload: str
     return f"For example: {example_payload}\nActual answer: {actual_payload}"
 
 
-def _wrap_indented_fence_example_then_actual(example_payload: str, actual_payload: str) -> str:
+def _wrap_indented_fence_example_then_actual(
+    example_payload: str, actual_payload: str, *, indentation: str = "    "
+) -> str:
     indented_example = "\n".join(
-        f"    {line}" for line in f"```json\n{example_payload}\n```".splitlines()
+        f"{indentation}{line}" for line in f"```json\n{example_payload}\n```".splitlines()
     )
     return f"Example only:\n{indented_example}\nActual answer: {actual_payload}"
 
@@ -178,6 +184,8 @@ FENCE_VARIANTS = [
     "longer_bare_fence",
     "inline_before_prose_json",
     "inline_before_indented_crlf_fence",
+    "pretty_raw_spaces",
+    "pretty_raw_tabs",
     "no_fence",
 ]
 
@@ -274,7 +282,8 @@ class TestWonderFenceRobustness:
             "What assumptions remain untested for goal: Build a login system?",
         )
 
-    def test_indented_fence_example_cannot_override_unfenced_answer(self) -> None:
+    @pytest.mark.parametrize("indentation", ["    ", "\t"], ids=["spaces", "tab"])
+    def test_indented_fence_example_cannot_override_unfenced_answer(self, indentation: str) -> None:
         stale_payload = json.dumps(
             {"questions": [], "should_continue": False, "reasoning": "stale example"}
         )
@@ -287,7 +296,9 @@ class TestWonderFenceRobustness:
         )
 
         out = WonderEngine(llm_adapter=AsyncMock(), model="test")._parse_response(
-            _wrap_indented_fence_example_then_actual(stale_payload, actual_payload),
+            _wrap_indented_fence_example_then_actual(
+                stale_payload, actual_payload, indentation=indentation
+            ),
             _seed(),
         )
 
@@ -610,7 +621,10 @@ class TestReflectFenceRobustness:
         assert "failed to parse" in result.error.message.lower()
 
     @pytest.mark.asyncio
-    async def test_indented_fence_example_cannot_override_unfenced_answer(self) -> None:
+    @pytest.mark.parametrize("indentation", ["    ", "\t"], ids=["spaces", "tab"])
+    async def test_indented_fence_example_cannot_override_unfenced_answer(
+        self, indentation: str
+    ) -> None:
         stale_payload = json.dumps(
             {
                 "refined_goal": "Stale example",
@@ -630,7 +644,9 @@ class TestReflectFenceRobustness:
         adapter = AsyncMock()
         adapter.complete.return_value = Result.ok(
             CompletionResponse(
-                content=_wrap_indented_fence_example_then_actual(stale_payload, actual_payload),
+                content=_wrap_indented_fence_example_then_actual(
+                    stale_payload, actual_payload, indentation=indentation
+                ),
                 model="test",
                 usage=UsageInfo(prompt_tokens=1, completion_tokens=1, total_tokens=2),
             )
@@ -980,7 +996,8 @@ class TestAssertionExtractorFenceRobustness:
 
         assert assertions == ()
 
-    def test_indented_fence_example_cannot_override_unfenced_answer(self) -> None:
+    @pytest.mark.parametrize("indentation", ["    ", "\t"], ids=["spaces", "tab"])
+    def test_indented_fence_example_cannot_override_unfenced_answer(self, indentation: str) -> None:
         stale_payload = json.dumps(
             [
                 {
@@ -1003,7 +1020,9 @@ class TestAssertionExtractorFenceRobustness:
         )
 
         assertions = AssertionExtractor(llm_adapter=AsyncMock())._parse_response(
-            _wrap_indented_fence_example_then_actual(stale_payload, actual_payload),
+            _wrap_indented_fence_example_then_actual(
+                stale_payload, actual_payload, indentation=indentation
+            ),
             ("AC number 1",),
         )
 

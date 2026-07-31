@@ -1,5 +1,7 @@
 """Tests for extract_json_payload — the shared JSON extractor."""
 
+import json
+
 import pytest
 
 from ouroboros.evaluation.json_utils import extract_json_payload
@@ -15,6 +17,34 @@ class TestExtractJsonPayload:
         result = extract_json_payload(text)
         assert result is not None
         assert '"score": 0.85' in result
+
+    @pytest.mark.parametrize(
+        ("payload", "indent"),
+        [
+            ({"outer": {"inner": 42}, "items": [1, 2]}, 4),
+            ([{"assertion": {"verified": True}}], "\t"),
+        ],
+        ids=["pretty-object-spaces", "pretty-array-tabs"],
+    )
+    def test_pretty_raw_json_preserves_nested_indentation(
+        self, payload: object, indent: int | str
+    ) -> None:
+        text = json.dumps(payload, indent=indent)
+
+        assert extract_json_payload(text) == text
+
+    @pytest.mark.parametrize("indentation", ["    ", "\t"], ids=["spaces", "tab"])
+    def test_indented_literal_fence_is_excluded_without_rewriting_pretty_answer(
+        self, indentation: str
+    ) -> None:
+        stale = json.dumps({"stale": {"nested": True}}, indent=4)
+        indented_example = "\n".join(
+            f"{indentation}{line}" for line in f"```json\n{stale}\n```".splitlines()
+        )
+        actual = json.dumps({"actual": {"nested": True}}, indent=4)
+        text = f"Example only:\n{indented_example}\nActual answer:\n{actual}"
+
+        assert extract_json_payload(text) == actual
 
     def test_json_in_code_fence(self):
         text = '```json\n{"score": 0.85}\n```'

@@ -1,5 +1,6 @@
 """Tests for Stage 2 semantic evaluation."""
 
+import json
 from unittest.mock import AsyncMock
 
 import pytest
@@ -182,6 +183,27 @@ class TestParseSemanticResponse:
         assert semantic.uncertainty == 0.2
         assert semantic.reasoning == "Good implementation"
         assert semantic.reward_hacking_risk == 0.05
+
+    def test_tab_indented_pretty_raw_response(self) -> None:
+        response = json.dumps(
+            {
+                "score": 0.85,
+                "ac_compliance": True,
+                "goal_alignment": 0.9,
+                "drift_score": 0.1,
+                "uncertainty": 0.2,
+                "reasoning": "Pretty response remains intact",
+                "reward_hacking_risk": 0.05,
+                "evidence": ["nested array survives"],
+            },
+            indent="\t",
+        )
+
+        result = parse_semantic_response(response)
+
+        assert result.is_ok
+        assert result.value.reasoning == "Pretty response remains intact"
+        assert result.value.evidence == ("nested array survives",)
 
     def test_json_with_surrounding_text(self) -> None:
         """Parse JSON embedded in text."""

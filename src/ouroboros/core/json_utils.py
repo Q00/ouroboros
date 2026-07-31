@@ -42,9 +42,7 @@ def extract_json_payload(text: str) -> str | None:
         return None
 
     payloads = [
-        payload
-        for segment in fallback_segments
-        for payload in _extract_json_from_text(_exclude_indented_code_blocks(segment))
+        payload for segment in fallback_segments for payload in _extract_json_from_text(segment)
     ]
     return payloads[0] if len(payloads) == 1 else None
 
@@ -202,21 +200,81 @@ def _decode_fenced_body(body: str, *, quote_prefix: str | None) -> str | None:
     return "\n".join(decoded).strip()
 
 
-def _exclude_indented_code_blocks(text: str) -> str:
-    """Exclude Markdown indented-code lines from unfenced answer fallback.
+def _indented_fence_line(
+    text: str, line_start: int, line_end: int
+) -> tuple[str, str, int, str] | None:
+    """Describe a literal fence line inside a Markdown indented-code block."""
+    marker_start = line_start
+    while marker_start < line_end and text[marker_start] in " \t":
+        marker_start += 1
+    prefix = text[line_start:marker_start]
+    if _INDENTED_CODE_PREFIX.match(prefix) is None or marker_start >= line_end:
+        return None
 
-    A fence-looking line indented by four spaces (or a tab) is literal code,
-    not an authoritative fenced answer.  Its indented body must likewise not
-    compete with the model's actual top-level payload.
+    marker = text[marker_start]
+    if marker not in _FENCE_MARKERS:
+        return None
+    marker_length = _fence_run_length(text, marker_start, marker)
+    if marker_length < 3:
+        return None
+    suffix = text[marker_start + marker_length : line_end].strip()
+    return prefix, marker, marker_length, suffix
+
+
+def _indented_fence_example_ranges(text: str) -> tuple[tuple[int, int], ...]:
+    """Return closed literal-fence examples that cannot supply answer JSON.
+
+    Only the complete indented `````...`````-shaped example is excluded. Raw
+    JSON candidates are otherwise scanned from the original text, preserving
+    every nested four-space or tab-indented line byte-for-byte.
     """
-    return "".join(
-        line for line in text.splitlines(keepends=True) if _INDENTED_CODE_PREFIX.match(line) is None
-    )
+    lines: list[tuple[int, int, int]] = []
+    line_start = 0
+    for line in text.splitlines(keepends=True):
+        line_stop = line_start + len(line)
+        content_end = line_stop
+        while content_end > line_start and text[content_end - 1] in "\r\n":
+            content_end -= 1
+        lines.append((line_start, content_end, line_stop))
+        line_start = line_stop
+    if line_start < len(text) or not lines:
+        lines.append((line_start, len(text), len(text)))
+
+    ranges: list[tuple[int, int]] = []
+    index = 0
+    while index < len(lines):
+        opener_start, opener_end, _ = lines[index]
+        opener = _indented_fence_line(text, opener_start, opener_end)
+        if opener is None:
+            index += 1
+            continue
+        prefix, marker, marker_length, _ = opener
+
+        closing_index = index + 1
+        while closing_index < len(lines):
+            closing_start, closing_end, closing_stop = lines[closing_index]
+            closing = _indented_fence_line(text, closing_start, closing_end)
+            if (
+                closing is not None
+                and closing[0] == prefix
+                and closing[1] == marker
+                and closing[2] >= marker_length
+                and closing[3] == ""
+            ):
+                ranges.append((opener_start, closing_stop))
+                index = closing_index + 1
+                break
+            closing_index += 1
+        else:
+            index += 1
+    return tuple(ranges)
 
 
 def _extract_json_from_text(text: str) -> tuple[str, ...]:
     """Return non-overlapping valid JSON payloads found in prose."""
     payloads: list[str] = []
+    excluded_ranges = _indented_fence_example_ranges(text)
+    excluded_index = 0
     pos = 0
     while True:
         obj_start = text.find("{", pos)
@@ -229,6 +287,15 @@ def _extract_json_from_text(text: str) -> tuple[str, ...]:
             start = obj_start
         else:
             start = min(obj_start, arr_start)
+
+        while excluded_index < len(excluded_ranges) and excluded_ranges[excluded_index][1] <= start:
+            excluded_index += 1
+        if (
+            excluded_index < len(excluded_ranges)
+            and excluded_ranges[excluded_index][0] <= start < excluded_ranges[excluded_index][1]
+        ):
+            pos = excluded_ranges[excluded_index][1]
+            continue
 
         candidate = _bracket_extract(text, start)
         if candidate is not None:
