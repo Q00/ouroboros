@@ -139,7 +139,7 @@ class TestResolveClientIdentity:
             return entry[column] if entry else None
 
         monkeypatch.setattr(mcp, "_ps_value", fake_ps)
-        monkeypatch.setattr(mcp, "process_start_time", lambda _pid: 1700000000.0)
+        monkeypatch.setattr(mcp, "_process_start_marker", lambda _pid: 1700000000.0)
 
         resolved = mcp._resolve_client_identity(100)
 
@@ -150,7 +150,7 @@ class TestResolveClientIdentity:
         monkeypatch.setattr(
             mcp, "_ps_value", lambda _pid, column: {"comm": "codex", "ppid": "1"}[column]
         )
-        monkeypatch.setattr(mcp, "process_start_time", lambda _pid: None)
+        monkeypatch.setattr(mcp, "_process_start_marker", lambda _pid: None)
 
         resolved = mcp._resolve_client_identity(77)
 
@@ -176,7 +176,7 @@ class TestResolveClientIdentity:
 
     def test_env_override_wins(self, monkeypatch):
         monkeypatch.setenv("OUROBOROS_CLIENT_PID", "4242")
-        monkeypatch.setattr(mcp, "process_start_time", lambda _pid: 5.0)
+        monkeypatch.setattr(mcp, "_process_start_marker", lambda _pid: 5.0)
         monkeypatch.setattr(
             mcp,
             "_ps_value",
@@ -189,18 +189,30 @@ class TestResolveClientIdentity:
 class TestClientIsAlive:
     def test_defunct_zombie_client_counts_as_dead(self, monkeypatch):
         """kill(pid, 0) succeeds on an unreaped zombie; ps stat 'Z' must catch it."""
-        monkeypatch.setattr(mcp, "is_process_identity_alive", lambda _pid, _start=None: True)
+        monkeypatch.setattr(mcp.os, "kill", lambda _pid, _sig: None)
         monkeypatch.setattr(mcp, "_ps_value", lambda _pid, _column: "Z+")
         assert mcp._client_is_alive(123, None) is False
 
     def test_live_client_stays_alive(self, monkeypatch):
-        monkeypatch.setattr(mcp, "is_process_identity_alive", lambda _pid, _start=None: True)
+        monkeypatch.setattr(mcp.os, "kill", lambda _pid, _sig: None)
         monkeypatch.setattr(mcp, "_ps_value", lambda _pid, _column: "S+")
         assert mcp._client_is_alive(123, None) is True
 
     def test_dead_identity_short_circuits(self, monkeypatch):
-        monkeypatch.setattr(mcp, "is_process_identity_alive", lambda _pid, _start=None: False)
+        def _gone(_pid, _sig):
+            raise ProcessLookupError
+
+        monkeypatch.setattr(mcp.os, "kill", _gone)
         monkeypatch.setattr(
             mcp, "_ps_value", lambda _pid, _column: pytest.fail("must short-circuit")
         )
         assert mcp._client_is_alive(123, None) is False
+
+    def test_recycled_pid_counts_as_dead(self, monkeypatch):
+        """A signalable pid whose start marker moved is a different process."""
+        monkeypatch.setattr(mcp.os, "kill", lambda _pid, _sig: None)
+        monkeypatch.setattr(mcp, "_process_start_marker", lambda _pid: 100.0)
+        monkeypatch.setattr(
+            mcp, "_ps_value", lambda _pid, _column: pytest.fail("must short-circuit")
+        )
+        assert mcp._client_is_alive(123, 10.0) is False

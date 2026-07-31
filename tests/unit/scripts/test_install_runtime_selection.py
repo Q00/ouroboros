@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 from pathlib import Path
 import re
@@ -134,6 +133,25 @@ def test_install_script_syntax_is_valid() -> None:
     assert result.returncode == 0, result.stderr
 
 
+def test_fresh_install_keeps_direct_model_settings_optional() -> None:
+    """The installer should start with the runtime default instead of forcing pins."""
+    text = INSTALL_SH.read_text(encoding="utf-8")
+
+    assert "Codex's current default model is ready to use." in text
+    assert 'GUI_DEFAULT="n"' in text
+    assert "Open direct model settings" in text
+    assert "Using the runtime default model." in text
+
+
+def test_installer_does_not_report_ready_after_runtime_setup_failure() -> None:
+    """The activation command is a hard gate, not a best-effort side effect."""
+    source = INSTALL_SH.read_text(encoding="utf-8")
+
+    assert 'setup --runtime "$RUNTIME" --non-interactive || true' not in source
+    assert 'if "$OUROBOROS_SETUP_CMD" setup --runtime "$RUNTIME" --non-interactive; then' in source
+    assert 'exit "$setup_status"\n  fi' in source
+
+
 def test_preserves_opencode_backend_from_existing_config(tmp_path: Path) -> None:
     config_dir = tmp_path / "home" / ".ouroboros"
     config_dir.mkdir(parents=True)
@@ -154,7 +172,7 @@ def test_preserves_opencode_backend_from_existing_config(tmp_path: Path) -> None
     ]
 
 
-def test_explicit_claude_installs_mcp_and_claude_extras(tmp_path: Path) -> None:
+def test_explicit_claude_isolates_mcp_from_claude_extra(tmp_path: Path) -> None:
     result = _run_installer(
         tmp_path,
         env={"OUROBOROS_INSTALL_RUNTIME": "claude"},
@@ -165,26 +183,14 @@ def test_explicit_claude_installs_mcp_and_claude_extras(tmp_path: Path) -> None:
     calls = (tmp_path / "calls.log").read_text(encoding="utf-8")
     assert "Runtime: claude (from --runtime / OUROBOROS_INSTALL_RUNTIME)" in result.stdout
     assert (
-        "uv tool install --upgrade --python >=3.12 . --with click>=8.1.0,<9.0.0 --with mcp==1.28.1 --with claude-agent-sdk==0.2.110 --with anthropic==0.116.0 --with textual==8.2.8 --with textual-serve==1.1.3"
+        "uv tool install --upgrade --python >=3.12 . --with click>=8.1.0,<9.0.0 --with claude-agent-sdk==0.2.123 --with anthropic==0.117.0 --with textual==8.2.8 --with textual-serve==1.1.3"
         in calls
     )
-    _assert_calls_include_pyproject_pins(calls, "mcp", "claude")
+    _assert_calls_include_pyproject_pins(calls, "claude")
+    assert "--with mcp==" not in calls
     assert "ouroboros setup --runtime claude --non-interactive" in calls
-    mcp_config = json.loads(
-        (tmp_path / "home" / ".claude" / "mcp.json").read_text(encoding="utf-8")
-    )
-    assert mcp_config["mcpServers"]["ouroboros"] == {
-        "command": "uvx",
-        "args": [
-            "--python",
-            ">=3.12",
-            "--from",
-            "ouroboros-ai[mcp,claude]",
-            "ouroboros",
-            "mcp",
-            "serve",
-        ],
-    }
+    assert "MCP registration skipped for the standalone Claude SDK profile" in result.stdout
+    assert not (tmp_path / "home" / ".claude" / "mcp.json").exists()
 
 
 def test_explicit_hermes_mcp_extra_matches_pyproject_pins(tmp_path: Path) -> None:
@@ -216,6 +222,27 @@ def test_explicit_pi_installs_base_and_runs_pi_setup(tmp_path: Path) -> None:
         "ouroboros setup --runtime pi --non-interactive",
         "ouroboros setup refresh",
     ]
+
+
+def test_explicit_runtime_setup_failure_fails_install(tmp_path: Path) -> None:
+    result = _run_installer(
+        tmp_path,
+        include_uv=False,
+        env={"OUROBOROS_INSTALL_RUNTIME": "pi"},
+        fake_commands={
+            "pipx": "#!/bin/sh\nprintf 'pipx %s\\n' \"$*\" >> __CALLS__\nexit 0\n".replace(
+                "__CALLS__", str(tmp_path / "calls.log")
+            ),
+            "python3.12": '#!/bin/sh\nif [ "$1" = "-c" ]; then echo 3.12; exit 0; fi\necho \'Python 3.12.0\'\n',
+            "pi": "#!/bin/sh\nexit 0\n",
+            "ouroboros": f'#!/bin/sh\nprintf \'ouroboros %s\\n\' "$*" >> {tmp_path / "calls.log"}\nif [ "$1" = "setup" ] && [ "$2" = "--runtime" ]; then exit 42; fi\nexit 0\n',
+        },
+    )
+
+    assert result.returncode == 42
+    calls = (tmp_path / "calls.log").read_text(encoding="utf-8")
+    assert "ouroboros setup --runtime pi --non-interactive" in calls
+    assert "ouroboros setup refresh" not in calls
 
 
 def test_explicit_goose_installs_base_and_runs_goose_setup(tmp_path: Path) -> None:
@@ -324,13 +351,8 @@ def test_all_runtime_uv_install_uses_litellm_python_range(tmp_path: Path) -> Non
     assert ("uv tool install --upgrade --python >=3.12,<3.14 . --with click>=8.1.0,<9.0.0") in calls
     assert "--with litellm==1.91.0" in calls
 
-    mcp_config = json.loads(
-        (tmp_path / "home" / ".claude" / "mcp.json").read_text(encoding="utf-8")
-    )
-    assert mcp_config["mcpServers"]["ouroboros"]["args"][:2] == [
-        "--python",
-        ">=3.12,<3.14",
-    ]
+    assert "MCP registration skipped for the standalone Claude SDK profile" in result.stdout
+    assert not (tmp_path / "home" / ".claude" / "mcp.json").exists()
 
 
 def test_non_litellm_uv_install_retains_python_312_floor(tmp_path: Path) -> None:
@@ -618,7 +640,7 @@ def _read_pyproject_extras() -> dict[str, list[str]]:
 
 
 def test_install_all_extras_match_pyproject(tmp_path: Path) -> None:
-    """`[all]` under uv must install every extra that pyproject declares.
+    """`[all]` mirrors every compatible extra and intentionally omits MCP 2.
 
     Catches the contract drift flagged by ouroboros-agent on PR #654:
     install.sh's hand-maintained --with list silently dropped tui, so
@@ -634,7 +656,10 @@ def test_install_all_extras_match_pyproject(tmp_path: Path) -> None:
         if match:
             declared_in_all.update(name.strip() for name in match.group(1).split(","))
 
-    expected_extras = set(_EXTRA_TO_PACKAGES.keys())
+    # The compatibility [all] profile intentionally excludes MCP 2 because
+    # its Claude SDK dependency embeds MCP 1.x. The protocol server is a
+    # separate uvx ouroboros-ai[mcp] process.
+    expected_extras = set(_EXTRA_TO_PACKAGES.keys()) - {"mcp"}
 
     # Sanity: pyproject's `all` aggregates every extra we know about.
     assert declared_in_all == expected_extras, (
@@ -646,7 +671,12 @@ def test_install_all_extras_match_pyproject(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     calls = (tmp_path / "calls.log").read_text(encoding="utf-8")
 
-    expected_packages = {pkg for pkgs in _EXTRA_TO_PACKAGES.values() for pkg in pkgs}
+    expected_packages = {
+        pkg
+        for extra, pkgs in _EXTRA_TO_PACKAGES.items()
+        if extra in expected_extras
+        for pkg in pkgs
+    }
     missing = sorted(pkg for pkg in expected_packages if f"--with {pkg}" not in calls)
     assert not missing, (
         f"install.sh `[all]` is missing --with entries for: {missing}.\n"
@@ -656,8 +686,7 @@ def test_install_all_extras_match_pyproject(tmp_path: Path) -> None:
 
 
 def test_install_all_extras_match_pyproject_pins(tmp_path: Path) -> None:
-    """`[all]` under uv must mirror pyproject's full version specifiers, not
-    just the package names.
+    """`[all]` mirrors full pins for its compatible extras, not just names.
 
     Bot follow-up on PR #660: the package-name check was insufficient — a
     silent change to a pin range (e.g. relaxing ``<1.0.0`` to ``<2.0.0`` in
@@ -669,4 +698,5 @@ def test_install_all_extras_match_pyproject_pins(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     calls = (tmp_path / "calls.log").read_text(encoding="utf-8")
 
-    _assert_calls_include_pyproject_pins(calls, *_EXTRA_TO_PACKAGES)
+    _assert_calls_include_pyproject_pins(calls, *(set(_EXTRA_TO_PACKAGES) - {"mcp"}))
+    assert "--with mcp==" not in calls

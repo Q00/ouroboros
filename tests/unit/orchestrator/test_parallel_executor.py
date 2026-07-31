@@ -34,7 +34,15 @@ from ouroboros.orchestrator.adapter import (
 )
 from ouroboros.orchestrator.coordinator import CoordinatorReview, FileConflict, LevelCoordinator
 from ouroboros.orchestrator.decomposition_limits import MAX_DECOMPOSITION_DEPTH
-from ouroboros.orchestrator.decomposition_policy import DecompositionDisposition
+from ouroboros.orchestrator.decomposition_policy import (
+    BounceCause,
+    DecompositionChild,
+    DecompositionDecisionRecord,
+    DecompositionDisposition,
+    DecompositionSource,
+    SemanticAttestationStatus,
+    StructuralCheckStatus,
+)
 from ouroboros.orchestrator.dependency_analyzer import ACNode, DependencyGraph
 from ouroboros.orchestrator.evidence.claims import (
     _python_c_pathlib_write_targets_reference,
@@ -75,6 +83,29 @@ from tests.unit.orchestrator.parallel_executor_test_support import ProcessLocalT
 
 def _trusted_python_c(source: str) -> str:
     return shlex.join([sys.executable, "-I", "-S", "-c", source])
+
+
+def _trusted_preflight_split(
+    node_id: str,
+    *descriptions: str,
+) -> DecompositionDecisionRecord:
+    """Build a verified historical preflight decision for replay-only tests."""
+    return DecompositionDecisionRecord(
+        node_id=node_id,
+        source=DecompositionSource.PREFLIGHT,
+        disposition=DecompositionDisposition.SPLIT,
+        children=tuple(
+            DecompositionChild(
+                description=description,
+                coverage_claims=(f"scope-{index}",),
+                verification_hint=f"verify scope {index}",
+            )
+            for index, description in enumerate(descriptions)
+        ),
+        structural_status=StructuralCheckStatus.PASSED,
+        semantic_status=SemanticAttestationStatus.ESTABLISHED,
+        trustworthy=True,
+    )
 
 
 def test_stall_timeout_default_allows_realistic_test_suites() -> None:
@@ -383,10 +414,10 @@ def test_python_c_pathlib_static_proof_rejects_isolated_without_no_site(tmp_path
     )
 
 
-def test_files_touched_resolves_relative_python_executable_against_command_cwd(
+def test_files_touched_rejects_relative_python_executable_even_when_final_state_matches(
     tmp_path, monkeypatch
 ) -> None:
-    """Relative Python executables are authenticated under the recorded command cwd."""
+    """Workspace-controlled Python executable paths are mutable final-state evidence."""
     command_cwd = tmp_path / "runner"
     command_cwd.mkdir()
     claimed_file = command_cwd / "claimed.py"
@@ -412,6 +443,85 @@ def test_files_touched_resolves_relative_python_executable_against_command_cwd(
     assert (
         _runtime_messages_support_file_claim(
             "runner/claimed.py",
+            messages,
+            task_cwd=str(tmp_path),
+        )
+        is False
+    )
+
+
+def test_files_touched_rejects_pathlib_receiver_symlink_final_state_spoof(tmp_path) -> None:
+    """A symlink retargeted after execution must not authenticate the old receiver."""
+    claimed_file = tmp_path / "claimed.py"
+    other_file = tmp_path / "other.py"
+    alias = tmp_path / "alias.py"
+    claimed_file.write_text("VALUE = 1\n", encoding="utf-8")
+    other_file.write_text("VALUE = 2\n", encoding="utf-8")
+    try:
+        os.symlink(other_file, alias)
+        alias.unlink()
+        os.symlink(claimed_file, alias)
+    except (OSError, NotImplementedError):  # pragma: no cover - unprivileged/Windows
+        pytest.skip("symlink creation not permitted in this environment")
+    command = _trusted_python_c("from pathlib import Path; Path('alias.py').write_text('x')")
+    messages = (
+        AgentMessage(
+            type="tool",
+            content=f"Bash: {command}",
+            tool_name="Bash",
+            data={"tool_input": {"command": command}},
+        ),
+        AgentMessage(
+            type="tool_result",
+            content="command completed with exit code 0",
+            data={"subtype": "tool_result", "exit_code": 0},
+        ),
+    )
+
+    assert (
+        _runtime_messages_support_file_claim(
+            "claimed.py",
+            messages,
+            task_cwd=str(tmp_path),
+        )
+        is False
+    )
+
+
+def test_files_touched_accepts_production_shaped_goose_tool_output_success(tmp_path) -> None:
+    """Goose reports Bash start/output as runtime events rather than exit_code."""
+    generated_file = tmp_path / "src" / "generated.py"
+    generated_file.parent.mkdir()
+    generated_file.write_text("VALUE = 1\n", encoding="utf-8")
+    command = _trusted_python_c(
+        "from pathlib import Path; Path('src/generated.py').write_text('VALUE = 2')"
+    )
+    messages = (
+        AgentMessage(
+            type="tool",
+            content="tool.started Bash",
+            tool_name="Bash",
+            data={
+                "runtime_event_type": "tool.started",
+                "tool_call_id": "goose-call-1",
+                "tool_input": {"cmd": command},
+            },
+        ),
+        AgentMessage(
+            type="tool_result",
+            content="tool.output",
+            data={
+                "runtime_event_type": "tool.output",
+                "tool_call_id": "goose-call-1",
+                "is_error": False,
+                "output": "",
+            },
+        ),
+    )
+
+    assert (
+        _runtime_messages_support_file_claim(
+            "src/generated.py",
             messages,
             task_cwd=str(tmp_path),
         )
@@ -6113,7 +6223,7 @@ class TestParallelACExecutor:
         tmp_path,
     ) -> None:
         """The verify gate owns artifact and command proof for contract ACs."""
-        command = "python -c \"print('OK')\""
+        command = "python3 -c \"print('OK')\""
         (tmp_path / "hello.py").write_text(
             "def greet(name):\n    return f'Hello, {name}'\n",
             encoding="utf-8",
@@ -6199,7 +6309,7 @@ class TestParallelACExecutor:
         artifact on disk. The verify-gate-active guard keeps those fields required,
         so the worker's self-reported evidence fails and the AC is not accepted.
         """
-        command = "python -c \"print('OK')\""
+        command = "python3 -c \"print('OK')\""
         command_json = command.replace("\\", "\\\\").replace('"', '\\"')
         # Deliberately do NOT write hello.py: the artifact is missing on disk.
         event_store, appended_events = _make_replaying_event_store()
@@ -7377,6 +7487,9 @@ class TestParallelACExecutor:
             ),
             lambda _tmp_path: _trusted_python_c(
                 "from pathlib import Path; (Path('src') / 'generated.py').write_text('VALUE = 2')"
+            ),
+            lambda _tmp_path: _trusted_python_c(
+                "from pathlib import Path; Path('src', 'generated.py').write_text('VALUE = 2')"
             ),
             lambda tmp_path: _trusted_python_c(
                 f"from pathlib import Path; Path('{tmp_path / 'src' / 'generated.py'}').write_text('VALUE = 2')"
@@ -10516,6 +10629,8 @@ class TestParallelACExecutor:
                 seed_goal="Ship OpenCode support",
                 tools=["Read", "Edit"],
                 system_prompt="system",
+                source=DecompositionSource.BOUNCE,
+                cause=BounceCause.TOO_BIG,
             )
 
         assert result.disposition is DecompositionDisposition.UNKNOWN
@@ -10533,9 +10648,15 @@ class TestParallelACExecutor:
             enable_decomposition=True,
         )
         executor._emit_subtask_event = AsyncMock()
-        executor._try_decompose_ac = AsyncMock(
-            side_effect=[["Extract parser", "Wire parser"], None, None]
+        root = ExecutionNodeIdentity.root(execution_context_id="exec_decompose", ac_index=1)
+        executor._publish_event_owned_decomposition_decision(
+            _trusted_preflight_split(
+                root.node_id,
+                "Extract parser",
+                "Wire parser",
+            )
         )
+        executor._try_decompose_ac = AsyncMock()
 
         async def fake_execute_atomic_ac(**kwargs: Any) -> ACExecutionResult:
             return ACExecutionResult(
@@ -10582,7 +10703,7 @@ class TestParallelACExecutor:
             (100, "Extract parser", 1),
             (101, "Wire parser", 1),
         ]
-        assert executor._try_decompose_ac.await_count == 3
+        executor._try_decompose_ac.assert_not_awaited()
         assert execute_atomic_ac.await_count == 2
 
     @pytest.mark.asyncio
@@ -10595,9 +10716,15 @@ class TestParallelACExecutor:
             enable_decomposition=True,
         )
         executor._emit_subtask_event = AsyncMock()
-        executor._try_decompose_ac = AsyncMock(
-            side_effect=[["Extract parser", "Wire parser"], None, None]
+        root = ExecutionNodeIdentity.root(execution_context_id="exec_sub_ac_runtime", ac_index=1)
+        executor._publish_event_owned_decomposition_decision(
+            _trusted_preflight_split(
+                root.node_id,
+                "Extract parser",
+                "Wire parser",
+            )
         )
+        executor._try_decompose_ac = AsyncMock()
 
         async def fake_execute_atomic_ac(**kwargs: Any) -> ACExecutionResult:
             return ACExecutionResult(
@@ -10851,9 +10978,17 @@ class TestParallelACExecutor:
             enable_decomposition=True,
         )
         executor._emit_subtask_event = AsyncMock()
-        executor._try_decompose_ac = AsyncMock(
-            side_effect=[["Retry leaf", "Stable leaf"], None, None]
+        root = ExecutionNodeIdentity.root(
+            execution_context_id="exec_atomic_retry_scope", ac_index=1
         )
+        executor._publish_event_owned_decomposition_decision(
+            _trusted_preflight_split(
+                root.node_id,
+                "Retry leaf",
+                "Stable leaf",
+            )
+        )
+        executor._try_decompose_ac = AsyncMock()
 
         async def fake_execute_atomic_ac(**kwargs: Any) -> ACExecutionResult:
             ac_index = int(kwargs["ac_index"])
@@ -10895,7 +11030,7 @@ class TestParallelACExecutor:
         assert result.success is True
         assert result.is_decomposed is True
         assert [sub_result.retry_attempt for sub_result in result.sub_results] == [1, 0]
-        assert executor._try_decompose_ac.await_count == 3
+        executor._try_decompose_ac.assert_not_awaited()
         assert [
             (
                 int(call.kwargs["ac_index"]),
@@ -14113,20 +14248,12 @@ async def test_try_decompose_ac_replaces_goose_chunks_with_final_result() -> Non
         enable_decomposition=True,
     )
 
-    result = await executor._try_decompose_ac(
-        ac_content="Investigate and test sub-AC behavior.",
-        ac_index=0,
-        seed_goal="Verify Goose final result handling",
-        tools=[],
+    response = await executor._dispatch_decomposition_prompt(
+        prompt="Investigate and test sub-AC behavior.",
         system_prompt="system",
     )
 
-    assert result.disposition is DecompositionDisposition.SPLIT
-    assert [child.description for child in result.children] == [
-        "Sub-AC 1: inspect",
-        "Sub-AC 2: test",
-    ]
-    assert result.trustworthy is False
+    assert response == '["Sub-AC 1: inspect", "Sub-AC 2: test"]'
 
 
 @pytest.mark.asyncio
@@ -14160,21 +14287,16 @@ async def test_try_decompose_ac_accumulates_goose_stream_chunks() -> None:
         enable_decomposition=True,
     )
 
-    result = await executor._try_decompose_ac(
-        ac_content="Investigate, test, and document sub-AC behavior.",
-        ac_index=0,
-        seed_goal="Verify Goose sub-AC support",
-        tools=[],
+    response = await executor._dispatch_decomposition_prompt(
+        prompt="Investigate, test, and document sub-AC behavior.",
         system_prompt="system",
     )
 
-    assert result.disposition is DecompositionDisposition.SPLIT
-    assert [child.description for child in result.children] == [
-        "Sub-AC 1: inspect the implementation",
-        "Sub-AC 2: write a focused regression test",
-        "Sub-AC 3: document the result",
-    ]
-    assert result.trustworthy is False
+    assert response == (
+        '["Sub-AC 1: inspect the implementation", '
+        '"Sub-AC 2: write a focused regression test", '
+        '"Sub-AC 3: document the result"]'
+    )
 
 
 @pytest.mark.asyncio
@@ -14212,20 +14334,12 @@ async def test_try_decompose_ac_announces_same_empty_tools_allowlist_it_dispatch
         enable_decomposition=True,
     )
 
-    result = await executor._try_decompose_ac(
-        ac_content="Investigate and test sub-AC behavior.",
-        ac_index=0,
-        seed_goal="Verify decomposition tool handling",
-        tools=["Read"],
+    response = await executor._dispatch_decomposition_prompt(
+        prompt="Investigate and test sub-AC behavior.",
         system_prompt="system",
     )
 
-    assert result.disposition is DecompositionDisposition.SPLIT
-    assert [child.description for child in result.children] == [
-        "Sub-AC 1: inspect",
-        "Sub-AC 2: test",
-    ]
-    assert result.trustworthy is False
+    assert response == '["Sub-AC 1: inspect", "Sub-AC 2: test"]'
     assert runtime.dispatched_tools == []
     console.print.assert_called_once()
     notice = console.print.call_args.args[0]

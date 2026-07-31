@@ -357,13 +357,12 @@ class TestShorthandCommands:
 
     def test_init_list_subcommand_still_works(self) -> None:
         """Test backward compat: 'ouroboros init list' still routes to list."""
-        with patch("ouroboros.cli.commands.init.create_llm_adapter"):
-            with patch(
-                "ouroboros.cli.commands.init.InterviewEngine.list_interviews",
-                new=AsyncMock(return_value=[]),
-            ):
-                result = runner.invoke(app, ["init", "list"])
-                assert result.exit_code == 0
+        with patch(
+            "ouroboros.cli.commands.init.InterviewEngine.list_interviews",
+            new=AsyncMock(return_value=[]),
+        ):
+            result = runner.invoke(app, ["init", "list"])
+            assert result.exit_code == 0
 
     def test_monitor_top_level_alias(self) -> None:
         """Test that 'ouroboros monitor' is a shorthand for 'ouroboros tui monitor'."""

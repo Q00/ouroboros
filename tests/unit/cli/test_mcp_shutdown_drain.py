@@ -77,9 +77,7 @@ async def test_watchdog_dead_client_stops_server(monkeypatch) -> None:
     mock_server.serve.side_effect = cooperative_serve
 
     monkeypatch.setattr(mcp_module, "_resolve_client_identity", lambda _ppid: (4242, 1.0))
-    monkeypatch.setattr(
-        mcp_module, "is_process_identity_alive", lambda _pid, _start_time=None: False
-    )
+    monkeypatch.setattr(mcp_module, "_client_is_alive", lambda _pid, _start_marker=None: False)
 
     es_patch, repo_patch, server_patch = _patches(mock_es, mock_repo, mock_server)
     with es_patch, repo_patch, server_patch:
@@ -126,9 +124,7 @@ async def test_stuck_serve_loop_is_bounded_and_unblocked_by_fd0_close(monkeypatc
 
     # Dead client fires the watchdog -> stop -> shutdown path.
     monkeypatch.setattr(mcp_module, "_resolve_client_identity", lambda _ppid: (4242, 1.0))
-    monkeypatch.setattr(
-        mcp_module, "is_process_identity_alive", lambda _pid, _start_time=None: False
-    )
+    monkeypatch.setattr(mcp_module, "_client_is_alive", lambda _pid, _start_marker=None: False)
 
     es_patch, repo_patch, server_patch = _patches(mock_es, mock_repo, mock_server)
     with es_patch, repo_patch, server_patch:
@@ -171,9 +167,7 @@ async def test_non_stdio_transport_never_closes_fd0(monkeypatch) -> None:
     mock_server.serve.side_effect = slow_then_cooperative_serve
 
     monkeypatch.setattr(mcp_module, "_resolve_client_identity", lambda _ppid: (4242, 1.0))
-    monkeypatch.setattr(
-        mcp_module, "is_process_identity_alive", lambda _pid, _start_time=None: False
-    )
+    monkeypatch.setattr(mcp_module, "_client_is_alive", lambda _pid, _start_marker=None: False)
 
     es_patch, repo_patch, server_patch = _patches(mock_es, mock_repo, mock_server)
     with es_patch, repo_patch, server_patch:

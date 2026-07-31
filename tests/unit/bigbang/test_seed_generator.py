@@ -21,6 +21,10 @@ from ouroboros.bigbang.interview import (
 )
 from ouroboros.bigbang.seed_generator import (
     SeedGenerator,
+    _parse_context_references,
+    _parse_evaluation_principles,
+    _parse_exit_conditions,
+    _parse_ontology_fields,
     _parse_string_array_values,
     load_seed,
     save_seed_sync,
@@ -29,6 +33,7 @@ from ouroboros.config.loader import get_clarification_model
 from ouroboros.core.errors import ProviderError, ValidationError
 from ouroboros.core.seed import (
     AcceptanceCriterionSpec,
+    ContextReference,
     EvaluationPrinciple,
     ExitCondition,
     OntologyField,
@@ -60,9 +65,19 @@ def create_valid_extraction_response(
     acceptance_criteria: str = "Tasks can be created | Tasks can be listed | Tasks can be deleted",
     ontology_name: str = "TaskManager",
     ontology_description: str = "Task management domain model",
-    ontology_fields: str = "tasks:array:List of task objects | projects:array:List of project objects",
-    evaluation_principles: str = "completeness:All requirements implemented:0.4 | quality:Code meets standards:0.3",
-    exit_conditions: str = "all_criteria_met:All acceptance criteria pass:100% criteria satisfied",
+    ontology_fields: str = (
+        '[{"name": "tasks", "type": "array", "description": "List of task objects"},'
+        ' {"name": "projects", "type": "array", "description": "List of project objects"}]'
+    ),
+    evaluation_principles: str = (
+        '[{"name": "completeness", "description": "All requirements implemented",'
+        ' "weight": 0.4},'
+        ' {"name": "quality", "description": "Code meets standards", "weight": 0.3}]'
+    ),
+    exit_conditions: str = (
+        '[{"name": "all_criteria_met", "description": "All acceptance criteria pass",'
+        ' "criteria": "100% criteria satisfied"}]'
+    ),
 ) -> str:
     """Create a valid LLM extraction response string."""
     return f"""GOAL: {goal}
@@ -802,7 +817,10 @@ class TestSeedGeneratorExtraction:
         extraction_response = create_valid_extraction_response(
             ontology_name="TaskManager",
             ontology_description="Domain model for task management",
-            ontology_fields="tasks:array:List of tasks | status:string:Task status",
+            ontology_fields=(
+                '[{"name": "tasks", "type": "array", "description": "List of tasks"},'
+                ' {"name": "status", "type": "string", "description": "Task status"}]'
+            ),
         )
         mock_adapter.complete = AsyncMock(
             return_value=Result.ok(create_mock_completion_response(extraction_response))
@@ -828,7 +846,11 @@ class TestSeedGeneratorExtraction:
         low_ambiguity = create_low_ambiguity_score()
 
         extraction_response = create_valid_extraction_response(
-            evaluation_principles="completeness:All requirements met:0.5 | quality:High quality:0.3"
+            evaluation_principles=(
+                '[{"name": "completeness", "description": "All requirements met",'
+                ' "weight": 0.5},'
+                ' {"name": "quality", "description": "High quality", "weight": 0.3}]'
+            )
         )
         mock_adapter.complete = AsyncMock(
             return_value=Result.ok(create_mock_completion_response(extraction_response))
@@ -855,7 +877,10 @@ class TestSeedGeneratorExtraction:
         low_ambiguity = create_low_ambiguity_score()
 
         extraction_response = create_valid_extraction_response(
-            exit_conditions="done:All done:100% pass | timeout:Max time:10 iterations"
+            exit_conditions=(
+                '[{"name": "done", "description": "All done", "criteria": "100% pass"},'
+                ' {"name": "timeout", "description": "Max time", "criteria": "10 iterations"}]'
+            )
         )
         mock_adapter.complete = AsyncMock(
             return_value=Result.ok(create_mock_completion_response(extraction_response))
@@ -1346,8 +1371,24 @@ class TestGeneratedSeedImmutability:
 
 
 class TestAcceptanceCriteriaGranularityContract:
-    """Guard the seed-generation prompt against silent loss of the AC granularity
-    contract (the fix for Fable-5-style over-atomization at seed-gen time)."""
+    """Guard every surface that carries the AC granularity contract — the
+    extraction prompt, the retry prompt, the seed-architect contract, and the QA
+    quality bar — against silent loss of it (the fix for Fable-5-style
+    over-atomization at seed-gen time).
+
+    The contract hands the model a distinction to reason with — a criterion is a
+    state of the finished work, an implementation step is a means of reaching it
+    — rather than a quantity to comply with. These tests hold that shape: the
+    distinction must be stated, and the rule must carry no number, because a
+    number is satisfiable without making the judgment the rule exists to elicit.
+    """
+
+    @staticmethod
+    def _granularity_rule(prompt: str) -> str:
+        for line in prompt.splitlines():
+            if line.startswith("ACCEPTANCE_CRITERIA rule:"):
+                return line
+        raise AssertionError("prompt carries no ACCEPTANCE_CRITERIA granularity rule")
 
     def test_extraction_user_prompt_carries_granularity_contract(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -1357,8 +1398,12 @@ class TestAcceptanceCriteriaGranularityContract:
             )
             prompt = generator._build_extraction_user_prompt("Q: goal?\nA: build a thing")
 
-        assert "3-7" in prompt
-        assert "implementation step" in prompt.lower()
+        rule = self._granularity_rule(prompt).lower()
+        assert "acceptance criterion" in rule
+        assert "implementation step" in rule
+        # A criterion is weighed against its siblings, never against a quantity,
+        # so the rule states no count of any kind.
+        assert not any(char.isdigit() for char in rule)
 
     def test_extraction_user_prompt_requests_structured_ac_contracts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -1375,11 +1420,626 @@ class TestAcceptanceCriteriaGranularityContract:
         assert "python -c" in prompt
         assert "ACCEPTANCE_CRITERIA: <criterion 1> | <criterion 2>" not in prompt
 
+    def test_extraction_retry_prompt_carries_granularity_contract(self) -> None:
+        """The retry prompt is a parallel surface for the same contract: a parse
+        failure must not be the moment the model stops being told what a
+        criterion is, nor the crack a count creeps back in through."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            generator = SeedGenerator(
+                llm_adapter=AsyncMock(),
+                output_dir=Path(tmp_dir) / "seeds",
+            )
+            prompt = generator._build_retry_prompt(
+                "Q: goal?\nA: build a thing",
+                failed_response="not parseable",
+                error="missing GOAL",
+            )
+
+        rule = self._granularity_rule(prompt).lower()
+        assert "acceptance criterion" in rule
+        assert "implementation step" in rule
+        assert not any(char.isdigit() for char in rule)
+
+    def test_seed_qa_quality_bar_carries_granularity_contract(self) -> None:
+        """The QA quality bar is where the judgment actually lands once the
+        deterministic gate stopped counting, so it carries the same distinction
+        and, like the prompts, states no quantity."""
+        quality_bar = next(
+            line
+            for line in Path("skills/seed/SKILL.md").read_text(encoding="utf-8").splitlines()
+            if line.strip().startswith("quality_bar:")
+        ).lower()
+
+        assert "acceptance_criteria" in quality_bar
+        assert "implementation step" in quality_bar
+        assert "siblings" in quality_bar
+        assert not any(char.isdigit() for char in quality_bar)
+
     def test_seed_architect_agent_prompt_carries_granularity_contract(self) -> None:
         from ouroboros.agents.loader import load_agent_prompt
 
         system_prompt = load_agent_prompt("seed-architect")
-        assert "3-7" in system_prompt
-        assert "sub-step of a sibling" in system_prompt.lower()
+        assert "**Granularity contract (read carefully):**" in system_prompt
+        contract = system_prompt.split("**Granularity contract (read carefully):**", 1)[1]
+        contract = contract.split("### ", 1)[0].lower()
+        assert "acceptance criterion" in contract
+        assert "implementation step" in contract
+        assert not any(char.isdigit() for char in contract)
         assert "heredoc" in system_prompt.lower()
         assert "python -c" in system_prompt
+
+
+class TestObjectArrayExtractionContract:
+    """#1729 slice 2: EVALUATION_PRINCIPLES / EXIT_CONDITIONS as JSON object arrays.
+
+    Extraction (strict) demands single-line JSON arrays of objects so colons
+    and pipes inside names, descriptions, and criteria survive as data; stored
+    legacy requirements (lenient) keep the historical colon/pipe split and
+    never raise.
+    """
+
+    def test_strict_parses_json_object_arrays_with_delimiters_in_data(self) -> None:
+        principles = _parse_evaluation_principles(
+            '[{"name": "ratio", "description": "Keep a 1:1 request:response mapping | no drops",'
+            ' "weight": 0.4}]',
+            strict=True,
+        )
+        assert principles == (
+            EvaluationPrinciple(
+                name="ratio",
+                description="Keep a 1:1 request:response mapping | no drops",
+                weight=0.4,
+            ),
+        )
+        conditions = _parse_exit_conditions(
+            '[{"name": "done", "description": "All pass",'
+            ' "criteria": "pytest exit 0: all green | no skips"}]',
+            strict=True,
+        )
+        assert conditions == (
+            ExitCondition(
+                name="done",
+                description="All pass",
+                evaluation_criteria="pytest exit 0: all green | no skips",
+            ),
+        )
+
+    def test_strict_accepts_evaluation_criteria_key_alias(self) -> None:
+        conditions = _parse_exit_conditions(
+            '[{"name": "done", "description": "All pass",'
+            ' "evaluation_criteria": "coverage >= 80%"}]',
+            strict=True,
+        )
+        assert conditions[0].evaluation_criteria == "coverage >= 80%"
+
+    def test_strict_defaults_and_clamps_weight(self) -> None:
+        principles = _parse_evaluation_principles(
+            '[{"name": "a", "description": "no weight"},'
+            ' {"name": "b", "description": "too big", "weight": 1.5},'
+            ' {"name": "c", "description": "negative", "weight": -0.5}]',
+            strict=True,
+        )
+        assert [p.weight for p in principles] == [1.0, 1.0, 0.0]
+
+    def test_strict_rejects_blank_object_array_fields(self) -> None:
+        with pytest.raises(ValueError, match="EVALUATION_PRINCIPLES"):
+            _parse_evaluation_principles("", strict=True)
+        with pytest.raises(ValueError, match="EXIT_CONDITIONS"):
+            _parse_exit_conditions("   ", strict=True)
+
+        assert _parse_evaluation_principles("[]", strict=True) == ()
+        assert _parse_exit_conditions("[]", strict=True) == ()
+
+    def test_strict_distinguishes_omitted_weight_from_explicit_null(self) -> None:
+        omitted = _parse_evaluation_principles(
+            '[{"name": "a", "description": "omitted weight"}]',
+            strict=True,
+        )
+        assert omitted[0].weight == 1.0
+
+        with pytest.raises(ValueError, match="weight"):
+            _parse_evaluation_principles(
+                '[{"name": "a", "description": "null weight", "weight": null}]',
+                strict=True,
+            )
+
+    def test_strict_rejects_legacy_pipe_lines(self) -> None:
+        with pytest.raises(ValueError, match="JSON array"):
+            _parse_evaluation_principles(
+                "completeness:All requirements implemented:0.4 | quality:Meets standards:0.3",
+                strict=True,
+            )
+        with pytest.raises(ValueError, match="JSON array"):
+            _parse_exit_conditions(
+                "all_criteria_met:All acceptance criteria pass:100% criteria satisfied",
+                strict=True,
+            )
+
+    def test_strict_rejects_malformed_entries(self) -> None:
+        malformed_principles = (
+            '["not an object"]',
+            '[{"description": "missing name"}]',
+            '[{"name": "  ", "description": "blank name"}]',
+            '[{"name": "x", "description": ""}]',
+            '[{"name": "x", "description": "d", "weight": "high"}]',
+            '[{"name": "x", "description": "d", "weight": true}]',
+            '[{"name": "x", "description": "d", "weight": null}]',
+        )
+        for malformed in malformed_principles:
+            with pytest.raises(ValueError, match="EVALUATION_PRINCIPLES"):
+                _parse_evaluation_principles(malformed, strict=True)
+        malformed_conditions = (
+            "[42]",
+            '[{"name": "x", "description": "d"}]',
+            '[{"name": "x", "description": "d", "criteria": "   "}]',
+        )
+        for malformed in malformed_conditions:
+            with pytest.raises(ValueError, match="EXIT_CONDITIONS"):
+                _parse_exit_conditions(malformed, strict=True)
+
+    def test_lenient_keeps_legacy_colon_pipe_split(self) -> None:
+        principles = _parse_evaluation_principles(
+            "completeness:All requirements implemented:0.4 | quality:Meets standards:bad | solo"
+        )
+        assert principles == (
+            EvaluationPrinciple(
+                name="completeness", description="All requirements implemented", weight=0.4
+            ),
+            EvaluationPrinciple(name="quality", description="Meets standards", weight=1.0),
+        )
+        conditions = _parse_exit_conditions(
+            "all_met:All pass:100% satisfied:with margin | too:short"
+        )
+        assert conditions == (
+            ExitCondition(
+                name="all_met",
+                description="All pass",
+                evaluation_criteria="100% satisfied:with margin",
+            ),
+        )
+
+    def test_lenient_skips_malformed_legacy_principle_entries_without_raising(self) -> None:
+        assert _parse_evaluation_principles(
+            ":description:0.5 | complete::0.4 | valid:Description:0.25"
+        ) == (EvaluationPrinciple(name="valid", description="Description", weight=0.25),)
+
+    def test_lenient_nonfinite_tokens_all_default_to_one(self) -> None:
+        """#1766: every non-standard constant defaults to 1.0 in lenient mode.
+
+        The token marker must be recognized before numeric conversion so a
+        stored -Infinity literal is not conflated with genuine negative
+        overflow (which keeps saturating to 0.0 by sign).
+        """
+        for token in ("NaN", "Infinity", "-Infinity"):
+            principles = _parse_evaluation_principles(
+                f'[{{"name": "x", "description": "d", "weight": {token}}}]'
+            )
+            assert principles[0].weight == 1.0, f"token {token} did not default to 1.0"
+        overflow = _parse_evaluation_principles(
+            '[{"name": "x", "description": "d", "weight": -1e999}]'
+        )
+        assert overflow[0].weight == 0.0
+
+    def test_weights_beyond_interpreter_digit_limit_never_raise(self) -> None:
+        huge = "9" * 5000
+        lenient = _parse_evaluation_principles(
+            f'[{{"name": "x", "description": "d", "weight": {huge}}}]'
+        )
+        assert lenient[0].weight == 1.0
+        strict = _parse_evaluation_principles(
+            f'[{{"name": "x", "description": "d", "weight": {huge}}}]', strict=True
+        )
+        assert strict[0].weight == 1.0
+        negative = _parse_evaluation_principles(
+            f'[{{"name": "x", "description": "d", "weight": -{huge}}}]', strict=True
+        )
+        assert negative[0].weight == 0.0
+
+    def test_overflowed_negative_weights_keep_their_sign(self) -> None:
+        legacy = _parse_evaluation_principles("x:d:-1e999 | y:d:1e999")
+        assert [p.weight for p in legacy] == [0.0, 1.0]
+        json_neg = _parse_evaluation_principles(
+            '[{"name": "x", "description": "d", "weight": -1e999}]'
+        )
+        assert json_neg[0].weight == 0.0
+        json_neg_strict = _parse_evaluation_principles(
+            '[{"name": "x", "description": "d", "weight": -1e999}]', strict=True
+        )
+        assert json_neg_strict[0].weight == 0.0
+
+    def test_context_refs_strict_parses_json_with_colons_in_paths(self) -> None:
+        refs = _parse_context_references(
+            '[{"path": "C:/repos/api", "role": "primary",'
+            ' "summary": "API layer: handlers | middleware"}]',
+            strict=True,
+        )
+        assert refs == (
+            ContextReference(
+                path="C:/repos/api",
+                role="primary",
+                summary="API layer: handlers | middleware",
+            ),
+        )
+        no_summary = _parse_context_references(
+            '[{"path": "/repo/lib", "role": "reference"}]', strict=True
+        )
+        assert no_summary[0].summary == ""
+
+    def test_context_refs_strict_rejects_legacy_and_malformed(self) -> None:
+        with pytest.raises(ValueError, match="JSON array"):
+            _parse_context_references("/repo/api:primary:API layer", strict=True)
+        with pytest.raises(ValueError, match="JSON array"):
+            _parse_context_references("", strict=True)
+        assert _parse_context_references("[]", strict=True) == ()
+        malformed = (
+            '["not an object"]',
+            '[{"role": "primary"}]',
+            '[{"path": "/repo", "role": "  "}]',
+            '[{"path": "/repo", "role": "primary", "summary": 42}]',
+        )
+        for case in malformed:
+            with pytest.raises(ValueError, match="CONTEXT_REFERENCES"):
+                _parse_context_references(case, strict=True)
+
+    def test_context_refs_lenient_keeps_legacy_split_and_never_raises(self) -> None:
+        legacy = _parse_context_references(
+            "/repo/api:primary:API layer: v2 | /repo/lib:reference | :primary:bad | x"
+        )
+        assert legacy == (
+            ContextReference(path="/repo/api", role="primary", summary="API layer: v2"),
+            ContextReference(path="/repo/lib", role="reference", summary=""),
+        )
+        stored_json = _parse_context_references(
+            '[{"path": "/a", "role": "primary", "summary": "s | t"}, {"role": "x"}, 7]'
+        )
+        assert len(stored_json) == 1
+        assert stored_json[0].summary == "s | t"
+        # Bracket-led malformed JSON falls back to the legacy split (junk
+        # tolerated, never raises) — same contract as the other parsers.
+        assert isinstance(_parse_context_references('[{"path":]'), tuple)
+        assert _parse_context_references(None) == ()
+        model = ContextReference(path="/m", role="reference", summary="")
+        assert _parse_context_references([model]) == (model,)
+
+    def test_ontology_strict_parses_json_object_arrays(self) -> None:
+        fields = _parse_ontology_fields(
+            '[{"name": "ratio", "type": "string",'
+            ' "description": "A 1:1 request:response mapping | primary"}]',
+            strict=True,
+        )
+        assert fields == (
+            OntologyField(
+                name="ratio",
+                field_type="string",
+                description="A 1:1 request:response mapping | primary",
+            ),
+        )
+        aliased = _parse_ontology_fields(
+            '[{"name": "n", "field_type": "number", "description": "d", "required": false}]',
+            strict=True,
+        )
+        assert aliased[0].field_type == "number"
+        assert aliased[0].required is False
+
+    def test_ontology_strict_rejects_legacy_and_malformed(self) -> None:
+        with pytest.raises(ValueError, match="JSON array"):
+            _parse_ontology_fields("tasks:array:List of tasks", strict=True)
+        with pytest.raises(ValueError, match="JSON array"):
+            _parse_ontology_fields("", strict=True)
+        assert _parse_ontology_fields("[]", strict=True) == ()
+        malformed = (
+            '["not an object"]',
+            '[{"type": "string", "description": "missing name"}]',
+            '[{"name": "x", "description": "no type"}]',
+            '[{"name": "x", "type": " ", "description": "blank type"}]',
+            '[{"name": "x", "type": "string", "description": "d", "required": "yes"}]',
+        )
+        for case in malformed:
+            with pytest.raises(ValueError, match="ONTOLOGY_FIELDS"):
+                _parse_ontology_fields(case, strict=True)
+
+    def test_ontology_lenient_keeps_legacy_split_and_never_raises(self) -> None:
+        legacy = _parse_ontology_fields(
+            "tasks:array:List of tasks | status:string:Status: open or closed | :string:d | x::d"
+        )
+        assert legacy == (
+            OntologyField(name="tasks", field_type="array", description="List of tasks"),
+            OntologyField(name="status", field_type="string", description="Status: open or closed"),
+        )
+        stored_json = _parse_ontology_fields(
+            '[{"name": "a", "type": "string", "description": "d | note"},'
+            ' {"name": "bad", "required": "yes"}, 42]'
+        )
+        assert len(stored_json) == 1
+        assert stored_json[0].description == "d | note"
+        assert _parse_ontology_fields('[{"name": "x",]') == ()
+        assert _parse_ontology_fields(None) == ()
+        model = OntologyField(name="m", field_type="string", description="d")
+        assert _parse_ontology_fields((model,)) == (model,)
+
+    @pytest.mark.asyncio
+    async def test_ontology_json_fields_reach_seed_and_legacy_retries(self) -> None:
+        malformed = create_valid_extraction_response(ontology_fields="tasks:array:List of tasks")
+        reformatted = create_valid_extraction_response(
+            ontology_fields=(
+                '[{"name": "tasks", "type": "array",'
+                ' "description": "Tasks with a 1:1 owner mapping | primary"}]'
+            )
+        )
+        mock_adapter = AsyncMock()
+        mock_adapter.complete = AsyncMock(
+            side_effect=[
+                Result.ok(create_mock_completion_response(malformed)),
+                Result.ok(create_mock_completion_response(reformatted)),
+            ]
+        )
+        state = create_interview_state_with_rounds()
+        low_ambiguity = create_low_ambiguity_score()
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            generator = SeedGenerator(
+                llm_adapter=mock_adapter,
+                output_dir=Path(tmp_dir) / "seeds",
+            )
+            result = await generator.generate(state, low_ambiguity)
+
+        assert result.is_ok
+        assert mock_adapter.complete.await_count == 2
+        fields = result.value.ontology_schema.fields
+        assert fields[0].description == "Tasks with a 1:1 owner mapping | primary"
+
+    def test_lenient_null_weight_defaults_without_raising(self) -> None:
+        principles = _parse_evaluation_principles(
+            '[{"name": "x", "description": "d", "weight": null}]'
+        )
+        assert principles[0].weight == 1.0
+        assert _parse_exit_conditions("done:desc:   ") == ()
+
+    def test_lenient_skips_malformed_legacy_exit_condition_entries_without_raising(self) -> None:
+        assert _parse_exit_conditions(
+            "done::criteria | :description:criteria | valid:Description:criteria"
+        ) == (
+            ExitCondition(
+                name="valid",
+                description="Description",
+                evaluation_criteria="criteria",
+            ),
+        )
+
+    def test_lenient_parses_stored_json_object_arrays(self) -> None:
+        principles = _parse_evaluation_principles(
+            '[{"name": "ratio", "description": "1:1 mapping | no drops", "weight": 0.4}]'
+        )
+        assert principles[0].description == "1:1 mapping | no drops"
+
+    def test_lenient_never_raises(self) -> None:
+        # Bracket-led malformed JSON falls back to the historical colon/pipe
+        # split (slice-1-consistent junk tolerance) instead of raising.
+        fallback = _parse_evaluation_principles('[{"name": "x",]')
+        assert isinstance(fallback, tuple)
+        assert _parse_exit_conditions("[1, 2]") == ()
+        assert _parse_evaluation_principles("[not json | at all") == ()
+        assert _parse_evaluation_principles(None) == ()
+        assert _parse_exit_conditions("") == ()
+
+    def test_predecoded_sequences_pass_through(self) -> None:
+        model = EvaluationPrinciple(name="a", description="b", weight=0.5)
+        assert _parse_evaluation_principles((model,)) == (model,)
+        assert _parse_evaluation_principles(
+            [{"name": "a", "description": "b", "weight": 0.5}], strict=True
+        ) == (model,)
+        condition = ExitCondition(name="c", description="d", evaluation_criteria="e")
+        assert _parse_exit_conditions([condition]) == (condition,)
+
+    def test_strict_rejects_nonfinite_weights(self) -> None:
+        for token in ("NaN", "Infinity", "-Infinity"):
+            with pytest.raises(ValueError, match="weight"):
+                _parse_evaluation_principles(
+                    f'[{{"name": "x", "description": "d", "weight": {token}}}]',
+                    strict=True,
+                )
+
+    def test_oversized_integer_weights_clamp_without_crashing(self) -> None:
+        huge = "9" * 400
+        principles = _parse_evaluation_principles(
+            f'[{{"name": "x", "description": "d", "weight": {huge}}}]', strict=True
+        )
+        assert principles[0].weight == 1.0
+        principles = _parse_evaluation_principles(
+            f'[{{"name": "x", "description": "d", "weight": -{huge}}}]', strict=True
+        )
+        assert principles[0].weight == 0.0
+
+    def test_lenient_nonfinite_and_oversized_weights_never_raise(self) -> None:
+        principles = _parse_evaluation_principles(
+            '[{"name": "a", "description": "d", "weight": NaN},'
+            ' {"name": "b", "description": "d", "weight": Infinity},'
+            f' {{"name": "c", "description": "d", "weight": {"9" * 400}}}]'
+        )
+        assert [p.weight for p in principles] == [1.0, 1.0, 1.0]
+        legacy = _parse_evaluation_principles("a:d:inf | b:d:nan | c:d:1e999")
+        assert [p.weight for p in legacy] == [1.0, 1.0, 1.0]
+
+    @pytest.mark.asyncio
+    async def test_nonfinite_weight_triggers_extraction_retry_not_crash(self) -> None:
+        malformed = create_valid_extraction_response(
+            evaluation_principles='[{"name": "x", "description": "d", "weight": NaN}]'
+        )
+        reformatted = create_valid_extraction_response()
+        mock_adapter = AsyncMock()
+        mock_adapter.complete = AsyncMock(
+            side_effect=[
+                Result.ok(create_mock_completion_response(malformed)),
+                Result.ok(create_mock_completion_response(reformatted)),
+            ]
+        )
+        state = create_interview_state_with_rounds()
+        low_ambiguity = create_low_ambiguity_score()
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            generator = SeedGenerator(
+                llm_adapter=mock_adapter,
+                output_dir=Path(tmp_dir) / "seeds",
+            )
+            result = await generator.generate(state, low_ambiguity)
+
+        assert result.is_ok
+        assert mock_adapter.complete.await_count == 2
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("field_name", "field_value"),
+        (
+            ("evaluation_principles", ""),
+            ("exit_conditions", "   "),
+        ),
+    )
+    async def test_blank_object_array_field_triggers_extraction_retry(
+        self, field_name: str, field_value: str
+    ) -> None:
+        malformed = create_valid_extraction_response(**{field_name: field_value})
+        reformatted = create_valid_extraction_response(
+            evaluation_principles="[]",
+            exit_conditions="[]",
+        )
+        mock_adapter = AsyncMock()
+        mock_adapter.complete = AsyncMock(
+            side_effect=[
+                Result.ok(create_mock_completion_response(malformed)),
+                Result.ok(create_mock_completion_response(reformatted)),
+            ]
+        )
+        state = create_interview_state_with_rounds()
+        low_ambiguity = create_low_ambiguity_score()
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            generator = SeedGenerator(
+                llm_adapter=mock_adapter,
+                output_dir=Path(tmp_dir) / "seeds",
+            )
+            result = await generator.generate(state, low_ambiguity)
+
+        assert result.is_ok
+        assert result.value.evaluation_principles == ()
+        assert result.value.exit_conditions == ()
+        assert mock_adapter.complete.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_null_weight_triggers_extraction_retry(self) -> None:
+        malformed = create_valid_extraction_response(
+            evaluation_principles='[{"name": "x", "description": "d", "weight": null}]'
+        )
+        reformatted = create_valid_extraction_response(
+            evaluation_principles='[{"name": "x", "description": "d"}]'
+        )
+        mock_adapter = AsyncMock()
+        mock_adapter.complete = AsyncMock(
+            side_effect=[
+                Result.ok(create_mock_completion_response(malformed)),
+                Result.ok(create_mock_completion_response(reformatted)),
+            ]
+        )
+        state = create_interview_state_with_rounds()
+        low_ambiguity = create_low_ambiguity_score()
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            generator = SeedGenerator(
+                llm_adapter=mock_adapter,
+                output_dir=Path(tmp_dir) / "seeds",
+            )
+            result = await generator.generate(state, low_ambiguity)
+
+        assert result.is_ok
+        assert result.value.evaluation_principles[0].weight == 1.0
+        assert mock_adapter.complete.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_oversized_weight_does_not_crash_seed_generation(self) -> None:
+        response = create_valid_extraction_response(
+            evaluation_principles=(f'[{{"name": "x", "description": "d", "weight": {"9" * 400}}}]')
+        )
+        mock_adapter = AsyncMock()
+        mock_adapter.complete = AsyncMock(
+            return_value=Result.ok(create_mock_completion_response(response))
+        )
+        state = create_interview_state_with_rounds()
+        low_ambiguity = create_low_ambiguity_score()
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            generator = SeedGenerator(
+                llm_adapter=mock_adapter,
+                output_dir=Path(tmp_dir) / "seeds",
+            )
+            result = await generator.generate(state, low_ambiguity)
+
+        assert result.is_ok
+        assert result.value.evaluation_principles[0].weight == 1.0
+
+    def test_strict_string_array_rejects_predecoded_non_strings(self) -> None:
+        with pytest.raises(ValueError, match="only strings"):
+            _parse_string_array_values([1, "x"], field_label="CONSTRAINTS", strict=True)
+        assert _parse_string_array_values([1, "x"], field_label="CONSTRAINTS") == ("1", "x")
+
+    @pytest.mark.asyncio
+    async def test_extraction_json_object_arrays_reach_seed(self) -> None:
+        response = create_valid_extraction_response(
+            evaluation_principles=(
+                '[{"name": "ratio", "description": "Keep a 1:1 mapping | no drops", "weight": 0.4}]'
+            ),
+            exit_conditions=(
+                '[{"name": "done", "description": "All pass",'
+                ' "criteria": "pytest exit 0: all green"}]'
+            ),
+        )
+        mock_adapter = AsyncMock()
+        mock_adapter.complete = AsyncMock(
+            return_value=Result.ok(create_mock_completion_response(response))
+        )
+        state = create_interview_state_with_rounds()
+        low_ambiguity = create_low_ambiguity_score()
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            generator = SeedGenerator(
+                llm_adapter=mock_adapter,
+                output_dir=Path(tmp_dir) / "seeds",
+            )
+            result = await generator.generate(state, low_ambiguity)
+
+        assert result.is_ok
+        assert result.value.evaluation_principles == (
+            EvaluationPrinciple(
+                name="ratio", description="Keep a 1:1 mapping | no drops", weight=0.4
+            ),
+        )
+        assert result.value.exit_conditions == (
+            ExitCondition(
+                name="done", description="All pass", evaluation_criteria="pytest exit 0: all green"
+            ),
+        )
+
+    @pytest.mark.asyncio
+    async def test_malformed_object_array_triggers_extraction_retry(self) -> None:
+        malformed = create_valid_extraction_response(
+            evaluation_principles="completeness:All requirements implemented:0.4"
+        )
+        reformatted = create_valid_extraction_response()
+        mock_adapter = AsyncMock()
+        mock_adapter.complete = AsyncMock(
+            side_effect=[
+                Result.ok(create_mock_completion_response(malformed)),
+                Result.ok(create_mock_completion_response(reformatted)),
+            ]
+        )
+        state = create_interview_state_with_rounds()
+        low_ambiguity = create_low_ambiguity_score()
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            generator = SeedGenerator(
+                llm_adapter=mock_adapter,
+                output_dir=Path(tmp_dir) / "seeds",
+            )
+            result = await generator.generate(state, low_ambiguity)
+
+        assert result.is_ok
+        assert mock_adapter.complete.await_count == 2
+        assert result.value.evaluation_principles[0].name == "completeness"

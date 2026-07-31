@@ -598,7 +598,7 @@ def _python_c_pathlib_write_reference_match(
     if not targets:
         return False
     return any(
-        _file_claim_matches_runtime_path(
+        _pathlib_static_target_matches_claim(
             reference,
             target,
             task_cwd=claim_cwd or task_cwd,
@@ -606,6 +606,41 @@ def _python_c_pathlib_write_reference_match(
         )
         for target in targets
     )
+
+
+def _pathlib_static_target_matches_claim(
+    reference: str,
+    target: str,
+    *,
+    task_cwd: str,
+    runtime_cwd: str,
+) -> bool:
+    """Match static pathlib targets lexically, without final-state symlink resolution."""
+    try:
+        claim_path = Path(reference.strip())
+        target_path = Path(target)
+    except (OSError, RuntimeError, ValueError):
+        return False
+    if not reference.strip() or claim_path.is_absolute() or ".." in claim_path.parts:
+        return False
+    if any(part == ".." for part in target_path.parts):
+        return False
+    try:
+        claim_base = Path(task_cwd).absolute()
+        runtime_base = Path(runtime_cwd).absolute()
+        claim_absolute = _normalize_absolute_path(claim_base / claim_path)
+        target_absolute = _normalize_absolute_path(
+            target_path if target_path.is_absolute() else runtime_base / target_path
+        )
+        target_absolute.relative_to(claim_base)
+    except (OSError, RuntimeError, ValueError):
+        return False
+    return target_absolute == claim_absolute
+
+
+def _normalize_absolute_path(path: Path) -> Path:
+    """Collapse lexical ``.`` segments without resolving symlinks."""
+    return Path(PurePosixPath(path).as_posix())
 
 
 def _raw_command_mentions_python_c_pathlib_write(command: str) -> bool:
@@ -718,9 +753,12 @@ def _target_binds_name(target: ast.AST, name: str) -> bool:
 def _literal_pathlib_receiver(node: ast.AST) -> str | None:
     try:
         if isinstance(node, ast.Call) and _is_path_constructor(node.func):
-            if len(node.args) != 1 or node.keywords:
+            if not node.args or node.keywords:
                 return None
-            return _literal_path_segment(node.args[0])
+            segments = tuple(_literal_path_segment(arg) for arg in node.args)
+            if any(segment is None for segment in segments):
+                return None
+            return str(PurePosixPath(*segments))
         if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
             left = _literal_pathlib_receiver(node.left)
             right = _literal_path_segment(node.right)
@@ -764,6 +802,8 @@ def _python_c_argv_index(argv: list[str], *, task_cwd: str) -> int | None | bool
 def _trusted_python_executable(value: str, *, task_cwd: str) -> bool:
     try:
         path = Path(value)
+        if not path.is_absolute():
+            return False
         candidate = path if path.is_absolute() else Path(task_cwd) / path
         return candidate.resolve() == Path(sys.executable).resolve()
     except (OSError, RuntimeError, ValueError):
@@ -856,7 +896,7 @@ def _runtime_message_is_tool_completion(message: AgentMessage) -> bool:
         return True
     runtime_event_type = message.data.get("runtime_event_type")
     return isinstance(runtime_event_type, str) and runtime_event_type.strip().lower().endswith(
-        ("tool.completed", "tool.failed")
+        ("tool.completed", "tool.failed", "tool.output")
     )
 
 

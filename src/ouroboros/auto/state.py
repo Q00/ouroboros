@@ -14,6 +14,7 @@ from typing import Any
 from uuid import uuid4
 
 from ouroboros.auto.recovery_plan import AutoRecoveryPlan
+from ouroboros.core.owner_only import write_owner_only
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -1540,15 +1541,29 @@ class AutoStore:
         return self.root / f"{safe}.json"
 
     def save(self, state: AutoPipelineState) -> Path:
-        """Persist ``state`` atomically and return the written path."""
+        """Persist ``state`` atomically, owner-only, and return the path.
+
+        Auto pipeline state carries the interview answers the user gave, and
+        it lives for as long as the session record does. It is the same
+        artifact class the interview transcript and the Seed belong to, so it
+        takes the same primitive — writing it through ``write_text`` left it
+        at the umask default, typically ``0644``, for its whole lifetime.
+
+        The directory is deliberately NOT re-permissioned: ``root`` may be
+        supplied by the caller, and narrowing a directory this package does
+        not own is not its to do.
+        """
         state._validate_loaded()
         self.root.mkdir(parents=True, exist_ok=True)
         path = self.path_for(state.auto_session_id)
-        tmp_path = path.with_suffix(".json.tmp")
-        tmp_path.write_text(
-            json.dumps(state.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8"
-        )
-        tmp_path.replace(path)
+        # Written straight to the target: write_owner_only is temp-file +
+        # atomic rename + fsync, so the prior state survives a failed write
+        # and a second staging step would only add an unflushed rename.
+        durable = write_owner_only(path, json.dumps(state.to_dict(), ensure_ascii=False, indent=2))
+        if not durable:
+            logging.getLogger(__name__).warning(
+                "auto.state_save_durability_unconfirmed path=%s", path
+            )
         return path
 
     def load(self, auto_session_id: str) -> AutoPipelineState:

@@ -165,12 +165,15 @@ currently makes both attestations, so Claude/Codex/Gemini/etc. skip replay and e
 no baseline today. This is intentional fail-closed behavior, not a claim that
 copytree or a normal workspace-write sandbox is sufficient.
 
-Likewise, an LLM-produced string array is not a deterministic MECE proof. The live
-decomposer currently checks JSON type and child count only; until a validator can
-attest non-empty uniqueness plus semantic coverage/exclusivity, production
-decompositions are marked untrustworthy and shadow replay is skipped before any
-extra model call. Test doubles may supply an explicit trusted attestation to verify
-the downstream event/proof machinery, but that does not certify the live producer.
+Likewise, an LLM-produced string array is not a Verified-MECE proof. The live
+`bounce_only` path now requires an exact structured proposal with bounded,
+non-empty, unique child scope claims and verification hints. A fresh independent
+runtime session must attest collective coverage, sibling non-overlap, and simpler
+units; one verifier-guided repair is allowed, after which the decision escalates
+and records its compromise. Only that finalized durable decision may carry
+`trustworthy=true`. Parsing and replay are deterministic and fail closed; the
+semantic attestation does not claim that generated child wording must equal text
+predicted by the Seed.
 
 Host-side `verify_command` execution is also unsupported in shadow mode: such a
 command could name an absolute live path or escape with `cd ../..` outside the

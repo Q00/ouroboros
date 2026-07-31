@@ -10,7 +10,11 @@ from ouroboros.core.errors import PersistenceError
 from ouroboros.events.base import BaseEvent
 from ouroboros.orchestrator.execution_runtime_scope import normalize_execution_scope_id
 from ouroboros.orchestrator.session import SessionRepository
-from ouroboros.persistence.event_store import EventStore, acceptance_generation_id_for_session
+from ouroboros.persistence.event_store import (
+    EventStore,
+    _await_sqlite_write_atomically,
+    acceptance_generation_id_for_session,
+)
 
 
 @pytest.fixture
@@ -44,6 +48,32 @@ class TestEventStoreInitialization:
         await store.initialize()
         # If we get here without error, tables were created
         await store.close()
+
+    async def test_sqlite_write_drain_survives_repeated_caller_cancellation(self) -> None:
+        """A second cancellation must not cancel the shielded write cleanup task."""
+        started = asyncio.Event()
+        release = asyncio.Event()
+        completed = False
+
+        async def _write() -> str:
+            nonlocal completed
+            started.set()
+            await release.wait()
+            completed = True
+            return "committed"
+
+        task = asyncio.create_task(_await_sqlite_write_atomically(_write()))
+        await asyncio.wait_for(started.wait(), timeout=1)
+
+        task.cancel()
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=1)
+        assert completed is True
 
     async def test_event_store_can_be_initialized_multiple_times(self, tmp_path) -> None:
         """Calling initialize() multiple times is safe."""

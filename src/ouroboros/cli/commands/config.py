@@ -5,10 +5,13 @@ Manage configuration settings and provider setup.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+import os
 from pathlib import Path
 import shutil
 from typing import Annotated, get_args, get_origin
 
+from rich.markup import escape
 import typer
 import yaml
 
@@ -20,6 +23,7 @@ from ouroboros.backends import (
 from ouroboros.cli.formatters import console
 from ouroboros.cli.formatters.panels import print_error, print_info, print_success, print_warning
 from ouroboros.cli.formatters.tables import create_key_value_table, create_table, print_table
+from ouroboros.codex.cli_policy import resolve_codex_cli_path
 
 app = typer.Typer(
     name="config",
@@ -75,11 +79,49 @@ def main(
 
 
 _VALID_BACKENDS = runtime_backend_choices()
+
+
+class _ConfigCliPathLogger:
+    """No-op logger for shared resolver use inside user-facing config output."""
+
+    def warning(self, *_args: object, **_kwargs: object) -> None:
+        return
+
+    def info(self, *_args: object, **_kwargs: object) -> None:
+        return
+
+
 _SWITCHABLE_BACKENDS = tuple(
     backend
     for backend in _VALID_BACKENDS
     if (capability := get_backend_capability(backend)) is not None and capability.switchable_runtime
 )
+
+_CLI_PATH_ENV_BY_BACKEND = {
+    "claude": "OUROBOROS_CLI_PATH",
+    "codex": "OUROBOROS_CODEX_CLI_PATH",
+    "copilot": "OUROBOROS_COPILOT_CLI_PATH",
+    "gemini": "OUROBOROS_GEMINI_CLI_PATH",
+    "goose": "OUROBOROS_GOOSE_CLI_PATH",
+    "gjc": "OUROBOROS_GJC_CLI_PATH",
+    "hermes": "OUROBOROS_HERMES_CLI_PATH",
+    "kiro": "OUROBOROS_KIRO_CLI_PATH",
+    "opencode": "OUROBOROS_OPENCODE_CLI_PATH",
+    "antigravity": "OUROBOROS_ANTIGRAVITY_CLI_PATH",
+    "grok": "OUROBOROS_GROK_CLI_PATH",
+    "ourocode": "OUROBOROS_OUROCODE_CLI_PATH",
+    "pi": "OUROBOROS_PI_CLI_PATH",
+    "zcode": "OUROBOROS_ZCODE_CLI_PATH",
+}
+
+
+@dataclass(frozen=True)
+class _ConfigStageModelField:
+    key: str
+    label: str
+    env_vars: tuple[str, ...] = ()
+    empty_env_overrides: bool = False
+    stage: str | None = None
 
 
 def _load_config() -> tuple[dict, Path]:
@@ -138,9 +180,34 @@ def _save_config(data: dict, path: Path) -> None:
 
 
 def _resolve_cli_path(data: dict) -> str | None:
-    """Return the active CLI path based on the current runtime backend."""
-    backend = data.get("orchestrator", {}).get("runtime_backend", "claude")
-    capability = get_backend_capability(str(backend))
+    """Return the effective CLI path based on env-aware runtime selection."""
+    from ouroboros.config_tui.fields import GLOBAL_RUNTIME_FIELD, get_value
+
+    backend, _source = _effective_value(
+        GLOBAL_RUNTIME_FIELD.env_vars,
+        get_value(data, GLOBAL_RUNTIME_FIELD.key),
+        "claude",
+    )
+    resolved_backend = _normalize_runtime_backend_for_display(backend)
+    if resolved_backend == "codex":
+        from ouroboros.config import get_codex_cli_path
+
+        configured = get_codex_cli_path() or data.get("orchestrator", {}).get("codex_cli_path")
+        resolution = resolve_codex_cli_path(
+            explicit_cli_path=None,
+            configured_cli_path=configured,
+            logger=_ConfigCliPathLogger(),
+            log_namespace="config",
+        )
+        return resolution.cli_path
+
+    env_var = _CLI_PATH_ENV_BY_BACKEND.get(resolved_backend)
+    if env_var:
+        env_path = os.environ.get(env_var, "").strip()
+        if env_path:
+            return env_path
+
+    capability = get_backend_capability(resolved_backend)
     if capability is not None and capability.cli_config_key:
         return data.get("orchestrator", {}).get(capability.cli_config_key)
     return None
@@ -164,20 +231,31 @@ def _effective_value(
     env_vars: tuple[str, ...],
     raw_value: object,
     default: object,
+    *,
+    empty_env_overrides: bool = False,
 ) -> tuple[str, str]:
     """Resolve the effective value and its source (env > config > default)."""
     import os
 
     for name in env_vars:
-        env_value = os.environ.get(name, "").strip()
+        raw_env_value = os.environ.get(name)
+        if raw_env_value is None:
+            continue
+        env_value = raw_env_value.strip()
         if env_value:
             return env_value, f"env {name} ⚠"
+        if empty_env_overrides:
+            return str(default), f"env {name} (cleared) ⚠"
     if raw_value is not None:
         return str(raw_value), "config"
     return str(default), "default"
 
 
-def _effective_llm_backend_value(raw_value: object) -> tuple[str, str]:
+def _effective_llm_backend_value(
+    raw_value: object,
+    *,
+    default_agent: object = None,
+) -> tuple[str, str]:
     """Resolve the effective LLM backend using the loader's env fallback order."""
     import os
 
@@ -193,13 +271,195 @@ def _effective_llm_backend_value(raw_value: object) -> tuple[str, str]:
         return capability.name, "env OUROBOROS_RUNTIME ⚠"
 
     if raw_value is not None:
-        return str(raw_value), "config"
+        normalized = str(raw_value).strip().lower()
+        if normalized:
+            if normalized == "claude_code":
+                return "claude_code", "config"
+            return _normalize_runtime_backend_for_display(normalized), "config"
+    default_backend = _normalize_runtime_backend_for_display(default_agent or "")
+    capability = get_backend_capability(default_backend)
+    if capability is not None and capability.supports_llm:
+        return default_backend, "default"
     return "claude_code", "default"
 
 
 def _agent_cell(backend: str, installed: dict[str, str | None]) -> str:
     """Render an agent name with an install marker."""
-    return backend if installed.get(backend) else f"{backend} ⚠ not installed"
+    resolved = _normalize_runtime_backend_for_display(backend)
+    return resolved if installed.get(resolved) else f"{resolved} ⚠ not installed"
+
+
+def _normalize_runtime_backend_for_display(backend: object) -> str:
+    raw = str(backend)
+    try:
+        return resolve_runtime_backend_name(raw)
+    except ValueError:
+        return raw.strip().lower()
+
+
+def _is_automatic_model_value(value: str) -> bool:
+    """Whether an effective model value delegates choice to the runtime."""
+    return value.strip().lower() in {"backend default", "default", "current"}
+
+
+def _display_stage_model(model: str, source: str, runtime_backend: str) -> tuple[str, str]:
+    """Describe a stage model without claiming an unobserved Codex model.
+
+    Codex may use a model selected in the App or CLI rather than a model passed
+    by Ouroboros. A config-file value is a useful hint, but not evidence that
+    this invocation will use it.
+    """
+    capability = get_backend_capability(runtime_backend)
+    if capability is None or capability.name != "codex" or not _is_automatic_model_value(model):
+        return model, source
+
+    from ouroboros.backends.model_catalog import configured_default_model
+
+    configured_hint = configured_default_model("codex")
+    if configured_hint:
+        return (
+            "Codex current selected model "
+            f"(config.toml: {configured_hint}; not confirmed at runtime)",
+            "automatic Codex selection",
+        )
+    return (
+        "Codex current selected model (concrete model not reported by Codex)",
+        "automatic Codex selection",
+    )
+
+
+def _stage_model_default_for_runtime(stage: object, runtime_backend: str) -> str | None:
+    """Resolve shipped stage defaults the same way runtime model loaders do."""
+    from ouroboros.backends.model_catalog import DEFAULT_MODEL_SENTINEL, uses_default_model_sentinel
+    from ouroboros.orchestrator_stage import Stage
+
+    if not uses_default_model_sentinel(runtime_backend):
+        return None
+
+    # These persisted fields ship with Claude Opus defaults. For Codex and the
+    # other CLI-owned-model backends, the loader maps untouched shipped defaults
+    # to the backend-owned "default" sentinel before execution.
+    if stage in {Stage.INTERVIEW, Stage.EVALUATE, Stage.REFLECT}:
+        return DEFAULT_MODEL_SENTINEL
+
+    return None
+
+
+def _normalize_stage_model_for_display(
+    stage: object,
+    model: str,
+    source: str,
+    runtime_backend: str,
+) -> tuple[str, str]:
+    """Render the model value that runtime loading would actually use."""
+    from ouroboros.config._model_defaults import DEFAULT_OPUS_MODEL, recognized_shipped_defaults
+
+    normalized_model = model
+    normalized_source = source
+    runtime_default = _stage_model_default_for_runtime(stage, runtime_backend)
+    source_is_env_override = source.startswith("env ")
+    if (
+        runtime_default is not None
+        and not source_is_env_override
+        and model in recognized_shipped_defaults(DEFAULT_OPUS_MODEL)
+    ):
+        normalized_model = runtime_default
+        normalized_source = f"{source} → backend default"
+    return _display_stage_model(normalized_model, normalized_source, runtime_backend)
+
+
+def _stage_model_backend_for_display(stage: object, data: dict, agent_backend: str) -> str:
+    """Return the backend whose model resolver will interpret this stage's model."""
+    from ouroboros.config_tui.fields import GLOBAL_LLM_BACKEND_FIELD, get_value
+    from ouroboros.orchestrator_stage import Stage
+
+    if stage is Stage.EXECUTE:
+        return agent_backend
+    stage_agent = get_value(data, f"orchestrator.runtime_profile.stages.{stage.value}")
+    llm_value, llm_source = _effective_llm_backend_value(
+        get_value(data, GLOBAL_LLM_BACKEND_FIELD.key),
+        default_agent=agent_backend,
+    )
+    if stage_agent:
+        stage_backend = _normalize_runtime_backend_for_display(stage_agent)
+        capability = get_backend_capability(stage_backend)
+        return stage_backend if capability is not None and capability.supports_llm else llm_value
+    profile_default = get_value(data, "orchestrator.runtime_profile.default")
+    if profile_default:
+        default_backend = _normalize_runtime_backend_for_display(profile_default)
+        capability = get_backend_capability(default_backend)
+        return default_backend if capability is not None and capability.supports_llm else llm_value
+    if llm_source.startswith("env OUROBOROS_LLM_BACKEND") or llm_value != "claude_code":
+        return _normalize_runtime_backend_for_display(llm_value)
+    agent_capability = get_backend_capability(agent_backend)
+    if agent_capability is not None and agent_capability.supports_llm:
+        return agent_backend
+    return llm_value
+
+
+def _resolved_stage_model_for_display(
+    stage: object,
+    model_value: str,
+    model_source: str,
+    model_backend: str,
+) -> tuple[str, str]:
+    """Render the model value using the same stage-specific loader semantics."""
+    from ouroboros.config.loader import (
+        get_clarification_model,
+        get_reflect_model,
+        get_semantic_model,
+        resolve_execution_model,
+    )
+    from ouroboros.orchestrator_stage import Stage
+
+    source_is_env_override = model_source.startswith("env ")
+    normalized_source = model_source
+    if stage is Stage.EXECUTE:
+        resolved_model = resolve_execution_model(model_backend)
+        normalized_model = resolved_model or "backend default"
+        if _is_automatic_model_value(model_value) and not source_is_env_override:
+            normalized_source = f"{model_source} → backend default"
+        return _display_stage_model(normalized_model, normalized_source, model_backend)
+
+    if not isinstance(stage, Stage):
+        return _normalize_stage_model_for_display(stage, model_value, model_source, model_backend)
+
+    getter_by_stage = {
+        Stage.INTERVIEW: get_clarification_model,
+        Stage.EVALUATE: get_semantic_model,
+        Stage.REFLECT: get_reflect_model,
+    }
+    getter = getter_by_stage.get(stage)
+    if getter is None:
+        return _normalize_stage_model_for_display(stage, model_value, model_source, model_backend)
+    normalized_model = getter(model_backend)
+    if normalized_model != model_value and not source_is_env_override:
+        normalized_source = f"{model_source} → backend default"
+    return _display_stage_model(normalized_model, normalized_source, model_backend)
+
+
+def _config_stage_model_fields() -> dict[object, _ConfigStageModelField]:
+    """Model fields shown by `config show`, including script-only Execute state."""
+    from ouroboros.config_tui.fields import STAGE_MODEL_FIELDS
+    from ouroboros.orchestrator_stage import Stage
+
+    fields = {
+        stage: _ConfigStageModelField(
+            key=field.key,
+            label=field.label,
+            env_vars=field.env_vars,
+            stage=field.stage,
+        )
+        for stage, field in STAGE_MODEL_FIELDS.items()
+    }
+    fields[Stage.EXECUTE] = _ConfigStageModelField(
+        key="execution.default_model",
+        label="Execute model",
+        env_vars=("OUROBOROS_EXECUTION_MODEL",),
+        empty_env_overrides=True,
+        stage=Stage.EXECUTE.value,
+    )
+    return fields
 
 
 def _effective_view_data(data: dict, config_path: Path) -> dict:
@@ -208,26 +468,30 @@ def _effective_view_data(data: dict, config_path: Path) -> dict:
     from ouroboros.config_tui.fields import (
         GLOBAL_LLM_BACKEND_FIELD,
         GLOBAL_RUNTIME_FIELD,
-        STAGE_MODEL_FIELDS,
         get_value,
     )
     from ouroboros.orchestrator_stage import Stage
 
     installed = installed_backends()
+    stage_model_fields = _config_stage_model_fields()
     agent_value, agent_source = _effective_value(
         GLOBAL_RUNTIME_FIELD.env_vars,
         get_value(data, GLOBAL_RUNTIME_FIELD.key),
         "claude",
     )
+    resolved_agent_value = _normalize_runtime_backend_for_display(agent_value)
     llm_value, llm_source = _effective_llm_backend_value(
-        get_value(data, GLOBAL_LLM_BACKEND_FIELD.key)
+        get_value(data, GLOBAL_LLM_BACKEND_FIELD.key),
+        default_agent=resolved_agent_value,
     )
     profile_default = get_value(data, "orchestrator.runtime_profile.default")
     stages: dict[str, dict] = {}
     for stage in Stage:
         stage_agent = get_value(data, f"orchestrator.runtime_profile.stages.{stage.value}")
-        resolved = str(stage_agent or profile_default or agent_value)
-        model_field = STAGE_MODEL_FIELDS.get(stage)
+        resolved = _normalize_runtime_backend_for_display(
+            stage_agent or profile_default or agent_value
+        )
+        model_field = stage_model_fields.get(stage)
         if model_field is None:
             model_value, model_source, model_key = None, "not configurable", None
         else:
@@ -235,6 +499,11 @@ def _effective_view_data(data: dict, config_path: Path) -> dict:
                 model_field.env_vars,
                 get_value(data, model_field.key),
                 "backend default",
+                empty_env_overrides=getattr(model_field, "empty_env_overrides", False),
+            )
+            model_backend = _stage_model_backend_for_display(stage, data, resolved)
+            model_value, model_source = _resolved_stage_model_for_display(
+                stage, model_value, model_source, model_backend
             )
             model_key = model_field.key
         stages[stage.value] = {
@@ -248,9 +517,9 @@ def _effective_view_data(data: dict, config_path: Path) -> dict:
     return {
         "defaults": {
             "default_agent": {
-                "value": agent_value,
+                "value": resolved_agent_value,
                 "source": agent_source,
-                "installed": bool(installed.get(agent_value)),
+                "installed": bool(installed.get(resolved_agent_value)),
             },
             "llm_backend": {"value": llm_value, "source": llm_source},
         },
@@ -276,12 +545,12 @@ def _render_effective_view(data: dict, config_path: Path) -> None:
     from ouroboros.config_tui.fields import (
         GLOBAL_LLM_BACKEND_FIELD,
         GLOBAL_RUNTIME_FIELD,
-        STAGE_MODEL_FIELDS,
         get_value,
     )
     from ouroboros.orchestrator_stage import Stage
 
     installed = installed_backends()
+    stage_model_fields = _config_stage_model_fields()
 
     defaults_table = create_table("Defaults", show_lines=False)
     defaults_table.add_column("Setting", style="cyan")
@@ -294,7 +563,8 @@ def _render_effective_view(data: dict, config_path: Path) -> None:
     )
     defaults_table.add_row("Default agent", _agent_cell(agent_value, installed), agent_source)
     llm_value, llm_source = _effective_llm_backend_value(
-        get_value(data, GLOBAL_LLM_BACKEND_FIELD.key)
+        get_value(data, GLOBAL_LLM_BACKEND_FIELD.key),
+        default_agent=agent_value,
     )
     defaults_table.add_row("LLM backend (internal calls)", llm_value, llm_source)
     print_table(defaults_table)
@@ -307,12 +577,14 @@ def _render_effective_view(data: dict, config_path: Path) -> None:
     profile_default = get_value(data, "orchestrator.runtime_profile.default")
     for stage in Stage:
         stage_agent = get_value(data, f"orchestrator.runtime_profile.stages.{stage.value}")
+        resolved = _normalize_runtime_backend_for_display(
+            stage_agent or profile_default or agent_value
+        )
         if stage_agent:
             agent_cell = _agent_cell(str(stage_agent), installed)
         else:
-            resolved = str(profile_default or agent_value)
             agent_cell = f"(inherit) → {_agent_cell(resolved, installed)}"
-        model_field = STAGE_MODEL_FIELDS.get(stage)
+        model_field = stage_model_fields.get(stage)
         if model_field is None:
             model_value, model_source = "n/a", "not configurable"
         else:
@@ -320,6 +592,11 @@ def _render_effective_view(data: dict, config_path: Path) -> None:
                 model_field.env_vars,
                 get_value(data, model_field.key),
                 "backend default",
+                empty_env_overrides=getattr(model_field, "empty_env_overrides", False),
+            )
+            model_backend = _stage_model_backend_for_display(stage, data, resolved)
+            model_value, model_source = _resolved_stage_model_for_display(
+                stage, model_value, model_source, model_backend
             )
         stages_table.add_row(stage.value, agent_cell, model_value, model_source)
     print_table(stages_table)
@@ -418,7 +695,10 @@ def backend(
         console.print(f"\n[bold]Current backend:[/bold] [cyan]{current}[/cyan]")
         cli_path = _resolve_cli_path(data)
         if cli_path:
-            console.print(f"[bold]CLI path:[/bold]        [dim]{cli_path}[/dim]")
+            console.print(
+                f"[bold]CLI path:[/bold]        [dim]{escape(cli_path)}[/dim]",
+                highlight=False,
+            )
         console.print(
             "\n[dim]Switch with: ouroboros config backend "
             "<claude|codex|hermes|gemini|gjc|goose|pi|antigravity|grok|zcode>[/dim]\n"
@@ -449,6 +729,10 @@ def backend(
         from ouroboros.config import get_gemini_cli_path
 
         cli_path = get_gemini_cli_path()
+    elif new_backend == "codex":
+        from ouroboros.cli.commands.setup import _detect_runtimes
+
+        cli_path = _detect_runtimes().get("codex")
     elif new_backend == "goose":
         from ouroboros.config import get_goose_cli_path
 
@@ -532,10 +816,10 @@ def backend(
     _setup_had_errors = False
     _orig_print_error = setup_mod.print_error
 
-    def _tracking_print_error(msg: str) -> None:
+    def _tracking_print_error(msg: str, *args: object, **kwargs: object) -> None:
         nonlocal _setup_had_errors
         _setup_had_errors = True
-        _orig_print_error(msg)
+        _orig_print_error(msg, *args, **kwargs)
 
     prev_quiet = console.quiet
     setup_failed = False
@@ -545,7 +829,8 @@ def backend(
         if new_backend == "claude":
             _setup_claude(cli_path)
         elif new_backend == "codex":
-            _setup_codex(cli_path)
+            if _setup_codex(cli_path) is False:
+                setup_failed = True
         elif new_backend == "hermes":
             _setup_hermes(cli_path)
         elif new_backend == "gemini":
@@ -572,7 +857,9 @@ def backend(
         setup_mod.print_error = _orig_print_error  # type: ignore[assignment]
 
     if setup_failed:
-        pass  # Already warned above
+        print_error(f"Could not switch backend to {new_backend}; setup did not complete.")
+        print_info("Existing configuration was left unchanged or restored.")
+        raise typer.Exit(1)
     elif _setup_had_errors:
         print_warning("Backend switched but some setup steps had issues.")
         print_info("Run [bold]ouroboros setup[/] to verify configuration.")

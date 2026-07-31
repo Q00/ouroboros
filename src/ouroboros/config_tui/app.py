@@ -292,17 +292,31 @@ class SettingsApp(App[None]):
         self._fetch_pending: set[str] = set()
         # Last concrete model per stage, restored when a search is cancelled.
         self._last_model_value: dict[str, str | None] = {}
+        # Runtime changes refresh model selects automatically. Keep those
+        # automatic values separate from explicit user model picks so backend-
+        # only saves can clear stale legacy model pins.
+        self._explicit_stage_model_changes: set[str] = set()
+        self._programmatic_stage_model_changes: set[str] = set()
+        self._automatic_stage_model_values: dict[str, str | None] = {}
         # What the "default" sentinel resolves to per backend (config-file
         # hint, e.g. hermes → gpt-5.5). Cached: file reads once per backend.
         self._default_hints: dict[str, str | None] = {}
         # Hidden legacy fallback sync for llm.backend after its visible field
         # was removed from the TUI. The most recent Agent selection wins.
         self._last_agent_backend_selection: str | None = None
+        self._hydrating_selects = True
 
     def on_mount(self) -> None:
         # Config-derived (not widget-derived): widgets may still be mounting.
-        for backend in {self._effective_stage_backend(stage) for stage in Stage}:
+        for backend in {
+            *(self._effective_stage_backend(stage) for stage in Stage),
+            *(self._effective_completion_backend(stage) for stage in Stage),
+        }:
             self._request_model_listing(backend)
+        self.call_after_refresh(self._finish_hydration)
+
+    def _finish_hydration(self) -> None:
+        self._hydrating_selects = False
 
     # ── value helpers ────────────────────────────────────────────────
 
@@ -391,6 +405,20 @@ class SettingsApp(App[None]):
             return self._effective_default_runtime()
         return _canonical_backend(global_value)
 
+    def _projected_saved_default_runtime(self) -> str:
+        """Return the default Agent that will be persisted after Save.
+
+        Unlike ``_selected_default_runtime`` this deliberately ignores active
+        environment overrides. Save reconciliation must reason about the config
+        that will remain after the user unsets env vars, not the currently
+        effective runtime injected by the process environment.
+        """
+        global_select = self.query_one("#global-runtime", Select)
+        global_value = global_select.value
+        if not _is_blank(global_value):
+            return _canonical_backend(global_value)
+        return _canonical_backend(self._current(GLOBAL_RUNTIME_FIELD.key))
+
     # ── dynamic model listings ───────────────────────────────────────
 
     def _request_model_listing(self, backend: str) -> None:
@@ -412,7 +440,7 @@ class SettingsApp(App[None]):
             return
         for stage in Stage:
             try:
-                if self._selected_runtime(stage) == backend:
+                if self._projected_completion_backend(stage) == backend:
                     self._merge_fetched_into_stage(stage, backend)
             except NoMatches:
                 continue
@@ -435,6 +463,102 @@ class SettingsApp(App[None]):
             stages=stages,
             default=default,
             fallback=self._effective_default_runtime(),
+        )
+
+    def _effective_completion_backend(self, stage: Stage) -> str:
+        """Return the currently effective backend for a stage's model field."""
+        if stage is Stage.EXECUTE:
+            return self._effective_stage_backend(stage)
+
+        stage_value = get_value(self._raw, f"orchestrator.runtime_profile.stages.{stage.value}")
+        if stage_value:
+            return self._completion_capable_backend(
+                str(stage_value),
+                fallback_backend=self._effective_llm_fallback_backend(),
+            )
+
+        profile_default = get_value(self._raw, "orchestrator.runtime_profile.default")
+        if profile_default:
+            return self._completion_capable_backend(
+                str(profile_default),
+                fallback_backend=self._effective_llm_fallback_backend(),
+            )
+
+        explicit_llm = self._explicit_llm_backend_override()
+        if explicit_llm:
+            return explicit_llm
+
+        return self._completion_capable_backend(
+            self._effective_stage_backend(stage),
+            fallback_backend=self._effective_llm_fallback_backend(),
+        )
+
+    def _explicit_llm_backend_override(self) -> str | None:
+        """Return explicit LLM-only override, excluding shipped defaults."""
+        env_llm = os.environ.get("OUROBOROS_LLM_BACKEND", "").strip()
+        if env_llm:
+            return _canonical_backend(env_llm)
+
+        env_runtime = os.environ.get("OUROBOROS_RUNTIME", "").strip()
+        env_capability = get_backend_capability(_canonical_backend(env_runtime))
+        if env_capability is not None and env_capability.supports_llm:
+            return env_capability.name
+
+        raw_llm = get_value(self._raw, GLOBAL_LLM_BACKEND_FIELD.key)
+        if raw_llm and str(raw_llm).strip().lower() != "claude_code":
+            return _canonical_backend(raw_llm)
+
+        return None
+
+    def _effective_llm_fallback_backend(self) -> str:
+        """Return the loader-equivalent completion fallback before UI edits."""
+        env_llm = os.environ.get("OUROBOROS_LLM_BACKEND", "").strip()
+        if env_llm:
+            return _canonical_backend(env_llm)
+
+        env_runtime = os.environ.get("OUROBOROS_RUNTIME", "").strip()
+        env_capability = get_backend_capability(_canonical_backend(env_runtime))
+        if env_capability is not None and env_capability.supports_llm:
+            return env_capability.name
+
+        raw_llm = get_value(self._raw, GLOBAL_LLM_BACKEND_FIELD.key)
+        if raw_llm:
+            return _canonical_backend(raw_llm)
+
+        return "claude_code"
+
+    def _saved_stage_backend_from_raw(self, stage: Stage) -> str:
+        """Return the saved stage Agent before staged UI changes, ignoring env."""
+        stage_value = get_value(self._raw, f"orchestrator.runtime_profile.stages.{stage.value}")
+        profile_default = get_value(self._raw, "orchestrator.runtime_profile.default")
+        stages = {stage: _canonical_backend(stage_value)} if stage_value else None
+        default = _canonical_backend(profile_default) if profile_default else None
+        return resolve_runtime_for_stage(
+            stage,
+            stages=stages,
+            default=default,
+            fallback=_canonical_backend(self._current(GLOBAL_RUNTIME_FIELD.key)),
+        )
+
+    def _saved_completion_backend_from_raw(self, stage: Stage) -> str:
+        """Return the saved completion backend before staged UI changes, ignoring env."""
+        if stage is Stage.EXECUTE:
+            return self._saved_stage_backend_from_raw(stage)
+
+        stage_value = get_value(self._raw, f"orchestrator.runtime_profile.stages.{stage.value}")
+        if stage_value:
+            return self._completion_capable_backend(str(stage_value))
+
+        profile_default = get_value(self._raw, "orchestrator.runtime_profile.default")
+        if profile_default:
+            return self._completion_capable_backend(str(profile_default))
+
+        raw_llm = get_value(self._raw, GLOBAL_LLM_BACKEND_FIELD.key)
+        if raw_llm and str(raw_llm).strip().lower() != "claude_code":
+            return _canonical_backend(raw_llm)
+
+        return self._completion_capable_backend(
+            _canonical_backend(self._current(GLOBAL_RUNTIME_FIELD.key))
         )
 
     # ── compose ──────────────────────────────────────────────────────
@@ -532,6 +656,7 @@ class SettingsApp(App[None]):
         model_field = STAGE_MODEL_FIELDS.get(stage)
         stage_value = get_value(self._raw, runtime_field.key)
         effective_backend = self._effective_stage_backend(stage)
+        completion_backend = self._effective_completion_backend(stage)
         current_model = str(self._current(model_field.key) or "") if model_field else ""
 
         with Container(classes="stage-card", id=f"stage-card-{stage.value}"):
@@ -561,9 +686,15 @@ class SettingsApp(App[None]):
                 warning = _env_warning_text(model_field)
                 if warning:
                     yield Static(warning, classes="env-warning")
+                initial_model = current_model
+                if not initial_model:
+                    concrete_models = self._all_models(completion_backend)
+                    if concrete_models:
+                        initial_model = concrete_models[0]
+                        self._automatic_stage_model_values[stage.value] = initial_model
                 yield Select(
-                    self._model_options(effective_backend, current_model),
-                    value=current_model if current_model else Select.NULL,
+                    self._model_options(completion_backend, initial_model),
+                    value=initial_model if initial_model else Select.NULL,
                     allow_blank=True,
                     id=f"stage-model-{stage.value}",
                 )
@@ -588,13 +719,32 @@ class SettingsApp(App[None]):
         select_id = event.select.id or ""
         if select_id.startswith("stage-runtime-"):
             stage = Stage(select_id.removeprefix("stage-runtime-"))
+            runtime_field = stage_runtime_field(stage)
+            initial_stage_value = get_value(self._raw, runtime_field.key)
+            if self._hydrating_selects and (
+                (initial_stage_value is None and event.value == INHERIT_SENTINEL)
+                or (
+                    initial_stage_value is not None
+                    and not _is_blank(event.value)
+                    and str(event.value) == str(initial_stage_value)
+                )
+            ):
+                return
             self._update_resolved_caption(stage)
             self._remember_agent_selection(self._selected_runtime(stage))
             if stage in STAGE_MODEL_FIELDS:
                 self._refresh_stage_model_options(stage)
             self._refresh_install_warning(stage, event.value)
         elif select_id == "global-runtime":
-            self._remember_agent_selection(self._selected_default_runtime())
+            initial_global_runtime = _canonical_backend(self._current(GLOBAL_RUNTIME_FIELD.key))
+            if self._hydrating_selects and (
+                _is_blank(event.value) or _canonical_backend(event.value) == initial_global_runtime
+            ):
+                return
+            if not _is_blank(event.value):
+                self._remember_agent_selection(str(event.value))
+            else:
+                self._remember_agent_selection(self._selected_default_runtime())
             # Cascade: every inheriting card re-resolves its agent and pulls
             # the matching model catalog. Guard per card so one failure
             # cannot skip the rest.
@@ -609,32 +759,53 @@ class SettingsApp(App[None]):
             stage = Stage(select_id.removeprefix("stage-model-"))
             custom_input = self.query_one(f"#stage-model-custom-{stage.value}", Input)
             custom_input.set_class(event.value != CUSTOM_SENTINEL, "hidden")
+            is_programmatic = stage.value in self._programmatic_stage_model_changes
+            self._programmatic_stage_model_changes.discard(stage.value)
+            if self._hydrating_selects:
+                model_field = STAGE_MODEL_FIELDS.get(stage)
+                if (
+                    _is_blank(event.value)
+                    and not is_programmatic
+                    and model_field is not None
+                    and get_value(self._raw, model_field.key) is not None
+                ):
+                    self._explicit_stage_model_changes.add(stage.value)
+                if not _is_blank(event.value) and event.value != CUSTOM_SENTINEL:
+                    self._last_model_value[stage.value] = str(event.value)
+                return
             if event.value == SEARCH_SENTINEL:
                 self._open_model_search(stage)
             elif not _is_blank(event.value) and event.value != CUSTOM_SENTINEL:
                 self._last_model_value[stage.value] = str(event.value)
+                if not is_programmatic:
+                    self._explicit_stage_model_changes.add(stage.value)
+            elif not is_programmatic:
+                self._explicit_stage_model_changes.add(stage.value)
 
     def _open_model_search(self, stage: Stage) -> None:
-        backend = self._selected_runtime(stage)
+        backend = self._projected_completion_backend(stage)
         models = tuple(self._all_models(backend))
 
         def _picked(model: str | None) -> None:
             previous = self._last_model_value.get(stage.value)
-            self._set_stage_model(stage, model or previous)
+            self._set_stage_model(stage, model or previous, explicit=True)
 
         self.push_screen(
             ModelSearchScreen(models, title=f"{stage.value.title()} model — {backend}"),
             _picked,
         )
 
-    def _set_stage_model(self, stage: Stage, model: str | None) -> None:
+    def _set_stage_model(self, stage: Stage, model: str | None, *, explicit: bool = True) -> None:
         if stage not in STAGE_MODEL_FIELDS:
             return
-        backend = self._selected_runtime(stage)
+        backend = self._projected_completion_backend(stage)
         model_select = self.query_one(f"#stage-model-{stage.value}", Select)
         model_select.set_options(self._model_options(backend, model))
         if model:
             model_select.value = model
+        if explicit:
+            self._explicit_stage_model_changes.add(stage.value)
+            self._automatic_stage_model_values.pop(stage.value, None)
 
     def _sync_stage_card(self, stage: Stage) -> None:
         runtime_select = self.query_one(f"#stage-runtime-{stage.value}", Select)
@@ -663,6 +834,106 @@ class SettingsApp(App[None]):
             )
         return _canonical_backend(value)
 
+    def _projected_saved_runtime(self, stage: Stage) -> str:
+        """Return the stage Agent that will be persisted after Save."""
+        runtime_select = self.query_one(f"#stage-runtime-{stage.value}", Select)
+        value = runtime_select.value
+        if value == INHERIT_SENTINEL or _is_blank(value):
+            profile_default = get_value(self._raw, "orchestrator.runtime_profile.default")
+            default = _canonical_backend(profile_default) if profile_default else None
+            return resolve_runtime_for_stage(
+                stage,
+                stages=None,
+                default=default,
+                fallback=self._projected_saved_default_runtime(),
+            )
+        return _canonical_backend(value)
+
+    def _projected_completion_backend(self, stage: Stage) -> str:
+        """Return the LLM backend that will interpret this stage's model value."""
+        if stage is Stage.EXECUTE:
+            return self._projected_saved_runtime(stage)
+
+        runtime_select = self.query_one(f"#stage-runtime-{stage.value}", Select)
+        runtime_value = runtime_select.value
+        if runtime_value != INHERIT_SENTINEL and not _is_blank(runtime_value):
+            return self._completion_capable_backend(
+                str(runtime_value),
+                fallback_backend=self._projected_saved_llm_backend(),
+            )
+
+        profile_default = get_value(self._raw, "orchestrator.runtime_profile.default")
+        if profile_default:
+            return self._completion_capable_backend(
+                str(profile_default),
+                fallback_backend=self._projected_saved_llm_backend(),
+            )
+
+        global_backend = self._projected_saved_default_runtime()
+        global_capability = get_backend_capability(global_backend)
+        if (
+            GLOBAL_RUNTIME_FIELD.key in self._collect_global_runtime_change_keys()
+            and global_capability is not None
+            and global_capability.supports_llm
+        ):
+            return global_backend
+
+        current_llm = get_value(self._raw, GLOBAL_LLM_BACKEND_FIELD.key)
+        if current_llm and str(current_llm).strip().lower() != "claude_code":
+            return _canonical_backend(current_llm)
+
+        return self._completion_capable_backend(
+            self._projected_saved_default_runtime(),
+            fallback_backend=self._projected_saved_llm_backend(),
+        )
+
+    def _projected_saved_llm_backend(self) -> str:
+        """Return the completion backend that will be saved after staged changes."""
+        global_backend = self._projected_saved_default_runtime()
+        global_capability = get_backend_capability(global_backend)
+        if (
+            GLOBAL_RUNTIME_FIELD.key in self._collect_global_runtime_change_keys()
+            and global_capability is not None
+            and global_capability.supports_llm
+        ):
+            return global_backend
+
+        current_llm = get_value(self._raw, GLOBAL_LLM_BACKEND_FIELD.key) or get_value(
+            self._defaults, GLOBAL_LLM_BACKEND_FIELD.key
+        )
+        return _canonical_backend(current_llm)
+
+    def _completion_capable_backend(
+        self,
+        backend: str,
+        *,
+        fallback_backend: str | None = None,
+    ) -> str:
+        """Return a completion-capable backend for stage model validation."""
+        runtime_backend = _canonical_backend(backend)
+        capability = get_backend_capability(runtime_backend)
+        if capability is not None and capability.supports_llm:
+            return runtime_backend
+
+        if fallback_backend is not None:
+            return _canonical_backend(fallback_backend)
+
+        current_llm = get_value(self._raw, GLOBAL_LLM_BACKEND_FIELD.key) or get_value(
+            self._defaults, GLOBAL_LLM_BACKEND_FIELD.key
+        )
+        return _canonical_backend(current_llm)
+
+    def _collect_global_runtime_change_keys(self) -> set[str]:
+        global_runtime = self.query_one("#global-runtime", Select).value
+        if _is_blank(global_runtime):
+            return set()
+        old = get_value(self._raw, GLOBAL_RUNTIME_FIELD.key) or get_value(
+            self._defaults, GLOBAL_RUNTIME_FIELD.key
+        )
+        if _canonical_backend(old) == _canonical_backend(global_runtime):
+            return set()
+        return {GLOBAL_RUNTIME_FIELD.key}
+
     def _refresh_stage_model_options(self, stage: Stage) -> None:
         """Repopulate the model select with the effective backend's catalog.
 
@@ -672,19 +943,30 @@ class SettingsApp(App[None]):
         """
         if stage not in STAGE_MODEL_FIELDS:
             return
-        backend = self._selected_runtime(stage)
+        backend = self._projected_completion_backend(stage)
         self._request_model_listing(backend)
         model_select = self.query_one(f"#stage-model-{stage.value}", Select)
         current = model_select.value
         current_str = None if _is_blank(current) else str(current)
-        keep = current_str if current_str and current_str in self._all_models(backend) else None
+        known_models = self._all_models(backend)
+        saved_backend = _canonical_backend(self._saved_completion_backend_from_raw(stage))
+        backend_unchanged = _canonical_backend(backend) == saved_backend
+        keep = None
+        if current_str and (current_str in known_models or backend_unchanged):
+            keep = current_str
         options = self._model_options(backend, keep)
         model_select.set_options(options)
         concrete = [v for _, v in options if v not in (SEARCH_SENTINEL, CUSTOM_SENTINEL)]
+        automatic_value = None
         if keep:
+            self._programmatic_stage_model_changes.add(stage.value)
             model_select.value = keep
+            automatic_value = keep
         elif concrete:
+            self._programmatic_stage_model_changes.add(stage.value)
             model_select.value = concrete[0]
+            automatic_value = concrete[0]
+        self._automatic_stage_model_values[stage.value] = automatic_value
         # Custom-only backends (no known models) stay blank for free text.
 
     def _refresh_install_warning(self, stage: Stage, value: Any) -> None:
@@ -788,6 +1070,7 @@ class SettingsApp(App[None]):
 
             model_field = STAGE_MODEL_FIELDS.get(stage)
             if model_field is not None:
+                projected_backend = self._projected_completion_backend(stage)
                 model_value = self.query_one(f"#stage-model-{stage.value}", Select).value
                 if model_value == CUSTOM_SENTINEL:
                     custom = self.query_one(
@@ -796,14 +1079,75 @@ class SettingsApp(App[None]):
                     if custom:
                         record(model_field.key, custom)
                 elif not _is_blank(model_value):
+                    automatic_model = self._automatic_stage_model_values.get(stage.value)
                     model_text = str(model_value)
+                    saved_completion_backend = _canonical_backend(
+                        self._saved_completion_backend_from_raw(stage)
+                    )
+                    if (
+                        stage.value not in self._explicit_stage_model_changes
+                        and saved_completion_backend != _canonical_backend(projected_backend)
+                        and get_value(self._raw, model_field.key) is not None
+                    ):
+                        changes[model_field.key] = None
+                        continue
+                    if (
+                        automatic_model is not None
+                        and model_text == automatic_model
+                        and saved_completion_backend != _canonical_backend(projected_backend)
+                        and get_value(self._raw, model_field.key) is not None
+                    ):
+                        changes[model_field.key] = None
+                        continue
+                    if (
+                        stage.value not in self._explicit_stage_model_changes
+                        and automatic_model is not None
+                        and model_text == automatic_model
+                    ):
+                        if (
+                            model_text == DEFAULT_MODEL_SENTINEL
+                            and stage_runtime_field(stage).key in changes
+                            and uses_default_model_sentinel(projected_backend)
+                        ):
+                            record(model_field.key, model_text)
+                        continue
+                    if stage is Stage.EXECUTE:
+                        old_execute_backend = _canonical_backend(
+                            self._saved_stage_backend_from_raw(Stage.EXECUTE)
+                        )
+                        new_execute_backend = _canonical_backend(
+                            self._projected_saved_runtime(Stage.EXECUTE)
+                        )
+                        if (
+                            old_execute_backend != new_execute_backend
+                            and (
+                                f"orchestrator.runtime_profile.stages.{Stage.EXECUTE.value}"
+                                not in changes
+                            )
+                            and automatic_model is not None
+                            and str(model_value) == automatic_model
+                        ):
+                            if get_value(self._raw, model_field.key) is not None:
+                                changes[model_field.key] = None
+                            continue
+                    if (
+                        stage is Stage.EXECUTE
+                        and model_text == DEFAULT_MODEL_SENTINEL
+                        and uses_default_model_sentinel(projected_backend)
+                    ):
+                        if get_value(self._raw, model_field.key) is not None:
+                            changes[model_field.key] = None
+                        continue
                     if model_text == DEFAULT_MODEL_SENTINEL and not uses_default_model_sentinel(
-                        self._selected_runtime(stage)
+                        projected_backend
                     ):
                         if get_value(self._raw, model_field.key) == DEFAULT_MODEL_SENTINEL:
                             changes[model_field.key] = None
                         continue
                     record(model_field.key, model_text)
+                elif stage.value in self._explicit_stage_model_changes:
+                    if get_value(self._raw, model_field.key) is not None:
+                        changes[model_field.key] = None
 
         for field in ADVANCED_MODEL_FIELDS:
             raw_value = self.query_one(f"#adv-{_slug(field.key)}", Input).value.strip()
@@ -818,15 +1162,38 @@ class SettingsApp(App[None]):
             key.startswith("orchestrator.runtime_profile.stages.") for key in changes
         )
         if routing_changed:
-            new_backend = self._last_agent_backend_selection or self._selected_default_runtime()
-            # Only sync the legacy llm.backend (a completion backend) when the
-            # selected agent is itself completion-capable. Runtime-only backends
-            # (antigravity / grok, supports_llm=False) are not valid llm.backend
-            # values, so leave the existing completion backend untouched rather
-            # than persisting a config that fails validation on next load.
-            capability = get_backend_capability(new_backend) if new_backend else None
-            if new_backend and capability is not None and capability.supports_llm:
-                record_backend(GLOBAL_LLM_BACKEND_FIELD.key, new_backend)
+            old_execute_backend = _canonical_backend(
+                self._saved_stage_backend_from_raw(Stage.EXECUTE)
+            )
+            new_execute_backend = _canonical_backend(self._projected_saved_runtime(Stage.EXECUTE))
+            if (
+                old_execute_backend != new_execute_backend
+                and get_value(self._raw, "execution.default_model") is not None
+                and "execution.default_model" not in changes
+                and (
+                    Stage.EXECUTE.value not in self._explicit_stage_model_changes
+                    or (
+                        self._automatic_stage_model_values.get(Stage.EXECUTE.value) is not None
+                        and str(
+                            self.query_one(
+                                f"#stage-model-{Stage.EXECUTE.value}",
+                                Select,
+                            ).value
+                        )
+                        == self._automatic_stage_model_values[Stage.EXECUTE.value]
+                    )
+                )
+            ):
+                changes["execution.default_model"] = None
+
+            if GLOBAL_RUNTIME_FIELD.key in changes:
+                new_backend = self._projected_saved_default_runtime()
+                # Only sync the legacy llm.backend (a completion backend) when the
+                # selected global agent is itself completion-capable. Per-stage
+                # Agent overrides must not mutate unrelated completion fallback.
+                capability = get_backend_capability(new_backend) if new_backend else None
+                if new_backend and capability is not None and capability.supports_llm:
+                    record_backend(GLOBAL_LLM_BACKEND_FIELD.key, new_backend)
 
         return changes
 

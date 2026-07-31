@@ -56,14 +56,19 @@ def _provider_config(
     backend: str,
 ) -> LLMProviderProfileConfig | None:
     providers = profile.providers
-    if backend in providers:
-        return providers[backend]
-
+    matched: tuple[str, LLMProviderProfileConfig] | None = None
     for key, value in providers.items():
         if _normalize_backend(key) == backend:
-            return value
+            if matched is not None:
+                first_key, _ = matched
+                msg = (
+                    f"LLM profile has duplicate provider aliases {first_key!r} and {key!r} "
+                    f"for backend {backend!r}"
+                )
+                raise ConfigError(msg, config_key="llm_profiles.providers")
+            matched = (key, value)
 
-    return None
+    return matched[1] if matched is not None else None
 
 
 def _coalesce[T](specific: T | None, general: T | None, fallback: T) -> T:

@@ -6,10 +6,9 @@ and health checks.
 """
 
 import asyncio
-from contextlib import asynccontextmanager, contextmanager
-import sys
+from contextlib import contextmanager
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import patch
 
 import pytest
 
@@ -27,57 +26,18 @@ from ouroboros.mcp.types import (
 
 from .conftest import (
     MockMCPServerState,
-    create_mock_client_session_class,
+    create_mock_sdk_client_resources,
 )
 
 
 @contextmanager
 def install_mcp_mocks(server_state: MockMCPServerState):
-    """Install MCP SDK module mocks and clean up after.
-
-    Args:
-        server_state: The mock server state to use.
-
-    Yields:
-        Tuple of (mock_mcp, mock_stdio) modules.
-    """
-    mock_session_class = create_mock_client_session_class(server_state)
-
-    @asynccontextmanager
-    async def mock_stdio_client(params: Any):
-        read_stream = MagicMock()
-        write_stream = MagicMock()
-        yield (read_stream, write_stream)
-
-    mock_mcp = MagicMock()
-    mock_mcp.ClientSession = mock_session_class
-    mock_mcp.StdioServerParameters = MagicMock()
-
-    mock_mcp_client_stdio = MagicMock()
-    mock_mcp_client_stdio.stdio_client = mock_stdio_client
-
-    original_mcp = sys.modules.get("mcp")
-    original_mcp_client = sys.modules.get("mcp.client")
-    original_mcp_client_stdio = sys.modules.get("mcp.client.stdio")
-
-    try:
-        sys.modules["mcp"] = mock_mcp
-        sys.modules["mcp.client"] = MagicMock()
-        sys.modules["mcp.client.stdio"] = mock_mcp_client_stdio
-        yield mock_mcp, mock_mcp_client_stdio
-    finally:
-        if original_mcp is not None:
-            sys.modules["mcp"] = original_mcp
-        else:
-            sys.modules.pop("mcp", None)
-        if original_mcp_client is not None:
-            sys.modules["mcp.client"] = original_mcp_client
-        else:
-            sys.modules.pop("mcp.client", None)
-        if original_mcp_client_stdio is not None:
-            sys.modules["mcp.client.stdio"] = original_mcp_client_stdio
-        else:
-            sys.modules.pop("mcp.client.stdio", None)
+    """Patch the adapter boundary with an in-memory SDK v2 client."""
+    with patch(
+        "ouroboros.mcp.client.adapter.build_sdk_client",
+        side_effect=lambda _config: create_mock_sdk_client_resources(server_state),
+    ) as build:
+        yield build
 
 
 # ---------------------------------------------------------------------------
@@ -243,6 +203,10 @@ class TestMCPClientManagerConnection:
             tool_names = {t.name for t in tools}
             assert "tool1" in tool_names
             assert "tool2" in tool_names
+            snapshot = manager.get_connection_snapshot("server1")
+            assert snapshot is not None
+            assert snapshot.generation == 1
+            assert snapshot.tools == tuple(tools)
 
     @pytest.mark.asyncio
     async def test_connect_nonexistent_server_fails(self) -> None:

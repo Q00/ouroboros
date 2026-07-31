@@ -168,7 +168,10 @@ class LLMProviderProfileConfig(BaseModel, frozen=True):
     max_tokens: int | None = Field(default=None, ge=1)
     top_p: float | None = Field(default=None, ge=0.0, le=1.0)
     max_turns: int | None = Field(default=None, ge=1)
-    reasoning_effort: Literal["low", "medium", "high"] | None = None
+    # Provider-scoped mappings may use the Codex-native ``xhigh`` level.
+    # Keeping it here (rather than in a generated Codex profile file) lets
+    # Ouroboros apply it only to the selected Codex invocation.
+    reasoning_effort: Literal["low", "medium", "high", "xhigh"] | None = None
 
 
 class LLMTaskProfileConfig(BaseModel, frozen=True):
@@ -181,6 +184,23 @@ class LLMTaskProfileConfig(BaseModel, frozen=True):
     max_turns: int | None = Field(default=None, ge=1)
     reasoning_effort: Literal["low", "medium", "high"] | None = None
     providers: dict[str, LLMProviderProfileConfig] = Field(default_factory=dict)
+
+    @field_validator("providers")
+    @classmethod
+    def validate_provider_reasoning_efforts(
+        cls, providers: dict[str, LLMProviderProfileConfig]
+    ) -> dict[str, LLMProviderProfileConfig]:
+        """Keep Codex-only reasoning effort levels out of non-Codex providers."""
+        for provider_name, provider_config in providers.items():
+            if provider_config.reasoning_effort != "xhigh":
+                continue
+            if provider_name.strip().lower() not in {"codex", "codex_cli"}:
+                msg = (
+                    "reasoning_effort='xhigh' is only supported for Codex provider "
+                    f"profiles, not {provider_name!r}"
+                )
+                raise ValueError(msg)
+        return providers
 
 
 class ClarificationConfig(BaseModel, frozen=True):
@@ -208,6 +228,8 @@ class ExecutionConfig(BaseModel, frozen=True):
         tui_autolaunch: Whether `ooo run` should open the TUI without prompting
         auto_evaluate: When true, a successful `execute_seed` run automatically
             enqueues formal evaluation as a background job.
+        default_model: Optional model pin for every Execute-stage runtime call.
+            ``None`` (the default) keeps the runtime's own selected model.
         run_verify_commands: Whether the orchestrator checks an AC's success
             contract itself before accepting the AC: all ``expected_artifacts``
             must exist under the run workspace and ``verify_command`` must exit
@@ -222,9 +244,9 @@ class ExecutionConfig(BaseModel, frozen=True):
             alt-harness redispatch may fan out to multiple runtimes in parallel,
             first-passing-verification wins (PR-X N-version tournament, opt-in).
         decomposition_mode: Controls where AC decomposition is allowed:
-            ``preflight`` uses the configured preflight decomposition path,
-            ``bounce_only`` only decomposes after an atomic AC bounces, and
-            ``off`` disables decomposition.
+            ``bounce_only`` only decomposes after an evidence-backed too-big
+            bounce, and ``off`` disables decomposition. Legacy ``preflight``
+            configuration is migrated to ``bounce_only`` at load time.
         context_pack: Whether to append a deterministic repo context pack
             (stack, verify commands, layout) to run worker system prompts.
         project_guidance: Allowlist of project guidance ids to resolve from
@@ -235,14 +257,21 @@ class ExecutionConfig(BaseModel, frozen=True):
     retrospective_interval: int = Field(default=3, ge=1)
     tui_autolaunch: bool = False
     auto_evaluate: bool = True
+    default_model: str | None = None
     run_verify_commands: bool = True
     verify_command_timeout_seconds: int = Field(default=600, ge=1)
     ac_retry_attempts: int = Field(default=2, ge=0)
     cross_harness_redispatch: bool = True
     n_version_tournament: bool = False
-    decomposition_mode: Literal["preflight", "bounce_only", "off"] = "preflight"
+    decomposition_mode: Literal["bounce_only", "off"] = "bounce_only"
     context_pack: bool = True
     project_guidance: tuple[str, ...] = ()
+
+    @field_validator("decomposition_mode", mode="before")
+    @classmethod
+    def _migrate_legacy_decomposition_mode(cls, value: object) -> object:
+        """Retire pre-execution splitting without breaking stored config files."""
+        return "bounce_only" if value == "preflight" else value
 
     @field_validator("project_guidance")
     @classmethod

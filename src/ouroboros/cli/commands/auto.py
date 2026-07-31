@@ -132,7 +132,10 @@ app = typer.Typer(
 
 @app.callback(invoke_without_command=True)
 def auto_command(
-    goal: Annotated[str | None, typer.Argument(help="Goal/task for ooo auto.")] = None,
+    goal: Annotated[
+        str | None,
+        typer.Argument(help="Goal/task for ooo auto.", metavar="[GOAL]"),
+    ] = None,
     resume: Annotated[
         str | None, typer.Option("--resume", help="Resume an auto session id.")
     ] = None,

@@ -11,11 +11,16 @@ from __future__ import annotations
 
 from typing import Any
 
+from rich.cells import cell_len
+from rich.text import Text
+from textual import events
 from textual.app import ComposeResult
 from textual.reactive import reactive
 from textual.widget import Widget
 from textual.widgets import Label, Static, Tree
 from textual.widgets.tree import TreeNode
+
+from ouroboros.tui.cell_width import truncate_to_cell_width
 
 # Status display configuration
 STATUS_ICONS = {
@@ -26,6 +31,9 @@ STATUS_ICONS = {
     "completed": "[green][OK][/green]",
     "failed": "[red][X][/red]",
 }
+
+_FALLBACK_NODE_CONTENT_WIDTH = 50
+_FALLBACK_ROOT_CONTENT_WIDTH = 30
 
 
 class ACTreeWidget(Widget):
@@ -119,6 +127,52 @@ class ACTreeWidget(Widget):
         self.tree_data = tree_data or {}
         self.current_ac_id = current_ac_id
 
+    @staticmethod
+    def _display_depth(node: TreeNode[str]) -> int:
+        """Return a node's rendered depth below the visible tree root."""
+        depth = 0
+        parent = node.parent
+        while isinstance(parent, TreeNode):
+            depth += 1
+            parent = parent.parent
+        return depth
+
+    def _tree_label_width(
+        self,
+        *,
+        display_depth: int,
+        allow_expand: bool,
+        fixed_label_width: int,
+        fallback_content_width: int,
+    ) -> int:
+        """Return the label budget after Tree guides and toggle glyphs."""
+        tree = self._tree_widget
+        tree_width = getattr(getattr(tree, "scrollable_content_region", None), "width", 0)
+        if not isinstance(tree_width, int) or tree_width <= 0:
+            tree_width = getattr(getattr(tree, "size", None), "width", 0)
+        if tree is not None and isinstance(tree_width, int) and tree_width > 0:
+            guide_levels = display_depth if tree.show_root else max(0, display_depth - 1)
+            guide_width = guide_levels * tree.guide_depth
+            toggle_width = cell_len(tree.ICON_NODE_EXPANDED) if allow_expand else 0
+            return max(0, tree_width - guide_width - toggle_width)
+        return fixed_label_width + fallback_content_width
+
+    def _format_root_label(
+        self,
+        content: str,
+        *,
+        max_width: int | None = None,
+    ) -> str:
+        """Format the visible root within its toggle-aware row budget."""
+        if max_width is None:
+            max_width = self._tree_label_width(
+                display_depth=0,
+                allow_expand=True,
+                fixed_label_width=0,
+                fallback_content_width=_FALLBACK_ROOT_CONTENT_WIDTH,
+            )
+        return truncate_to_cell_width(content, max_width)
+
     def compose(self) -> ComposeResult:
         """Compose the widget layout."""
         yield Label("AC Decomposition Tree", classes="header")
@@ -131,7 +185,7 @@ class ACTreeWidget(Widget):
             root_id = self.tree_data.get("root_id")
             root_label = "AC Tree"
             if root_id and root_id in nodes:
-                root_label = nodes[root_id].get("content", "AC Tree")[:30]
+                root_label = self._format_root_label(str(nodes[root_id].get("content", "AC Tree")))
 
             tree: Tree[str] = Tree(root_label)
             tree.show_root = True
@@ -169,27 +223,47 @@ class ACTreeWidget(Widget):
         self,
         node_data: dict[str, Any],
         is_current: bool = False,
+        *,
+        display_depth: int = 1,
+        allow_expand: bool | None = None,
+        max_width: int | None = None,
     ) -> str:
         """Format display label for a tree node.
 
         Args:
             node_data: Data for the node.
             is_current: Whether this is the currently executing AC.
+            display_depth: Rendered depth below the visible tree root.
+            allow_expand: Whether Textual prepends an expand/collapse glyph.
+            max_width: Optional label-only width for direct tests.
 
         Returns:
             Formatted label with status icon and content.
         """
         status = node_data.get("status", "pending")
-        content = node_data.get("content", "Unknown")
+        content = str(node_data.get("content", "Unknown"))
         is_atomic = node_data.get("is_atomic", False)
-
-        # Truncate content for display
-        display_content = content[:50] + "..." if len(content) > 50 else content
 
         # Build label with status icon
         status_icon = STATUS_ICONS.get(status, "[ ]")
         if is_atomic and status in {"atomic", "pending"}:
             status_icon = STATUS_ICONS["atomic"]
+
+        prefix = Text.from_markup(status_icon)
+        prefix.append(" ")
+        if allow_expand is None:
+            allow_expand = bool(node_data.get("children_ids"))
+        if max_width is None:
+            max_width = self._tree_label_width(
+                display_depth=display_depth,
+                allow_expand=allow_expand,
+                fixed_label_width=prefix.cell_len,
+                fallback_content_width=_FALLBACK_NODE_CONTENT_WIDTH,
+            )
+        display_content = truncate_to_cell_width(
+            content,
+            max(0, max_width - prefix.cell_len),
+        )
 
         # Highlight current AC
         if is_current:
@@ -214,10 +288,16 @@ class ACTreeWidget(Widget):
         """
         node_id = node_data.get("id", "")
         is_current = node_id == self.current_ac_id
-        label = self._format_node_label(node_data, is_current)
 
         # Add to tree
         child_ids = node_data.get("children_ids", [])
+        display_depth = self._display_depth(parent) + 1
+        label = self._format_node_label(
+            node_data,
+            is_current,
+            display_depth=display_depth,
+            allow_expand=bool(child_ids),
+        )
         if child_ids:
             # Has children - add as expandable node
             tree_node = parent.add(label, data=node_id)
@@ -279,7 +359,14 @@ class ACTreeWidget(Widget):
             if ac_id in nodes:
                 node_data = nodes[ac_id]
                 is_current = ac_id == new_id
-                tree_node.set_label(self._format_node_label(node_data, is_current))
+                tree_node.set_label(
+                    self._format_node_label(
+                        node_data,
+                        is_current,
+                        display_depth=self._display_depth(tree_node),
+                        allow_expand=tree_node.allow_expand,
+                    )
+                )
 
     def update_tree(
         self,
@@ -339,8 +426,56 @@ class ACTreeWidget(Widget):
             node_data = nodes.get(node_id)
             if not isinstance(node_data, dict):
                 continue
+            if node_id == tree_data.get("root_id"):
+                tree_node.set_label(
+                    self._format_root_label(str(node_data.get("content", "AC Tree")))
+                )
+                continue
             is_current = node_id == self.current_ac_id
-            tree_node.set_label(self._format_node_label(node_data, is_current))
+            tree_node.set_label(
+                self._format_node_label(
+                    node_data,
+                    is_current,
+                    display_depth=self._display_depth(tree_node),
+                    allow_expand=tree_node.allow_expand,
+                )
+            )
+
+    def _resync_labels_for_current_width(self) -> None:
+        """Reapply root and child labels against the current Tree viewport."""
+        if self._tree_widget is None or not self._node_map:
+            return
+
+        data = self._tree_data_cache or self.tree_data
+        nodes = data.get("nodes")
+        if not isinstance(nodes, dict):
+            return
+
+        root_id = data.get("root_id")
+        for node_id, tree_node in self._node_map.items():
+            node_data = nodes.get(node_id)
+            if not isinstance(node_data, dict):
+                continue
+            if node_id == root_id:
+                tree_node.set_label(
+                    self._format_root_label(str(node_data.get("content", "AC Tree")))
+                )
+                continue
+            tree_node.set_label(
+                self._format_node_label(
+                    node_data,
+                    node_id == self.current_ac_id,
+                    display_depth=self._display_depth(tree_node),
+                    allow_expand=tree_node.allow_expand,
+                )
+            )
+        # TreeNode.set_label refreshes a row but does not recompute virtual width.
+        self._tree_widget._invalidate()
+
+    def on_resize(self, event: events.Resize) -> None:
+        """Recalculate labels after Textual measures a new tree width."""
+        del event
+        self._resync_labels_for_current_width()
 
     def update_node_status(self, ac_id: str, status: str) -> None:
         """Update status of a single node without recompose.
@@ -365,7 +500,15 @@ class ACTreeWidget(Widget):
         if ac_id in self._node_map and self._tree_widget:
             node_data = new_nodes[ac_id]
             is_current = ac_id == self.current_ac_id
-            self._node_map[ac_id].set_label(self._format_node_label(node_data, is_current))
+            tree_node = self._node_map[ac_id]
+            tree_node.set_label(
+                self._format_node_label(
+                    node_data,
+                    is_current,
+                    display_depth=self._display_depth(tree_node),
+                    allow_expand=tree_node.allow_expand,
+                )
+            )
 
         # Update reactive data (watch will skip recompose since tree exists)
         self.tree_data = new_data
@@ -407,7 +550,12 @@ class ACTreeWidget(Widget):
 
             # Update parent node label to show decomposed status
             self._node_map[parent_ac_id].set_label(
-                self._format_node_label(parent_data, parent_ac_id == self.current_ac_id)
+                self._format_node_label(
+                    parent_data,
+                    parent_ac_id == self.current_ac_id,
+                    display_depth=self._display_depth(parent_tree_node),
+                    allow_expand=parent_tree_node.allow_expand,
+                )
             )
 
         # Add children to tree widget and data
@@ -420,8 +568,17 @@ class ACTreeWidget(Widget):
             nodes[child_id] = child_data
 
             # Add to tree widget
-            label = self._format_node_label(child_data, child_id == self.current_ac_id)
-            child_tree_node = parent_tree_node.add_leaf(label, data=child_id)
+            child_ids = child_data.get("children_ids", [])
+            label = self._format_node_label(
+                child_data,
+                child_id == self.current_ac_id,
+                display_depth=self._display_depth(parent_tree_node) + 1,
+                allow_expand=bool(child_ids),
+            )
+            if child_ids:
+                child_tree_node = parent_tree_node.add(label, data=child_id)
+            else:
+                child_tree_node = parent_tree_node.add_leaf(label, data=child_id)
             self._node_map[child_id] = child_tree_node
 
         # Expand parent to show new children
@@ -455,7 +612,15 @@ class ACTreeWidget(Widget):
         if ac_id in self._node_map and self._tree_widget:
             node_data = new_nodes[ac_id]
             is_current = ac_id == self.current_ac_id
-            self._node_map[ac_id].set_label(self._format_node_label(node_data, is_current))
+            tree_node = self._node_map[ac_id]
+            tree_node.set_label(
+                self._format_node_label(
+                    node_data,
+                    is_current,
+                    display_depth=self._display_depth(tree_node),
+                    allow_expand=tree_node.allow_expand,
+                )
+            )
 
         # Update reactive data (watch will skip recompose since tree exists)
         self.tree_data = new_data

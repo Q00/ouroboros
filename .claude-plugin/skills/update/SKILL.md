@@ -80,7 +80,8 @@ When the user invokes this skill:
 
 4. **Run update** (if user chose to update):
 
-   a. **Update PyPI package** — detect the original install method and preserve `[mcp,claude]` extras:
+   a. **Update PyPI package** — detect the original install method and preserve
+   the standalone `[claude]` profile:
 
    Check which installer was used:
    ```bash
@@ -88,38 +89,39 @@ When the user invokes this skill:
    pipx list 2>/dev/null | grep -q ouroboros && echo "pipx"
    ```
 
-   > This skill runs inside Claude Code, so always use `ouroboros-ai[mcp,claude]`
-   > (includes `mcp` for the MCP server plus `claude-agent-sdk` and `anthropic`
-   > required for MCP tools).
+   > This skill runs inside Claude Code, so use `ouroboros-ai[claude]`.
+   > Never combine it with `[mcp]`: the current Claude Agent SDK embeds MCP 1.x,
+   > while the protocol server requires MCP 2. Supported MCP hosts launch their
+   > own isolated `ouroboros-ai[mcp]` process through `uvx` or `pipx run`.
 
    - If installed via **uv tool** (most common with install.sh):
      ```bash
      # For pre-release targets:
-     uv tool install --upgrade --prerelease=allow 'ouroboros-ai[mcp,claude]'
+     uv tool install --upgrade --prerelease=allow 'ouroboros-ai[claude]'
      # For stable targets:
-     uv tool install --upgrade 'ouroboros-ai[mcp,claude]'
+     uv tool install --upgrade 'ouroboros-ai[claude]'
      ```
 
    - If installed via **pipx**:
      > `pipx upgrade` cannot add extras to an existing venv — use `install --force` to reinstall with extras.
      ```bash
      # For pre-release targets:
-     pipx install --force --pip-args='--pre' 'ouroboros-ai[mcp,claude]'
+     pipx install --force --pip-args='--pre' 'ouroboros-ai[claude]'
      # For stable targets:
-     pipx install --force 'ouroboros-ai[mcp,claude]'
+     pipx install --force 'ouroboros-ai[claude]'
      ```
 
    - If installed via **pip** (fallback):
      ```bash
      # For pre-release targets:
-     python3 -m pip install --upgrade --pre 'ouroboros-ai[mcp,claude]'
+     python3 -m pip install --upgrade --pre 'ouroboros-ai[claude]'
      # For stable targets:
-     python3 -m pip install --upgrade 'ouroboros-ai[mcp,claude]'
+     python3 -m pip install --upgrade 'ouroboros-ai[claude]'
      ```
 
-   > **Note**: The `[mcp,claude]` extras are critical. Omitting `[mcp]` makes the MCP
-   > server fail to boot (ImportError at startup); omitting `[claude]` causes MCP
-   > tools to fail silently at call time.
+   > **Note**: `[claude]` is the complete standalone Claude SDK profile. MCP tools
+   > are intentionally not registered by this profile; configure a supported
+   > CLI-backed runtime separately when MCP 2 is required.
 
    b. **Update runtime integration**:
 
@@ -134,9 +136,9 @@ When the user invokes this skill:
    ouroboros setup --runtime codex --non-interactive
    ```
 
-   c. **Refresh MCP server config** (fixes stale args from older versions):
+   c. **Refresh runtime config**:
 
-   Run the same setup command used in step b to ensure MCP config is current:
+   Run the same setup command used in step b to ensure runtime config is current:
 
    For Claude Code:
    ```bash
@@ -145,8 +147,8 @@ When the user invokes this skill:
 
    For Codex CLI (already handled by step b above — skip this step).
 
-   This ensures `~/.claude/mcp.json` has the latest MCP command and args
-   (e.g., `ouroboros-ai[mcp,claude]` extras). Skips if already up to date.
+   Standalone Claude setup leaves `~/.claude/mcp.json` untouched. It refreshes
+   the Claude runtime/LLM settings and preserves the MCP 1.x / MCP 2 boundary.
 
    d. **Verify and update CLAUDE.md version marker**:
    ```bash
@@ -186,3 +188,13 @@ When the user invokes this skill:
 - Plugin update (Claude Code) pulls the latest from the marketplace.
 - No data is lost during updates — event stores and session data are preserved.
 - **Always use the same installer** that was used for the original installation (uv tool > pipx > pip).
+
+## RFC #1392 State Breadcrumb Footer
+
+Your final response MUST end with exactly one breadcrumb footer line:
+
+```
+◆ <current state> → next: <recommended action>
+```
+
+Derive `<current state>` from live session state via `ouroboros_session_status` when that MCP projection is available; otherwise derive it from this skill's actual outcome. Never use a linear `Step N of M` footer because Ouroboros is an evolutionary loop. When the next action is genuinely a choice, list 2-3 honest options in the `next:` clause. The breadcrumb line must be the last line of the response.

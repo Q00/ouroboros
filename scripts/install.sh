@@ -259,13 +259,13 @@ RUNTIME_COUNT=0
 # Map a runtime name to (EXTRAS, RUNTIME) pair.
 # Used after explicit/preserved runtime resolution to derive install extras.
 # Keep this table boring and explicit: agents reading this installer should be
-# able to see why Claude/Hermes pull MCP dependencies while file-based runtimes
-# only need the base CLI.
+# able to see why Claude's SDK runtime and the modern MCP server are installed
+# in different environments. The Claude tool environment must not pull MCP 2.
 _runtime_to_extras() {
   # `tui` ships with every selection so the settings GUI
   # (`ouroboros config`) works out of the box (#1414).
   case "$1" in
-    claude)  EXTRAS="[mcp,claude,tui]"; RUNTIME="claude" ;;
+    claude)  EXTRAS="[claude,tui]"; RUNTIME="claude" ;;
     codex)   EXTRAS="[tui]"; RUNTIME="codex" ;;
     opencode) EXTRAS="[tui]"; RUNTIME="opencode" ;;
     hermes)  EXTRAS="[mcp,tui]"; RUNTIME="hermes" ;;
@@ -289,10 +289,6 @@ _runtime_to_extras() {
 # Preserves user choice across upgrades unless --reconfigure / --runtime is set.
 EXISTING_RUNTIME=""
 EXISTING_CONFIG="$HOME/.ouroboros/config.yaml"
-# Fresh install (no config yet) → the post-install settings-GUI offer
-# defaults to yes; upgrades default to no.
-FRESH_CONFIG=true
-[ -f "$EXISTING_CONFIG" ] && FRESH_CONFIG=false
 if [ -z "$EXPLICIT_RUNTIME" ] && [ -z "$RECONFIGURE" ] && [ -f "$EXISTING_CONFIG" ] && command -v python3 &>/dev/null; then
   EXISTING_RUNTIME=$(EXISTING_CONFIG="$EXISTING_CONFIG" python3 -c "
 import os, re
@@ -329,7 +325,7 @@ elif [ "$RUNTIME_COUNT" -gt 1 ]; then
   if [ -t 0 ]; then
     _blank
     _say "${BOLD}Multiple runtimes detected. Pick where Ouroboros should appear first:${RESET}"
-    _choice 1 "Claude" "Claude Code plugin + MCP server (${PACKAGE_NAME}[mcp,claude,tui])"
+    _choice 1 "Claude" "Claude SDK tool + skills; MCP registration skipped (${PACKAGE_NAME}[claude,tui])"
     _choice 2 "Codex" "Codex plugin artifacts (${PACKAGE_NAME}[tui])"
     _choice 3 "Hermes" "Hermes agent guides + MCP server (${PACKAGE_NAME}[mcp,tui])"
     _choice 4 "OpenCode" "OpenCode commands and agent files (${PACKAGE_NAME}[tui])"
@@ -386,7 +382,7 @@ else
   if [ -t 0 ]; then
     _blank
     _say "${BOLD}No runtime CLI detected yet. Choose the agent you plan to use:${RESET}"
-    _choice 1 "Claude" "Recommended: plugin + MCP server (${PACKAGE_NAME}[mcp,claude,tui])"
+    _choice 1 "Claude" "Recommended: Claude SDK tool + skills; MCP registration skipped (${PACKAGE_NAME}[claude,tui])"
     _choice 2 "Codex" "Codex plugin artifacts (${PACKAGE_NAME}[tui])"
     _choice 3 "Hermes" "Hermes agent guides + MCP server (${PACKAGE_NAME}[mcp,tui])"
     _choice 4 "OpenCode" "OpenCode commands and agent files (${PACKAGE_NAME}[tui])"
@@ -499,25 +495,23 @@ if [ "$HAS_UV" = true ]; then
   # Map extras to explicit --with flags for uv.
   # NOTE: Pin specs MUST mirror [project.optional-dependencies] in
   # pyproject.toml. tests/unit/scripts/test_install_runtime_selection.py
-  # asserts the `[all]` set covers every declared extra so silent drift
-  # (e.g. forgetting `tui`) is caught in CI rather than discovered by a
-  # user with a half-installed `[all]` tree.
+  # asserts `[all]` covers every compatible extra while MCP stays in its
+  # isolated profile, so silent drift is caught in CI rather than discovered
+  # by a user with a conflicting tool environment.
   case "$EXTRAS" in
-    "[mcp,claude,tui]")
+    "[claude,tui]")
       UV_ARGS+=(
-        --with "mcp==1.28.1"
-        --with "claude-agent-sdk==0.2.110"
-        --with "anthropic==0.116.0"
+        --with "claude-agent-sdk==0.2.123"
+        --with "anthropic==0.117.0"
       )
       ;;
     "[mcp,tui]")
-      UV_ARGS+=(--with "mcp==1.28.1")
+      UV_ARGS+=(--with "mcp==2.0.0")
       ;;
     "[all]")
       UV_ARGS+=(
-        --with "mcp==1.28.1"
-        --with "claude-agent-sdk==0.2.110"
-        --with "anthropic==0.116.0"
+        --with "claude-agent-sdk==0.2.123"
+        --with "anthropic==0.117.0"
         --with "litellm==1.91.0"
       )
       ;;
@@ -591,7 +585,13 @@ fi
 _step "4/4  Wiring local integrations" "Creates config and runtime-specific files when a backend was selected."
 if [ -n "$RUNTIME" ] && [ -n "$OUROBOROS_SETUP_CMD" ]; then
   _info "Running: $OUROBOROS_SETUP_CMD setup --runtime $RUNTIME --non-interactive"
-  "$OUROBOROS_SETUP_CMD" setup --runtime "$RUNTIME" --non-interactive || true
+  if "$OUROBOROS_SETUP_CMD" setup --runtime "$RUNTIME" --non-interactive; then
+    :
+  else
+    setup_status=$?
+    _warn "Runtime setup failed; installation is incomplete. Fix the error above and re-run setup."
+    exit "$setup_status"
+  fi
 elif [ -n "$RUNTIME" ]; then
   _warn "ouroboros command is not on PATH yet; run setup after your shell sees the installed binary."
 else
@@ -608,81 +608,17 @@ if [ -n "$OUROBOROS_SETUP_CMD" ]; then
   "$OUROBOROS_SETUP_CMD" setup refresh || _warn "Artifact refresh skipped; run: ouroboros setup refresh"
 fi
 
-# 5. Claude Code integration (MCP + skills)
-# MCP registration changes Claude's tool wiring, so keep it tied to Claude/all.
+# 5. Claude Code integration (skills only for the standalone SDK profile)
+# The Claude Agent SDK requires MCP 1.x. An isolated MCP 2 server would boot
+# without the configured Claude runtime/LLM dependencies and then fail lazily,
+# so this install path deliberately does not register it.
 # Skill refresh is artifact-only and should happen whenever Claude is present;
 # otherwise a Codex-primary upgrade can leave Claude Code reading stale skills.
 if command -v claude &>/dev/null && { [ "$RUNTIME" = "claude" ] || [ "$EXTRAS" = "[all]" ]; }; then
   _blank
   _say "${BLUE}◆${RESET} ${BOLD}Claude Code extras${RESET}"
 
-  # 5a. Register MCP server in ~/.claude/mcp.json
-  # (ouroboros setup may have done this already, but we ensure it with timeout)
-  MCP_FILE="$HOME/.claude/mcp.json"
-  mkdir -p "$HOME/.claude"
-
-  # MCP command matches the installer that actually ran in step 3
-  if [ "$INSTALL_METHOD" = "uv" ]; then
-    case "$EXTRAS" in
-      "[mcp,claude]" | "[mcp,claude,tui]")
-        OUROBOROS_ENTRY='{"command":"uvx","args":["--python","'"$INSTALL_PYTHON_SPEC"'","--from","ouroboros-ai[mcp,claude]","ouroboros","mcp","serve"]}'
-        ;;
-      "[all]")
-        OUROBOROS_ENTRY='{"command":"uvx","args":["--python","'"$INSTALL_PYTHON_SPEC"'","--from","ouroboros-ai[all]","ouroboros","mcp","serve"]}'
-        ;;
-      *)
-        OUROBOROS_ENTRY='{"command":"uvx","args":["--python","'"$INSTALL_PYTHON_SPEC"'","--from","ouroboros-ai[mcp]","ouroboros","mcp","serve"]}'
-        ;;
-    esac
-  elif [ "$INSTALL_METHOD" = "pipx" ]; then
-    OUROBOROS_ENTRY='{"command":"ouroboros","args":["mcp","serve"]}'
-  else
-    OUROBOROS_ENTRY='{"command":"'"${PYTHON:-python3}"'","args":["-m","ouroboros","mcp","serve"]}'
-  fi
-
-  # Find a working Python: system python3, or uv-managed python
-  MCP_PYTHON=""
-  if command -v python3 &>/dev/null; then
-    MCP_PYTHON="python3"
-  elif command -v uv &>/dev/null; then
-    MCP_PYTHON="uv run python3"
-  fi
-
-  if [ -n "$MCP_PYTHON" ]; then
-    if [ -f "$MCP_FILE" ]; then
-      if MCP_FILE="$MCP_FILE" OUROBOROS_ENTRY="$OUROBOROS_ENTRY" $MCP_PYTHON -c "
-import json, os
-mcp_file = os.environ['MCP_FILE']
-entry = json.loads(os.environ['OUROBOROS_ENTRY'])
-with open(mcp_file) as f:
-    data = json.load(f)
-servers = data.setdefault('mcpServers', {})
-servers['ouroboros'] = entry
-with open(mcp_file, 'w') as f:
-    json.dump(data, f, indent=2)
-print('merged')
-" 2>/dev/null; then
-        _ok "MCP merged into existing $MCP_FILE"
-      else
-        _warn "MCP could not merge; check $MCP_FILE manually."
-      fi
-    else
-      if MCP_FILE="$MCP_FILE" OUROBOROS_ENTRY="$OUROBOROS_ENTRY" $MCP_PYTHON -c "
-import json, os
-mcp_file = os.environ['MCP_FILE']
-entry = json.loads(os.environ['OUROBOROS_ENTRY'])
-data = {'mcpServers': {'ouroboros': entry}}
-with open(mcp_file, 'w') as f:
-    json.dump(data, f, indent=2)
-" 2>/dev/null; then
-        _ok "MCP created at $MCP_FILE"
-      else
-        _warn "MCP could not create; check $MCP_FILE manually."
-      fi
-    fi
-  else
-    _warn "MCP skipped: no python3 found. Add the entry manually to $MCP_FILE."
-  fi
+  _warn "MCP registration skipped for the standalone Claude SDK profile (MCP 1.x). Use a supported CLI-backed runtime setup for the isolated MCP 2 server."
 fi
 
 if command -v claude &>/dev/null; then
@@ -690,7 +626,7 @@ if command -v claude &>/dev/null; then
     _blank
     _say "${BLUE}◆${RESET} ${BOLD}Claude Code skills${RESET}"
   fi
-  # 5b. Install/update Ouroboros skills (claude plugin)
+  # 5a. Install/update Ouroboros skills (claude plugin)
   _info "Installing Ouroboros skills via Claude plugin marketplace..."
   claude plugin marketplace add Q00/ouroboros 2>/dev/null || true
   claude plugin marketplace update ouroboros 2>/dev/null || true
@@ -713,25 +649,28 @@ if [ -n "$RUNTIME" ]; then
   _info "Current backend: $RUNTIME"
 fi
 _info "Switch backend later: ouroboros setup --runtime <claude|codex|opencode|hermes|gemini|goose|kiro|copilot|pi|gjc>"
-_say "${BOLD}Settings GUI — pick per-stage agents & models${RESET}"
+_say "${BOLD}Model settings — use your default model or configure one directly${RESET}"
 _info 'Inside your AI agent: > ooo config   (opens in your browser)'
 _info 'From this terminal:  ouroboros config   (full-screen TUI)'
 
-# 6. Optional first-run settings GUI (interactive installs only).
+# 6. Optional direct model settings (interactive installs only).
 # install.sh always runs in a real terminal when interactive, so the
 # full-screen Textual settings app can open right here. curl|bash pipe
 # installs skip this automatically ([ -t 0 ] is false).
 if [ -t 0 ] && [ -z "${OUROBOROS_INSTALL_SKIP_CONFIG_GUI:-}" ]; then
-  if [ "$FRESH_CONFIG" = true ]; then
-    GUI_DEFAULT="y"
-    GUI_HINT="[Y/n]"
+  if [ "$RUNTIME" = "codex" ]; then
+    GUI_MESSAGE="Codex's current default model is ready to use. Configure a model directly now?"
   else
-    GUI_DEFAULT="n"
-    GUI_HINT="[y/N]"
+    GUI_MESSAGE="Your selected runtime's default model is ready to use. Configure a model directly now?"
   fi
+  # Most people should start with the runtime default. The settings UI is for
+  # deliberate model pins, so it must remain an opt-in rather than a fresh
+  # install speed bump.
+  GUI_DEFAULT="n"
+  GUI_HINT="[y/N]"
   _blank
-  _say "${BOLD}First-time setup: pick per-stage agents & models in the settings GUI?${RESET}"
-  _prompt "Open settings GUI now $GUI_HINT: "
+  _say "${BOLD}${GUI_MESSAGE}${RESET}"
+  _prompt "Open direct model settings $GUI_HINT: "
   read -r gui_choice
   case "${gui_choice:-$GUI_DEFAULT}" in
     y | Y | yes | YES)
@@ -752,7 +691,7 @@ if [ -t 0 ] && [ -z "${OUROBOROS_INSTALL_SKIP_CONFIG_GUI:-}" ]; then
       fi
       ;;
     *)
-      _info "Skipped. Open it anytime:"
+      _info "Using the runtime default model. You can change it anytime:"
       _info '  in your AI agent: > ooo config'
       _info '  in a terminal:    ouroboros config'
       ;;

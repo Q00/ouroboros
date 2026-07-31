@@ -82,29 +82,6 @@ async def test_packaged_ooo_prefixes_dispatch_from_skill_frontmatter(
     first_argument: str,
 ) -> None:
     """Packaged `SKILL.md` metadata should drive exact-prefix MCP dispatch."""
-    runtime = create_agent_runtime(
-        backend="codex",
-        cli_path="codex",
-        permission_mode="acceptEdits",
-        cwd=tmp_path,
-    )
-    assert isinstance(runtime, CodexCliRuntime)
-
-    with resolve_packaged_codex_skill_path(
-        skill_name, skills_dir=runtime._skills_dir
-    ) as skill_md_path:
-        assert skill_md_path.is_file()
-
-        frontmatter = _load_skill_frontmatter(skill_md_path)
-    expected_tool = frontmatter["mcp_tool"]
-    expected_args = _resolve_frontmatter_args(
-        frontmatter["mcp_args"],
-        cwd=str(tmp_path),
-        first_argument=first_argument,
-    )
-    assert isinstance(expected_tool, str)
-    assert isinstance(expected_args, dict)
-
     fake_server = AsyncMock()
     fake_server.call_tool = AsyncMock(
         return_value=Result.ok(
@@ -129,6 +106,28 @@ async def test_packaged_ooo_prefixes_dispatch_from_skill_frontmatter(
             "ouroboros.orchestrator.codex_cli_runtime.asyncio.create_subprocess_exec"
         ) as mock_exec,
     ):
+        runtime = create_agent_runtime(
+            backend="codex",
+            cli_path="codex",
+            permission_mode="acceptEdits",
+            cwd=tmp_path,
+        )
+        assert isinstance(runtime, CodexCliRuntime)
+
+        with resolve_packaged_codex_skill_path(
+            skill_name, skills_dir=runtime._skills_dir
+        ) as skill_md_path:
+            assert skill_md_path.is_file()
+
+            frontmatter = _load_skill_frontmatter(skill_md_path)
+        expected_tool = frontmatter["mcp_tool"]
+        expected_args = _resolve_frontmatter_args(
+            frontmatter["mcp_args"],
+            cwd=str(tmp_path),
+            first_argument=first_argument,
+        )
+        assert isinstance(expected_tool, str)
+        assert isinstance(expected_args, dict)
         messages = [message async for message in runtime.execute_task(prompt)]
 
     fake_server.call_tool.assert_awaited_once_with(expected_tool, expected_args)

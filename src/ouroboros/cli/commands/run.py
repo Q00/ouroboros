@@ -21,8 +21,12 @@ if TYPE_CHECKING:
 
 from ouroboros.cli.formatters import console
 from ouroboros.cli.formatters.panels import print_error, print_info, print_success, print_warning
-from ouroboros.config._model_defaults import DEFAULT_SONNET_MODEL
-from ouroboros.config.loader import get_config_dir, get_max_parallel_workers, load_config
+from ouroboros.config.loader import (
+    get_config_dir,
+    get_max_parallel_workers,
+    load_config,
+    resolve_execution_model,
+)
 from ouroboros.core.errors import ConfigError
 from ouroboros.core.project_paths import resolve_path_against_base, resolve_seed_project_path
 from ouroboros.core.security import InputValidator
@@ -41,14 +45,29 @@ from ouroboros.orchestrator.decomposition_limits import (
 )
 
 
-def _resolve_execution_model(runtime_backend: str | None) -> str | None:
-    execution_model = os.environ.get("OUROBOROS_EXECUTION_MODEL")
-    if execution_model is not None:
-        stripped = execution_model.strip()
-        return stripped or None
-    if runtime_backend == "claude":
-        return DEFAULT_SONNET_MODEL
-    return None
+def _execution_model_status(runtime_backend: str | None, model: str | None) -> str:
+    """Return a truthful pre-run model summary for the CLI.
+
+    An absent Codex model means no ``--model`` flag is sent, so Codex owns the
+    choice. A config.toml value is diagnostic context, not proof of the model
+    selected by the current App/CLI session.
+    """
+    if model is not None:
+        return f"Execution model: {model} (fixed)"
+    if runtime_backend == "codex":
+        from ouroboros.backends.model_catalog import configured_default_model
+
+        hint = configured_default_model("codex")
+        if hint:
+            return (
+                "Execution model: follows Codex's currently selected model "
+                f"(config.toml: {hint}; not confirmed at runtime)"
+            )
+        return (
+            "Execution model: follows Codex's currently selected model "
+            "(concrete model not reported by Codex)"
+        )
+    return "Execution model: runtime default"
 
 
 def _resolve_run_execute_runtime_backend(
@@ -701,9 +720,11 @@ async def _run_orchestrator(
     if debug:
         print_info(f"Execution runtime: {resolved_runtime_backend}")
 
+    execution_model = resolve_execution_model(resolved_runtime_backend)
+    print_info(_execution_model_status(resolved_runtime_backend, execution_model))
     adapter = create_agent_runtime(
         backend=resolved_runtime_backend,
-        model=_resolve_execution_model(resolved_runtime_backend),
+        model=execution_model,
         cwd=Path(workspace.effective_cwd) if workspace else project_dir,
     )
     runner = OrchestratorRunner(

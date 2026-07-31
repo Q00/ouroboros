@@ -9,8 +9,9 @@ that existing result semantics (status, blocker strings) are unchanged.
 from __future__ import annotations
 
 import pytest
-from structlog.testing import capture_logs
 
+from ouroboros.auto import interview_driver as interview_driver_module
+from ouroboros.auto import safe_defaults as safe_defaults_module
 from ouroboros.auto.interview_driver import (
     AutoInterviewDriver,
     FunctionInterviewBackend,
@@ -24,6 +25,32 @@ from ouroboros.auto.state import AutoPipelineState, AutoStore
 # (empty production bank); re-inject the historical bank so the matcher
 # observability + blocking paths stay covered. See tests/unit/auto/conftest.py.
 pytestmark = pytest.mark.usefixtures("_legacy_unsafe_bank")
+
+
+class _StructuredLogRecorder:
+    """Minimal logger test double for structured event assertions."""
+
+    def __init__(self) -> None:
+        self.events: list[dict[str, object]] = []
+
+    def info(self, event: str, **kwargs: object) -> None:
+        self.events.append({"event": event, **kwargs, "log_level": "info"})
+
+    def warning(self, event: str, **kwargs: object) -> None:
+        self.events.append({"event": event, **kwargs, "log_level": "warning"})
+
+    def error(self, event: str, **kwargs: object) -> None:
+        self.events.append({"event": event, **kwargs, "log_level": "error"})
+
+
+@pytest.fixture
+def captured_structured_logs(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, object]]:
+    """Capture module log calls without depending on process-global structlog state."""
+    recorder = _StructuredLogRecorder()
+    monkeypatch.setattr(interview_driver_module, "log", recorder)
+    monkeypatch.setattr(safe_defaults_module, "log", recorder)
+    return recorder.events
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -83,7 +110,9 @@ class _RecordingEventStore:
 
 
 @pytest.mark.asyncio
-async def test_complete_ledger_does_not_close_without_backend_low_ambiguity(tmp_path) -> None:
+async def test_complete_ledger_does_not_close_without_backend_low_ambiguity(
+    tmp_path, captured_structured_logs
+) -> None:
     """Ledger completeness alone cannot close auto interview.
 
     The backend must also signal completion at or below the ambiguity threshold
@@ -109,10 +138,9 @@ async def test_complete_ledger_does_not_close_without_backend_low_ambiguity(tmp_
         timeout_seconds=1,
     )
 
-    with capture_logs() as captured:
-        result = await driver.run(state, ledger)
+    result = await driver.run(state, ledger)
 
-    events = [e["event"] for e in captured]
+    events = [e["event"] for e in captured_structured_logs]
     assert "auto.interview.ledger_only_closure" not in events
     assert result.status == "blocked"
     assert "without closure" in (result.blocker or "")
@@ -125,7 +153,7 @@ async def test_complete_ledger_does_not_close_without_backend_low_ambiguity(tmp_
 
 
 @pytest.mark.asyncio
-async def test_safe_default_logs_closed_path(tmp_path) -> None:
+async def test_safe_default_logs_closed_path(tmp_path, captured_structured_logs) -> None:
     """Benign goal with no pre-filled ledger; backend keeps asking at max_rounds=1.
 
     After max_rounds the driver calls ``finalize_safe_defaultable_gaps``, which
@@ -158,16 +186,17 @@ async def test_safe_default_logs_closed_path(tmp_path) -> None:
         event_store=event_store,
     )
 
-    with capture_logs() as captured:
-        result = await driver.run(state, ledger)
+    result = await driver.run(state, ledger)
     await driver.wait_for_pending_emits()
 
-    events = [e["event"] for e in captured]
+    events = [e["event"] for e in captured_structured_logs]
     assert "auto.interview.safe_default.entered" in events
     assert "auto.interview.safe_default.closed" in events
 
     # Verify the defaulted_sections field on the closed event includes runtime_context.
-    closed_events = [e for e in captured if e["event"] == "auto.interview.safe_default.closed"]
+    closed_events = [
+        e for e in captured_structured_logs if e["event"] == "auto.interview.safe_default.closed"
+    ]
     assert len(closed_events) == 1
     defaulted = closed_events[0]["defaulted_sections"]
     assert "runtime_context" in defaulted
@@ -189,7 +218,7 @@ async def test_safe_default_logs_closed_path(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_safe_default_logs_synthesis_nonclosure(tmp_path) -> None:
+async def test_safe_default_logs_synthesis_nonclosure(tmp_path, captured_structured_logs) -> None:
     """Backend response that accepts synthesis but keeps interviewing is structured-log visible."""
     ledger = SeedDraftLedger.from_goal("Build a tiny local CLI")
 
@@ -211,13 +240,14 @@ async def test_safe_default_logs_synthesis_nonclosure(tmp_path) -> None:
         timeout_seconds=1,
     )
 
-    with capture_logs() as captured:
-        result = await driver.run(state, ledger)
+    result = await driver.run(state, ledger)
 
-    events = [e["event"] for e in captured]
+    events = [e["event"] for e in captured_structured_logs]
     assert "auto.interview.safe_default_synthesis_nonclosure" in events
     nonclosure = [
-        e for e in captured if e["event"] == "auto.interview.safe_default_synthesis_nonclosure"
+        e
+        for e in captured_structured_logs
+        if e["event"] == "auto.interview.safe_default_synthesis_nonclosure"
     ][0]
     assert nonclosure["synthesis_pushed"] is True
     assert nonclosure["backend_seed_ready"] is False
@@ -276,7 +306,9 @@ async def test_no_backend_safe_default_persists_closure_events(tmp_path) -> None
 # ---------------------------------------------------------------------------
 
 
-def test_unsafe_context_match_logs_pattern_name_without_raw_text() -> None:
+def test_unsafe_context_match_logs_pattern_name_without_raw_text(
+    captured_structured_logs,
+) -> None:
     """Unsafe context logs bounded diagnostics without raw user/secret text.
 
     ``_unsafe_context_reason`` must emit ``auto.safe_default.unsafe_context_match``
@@ -291,16 +323,19 @@ def test_unsafe_context_match_logs_pattern_name_without_raw_text() -> None:
         f"Use the access token {raw_secret} from the user.",
     )
 
-    with capture_logs() as captured:
-        reason = _unsafe_context_reason(
-            ledger,
-            goal=raw_goal,
-            pending_question=None,
-        )
+    reason = _unsafe_context_reason(
+        ledger,
+        goal=raw_goal,
+        pending_question=None,
+    )
 
     assert reason == "credentials/secrets"
 
-    match_events = [e for e in captured if e["event"] == "auto.safe_default.unsafe_context_match"]
+    match_events = [
+        e
+        for e in captured_structured_logs
+        if e["event"] == "auto.safe_default.unsafe_context_match"
+    ]
     assert len(match_events) == 1
     event = match_events[0]
     assert event["pattern_name"] == "credentials/secrets"
@@ -325,7 +360,9 @@ def test_unsafe_context_match_logs_pattern_name_without_raw_text() -> None:
 
 
 @pytest.mark.asyncio
-async def test_safe_default_logs_unsafe_context_observed_without_raw_text(tmp_path) -> None:
+async def test_safe_default_logs_unsafe_context_observed_without_raw_text(
+    tmp_path, captured_structured_logs
+) -> None:
     """Unsafe finalization emits the blocking event without raw user/secret text."""
     raw_secret = "prod-token-please-do-not-log"
     raw_goal = f"Use the customer access token {raw_secret} for a local helper"
@@ -347,15 +384,16 @@ async def test_safe_default_logs_unsafe_context_observed_without_raw_text(tmp_pa
         timeout_seconds=1,
     )
 
-    with capture_logs() as captured:
-        result = await driver.run(state, ledger)
+    result = await driver.run(state, ledger)
 
-    events = [e["event"] for e in captured]
+    events = [e["event"] for e in captured_structured_logs]
     assert "auto.interview.safe_default.entered" in events
     assert "auto.interview.safe_default.unsafe_context_observed" in events
 
     unsafe_events = [
-        e for e in captured if e["event"] == "auto.interview.safe_default.unsafe_context_observed"
+        e
+        for e in captured_structured_logs
+        if e["event"] == "auto.interview.safe_default.unsafe_context_observed"
     ]
     assert len(unsafe_events) == 1
     assert unsafe_events[0]["unsafe_gaps"]

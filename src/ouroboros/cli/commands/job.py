@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Iterator
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
+import io
 import json
 import os
 from pathlib import Path
@@ -30,9 +33,47 @@ def _emit_result(result: MCPToolResult) -> None:
         typer.echo(text)
 
 
+def _env_flag(name: str) -> bool:
+    """Return True when an environment variable carries a truthy value."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return False
+    return raw.strip().lower() not in {"", "0", "false", "no", "off"}
+
+
+@contextmanager
+def _job_cli_console_log_boundary() -> Iterator[None]:
+    """Keep job command stdout/stderr reserved for user-facing job output.
+
+    The MCP job handlers emit debug logs for server/runtime observability. CLI
+    callers and Typer's test runner capture stderr alongside stdout, so those
+    diagnostics can leak timestamps and timing values into otherwise stable
+    `ouroboros job ...` output. Keep file logging intact and allow explicit
+    opt-in for diagnostics via ``OUROBOROS_JOB_VERBOSE=1``.
+    """
+    if _env_flag("OUROBOROS_JOB_VERBOSE"):
+        yield
+        return
+
+    from ouroboros.observability.logging import (
+        is_console_logging_enabled,
+        set_console_logging,
+    )
+
+    previous = is_console_logging_enabled()
+    set_console_logging(False)
+    try:
+        buffer = io.StringIO()
+        with redirect_stdout(buffer), redirect_stderr(buffer):
+            yield
+    finally:
+        set_console_logging(previous)
+
+
 def _run_job_handler(handler, arguments: dict[str, object]) -> None:
     """Run an async MCP job handler and map errors to CLI exit status."""
-    result = asyncio.run(handler.handle(arguments))
+    with _job_cli_console_log_boundary():
+        result = asyncio.run(handler.handle(arguments))
     if result.is_err:
         print_error(result.error.message)
         raise typer.Exit(1)

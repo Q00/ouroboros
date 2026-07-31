@@ -30,10 +30,13 @@ from ouroboros.orchestrator.adapter import (
 )
 from ouroboros.orchestrator.decomposition_limits import MAX_DECOMPOSITION_DEPTH
 from ouroboros.orchestrator.decomposition_policy import (
+    BounceCause,
+    DecompositionChild,
     DecompositionDecisionRecord,
     DecompositionDisposition,
     DecompositionSource,
-    legacy_unverified_split_decision,
+    SemanticAttestationStatus,
+    StructuralCheckStatus,
 )
 from ouroboros.orchestrator.dependency_analyzer import ACNode, DependencyGraph
 from ouroboros.orchestrator.execution_runtime_scope import ExecutionNodeIdentity
@@ -60,7 +63,7 @@ from ouroboros.orchestrator.route_escalation import (
     advance_route,
 )
 from ouroboros.orchestrator.route_policy import RouteRequirements
-from ouroboros.orchestrator.verifier import VerifierVerdict
+from ouroboros.orchestrator.verifier import RetryAdmission, VerifierVerdict
 from ouroboros.persistence.event_store import EventStore
 
 
@@ -335,10 +338,21 @@ def _split_decision(
     identity = node_identity or ExecutionNodeIdentity.root(
         execution_context_id=execution_id, ac_index=root_ac_index
     )
-    return legacy_unverified_split_decision(
+    return DecompositionDecisionRecord(
         node_id=identity.node_id,
         source=DecompositionSource.PREFLIGHT,
-        child_descriptions=child_descriptions,
+        disposition=DecompositionDisposition.SPLIT,
+        children=tuple(
+            DecompositionChild(
+                description=description,
+                coverage_claims=(f"scope-{index}",),
+                verification_hint=f"verify scope {index}",
+            )
+            for index, description in enumerate(child_descriptions)
+        ),
+        structural_status=StructuralCheckStatus.PASSED,
+        semantic_status=SemanticAttestationStatus.ESTABLISHED,
+        trustworthy=True,
     )
 
 
@@ -532,6 +546,98 @@ async def test_live_loop_walks_each_route_once_then_succeeds() -> None:
     assert [event.data["route_id"] for event in judgments] == calls
     assert [event.data["route_attempt_index"] for event in judgments] == [0, 1, 2]
     assert all(event.data["route_episode_id"] == _episode_id(_seed()) for event in judgments)
+
+
+@pytest.mark.asyncio
+async def test_live_bounded_route_too_big_transitions_to_verified_composite() -> None:
+    """Routing D must not make the sole live bounce path unreachable."""
+
+    executor, _store, events = _executor(enable_decomposition=True)
+    node = ExecutionNodeIdentity.root(execution_context_id="execution-1", ac_index=0)
+    decision = replace(
+        _split_decision(node_identity=node),
+        source=DecompositionSource.BOUNCE,
+        cause=BounceCause.TOO_BIG,
+    )
+    route_calls = 0
+
+    async def failed_atomic_batch(**_kwargs: Any) -> list[ACExecutionResult]:
+        nonlocal route_calls
+        route_calls += 1
+        return [
+            ACExecutionResult(
+                ac_index=0,
+                ac_content="ship it",
+                success=False,
+                error="The parent has multiple unfinished scopes.",
+                messages=(AgentMessage(type="tool", content="attempted", tool_name="Read"),),
+                outcome=ACExecutionOutcome.FAILED,
+                atomic_verifier_verdict=VerifierVerdict(
+                    passed=False,
+                    reasons=("unfinished independent scopes",),
+                    failure_class=FailureClass.SCOPE_CREEP.value,
+                    retry_admission=RetryAdmission.REDISPATCH,
+                ),
+                route_candidate=_candidate(executor, "compat:claude:frugal"),
+            )
+        ]
+
+    child_results = (
+        ACExecutionResult(
+            ac_index=0,
+            ac_content=decision.children[0].description,
+            success=True,
+            final_message="first complete",
+            depth=1,
+        ),
+        ACExecutionResult(
+            ac_index=1,
+            ac_content=decision.children[1].description,
+            success=True,
+            final_message="second complete",
+            depth=1,
+        ),
+    )
+    composite = ACExecutionResult(
+        ac_index=0,
+        ac_content="ship it",
+        success=True,
+        final_message="composite complete",
+        is_decomposed=True,
+        sub_results=child_results,
+        decomposition_decision=decision,
+    )
+    executor._execute_ac_batch = failed_atomic_batch  # type: ignore[method-assign]
+    executor._request_bounce_classification = AsyncMock(return_value=(BounceCause.TOO_BIG, True))
+    executor._try_decompose_ac = AsyncMock(return_value=decision)  # type: ignore[method-assign]
+    executor._execute_decomposition_children = AsyncMock(  # type: ignore[method-assign]
+        return_value=composite
+    )
+
+    results = await executor._run_batch_with_bounded_route_escalation(
+        seed=_seed(),
+        batch_executable=[0],
+        session_id="session-1",
+        execution_id="execution-1",
+        tools=[],
+        tool_catalog=None,
+        system_prompt="sys",
+        level_contexts=[],
+        ac_retry_attempts={0: 0},
+        execution_counters=None,
+    )
+
+    assert route_calls == 1
+    assert isinstance(results[0], ACExecutionResult)
+    assert results[0].success and results[0].is_decomposed
+    executor._request_bounce_classification.assert_awaited_once()
+    executor._try_decompose_ac.assert_awaited_once()  # type: ignore[attr-defined]
+    executor._execute_decomposition_children.assert_awaited_once()  # type: ignore[attr-defined]
+    event_types = [event.type for event in events]
+    assert "execution.decomposition.bounce_classified" in event_types
+    assert "execution.decomposition.decision_finalized" in event_types
+    assert "execution.ac.composite_completed" in event_types
+    assert "execution.ac.route_observed" not in event_types
 
 
 @pytest.mark.asyncio
@@ -1214,6 +1320,12 @@ async def test_partial_composite_resume_reuses_only_exact_paused_child_boundary(
                 data={"subtype": "success" if resume_succeeds else "error"},
                 resume_handle=handle,
             )
+        elif call_number == 4 and not resume_succeeds:
+            assert kwargs.get("resume_handle") is None
+            yield AgentMessage(
+                type="result",
+                content=('{"cause":"BAD_SPEC","has_remaining_scope":false}'),
+            )
         else:  # pragma: no cover - the assertion below is the primary guard
             raise AssertionError("a completed child was redispatched")
 
@@ -1229,7 +1341,7 @@ async def test_partial_composite_resume_reuses_only_exact_paused_child_boundary(
         execution_context_id="execution-1",
         ac_index=0,
     )
-    executor._decomposition_decisions[root_identity.node_id] = decision
+    executor._publish_event_owned_decomposition_decision(decision)
 
     first = await executor._run_batch_with_bounded_route_escalation(
         seed=seed,
@@ -1286,6 +1398,7 @@ async def test_partial_composite_resume_reuses_only_exact_paused_child_boundary(
         event_log=events,
         adapter_override=executor._adapter,
     )
+    resumed_executor._publish_event_owned_decomposition_decision(decision)
     resumed = await resumed_executor._run_batch_with_bounded_route_escalation(
         seed=seed,
         batch_executable=[0],
@@ -1299,7 +1412,7 @@ async def test_partial_composite_resume_reuses_only_exact_paused_child_boundary(
         execution_counters=None,
     )
 
-    assert len(provider_resume_handles) == 3
+    assert len(provider_resume_handles) == (3 if resume_succeeds else 4)
     restored = resumed[0]
     assert isinstance(restored, ACExecutionResult)
     assert restored.success is resume_succeeds
@@ -1375,17 +1488,15 @@ async def test_nested_partial_composite_resume_reuses_exact_depth_two_leaf_bound
         node_identity=root.child(1),
         child_descriptions=("nested completed", "nested paused"),
     )
-    executor._decomposition_decisions.update(
-        {
-            root.node_id: root_decision,
-            root.child(0).node_id: DecompositionDecisionRecord(
-                node_id=root.child(0).node_id,
-                source=DecompositionSource.PREFLIGHT,
-                disposition=DecompositionDisposition.ATOMIC,
-            ),
-            root.child(1).node_id: nested_decision,
-        }
+    executor._publish_event_owned_decomposition_decision(root_decision)
+    executor._publish_event_owned_decomposition_decision(
+        DecompositionDecisionRecord(
+            node_id=root.child(0).node_id,
+            source=DecompositionSource.PREFLIGHT,
+            disposition=DecompositionDisposition.ATOMIC,
+        )
     )
+    executor._publish_event_owned_decomposition_decision(nested_decision)
 
     first = await executor._run_batch_with_bounded_route_escalation(
         seed=seed,
@@ -1430,6 +1541,8 @@ async def test_nested_partial_composite_resume_reuses_exact_depth_two_leaf_bound
         event_log=events,
         adapter_override=executor._adapter,
     )
+    resumed_executor._publish_event_owned_decomposition_decision(root_decision)
+    resumed_executor._publish_event_owned_decomposition_decision(nested_decision)
     resumed = await resumed_executor._run_batch_with_bounded_route_escalation(
         seed=seed,
         batch_executable=[0],
@@ -2132,6 +2245,7 @@ async def test_parallel_pause_resume_preserves_completed_composite_without_effec
     executor._adapter.working_directory = str(tmp_path)  # type: ignore[attr-defined]
     seed = _multi_seed()
     cheap = _candidate(executor, "compat:claude:frugal")
+    decomposition_decision = _split_decision()
     touched = tmp_path / "composite.py"
     touched.write_text("def completed_effect():\n    return True\n")
     child_message = AgentMessage(
@@ -2167,7 +2281,7 @@ async def test_parallel_pause_resume_preserves_completed_composite_without_effec
                     ),
                 ),
                 outcome=ACExecutionOutcome.SUCCEEDED,
-                decomposition_decision=_split_decision(),
+                decomposition_decision=decomposition_decision,
             ),
             ACExecutionResult(
                 ac_index=1,
@@ -2228,6 +2342,7 @@ async def test_parallel_pause_resume_preserves_completed_composite_without_effec
     executor._try_decompose_ac = AsyncMock(  # type: ignore[method-assign]
         side_effect=AssertionError("completed composite decomposition replayed")
     )
+    executor._publish_event_owned_decomposition_decision(decomposition_decision)
     resumed = await executor._run_batch_with_bounded_route_escalation(
         seed=seed,
         batch_executable=[0, 1],
@@ -2627,10 +2742,98 @@ async def test_partial_composite_replay_rejects_non_strict_or_conflicting_state(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("projection", ["completion", "partial"])
+async def test_composite_projection_without_finalized_event_cannot_mint_authority(
+    projection: str,
+) -> None:
+    executor, store, events = _executor(enable_decomposition=True)
+    seed = _seed()
+    decision = _split_decision()
+    if projection == "completion":
+        result = ACExecutionResult(
+            ac_index=0,
+            ac_content="ship it",
+            success=True,
+            final_message="composite complete",
+            is_decomposed=True,
+            sub_results=(
+                ACExecutionResult(ac_index=100, ac_content="first child", success=True, depth=1),
+                ACExecutionResult(ac_index=101, ac_content="second child", success=True, depth=1),
+            ),
+            decomposition_decision=decision,
+        )
+        await executor._persist_composite_completion(
+            seed=seed,
+            result=result,
+            root_ac_index=0,
+            session_id="session-1",
+            execution_id="execution-1",
+        )
+    else:
+        root = ExecutionNodeIdentity.root(execution_context_id="execution-1", ac_index=0)
+        paused = AgentMessage(
+            type="result",
+            content="Usage limit reached. Please try again in 5 hours.",
+            data={"subtype": "error", "error_type": "CodexCliError"},
+        )
+        result = ACExecutionResult(
+            ac_index=0,
+            ac_content="ship it",
+            success=False,
+            is_decomposed=True,
+            sub_results=(
+                ACExecutionResult(
+                    ac_index=0,
+                    ac_content="first child",
+                    success=False,
+                    messages=(paused,),
+                    final_message=paused.content,
+                    runtime_handle=RuntimeHandle(
+                        backend="claude",
+                        native_session_id="cache-only-child",
+                        cwd="/tmp/project",
+                        metadata={
+                            "node_id": root.child(0).node_id,
+                            "session_scope_id": "execution-1-cache-only-child",
+                            "ac_dispatch_id": "e" * 32,
+                            "ac_capsule_fingerprint": "sha256:" + "e" * 64,
+                        },
+                    ),
+                    depth=1,
+                ),
+            ),
+            decomposition_decision=decision,
+        )
+        await executor._persist_partial_composite_pause(
+            seed=seed,
+            result=result,
+            root_ac_index=0,
+            session_id="session-1",
+            execution_id="execution-1",
+        )
+
+    async def query(*_args: Any, **kwargs: Any) -> list[BaseEvent]:
+        return [event for event in events if event.type == kwargs.get("event_type")]
+
+    store.query_execution_related_events.side_effect = query
+    with pytest.raises(RuntimeError, match=f"{projection}.*finalized-event authority"):
+        await executor._load_bounded_route_resume_state(
+            seed=seed,
+            execution_id="execution-1",
+            session_id="session-1",
+            root_ac_indices=(0,),
+        )
+
+    assert executor._decomposition_decisions == {}
+    assert executor._partial_composite_resumes == {}
+
+
+@pytest.mark.asyncio
 async def test_partial_composite_replay_folds_newest_first_advancing_history() -> None:
     executor, store, events = _executor(enable_decomposition=True)
     seed = _seed()
     decision = _split_decision()
+    executor._publish_event_owned_decomposition_decision(decision)
     root = ExecutionNodeIdentity.root(execution_context_id="execution-1", ac_index=0)
     paused_message = AgentMessage(
         type="result",
@@ -2771,6 +2974,7 @@ async def test_valid_4097_composite_pauses_replay_without_a_total_cap(tmp_path: 
         working_directory=str(tmp_path),
         process_local_resume_nonce="d" * 32,
     )
+    replay._publish_event_owned_decomposition_decision(decision)
     try:
         await replay._load_bounded_route_resume_state(
             seed=seed,
@@ -2994,7 +3198,7 @@ async def test_parallel_pause_rejects_effort_drift_from_durable_successor() -> N
 
 
 @pytest.mark.asyncio
-async def test_durable_route_override_bypasses_preflight_decomposition_effect() -> None:
+async def test_durable_route_override_creates_no_preflight_decomposition_state() -> None:
     executor, _store, _events = _executor(enable_decomposition=True)
     candidate = _candidate(executor, "compat:claude:frugal")
 
@@ -3016,9 +3220,7 @@ async def test_durable_route_override_bypasses_preflight_decomposition_effect() 
 
     assert result.success is False
     assert "execute_task" in (result.error or "")
-    decision = next(iter(executor._decomposition_decisions.values()))
-    assert decision.disposition.value == "ATOMIC"
-    assert decision.reasons == ("durable_route_history_proves_atomic",)
+    assert executor._decomposition_decisions == {}
 
 
 @pytest.mark.asyncio
@@ -3616,6 +3818,10 @@ async def test_valid_4097_composite_completion_population_replays_all_roots(
         working_directory=str(tmp_path),
         process_local_resume_nonce="a" * 32,
     )
+    for root_ac_index in range(root_count):
+        replay._publish_event_owned_decomposition_decision(
+            _split_decision(root_ac_index=root_ac_index)
+        )
     try:
         (
             _histories,

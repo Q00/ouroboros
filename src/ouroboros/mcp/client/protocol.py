@@ -12,10 +12,13 @@ from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPClientError
 from ouroboros.mcp.types import (
     MCPPromptDefinition,
+    MCPPromptResult,
     MCPResourceContent,
     MCPResourceDefinition,
+    MCPResourceResult,
     MCPServerConfig,
     MCPServerInfo,
+    MCPServerSnapshot,
     MCPToolDefinition,
     MCPToolResult,
 )
@@ -90,6 +93,16 @@ class MCPClient(Protocol):
         """Return information about the connected server, or None if not connected."""
         ...
 
+    @property
+    def server_snapshot(self) -> MCPServerSnapshot | None:
+        """Return the immutable negotiated server view, or None if disconnected."""
+        ...
+
+    @property
+    def protocol_version(self) -> str | None:
+        """Return the negotiated protocol revision, or None if disconnected."""
+        ...
+
     async def list_tools(self) -> Result[Sequence[MCPToolDefinition], MCPClientError]:
         """List available tools from the connected server.
 
@@ -136,6 +149,13 @@ class MCPClient(Protocol):
         """
         ...
 
+    async def read_resource_result(
+        self,
+        uri: str,
+    ) -> Result[MCPResourceResult, MCPClientError]:
+        """Read every ordered resource content item and result metadata."""
+        ...
+
     async def list_prompts(self) -> Result[Sequence[MCPPromptDefinition], MCPClientError]:
         """List available prompts from the connected server.
 
@@ -158,4 +178,12 @@ class MCPClient(Protocol):
         Returns:
             Result containing the prompt text or MCPClientError.
         """
+        ...
+
+    async def get_prompt_result(
+        self,
+        name: str,
+        arguments: dict[str, str] | None = None,
+    ) -> Result[MCPPromptResult, MCPClientError]:
+        """Get a role- and content-preserving prompt result."""
         ...

@@ -7,7 +7,7 @@ with aiosqlite backend.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
+from collections.abc import Awaitable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 import hashlib
@@ -38,6 +38,7 @@ from ouroboros.persistence.schema import (
 )
 
 logger = logging.getLogger(__name__)
+
 
 _RAW_SUBSCRIBED_EVENT_TYPE_KEYS = frozenset({"type", "event", "kind", "name"})
 _RAW_SUBSCRIBED_EVENT_SIGNAL_KEYS = frozenset(
@@ -80,6 +81,37 @@ _AC_ACCEPTANCE_TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"
 _AC_ACCEPTANCE_OUTCOMES = frozenset(
     {"succeeded", "satisfied_externally", "failed", "blocked", "invalid", "cancelled"}
 )
+
+
+async def _await_sqlite_write_atomically[T](awaitable: Awaitable[T]) -> T:
+    """Let a SQLite write transaction finish even if its caller is cancelled.
+
+    aiosqlite performs DB work on a worker thread. If an asyncio task is
+    cancelled while a transaction is in flight, returning to the caller before
+    the worker has finished can leave SQLite's write lock visible to the next
+    operation on the same EventStore. The cancellation still wins; this helper
+    only waits for the transaction coroutine to finish its commit/rollback path
+    before re-raising ``CancelledError``.
+    """
+    task: asyncio.Task[T] = asyncio.create_task(awaitable)
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                continue
+        try:
+            task.result()
+        except Exception:
+            logger.debug(
+                "event_store.sqlite_write.cleanup_after_cancellation_failed",
+                exc_info=True,
+            )
+        raise
+
+
 _AC_ACCEPTANCE_DISPOSITIONS = frozenset(
     {
         "accepted",
@@ -1286,23 +1318,26 @@ class EventStore:
                 },
             )
 
+        async def _insert_event() -> int:
+            async with self._engine.begin() as conn:
+                await conn.execute(events_table.insert().values(**event.to_db_dict()))
+                rowid = await conn.scalar(
+                    select(text("rowid"))
+                    .select_from(events_table)
+                    .where(events_table.c.id == event.id)
+                )
+                if not isinstance(rowid, int):
+                    raise PersistenceError(
+                        "Inserted event rowid was not returned.",
+                        operation="append_with_rowid",
+                        table="events",
+                        details={"event_id": event.id, "event_type": event.type},
+                    )
+            return rowid
+
         for attempt in range(3):
             try:
-                async with self._engine.begin() as conn:
-                    await conn.execute(events_table.insert().values(**event.to_db_dict()))
-                    rowid = await conn.scalar(
-                        select(text("rowid"))
-                        .select_from(events_table)
-                        .where(events_table.c.id == event.id)
-                    )
-                    if not isinstance(rowid, int):
-                        raise PersistenceError(
-                            "Inserted event rowid was not returned.",
-                            operation="append_with_rowid",
-                            table="events",
-                            details={"event_id": event.id, "event_type": event.type},
-                        )
-                return rowid
+                return await _await_sqlite_write_atomically(_insert_event())
             except Exception as e:
                 if "database is locked" in str(e) and attempt < 2:
                     logger.warning(
@@ -1410,13 +1445,16 @@ class EventStore:
                 details={"count": len(acceptance_events)},
             )
 
+        async def _insert_batch() -> None:
+            async with self._engine.begin() as conn:
+                await conn.execute(
+                    events_table.insert(),
+                    [event.to_db_dict() for event in events],
+                )
+
         for attempt in range(3):
             try:
-                async with self._engine.begin() as conn:
-                    await conn.execute(
-                        events_table.insert(),
-                        [event.to_db_dict() for event in events],
-                    )
+                await _await_sqlite_write_atomically(_insert_batch())
                 return
             except Exception as e:
                 if "database is locked" in str(e) and attempt < 2:

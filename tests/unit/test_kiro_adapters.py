@@ -10,6 +10,7 @@ Tests cover:
 
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -20,6 +21,8 @@ from ouroboros.providers.factory import (
     resolve_llm_permission_mode,
 )
 from ouroboros.providers.kiro_adapter import KiroCodeAdapter
+
+_EXPECTED_RUNTIME_CWD = str(Path("/tmp/project").resolve())
 
 # ---------------------------------------------------------------------------
 # helpers
@@ -584,7 +587,7 @@ class TestCreateAgentRuntimeKiro:
         runtime = create_agent_runtime(backend="kiro", cwd="/tmp/project")
         assert isinstance(runtime, KiroAgentAdapter)
         assert runtime.runtime_backend == "kiro"
-        assert runtime.working_directory == "/tmp/project"
+        assert runtime.working_directory == _EXPECTED_RUNTIME_CWD
 
     def test_uses_configured_cli_path(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from ouroboros.orchestrator.kiro_adapter import KiroAgentAdapter
@@ -1092,7 +1095,7 @@ class TestKiroSkillInterceptWiring:
         adapter = KiroAgentAdapter(cli_path="kiro-cli", cwd="/tmp/kiro-test")
         assert isinstance(adapter._interceptor, SkillInterceptor)
         assert adapter._interceptor._runtime_backend == "kiro"
-        assert adapter._interceptor._cwd == "/tmp/kiro-test"
+        assert adapter._interceptor._cwd == str(Path("/tmp/kiro-test").resolve())
 
     @pytest.mark.asyncio
     async def test_intercept_short_circuits_subprocess(self) -> None:
@@ -1234,7 +1237,7 @@ class TestKiroSkillDispatchParity:
         assert intercept.first_argument == "Build a REST API"
         assert intercept.mcp_args == {
             "initial_context": "Build a REST API",
-            "cwd": "/tmp/kiro-project",
+            "cwd": str(Path("/tmp/kiro-project").resolve()),
         }
         assert [m.content for m in messages] == ["Starting interview", "Interview started"]
 

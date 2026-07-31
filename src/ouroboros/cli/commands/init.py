@@ -1029,9 +1029,7 @@ def list_interviews(
     ] = None,
 ) -> None:
     """List all interview sessions."""
-    llm_adapter = create_llm_adapter(backend="litellm")
     engine = InterviewEngine(
-        llm_adapter=llm_adapter,
         state_dir=state_dir or Path.home() / ".ouroboros" / "data",
     )
 

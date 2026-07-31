@@ -13,10 +13,12 @@ The SeedGenerator:
 
 from dataclasses import dataclass, field
 import json
+import math
 from pathlib import Path
 import re
 from typing import Any
 
+from pydantic import ValidationError as PydanticValidationError
 import structlog
 import yaml
 
@@ -36,6 +38,7 @@ from ouroboros.bigbang.requirement_distillation import (
 )
 from ouroboros.config import get_llm_model_for_role
 from ouroboros.core.errors import ProviderError, ValidationError
+from ouroboros.core.owner_only import write_owner_only
 from ouroboros.core.seed import (
     AcceptanceCriterionSpec,
     BrownfieldContext,
@@ -81,6 +84,14 @@ def _parse_string_array_values(
             array of strings.
     """
     if isinstance(raw_value, list | tuple):
+        if strict:
+            non_strings = tuple(
+                type(entry).__name__ for entry in raw_value if not isinstance(entry, str)
+            )
+            if non_strings:
+                raise ValueError(
+                    f"{field_label} array must contain only strings; got {', '.join(non_strings)}."
+                )
         return tuple(item for item in (str(entry).strip() for entry in raw_value) if item)
     if not isinstance(raw_value, str):
         return ()
@@ -89,7 +100,9 @@ def _parse_string_array_values(
         return ()
     if strict:
         try:
-            decoded = json.loads(text)
+            decoded = json.loads(
+                text, parse_int=_bounded_json_int, parse_constant=_JsonNonFiniteToken
+            )
         except json.JSONDecodeError as e:
             raise ValueError(
                 f"{field_label} must be a single-line JSON array of strings: {e}. Value: {text[:200]}"
@@ -115,6 +128,470 @@ def _parse_string_array_values(
             if isinstance(decoded, list):
                 return tuple(item for item in (str(entry).strip() for entry in decoded) if item)
     return tuple(item.strip() for item in text.split("|") if item.strip())
+
+
+class _JsonNonFiniteToken:
+    """Marks a non-standard JSON constant (NaN/Infinity) seen during decoding.
+
+    These tokens are not JSON numbers, so strict extraction must retry them
+    while lenient parsing falls back to the default weight — unlike genuine
+    numeric overflow, which saturates by sign (review round three).
+    """
+
+    def __init__(self, token: str) -> None:
+        self.token = token
+
+    def __repr__(self) -> str:
+        return self.token
+
+
+_JSON_INT_SATURATION_DIGITS = 400
+
+
+def _bounded_json_int(text: str) -> int | float:
+    """Decode a JSON integer, saturating past a fixed digit bound.
+
+    CPython raises a plain ``ValueError`` (not ``JSONDecodeError``) when an
+    integer literal exceeds its conversion digit limit, which would escape the
+    lenient never-raises contract and turn a syntactically valid number into a
+    strict retry. Anything beyond the bound saturates to a signed infinity so
+    the weight clamp resolves it deterministically in both modes.
+    """
+    digits = text.lstrip("+-")
+    if len(digits) > _JSON_INT_SATURATION_DIGITS:
+        return float("-inf") if text.lstrip().startswith("-") else float("inf")
+    return int(text)
+
+
+def _require_object_string(
+    entry: dict, key: str, *, field_label: str, aliases: tuple[str, ...] = ()
+) -> str:
+    """Return a required non-empty string value from an extraction object entry."""
+    for candidate in (key, *aliases):
+        if candidate in entry:
+            value = entry[candidate]
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+            raise ValueError(
+                f"{field_label} entry field {candidate!r} must be a non-empty string; "
+                f"got {value!r}."
+            )
+    raise ValueError(f"{field_label} entry is missing required field {key!r}: {entry!r}")
+
+
+def _clamp_weight(raw_weight: object, *, field_label: str, strict: bool) -> float:
+    """Resolve an optional principle weight, clamped to [0.0, 1.0].
+
+    Strict mode requires a JSON number (bools rejected) so malformed weights
+    trigger the extraction retry; lenient mode keeps the historical behavior
+    of falling back to 1.0 on anything unparseable.
+    """
+    if raw_weight is None:
+        if strict:
+            raise ValueError(
+                f"{field_label} entry field 'weight' must be omitted or a number; got null."
+            )
+        return 1.0
+    if isinstance(raw_weight, bool) or not isinstance(raw_weight, int | float):
+        if strict:
+            raise ValueError(
+                f"{field_label} entry field 'weight' must be a number; got {raw_weight!r}."
+            )
+        if isinstance(raw_weight, _JsonNonFiniteToken):
+            # Non-standard constants (NaN/Infinity/-Infinity) are not JSON
+            # numbers, so they take the documented 1.0 default rather than
+            # the sign-saturation reserved for genuine numeric overflow;
+            # without this check float(str(...)) below would turn a stored
+            # -Infinity literal into a 0.0 clamp (#1766).
+            return 1.0
+        try:
+            numeric = float(str(raw_weight).strip())
+        except (ValueError, OverflowError):
+            return 1.0
+        if math.isnan(numeric):
+            return 1.0
+        if math.isinf(numeric):
+            # Saturate overflow by sign so a negative overflow keeps the
+            # historical 0.0 clamp (review round three).
+            return 1.0 if numeric > 0 else 0.0
+        return min(1.0, max(0.0, numeric))
+    if isinstance(raw_weight, int):
+        # Clamp in integer space: arbitrary-precision JSON integers would
+        # overflow float() (an OverflowError the retry path does not catch),
+        # and the clamp result is what any out-of-range number gets anyway.
+        return float(min(max(raw_weight, 0), 1))
+    if not math.isfinite(raw_weight):
+        # A NaN float cannot come from a JSON number (the non-standard tokens
+        # decode to _JsonNonFiniteToken and are handled above), so it only
+        # appears in pre-decoded input: strict retries it, lenient defaults.
+        if math.isnan(raw_weight):
+            if strict:
+                raise ValueError(
+                    f"{field_label} entry field 'weight' must be a finite number; "
+                    f"got {raw_weight!r}."
+                )
+            return 1.0
+        # Genuine numeric overflow (e.g. 1e999 or an integer past the decode
+        # bound) is a valid JSON number and follows the clamp contract in both
+        # modes, saturating by sign (review round three).
+        return 1.0 if raw_weight > 0 else 0.0
+    return min(1.0, max(0.0, raw_weight))
+
+
+def _decode_object_array(text: str, *, field_label: str, strict: bool) -> list | None:
+    """Decode an extraction field into a JSON list, honoring the strict boundary.
+
+    Strict mode raises unless the text is a valid JSON array — the retry path
+    asks the LLM to reformat (#1729). Lenient mode returns the decoded list
+    only for valid bracket-led JSON arrays and ``None`` otherwise so callers
+    fall back to the historical colon/pipe split.
+    """
+    if strict:
+        try:
+            decoded = json.loads(
+                text, parse_int=_bounded_json_int, parse_constant=_JsonNonFiniteToken
+            )
+        except json.JSONDecodeError as e:
+            raise ValueError(
+                f"{field_label} must be a single-line JSON array of objects: {e}. "
+                f"Value: {text[:200]}"
+            ) from e
+        if not isinstance(decoded, list):
+            raise ValueError(
+                f"{field_label} must be a JSON array of objects, got "
+                f"{type(decoded).__name__}. Value: {text[:200]}"
+            )
+        return decoded
+    if not text.startswith("["):
+        return None
+    try:
+        decoded = json.loads(text, parse_int=_bounded_json_int, parse_constant=_JsonNonFiniteToken)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    return decoded if isinstance(decoded, list) else None
+
+
+def _parse_evaluation_principles(
+    raw_value: object, *, strict: bool = False
+) -> tuple[EvaluationPrinciple, ...]:
+    """Parse EVALUATION_PRINCIPLES from JSON object arrays or the legacy pipe list.
+
+    The extraction format requests a single-line JSON array of
+    ``{"name", "description", "weight"}`` objects so colons and pipes inside
+    the data survive (#1729 slice 2). Strict mode (extraction time) raises on
+    anything else so the retry path can reformat; lenient mode (stored legacy
+    requirements) keeps the historical ``name:description:weight`` pipe split
+    and never raises.
+    """
+    field_label = "EVALUATION_PRINCIPLES"
+
+    def _build(entry: object) -> EvaluationPrinciple | None:
+        if isinstance(entry, EvaluationPrinciple):
+            return entry
+        if not isinstance(entry, dict):
+            if strict:
+                raise ValueError(
+                    f"{field_label} entries must be JSON objects; got "
+                    f"{type(entry).__name__}: {entry!r}"
+                )
+            return None
+        try:
+            return EvaluationPrinciple(
+                name=_require_object_string(entry, "name", field_label=field_label),
+                description=_require_object_string(entry, "description", field_label=field_label),
+                weight=(
+                    _clamp_weight(entry["weight"], field_label=field_label, strict=strict)
+                    if "weight" in entry
+                    else 1.0
+                ),
+            )
+        except (ValueError, TypeError, PydanticValidationError):
+            if strict:
+                raise
+            return None
+
+    def _build_all(entries: list | tuple) -> tuple[EvaluationPrinciple, ...]:
+        return tuple(built for built in (_build(entry) for entry in entries) if built)
+
+    if isinstance(raw_value, list | tuple):
+        return _build_all(raw_value)
+    if not isinstance(raw_value, str):
+        return ()
+    text = raw_value.strip()
+    if not text:
+        if strict:
+            raise ValueError(f"{field_label} must be an explicit JSON array; got a blank value.")
+        return ()
+    decoded = _decode_object_array(text, field_label=field_label, strict=strict)
+    if decoded is not None:
+        return _build_all(decoded)
+
+    principles: list[EvaluationPrinciple] = []
+    for principle_str in text.split("|"):
+        principle_str = principle_str.strip()
+        if not principle_str:
+            continue
+        parts = principle_str.split(":")
+        if len(parts) < 2:
+            continue
+        name = parts[0].strip()
+        description = parts[1].strip()
+        if not name or not description:
+            continue
+        principles.append(
+            EvaluationPrinciple(
+                name=name,
+                description=description,
+                weight=_clamp_weight(
+                    parts[2].strip() if len(parts) >= 3 else None,
+                    field_label=field_label,
+                    strict=False,
+                ),
+            )
+        )
+    return tuple(principles)
+
+
+def _parse_exit_conditions(raw_value: object, *, strict: bool = False) -> tuple[ExitCondition, ...]:
+    """Parse EXIT_CONDITIONS from JSON object arrays or the legacy pipe list.
+
+    Mirrors :func:`_parse_evaluation_principles`: strict extraction demands a
+    JSON array of ``{"name", "description", "criteria"}`` objects (the
+    ``evaluation_criteria`` spelling is accepted too); lenient parsing keeps
+    the historical ``name:description:criteria`` split where the criteria
+    segment absorbs any further colons, and never raises.
+    """
+    field_label = "EXIT_CONDITIONS"
+
+    def _build(entry: object) -> ExitCondition | None:
+        if isinstance(entry, ExitCondition):
+            return entry
+        if not isinstance(entry, dict):
+            if strict:
+                raise ValueError(
+                    f"{field_label} entries must be JSON objects; got "
+                    f"{type(entry).__name__}: {entry!r}"
+                )
+            return None
+        try:
+            return ExitCondition(
+                name=_require_object_string(entry, "name", field_label=field_label),
+                description=_require_object_string(entry, "description", field_label=field_label),
+                evaluation_criteria=_require_object_string(
+                    entry,
+                    "criteria",
+                    field_label=field_label,
+                    aliases=("evaluation_criteria",),
+                ),
+            )
+        except (ValueError, TypeError, PydanticValidationError):
+            if strict:
+                raise
+            return None
+
+    def _build_all(entries: list | tuple) -> tuple[ExitCondition, ...]:
+        return tuple(built for built in (_build(entry) for entry in entries) if built)
+
+    if isinstance(raw_value, list | tuple):
+        return _build_all(raw_value)
+    if not isinstance(raw_value, str):
+        return ()
+    text = raw_value.strip()
+    if not text:
+        if strict:
+            raise ValueError(f"{field_label} must be an explicit JSON array; got a blank value.")
+        return ()
+    decoded = _decode_object_array(text, field_label=field_label, strict=strict)
+    if decoded is not None:
+        return _build_all(decoded)
+
+    conditions: list[ExitCondition] = []
+    for condition_str in text.split("|"):
+        condition_str = condition_str.strip()
+        if not condition_str:
+            continue
+        parts = condition_str.split(":")
+        if len(parts) < 3:
+            continue
+        name = parts[0].strip()
+        description = parts[1].strip()
+        criteria = ":".join(parts[2:]).strip()
+        if not name or not description or not criteria:
+            continue
+        conditions.append(
+            ExitCondition(
+                name=name,
+                description=description,
+                evaluation_criteria=criteria,
+            )
+        )
+    return tuple(conditions)
+
+
+def _parse_ontology_fields(raw_value: object, *, strict: bool = False) -> tuple[OntologyField, ...]:
+    """Parse ONTOLOGY_FIELDS from JSON object arrays or the legacy pipe list.
+
+    Mirrors the evaluation-principle and exit-condition parsers (#1729): the
+    extraction format requests a single-line JSON array of ``{"name", "type",
+    "description"}`` objects (the model field spelling ``field_type`` is
+    accepted too, and an optional boolean ``required`` is honored) so colons
+    and pipes inside the data survive. Strict mode raises on anything else so
+    the retry path reformats; lenient mode keeps the historical
+    ``name:type:description`` split where the description absorbs any further
+    colons, skips malformed entries, and never raises.
+    """
+    field_label = "ONTOLOGY_FIELDS"
+
+    def _build(entry: object) -> OntologyField | None:
+        if isinstance(entry, OntologyField):
+            return entry
+        if not isinstance(entry, dict):
+            if strict:
+                raise ValueError(
+                    f"{field_label} entries must be JSON objects; got "
+                    f"{type(entry).__name__}: {entry!r}"
+                )
+            return None
+        try:
+            required = entry.get("required", True)
+            if not isinstance(required, bool):
+                raise ValueError(
+                    f"{field_label} entry field 'required' must be a boolean; got {required!r}."
+                )
+            return OntologyField(
+                name=_require_object_string(entry, "name", field_label=field_label),
+                field_type=_require_object_string(
+                    entry, "type", field_label=field_label, aliases=("field_type",)
+                ),
+                description=_require_object_string(entry, "description", field_label=field_label),
+                required=required,
+            )
+        except (ValueError, TypeError, PydanticValidationError):
+            if strict:
+                raise
+            return None
+
+    def _build_all(entries: list | tuple) -> tuple[OntologyField, ...]:
+        return tuple(built for built in (_build(entry) for entry in entries) if built)
+
+    if isinstance(raw_value, list | tuple):
+        return _build_all(raw_value)
+    if not isinstance(raw_value, str):
+        return ()
+    text = raw_value.strip()
+    if not text:
+        if strict:
+            raise ValueError(
+                f"{field_label} must be a single-line JSON array of objects; "
+                "use [] for an intentionally empty list."
+            )
+        return ()
+    decoded = _decode_object_array(text, field_label=field_label, strict=strict)
+    if decoded is not None:
+        return _build_all(decoded)
+
+    fields: list[OntologyField] = []
+    for field_str in text.split("|"):
+        field_str = field_str.strip()
+        if not field_str:
+            continue
+        parts = field_str.split(":")
+        if len(parts) < 3:
+            continue
+        name = parts[0].strip()
+        field_type = parts[1].strip()
+        description = ":".join(parts[2:]).strip()
+        if not name or not field_type or not description:
+            # Stored legacy data has no retry path; skip malformed entries
+            # instead of raising at model construction.
+            continue
+        fields.append(OntologyField(name=name, field_type=field_type, description=description))
+    return tuple(fields)
+
+
+def _parse_context_references(
+    raw_value: object, *, strict: bool = False
+) -> tuple[ContextReference, ...]:
+    """Parse CONTEXT_REFERENCES from JSON object arrays or the legacy pipe list.
+
+    Mirrors the other #1729 object-array parsers: the extraction format
+    requests a single-line JSON array of ``{"path", "role", "summary"}``
+    objects — ``summary`` is optional and defaults to empty — so colons in
+    paths (e.g. Windows drives) and colons/pipes in summaries survive as
+    data. Strict mode raises on anything else so the retry path reformats;
+    lenient mode keeps the historical ``path:role:summary`` split where the
+    summary absorbs further colons, skips malformed entries, and never
+    raises.
+    """
+    field_label = "CONTEXT_REFERENCES"
+
+    def _build(entry: object) -> ContextReference | None:
+        if isinstance(entry, ContextReference):
+            return entry
+        if not isinstance(entry, dict):
+            if strict:
+                raise ValueError(
+                    f"{field_label} entries must be JSON objects; got "
+                    f"{type(entry).__name__}: {entry!r}"
+                )
+            return None
+        try:
+            summary = entry.get("summary", "")
+            if not isinstance(summary, str):
+                raise ValueError(
+                    f"{field_label} entry field 'summary' must be a string; got {summary!r}."
+                )
+            return ContextReference(
+                path=_require_object_string(entry, "path", field_label=field_label),
+                role=_require_object_string(entry, "role", field_label=field_label),
+                summary=summary.strip(),
+            )
+        except (ValueError, TypeError, PydanticValidationError):
+            if strict:
+                raise
+            return None
+
+    def _build_all(entries: list | tuple) -> tuple[ContextReference, ...]:
+        return tuple(built for built in (_build(entry) for entry in entries) if built)
+
+    if isinstance(raw_value, list | tuple):
+        return _build_all(raw_value)
+    if not isinstance(raw_value, str):
+        return ()
+    text = raw_value.strip()
+    if not text:
+        if strict:
+            raise ValueError(
+                f"{field_label} must be a single-line JSON array of objects; "
+                "use [] for an intentionally empty list."
+            )
+        return ()
+    decoded = _decode_object_array(text, field_label=field_label, strict=strict)
+    if decoded is not None:
+        return _build_all(decoded)
+
+    references: list[ContextReference] = []
+    for ref_str in text.split("|"):
+        ref_str = ref_str.strip()
+        if not ref_str:
+            continue
+        parts = ref_str.split(":")
+        if len(parts) < 2:
+            continue
+        path = parts[0].strip()
+        role = parts[1].strip()
+        if not path or not role:
+            # Stored legacy data has no retry path; skip malformed entries
+            # instead of raising at model construction.
+            continue
+        references.append(
+            ContextReference(
+                path=path,
+                role=role,
+                summary=":".join(parts[2:]).strip() if len(parts) > 2 else "",
+            )
+        )
+    return tuple(references)
 
 
 def _parse_acceptance_criteria_contracts(
@@ -630,7 +1107,7 @@ Please try again. Extract requirements from this interview:
 
 You MUST respond with ONLY the following format, one field per line, no other text:
 
-ACCEPTANCE_CRITERIA rule: produce 3-7 outcome-level criteria. Each is one independently valuable, user-visible outcome — NOT an implementation step. Do not pre-decompose into sub-tasks; the execution engine splits work at runtime.
+ACCEPTANCE_CRITERIA rule: an acceptance criterion names a state of the finished work that a user can see is true; an implementation step names a means of reaching that state. Only the first belongs here — deciding means is the execution engine's work at runtime. A criterion intelligible only as a move toward a sibling is that sibling's means and belongs merged into the outcome it serves. How many criteria a goal has is discovered by that judgment.
 ACCEPTANCE_CRITERIA verify rule: `verify` must be one complete single-line shell command. Never use heredoc or multiline syntax (`<<`, `<<'PY'`, `cat <<EOF`, line-continuation scripts); use `python -c "..."`, `python3 -c "..."`, or `python -m pytest -q` instead.
 ACCEPTANCE_CRITERIA expect rule: `expect` is ONLY a literal string printed verbatim in stdout, such as `OK` or `5 passed`. Use `expect: NONE` for exit-code/status conditions like `exit code 0`, `success`, `passed`, or `no errors`; exit-code 0 is already verified separately.
 
@@ -643,9 +1120,9 @@ AC: <description> | verify: <command or NONE> | artifacts: <comma-list or NONE> 
 AC: <description> | verify: <command or NONE> | artifacts: <comma-list or NONE> | expect: <output assertion or NONE>
 ONTOLOGY_NAME: <name>
 ONTOLOGY_DESCRIPTION: <description>
-ONTOLOGY_FIELDS: <name>:<type>:<description> | ...
-EVALUATION_PRINCIPLES: <name>:<description>:<weight> | ...
-EXIT_CONDITIONS: <name>:<description>:<criteria> | ...
+ONTOLOGY_FIELDS: [{{"name": "<name>", "type": "<string|number|boolean|array|object>", "description": "<description>"}}, ...]
+EVALUATION_PRINCIPLES: [{{"name": "<name>", "description": "<description>", "weight": <0.0-1.0>}}, ...]
+EXIT_CONDITIONS: [{{"name": "<name>", "description": "<description>", "criteria": "<criteria>"}}, ...]
 {self._project_type_template(is_brownfield=is_brownfield)}"""
 
     @staticmethod
@@ -661,9 +1138,12 @@ EXIT_CONDITIONS: <name>:<description>:<criteria> | ...
             return "PROJECT_TYPE: greenfield"
         return (
             "PROJECT_TYPE: brownfield\n"
-            "CONTEXT_REFERENCES: <path>:<role primary|reference>:<summary> | ...\n"
+            'CONTEXT_REFERENCES: [{{"path": "<path>", "role": "<primary|reference>", "summary": "<summary>"}}, ...]\n'
             'EXISTING_PATTERNS: ["<pattern 1>", "<pattern 2>", ...]\n'
             'EXISTING_DEPENDENCIES: ["<dependency 1>", "<dependency 2>", ...]\n'
+            "CONTEXT_REFERENCES rule: respond with one single-line JSON array of objects. "
+            "Path, role, and summary values may contain any characters, including literal "
+            ": colons and | pipes; never use a bare pipe as the list separator.\n"
             "EXISTING_PATTERNS rule: respond with one single-line JSON array of strings. "
             "Pattern values may contain any characters, including literal | pipes; "
             "never use a bare pipe as the list separator.\n"
@@ -737,7 +1217,7 @@ EXIT_CONDITIONS: <name>:<description>:<criteria> | ...
 
 Respond ONLY with the structured format below. Do NOT add explanations, questions, commentary, or prose. Do NOT wrap in markdown code blocks.
 
-ACCEPTANCE_CRITERIA rule: produce 3-7 outcome-level criteria. Each is one independently valuable, user-visible outcome — NOT an implementation step. Do not pre-decompose into sub-tasks; the execution engine splits work at runtime. If you would list more than 7, merge criteria that share a user-visible outcome before responding. An AC that is a sub-step of a sibling AC is a defect, as severe as a missing requirement.
+ACCEPTANCE_CRITERIA rule: an acceptance criterion names a state of the finished work that a user can see is true; an implementation step names a means of reaching that state. Only the first belongs here — deciding means is the execution engine's work at runtime. Read each criterion beside its siblings and ask which kind it is: one that stands on its own as something a user would value is an outcome, while one intelligible only as a move toward a sibling is that sibling's means and belongs merged into the outcome it serves. Leaving a means in the list is a defect as severe as a missing requirement, because it commits the seed to a path no one has verified. How many criteria a goal has is discovered by making this judgment.
 ACCEPTANCE_CRITERIA verify rule: `verify` must be one complete single-line shell command. Never use heredoc or multiline syntax (`<<`, `<<'PY'`, `cat <<EOF`, line-continuation scripts); use `python -c "..."`, `python3 -c "..."`, or `python -m pytest -q` instead.
 ACCEPTANCE_CRITERIA expect rule: `expect` is ONLY a literal string printed verbatim in stdout, such as `OK` or `5 passed`. Use `expect: NONE` for exit-code/status conditions like `exit code 0`, `success`, `passed`, or `no errors`; exit-code 0 is already verified separately.
 
@@ -750,9 +1230,9 @@ AC: <description> | verify: <command or NONE> | artifacts: <comma-list or NONE> 
 AC: <description> | verify: <command or NONE> | artifacts: <comma-list or NONE> | expect: <output assertion or NONE>
 ONTOLOGY_NAME: <name>
 ONTOLOGY_DESCRIPTION: <description>
-ONTOLOGY_FIELDS: <name>:<type>:<description> | ...
-EVALUATION_PRINCIPLES: <name>:<description>:<weight> | ...
-EXIT_CONDITIONS: <name>:<description>:<criteria> | ...
+ONTOLOGY_FIELDS: [{{"name": "<name>", "type": "<string|number|boolean|array|object>", "description": "<description>"}}, ...]
+EVALUATION_PRINCIPLES: [{{"name": "<name>", "description": "<description>", "weight": <0.0-1.0>}}, ...]
+EXIT_CONDITIONS: [{{"name": "<name>", "description": "<description>", "criteria": "<criteria>"}}, ...]
 {self._project_type_template(is_brownfield=is_brownfield)}"""
 
     _KNOWN_PREFIXES = (
@@ -870,6 +1350,22 @@ EXIT_CONDITIONS: <name>:<description>:<criteria> | ...
                 requirements[field_name] = _parse_string_array_values(
                     requirements[field_name], field_label=field_label, strict=True
                 )
+        if "evaluation_principles" in requirements:
+            requirements["evaluation_principles"] = _parse_evaluation_principles(
+                requirements["evaluation_principles"], strict=True
+            )
+        if "exit_conditions" in requirements:
+            requirements["exit_conditions"] = _parse_exit_conditions(
+                requirements["exit_conditions"], strict=True
+            )
+        if "ontology_fields" in requirements:
+            requirements["ontology_fields"] = _parse_ontology_fields(
+                requirements["ontology_fields"], strict=True
+            )
+        if "context_references" in requirements:
+            requirements["context_references"] = _parse_context_references(
+                requirements["context_references"], strict=True
+            )
 
         return requirements
 
@@ -895,22 +1391,9 @@ EXIT_CONDITIONS: <name>:<description>:<criteria> | ...
                 requirements["acceptance_criteria"]
             )
 
-        # Parse ontology fields
-        ontology_fields: list[OntologyField] = []
-        if "ontology_fields" in requirements and requirements["ontology_fields"]:
-            for field_str in requirements["ontology_fields"].split("|"):
-                field_str = field_str.strip()
-                if not field_str:
-                    continue
-                parts = field_str.split(":")
-                if len(parts) >= 3:
-                    ontology_fields.append(
-                        OntologyField(
-                            name=parts[0].strip(),
-                            field_type=parts[1].strip(),
-                            description=":".join(parts[2:]).strip(),
-                        )
-                    )
+        # Parse ontology fields (JSON object arrays preferred; legacy
+        # colon/pipe lists supported for stored requirements)
+        ontology_fields = _parse_ontology_fields(requirements.get("ontology_fields"))
 
         # Build ontology schema
         ontology_schema = OntologySchema(
@@ -919,66 +1402,20 @@ EXIT_CONDITIONS: <name>:<description>:<criteria> | ...
             fields=tuple(ontology_fields),
         )
 
-        # Parse evaluation principles
-        evaluation_principles: list[EvaluationPrinciple] = []
-        if "evaluation_principles" in requirements and requirements["evaluation_principles"]:
-            for principle_str in requirements["evaluation_principles"].split("|"):
-                principle_str = principle_str.strip()
-                if not principle_str:
-                    continue
-                parts = principle_str.split(":")
-                if len(parts) >= 2:
-                    weight = 1.0
-                    if len(parts) >= 3:
-                        try:
-                            weight = float(parts[2].strip())
-                        except ValueError:
-                            weight = 1.0
-                    evaluation_principles.append(
-                        EvaluationPrinciple(
-                            name=parts[0].strip(),
-                            description=parts[1].strip(),
-                            weight=min(1.0, max(0.0, weight)),
-                        )
-                    )
-
-        # Parse exit conditions
-        exit_conditions: list[ExitCondition] = []
-        if "exit_conditions" in requirements and requirements["exit_conditions"]:
-            for condition_str in requirements["exit_conditions"].split("|"):
-                condition_str = condition_str.strip()
-                if not condition_str:
-                    continue
-                parts = condition_str.split(":")
-                if len(parts) >= 3:
-                    exit_conditions.append(
-                        ExitCondition(
-                            name=parts[0].strip(),
-                            description=parts[1].strip(),
-                            evaluation_criteria=":".join(parts[2:]).strip(),
-                        )
-                    )
+        # Parse evaluation principles and exit conditions (JSON object arrays
+        # preferred; legacy colon/pipe lists supported for stored requirements)
+        evaluation_principles = _parse_evaluation_principles(
+            requirements.get("evaluation_principles")
+        )
+        exit_conditions = _parse_exit_conditions(requirements.get("exit_conditions"))
 
         # Parse brownfield context
         brownfield_context = BrownfieldContext()
         project_type = requirements.get("project_type", "greenfield").strip().lower()
         if project_type == "brownfield":
-            # Parse context references: path:role:summary | ...
-            context_refs: list[ContextReference] = []
-            if "context_references" in requirements and requirements["context_references"]:
-                for ref_str in requirements["context_references"].split("|"):
-                    ref_str = ref_str.strip()
-                    if not ref_str:
-                        continue
-                    parts = ref_str.split(":")
-                    if len(parts) >= 2:
-                        context_refs.append(
-                            ContextReference(
-                                path=parts[0].strip(),
-                                role=parts[1].strip() if len(parts) > 1 else "reference",
-                                summary=":".join(parts[2:]).strip() if len(parts) > 2 else "",
-                            )
-                        )
+            # Parse context references (JSON object arrays preferred; legacy
+            # colon/pipe lists supported for stored requirements)
+            context_refs = _parse_context_references(requirements.get("context_references"))
 
             # Parse existing patterns (lenient: stored data has no retry path)
             existing_patterns = _parse_string_array_values(
@@ -1047,7 +1484,14 @@ EXIT_CONDITIONS: <name>:<description>:<criteria> | ...
                 sort_keys=False,
             )
 
-            file_path.write_text(content, encoding="utf-8")
+            if not write_owner_only(file_path, content):
+                # Reported like every other artifact writer: the file exists
+                # but the directory flush was unconfirmed.
+                log.warning(
+                    "seed.save_durability_uncertain",
+                    seed_id=seed.metadata.seed_id,
+                    file_path=str(file_path),
+                )
 
             log.info(
                 "seed.saved",
@@ -1155,7 +1599,12 @@ def save_seed_sync(seed: Seed, file_path: Path) -> Result[Path, ValidationError]
             sort_keys=False,
         )
 
-        file_path.write_text(content, encoding="utf-8")
+        if not write_owner_only(file_path, content):
+            log.warning(
+                "seed.save_durability_uncertain",
+                seed_id=seed.metadata.seed_id,
+                file_path=str(file_path),
+            )
 
         log.info(
             "seed.saved.sync",
