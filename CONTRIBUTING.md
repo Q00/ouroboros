@@ -10,6 +10,7 @@ Thank you for your interest in contributing to Ouroboros! This guide covers ever
 - [Development Environment](#development-environment)
 - [Code Style Guide](#code-style-guide)
 - [Commit Message Convention](#commit-message-convention)
+- [Release Maintenance](#release-maintenance)
 - [Project Structure](#project-structure)
 - [Key Patterns](#key-patterns)
 - [Documentation Coverage](#documentation-coverage)
@@ -139,6 +140,18 @@ the PR description.
 - Reference the related issue (e.g., `Closes #123`)
 - Ensure all tests pass and linting is clean
 - Wait for code review and address feedback
+
+### Release Maintenance
+
+Before creating a release tag, synchronize every version-bearing plugin artifact in the release commit:
+
+```bash
+python scripts/sync-plugin-version.py --write --version 0.50.7
+python scripts/sync-plugin-version.py --require-canonical --version 0.50.7
+git diff --check
+```
+
+Commit the metadata changes before creating `v0.50.7`. The tag-triggered release workflow repeats the read-only check and refuses to build when the tag version and tracked metadata differ.
 
 ---
 

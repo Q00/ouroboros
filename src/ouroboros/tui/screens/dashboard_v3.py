@@ -31,6 +31,9 @@ from collections.abc import Mapping
 import contextlib
 from typing import TYPE_CHECKING, Any
 
+from rich.cells import cell_len
+from rich.text import Text
+from textual import events
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal
@@ -41,6 +44,7 @@ from textual.screen import Screen
 from textual.widgets import Footer, Label, Static, Tree
 from textual.widgets.tree import TreeNode
 
+from ouroboros.tui.cell_width import fit_text
 from ouroboros.tui.events import (
     ACUpdated,
     AgentThinkingUpdated,
@@ -89,6 +93,7 @@ _TOOL_ACTIVITY_FALLBACK_LABELS = {
 }
 
 _MODEL_SHORT_PREFIXES = ("claude-", "us.anthropic.", "anthropic.")
+_FALLBACK_TREE_CONTENT_WIDTH = 40
 
 
 def _compact_tokens(value: float) -> str:
@@ -457,6 +462,7 @@ class SelectableACTree(Static):
         if tree_data:
             self.tree_data = tree_data
         self._node_map: dict[str, dict[str, Any]] = {}
+        self._tree_node_map: dict[str, TreeNode[dict[str, Any]]] = {}
         self._active_tools: dict[str, str] = {}
 
     def compose(self) -> ComposeResult:
@@ -467,6 +473,93 @@ class SelectableACTree(Static):
 
     def on_mount(self) -> None:
         self._rebuild_tree()
+        self.call_after_refresh(self._resync_labels_for_current_width)
+
+    @staticmethod
+    def _display_depth(node: TreeNode[dict[str, Any]]) -> int:
+        """Return a node's rendered depth below the visible Seed root."""
+        depth = 0
+        parent = node.parent
+        while isinstance(parent, TreeNode):
+            depth += 1
+            parent = parent.parent
+        return depth
+
+    @staticmethod
+    def _badge_suffix(node_data: Mapping[str, Any], activity: str = "") -> Text:
+        """Build provider, model, token, and activity suffixes as styled text."""
+        suffix = Text()
+
+        provider = node_data.get("provider")
+        if isinstance(provider, str) and provider:
+            suffix.append(f" [{provider}]", style="dim cyan")
+
+        model = node_data.get("model")
+        tier = node_data.get("model_tier")
+        if isinstance(model, str) and model:
+            suffix.append(f" ⚡{_short_model(model)}", style="dim")
+        elif isinstance(tier, str) and tier:
+            suffix.append(f" ⚡{tier}", style="dim")
+
+        tokens = node_data.get("tokens")
+        if isinstance(tokens, (int, float)) and not isinstance(tokens, bool) and tokens > 0:
+            suffix.append(f" {_compact_tokens(float(tokens))}", style="dim")
+
+        if activity:
+            suffix.append(f" · {activity}", style="dim italic")
+        return suffix
+
+    def _tree_label_width(
+        self,
+        tree: Tree[dict[str, Any]],
+        *,
+        display_depth: int,
+        allow_expand: bool,
+        fixed_label_width: int,
+    ) -> int:
+        """Return label width after guides and the expand/collapse glyph."""
+        tree_width = getattr(tree.scrollable_content_region, "width", 0)
+        if not isinstance(tree_width, int) or tree_width <= 0:
+            tree_width = getattr(tree.size, "width", 0)
+        if isinstance(tree_width, int) and tree_width > 0:
+            guide_levels = display_depth if tree.show_root else max(0, display_depth - 1)
+            guide_width = guide_levels * tree.guide_depth
+            toggle_width = cell_len(tree.ICON_NODE_EXPANDED) if allow_expand else 0
+            return max(0, tree_width - guide_width - toggle_width)
+        return fixed_label_width + _FALLBACK_TREE_CONTENT_WIDTH
+
+    def _format_node_label(
+        self,
+        tree: Tree[dict[str, Any]],
+        node_data: Mapping[str, Any],
+        *,
+        display_depth: int,
+        allow_expand: bool,
+    ) -> Text:
+        """Format one complete tree label within its rendered row budget."""
+        status = str(node_data.get("status", "pending"))
+        prefix = Text.from_markup(STATUS_ICONS.get(status, "○"))
+        prefix.append(" ")
+
+        activity = self._active_tools.get(str(node_data.get("id", "")))
+        if not activity:
+            activity = self._activity_from_node(node_data)
+        if status not in {"executing", "running"}:
+            activity = ""
+
+        suffix = self._badge_suffix(node_data, activity)
+        label_width = self._tree_label_width(
+            tree,
+            display_depth=display_depth,
+            allow_expand=allow_expand,
+            fixed_label_width=prefix.cell_len + suffix.cell_len,
+        )
+        return fit_text(
+            str(node_data.get("content", "")),
+            label_width,
+            prefix=prefix,
+            suffix=suffix,
+        )
 
     def _rebuild_tree(self) -> None:
         try:
@@ -475,9 +568,10 @@ class SelectableACTree(Static):
             return
 
         tree.clear()
-        tree.root.label = "[bold]Seed[/]"
+        tree.root.label = Text("Seed", style="bold")
         tree.root.data = {"id": "seed", "content": "Seed", "status": "executing", "depth": 0}
         self._node_map = {"seed": tree.root.data}
+        self._tree_node_map = {"seed": tree.root}
 
         if not self.tree_data:
             return
@@ -504,44 +598,56 @@ class SelectableACTree(Static):
                 continue
 
             child_data = nodes[child_id]
-            status = child_data.get("status", "pending")
-            content = child_data.get("content", "")[:40]
-            icon = STATUS_ICONS.get(status, "○")
-
-            label = f"{icon} {content}"
-            if len(child_data.get("content", "")) > 40:
-                label += "..."
-
-            # Provider identity from the shared board projection (runtime_backend
-            # per node) — gives the TUI the multi-provider view the web Kanban has.
-            provider = child_data.get("provider")
-            if isinstance(provider, str) and provider:
-                label += f" [dim cyan]\\[{provider}][/]"
-
-            # Frugality telemetry: model-tier badge (model family, vendor prefix
-            # stripped) + compact token spend, both stamped from TUIState.
-            model = child_data.get("model")
-            tier = child_data.get("model_tier")
-            if isinstance(model, str) and model:
-                label += f" [dim]⚡{_short_model(model)}[/]"
-            elif isinstance(tier, str) and tier:
-                label += f" [dim]⚡{tier}[/]"
-            tokens = child_data.get("tokens")
-            if isinstance(tokens, (int, float)) and not isinstance(tokens, bool) and tokens > 0:
-                label += f" [dim]{_compact_tokens(float(tokens))}[/]"
-
-            # P2: Show inline tool activity for executing nodes
-            activity = self._active_tools.get(child_id) or self._activity_from_node(child_data)
-            if activity and status in ("executing", "running"):
-                label += f"\n     [dim italic]{activity}[/]"
-
-            child_node = parent.add(label, data=child_data)
+            child_ids = child_data.get("children_ids", [])
+            display_depth = self._display_depth(parent) + 1
+            allow_expand = bool(child_ids)
+            label = self._format_node_label(
+                parent.tree,
+                child_data,
+                display_depth=display_depth,
+                allow_expand=allow_expand,
+            )
+            if allow_expand:
+                child_node = parent.add(label, data=child_data)
+            else:
+                child_node = parent.add_leaf(label, data=child_data)
             self._node_map[child_id] = child_data
+            self._tree_node_map[child_id] = child_node
 
             # Recursively add grandchildren
-            if child_data.get("children_ids"):
+            if child_ids:
                 self._add_children(child_node, child_data, nodes)
                 child_node.expand()
+
+    def _resync_labels_for_current_width(self) -> None:
+        """Reformat rendered nodes after layout or terminal width changes."""
+        try:
+            tree = self.query_one("#ac-tree", Tree)
+        except NoMatches:
+            return
+
+        for node_id, tree_node in self._tree_node_map.items():
+            if node_id == "seed":
+                tree_node.set_label(Text("Seed", style="bold"))
+                continue
+            node_data = self._node_map.get(node_id)
+            if node_data is None:
+                continue
+            tree_node.set_label(
+                self._format_node_label(
+                    tree,
+                    node_data,
+                    display_depth=self._display_depth(tree_node),
+                    allow_expand=tree_node.allow_expand,
+                )
+            )
+        # TreeNode.set_label refreshes a row but does not recompute virtual width.
+        tree._invalidate()
+
+    def on_resize(self, event: events.Resize) -> None:
+        """Recalculate labels after Textual measures a new tree width."""
+        del event
+        self.call_after_refresh(self._resync_labels_for_current_width)
 
     def update_tree(self, tree_data: dict[str, Any]) -> None:
         self.tree_data = tree_data

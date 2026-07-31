@@ -62,6 +62,9 @@ _WINDOWS_RESERVED_COMPONENT_STEMS = frozenset(
 )
 _EXPECTED_ARTIFACT_DELIMITER_RE = re.compile(r",\s+")
 _PORTABLE_PATH_COMPONENT_MAX_BYTES = 255
+MAX_AC_SUCCESS_CONTRACT_ARTIFACTS = 253
+MAX_AC_SUCCESS_CONTRACT_ARTIFACT_CHARS = 2_038
+MAX_AC_SUCCESS_CONTRACT_CHARS = 64_000
 
 
 def _is_none_sentinel(value: str) -> bool:
@@ -130,6 +133,47 @@ def parse_expected_artifact_list(value: str) -> tuple[str, ...]:
     if any(not artifact for artifact in artifacts):
         raise ValueError("expected_artifacts entries cannot be empty")
     return artifacts
+
+
+def validate_ac_success_contract_values(
+    *,
+    verify_command: str | None,
+    expected_artifacts: tuple[str, ...],
+    output_assertion: str | None,
+) -> None:
+    """Enforce the execution capsule's complete success-contract budget.
+
+    This validator lives at the Seed boundary so every schema-valid contract
+    is guaranteed to be materializable by the downstream execution capsule.
+    The capsule calls the same function for low-level and replay inputs rather
+    than maintaining a second set of limits.
+    """
+    if verify_command is not None and not isinstance(verify_command, str):
+        raise ValueError("success contract verify command is invalid")
+    if output_assertion is not None and not isinstance(output_assertion, str):
+        raise ValueError("success contract output assertion is invalid")
+    try:
+        artifact_count = len(expected_artifacts)
+    except TypeError as exc:
+        raise ValueError("success contract artifacts are invalid") from exc
+    if artifact_count > MAX_AC_SUCCESS_CONTRACT_ARTIFACTS:
+        raise ValueError(
+            f"success contract artifact limit exceeded ({MAX_AC_SUCCESS_CONTRACT_ARTIFACTS})"
+        )
+
+    contract_chars = len(verify_command or "") + len(output_assertion or "")
+    for path in expected_artifacts:
+        if (
+            not isinstance(path, str)
+            or not path
+            or len(path) > MAX_AC_SUCCESS_CONTRACT_ARTIFACT_CHARS
+        ):
+            raise ValueError("success contract artifacts are invalid")
+        contract_chars += len(path)
+    if contract_chars > MAX_AC_SUCCESS_CONTRACT_CHARS:
+        raise ValueError(
+            f"success contract character budget exceeded ({MAX_AC_SUCCESS_CONTRACT_CHARS})"
+        )
 
 
 class ExitCondition(BaseModel, frozen=True):
@@ -439,6 +483,11 @@ class AcceptanceCriterionSpec(BaseModel, frozen=True):
             raise ValueError(
                 f"expected_artifacts entries must be portable workspace-relative paths: {rendered}"
             )
+        validate_ac_success_contract_values(
+            verify_command=self.verify_command,
+            expected_artifacts=self.expected_artifacts,
+            output_assertion=self.output_assertion,
+        )
         return self
 
     @property

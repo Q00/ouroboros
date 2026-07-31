@@ -8,7 +8,9 @@ from pathlib import Path
 import pytest
 
 from ouroboros.orchestrator.adapter import (
+    WORKER_CWD_UNAVAILABLE_MESSAGE,
     ParamSupport,
+    ResolvedWorkerCwd,
     SubagentOrchestration,
     is_leader_driven_worker,
 )
@@ -103,6 +105,108 @@ class TestRuntimeWiring:
         rt = build_claude_worker_runtime(cwd=tmp_path, persist_sessions=True)
 
         assert rt.working_directory == str(tmp_path)
+
+    def test_omitted_cwd_survives_unavailable_process_cwd(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        calls: list[int] = []
+
+        def unavailable_cwd() -> str:
+            calls.append(len(calls))
+            if len(calls) == 1:
+                raise FileNotFoundError
+            return str(tmp_path / f"moving-cwd-{len(calls)}")
+
+        monkeypatch.setattr("ouroboros.orchestrator.adapter.os.getcwd", unavailable_cwd)
+
+        runtime = build_claude_worker_runtime(persist_sessions=True)
+        assert runtime.working_directory is None
+        assert runtime._transport._cwd is None
+        assert len(calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_unresolved_cwd_fails_before_later_process_cwd_or_transport(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        calls: list[int] = []
+
+        def moving_cwd() -> str:
+            calls.append(len(calls))
+            if len(calls) == 1:
+                raise FileNotFoundError
+            return str(tmp_path / "unselected-later-cwd")
+
+        monkeypatch.setattr("ouroboros.orchestrator.adapter.os.getcwd", moving_cwd)
+        runtime = build_claude_worker_runtime(persist_sessions=True)
+
+        async def unexpected_spawn(**_kwargs) -> WorkerTurn:
+            raise AssertionError("transport must not run without a resolved cwd")
+
+        runtime._transport.spawn = unexpected_spawn  # type: ignore[method-assign]
+        messages = [message async for message in runtime.execute_task("must not run")]
+
+        assert len(messages) == 1
+        assert messages[0].data["error_type"] == "WorkerCwdUnavailable"
+        assert calls == [0]
+
+    @pytest.mark.asyncio
+    async def test_transport_rejects_none_cwd_before_subprocess(self) -> None:
+        transport = ClaudeWorkerTransport(cli_path="claude", cwd=ResolvedWorkerCwd(None))
+
+        turn = await transport.spawn(
+            prompt="must not run",
+            system_prompt=None,
+            cwd=None,
+            permission_mode=None,
+            model=None,
+            reasoning_effort=None,
+        )
+
+        assert turn.is_error
+        assert turn.error == WORKER_CWD_UNAVAILABLE_MESSAGE
+
+    @pytest.mark.parametrize("cwd", [None, "workspace"], ids=["omitted", "relative"])
+    @pytest.mark.asyncio
+    async def test_cwd_is_resolved_once_and_shared_by_spawn_and_persistent_resume(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        cwd: str | None,
+    ) -> None:
+        launch_cwd = tmp_path / "launch"
+        later_cwd = tmp_path / "later"
+        launch_cwd.mkdir()
+        later_cwd.mkdir()
+        resolved_cwd = launch_cwd if cwd is None else launch_cwd / cwd
+        resolved_cwd.mkdir(exist_ok=True)
+        monkeypatch.chdir(launch_cwd)
+        runtime = build_claude_worker_runtime(cwd=cwd, persist_sessions=True)
+        transport = runtime._transport
+        observed_cwds: list[str | None] = []
+
+        async def fake_run(command, prompt, cwd):
+            observed_cwds.append(cwd)
+            return WorkerTurn(text="ok", session_id="session-1")
+
+        transport._run = fake_run  # type: ignore[method-assign]
+        first = [message async for message in runtime.execute_task("first")]
+        resume_handle = first[-1].resume_handle
+        assert resume_handle is not None
+        monkeypatch.chdir(later_cwd)
+        _ = [
+            message
+            async for message in runtime.execute_task(
+                "resume",
+                resume_handle=resume_handle,
+            )
+        ]
+
+        assert runtime.working_directory == str(resolved_cwd)
+        assert observed_cwds == [str(resolved_cwd), str(resolved_cwd)]
 
     def test_exposes_effective_cli_path(self) -> None:
         rt = build_claude_worker_runtime(cli_path="/tmp/claude", cwd="/tmp")

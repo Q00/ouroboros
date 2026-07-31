@@ -50,31 +50,33 @@ Example: "AC: Tasks can be created | verify: python -m pytest tests/test_tasks.p
 - If the command has no distinctive output literal to assert, write `expect: NONE`. Exit-code 0 is already verified separately by the runner.
 
 **Granularity contract (read carefully):**
-- Produce **3-7** acceptance criteria. Each criterion is **one independently valuable, user-visible outcome** — not an implementation step.
-- Do **NOT** pre-decompose criteria into executable sub-tasks. Splitting work into atomic units is the execution engine's job at runtime; doing it here multiplies token cost with no benefit.
-- An AC that is a sub-step of a sibling AC (e.g. "create the model" + "add a field to the model") is a **defect**, equal in severity to a missing requirement. Merge such criteria into the outcome they serve.
-- If you draft more than 7, merge criteria that share a user-visible outcome **before responding**.
+
+An acceptance criterion names a **state of the finished work** that a user can see is true. An implementation step names a **means of reaching that state**. These are different categories, and only the first belongs here — deciding means is the execution engine's work at runtime, and it decides them better with the outcome in hand than with your guess at the path.
+
+So the question to ask of every criterion is what kind of thing it is. Read it beside its siblings: if it stands on its own as something a user would value, it is an outcome. If it is intelligible only as a move toward a sibling, it is that sibling's means wearing an outcome's clothes, and it belongs merged into the outcome it serves. Leaving a means in the criteria list is a defect equal in severity to a missing requirement — it commits the seed to a path before anyone has verified the path is the right one.
+
+How many criteria a goal has is a property of that goal, discovered by making this judgment.
 
 ### 4. ONTOLOGY
 The data structure/domain model for this work:
 - **ONTOLOGY_NAME**: A name for the domain model
 - **ONTOLOGY_DESCRIPTION**: What the ontology represents
-- **ONTOLOGY_FIELDS**: Key fields in format: name:type:description (pipe-separated)
+- **ONTOLOGY_FIELDS**: Key fields as a single-line JSON array of objects with "name", "type" (string, number, boolean, array, object), and "description"
 
 Field types should be one of: string, number, boolean, array, object
 
 ### 5. EVALUATION_PRINCIPLES
 Principles for evaluating output quality.
-Format: name:description:weight (pipe-separated, weight 0.0-1.0)
+Format: single-line JSON array of objects with "name", "description", and "weight" (0.0-1.0) so colons and pipes inside the text survive as data
 
 ### 6. EXIT_CONDITIONS
 Conditions that indicate the workflow should terminate.
-Format: name:description:criteria (pipe-separated)
+Format: single-line JSON array of objects with "name", "description", and "criteria"
 
 ### 7. BROWNFIELD CONTEXT (if applicable)
 If the interview mentions existing codebases, extract:
 - **PROJECT_TYPE**: 'greenfield' or 'brownfield'
-- **CONTEXT_REFERENCES**: path:role:summary (pipe-separated, role is 'primary' or 'reference')
+- **CONTEXT_REFERENCES**: single-line JSON array of objects with "path", "role" ('primary' or 'reference'), and optional "summary" so colons and pipes inside values survive as data
 - **EXISTING_PATTERNS**: Key patterns that must be followed (single-line JSON array of strings)
 - **EXISTING_DEPENDENCIES**: Key dependencies to reuse (single-line JSON array of strings)
 
@@ -90,11 +92,11 @@ AC: <description> | verify: <command or NONE> | artifacts: <comma+space-list or 
 AC: <description> | verify: <command or NONE> | artifacts: <comma+space-list or NONE> | expect: <output assertion or NONE>
 ONTOLOGY_NAME: <name>
 ONTOLOGY_DESCRIPTION: <description>
-ONTOLOGY_FIELDS: <name>:<type>:<description> | ...
-EVALUATION_PRINCIPLES: <name>:<description>:<weight> | ...
-EXIT_CONDITIONS: <name>:<description>:<criteria> | ...
+ONTOLOGY_FIELDS: [{"name": "<name>", "type": "<string|number|boolean|array|object>", "description": "<description>"}, ...]
+EVALUATION_PRINCIPLES: [{"name": "<name>", "description": "<description>", "weight": <0.0-1.0>}, ...]
+EXIT_CONDITIONS: [{"name": "<name>", "description": "<description>", "criteria": "<criteria>"}, ...]
 PROJECT_TYPE: greenfield|brownfield
-CONTEXT_REFERENCES: <path>:<role>:<summary> | ...
+CONTEXT_REFERENCES: [{"path": "<path>", "role": "<primary|reference>", "summary": "<summary>"}, ...]
 EXISTING_PATTERNS: ["<pattern 1>", "<pattern 2>", ...]
 EXISTING_DEPENDENCIES: ["<dep 1>", "<dep 2>", ...]
 ```

@@ -1,0 +1,223 @@
+name: PR Hygiene
+
+# Every pull request must be traceable to an issue.
+#
+# Why this exists: a 2026-07-28 board audit found that 6 of the 11 issues closed
+# during cleanup were already fully implemented on main — the work had landed,
+# but no PR ever linked back, so the issue sat open for weeks. Of the 80 PRs
+# merged in the preceding 30 days, 17 carried no issue reference at all.
+#
+# The gate deliberately accepts a plain reference (`Refs #123`, `Part of #123`),
+# not just a closing keyword. Most PRs here are slices of an epic and must NOT
+# auto-close their parent; forcing `Closes` on them would produce false closures.
+# Closing remains a human decision — this gate only guarantees the trail exists.
+#
+# The body half is answered from GitHub's own rendering of the PR body rather
+# than from its Markdown source: only the renderer knows whether a `#N` lands in
+# prose, a comment, a code block, or a link target. scripts/check-pr-issue-link.py
+# reads the issue anchors out of that rendering.
+
+on:
+  pull_request:
+    branches: [main, develop]
+    types: [opened, edited, synchronize, reopened, labeled, unlabeled]
+
+permissions:
+  contents: read
+  pull-requests: read
+  issues: read
+
+jobs:
+  require-issue-link:
+    name: Issue link present
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.0
+
+      - name: Set up Python
+        uses: actions/setup-python@v6.3.0
+        with:
+          python-version: "3.12"
+
+      - name: Check for a linked or referenced issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OWNER: ${{ github.repository_owner }}
+          REPO: ${{ github.event.repository.name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+        run: |
+          set -euo pipefail
+
+          # --- exemptions -----------------------------------------------------
+          # Written as a runtime check rather than a job-level `if` so that an
+          # exempt PR still reports a green check instead of "skipped", which
+          # would deadlock a required-status-check branch protection rule.
+          case ",${PR_LABELS}," in
+            *,no-issue,*)
+              echo "Exempt: 'no-issue' label present."
+              exit 0
+              ;;
+          esac
+
+          if [ "${PR_AUTHOR}" = "dependabot[bot]" ]; then
+            echo "Exempt: dependabot."
+            exit 0
+          fi
+
+          case "${PR_TITLE}" in
+            "chore(deps)"*|"chore(release)"*|"release:"*)
+              echo "Exempt: dependency or release PR (${PR_TITLE})."
+              exit 0
+              ;;
+          esac
+
+          # --- shared: one retry, then fail open ------------------------------
+          # Both lookups below go through this. A GitHub API outage is not the
+          # contributor's problem, and a hygiene gate must not hold a merge
+          # hostage to infrastructure -- but it also must not fail open
+          # silently, so every fallback announces itself.
+          # Diagnostics go to stderr. `closing=$(api_retry ...)` captures
+          # stdout, so a warning printed there would be concatenated with the
+          # count and turn a successful retry into `integer expression
+          # expected` -- silently discarding a valid closing link.
+          api_retry() {
+            "$@" && return 0
+            echo "::warning::GitHub API call failed; retrying once." >&2
+            sleep 5
+            "$@" && return 0
+            return 1
+          }
+
+          # --- signal 1: GitHub's own closing link ----------------------------
+          # Covers both `Closes #123` in the body and issues linked manually
+          # through the Development sidebar, which no body scan can see.
+          closing_query='
+            query($owner:String!, $repo:String!, $pr:Int!) {
+              repository(owner: $owner, name: $repo) {
+                pullRequest(number: $pr) {
+                  closingIssuesReferences(first: 10) { totalCount }
+                }
+              }
+            }'
+          # `closing=$(gh ...)` under `set -e` would abort the whole step on a
+          # transient failure, skipping the fail-open path below, so the
+          # assignment and the error check are kept separate.
+          if ! closing=$(api_retry gh api graphql -f query="${closing_query}" \
+                -F owner="${OWNER}" -F repo="${REPO}" -F pr="${PR_NUMBER}" \
+                --jq '.data.repository.pullRequest.closingIssuesReferences.totalCount'); then
+            echo "::warning::Could not read closing issue references; skipping the issue-link check."
+            exit 0
+          fi
+
+          if [ "${closing}" -gt 0 ]; then
+            echo "OK: ${closing} closing issue reference(s)."
+            exit 0
+          fi
+
+          # --- signal 2: an issue link in the *rendered* body ----------------
+          # Render with GitHub's own engine rather than scanning the Markdown
+          # source. Four review rounds on a regex scanner each found another
+          # construct that looks like `#N` but renders as something else --
+          # HTML comments, fenced/indented/blockquoted code, inline code, URL
+          # fragments, character entities, raw-text HTML, link reference
+          # definitions, inline link destinations. Markdown context is not a
+          # regular language; the renderer is the only authority on what a
+          # reviewer sees.
+          #
+          # Delegating also settles two things a scanner cannot: GitHub emits
+          # /issues/N for an issue and /pull/N for a pull request, and it
+          # autolinks only numbers that exist -- so `See PR #1735`, `#0`, and
+          # a typo all stop counting.
+          printf '%s' "${PR_BODY}" > "${RUNNER_TEMP}/pr-body.md"
+
+          if ! api_retry sh -c 'jq -n --rawfile text "$1" --arg context "$2" \
+                "{text: \$text, mode: \"gfm\", context: \$context}" \
+                | gh api -X POST /markdown --input - > "$3"' _ \
+                "${RUNNER_TEMP}/pr-body.md" "${OWNER}/${REPO}" "${RUNNER_TEMP}/rendered.html"; then
+            echo "::warning::Could not render the PR body; skipping the issue-link check."
+            exit 0
+          fi
+
+          candidates=$(python3 scripts/check-pr-issue-link.py \
+            --rendered-file "${RUNNER_TEMP}/rendered.html" \
+            --owner "${OWNER}" --repo "${REPO}" || true)
+
+          # The renderer settles *visibility*, and it existence-checks the
+          # shorthand it autolinks itself -- but an author-supplied destination
+          # is rendered verbatim, so `[x](/owner/repo/issues/0)` yields an
+          # anchor for an issue that does not exist. Resolve each candidate.
+          resolve_issue() {
+            # 0 = a real issue, 1 = definitively not, 2 = could not tell.
+            if payload=$(gh api "repos/${OWNER}/${REPO}/issues/$1" 2>"${RUNNER_TEMP}/api-err"); then
+              # The REST issues endpoint also serves pull requests; only a
+              # pull request carries a `pull_request` object.
+              if [ "$(printf '%s' "${payload}" | jq -r 'has("pull_request")')" = "true" ]; then
+                echo "  #$1: resolves to a pull request, not an issue"
+                return 1
+              fi
+              return 0
+            fi
+            if grep -qi "HTTP 404" "${RUNNER_TEMP}/api-err"; then
+              echo "  #$1: linked, but no such issue in this repository"
+              return 1
+            fi
+            # Rate limiting, 5xx, DNS. Treating these as "no such issue" would
+            # turn a GitHub outage into a red check on a correctly linked PR.
+            echo "::warning::Could not resolve #$1: $(tr -d '\n' < "${RUNNER_TEMP}/api-err")" >&2
+            return 2
+          }
+
+          # Bounded so a link-heavy body cannot fan out into API calls. Hitting
+          # the cap is *undecidable*, not a failure: the eleventh candidate may
+          # be the valid one, and candidates arrive in numeric order rather
+          # than by likelihood.
+          RESOLVE_CAP=20
+          checked=0
+          undecided=0
+          for number in ${candidates}; do
+            if [ "${checked}" -ge "${RESOLVE_CAP}" ]; then
+              echo "::warning::More than ${RESOLVE_CAP} linked issues; stopped resolving. Treating the result as undetermined rather than as a missing link."
+              undecided=1
+              break
+            fi
+            checked=$((checked + 1))
+
+            # `|| status=$?` is load-bearing. A bare call under `set -e`
+            # terminates the step on status 1 or 2, so one invalid candidate
+            # ahead of a valid one would reject the PR and an outage would
+            # exit red instead of following the fail-open path below.
+            status=0
+            resolve_issue "${number}" || status=$?
+            case "${status}" in
+              0)
+                echo "OK: the rendered body links to issue #${number}."
+                echo "::notice::This PR references an issue without closing it. If it completes the issue, use 'Closes #N' so the board stays accurate."
+                exit 0
+                ;;
+              2) undecided=1 ;;
+            esac
+          done
+
+          if [ "${undecided}" -eq 1 ]; then
+            echo "::warning::Could not determine whether a linked issue exists; skipping the issue-link check."
+            exit 0
+          fi
+
+          # --- fail ------------------------------------------------------------
+          echo "::error::No issue link found. Do one of the following:"
+          echo "::error::  1. Add 'Closes #123' to the PR body (this PR completes the issue)."
+          echo "::error::  2. Add 'Refs #123' or 'Part of #123' (this PR is one slice of it)."
+          echo "::error::  3. Apply the 'no-issue' label if this PR genuinely has no issue."
+          echo "::error::"
+          echo "::error::The number must render as prose. GitHub does not autolink inside"
+          echo "::error::comments, code blocks, link targets, or reference definitions, and"
+          echo "::error::a pull request number does not count as an issue trail."
+          echo "::error::"
+          echo "::error::Editing the PR body re-runs this check automatically. Linking through"
+          echo "::error::the Development sidebar does NOT -- GitHub fires no pull_request event"
+          echo "::error::for it, so re-run this job from the Checks tab afterwards."
+          exit 1

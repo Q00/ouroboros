@@ -19,6 +19,8 @@ from ouroboros.orchestrator.opencode_runtime import OpenCodeRuntime
 from ouroboros.router import Resolved, ResolveRequest
 from ouroboros.router import resolve_skill_dispatch as shared_resolve_skill_dispatch
 
+_EXPECTED_CWD = str(Path("/tmp/project").resolve())
+
 
 async def _collect_async(iterator):
     return [item async for item in iterator]
@@ -137,7 +139,7 @@ class TestOpenCodeRuntimeProperties:
 
     def test_working_directory(self) -> None:
         runtime = OpenCodeRuntime(cli_path="opencode", cwd="/tmp/project")
-        assert runtime.working_directory == "/tmp/project"
+        assert runtime.working_directory == _EXPECTED_CWD
 
     def test_permission_mode_default(self) -> None:
         runtime = OpenCodeRuntime(cli_path="opencode", cwd="/tmp")
@@ -254,7 +256,7 @@ class TestOpenCodeRuntimeHandleManagement:
         assert handle is not None
         assert handle.backend == "opencode"
         assert handle.native_session_id == "sess-123"
-        assert handle.cwd == "/tmp"
+        assert handle.cwd == str(Path("/tmp").resolve())
 
     def test_build_runtime_handle_none(self) -> None:
         runtime = OpenCodeRuntime(cli_path="opencode", cwd="/tmp")
@@ -403,7 +405,7 @@ class TestOpenCodeRuntimeSkillDispatch:
         resolve_request = observed_requests[0]
         assert isinstance(resolve_request, ResolveRequest)
         assert resolve_request.prompt == prompt
-        assert resolve_request.cwd == "/tmp/project"
+        assert resolve_request.cwd == _EXPECTED_CWD
         assert resolve_request.skills_dir == tmp_path
         dispatcher.assert_awaited_once()
         mock_exec.assert_not_called()
@@ -416,9 +418,9 @@ class TestOpenCodeRuntimeSkillDispatch:
         assert intercept.first_argument == expected_argument
         assert intercept.mcp_args == {
             "seed_path": expected_argument,
-            "cwd": "/tmp/project",
-            "label": f"cwd=/tmp/project seed={expected_argument}",
-            "nested": {"values": [expected_argument, "/tmp/project"]},
+            "cwd": _EXPECTED_CWD,
+            "label": f"cwd={_EXPECTED_CWD} seed={expected_argument}",
+            "nested": {"values": [expected_argument, _EXPECTED_CWD]},
         }
         assert messages[-1].content == "Intercepted"
 
@@ -467,7 +469,7 @@ class TestOpenCodeRuntimeSkillDispatch:
         request = mock_resolve.call_args.args[0]
         assert isinstance(request, ResolveRequest)
         assert request.prompt == "ooo run seed.yaml"
-        assert request.cwd == "/tmp/project"
+        assert request.cwd == _EXPECTED_CWD
         assert request.skills_dir == tmp_path
         dispatcher.assert_awaited_once()
         assert dispatcher.await_args.args[0] is resolved
@@ -530,7 +532,7 @@ class TestOpenCodeRuntimeSkillDispatch:
         request = mock_resolve.call_args.args[0]
         assert isinstance(request, ResolveRequest)
         assert request.prompt == "ooo run prompt-derived.yaml"
-        assert request.cwd == "/tmp/project"
+        assert request.cwd == _EXPECTED_CWD
         assert request.skills_dir == tmp_path
         mock_lookup.assert_called_once_with("router_only_tool")
         fake_handler.handle.assert_awaited_once_with(

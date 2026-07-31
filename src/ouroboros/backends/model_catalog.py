@@ -23,6 +23,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -31,6 +32,7 @@ from ouroboros.backends.capabilities import (
     get_backend_capability,
     runtime_backend_choices,
 )
+from ouroboros.codex.home import resolve_codex_home
 from ouroboros.config._model_defaults import DEFAULT_OPUS_MODEL, DEFAULT_SONNET_MODEL
 
 # Backends whose runnable model is the CLI's own configured default rather
@@ -280,9 +282,24 @@ def detect_backend_cli(backend: str) -> str | None:
 
         configured = getattr(config_loader, getter_name)()
         if configured:
-            return configured
+            configured_path = _resolve_executable_candidate(configured)
+            if configured_path is not None:
+                return configured_path
     if capability.cli_name:
         return shutil.which(capability.cli_name)
+    return None
+
+
+def _resolve_executable_candidate(candidate: str) -> str | None:
+    """Return an executable path for a configured CLI candidate, if usable."""
+    value = candidate.strip()
+    if not value:
+        return None
+    if os.sep not in value and (os.altsep is None or os.altsep not in value):
+        return shutil.which(value)
+    path = Path(value).expanduser()
+    if path.is_file() and os.access(path, os.X_OK):
+        return str(path)
     return None
 
 
@@ -319,7 +336,7 @@ def configured_default_model(backend: str) -> str | None:
         if capability.name == "codex":
             import tomllib
 
-            config_path = Path.home() / ".codex" / "config.toml"
+            config_path = resolve_codex_home() / "config.toml"
             if not config_path.exists():
                 return None
             data = tomllib.loads(config_path.read_text())

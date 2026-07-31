@@ -26,6 +26,7 @@ from ouroboros.core.security import MAX_LLM_RESPONSE_LENGTH, InputValidator
 from ouroboros.orchestrator.adapter import (
     AgentMessage,
     ParamSupport,
+    ResolvedWorkerCwd,
     RuntimeCapabilities,
     RuntimeHandle,
 )
@@ -152,7 +153,7 @@ class GeminiCLIRuntime(CodexCliRuntime):
         cli_path: str | Path | None = None,
         permission_mode: str | None = None,
         model: str | None = None,
-        cwd: str | Path | None = None,
+        cwd: str | Path | ResolvedWorkerCwd | None = None,
         skills_dir: str | Path | None = None,
         skill_dispatcher: SkillDispatchHandler | None = None,
         llm_backend: str | None = None,
@@ -291,6 +292,7 @@ class GeminiCLIRuntime(CodexCliRuntime):
           prompt-driven mode under ``--non-interactive`` would deadlock the
           subprocess. The fallback to ``auto_edit`` below is defensive only.
         """
+        self._assert_cli_executable_identity_unchanged()
         del output_last_message_path, resume_session_id, runtime_handle
 
         approval_flag = _GEMINI_PERMISSION_MODE_TO_FLAG.get(

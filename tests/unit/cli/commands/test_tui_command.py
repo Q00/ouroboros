@@ -53,6 +53,26 @@ def test_tui_open_ghostty_uses_argv_and_working_directory(tmp_path: Path) -> Non
     assert launch.manual_command.startswith(f"cd {tmp_path}")
 
 
+def test_tui_open_default_uses_configured_event_store(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_dir = tmp_path / "config"
+    configured_db = config_dir / "data" / "events.db"
+    config_dir.mkdir()
+    (config_dir / "config.yaml").write_text("persistence:\n  database_path: data/events.db\n")
+    monkeypatch.setattr("ouroboros.config.models.get_config_dir", lambda: config_dir)
+
+    with patch("ouroboros.cli.commands.tui.shutil.which", return_value=None):
+        launch = build_tui_open_launch(
+            cwd=tmp_path,
+            env={"SSH_TTY": "/dev/ttys001"},
+        )
+
+    assert launch.argv is None
+    assert f"--db-path {configured_db}" in launch.manual_command
+
+
 def test_tui_open_iterm_uses_osascript_with_cd(tmp_path: Path) -> None:
     db_path = tmp_path / "ouroboros.db"
 

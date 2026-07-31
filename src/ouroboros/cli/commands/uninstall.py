@@ -18,6 +18,7 @@ import json
 from pathlib import Path
 import re
 import shutil
+import tomllib
 from typing import Annotated
 
 import typer
@@ -33,7 +34,7 @@ from ouroboros.cli.opencode_config import (
     is_bridge_plugin_entry,
     opencode_config_dir,
 )
-from ouroboros.codex import CODEX_RULE_FILENAME, resolve_packaged_codex_assets
+from ouroboros.codex import CODEX_RULE_FILENAME, resolve_codex_home, resolve_packaged_codex_assets
 
 app = typer.Typer(
     name="uninstall",
@@ -77,57 +78,59 @@ def _remove_claude_mcp(dry_run: bool) -> bool:
 
 def _remove_codex_mcp(dry_run: bool) -> bool:
     """Remove ouroboros MCP section from ~/.codex/config.toml."""
-    codex_config = Path.home() / ".codex" / "config.toml"
+    from ouroboros.cli.commands.setup import (
+        _atomic_write_text_if_current_matches,
+        _codex_mcp_entry_from_toml,
+        _has_managed_codex_mcp_comment,
+        _is_setup_managed_codex_mcp_entry,
+        _remove_codex_mcp_section,
+        _snapshot_path,
+    )
+
+    codex_config = resolve_codex_home() / "config.toml"
     if not codex_config.exists():
         return False
 
+    config_snapshot = _snapshot_path(codex_config)
     try:
         raw = codex_config.read_text()
     except OSError:
         print_warning("~/.codex/config.toml is unreadable — skipping.")
         return False
-    if "[mcp_servers.ouroboros]" not in raw:
+    try:
+        parsed = tomllib.loads(raw)
+    except tomllib.TOMLDecodeError:
+        print_warning("~/.codex/config.toml is malformed — skipping Codex MCP removal.")
+        return False
+    entry = _codex_mcp_entry_from_toml(parsed)
+    if entry is None:
+        return False
+    if not _is_setup_managed_codex_mcp_entry(
+        entry,
+        has_managed_comment=_has_managed_codex_mcp_comment(raw),
+    ):
+        print_info("Preserved user-managed Ouroboros MCP config in ~/.codex/config.toml")
         return False
 
     if dry_run:
         print_info("[dry-run] Would remove ouroboros from ~/.codex/config.toml")
         return True
 
-    lines = raw.splitlines()
-    output: list[str] = []
-    skip = False
-    in_comment_block = False
-
-    for line in lines:
-        stripped = line.strip()
-
-        if stripped.startswith("# Ouroboros MCP hookup"):
-            in_comment_block = True
-            continue
-        if in_comment_block and stripped.startswith("#"):
-            continue
-        in_comment_block = False
-
-        if stripped == "[mcp_servers.ouroboros]" or stripped.startswith("[mcp_servers.ouroboros."):
-            skip = True
-            continue
-        if skip:
-            if stripped.startswith("[") and stripped.endswith("]"):
-                # Next TOML table header — stop skipping
-                skip = False
-                output.append(line)
-            elif stripped.startswith("#"):
-                # Comment after the managed section — preserve it
-                skip = False
-                output.append(line)
-            # else: key=value lines or blank lines inside the table — skip them
-            continue
-
-        output.append(line)
-
-    cleaned = re.sub(r"\n{3,}", "\n\n", "\n".join(output)).strip() + "\n"
+    cleaned, removed = _remove_codex_mcp_section(raw)
+    if not removed:
+        print_warning("Codex MCP ownership was detected but no removable TOML entry was found.")
+        return False
     try:
-        codex_config.write_text(cleaned)
+        tomllib.loads(cleaned)
+    except tomllib.TOMLDecodeError:
+        print_warning("Codex MCP removal would create malformed TOML — skipping.")
+        return False
+    try:
+        _atomic_write_text_if_current_matches(
+            codex_config,
+            cleaned,
+            config_snapshot,
+        )
     except OSError:
         print_warning("Could not write ~/.codex/config.toml — skipping.")
         return False
@@ -141,7 +144,7 @@ def _remove_codex_artifacts(dry_run: bool) -> bool:
     Returns True only if ALL existing artifacts were removed successfully.
     Returns False if any artifact could not be removed.
     """
-    codex_dir = Path.home() / ".codex"
+    codex_dir = resolve_codex_home()
     try:
         with resolve_packaged_codex_assets() as assets:
             managed_relative_paths = set(assets.managed_relative_install_paths)
@@ -431,10 +434,27 @@ def uninstall(
         except (json.JSONDecodeError, OSError):
             targets.append("MCP server registration (~/.claude/mcp.json — may be malformed)")
 
-    codex_config = Path.home() / ".codex" / "config.toml"
+    codex_config = resolve_codex_home() / "config.toml"
     try:
-        if codex_config.exists() and "[mcp_servers.ouroboros]" in codex_config.read_text():
-            targets.append("Codex MCP config (~/.codex/config.toml)")
+        if codex_config.exists():
+            raw_codex_config = codex_config.read_text()
+            try:
+                parsed_codex_config = tomllib.loads(raw_codex_config)
+            except tomllib.TOMLDecodeError:
+                targets.append("Codex MCP config (~/.codex/config.toml — may be malformed)")
+            else:
+                from ouroboros.cli.commands.setup import (
+                    _codex_mcp_entry_from_toml,
+                    _has_managed_codex_mcp_comment,
+                    _is_setup_managed_codex_mcp_entry,
+                )
+
+                entry = _codex_mcp_entry_from_toml(parsed_codex_config)
+                if isinstance(entry, dict) and _is_setup_managed_codex_mcp_entry(
+                    entry,
+                    has_managed_comment=_has_managed_codex_mcp_comment(raw_codex_config),
+                ):
+                    targets.append("Codex MCP config (~/.codex/config.toml)")
     except OSError:
         targets.append("Codex MCP config (~/.codex/config.toml — may be unreadable)")
 
@@ -447,7 +467,7 @@ def uninstall(
     except (json.JSONDecodeError, OSError):
         targets.append(f"OpenCode MCP config ({opencode_config} — may be malformed)")
 
-    codex_dir = Path.home() / ".codex"
+    codex_dir = resolve_codex_home()
     try:
         with resolve_packaged_codex_assets() as assets:
             managed_relative_paths = set(assets.managed_relative_install_paths)
@@ -573,3 +593,5 @@ def uninstall(
     )
     console.print("  claude plugin uninstall ouroboros   [dim]# if using Claude Code plugin[/dim]")
     console.print()
+    if failed:
+        raise typer.Exit(1)

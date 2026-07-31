@@ -8,7 +8,7 @@ they are not leaf execution failures.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 import re
@@ -27,8 +27,30 @@ MAX_COVERAGE_CLAIMS = 8
 MAX_COVERAGE_CLAIM_CHARS = 240
 MAX_VERIFICATION_HINT_CHARS = 300
 MAX_RATIONALE_CHARS = 1_000
-MAX_PROPOSAL_REPR_CHARS = 10_000
 MAX_TRACE_SUMMARY_CHARS = 1_000
+MAX_NODE_ID_CHARS = 512
+MAX_REPAIR_COUNT = 1
+
+_TRACE_KEYS = frozenset({"summary", "evidence_refs"})
+_CHILD_KEYS = frozenset({"description", "coverage_claims", "verification_hint"})
+_PROPOSAL_KEYS = frozenset({"children", "covers_parent", "rationale"})
+_DECISION_KEYS = frozenset(
+    {
+        "schema_version",
+        "node_id",
+        "source",
+        "disposition",
+        "cause",
+        "reasons",
+        "evidence_refs",
+        "children",
+        "structural_status",
+        "semantic_status",
+        "repair_count",
+        "trustworthy",
+        "compromise_reason",
+    }
+)
 
 _SECRET_VALUE = "[REDACTED]"
 _SECRET_KEY_PATTERN = (
@@ -131,13 +153,19 @@ class DecompositionTraceSummary:
 
     @classmethod
     def from_dict(cls, data: object) -> DecompositionTraceSummary | None:
-        if not isinstance(data, Mapping):
+        if not _mapping_has_exact_keys(data, _TRACE_KEYS):
             return None
+        assert type(data) is dict
         try:
-            return cls(
+            if type(data["summary"]) is not str:
+                return None
+            parsed = cls(
                 summary=data["summary"],
-                evidence_refs=_read_string_list(data.get("evidence_refs", ())),
+                evidence_refs=_read_bounded_string_list(
+                    data["evidence_refs"], max_count=MAX_EVIDENCE_REF_COUNT
+                ),
             )
+            return parsed if parsed.to_dict() == data else None
         except (KeyError, TypeError, ValueError):
             return None
 
@@ -190,14 +218,20 @@ class DecompositionChild:
 
     @classmethod
     def from_dict(cls, data: object) -> DecompositionChild | None:
-        if not isinstance(data, Mapping):
+        if not _mapping_has_exact_keys(data, _CHILD_KEYS):
             return None
+        assert type(data) is dict
         try:
-            return cls(
+            if type(data["description"]) is not str or type(data["verification_hint"]) is not str:
+                return None
+            parsed = cls(
                 description=data["description"],
-                coverage_claims=_read_string_list(data.get("coverage_claims", ())),
+                coverage_claims=_read_bounded_string_list(
+                    data["coverage_claims"], max_count=MAX_COVERAGE_CLAIMS
+                ),
                 verification_hint=data["verification_hint"],
             )
+            return parsed if parsed.to_dict() == data else None
         except (KeyError, TypeError, ValueError):
             return None
 
@@ -214,12 +248,18 @@ class DecompositionProposal:
         if type(self.covers_parent) is not bool:
             msg = "covers_parent must be a boolean"
             raise ValueError(msg)
+        if self.covers_parent is not True:
+            msg = "covers_parent must be true"
+            raise ValueError(msg)
         if not isinstance(self.rationale, str):
             msg = "rationale must be a string"
             raise ValueError(msg)
         children = _coerce_children(self.children)
         if not MIN_CHILDREN <= len(children) <= MAX_CHILDREN:
             msg = f"children must contain {MIN_CHILDREN}-{MAX_CHILDREN} items"
+            raise ValueError(msg)
+        if not _children_support_trust(children):
+            msg = "proposal children require unique scope claims and verification hints"
             raise ValueError(msg)
         object.__setattr__(self, "children", children)
         object.__setattr__(
@@ -241,11 +281,17 @@ class DecompositionProposal:
 
     @classmethod
     def from_dict(cls, data: object) -> DecompositionProposal | None:
-        if not isinstance(data, Mapping):
+        if not _mapping_has_exact_keys(data, _PROPOSAL_KEYS):
             return None
+        assert type(data) is dict
         try:
             children_raw = data["children"]
-            if not isinstance(children_raw, Sequence) or isinstance(children_raw, str | bytes):
+            if (
+                type(children_raw) is not list
+                or not MIN_CHILDREN <= len(children_raw) <= MAX_CHILDREN
+                or type(data["covers_parent"]) is not bool
+                or type(data["rationale"]) is not str
+            ):
                 return None
             children: list[DecompositionChild] = []
             for raw in children_raw:
@@ -253,11 +299,12 @@ class DecompositionProposal:
                 if child is None:
                     return None
                 children.append(child)
-            return cls(
+            parsed = cls(
                 children=tuple(children),
                 covers_parent=data["covers_parent"],
                 rationale=data["rationale"],
             )
+            return parsed if parsed.to_dict() == data else None
         except (KeyError, TypeError, ValueError):
             return None
 
@@ -288,7 +335,11 @@ class DecompositionDecisionRecord:
         ):
             msg = f"schema_version must be {SCHEMA_VERSION}"
             raise ValueError(msg)
-        if not isinstance(self.node_id, str) or not self.node_id.strip():
+        if (
+            not isinstance(self.node_id, str)
+            or not self.node_id.strip()
+            or len(self.node_id) > MAX_NODE_ID_CHARS
+        ):
             msg = "node_id must be a non-empty string"
             raise ValueError(msg)
         _require_enum(self.source, DecompositionSource, "source")
@@ -300,8 +351,8 @@ class DecompositionDecisionRecord:
         if isinstance(self.repair_count, bool) or not isinstance(self.repair_count, int):
             msg = "repair_count must be an integer"
             raise ValueError(msg)
-        if self.repair_count < 0:
-            msg = "repair_count must be >= 0"
+        if not 0 <= self.repair_count <= MAX_REPAIR_COUNT:
+            msg = f"repair_count must be 0-{MAX_REPAIR_COUNT}"
             raise ValueError(msg)
         if type(self.trustworthy) is not bool:
             msg = "trustworthy must be a boolean"
@@ -356,6 +407,13 @@ class DecompositionDecisionRecord:
                 "semantic ESTABLISHED, at least 2 children, and repair_count <= 1"
             )
             raise ValueError(msg)
+        if (
+            self.trustworthy
+            and self.source is DecompositionSource.BOUNCE
+            and self.cause is not BounceCause.TOO_BIG
+        ):
+            msg = "trustworthy BOUNCE splits require a TOO_BIG cause"
+            raise ValueError(msg)
 
     def _meets_trust_invariant(self) -> bool:
         return (
@@ -386,14 +444,15 @@ class DecompositionDecisionRecord:
 
     @classmethod
     def from_dict(cls, data: object) -> DecompositionDecisionRecord | None:
-        if not isinstance(data, Mapping):
+        if not _mapping_has_exact_keys(data, _DECISION_KEYS):
             return None
+        assert type(data) is dict
         try:
             schema_version = data.get("schema_version")
             if type(schema_version) is not int or schema_version != SCHEMA_VERSION:
                 return None
             children_raw = data["children"]
-            if not isinstance(children_raw, Sequence) or isinstance(children_raw, str | bytes):
+            if type(children_raw) is not list or len(children_raw) > MAX_CHILDREN:
                 return None
             children: list[DecompositionChild] = []
             for raw in children_raw:
@@ -402,16 +461,32 @@ class DecompositionDecisionRecord:
                     return None
                 children.append(child)
             cause_raw = data.get("cause")
-            if cause_raw is not None and not isinstance(cause_raw, str):
+            if cause_raw is not None and type(cause_raw) is not str:
                 return None
-            return cls(
+            if (
+                type(data["node_id"]) is not str
+                or type(data["source"]) is not str
+                or type(data["disposition"]) is not str
+                or type(data["structural_status"]) is not str
+                or type(data["semantic_status"]) is not str
+                or type(data["repair_count"]) is not int
+                or type(data["trustworthy"]) is not bool
+                or (
+                    data["compromise_reason"] is not None
+                    and type(data["compromise_reason"]) is not str
+                )
+            ):
+                return None
+            parsed = cls(
                 schema_version=data["schema_version"],
                 node_id=data["node_id"],
                 source=_parse_enum(DecompositionSource, data["source"]),
                 disposition=_parse_enum(DecompositionDisposition, data["disposition"]),
                 cause=None if cause_raw is None else _parse_enum(BounceCause, cause_raw),
-                reasons=_read_string_list(data["reasons"]),
-                evidence_refs=_read_string_list(data["evidence_refs"]),
+                reasons=_read_bounded_string_list(data["reasons"], max_count=MAX_REASON_COUNT),
+                evidence_refs=_read_bounded_string_list(
+                    data["evidence_refs"], max_count=MAX_EVIDENCE_REF_COUNT
+                ),
                 children=tuple(children),
                 structural_status=_parse_enum(StructuralCheckStatus, data["structural_status"]),
                 semantic_status=_parse_enum(SemanticAttestationStatus, data["semantic_status"]),
@@ -419,6 +494,7 @@ class DecompositionDecisionRecord:
                 trustworthy=data["trustworthy"],
                 compromise_reason=data.get("compromise_reason"),
             )
+            return parsed if parsed.to_dict() == data else None
         except (KeyError, TypeError, ValueError):
             return None
 
@@ -458,12 +534,12 @@ def validate_decomposition_proposal(
     """Return structural validation errors for a proposal payload."""
 
     errors: list[str] = []
-    if isinstance(data, str | bytes) or not isinstance(data, Mapping):
+    if type(data) is not dict:
         return ("proposal must be an object",)
-    if len(repr(data)) > MAX_PROPOSAL_REPR_CHARS:
-        errors.append("proposal payload is too large")
+    if not _mapping_has_exact_keys(data, _PROPOSAL_KEYS):
+        errors.append("proposal must contain exactly the supported fields")
     children_raw = data.get("children")
-    if not isinstance(children_raw, Sequence) or isinstance(children_raw, str | bytes):
+    if type(children_raw) is not list:
         errors.append("children must be a list")
         children_raw = ()
     if not min_children <= len(children_raw) <= max_children:
@@ -482,11 +558,13 @@ def validate_decomposition_proposal(
     coverage_fingerprints: set[str] = set()
     parent_fingerprint = _fingerprint(parent_text)
     for index, child_raw in enumerate(children_raw):
-        if not isinstance(child_raw, Mapping):
+        if type(child_raw) is not dict:
             errors.append(f"child {index} must be an object")
             continue
+        if not _mapping_has_exact_keys(child_raw, _CHILD_KEYS):
+            errors.append(f"child {index} must contain exactly the supported fields")
         description = child_raw.get("description")
-        if not isinstance(description, str) or not _normalize_spaces(description):
+        if type(description) is not str or not _normalize_spaces(description):
             errors.append(f"child {index} description must be a non-empty string")
             continue
         if len(description) > MAX_CHILD_DESCRIPTION_CHARS:
@@ -499,7 +577,7 @@ def validate_decomposition_proposal(
         child_fingerprints.add(child_fingerprint)
 
         claims = child_raw.get("coverage_claims")
-        if not isinstance(claims, Sequence) or isinstance(claims, str | bytes):
+        if type(claims) is not list:
             errors.append(f"child {index} coverage_claims must be a list")
             continue
         if not claims:
@@ -508,7 +586,7 @@ def validate_decomposition_proposal(
             errors.append(f"child {index} has too many coverage claims")
         child_claim_fingerprints: set[str] = set()
         for claim_index, claim in enumerate(claims):
-            if not isinstance(claim, str) or not _normalize_spaces(claim):
+            if type(claim) is not str or not _normalize_spaces(claim):
                 errors.append(f"child {index} claim {claim_index} must be a non-empty string")
                 continue
             if len(claim) > MAX_COVERAGE_CLAIM_CHARS:
@@ -522,7 +600,7 @@ def validate_decomposition_proposal(
             coverage_fingerprints.add(claim_fingerprint)
 
         hint = child_raw.get("verification_hint")
-        if not isinstance(hint, str):
+        if type(hint) is not str:
             errors.append(f"child {index} verification_hint must be a string")
         elif not _normalize_spaces(hint):
             errors.append(f"child {index} verification_hint must be non-empty")
@@ -660,11 +738,27 @@ def _parse_enum(enum_type: type[StrEnum], value: object) -> Any:
 
 
 def _read_string_list(value: object) -> tuple[str, ...]:
-    if not isinstance(value, Sequence) or isinstance(value, str | bytes):
+    if type(value) is not list:
         raise ValueError
-    if not all(isinstance(item, str) for item in value):
+    if not all(type(item) is str for item in value):
         raise ValueError
     return tuple(value)
+
+
+def _read_bounded_string_list(value: object, *, max_count: int) -> tuple[str, ...]:
+    if type(value) is not list or len(value) > max_count:
+        raise ValueError
+    return _read_string_list(value)
+
+
+def _mapping_has_exact_keys(value: object, expected: frozenset[str]) -> bool:
+    """Accept only the exact built-in JSON object shape used by durable records."""
+    return (
+        type(value) is dict
+        and len(value) == len(expected)
+        and all(type(key) is str for key in value)
+        and value.keys() == expected
+    )
 
 
 def _bounded_nonblank_text(text: str, *, field_name: str, max_chars: int) -> str:

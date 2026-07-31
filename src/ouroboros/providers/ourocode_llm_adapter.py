@@ -18,12 +18,9 @@ runtime.
 from __future__ import annotations
 
 from dataclasses import replace
-import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from jsonschema import Draft202012Validator
-from jsonschema.exceptions import ValidationError as JsonSchemaValidationError
 import structlog
 
 from ouroboros.config._model_defaults import (
@@ -45,6 +42,10 @@ from ouroboros.providers.base import (
 )
 from ouroboros.providers.ourocode_acp_client import AcpClientError, OurocodeAcpClient
 from ouroboros.providers.profiles import resolve_completion_profile_result
+from ouroboros.providers.response_format import (
+    build_response_format_directive,
+    validate_response_format_payload,
+)
 
 if TYPE_CHECKING:
     from ouroboros.events.io_recorder import IOJournalRecorder
@@ -307,39 +308,7 @@ class OurocodeLLMAdapter:
         response_format: dict[str, object] | None,
     ) -> str | None:
         """Translate response_format into cooperative ourocode prompt instructions."""
-        if not response_format:
-            return None
-        fmt_type = response_format.get("type")
-        if fmt_type == "json_object":
-            return (
-                "Respond with ONLY a valid JSON object. Do not use markdown fences, "
-                "headers, or explanatory text."
-            )
-        if fmt_type == "json_schema":
-            schema = response_format.get("json_schema")
-            if not isinstance(schema, dict):
-                return None
-            schema_payload = (
-                schema.get("schema") if isinstance(schema.get("schema"), dict) else schema
-            )
-            top_type = (
-                schema_payload.get("type", "object")
-                if isinstance(schema_payload, dict)
-                else "object"
-            )
-            type_noun = {"array": "JSON array", "object": "JSON object"}.get(
-                str(top_type), "JSON value"
-            )
-            try:
-                rendered = json.dumps(schema_payload, indent=2, sort_keys=True)
-            except (TypeError, ValueError):
-                rendered = str(schema_payload)
-            return (
-                f"Respond with ONLY a valid {type_noun} that matches this schema. "
-                "Do not use markdown fences, headers, or explanatory text.\n\n"
-                f"JSON schema:\n{rendered}"
-            )
-        return None
+        return build_response_format_directive(response_format)
 
     @staticmethod
     def _validate_response_format_payload(
@@ -347,26 +316,7 @@ class OurocodeLLMAdapter:
         response_format: dict[str, object],
     ) -> str | None:
         """Validate extracted JSON against the requested response_format."""
-        try:
-            parsed = json.loads(payload)
-        except json.JSONDecodeError as exc:
-            return f"invalid JSON: {exc}"
-
-        fmt_type = response_format.get("type")
-        if fmt_type == "json_object":
-            return None if isinstance(parsed, dict) else "expected a JSON object"
-        if fmt_type == "json_schema":
-            schema = response_format.get("json_schema")
-            if not isinstance(schema, dict):
-                return "json_schema response_format is missing a schema object"
-            schema_payload = (
-                schema.get("schema") if isinstance(schema.get("schema"), dict) else schema
-            )
-            try:
-                Draft202012Validator(schema_payload).validate(parsed)
-            except JsonSchemaValidationError as exc:
-                return exc.message
-        return None
+        return validate_response_format_payload(payload, response_format)
 
     @staticmethod
     def _finish_reason(stop_reason: str) -> str:

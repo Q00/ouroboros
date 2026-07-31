@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -388,7 +389,7 @@ def test_goose_child_env_sets_nested_guard(monkeypatch: pytest.MonkeyPatch) -> N
 
     assert env["_OUROBOROS_NESTED"] == "1"
     assert env["GOOSE_MODE"] == "approve"
-    assert env["GOOSE_WORKING_DIR"] == "/tmp/project"
+    assert env["GOOSE_WORKING_DIR"] == str(Path("/tmp/project").resolve())
     assert env["GOOSE_PROVIDER"] == "anthropic"
     assert "OUROBOROS_AGENT_RUNTIME" not in env
     assert "OUROBOROS_LLM_BACKEND" not in env

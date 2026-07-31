@@ -85,11 +85,12 @@ fallback instead of retrying the failing call.
    Tool: ouroboros_start_execute_seed
    Arguments:
      seed_content: <the seed YAML>
-     model_tier: "medium"  (or as specified by user)
      efficiency_mode: <adaptive or quality_first>
      frugality_assurance: <observe, off, or explicit strict>
      max_iterations: 10    (or as specified by user)
    ```
+   Omit `model_tier` by default so the runtime selects automatically. Include
+   `model_tier: <user choice>` only when the user explicitly requested a tier.
    This returns immediately with a `job_id`, `session_id`, and `execution_id`.
 
 4. If resuming an existing session, include `session_id`:

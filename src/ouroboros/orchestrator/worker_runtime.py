@@ -29,10 +29,13 @@ from ouroboros.orchestrator.adapter import (
     FULL_CAPABILITIES,
     AgentMessage,
     ParamSupport,
+    ResolvedWorkerCwd,
     RuntimeCapabilities,
     RuntimeHandle,
     SubagentOrchestration,
     TaskResult,
+    resolve_worker_cwd,
+    worker_cwd_failure_message,
 )
 from ouroboros.orchestrator.subagent_label import derive_session_label
 
@@ -131,7 +134,7 @@ class LeaderDrivenWorkerRuntime:
         transport: LeaderDrivenWorkerTransport,
         runtime_backend: str,
         llm_backend: str,
-        cwd: str | os.PathLike[str] | None = None,
+        cwd: str | os.PathLike[str] | ResolvedWorkerCwd | None = None,
         permission_mode: str | None = None,
         model: str | None = None,
         reasoning_effort_support: ParamSupport = ParamSupport.IGNORED,
@@ -142,7 +145,7 @@ class LeaderDrivenWorkerRuntime:
         self._transport = transport
         self._runtime_backend = runtime_backend
         self._llm_backend = llm_backend
-        self._cwd = os.fspath(cwd) if cwd is not None else None
+        self._cwd = resolve_worker_cwd(cwd)
         self._permission_mode = permission_mode
         self._model = model
         self._reasoning_effort_support = reasoning_effort_support
@@ -233,6 +236,15 @@ class LeaderDrivenWorkerRuntime:
         and resume. Each transport applies only controls it can enforce and must
         advertise that truth through its runtime capabilities.
         """
+        cwd_failure = worker_cwd_failure_message(
+            self._cwd,
+            runtime_backend=self._runtime_backend,
+            resume_handle=resume_handle,
+        )
+        if cwd_failure is not None:
+            yield cwd_failure
+            return
+
         # A handle carrying ``fork_session`` is the HOST session delegated by the
         # parent (its native_session_id is the human's LIVE conversation). It is a
         # fork SOURCE, never a resume target: resuming it would append worker turns
@@ -373,5 +385,7 @@ class LeaderDrivenWorkerRuntime:
 __all__ = [
     "LeaderDrivenWorkerRuntime",
     "LeaderDrivenWorkerTransport",
+    "ResolvedWorkerCwd",
     "WorkerTurn",
+    "resolve_worker_cwd",
 ]

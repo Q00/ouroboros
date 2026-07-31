@@ -106,8 +106,8 @@ python scripts/export_interview_latency.py \
   > interview-latency.jsonl
 ```
 
-The database defaults to `~/.ouroboros/ouroboros.db`; use `--db` only when the
-EventStore lives elsewhere. The exporter opens SQLite in read-only mode and
+The database defaults to the configured runtime EventStore shown by
+`ouroboros config show`; use `--db` to override it. The exporter opens SQLite in read-only mode and
 emits only:
 
 - SHA-256-hashed interview id.

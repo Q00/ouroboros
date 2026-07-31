@@ -28,18 +28,26 @@ question: **can the user open a browser pointed at this machine?**
 1. Launch in the background (the command serves until stopped):
 
    ```bash
-   ouroboros config
+   if command -v ouroboros >/dev/null 2>&1; then
+     ouroboros config
+   else
+     uvx --from 'ouroboros-ai[tui]' ouroboros config
+   fi
    ```
 
    The command detects the non-interactive context itself and serves the
-   settings app over a local web server, auto-opening the user's browser.
-   In a development checkout use `uv run ouroboros config`.
+   settings app over a local web server, auto-opening the user's browser. The
+   `uvx` fallback is required for a Marketplace-plugin-only install, where the
+   MCP server exists but `ouroboros` is not on `PATH`. In a development
+   checkout use `uv run ouroboros config`.
 
 2. Relay the `http://localhost:<port>` line from the output so the user can
    open it manually if the browser did not pop up.
 
 3. Tell the user: edit → Save → then ask you to stop the server. Remind them
-   a running MCP server may need a reconnect to pick up backend changes.
+   a running MCP server may need a reconnect to pick up backend changes. Tell
+   them they can reopen these settings any time with `ooo config`; saving a
+   model choice never locks it permanently.
 
 ### Branch B — remote host the user can reach over the network (SSH box, home server)
 
@@ -74,6 +82,7 @@ conversationally over the scriptable surface:
    ouroboros config set orchestrator.runtime_backend <agent>
    ouroboros config set orchestrator.runtime_profile.stages.<interview|execute|evaluate|reflect> <agent>
    ouroboros config set clarification.default_model <model>        # interview & seed
+   ouroboros config set execution.default_model <model>            # execute
    ouroboros config set evaluation.semantic_model <model>          # evaluate
    ouroboros config set resilience.reflect_model <model>           # reflect
    ouroboros config set llm.backend <backend>                      # internal LLM calls

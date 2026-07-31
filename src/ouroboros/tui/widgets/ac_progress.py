@@ -10,10 +10,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from rich.text import Text
+from textual import events
 from textual.app import ComposeResult
 from textual.reactive import reactive
 from textual.widget import Widget
 from textual.widgets import Label, ProgressBar, Static
+
+from ouroboros.tui.cell_width import fit_text
 
 if TYPE_CHECKING:
     pass
@@ -33,6 +37,8 @@ STATUS_STYLES = {
     "completed": "green",
     "failed": "red",
 }
+
+_FALLBACK_CONTENT_WIDTH = 45
 
 
 @dataclass
@@ -199,11 +205,12 @@ class ACProgressWidget(Widget):
             )
             yield Static(remaining_text, classes="progress-footer")
 
-    def _render_ac_item(self, ac: ACProgressItem) -> Static:
+    def _render_ac_item(self, ac: ACProgressItem, *, max_width: int | None = None) -> Static:
         """Render a single AC item.
 
         Args:
             ac: AC progress item to render.
+            max_width: Optional total row width for direct tests.
 
         Returns:
             Static widget with formatted AC line.
@@ -211,24 +218,34 @@ class ACProgressWidget(Widget):
         icon = STATUS_ICONS.get(ac.status, "○")
         style = STATUS_STYLES.get(ac.status, "dim")
 
-        # Truncate content
-        content = ac.content[:45] + "..." if len(ac.content) > 45 else ac.content
+        prefix = Text(" ")
+        prefix.append(icon, style=style)
+        prefix.append(f"  {ac.index}. ")
 
-        # Build label
-        label = f" [{style}]{icon}[/{style}]  {ac.index}. {content}"
-
-        # Add elapsed time
+        suffix = Text()
         if ac.elapsed_display:
             if ac.status == "in_progress":
-                label += f"  [yellow dim][{ac.elapsed_display}...][/yellow dim]"
+                suffix.append(f"  [{ac.elapsed_display}...]", style="yellow dim")
             else:
-                label += f"  [dim][{ac.elapsed_display}][/dim]"
+                suffix.append(f"  [{ac.elapsed_display}]", style="dim")
+
+        if max_width is None:
+            max_width = self.size.width
+            if max_width <= 0:
+                max_width = prefix.cell_len + _FALLBACK_CONTENT_WIDTH + suffix.cell_len
+
+        label = fit_text(ac.content, max_width, prefix=prefix, suffix=suffix)
 
         classes = "ac-item current" if ac.is_current else "ac-item"
         return Static(label, classes=classes)
 
     def watch_acceptance_criteria(self, _new_criteria: list[ACProgressItem]) -> None:
         """React to acceptance_criteria changes."""
+        self.refresh(recompose=True)
+
+    def on_resize(self, event: events.Resize) -> None:
+        """Recompose rows against the newly measured content width."""
+        del event
         self.refresh(recompose=True)
 
     def watch_completed_count(self, _new_count: int) -> None:

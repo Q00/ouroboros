@@ -11,7 +11,6 @@ import asyncio
 from collections import deque
 from collections.abc import AsyncIterator
 import contextlib
-import os
 from pathlib import Path
 import re
 
@@ -29,10 +28,13 @@ from ouroboros.observability.logging import get_logger
 from ouroboros.orchestrator.adapter import (
     AgentMessage,
     ParamSupport,
+    ResolvedWorkerCwd,
     RuntimeCapabilities,
     RuntimeHandle,
     SkillDispatchHandler,
     TaskResult,
+    resolve_worker_cwd,
+    worker_cwd_failure_message,
 )
 from ouroboros.orchestrator.skill_intercept import SkillInterceptor
 from ouroboros.providers.codex_cli_stream import terminate_runtime_process
@@ -106,7 +108,7 @@ class KiroAgentAdapter:
         *,
         cli_path: str | Path | None = None,
         model: str | None = None,
-        cwd: str | Path | None = None,
+        cwd: str | Path | ResolvedWorkerCwd | None = None,
         permission_mode: str | None = None,
         skill_dispatcher: SkillDispatchHandler | None = None,
         llm_backend: str | None = None,
@@ -116,7 +118,7 @@ class KiroAgentAdapter:
         self._cli_path = self._resolve_cli_path(cli_path)
         self._model = model
         self._permission_mode_requested = permission_mode is not None
-        self._cwd = str(Path(cwd).expanduser()) if cwd is not None else os.getcwd()
+        self._cwd = resolve_worker_cwd(cwd)
         self._permission_mode = permission_mode or "acceptEdits"
         self._skill_dispatcher = skill_dispatcher
         self._llm_backend = llm_backend or "kiro"
@@ -302,6 +304,15 @@ class KiroAgentAdapter:
         backend would silently drop a runtime behavior that Claude and Codex
         both preserve.
         """
+        cwd_failure = worker_cwd_failure_message(
+            self._cwd,
+            runtime_backend=self._runtime_backend_name,
+            resume_handle=resume_handle,
+        )
+        if cwd_failure is not None:
+            yield cwd_failure
+            return
+
         current_handle = resume_handle
         intercepted_messages = await self._interceptor.maybe_dispatch(prompt, current_handle)
         if intercepted_messages is not None:

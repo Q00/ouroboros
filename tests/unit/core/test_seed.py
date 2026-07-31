@@ -11,6 +11,9 @@ from pydantic import ValidationError as PydanticValidationError
 import pytest
 
 from ouroboros.core.seed import (
+    MAX_AC_SUCCESS_CONTRACT_ARTIFACT_CHARS,
+    MAX_AC_SUCCESS_CONTRACT_ARTIFACTS,
+    MAX_AC_SUCCESS_CONTRACT_CHARS,
     AcceptanceCriterionSpec,
     EvaluationPrinciple,
     ExitCondition,
@@ -463,6 +466,45 @@ class TestSeed:
             "logs/task.log",
             "./Build Outputs",
         )
+
+    def test_success_contract_accepts_exact_capsule_artifact_limit(self) -> None:
+        spec = AcceptanceCriterionSpec(
+            description="bounded artifact contract",
+            expected_artifacts=tuple(
+                f"out/artifact-{index}.txt" for index in range(MAX_AC_SUCCESS_CONTRACT_ARTIFACTS)
+            ),
+        )
+
+        assert len(spec.expected_artifacts) == MAX_AC_SUCCESS_CONTRACT_ARTIFACTS
+
+    def test_success_contract_rejects_artifacts_beyond_capsule_limit(self) -> None:
+        with pytest.raises(PydanticValidationError, match="artifact limit exceeded"):
+            AcceptanceCriterionSpec(
+                description="oversized artifact contract",
+                expected_artifacts=tuple(
+                    f"out/artifact-{index}.txt"
+                    for index in range(MAX_AC_SUCCESS_CONTRACT_ARTIFACTS + 1)
+                ),
+            )
+
+    def test_success_contract_rejects_capsule_locator_overflow(self) -> None:
+        artifact = "/".join(
+            "a" * 250 for _ in range(MAX_AC_SUCCESS_CONTRACT_ARTIFACT_CHARS // 251 + 1)
+        )
+        assert len(artifact) > MAX_AC_SUCCESS_CONTRACT_ARTIFACT_CHARS
+
+        with pytest.raises(PydanticValidationError, match="artifacts are invalid"):
+            AcceptanceCriterionSpec(
+                description="oversized artifact locator",
+                expected_artifacts=(artifact,),
+            )
+
+    def test_success_contract_rejects_total_capsule_character_overflow(self) -> None:
+        with pytest.raises(PydanticValidationError, match="character budget exceeded"):
+            AcceptanceCriterionSpec(
+                description="oversized contract",
+                verify_command="x" * (MAX_AC_SUCCESS_CONTRACT_CHARS + 1),
+            )
 
     @pytest.mark.parametrize(
         "artifact",

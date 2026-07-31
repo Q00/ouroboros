@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from structlog.testing import capture_logs
 
+from ouroboros import __version__
 from ouroboros.core.lineage import EvaluationSummary, TaskResult
 from ouroboros.core.types import Result
 from ouroboros.events.base import BaseEvent
@@ -19,6 +20,7 @@ from ouroboros.mcp.server.adapter import (
     VALID_TRANSPORTS,
     MCPServerAdapter,
     _agent_results_from_execution_summary,
+    _build_prompt_signature_with_aliases,
     _build_tool_signature_with_aliases,
     _evaluation_summary_from_spec_verification,
     _extract_feedback_metadata_from_artifact,
@@ -35,6 +37,8 @@ from ouroboros.mcp.tools.job_handlers import JobResultHandler, JobWaitHandler
 from ouroboros.mcp.types import (
     ContentType,
     MCPContentItem,
+    MCPPromptArgument,
+    MCPPromptDefinition,
     MCPResourceContent,
     MCPResourceDefinition,
     MCPToolDefinition,
@@ -120,7 +124,7 @@ class TestMCPServerAdapter:
         """Adapter is created with correct defaults."""
         adapter = MCPServerAdapter()
         assert adapter.info.name == "ouroboros-mcp"
-        assert adapter.info.version == "1.0.0"
+        assert adapter.info.version == __version__
 
     def test_adapter_custom_name(self) -> None:
         """Adapter accepts custom name and version."""
@@ -129,7 +133,7 @@ class TestMCPServerAdapter:
         assert adapter.info.version == "2.0.0"
 
     def test_adapter_stores_instructions_for_serve(self) -> None:
-        """MCP server ``instructions`` are stored so ``serve()`` can pass them to FastMCP."""
+        """MCP server ``instructions`` are stored for the SDK v2 boundary."""
         adapter = MCPServerAdapter(instructions="hello ubiquitous language")
         assert adapter._instructions == "hello ubiquitous language"
         # Default is None when the caller does not supply instructions.
@@ -184,6 +188,22 @@ class TestMCPServerAdapter:
             "max_tokens": "max.tokens",
             "_class": "class",
         }
+
+    def test_build_prompt_signature_preserves_wire_argument_aliases(self) -> None:
+        definition = MCPPromptDefinition(
+            name="review",
+            arguments=(
+                MCPPromptArgument(name="file-path", description="File to review"),
+                MCPPromptArgument(name="class", required=False),
+            ),
+        )
+
+        signature, aliases = _build_prompt_signature_with_aliases(definition)
+
+        assert tuple(signature.parameters) == ("file_path", "_class")
+        assert aliases == {"file_path": "file-path", "_class": "class"}
+        assert signature.parameters["file_path"].default.is_required()
+        assert signature.parameters["_class"].default is None
 
     def test_validate_parameter_constraints_rejects_enum_and_array_items(self) -> None:
         parameters = (
@@ -914,7 +934,7 @@ class TestMCPServerAdapterTools:
 
         assert converted.content[0].text == "Success"
         assert converted.meta == {"internal_reasoning": ["phase: start"]}
-        assert converted.structuredContent == {
+        assert converted.structured_content == {
             "job_id": "job_123",
             "session_id": "orch_123",
         }
@@ -1191,8 +1211,8 @@ class TestServeTransport:
             await adapter.serve(transport="bogus")
 
     @pytest.mark.asyncio
-    async def test_sse_passes_host_port_to_fastmcp(self):
-        """Verify host/port are forwarded to FastMCP constructor."""
+    async def test_sse_passes_host_port_to_mcpserver_run_method(self):
+        """Network binding belongs to the v2 run method, not construction."""
         from unittest.mock import MagicMock, patch
 
         mock_fastmcp_cls = MagicMock()
@@ -1204,23 +1224,16 @@ class TestServeTransport:
 
         adapter = MCPServerAdapter()
 
-        with (
-            patch(
-                "ouroboros.mcp.server.adapter.FastMCP",
-                mock_fastmcp_cls,
-                create=True,
-            ),
-            patch.dict(
-                "sys.modules",
-                {"mcp.server.fastmcp": MagicMock(FastMCP=mock_fastmcp_cls)},
-            ),
+        with patch(
+            "ouroboros.mcp.server.adapter._OuroborosSDKServer",
+            mock_fastmcp_cls,
         ):
             await adapter.serve(transport="sse", host="0.0.0.0", port=9000)
 
         mock_fastmcp_cls.assert_called_once()
-        call_kwargs = mock_fastmcp_cls.call_args
-        assert call_kwargs.kwargs["host"] == "0.0.0.0"
-        assert call_kwargs.kwargs["port"] == 9000
+        assert mock_fastmcp_cls.call_args.args == (adapter,)
+        assert mock_fastmcp_cls.call_args.kwargs["version"] == __version__
+        mock_instance.run_sse_async.assert_awaited_once_with(host="0.0.0.0", port=9000)
 
     @pytest.mark.asyncio
     async def test_stdio_serve_logs_exit(self) -> None:
@@ -1238,13 +1251,8 @@ class TestServeTransport:
 
         with (
             patch(
-                "ouroboros.mcp.server.adapter.FastMCP",
+                "ouroboros.mcp.server.adapter._OuroborosSDKServer",
                 mock_fastmcp_cls,
-                create=True,
-            ),
-            patch.dict(
-                "sys.modules",
-                {"mcp.server.fastmcp": MagicMock(FastMCP=mock_fastmcp_cls)},
             ),
             capture_logs() as logs,
         ):
@@ -1258,7 +1266,7 @@ class TestServeTransport:
 
     @pytest.mark.asyncio
     async def test_sse_ephemeral_port_zero(self):
-        """port=0 must reach FastMCP without being rewritten."""
+        """port=0 must reach MCPServer's run method without being rewritten."""
         from unittest.mock import MagicMock, patch
 
         mock_fastmcp_cls = MagicMock()
@@ -1270,24 +1278,17 @@ class TestServeTransport:
 
         adapter = MCPServerAdapter()
 
-        with (
-            patch(
-                "ouroboros.mcp.server.adapter.FastMCP",
-                mock_fastmcp_cls,
-                create=True,
-            ),
-            patch.dict(
-                "sys.modules",
-                {"mcp.server.fastmcp": MagicMock(FastMCP=mock_fastmcp_cls)},
-            ),
+        with patch(
+            "ouroboros.mcp.server.adapter._OuroborosSDKServer",
+            mock_fastmcp_cls,
         ):
             await adapter.serve(transport="sse", host="localhost", port=0)
 
-        assert mock_fastmcp_cls.call_args.kwargs["port"] == 0
+        mock_instance.run_sse_async.assert_awaited_once_with(host="localhost", port=0)
 
     @pytest.mark.asyncio
-    async def test_streamable_http_passes_host_port_to_fastmcp(self):
-        """Verify host/port are forwarded to FastMCP for streamable HTTP."""
+    async def test_streamable_http_uses_modern_stateless_run_options(self):
+        """Streamable HTTP v2 is bound and configured at run time."""
         from unittest.mock import MagicMock, patch
 
         mock_fastmcp_cls = MagicMock()
@@ -1299,31 +1300,27 @@ class TestServeTransport:
 
         adapter = MCPServerAdapter()
 
-        with (
-            patch(
-                "ouroboros.mcp.server.adapter.FastMCP",
-                mock_fastmcp_cls,
-                create=True,
-            ),
-            patch.dict(
-                "sys.modules",
-                {"mcp.server.fastmcp": MagicMock(FastMCP=mock_fastmcp_cls)},
-            ),
+        with patch(
+            "ouroboros.mcp.server.adapter._OuroborosSDKServer",
+            mock_fastmcp_cls,
         ):
             await adapter.serve(transport="streamable-http", host="127.0.0.1", port=9100)
 
         mock_fastmcp_cls.assert_called_once()
-        call_kwargs = mock_fastmcp_cls.call_args
-        assert call_kwargs.kwargs["host"] == "127.0.0.1"
-        assert call_kwargs.kwargs["port"] == 9100
-        mock_instance.run_streamable_http_async.assert_awaited_once()
+        assert mock_fastmcp_cls.call_args.args == (adapter,)
+        assert mock_fastmcp_cls.call_args.kwargs["version"] == __version__
+        mock_instance.run_streamable_http_async.assert_awaited_once_with(
+            host="127.0.0.1",
+            port=9100,
+            stateless_http=True,
+        )
 
     @pytest.mark.asyncio
-    async def test_streamable_http_real_fastmcp_exposes_mcp_path(self) -> None:
-        """Real FastMCP streamable HTTP serving exposes the advertised /mcp path."""
+    async def test_streamable_http_real_mcpserver_exposes_mcp_path(self) -> None:
+        """Real MCPServer streamable HTTP serving exposes the advertised /mcp path."""
         from unittest.mock import patch
 
-        pytest.importorskip("mcp.server.fastmcp")
+        pytest.importorskip("mcp.server")
         pytest.importorskip("uvicorn")
 
         served = SimpleNamespace(config=None)
@@ -1340,9 +1337,6 @@ class TestServeTransport:
         assert served.config.host == "127.0.0.1"
         assert served.config.port == 9100
 
-        fastmcp = adapter._mcp_server
-        assert fastmcp.settings.streamable_http_path == "/mcp"
-
         route_paths = {getattr(route, "path", None) for route in served.config.app.routes}
         assert "/mcp" in route_paths
 
@@ -1350,14 +1344,14 @@ class TestServeTransport:
     async def test_real_fastmcp_tools_list_preserves_parameter_descriptions(self) -> None:
         from unittest.mock import patch
 
-        fastmcp_module = pytest.importorskip("mcp.server.fastmcp")
+        mcp_server_module = pytest.importorskip("mcp.server")
         from ouroboros.mcp.tools.definitions import StartEvolveStepHandler
 
         adapter = MCPServerAdapter()
         adapter.register_tool(StartEvolveStepHandler())
 
         with patch.object(
-            fastmcp_module.FastMCP,
+            mcp_server_module.MCPServer,
             "run_stdio_async",
             new=AsyncMock(),
         ):
@@ -1365,7 +1359,7 @@ class TestServeTransport:
 
         tools = await adapter._mcp_server.list_tools()
         tool = next(item for item in tools if item.name == "ouroboros_start_evolve_step")
-        description = tool.inputSchema["properties"]["seed_content"]["description"]
+        description = tool.input_schema["properties"]["seed_content"]["description"]
 
         assert "YAML-formatted string" in description
         assert "not JSON-shaped text or an object literal" in description
@@ -1375,7 +1369,7 @@ class TestServeTransport:
     async def test_real_fastmcp_tools_list_preserves_parameter_schema_metadata(self) -> None:
         from unittest.mock import patch
 
-        fastmcp_module = pytest.importorskip("mcp.server.fastmcp")
+        mcp_server_module = pytest.importorskip("mcp.server")
         from ouroboros.mcp.tools.authoring_handlers import GenerateSeedHandler
         from ouroboros.mcp.tools.brownfield_handler import BrownfieldHandler
         from ouroboros.mcp.tools.evolution_handlers import StartEvolveStepHandler
@@ -1386,7 +1380,7 @@ class TestServeTransport:
         adapter.register_tool(StartEvolveStepHandler())
 
         with patch.object(
-            fastmcp_module.FastMCP,
+            mcp_server_module.MCPServer,
             "run_stdio_async",
             new=AsyncMock(),
         ):
@@ -1394,7 +1388,7 @@ class TestServeTransport:
 
         tools = {tool.name: tool for tool in await adapter._mcp_server.list_tools()}
 
-        brownfield_action = tools["ouroboros_brownfield"].inputSchema["properties"]["action"]
+        brownfield_action = tools["ouroboros_brownfield"].input_schema["properties"]["action"]
         assert brownfield_action["enum"] == [
             "scan",
             "register",
@@ -1403,18 +1397,18 @@ class TestServeTransport:
             "set_defaults",
         ]
 
-        authoring_client_gates = tools["ouroboros_generate_seed"].inputSchema["properties"][
+        authoring_client_gates = tools["ouroboros_generate_seed"].input_schema["properties"][
             "client_gates"
         ]
         assert authoring_client_gates["items"] == {"type": "string"}
 
         evolve_tool = tools["ouroboros_start_evolve_step"]
-        execute_schema = evolve_tool.inputSchema["properties"]["execute"]
+        execute_schema = evolve_tool.input_schema["properties"]["execute"]
         assert execute_schema["type"] == "boolean"
         assert "null" not in execute_schema.get("type", [])
-        seed_schema = evolve_tool.inputSchema["properties"]["seed_content"]
+        seed_schema = evolve_tool.input_schema["properties"]["seed_content"]
         assert "default" not in seed_schema
-        assert "seed_content" not in evolve_tool.inputSchema.get("required", [])
+        assert "seed_content" not in evolve_tool.input_schema.get("required", [])
 
     @pytest.mark.asyncio
     @pytest.mark.asyncio
@@ -1426,7 +1420,7 @@ class TestServeTransport:
         with `Field(default=...)`, so the two surfaces must be pinned against each
         other or they silently describe different tools.
         """
-        fastmcp_module = pytest.importorskip("mcp.server.fastmcp")
+        mcp_server_module = pytest.importorskip("mcp.server")
 
         class DefaultedRequiredHandler(MockToolHandler):
             @property
@@ -1448,17 +1442,17 @@ class TestServeTransport:
         adapter = MCPServerAdapter()
         handler = DefaultedRequiredHandler(name="defaulted_tool")
         adapter.register_tool(handler)
-        with patch.object(fastmcp_module.FastMCP, "run_stdio_async", new=AsyncMock()):
+        with patch.object(mcp_server_module.MCPServer, "run_stdio_async", new=AsyncMock()):
             await adapter.serve(transport="stdio")
 
         tools = await adapter._mcp_server.list_tools()
         tool = next(t for t in tools if t.name == "defaulted_tool")
-        mode_schema = tool.inputSchema["properties"]["mode"]
+        mode_schema = tool.input_schema["properties"]["mode"]
 
         canonical = handler.definition.to_input_schema()["properties"]["mode"]
         assert canonical["default"] == "safe"
         assert mode_schema["default"] == "safe", "FastMCP schema dropped the canonical default"
-        assert "mode" in tool.inputSchema["required"], "the default must not make it optional"
+        assert "mode" in tool.input_schema["required"], "the default must not make it optional"
 
     def test_integer_array_items_accept_integral_floats(self) -> None:
         """JSON Schema `type: integer` matches any number with no fractional part.
@@ -1487,7 +1481,7 @@ class TestServeTransport:
         None`, which crashed handlers doing `.get(k, [])`. #1726 normalized that at
         the wrapper chokepoint, so the contract asserted here is omission, not None.
         """
-        fastmcp_module = pytest.importorskip("mcp.server.fastmcp")
+        mcp_server_module = pytest.importorskip("mcp.server")
 
         class OptionalParameterHandler(MockToolHandler):
             @property
@@ -1534,7 +1528,7 @@ class TestServeTransport:
         adapter.register_tool(handler)
         with (
             patch.object(
-                fastmcp_module.FastMCP,
+                mcp_server_module.MCPServer,
                 "run_stdio_async",
                 new=AsyncMock(),
             ),
@@ -1601,7 +1595,7 @@ class TestServeTransport:
 
         with (
             patch(
-                "ouroboros.mcp.server.adapter.FastMCP",
+                "ouroboros.mcp.server.adapter._OuroborosSDKServer",
                 mock_fastmcp_cls,
                 create=True,
             ),
@@ -1646,7 +1640,7 @@ class TestServeTransport:
 
         with (
             patch(
-                "ouroboros.mcp.server.adapter.FastMCP",
+                "ouroboros.mcp.server.adapter._OuroborosSDKServer",
                 mock_fastmcp_cls,
                 create=True,
             ),
@@ -1718,7 +1712,7 @@ class TestServeTransport:
 
         with (
             patch(
-                "ouroboros.mcp.server.adapter.FastMCP",
+                "ouroboros.mcp.server.adapter._OuroborosSDKServer",
                 mock_fastmcp_cls,
                 create=True,
             ),
@@ -1747,10 +1741,10 @@ class TestServeTransport:
         real_adapter = MCPServerAdapter()
         real_handler = OptionalToolHandler(name="optional_tool")
         real_adapter.register_tool(real_handler)
-        fastmcp_module = pytest.importorskip("mcp.server.fastmcp")
+        mcp_server_module = pytest.importorskip("mcp.server")
 
         with patch.object(
-            fastmcp_module.FastMCP,
+            mcp_server_module.MCPServer,
             "run_stdio_async",
             new=AsyncMock(),
         ):
@@ -1773,7 +1767,7 @@ class TestServeTransport:
         mock_instance = MagicMock()
         captured_resources: dict[str, Any] = {}
 
-        def capture_resource_decorator(uri: str):
+        def capture_resource_decorator(uri: str, **_kwargs: Any):
             def decorator(func):
                 captured_resources[uri] = func
                 return func
@@ -1787,7 +1781,7 @@ class TestServeTransport:
 
         with (
             patch(
-                "ouroboros.mcp.server.adapter.FastMCP",
+                "ouroboros.mcp.server.adapter._OuroborosSDKServer",
                 mock_fastmcp_cls,
                 create=True,
             ),
@@ -1825,7 +1819,7 @@ class TestServeTransport:
         # serve() should reject the incompatible configuration immediately
         with pytest.raises(
             ValueError,
-            match="FastMCP transport does not support authentication",
+            match="MCPServer transport does not support authentication",
         ):
             await adapter.serve(transport="stdio")
 
@@ -1858,7 +1852,7 @@ class TestServeTransport:
 
         with (
             patch(
-                "ouroboros.mcp.server.adapter.FastMCP",
+                "ouroboros.mcp.server.adapter._OuroborosSDKServer",
                 mock_fastmcp_cls,
                 create=True,
             ),
@@ -1888,7 +1882,7 @@ class TestServeTransport:
 
         with pytest.raises(
             ValueError,
-            match="FastMCP transport does not support rate limiting",
+            match="MCPServer transport does not support rate limiting",
         ):
             await adapter.serve(transport="stdio")
 

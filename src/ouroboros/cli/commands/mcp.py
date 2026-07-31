@@ -367,6 +367,10 @@ _WRAPPER_BASENAMES = frozenset(
     {"uv", "uvx", "uv.exe", "uvx.exe", "sh", "bash", "zsh", "dash", "fish", "env"}
 )
 
+# Slack for the watchdog's start-marker comparison. The Linux marker is exact,
+# so this only absorbs the 1-second resolution of the Darwin `ps lstart` path.
+_START_MARKER_TOLERANCE_SECONDS = 2.0
+
 
 def _ps_value(pid: int, column: str) -> str | None:
     """Best-effort single-column ``ps`` lookup (POSIX only)."""
@@ -385,7 +389,47 @@ def _ps_value(pid: int, column: str) -> str | None:
     return value or None
 
 
-def _client_is_alive(pid: int, start_time: float | None) -> bool:
+def _process_start_marker(pid: int) -> float | None:
+    """Drift-free start marker for the watchdog's own liveness comparison.
+
+    On Linux this is seconds since boot, taken straight from
+    ``/proc/<pid>/stat`` field 22, which never moves while the process lives.
+    It is deliberately *not* the epoch value from ``process_start_time()``:
+    that adds ``/proc/stat``'s ``btime``, which WSL2 re-derives from a clock
+    that resyncs, so it drifts upward for an unchanged pid and eventually
+    trips the tolerance below — the false "client gone" of #1699.
+
+    This marker is recorded and compared inside a single process and is never
+    persisted, so a boot-relative value is sufficient here. The epoch form
+    stays the cross-process identity used by lease payloads, the PID registry
+    and detached-job ownership, and is left untouched.
+    """
+    if sys.platform == "darwin":
+        # ps lstart does not drift; reuse the shared helper there.
+        return process_start_time(pid)
+    # Read bytes: comm carries the raw process name, which the kernel accepts
+    # as arbitrary non-NUL bytes. read_text() would raise UnicodeDecodeError —
+    # not an OSError — on a legal name like b"bad-\xff-name", and that would
+    # escape _resolve_client_identity and abort server startup.
+    try:
+        raw = Path(f"/proc/{pid}/stat").read_bytes()
+    except OSError:
+        return None
+    # Field 2 (comm) is parenthesised and may itself contain spaces and ')',
+    # so split only what follows the LAST ')' — field 3 (state) onwards.
+    close = raw.rfind(b")")
+    if close == -1:
+        return None
+    fields = raw[close + 1 :].split()
+    if len(fields) < 20:
+        return None
+    try:
+        return int(fields[19]) / os.sysconf("SC_CLK_TCK")
+    except (ValueError, OSError, ZeroDivisionError):
+        return None
+
+
+def _client_is_alive(pid: int, start_marker: float | None) -> bool:
     """Client liveness = identity-alive AND not a defunct (zombie) entry.
 
     A SIGKILLed client whose parent never reaps it keeps a signalable
@@ -393,23 +437,34 @@ def _client_is_alive(pid: int, start_time: float | None) -> bool:
     descriptors are long gone. stdin EOF covers that case for stdio
     transports, but streamable-http has no EOF to fall back on, so the
     watchdog must treat a Z-state client as dead.
+
+    ``start_marker`` comes from ``_process_start_marker`` and guards against
+    pid recycling.
     """
     try:
-        if not is_process_identity_alive(pid, start_time):
-            return False
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        pass
     except OSError:
         return False
+    if start_marker is not None:
+        current = _process_start_marker(pid)
+        if current is not None and abs(current - start_marker) > _START_MARKER_TOLERANCE_SECONDS:
+            return False
     stat = _ps_value(pid, "stat")
     return stat is None or not stat.startswith("Z")
 
 
 def _resolve_client_identity(orig_ppid: int) -> tuple[int, float | None] | None:
-    """Resolve the real MCP client's process identity (pid, start time).
+    """Resolve the real MCP client's process identity (pid, start marker).
 
     Walks the ancestor chain from the direct parent, skipping known wrapper
     binaries (uv/uvx/shells), and returns the first non-wrapper ancestor —
     the process whose death means this server is orphaned. The recorded
-    start time guards the later liveness polls against pid recycling.
+    start marker (see ``_process_start_marker``) guards the later liveness
+    polls against pid recycling.
 
     ``OUROBOROS_CLIENT_PID`` overrides the walk for spawners that want to
     pin the watched process explicitly. Returns None when the client cannot
@@ -425,7 +480,7 @@ def _resolve_client_identity(orig_ppid: int) -> tuple[int, float | None] | None:
         except ValueError:
             override_pid = 0
         if override_pid > 1:
-            return override_pid, process_start_time(override_pid)
+            return override_pid, _process_start_marker(override_pid)
     pid = orig_ppid
     for _ in range(16):
         if pid <= 1:
@@ -434,7 +489,7 @@ def _resolve_client_identity(orig_ppid: int) -> tuple[int, float | None] | None:
         if comm is None:
             return None
         if Path(comm).name.lower() not in _WRAPPER_BASENAMES:
-            return pid, process_start_time(pid)
+            return pid, _process_start_marker(pid)
         ppid_raw = _ps_value(pid, "ppid")
         if ppid_raw is None:
             return None
@@ -475,10 +530,11 @@ async def _run_mcp_server(
     # Ensure login-shell environment is available (critical for gateway-spawned processes)
     _ensure_shell_env()
 
+    from ouroboros.config.models import resolve_event_store_path
     from ouroboros.mcp.server.adapter import create_ouroboros_server, validate_transport
     from ouroboros.orchestrator.session import SessionRepository
     from ouroboros.persistence.brownfield import BrownfieldStore
-    from ouroboros.persistence.event_store import EventStore
+    from ouroboros.persistence.event_store import EventStore, sqlite_database_url
 
     # Validate transport early, before any expensive startup work
     try:
@@ -492,13 +548,23 @@ async def _run_mcp_server(
 
     _console_out = _stderr_console if transport == "stdio" else Console()
 
-    # Create EventStore with custom path if provided
-    if db_path:
-        event_store = EventStore(f"sqlite+aiosqlite:///{db_path}")
-        brownfield_store = BrownfieldStore(f"sqlite+aiosqlite:///{db_path}")
-    else:
-        event_store = EventStore()
-        brownfield_store = BrownfieldStore()
+    # Resolve once so both stores share one durable authority even if config
+    # changes while the long-lived MCP process is starting.
+    try:
+        if db_path:
+            resolved_db_path = Path(db_path).expanduser()
+        else:
+            resolved_db_path = resolve_event_store_path()
+        resolved_db_path.parent.mkdir(parents=True, exist_ok=True)
+        resolved_exists = resolved_db_path.exists() or resolved_db_path.is_symlink()
+        if resolved_exists and not resolved_db_path.is_file():
+            raise ValueError("invalid EventStore target")
+        database_url = sqlite_database_url(resolved_db_path)
+    except (OSError, RuntimeError, ValueError):
+        _console_out.print("[red]Invalid EventStore configuration.[/red]")
+        raise typer.Exit(1) from None
+    event_store = EventStore(database_url)
+    brownfield_store = BrownfieldStore(database_url)
 
     cleanup_task: asyncio.Task[None] | None = None
 
@@ -564,7 +630,6 @@ async def _run_mcp_server(
         # registers handlers with proper dependencies (event_store, llm_adapter, etc.).
         server = create_ouroboros_server(
             name="ouroboros-mcp",
-            version="1.0.0",
             event_store=event_store,
             brownfield_store=brownfield_store,
             runtime_backend=runtime_backend,
@@ -854,7 +919,10 @@ def serve(
         str,
         typer.Option(
             "--db",
-            help="Path to EventStore database (default: ~/.ouroboros/ouroboros.db)",
+            help=(
+                "Override the shared EventStore path "
+                "(default: persistence.database_path with legacy fallback)."
+            ),
         ),
     ] = "",
     runtime: Annotated[
@@ -937,9 +1005,11 @@ def serve(
     except ImportError as e:
         _stderr_console.print(f"[red]MCP dependencies not installed: {e}[/red]")
         _stderr_console.print(
-            "[blue]Fix for uv tool installs: uv tool install 'ouroboros-ai\\[mcp,claude]'\n"
-            "For pip/pipx installs: install 'ouroboros-ai\\[mcp,claude]' into the "
-            "environment that runs this server.[/blue]"
+            "[blue]Run MCP 2 in an isolated profile:\n"
+            "  uvx --from 'ouroboros-ai\\[mcp]' ouroboros mcp serve\n"
+            "or:\n"
+            "  pipx run --spec 'ouroboros-ai\\[mcp]' ouroboros mcp serve\n"
+            "Do not combine it with the MCP 1.x-based Claude SDK extra.[/blue]"
         )
         raise typer.Exit(1) from e
     except OSError as e:
@@ -994,7 +1064,6 @@ def info(
     # Create server with all tools pre-registered
     server = create_ouroboros_server(
         name="ouroboros-mcp",
-        version="1.0.0",
         runtime_backend=runtime.value if runtime else None,
         llm_backend=llm_backend.value if llm_backend else None,
     )

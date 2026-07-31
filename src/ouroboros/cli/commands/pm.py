@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Annotated, Any
 
 from rich.prompt import Confirm, Prompt
+import structlog
 import typer
 
 from ouroboros.bigbang.interview import InterviewRound
@@ -26,6 +27,7 @@ from ouroboros.cli.formatters import console
 from ouroboros.cli.formatters.panels import print_error, print_info, print_success, print_warning
 from ouroboros.cli.formatters.prompting import multiline_prompt_async
 from ouroboros.config import get_clarification_model, get_llm_backend
+from ouroboros.core.owner_only import secure_directory, write_owner_only
 from ouroboros.core.types import Result
 from ouroboros.observability import LoggingConfig, configure_logging
 from ouroboros.pm.handoff import build_pm_dev_handoff_command
@@ -42,6 +44,8 @@ app = typer.Typer(
     no_args_is_help=False,
     invoke_without_command=True,
 )
+
+log = structlog.get_logger()
 
 
 def _create_pm_litellm_adapter() -> Any:
@@ -341,7 +345,7 @@ def _save_cli_pm_meta(session_id: str, engine: Any) -> None:
     import json
 
     data_dir = Path.home() / ".ouroboros" / "data"
-    data_dir.mkdir(parents=True, exist_ok=True)
+    secure_directory(data_dir)
     meta_path = data_dir / f"pm_meta_{session_id}.json"
 
     # Build pending_reframe from the engine's reframe map (mirrors MCP _save_pm_meta)
@@ -369,7 +373,17 @@ def _save_cli_pm_meta(session_id: str, engine: Any) -> None:
         "classifications": [c.output_type.value for c in getattr(engine, "classifications", [])],
     }
 
-    meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    durability_confirmed = write_owner_only(
+        meta_path,
+        json.dumps(meta, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    if not durability_confirmed:
+        log.warning(
+            "pm.meta_save_durability_unconfirmed",
+            session_id=session_id,
+            path=str(meta_path),
+        )
 
 
 def _make_message_callback(debug: bool):

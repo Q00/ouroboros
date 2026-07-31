@@ -40,11 +40,14 @@ from ouroboros.orchestrator.adapter import (
     FULL_CAPABILITIES,
     AgentMessage,
     ParamSupport,
+    ResolvedWorkerCwd,
     RuntimeCapabilities,
     RuntimeHandle,
     SkillDispatchHandler,
     SubagentOrchestration,
     TaskResult,
+    resolve_worker_cwd,
+    worker_cwd_failure_message,
 )
 from ouroboros.orchestrator.opencode_event_normalizer import (
     OpenCodeEventContext,
@@ -194,7 +197,7 @@ class OpenCodeRuntime:
         cli_path: str | Path | None = None,
         permission_mode: str | None = None,
         model: str | None = None,
-        cwd: str | Path | None = None,
+        cwd: str | Path | ResolvedWorkerCwd | None = None,
         skills_dir: str | Path | None = None,
         skill_dispatcher: SkillDispatchHandler | None = None,
         llm_backend: str | None = None,
@@ -228,7 +231,7 @@ class OpenCodeRuntime:
         self._permission_mode_requested = permission_mode is not None
         self._permission_mode = permission_mode or "bypassPermissions"
         self._model = model
-        self._cwd = str(Path(cwd).expanduser()) if cwd is not None else os.getcwd()
+        self._cwd = resolve_worker_cwd(cwd)
         self._skills_dir = self._resolve_skills_dir(skills_dir)
         self._skill_dispatcher = skill_dispatcher
         self._llm_backend = llm_backend or self._default_llm_backend
@@ -1118,6 +1121,15 @@ class OpenCodeRuntime:
             :class:`~ouroboros.orchestrator.adapter.AgentMessage`
             values as they arrive from the CLI.
         """
+        cwd_failure = worker_cwd_failure_message(
+            self._cwd,
+            runtime_backend=self._runtime_backend,
+            resume_handle=resume_handle,
+        )
+        if cwd_failure is not None:
+            yield cwd_failure
+            return
+
         current_handle = resume_handle or self._build_runtime_handle(resume_session_id)
 
         # Resolve deterministic skill dispatch once before invoking OpenCode.

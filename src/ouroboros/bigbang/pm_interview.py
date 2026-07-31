@@ -5,7 +5,7 @@ Adds PM-specific behavior on top of the existing InterviewEngine:
 - Reframing technical questions for PM audience
 - Deferred item tracking for dev-only questions
 - PMSeed generation from completed interview
-- Brownfield repo management via ~/.ouroboros/ouroboros.db
+- Brownfield repo management via the configured runtime database
 - CodebaseExplorer scan-once semantics (shared context)
 
 Composition pattern: PMInterviewEngine *wraps* InterviewEngine without
@@ -39,7 +39,6 @@ from ouroboros.bigbang.interview import (
     MIN_ROUNDS_BEFORE_EARLY_EXIT,
     InterviewEngine,
     InterviewState,
-    _atomic_write_text,
     initial_context_summary_missing,
     prompt_safe_initial_context,
 )
@@ -52,6 +51,7 @@ from ouroboros.bigbang.question_classifier import (
 )
 from ouroboros.config import get_llm_model_for_role
 from ouroboros.core.errors import ProviderError, ValidationError
+from ouroboros.core.owner_only import write_owner_only
 from ouroboros.core.pm_snapshot import refresh_pm_snapshot_worktrees
 from ouroboros.core.types import Result
 from ouroboros.providers.base import (
@@ -146,7 +146,7 @@ class PMInterviewEngine:
     - Question classification via QuestionClassifier
     - Deferred item tracking (dev-only questions)
     - PMSeed extraction from completed interviews
-    - Brownfield repo registration (~/.ouroboros/ouroboros.db)
+    - Brownfield repo registration (configured runtime database)
     - Scan-once codebase context sharing
 
     Attributes:
@@ -1186,7 +1186,7 @@ class PMInterviewEngine:
             ensure_ascii=False,
             indent=2,
         )
-        durability_confirmed = _atomic_write_text(filepath, json_content)
+        durability_confirmed = write_owner_only(filepath, json_content)
 
         if not durability_confirmed:
             log.warning(

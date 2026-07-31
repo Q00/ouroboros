@@ -11,6 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
 from typer.testing import CliRunner
 
 from ouroboros.cli.commands.setup import app
@@ -137,6 +138,26 @@ class TestSetupRefreshUpdatesInstalledArtifacts:
         assert result.exit_code == 0
         mock_install.assert_called_once_with(codex_dir=codex_dir, prune=False)
         assert "codex" in result.output
+
+    def test_codex_refresh_preserves_raw_codex_home_for_symlink_refusal(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        real_home = tmp_path / "real-codex-home"
+        real_home.mkdir()
+        codex_home_link = tmp_path / ".codex"
+        try:
+            codex_home_link.symlink_to(real_home, target_is_directory=True)
+        except OSError:
+            pytest.skip("symlinks are not supported on this platform")
+        monkeypatch.setenv("CODEX_HOME", str(codex_home_link))
+
+        result = _invoke_refresh(tmp_path)
+
+        assert result.exit_code == 0
+        assert "Could not refresh Codex artifacts" in result.output
+        assert not (real_home / "rules").exists()
 
 
 class TestSetupRefreshDoesNotTouchConfig:

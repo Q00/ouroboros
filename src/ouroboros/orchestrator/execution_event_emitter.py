@@ -259,8 +259,8 @@ class ExecutionEventEmitter:
         node_identity: ExecutionNodeIdentity,
         decision: DecompositionDecisionRecord,
     ) -> None:
-        """Persist one finalized decomposition decision as best-effort audit data."""
-        await self._safe_emit_event(
+        """Persist the decision before it can authorize children or recovery."""
+        await self._event_store.append(
             BaseEvent(
                 type="execution.decomposition.decision_finalized",
                 aggregate_type="execution",
@@ -289,8 +289,8 @@ class ExecutionEventEmitter:
         evidence_refs: tuple[str, ...],
         trace_summary: str,
     ) -> None:
-        """Persist a bounded cause-matched recovery classification."""
-        await self._safe_emit_event(
+        """Persist the classified bounce before any decomposition provider effect."""
+        await self._event_store.append(
             BaseEvent(
                 type="execution.decomposition.bounce_classified",
                 aggregate_type="execution",

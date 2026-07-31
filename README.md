@@ -107,7 +107,19 @@ Most AI coding fails at the **input**, not the output. The bottleneck is not AI 
 curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.sh | bash
 ```
 
-**Build** — open your AI coding agent and go:
+**First use** — open your AI coding agent and type:
+
+```
+> ooo
+```
+
+If a one-time setup is needed, Ouroboros asks before it makes changes. After
+setup, Codex follows its currently selected model and Claude Code starts with
+its recommended model settings. Choose **Directly configure models** only when
+you want to pin a stage to a specific model; it opens the local settings screen
+in your browser. You can return to those settings any time with `ooo config`.
+
+**Build** — then go:
 
 ```
 > ooo interview "I want to build a task management CLI"
@@ -116,10 +128,25 @@ curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.
 > Works with Claude Code, Codex CLI, GitHub Copilot CLI, OpenCode, Hermes, Gemini, Kiro CLI, Pi CLI, and Zcode. The installer detects available runtimes and registers the MCP server where the host supports it. For explicit selection, run `ouroboros setup --runtime <opencode|kiro|copilot|gemini|pi|zcode>` after installation. The Copilot CLI runtime live-discovers its model catalog via the GitHub Copilot models API and lets you pick a default during setup.
 
 <details>
+<summary><strong>Codex plugin quick start</strong></summary>
+
+```bash
+codex plugin marketplace add Q00/ouroboros
+codex plugin add ouroboros@ouroboros
+```
+
+Start a new Codex session, then enter `ooo`. On first use, Ouroboros offers to
+prepare the runtime before it changes anything. Once ready, it follows Codex's
+current default model; choose **Directly configure models** only when you want
+to pin a specific model for a pipeline stage.
+
+</details>
+
+<details>
 <summary><strong>Kiro CLI quick start</strong></summary>
 
 ```bash
-pip install 'ouroboros-ai[mcp,claude]'
+pipx install 'ouroboros-ai[mcp]'       # or: uv tool install 'ouroboros-ai[mcp]'
 ouroboros setup            # detects Kiro CLI and registers MCP server
 ```
 
@@ -160,15 +187,19 @@ Then run `ooo setup` inside a Claude Code session.
 **pip / uv / pipx**:
 ```bash
 pip install ouroboros-ai                # base
-pip install ouroboros-ai[claude]        # + Claude Code deps; pair with [mcp] for the MCP server
-pip install ouroboros-ai[litellm]       # + LiteLLM multi-provider; Python 3.12-3.13
-pip install ouroboros-ai[mcp]           # + MCP server/client support
-pip install ouroboros-ai[tui]           # + Textual terminal UI
-pip install ouroboros-ai[all]           # everything (claude + litellm + mcp + tui); Python 3.12-3.13
+pip install 'ouroboros-ai[claude]'        # + standalone Claude SDK profile (MCP 1.x based)
+pip install 'ouroboros-ai[litellm]'       # + LiteLLM multi-provider; Python 3.12-3.13
+pip install 'ouroboros-ai[mcp]'           # + MCP server/client support
+pip install 'ouroboros-ai[tui]'           # + Textual terminal UI
+pip install 'ouroboros-ai[all]'           # Claude + LiteLLM + TUI; excludes MCP 2
 ouroboros setup                         # configure runtime
 ```
 
 Core and non-LiteLLM installs support Python 3.12-3.14. LiteLLM-bearing installs (`[litellm]`, `[all]`, and source `--all-extras`) support Python 3.12-3.13; use Python 3.13 for current examples. See [Platform Support](./docs/platform-support.md#python-profile-matrix).
+
+`[mcp]` and `[claude]` are intentionally separate profiles: MCP 2 and the current Claude Agent SDK require incompatible major versions of the `mcp` package. Supported MCP host setups launch `uvx --from 'ouroboros-ai[mcp]' ...` in a separate process. Standalone Claude SDK setup does not register that server because its configured Claude backend is unavailable inside the isolated process; use a supported CLI-backed runtime and LLM backend for MCP execution.
+
+`pip install 'ouroboros-ai[mcp]'` is valid for embedding the MCP client/server library in an already isolated Python environment, but host registration requires `uvx` or `pipx`. Use `pipx install 'ouroboros-ai[mcp]'` or `uv tool install 'ouroboros-ai[mcp]'` before `ouroboros setup --runtime <kiro|copilot|hermes>`; setup exits without changing runtime configuration when neither isolated launcher is available.
 
 Legacy compatibility: `ouroboros-ai[dashboard]` is still accepted as a compatibility alias/no-op; it does not install dashboard runtime payload. `ouroboros-ai[all]` includes that no-op alias only for compatibility.
 

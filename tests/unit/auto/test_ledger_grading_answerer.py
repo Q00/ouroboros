@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import pytest
+
 from ouroboros.auto.answerer import AutoAnswerContext, AutoAnswerer, AutoAnswerSource
 from ouroboros.auto.gap_detector import GapDetector
 from ouroboros.auto.grading import GradeGate, SeedGrade
 from ouroboros.auto.ledger import LedgerEntry, LedgerSource, LedgerStatus, SeedDraftLedger
 from ouroboros.core.seed import (
+    MAX_AC_SUCCESS_CONTRACT_ARTIFACT_CHARS,
+    MAX_AC_SUCCESS_CONTRACT_ARTIFACTS,
+    MAX_AC_SUCCESS_CONTRACT_CHARS,
     AcceptanceCriterionSpec,
     EvaluationPrinciple,
     ExitCondition,
@@ -365,6 +370,54 @@ def test_grade_gate_accepts_expected_artifacts_success_contract() -> None:
 
     assert result.grade == SeedGrade.A
     assert not any(finding.code == "missing_success_contract" for finding in result.findings)
+
+
+@pytest.mark.parametrize(
+    ("verify_command", "expected_artifacts"),
+    (
+        (
+            None,
+            tuple(
+                f"out/artifact-{index}.txt"
+                for index in range(MAX_AC_SUCCESS_CONTRACT_ARTIFACTS + 1)
+            ),
+        ),
+        (
+            None,
+            (
+                "/".join(
+                    "a" * 250 for _ in range(MAX_AC_SUCCESS_CONTRACT_ARTIFACT_CHARS // 251 + 1)
+                ),
+            ),
+        ),
+        ("x" * (MAX_AC_SUCCESS_CONTRACT_CHARS + 1), ()),
+    ),
+)
+def test_grade_gate_rejects_capsule_invalid_contract_before_grade_a(
+    verify_command: str | None,
+    expected_artifacts: tuple[str, ...],
+) -> None:
+    ledger = SeedDraftLedger.from_goal("Create bounded execution artifacts")
+    _fill_minimal_ready_ledger(ledger)
+    invalid_spec = AcceptanceCriterionSpec.model_construct(
+        description="All execution artifacts exist",
+        verify_command=verify_command,
+        expected_artifacts=expected_artifacts,
+        output_assertion=None,
+        investment=None,
+        semantic_ac_key=None,
+    )
+    seed = _seed(
+        goal="Create bounded execution artifacts",
+        ac=(AcceptanceCriterionSpec(description="placeholder", verify_command="true"),),
+    )
+    object.__setattr__(seed, "acceptance_criteria", (invalid_spec,))
+
+    result = GradeGate().grade_seed(seed, ledger=ledger)
+
+    assert result.grade != SeedGrade.A
+    assert not result.may_run
+    assert any(finding.code == "invalid_success_contract_budget" for finding in result.findings)
 
 
 def test_grade_gate_rejects_descriptive_expected_artifact_labels() -> None:
@@ -2994,11 +3047,12 @@ def test_pipeline_accepts_keyword_sees_closure_mode_on_production_signatures() -
     )
 
 
-def test_grade_gate_flags_over_fragmented_acceptance_criteria() -> None:
-    """A seed with >9 outcome criteria gets an *advisory* over-fragmentation
-    finding — the mirror of under-specification — that is visible but must NOT
-    block a runnable seed (frugality is goal-subordinate; we surface waste, we
-    do not halt on it)."""
+def test_grade_gate_does_not_judge_acceptance_criteria_by_count() -> None:
+    """Over-fragmentation is a judgment about the *relationship* between
+    criteria, which this deterministic gate cannot make. A count threshold only
+    ever proxied for it, and the proxy punished goals that genuinely have many
+    orthogonal outcomes. A seed whose criteria are all clean must therefore
+    grade A regardless of how many there are, with no count-based finding."""
     ledger = SeedDraftLedger.from_goal("Build a habit tracker")
     _fill_minimal_ready_ledger(ledger)
     ac = tuple(
@@ -3009,22 +3063,23 @@ def test_grade_gate_flags_over_fragmented_acceptance_criteria() -> None:
     result = GradeGate().grade_seed(seed, ledger=ledger)
 
     codes = {finding.code for finding in result.findings}
-    assert "over_fragmented_criteria" in codes
-    # Advisory contract: the finding must not flip the grade or block the run.
-    # All 10 ACs are otherwise clean (observable, non-vague), so the seed stays A.
+    assert "over_fragmented_criteria" not in codes
     assert result.grade == SeedGrade.A
     assert result.may_run
-    # And it must NOT be counted as an untestable finding (the code deliberately
-    # omits the "acceptance_criteria" substring): testability stays high.
     assert result.scores["testability"] >= 0.9
 
 
-def test_grade_gate_no_over_fragmentation_flag_for_normal_seed() -> None:
+def test_grade_gate_still_flags_unobservable_criteria_in_a_long_list() -> None:
+    """Dropping the count check must not weaken the checks the gate *can* make:
+    an unobservable criterion is still caught in a many-criterion seed."""
     ledger = SeedDraftLedger.from_goal("Build a habit tracker")
     _fill_minimal_ready_ledger(ledger)
-    seed = _seed(ac=("`habit list` prints stable stdout containing created habits",))
+    ac = tuple(
+        f"`habit step{i}` prints stable stdout containing step {i} result" for i in range(9)
+    ) + ("the tracker feels responsive",)
+    seed = _seed(ac=ac)
 
     result = GradeGate().grade_seed(seed, ledger=ledger)
 
     codes = {finding.code for finding in result.findings}
-    assert "over_fragmented_criteria" not in codes
+    assert "untestable_acceptance_criteria" in codes or "missing_success_contract" in codes

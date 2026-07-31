@@ -10,7 +10,7 @@ jobs:
   test:
     name: Test Python ${{ matrix.python-version }}
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     permissions:
       contents: read
     strategy:
@@ -20,7 +20,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v7.0.0
+        uses: actions/checkout@v7.0.1
         with:
           fetch-depth: 0
 
@@ -30,18 +30,18 @@ jobs:
           version: "latest"
 
       - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v6.3.0
+        uses: actions/setup-python@v7.0.0
         with:
           python-version: ${{ matrix.python-version }}
 
       - name: Install dependencies
         run: |
           if [[ "${{ matrix.python-version }}" == "3.14" ]]; then
-            echo "Installing dependency groups: dev"
-            uv sync --python "${{ matrix.python-version }}" --dev
+            echo "Installing dependency groups: dev + mcp-test"
+            uv sync --python "${{ matrix.python-version }}" --dev --group mcp-test
           else
-            echo "Installing dependency groups: dev + litellm-test"
-            uv sync --python "${{ matrix.python-version }}" --dev --group litellm-test
+            echo "Installing dependency groups: dev + mcp-test + litellm-test"
+            uv sync --python "${{ matrix.python-version }}" --dev --group mcp-test --group litellm-test
           fi
 
       - name: Check dependency consistency
@@ -51,10 +51,13 @@ jobs:
           import importlib.util
 
           print("litellm installed:", importlib.util.find_spec("litellm") is not None)
+          assert importlib.util.find_spec("mcp") is not None, "MCP test profile is missing"
           PY
           uv pip check
 
       - name: Run pytest with coverage
+        env:
+          PYTHONFAULTHANDLER: "1"
         run: |
           uv run --python "${{ matrix.python-version }}" --no-sync pytest tests/ -n 4 --dist worksteal --durations=25 --cov=src/ouroboros --cov-report=xml --cov-report=term-missing -v
 
@@ -77,7 +80,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v7.0.0
+        uses: actions/checkout@v7.0.1
         with:
           fetch-depth: 0
 

@@ -46,7 +46,6 @@ from ouroboros.copilot_permissions import (
 )
 from ouroboros.core.errors import ProviderError
 from ouroboros.core.retry import BASE_TRANSIENT_PATTERNS, is_transient_error
-from ouroboros.core.security import MAX_LLM_RESPONSE_LENGTH, InputValidator
 from ouroboros.core.types import Result
 from ouroboros.providers.base import (
     CompletionConfig,
@@ -56,6 +55,7 @@ from ouroboros.providers.base import (
     UsageInfo,
 )
 from ouroboros.providers.codex_cli_stream import RuntimeStreamMixin
+from ouroboros.providers.llm_response import truncate_llm_response_if_oversized
 from ouroboros.providers.profiles import resolve_completion_profile_result
 
 log = structlog.get_logger()
@@ -565,16 +565,8 @@ class CopilotCliLLMAdapter(RuntimeStreamMixin):
 
     @staticmethod
     def _truncate_if_oversized(content: str, model: str) -> str:
-        is_valid, _ = InputValidator.validate_llm_response(content)
-        if not is_valid:
-            log.warning(
-                "llm.response.truncated",
-                model=model,
-                original_length=len(content),
-                max_length=MAX_LLM_RESPONSE_LENGTH,
-            )
-            return content[:MAX_LLM_RESPONSE_LENGTH]
-        return content
+        """Validate and truncate oversized LLM responses."""
+        return truncate_llm_response_if_oversized(content, model=model)
 
     def _is_retryable_error(self, message: str) -> bool:
         return is_transient_error(

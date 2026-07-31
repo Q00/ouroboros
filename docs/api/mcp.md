@@ -675,7 +675,7 @@ await manager.disconnect_all()
 
 ### Class: `MCPServerAdapter`
 
-Concrete implementation of MCPServer protocol using FastMCP.
+Concrete implementation of the Ouroboros `MCPServer` protocol using the MCP SDK v2 server API.
 
 ```python
 class MCPServerAdapter:
@@ -1027,7 +1027,7 @@ for server_config in config.servers:
 await manager.connect_all()
 
 # Create runner with MCP integration
-event_store = EventStore("sqlite+aiosqlite:///~/.ouroboros/ouroboros.db")
+event_store = EventStore()
 await event_store.initialize()
 
 adapter = ClaudeAgentAdapter()

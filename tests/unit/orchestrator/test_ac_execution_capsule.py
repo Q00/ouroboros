@@ -267,11 +267,15 @@ def test_capsule_rejects_unbounded_success_contract_before_hashing(tmp_path) -> 
         execution_context_id="execution-contract-limit",
         retry_attempt=0,
     )
-    spec = AcceptanceCriterionSpec(
+    spec = AcceptanceCriterionSpec.model_construct(
         description="Implement the bounded AC",
         expected_artifacts=tuple(
             f"out/artifact-{index}.txt" for index in range(MAX_AC_SUCCESS_CONTRACT_ARTIFACTS + 1)
         ),
+        verify_command=None,
+        output_assertion=None,
+        investment=None,
+        semantic_ac_key=None,
     )
 
     with pytest.raises(ValueError, match="success contract artifact limit exceeded"):
@@ -287,13 +291,26 @@ def test_capsule_rejects_unbounded_success_contract_before_hashing(tmp_path) -> 
         )
 
 
+def test_schema_maximum_success_contract_materializes_into_capsule() -> None:
+    spec = AcceptanceCriterionSpec(
+        description="Implement the bounded AC",
+        expected_artifacts=tuple(
+            f"out/artifact-{index}.txt" for index in range(MAX_AC_SUCCESS_CONTRACT_ARTIFACTS)
+        ),
+    )
+
+    contract = ACSuccessContract.from_ac_spec(spec)
+
+    assert contract.expected_artifacts == spec.expected_artifacts
+
+
 def test_success_contract_rejects_unbounded_text_before_serialization() -> None:
     with pytest.raises(ValueError, match="success contract character budget exceeded"):
         ACSuccessContract(verify_command="x" * (MAX_AC_SUCCESS_CONTRACT_CHARS + 1))
 
 
 def test_success_contract_preserves_output_assertion_without_command() -> None:
-    """The public Seed schema permits output-only contracts and capsules preserve them."""
+    """The low-level capsule keeps compatibility while the public Seed rejects this shape."""
     contract = ACSuccessContract(output_assertion="OK")
 
     assert contract.has_success_contract is True

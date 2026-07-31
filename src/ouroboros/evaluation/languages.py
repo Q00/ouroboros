@@ -137,15 +137,27 @@ def _load_project_overrides(working_dir: Path) -> dict[str, Any] | None:
     malformed. Never raises.
     """
     config_path = working_dir / ".ouroboros" / "mechanical.toml"
-    if not config_path.exists():
-        return None
 
     import tomllib
 
     try:
         with open(config_path, "rb") as f:
             return tomllib.load(f)
-    except tomllib.TOMLDecodeError as e:
+    except FileNotFoundError:
+        return None
+    except OSError as e:
+        # Probe and read through one guarded operation. A separate ``exists()``
+        # preflight can itself raise for an inaccessible parent and introduces a
+        # race before ``open()``.
+        log.warning("mechanical.toml_read_error", path=str(config_path), error=str(e))
+        return None
+    except Exception as e:
+        # "Never raises" is the contract, and this file is optional operator-authored
+        # input, so anything that stops it becoming a dict must degrade to defaults
+        # rather than abort mechanical-config resolution. Narrowing this to the known
+        # exception types has repeatedly missed one: tomllib raises TOMLDecodeError for
+        # bad syntax, UnicodeDecodeError for non-UTF-8 bytes, and RecursionError for
+        # pathologically nested documents — and only the first two share a base class.
         log.warning("mechanical.toml_parse_error", path=str(config_path), error=str(e))
         return None
 

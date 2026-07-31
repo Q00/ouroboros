@@ -10,7 +10,6 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime
 import inspect
-import os
 from typing import Annotated
 from uuid import uuid4
 
@@ -114,9 +113,7 @@ async def _get_event_store():
     """
     from ouroboros.persistence.event_store import EventStore
 
-    db_path = os.path.expanduser("~/.ouroboros/ouroboros.db")
-    os.makedirs(os.path.dirname(db_path), exist_ok=True)
-    event_store = EventStore(f"sqlite+aiosqlite:///{db_path}")
+    event_store = EventStore()
     await event_store.initialize()
     return event_store
 

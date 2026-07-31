@@ -15,7 +15,13 @@ import hashlib
 import json
 import os
 
-from ouroboros.core.seed import AcceptanceCriterionSpec
+from ouroboros.core.seed import (
+    MAX_AC_SUCCESS_CONTRACT_ARTIFACT_CHARS,
+    MAX_AC_SUCCESS_CONTRACT_ARTIFACTS,
+    MAX_AC_SUCCESS_CONTRACT_CHARS,
+    AcceptanceCriterionSpec,
+    validate_ac_success_contract_values,
+)
 from ouroboros.orchestrator.adapter import RuntimeHandle
 from ouroboros.orchestrator.execution_runtime_scope import ACRuntimeIdentity
 from ouroboros.orchestrator.level_context import LevelContext
@@ -25,9 +31,11 @@ DEFAULT_AC_CONTEXT_BUDGET_CHARS = 12_000
 MAX_AC_CONTEXT_REFERENCES = 256
 _MAX_REFERENCE_LOCATOR_CHARS = 2_048
 _MAX_REFERENCE_HINT_CHARS = 240
-MAX_AC_SUCCESS_CONTRACT_ARTIFACTS = MAX_AC_CONTEXT_REFERENCES - 3
-MAX_AC_SUCCESS_CONTRACT_CHARS = 64_000
-_MAX_SUCCESS_CONTRACT_ARTIFACT_CHARS = _MAX_REFERENCE_LOCATOR_CHARS - len("workspace:")
+if (
+    MAX_AC_SUCCESS_CONTRACT_ARTIFACTS != MAX_AC_CONTEXT_REFERENCES - 3
+    or MAX_AC_SUCCESS_CONTRACT_ARTIFACT_CHARS + len("workspace:") > _MAX_REFERENCE_LOCATOR_CHARS
+):
+    raise RuntimeError("Seed success-contract limits exceed execution capsule capacity")
 
 
 def _sha256_text(value: str) -> str:
@@ -208,32 +216,11 @@ class ACSuccessContract:
     output_assertion: str | None = None
 
     def __post_init__(self) -> None:
-        if self.verify_command is not None and not isinstance(self.verify_command, str):
-            raise ValueError("success contract verify command is invalid")
-        if self.output_assertion is not None and not isinstance(self.output_assertion, str):
-            raise ValueError("success contract output assertion is invalid")
-        try:
-            artifact_count = len(self.expected_artifacts)
-        except TypeError as exc:
-            raise ValueError("success contract artifacts are invalid") from exc
-        if artifact_count > MAX_AC_SUCCESS_CONTRACT_ARTIFACTS:
-            raise ValueError(
-                f"success contract artifact limit exceeded ({MAX_AC_SUCCESS_CONTRACT_ARTIFACTS})"
-            )
-
-        contract_chars = len(self.verify_command or "") + len(self.output_assertion or "")
-        for path in self.expected_artifacts:
-            if (
-                not isinstance(path, str)
-                or not path
-                or len(path) > _MAX_SUCCESS_CONTRACT_ARTIFACT_CHARS
-            ):
-                raise ValueError("success contract artifacts are invalid")
-            contract_chars += len(path)
-        if contract_chars > MAX_AC_SUCCESS_CONTRACT_CHARS:
-            raise ValueError(
-                f"success contract character budget exceeded ({MAX_AC_SUCCESS_CONTRACT_CHARS})"
-            )
+        validate_ac_success_contract_values(
+            verify_command=self.verify_command,
+            expected_artifacts=self.expected_artifacts,
+            output_assertion=self.output_assertion,
+        )
 
     def to_contract_data(self) -> dict[str, object]:
         return {

@@ -25,26 +25,21 @@ EVERY `ouroboros_pm_interview` call** below (idempotent — a no-op if already
 loaded). If the load ever returns no matching tool (and the tool is not already callable — an empty load for an already-exposed tool is an expected no-op, not absence), follow the not-found diagnosis
 below instead of retrying the failing call.
 
-If not found → **diagnose before telling user to run setup**:
+If not found → fail closed without inspecting or mutating
+`~/.claude/mcp.json`. Standalone Claude SDK setup requires MCP 1.x and cannot
+activate the Ouroboros MCP 2 server with its configured backend. Explain:
 
-1. Check if MCP is already configured:
-   ```bash
-   grep -q '"ouroboros"' ~/.claude/mcp.json 2>/dev/null && echo "CONFIGURED" || echo "NOT_CONFIGURED"
-   ```
+```
+The PM interview MCP tool is unavailable in this runtime.
 
-2. **If NOT_CONFIGURED** → tell user to run `ooo setup` first. Stop.
+Configure a supported CLI-backed host with:
+  ouroboros setup --runtime <codex|opencode|kiro|copilot|hermes>
 
-3. **If CONFIGURED** → MCP is registered but the server isn't connecting. Do NOT tell the user to run `ooo setup` again. Instead show:
-   ```
-   Ouroboros MCP is configured but not connected.
+Then restart that host and retry ooo pm. Do not combine the [claude] and [mcp]
+extras or add a direct Python MCP fallback.
+```
 
-   Try these steps in order:
-   1. Restart Claude Code (Cmd+Shift+P → "Reload Window" or close/reopen terminal)
-   2. Check MCP status: type /mcp in Claude Code
-   3. If ouroboros shows "error", try: ooo update
-   4. If still failing, re-run: ooo setup
-   ```
-   Stop.
+Stop.
 
 ### Step 2: Start Interview
 
