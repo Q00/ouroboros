@@ -208,6 +208,41 @@ class TestExtractJsonPayload:
         assert result is not None
         assert '"valid": true' in result
 
+    @pytest.mark.parametrize(
+        "nested_payload",
+        [
+            '{"questions": [], "should_continue": false}',
+            '[{"ac_index": 0, "tier": "t4_unverifiable"}]',
+        ],
+        ids=["nested-object", "nested-array"],
+    )
+    def test_balanced_invalid_wrapper_does_not_promote_nested_payload(
+        self, nested_payload: str
+    ) -> None:
+        text = f"Analysis: {{draft: {nested_payload}}}"
+
+        assert extract_json_payload(text) is None
+
+    @pytest.mark.parametrize(
+        "nested_payload",
+        [
+            '{"questions": [], "should_continue": false}',
+            '[{"ac_index": 0, "tier": "t4_unverifiable"}]',
+        ],
+        ids=["nested-object", "nested-array"],
+    )
+    def test_unclosed_invalid_wrapper_does_not_promote_nested_payload(
+        self, nested_payload: str
+    ) -> None:
+        text = f"Analysis: {{draft: {nested_payload}"
+
+        assert extract_json_payload(text) is None
+
+    def test_balanced_invalid_wrapper_preserves_later_independent_payload(self) -> None:
+        text = 'Analysis: {draft: {"stale": true}} Actual: {"valid": true}'
+
+        assert extract_json_payload(text) == '{"valid": true}'
+
     def test_unclosed_unsupported_fence_fails_closed(self):
         text = '```python\nEXAMPLE = {"stale": true}\n{"actual": true}'
         assert extract_json_payload(text) is None

@@ -19,6 +19,11 @@ _FENCE_MARKERS = ("`", "~")
 _BLOCKQUOTE_FENCE_PREFIX = re.compile(r"^[ \t]{0,3}(?:>[ \t]?)+$")
 _PLAIN_FENCE_PREFIX = re.compile(r"^ {0,3}$")
 _INDENTED_CODE_PREFIX = re.compile(r"^(?: {4}| {0,3}\t)")
+_MAPPING_WRAPPER_PREFIX = re.compile(r'^\s*(?:[A-Za-z_][A-Za-z0-9_-]*|"(?:[^"\\]|\\.)*")\s*:\s*$')
+
+
+class _MalformedJsonBoundary(ValueError):
+    """Raised when malformed wrapper syntax owns the remaining text."""
 
 
 def extract_json_payload(text: str) -> str | None:
@@ -41,9 +46,12 @@ def extract_json_payload(text: str) -> str | None:
     if fence_state is _FenceScanState.MALFORMED:
         return None
 
-    payloads = [
-        payload for segment in fallback_segments for payload in _extract_json_from_text(segment)
-    ]
+    try:
+        payloads = [
+            payload for segment in fallback_segments for payload in _extract_json_from_text(segment)
+        ]
+    except _MalformedJsonBoundary:
+        return None
     return payloads[0] if len(payloads) == 1 else None
 
 
@@ -302,12 +310,35 @@ def _extract_json_from_text(text: str) -> tuple[str, ...]:
             try:
                 json.loads(candidate)
             except (json.JSONDecodeError, ValueError):
-                pass
+                # A complete balanced candidate is one structured-output
+                # boundary, even when its contents are invalid JSON.  Treat
+                # it as opaque so a valid nested fragment cannot be promoted
+                # to the authoritative payload.  Independent payloads after
+                # the failed boundary remain eligible for extraction.
+                pos = start + len(candidate)
+                continue
             else:
                 payloads.append(candidate)
                 pos = start + len(candidate)
                 continue
+        elif _starts_unclosed_mapping_wrapper(text, start):
+            # Unlike free-form prose introduced by the historical Anthropic
+            # prefill failure, ``{draft: <payload>`` is a structured wrapper
+            # whose missing outer closer leaves no safe boundary after it.
+            # Do not recover a nested value from inside that malformed owner.
+            raise _MalformedJsonBoundary
         pos = start + 1
+
+
+def _starts_unclosed_mapping_wrapper(text: str, start: int) -> bool:
+    """Return whether an unbalanced candidate begins a mapping-like wrapper."""
+    obj_start = text.find("{", start + 1)
+    arr_start = text.find("[", start + 1)
+    nested_starts = tuple(index for index in (obj_start, arr_start) if index != -1)
+    if not nested_starts:
+        return False
+    nested_start = min(nested_starts)
+    return _MAPPING_WRAPPER_PREFIX.fullmatch(text[start + 1 : nested_start]) is not None
 
 
 def _bracket_extract(text: str, start: int) -> str | None:

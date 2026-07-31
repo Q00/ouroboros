@@ -419,6 +419,20 @@ class TestWonderFenceRobustness:
             "What assumptions remain untested for goal: Build a login system?",
         )
 
+    @pytest.mark.parametrize("outer_closer", ["}", ""], ids=["balanced", "unclosed"])
+    def test_invalid_wrapper_with_nested_answer_uses_fallback(self, outer_closer: str) -> None:
+        content = (
+            'Analysis: {draft: {"questions": [], "should_continue": false, '
+            '"reasoning": "stale convergence"}' + outer_closer
+        )
+
+        out = WonderEngine(llm_adapter=AsyncMock(), model="test")._parse_response(content, _seed())
+
+        assert out.reasoning.startswith("Parse error, using seed-scoped fallback")
+        assert out.questions == (
+            "What assumptions remain untested for goal: Build a login system?",
+        )
+
     @pytest.mark.parametrize(
         "content",
         [
@@ -835,6 +849,40 @@ class TestReflectFenceRobustness:
         assert "failed to parse" in result.error.message.lower()
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("outer_closer", ["}", ""], ids=["balanced", "unclosed"])
+    async def test_invalid_wrapper_with_nested_answer_returns_error(
+        self, outer_closer: str
+    ) -> None:
+        adapter = AsyncMock()
+        adapter.complete.return_value = Result.ok(
+            CompletionResponse(
+                content=(
+                    'Analysis: {draft: {"refined_goal": "stale replacement", '
+                    '"refined_constraints": ["stale constraint"], '
+                    '"ontology_mutations": [], "reasoning": "stale"}' + outer_closer
+                ),
+                model="test",
+                usage=UsageInfo(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+            )
+        )
+
+        result = await ReflectEngine(llm_adapter=adapter, model="test").reflect(
+            current_seed=_seed(),
+            execution_output="",
+            evaluation_summary=EvaluationSummary(
+                final_approved=False,
+                highest_stage_passed=1,
+                score=0.0,
+                ac_results=(),
+            ),
+            wonder_output=WonderOutput(questions=("What remains unknown?",)),
+            lineage=OntologyLineage(lineage_id="lineage", goal="Build a login system"),
+        )
+
+        assert result.is_err
+        assert "failed to parse" in result.error.message.lower()
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "content",
         [
@@ -1149,6 +1197,19 @@ class TestAssertionExtractorFenceRobustness:
         assertions = AssertionExtractor(llm_adapter=AsyncMock())._parse_response(
             "I considered AC indices [0, 1] before answering.",
             ("AC number 1", "AC number 2"),
+        )
+
+        assert assertions == ()
+
+    @pytest.mark.parametrize("outer_closer", ["}", ""], ids=["balanced", "unclosed"])
+    def test_invalid_wrapper_does_not_create_nested_assertion(self, outer_closer: str) -> None:
+        content = (
+            'Analysis: {draft: [{"ac_index": 0, "tier": "t4_unverifiable", '
+            '"description": "stale assertion"}]' + outer_closer
+        )
+
+        assertions = AssertionExtractor(llm_adapter=AsyncMock())._parse_response(
+            content, ("AC number 1",)
         )
 
         assert assertions == ()
