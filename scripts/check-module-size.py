@@ -144,7 +144,7 @@ class BaselineUnavailable(Exception):
 Policy = tuple[dict[str, int], int, int, frozenset[str], str, str]
 
 
-def _policy_literals(source: str) -> Policy:
+def _policy_literals(source: str) -> Policy | None:
     """Extract every enforcement-semantic literal from this script.
 
     Parsed with ``ast`` rather than imported: the baseline comes from another
@@ -187,6 +187,11 @@ def _policy_literals(source: str) -> Policy:
                     raise BaselineUnavailable(
                         f"{target.id} is not a literal in the baseline copy"
                     ) from exc
+    # GRANDFATHERED uniquely identifies this policy among repository scripts.
+    # Its absence means this is an unrelated Python utility, not a malformed
+    # copy of the module-size gate.
+    if "GRANDFATHERED" not in found:
+        return None
     table = found.get("GRANDFATHERED")
     cap = found.get("SOFT_CAP")
     slack = found.get("RESEED_SLACK")
@@ -219,12 +224,14 @@ def _policy_literals(source: str) -> Policy:
 
 
 def _baseline_policy(ref: str) -> Policy | None:
-    """Return the policy recorded at ``ref``, or None if the gate is new there.
+    """Find the unique policy recorded at ``ref`` independent of its current path.
 
     A ref that does not resolve is an error: a silently skipped comparison is
     exactly the hole this check exists to close. A ref that resolves but has no
-    copy of this script is the gate's own introducing PR, which has no
-    predecessor policy to tighten.
+    script declaring GRANDFATHERED is the gate's own introducing PR, which has
+    no predecessor policy to tighten. Scanning the predecessor's scripts tree
+    instead of using the current ``__file__`` path prevents a rename plus
+    workflow edit from masquerading as a new gate.
     """
     try:
         subprocess.run(
@@ -238,32 +245,44 @@ def _baseline_policy(ref: str) -> Policy | None:
             f"baseline ref {ref!r} does not resolve; ensure the checkout uses "
             "fetch-depth: 0 and that the ref has been fetched"
         ) from exc
-    self_path = _relative(Path(__file__).resolve())
     try:
         tree = subprocess.run(
-            ["git", "ls-tree", "-r", "--name-only", ref, "--", self_path],
+            ["git", "ls-tree", "-r", "--name-only", "-z", ref, "--", "scripts"],
             cwd=REPO_ROOT,
             check=True,
             capture_output=True,
-            text=True,
         )
     except (subprocess.CalledProcessError, OSError) as exc:
-        raise BaselineUnavailable(f"could not inspect {self_path} at {ref!r}: {exc}") from exc
-    if tree.stdout.strip() == "":
+        raise BaselineUnavailable(f"could not inspect scripts at {ref!r}: {exc}") from exc
+
+    candidates: list[tuple[str, Policy]] = []
+    for raw_path in tree.stdout.split(b"\0"):
+        if not raw_path or not raw_path.endswith(b".py"):
+            continue
+        try:
+            path = raw_path.decode("utf-8")
+        except UnicodeError as exc:
+            raise BaselineUnavailable("baseline scripts path is not UTF-8") from exc
+        try:
+            completed = subprocess.run(
+                ["git", "show", f"{ref}:{path}"],
+                cwd=REPO_ROOT,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            policy = _policy_literals(completed.stdout)
+        except (UnicodeError, subprocess.CalledProcessError, OSError, SyntaxError) as exc:
+            raise BaselineUnavailable(f"could not inspect policy candidate {path!r}") from exc
+        if policy is not None:
+            candidates.append((path, policy))
+
+    if not candidates:
         return None
-    if tree.stdout.splitlines() != [self_path]:
-        raise BaselineUnavailable(f"baseline tree returned an ambiguous path for {self_path}")
-    try:
-        completed = subprocess.run(
-            ["git", "show", f"{ref}:{self_path}"],
-            cwd=REPO_ROOT,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-    except (subprocess.CalledProcessError, OSError) as exc:
-        raise BaselineUnavailable(f"could not read {self_path} at {ref!r}: {exc}") from exc
-    return _policy_literals(completed.stdout)
+    if len(candidates) != 1:
+        paths = ", ".join(path for path, _ in candidates)
+        raise BaselineUnavailable(f"baseline contains multiple module-size policies: {paths}")
+    return candidates[0][1]
 
 
 def _policy_regressions(

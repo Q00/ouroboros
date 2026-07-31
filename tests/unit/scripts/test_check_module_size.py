@@ -55,7 +55,6 @@ def _isolate(
 ) -> None:
     """Point the module at a fabricated repository with a controlled table."""
     monkeypatch.setattr(module, "REPO_ROOT", repo)
-    monkeypatch.setattr(module, "__file__", str(repo / "scripts" / "check-module-size.py"))
     monkeypatch.setattr(module, "GRANDFATHERED", grandfathered)
 
 
@@ -191,13 +190,15 @@ class TestPolicyTightening:
         assert "Measurement scope changed" in err
         assert name in err
 
-    def test_legacy_self_path_override_cannot_hide_predecessor_policy(
+    def test_renamed_current_script_cannot_hide_predecessor_policy(
         self, module, monkeypatch, tmp_path, capsys
     ):
         ref = _baseline_repo(tmp_path, {"src/ouroboros/god.py": 5000})
         _write(tmp_path, "src/ouroboros/god.py", 5500)
         _isolate(module, monkeypatch, tmp_path, {"src/ouroboros/god.py": 5500})
-        monkeypatch.setattr(module, "SELF_PATH", "missing/check.py", raising=False)
+        renamed = tmp_path / "scripts" / "check-size.py"
+        renamed.write_text("# renamed current gate\n", encoding="utf-8")
+        monkeypatch.setattr(module, "__file__", str(renamed))
 
         assert module.main(["--baseline-ref", ref]) == 1
         assert "budgets were raised" in capsys.readouterr().err
@@ -265,7 +266,7 @@ class TestPolicyTightening:
         monkeypatch.setattr(module.subprocess, "run", failing_show)
 
         assert module.main(["--baseline-ref", ref]) == 1
-        assert "could not read" in capsys.readouterr().err
+        assert "could not inspect policy candidate" in capsys.readouterr().err
 
     def test_no_baseline_ref_skips_the_comparison(self, module, monkeypatch, tmp_path):
         """A bare local run must not require a git repository."""
