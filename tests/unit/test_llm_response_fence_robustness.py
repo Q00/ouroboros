@@ -353,6 +353,25 @@ def _wrap_leading_tab_container_literal_example(
     return text
 
 
+RAW_NON_ANSWER_CONTEXTS = ("code-span", "double-code-span", "long-code-span", "comment")
+
+
+def _wrap_raw_non_answer_context(context: str, stale_payload: str, actual_payload: str = "") -> str:
+    if context == "code-span":
+        text = f"Example: `{stale_payload}`"
+    elif context == "double-code-span":
+        text = f"Example: `` `{stale_payload}` ``"
+    elif context == "long-code-span":
+        text = f"Example: ```` ```{stale_payload}``` ````"
+    elif context == "comment":
+        text = f"<!-- Example only: {stale_payload} -->"
+    else:
+        raise AssertionError(f"unknown raw non-answer context: {context}")
+    if actual_payload:
+        text += f"\nActual: {actual_payload}"
+    return text
+
+
 async def _reflect_wrapped_content(content: str):
     adapter = AsyncMock()
     adapter.complete.return_value = Result.ok(
@@ -801,6 +820,33 @@ class TestWonderFenceRobustness:
                 stale_payload,
                 actual_payload,
             ),
+            _seed(),
+        )
+
+        assert stale_only.reasoning.startswith("Parse error, using seed-scoped fallback")
+        assert actual.reasoning == "ACTUAL_WONDER"
+        assert actual.questions == ("actual?",)
+
+    @pytest.mark.parametrize("context", RAW_NON_ANSWER_CONTEXTS)
+    def test_raw_non_answer_context_releases_actual(self, context: str) -> None:
+        stale_payload = json.dumps(
+            {"questions": [], "should_continue": False, "reasoning": "STALE_WONDER"}
+        )
+        actual_payload = json.dumps(
+            {
+                "questions": [{"question": "actual?", "kind": "gap"}],
+                "should_continue": True,
+                "reasoning": "ACTUAL_WONDER",
+            }
+        )
+        engine = WonderEngine(llm_adapter=AsyncMock(), model="test")
+
+        stale_only = engine._parse_response(
+            _wrap_raw_non_answer_context(context, stale_payload),
+            _seed(),
+        )
+        actual = engine._parse_response(
+            _wrap_raw_non_answer_context(context, stale_payload, actual_payload),
             _seed(),
         )
 
@@ -1324,6 +1370,38 @@ class TestReflectFenceRobustness:
                 stale_payload,
                 actual_payload,
             )
+        )
+
+        assert stale_only.is_err
+        assert actual.is_ok
+        assert actual.value.reasoning == "ACTUAL_REFLECT"
+        assert actual.value.refined_goal == "ACTUAL_GOAL"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("context", RAW_NON_ANSWER_CONTEXTS)
+    async def test_raw_non_answer_context_releases_actual(self, context: str) -> None:
+        stale_payload = json.dumps(
+            {
+                "refined_goal": "STALE_GOAL",
+                "refined_constraints": ["stale"],
+                "ontology_mutations": [],
+                "reasoning": "STALE_REFLECT",
+            }
+        )
+        actual_payload = json.dumps(
+            {
+                "refined_goal": "ACTUAL_GOAL",
+                "refined_constraints": ["actual"],
+                "ontology_mutations": [],
+                "reasoning": "ACTUAL_REFLECT",
+            }
+        )
+
+        stale_only = await _reflect_wrapped_content(
+            _wrap_raw_non_answer_context(context, stale_payload)
+        )
+        actual = await _reflect_wrapped_content(
+            _wrap_raw_non_answer_context(context, stale_payload, actual_payload)
         )
 
         assert stale_only.is_err
@@ -2280,6 +2358,43 @@ class TestAssertionExtractorFenceRobustness:
                 stale_payload,
                 actual_payload,
             ),
+            ("AC number 1",),
+        )
+
+        assert stale_only == ()
+        assert len(actual) == 1
+        assert actual[0].description == "ACTUAL_ASSERTION"
+
+    @pytest.mark.parametrize("context", RAW_NON_ANSWER_CONTEXTS)
+    def test_raw_non_answer_context_releases_actual(self, context: str) -> None:
+        stale_payload = json.dumps(
+            [
+                {
+                    "ac_index": 0,
+                    "tier": "t4_unverifiable",
+                    "pattern": "",
+                    "description": "STALE_ASSERTION",
+                }
+            ]
+        )
+        actual_payload = json.dumps(
+            [
+                {
+                    "ac_index": 0,
+                    "tier": "t4_unverifiable",
+                    "pattern": "",
+                    "description": "ACTUAL_ASSERTION",
+                }
+            ]
+        )
+        extractor = AssertionExtractor(llm_adapter=AsyncMock())
+
+        stale_only = extractor._parse_response(
+            _wrap_raw_non_answer_context(context, stale_payload),
+            ("AC number 1",),
+        )
+        actual = extractor._parse_response(
+            _wrap_raw_non_answer_context(context, stale_payload, actual_payload),
             ("AC number 1",),
         )
 

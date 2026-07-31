@@ -334,6 +334,23 @@ class TestExtractJsonPayload:
         text = 'Use ``` as prose, then {"actual": true}'
         assert extract_json_payload(text) == '{"actual": true}'
 
+    @pytest.mark.parametrize(
+        "non_answer",
+        [
+            'Example: `{"stale": true}`',
+            'Example: `` `{"stale": true}` ``',
+            'Example: ```` ```{"stale": true}``` ````',
+            '<!-- {"stale": true} -->',
+            '<!-- multiline\n{"stale": true}\nexample -->',
+        ],
+        ids=["code-span", "double-code-span", "long-code-span", "comment", "multiline-comment"],
+    )
+    def test_raw_non_answer_context_is_excluded_and_releases_actual(self, non_answer: str) -> None:
+        with_actual = f'{non_answer}\nActual: {{"actual": true}}'
+
+        assert extract_json_payload(non_answer) is None
+        assert extract_json_payload(with_actual) == '{"actual": true}'
+
     def test_inline_tildes_do_not_suppress_prose_json_fallback(self) -> None:
         text = 'Use ~~~ as prose, then {"actual": true}'
         assert extract_json_payload(text) == '{"actual": true}'

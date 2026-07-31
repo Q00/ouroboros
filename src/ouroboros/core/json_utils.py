@@ -593,10 +593,84 @@ def _indented_fence_example_ranges(text: str) -> tuple[tuple[int, int], ...]:
     return tuple(ranges)
 
 
+def _is_backslash_escaped(text: str, position: int) -> bool:
+    """Return whether Markdown backslashes escape the character at *position*."""
+    backslashes = 0
+    cursor = position
+    while cursor > 0 and text[cursor - 1] == "\\":
+        backslashes += 1
+        cursor -= 1
+    return backslashes % 2 == 1
+
+
+def _closing_code_span(text: str, start: int, delimiter_length: int) -> int | None:
+    """Return the end of the next equal-length Markdown backtick run."""
+    cursor = start
+    while (candidate := text.find("`", cursor)) != -1:
+        run_length = _fence_run_length(text, candidate, "`")
+        if run_length == delimiter_length:
+            return candidate + run_length
+        cursor = candidate + run_length
+    return None
+
+
+def _markdown_non_answer_ranges(text: str) -> tuple[tuple[int, int], ...]:
+    """Return inline Markdown contexts that cannot own answer JSON.
+
+    Code-span delimiters close only on an equal-length backtick run, matching
+    CommonMark's variable-delimiter rule.  An unmatched run remains ordinary
+    prose so it cannot hide a later answer.  HTML comments, including an
+    unclosed comment through EOF, are non-rendered context.
+    """
+    ranges: list[tuple[int, int]] = []
+    position = 0
+    while position < len(text):
+        comment_start = text.find("<!--", position)
+        code_start = text.find("`", position)
+        if comment_start == -1 and code_start == -1:
+            break
+
+        if comment_start != -1 and (code_start == -1 or comment_start < code_start):
+            comment_end = text.find("-->", comment_start + 4)
+            end = len(text) if comment_end == -1 else comment_end + 3
+            ranges.append((comment_start, end))
+            position = end
+            continue
+
+        assert code_start != -1
+        delimiter_length = _fence_run_length(text, code_start, "`")
+        if _is_backslash_escaped(text, code_start):
+            position = code_start + delimiter_length
+            continue
+        code_end = _closing_code_span(
+            text,
+            code_start + delimiter_length,
+            delimiter_length,
+        )
+        if code_end is None:
+            position = code_start + delimiter_length
+            continue
+        ranges.append((code_start, code_end))
+        position = code_end
+    return tuple(ranges)
+
+
+def _non_answer_ranges(text: str) -> tuple[tuple[int, int], ...]:
+    """Return sorted, merged Markdown example ranges for raw fallback."""
+    ranges = sorted((*_indented_fence_example_ranges(text), *_markdown_non_answer_ranges(text)))
+    merged: list[tuple[int, int]] = []
+    for start, end in ranges:
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return tuple(merged)
+
+
 def _extract_json_from_text(text: str) -> tuple[str, ...]:
     """Return non-overlapping valid JSON payloads found in prose."""
     payloads: list[str] = []
-    excluded_ranges = _indented_fence_example_ranges(text)
+    excluded_ranges = _non_answer_ranges(text)
     excluded_index = 0
     pos = 0
     while True:
