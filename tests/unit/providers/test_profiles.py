@@ -43,6 +43,42 @@ def test_resolve_completion_profile_uses_codex_backend_profile() -> None:
     assert resolved.config.max_turns == 1
 
 
+def test_resolve_completion_profile_rejects_duplicate_normalized_provider_aliases() -> None:
+    """Ambiguous Codex aliases must not make provider order change the pin."""
+    config = OuroborosConfig(
+        llm_profiles={
+            "fast": {
+                "providers": {
+                    "CODEX": {"model": "first-pin"},
+                    "codex_cli": {"model": "second-pin"},
+                }
+            },
+        },
+        llm_role_profiles={"qa": "fast"},
+    )
+
+    with patch("ouroboros.providers.profiles.load_config", return_value=config):
+        with pytest.raises(ConfigError, match="duplicate provider aliases"):
+            resolve_completion_profile(
+                CompletionConfig(model="default", role="qa"), backend="codex"
+            )
+
+
+def test_resolve_completion_profile_preserves_codex_xhigh_effort() -> None:
+    """Codex-native provider effort fits the public resolved-config contract."""
+    config = OuroborosConfig(
+        llm_profiles={"deep": {"providers": {"codex": {"reasoning_effort": "xhigh"}}}},
+        llm_role_profiles={"qa": "deep"},
+    )
+
+    with patch("ouroboros.providers.profiles.load_config", return_value=config):
+        resolved = resolve_completion_profile(
+            CompletionConfig(model="default", role="qa"), backend="codex"
+        )
+
+    assert resolved.config.reasoning_effort == "xhigh"
+
+
 def test_resolve_completion_profile_uses_provider_aliases() -> None:
     """Provider aliases let OpenRouter mappings apply to the LiteLLM backend."""
     config = OuroborosConfig(
@@ -392,6 +428,38 @@ def test_resolve_completion_profile_threads_reasoning_effort() -> None:
 
     assert provider_pref.config.reasoning_effort == "medium"
     assert profile_pref.config.reasoning_effort == "high"
+
+
+@pytest.mark.parametrize(
+    "backend",
+    (
+        "claude_code",
+        "copilot",
+        "gemini",
+        "goose",
+        "hermes",
+        "opencode",
+        "pi",
+        "gjc",
+        "litellm",
+        "ourocode",
+    ),
+)
+def test_codex_native_effort_does_not_leak_to_other_harnesses(backend: str) -> None:
+    """A Codex-only xhigh mapping cannot alter another runtime's request."""
+    config = OuroborosConfig(
+        llm_profiles={"frontier": {"providers": {"codex": {"reasoning_effort": "xhigh"}}}},
+        llm_role_profiles={"qa": "frontier"},
+    )
+
+    with patch("ouroboros.providers.profiles.load_config", return_value=config):
+        resolved = resolve_completion_profile(
+            CompletionConfig(model="default", role="qa", reasoning_effort="low"),
+            backend=backend,
+        )
+
+    assert resolved.config.reasoning_effort == "low"
+    assert resolved.backend_profile is None
 
 
 def test_resolve_completion_profile_role_effort_overrides_request_effort() -> None:

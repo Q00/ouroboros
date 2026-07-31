@@ -57,7 +57,10 @@ class CompletionConfig:
         role: Optional logical Ouroboros task role used to resolve llm_profiles.
         profile: Optional explicit Ouroboros llm_profiles key.
         max_turns: Optional per-request agent turn budget for CLI-backed providers.
-        reasoning_effort: Optional reasoning-effort dial ("low"/"medium"/"high").
+        reasoning_effort: Optional reasoning-effort dial
+            ("low"/"medium"/"high"/"xhigh"). ``xhigh`` is available only
+            through a Codex provider profile; backends that do not accept it
+            continue to ignore or validate it at their own boundary.
             The effort-first investment lever (RFC #1405). Adapters with a native
             effort knob translate it: LiteLLM forwards a ``reasoning_effort`` kwarg
             (provider-agnostic), and the Anthropic-direct adapter maps it to
@@ -79,7 +82,7 @@ class CompletionConfig:
     role: str | None = None
     profile: str | None = None
     max_turns: int | None = None
-    reasoning_effort: Literal["low", "medium", "high"] | None = None
+    reasoning_effort: Literal["low", "medium", "high", "xhigh"] | None = None
     model_is_explicit: bool = False
 
 

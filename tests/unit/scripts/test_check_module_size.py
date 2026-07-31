@@ -29,6 +29,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SCRIPT = REPO_ROOT / "scripts" / "check-module-size.py"
+WORKFLOW = REPO_ROOT / ".github" / "workflows" / "module-size.yml"
 
 
 def _load_module():
@@ -58,14 +59,25 @@ def _isolate(
     monkeypatch.setattr(module, "GRANDFATHERED", grandfathered)
 
 
-def _baseline_repo(root: Path, grandfathered: dict[str, int], soft_cap: int = 2000) -> str:
+def _baseline_repo(
+    root: Path,
+    grandfathered: dict[str, int],
+    soft_cap: int = 2000,
+    reseed_slack: int = 200,
+    excluded: frozenset[str] = frozenset({"src/ouroboros/_version.py"}),
+) -> str:
     """Build a git repo whose HEAD carries a given policy, and return its ref.
 
     The gate reads its baseline by asking git for an earlier copy of itself, so
     a faithful test has to produce a real commit containing a real script body.
     """
     entries = "\n".join(f'    "{k}": {v},' for k, v in grandfathered.items())
-    body = f"SOFT_CAP = {soft_cap}\nGRANDFATHERED: dict[str, int] = {{\n{entries}\n}}\n"
+    body = (
+        f"SOFT_CAP = {soft_cap}\n"
+        f"RESEED_SLACK = {reseed_slack}\n"
+        f"GRANDFATHERED: dict[str, int] = {{\n{entries}\n}}\n"
+        f"EXCLUDED = frozenset({set(excluded)!r})\n"
+    )
     script = root / "scripts" / "check-module-size.py"
     script.parent.mkdir(parents=True, exist_ok=True)
     script.write_text(body, encoding="utf-8")
@@ -135,6 +147,30 @@ class TestPolicyTightening:
         assert module.main(["--baseline-ref", ref]) == 1
         assert "SOFT_CAP was raised from 2000 to 10000" in capsys.readouterr().err
 
+    def test_raising_reseed_slack_fails(self, module, monkeypatch, tmp_path, capsys):
+        ref = _baseline_repo(tmp_path, {}, reseed_slack=200)
+        _write(tmp_path, "src/ouroboros/ok.py", 10)
+        monkeypatch.setattr(module, "RESEED_SLACK", 1000)
+        _isolate(module, monkeypatch, tmp_path, {})
+
+        assert module.main(["--baseline-ref", ref]) == 1
+        assert "RESEED_SLACK was raised from 200 to 1000" in capsys.readouterr().err
+
+    def test_adding_exclusion_fails(self, module, monkeypatch, tmp_path, capsys):
+        ref = _baseline_repo(tmp_path, {})
+        _write(tmp_path, "src/ouroboros/hidden.py", 10)
+        monkeypatch.setattr(
+            module,
+            "EXCLUDED",
+            frozenset({"src/ouroboros/_version.py", "src/ouroboros/hidden.py"}),
+        )
+        _isolate(module, monkeypatch, tmp_path, {})
+
+        assert module.main(["--baseline-ref", ref]) == 1
+        err = capsys.readouterr().err
+        assert "added to EXCLUDED" in err
+        assert "src/ouroboros/hidden.py" in err
+
     def test_lowering_is_allowed(self, module, monkeypatch, tmp_path):
         """Tightening is the whole point; it must not be mistaken for drift."""
         ref = _baseline_repo(tmp_path, {"src/ouroboros/god.py": 5000})
@@ -183,6 +219,22 @@ class TestPolicyTightening:
 
         assert module.main(["--baseline-ref", "base"]) == 0
         assert "introducing commit" in capsys.readouterr().out
+
+    def test_baseline_show_failure_fails_closed(self, module, monkeypatch, tmp_path, capsys):
+        ref = _baseline_repo(tmp_path, {})
+        _write(tmp_path, "src/ouroboros/ok.py", 10)
+        _isolate(module, monkeypatch, tmp_path, {})
+        original_run = module.subprocess.run
+
+        def failing_show(command, *args, **kwargs):  # noqa: ANN001, ANN202
+            if command[:2] == ["git", "show"]:
+                raise subprocess.CalledProcessError(128, command)
+            return original_run(command, *args, **kwargs)
+
+        monkeypatch.setattr(module.subprocess, "run", failing_show)
+
+        assert module.main(["--baseline-ref", ref]) == 1
+        assert "could not read" in capsys.readouterr().err
 
     def test_no_baseline_ref_skips_the_comparison(self, module, monkeypatch, tmp_path):
         """A bare local run must not require a git repository."""
@@ -323,3 +375,13 @@ def test_real_repository_is_green():
     )
     assert result.returncode == 0, result.stderr
     assert "module-size: OK" in result.stdout
+
+
+def test_workflow_uses_event_specific_predecessor() -> None:
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    assert (
+        "BASELINE_REF: ${{ github.event_name == 'pull_request' && "
+        "github.event.pull_request.base.sha || github.event.before }}"
+    ) in workflow
+    assert '--baseline-ref "${BASELINE_REF}"' in workflow
+    assert "--baseline-ref origin/main" not in workflow

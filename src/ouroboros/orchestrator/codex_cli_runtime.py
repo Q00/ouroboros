@@ -15,6 +15,9 @@ import os
 from pathlib import Path
 import re
 import shlex
+import stat
+import subprocess
+import sys
 import tempfile
 import tomllib
 from typing import Any
@@ -49,6 +52,7 @@ from ouroboros.orchestrator.adapter import (
     resolve_worker_cwd,
     worker_cwd_failure_message,
 )
+from ouroboros.orchestrator.skill_tool_mapping import discover_skill_tool_mappings
 from ouroboros.providers.base import CompletionConfig
 from ouroboros.providers.codex_cli_stream import (
     iter_runtime_stream_lines,
@@ -70,6 +74,30 @@ log = get_logger(__name__)
 _TOP_LEVEL_EVENT_MESSAGE_TYPES: dict[str, str] = {
     "error": "assistant",
 }
+
+# ``codex exec --json`` does not currently promise an effective-model field on
+# every event.  Accept a model only when a lifecycle event reports one itself;
+# never infer it from a configured profile, a requested command argument, or
+# arbitrary item metadata.  That distinction keeps automatic mode honest when
+# a Codex version does not disclose the model it selected.
+_MODEL_REPORT_EVENT_TYPES = frozenset(
+    {
+        "thread.started",
+        "turn.started",
+        "turn.completed",
+        "session.started",
+        "session.updated",
+        "run.started",
+        "run.completed",
+    }
+)
+_MODEL_REPORT_KEYS = (
+    "effective_model",
+    "selected_model",
+    "resolved_model",
+    "model_id",
+    "model",
+)
 
 # Token-usage keys Codex's ``turn.completed`` event may carry. Kept in sync by
 # convention with the adapter's ``_USAGE_TOKEN_KEYS`` (a tiny duplicated helper,
@@ -263,12 +291,30 @@ class CodexCliRuntime:
         self._cwd = resolve_worker_cwd(cwd)
         self._skills_dir = self._resolve_skills_dir(skills_dir)
         self._skill_dispatcher = skill_dispatcher
+        self._skill_dispatcher_identity = self._fingerprint_skill_dispatcher(skill_dispatcher)
         self._llm_backend = llm_backend or self._default_llm_backend
+        self._builtin_mcp_handlers: dict[str, Any] | None = None
         self._runtime_profile = runtime_profile
         self._codex_profile = resolve_codex_profile(
             runtime_profile,
             logger=log,
             log_namespace=self._log_namespace,
+        )
+        snapshots_cli_execution_identity = self._runtime_backend in {
+            "codex",
+            "copilot",
+            "gemini",
+            "goose",
+            "grok",
+        }
+        self._cli_executable_path_identity = (
+            self._cli_executable_identity() if snapshots_cli_execution_identity else None
+        )
+        self._cli_executable_content_identity_snapshot = (
+            self._cli_executable_content_identity() if snapshots_cli_execution_identity else None
+        )
+        self._cli_executable_version_identity_snapshot = (
+            self._cli_executable_version_identity() if snapshots_cli_execution_identity else None
         )
         # Freeze the role-default model/profile once per runtime. Without this,
         # every ``codex exec`` call re-reads mutable profile config, so a long
@@ -278,6 +324,7 @@ class CodexCliRuntime:
             (
                 self._resolved_fallback_model,
                 self._resolved_fallback_profile,
+                self._resolved_fallback_reasoning_effort,
             ) = self._resolve_runtime_codex_config_uncached(None)
             # Freeze both layers that can retarget a Codex command without
             # changing its visible --profile name: Ouroboros role/profile
@@ -286,16 +333,30 @@ class CodexCliRuntime:
             # events. Resume compares the hashes, and command construction
             # checks them again before consulting any role-dependent fallback.
             self._profile_resolution_fingerprint = self._fingerprint_profile_resolution_config()
+            self._codex_profile_v2_names = self._codex_profile_v2_names_from_ouroboros_config()
+            self._codex_project_trust_baseline = self._read_codex_project_trust_levels()
             self._codex_config_fingerprint = self._fingerprint_codex_config_files()
+            self._skill_dispatch_registry_fingerprint = self._fingerprint_skill_dispatch_registry()
+            self._builtin_mcp_handler_registry_fingerprint = (
+                self._fingerprint_builtin_mcp_handler_registry()
+            )
+            self._runtime_handle_profile_fingerprints: dict[str, str] = {}
+            self._runtime_handle_codex_config_fingerprints: dict[str, str] = {}
         else:
             # Subclasses reuse the process/session machinery but implement
             # their own model/config semantics. Do not make their construction
             # depend on an unrelated Codex agent_runtime profile.
             self._resolved_fallback_model = None
             self._resolved_fallback_profile = None
+            self._resolved_fallback_reasoning_effort = None
             self._profile_resolution_fingerprint = None
             self._codex_config_fingerprint = None
-        self._builtin_mcp_handlers: dict[str, Any] | None = None
+            self._codex_profile_v2_names = set()
+            self._codex_project_trust_baseline = None
+            self._skill_dispatch_registry_fingerprint = None
+            self._builtin_mcp_handler_registry_fingerprint = None
+            self._runtime_handle_profile_fingerprints = {}
+            self._runtime_handle_codex_config_fingerprints = {}
         # Item-lifecycle correlation state (#1690): item ids whose
         # ``item.started`` was already projected as a tool start, so the
         # matching ``item.completed`` never duplicates the start. Id-less
@@ -418,6 +479,93 @@ class CodexCliRuntime:
         )
         return resolution.cli_path
 
+    def _cli_executable_identity(self) -> str | None:
+        """Return the stable path of the executable selected for this runtime.
+
+        ``codex`` may be selected through PATH, an explicit configuration value,
+        or the wrapper fallback policy.  A bare command name is not durable:
+        another process can resolve it to a different binary after PATH changes.
+        Only an absolute, existing path may therefore authorize the automatic
+        (no ``--model``) Codex resume exception.  Keep the selected path itself
+        rather than dereferencing symlinks so two launch paths remain distinct
+        execution identities even when they currently point at the same target.
+        """
+        try:
+            candidate = Path(self._cli_path).expanduser()
+            if not candidate.is_absolute() or not candidate.exists():
+                return None
+            return str(candidate.absolute())
+        except (OSError, RuntimeError):
+            return None
+
+    def _cli_executable_version_identity(self) -> str | None:
+        """Hash the selected CLI's bytes and version response for safe resumes.
+
+        The absolute launch path distinguishes parallel installations, while
+        this value detects both in-place binary changes and version-visible
+        upgrades at that same path. A model-less automatic resume is
+        deliberately unavailable when the executable cannot provide a stable
+        version response or content digest.
+        """
+        executable_path = self._cli_executable_identity()
+        if executable_path is None:
+            return None
+        content_digest = self._cli_executable_content_identity()
+        if content_digest is None:
+            return None
+        symlink_identity = self._cli_executable_symlink_identity()
+        try:
+            result = subprocess.run(
+                [executable_path, "--version"],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        version_output = (result.stdout or result.stderr).strip()
+        if result.returncode != 0 or not version_output:
+            return None
+        return self._hash_json_payload(
+            {
+                "content_sha256": content_digest,
+                "symlink": symlink_identity,
+                "version_output": version_output,
+            }
+        )
+
+    def _cli_executable_symlink_identity(self) -> dict[str, str] | None:
+        """Return launch-path symlink target identity without dereferencing it away."""
+        executable_path = self._cli_executable_identity()
+        if executable_path is None:
+            return None
+        path = Path(executable_path)
+        try:
+            if not path.is_symlink():
+                return None
+            raw_target = os.readlink(path)
+        except OSError:
+            return None
+        target_path = Path(raw_target)
+        if not target_path.is_absolute():
+            target_path = path.parent / target_path
+        return {
+            "raw_target": raw_target,
+            "resolved_target": str(target_path.expanduser().absolute()),
+        }
+
+    def _cli_executable_content_identity(self) -> str | None:
+        """Return the selected CLI byte digest without executing it."""
+        executable_path = self._cli_executable_identity()
+        if executable_path is None:
+            return None
+        try:
+            executable_bytes = Path(executable_path).read_bytes()
+        except OSError:
+            return None
+        return hashlib.sha256(executable_bytes).hexdigest()
+
     def _resolve_skills_dir(self, skills_dir: str | Path | None) -> Path | None:
         """Resolve an optional explicit skill override directory for intercept metadata."""
         if skills_dir is None:
@@ -435,6 +583,92 @@ class CodexCliRuntime:
         return candidate
 
     @staticmethod
+    def _normalize_runtime_reported_model(value: object) -> str | None:
+        """Accept one safe, machine-readable model identifier from Codex output."""
+        if not isinstance(value, str):
+            return None
+        candidate = value.strip()
+        # Model identifiers are protocol values, not user-facing text. Reject
+        # whitespace/control-containing values so arbitrary stream content can
+        # never be relabeled as the active model.
+        if not candidate or len(candidate) > 256 or any(char.isspace() for char in candidate):
+            return None
+        return candidate
+
+    @classmethod
+    def _runtime_reported_model(cls, event: Mapping[str, Any]) -> tuple[str, str] | None:
+        """Return an effective model explicitly reported by a Codex lifecycle event.
+
+        The command's ``--model`` is a requested pin, while profile/global
+        config is only an input to Codex's selection.  Neither is evidence of
+        what an automatic run actually used.  A model becomes *observed* only
+        when the runtime stream reports it on a lifecycle event.
+        """
+        event_type = event.get("type")
+        if not isinstance(event_type, str) or event_type not in _MODEL_REPORT_EVENT_TYPES:
+            return None
+
+        sources: tuple[tuple[str, Mapping[str, Any]], ...] = (("event", event),)
+        for container_key in ("session", "runtime", "metadata", "data"):
+            candidate = event.get(container_key)
+            if isinstance(candidate, Mapping):
+                sources += ((container_key, candidate),)
+
+        for source_name, source in sources:
+            for key in _MODEL_REPORT_KEYS:
+                model = cls._normalize_runtime_reported_model(source.get(key))
+                if model is not None:
+                    return model, f"runtime_stream:{event_type}:{source_name}.{key}"
+        return None
+
+    @staticmethod
+    def _command_requested_model(command: list[str]) -> str | None:
+        """Return the exact model handed to ``codex exec --model``, if any."""
+        try:
+            index = command.index("--model")
+        except ValueError:
+            return None
+        if index + 1 >= len(command):
+            return None
+        return CodexCliRuntime._normalize_runtime_reported_model(command[index + 1])
+
+    @classmethod
+    def _initial_model_observation(cls, command: list[str]) -> dict[str, str | None]:
+        """Describe the selection state before any runtime model report arrives."""
+        requested_model = cls._command_requested_model(command)
+        if requested_model is not None:
+            return {
+                "mode": "pinned",
+                "status": "requested",
+                "requested_model": requested_model,
+                "effective_model": None,
+                "source": "command:--model",
+            }
+        return {
+            "mode": "automatic",
+            "status": "unreported",
+            "requested_model": None,
+            "effective_model": None,
+            "source": None,
+        }
+
+    @staticmethod
+    def _observed_model_observation(
+        previous: Mapping[str, str | None],
+        *,
+        model: str,
+        source: str,
+    ) -> dict[str, str | None]:
+        """Upgrade selection metadata only from a runtime-reported model."""
+        return {
+            "mode": previous.get("mode"),
+            "status": "observed",
+            "requested_model": previous.get("requested_model"),
+            "effective_model": model,
+            "source": source,
+        }
+
+    @staticmethod
     def _hash_json_payload(payload: object) -> str:
         encoded = json.dumps(
             payload,
@@ -445,7 +679,10 @@ class CodexCliRuntime:
         ).encode("utf-8")
         return hashlib.sha256(encoded).hexdigest()
 
-    def _fingerprint_profile_resolution_config(self) -> str:
+    def _fingerprint_profile_resolution_config(
+        self,
+        runtime_handle: RuntimeHandle | None = None,
+    ) -> str:
         """Hash only Ouroboros profile fields that can alter a Codex command."""
         from ouroboros.providers import profiles as profile_module
 
@@ -456,46 +693,178 @@ class CodexCliRuntime:
             # that state stable without persisting path-rich error messages.
             return self._hash_json_payload({"version": 1, "load_error": type(exc).__name__})
 
+        relevant_role_profiles: dict[str, str] = {}
+        relevant_profile_names: set[str] = set()
+        if isinstance(self._runtime_profile, str) and self._runtime_profile.strip():
+            relevant_profile_names.add(self._runtime_profile.strip())
+        handle_profile = self._runtime_profile_from_metadata(runtime_handle)
+        if handle_profile:
+            relevant_profile_names.add(handle_profile)
+        for role, role_profile in sorted(config.llm_role_profiles.items()):
+            if role_profile:
+                relevant_role_profiles[role] = role_profile
+                relevant_profile_names.add(role_profile)
+
+        # Runtime handles may select `llm_profile` directly through metadata.
+        # After runtime recreation the process-local handle cache is empty, so
+        # the durable identity must already cover every handle-selectable
+        # semantic profile, including provider-neutral profiles that only carry
+        # top-level model / reasoning settings and no Codex provider mapping.
+        relevant_profile_names.update(config.llm_profiles)
+
         profiles: dict[str, object] = {}
         for name, profile in sorted(config.llm_profiles.items()):
-            codex_providers = {
-                key: {
+            if name not in relevant_profile_names:
+                continue
+            ordered_codex_providers: list[tuple[str, dict[str, str | None]]] = []
+            for key, provider in profile.providers.items():
+                if key.strip().lower() not in {"codex", "codex_cli"}:
+                    continue
+                provider_contract: dict[str, str | None] = {
                     "model": provider.model,
                     "profile": provider.profile,
                 }
-                for key, provider in sorted(profile.providers.items())
-                if key.strip().lower() in {"codex", "codex_cli"}
-            }
-            profiles[name] = {
+                # Retain the v1 identity when the newly introduced field is
+                # dormant. Existing sessions persisted that older shape, and
+                # a null value changes no command-line behavior.
+                if provider.reasoning_effort is not None:
+                    provider_contract["reasoning_effort"] = provider.reasoning_effort
+                ordered_codex_providers.append((key, provider_contract))
+
+            if len(ordered_codex_providers) == 1:
+                _, contract = ordered_codex_providers[0]
+                codex_providers: object = {"codex": contract}
+            else:
+                # Multiple keys that normalize to Codex are an invalid profile
+                # state. Command resolution rejects it regardless of insertion
+                # order, so the durable fingerprint must represent the same
+                # invalid semantics order-independently instead of blocking
+                # resume for a no-op alias reorder.
+                codex_providers = {
+                    "invalid_duplicate_aliases": sorted(
+                        (
+                            {
+                                "normalized_backend": "codex",
+                                "config": contract,
+                            }
+                            for _, contract in ordered_codex_providers
+                        ),
+                        key=lambda item: json.dumps(item, sort_keys=True),
+                    )
+                }
+
+            profile_contract: dict[str, object] = {
                 "model": profile.model,
                 "providers": codex_providers,
             }
+            if profile.reasoning_effort is not None:
+                profile_contract["reasoning_effort"] = profile.reasoning_effort
+            profiles[name] = profile_contract
 
         return self._hash_json_payload(
             {
                 "version": 1,
                 "llm_profiles": profiles,
-                "llm_role_profiles": dict(sorted(config.llm_role_profiles.items())),
+                "llm_role_profiles": dict(sorted(relevant_role_profiles.items())),
             }
         )
 
     @staticmethod
     def _codex_home() -> Path:
-        configured = os.environ.get("CODEX_HOME")
-        return Path(configured).expanduser() if configured else Path.home() / ".codex"
+        from ouroboros.codex.home import resolve_codex_home
 
-    def _fingerprint_codex_config_files(self) -> str:
-        """Hash global Codex config and every profile-v2 TOML by name/content."""
+        return resolve_codex_home()
+
+    @staticmethod
+    def _codex_profile_v2_names_from_ouroboros_config() -> set[str]:
+        """Return Codex profile-v2 names referenced by current Ouroboros profiles."""
+        from ouroboros.providers import profiles as profile_module
+
+        try:
+            config = profile_module.load_config()
+        except Exception:
+            return set()
+
+        names: set[str] = set()
+        for profile in config.llm_profiles.values():
+            for key, provider in profile.providers.items():
+                if key.strip().lower() not in {"codex", "codex_cli"}:
+                    continue
+                if isinstance(provider.profile, str) and provider.profile.strip():
+                    names.add(provider.profile.strip())
+        return names
+
+    def _read_codex_project_trust_levels(self) -> set[str] | None:
+        """Snapshot project trust state before Codex can mutate it on first use."""
+        config_path = self._codex_home() / "config.toml"
+        try:
+            parsed = tomllib.loads(config_path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return {}
+        except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+            return None
+
+        projects = parsed.get("projects")
+        if not isinstance(projects, dict):
+            return {}
+        return {
+            self._canonical_codex_project_path(str(project_path))
+            for project_path, settings in projects.items()
+            if isinstance(settings, dict) and "trust_level" in settings
+        }
+
+    @staticmethod
+    def _canonical_codex_project_path(project_path: str) -> str:
+        """Match Codex project keys to the canonical cwd without weakening drift."""
+        candidate = Path(project_path).expanduser()
+        if not candidate.is_absolute():
+            return project_path
+        try:
+            return str(candidate.resolve(strict=False))
+        except (OSError, RuntimeError, ValueError):
+            return project_path
+
+    def _fingerprint_codex_config_files(
+        self,
+        runtime_handle: RuntimeHandle | None = None,
+    ) -> str:
+        """Hash global Codex config plus command-reachable profile-v2 TOML."""
         codex_home = self._codex_home()
         candidates: dict[str, Path] = {"config.toml": codex_home / "config.toml"}
+        for profile_name in self._codex_profile_v2_names:
+            filename = f"{profile_name}.config.toml"
+            candidates[filename] = codex_home / filename
+        handle_native_profile = self._codex_profile_from_metadata(runtime_handle)
+        handle_resolved_profile: str | None = None
+        if runtime_handle is not None and self._runtime_handle_has_profile_selection(
+            runtime_handle
+        ):
+            try:
+                _, handle_resolved_profile, _ = self._resolve_runtime_codex_config_uncached(
+                    runtime_handle
+                )
+            except Exception as exc:
+                raise RuntimeError("Cannot resolve Codex runtime profile configuration") from exc
+        for profile_name in {
+            self._codex_profile,
+            self._resolved_fallback_profile,
+            handle_native_profile,
+            handle_resolved_profile,
+        }:
+            if isinstance(profile_name, str) and profile_name.strip():
+                filename = f"{profile_name.strip()}.config.toml"
+                candidates[filename] = codex_home / filename
+        # Runtime handles may select `codex_profile` directly after a resume.
+        # Include all profile-v2 files so durable identity fails closed instead
+        # of accepting current contents as a fresh first command.
         try:
-            for path in codex_home.glob("*.config.toml"):
-                candidates[path.name] = path
+            for profile_path in codex_home.glob("*.config.toml"):
+                candidates.setdefault(profile_path.name, profile_path)
         except OSError as exc:
             raise RuntimeError("Cannot inspect Codex profile configuration") from exc
 
         digest = hashlib.sha256()
-        digest.update(b"ouroboros-codex-config-v1\0")
+        digest.update(b"ouroboros-codex-config-v2\0")
         # CODEX_HOME also owns the session database used by ``codex exec
         # resume``. Identical profile files under a different home must not
         # authorize reconnecting a persisted thread id in another store.
@@ -528,18 +897,116 @@ class CodexCliRuntime:
                 raise RuntimeError("Cannot read Codex profile configuration") from exc
             if name == "config.toml":
                 contents = self._stable_global_codex_config_bytes(contents)
+            elif name.endswith(".config.toml"):
+                contents = self._stable_codex_profile_config_bytes(contents)
             digest.update(contents)
             digest.update(b"\0")
+        for asset_name in ("rules", "skills"):
+            self._update_codex_instruction_asset_fingerprint(
+                digest,
+                codex_home / asset_name,
+                relative_name=asset_name,
+            )
         return digest.hexdigest()
 
+    def _update_codex_instruction_asset_fingerprint(
+        self,
+        digest: Any,
+        path: Path,
+        *,
+        relative_name: str,
+        _seen: frozenset[Path] = frozenset(),
+    ) -> None:
+        """Hash active Codex rules/skills assets, including symlink target contents."""
+        digest.update(relative_name.encode("utf-8", errors="surrogateescape"))
+        digest.update(b"\0")
+        try:
+            stat_result = path.lstat()
+        except FileNotFoundError:
+            digest.update(b"missing\0")
+            return
+        except OSError as exc:
+            raise RuntimeError("Cannot inspect Codex instruction assets") from exc
+
+        mode = stat_result.st_mode
+        if stat.S_ISLNK(mode):
+            try:
+                link_target = os.readlink(path)
+                digest.update(b"symlink\0")
+                digest.update(link_target.encode("utf-8", errors="surrogateescape"))
+                digest.update(b"\0")
+            except OSError as exc:
+                raise RuntimeError("Cannot inspect Codex instruction assets") from exc
+            target_path = Path(link_target)
+            if not target_path.is_absolute():
+                target_path = path.parent / target_path
+            normalized_target = target_path.expanduser().absolute()
+            if normalized_target in _seen:
+                digest.update(b"symlink-cycle\0")
+                return
+            self._update_codex_instruction_asset_fingerprint(
+                digest,
+                target_path,
+                relative_name=f"{relative_name}->target",
+                _seen=_seen | {path.expanduser().absolute()},
+            )
+            return
+
+        if stat.S_ISREG(mode):
+            digest.update(b"file\0")
+            try:
+                digest.update(path.read_bytes())
+            except OSError as exc:
+                raise RuntimeError("Cannot read Codex instruction assets") from exc
+            digest.update(b"\0")
+            return
+
+        if stat.S_ISDIR(mode):
+            digest.update(b"directory\0")
+            try:
+                children = sorted(path.iterdir(), key=lambda child: child.name)
+            except OSError as exc:
+                raise RuntimeError("Cannot inspect Codex instruction assets") from exc
+            for child in children:
+                self._update_codex_instruction_asset_fingerprint(
+                    digest,
+                    child,
+                    relative_name=f"{relative_name}/{child.name}",
+                    _seen=_seen | {path.expanduser().absolute()},
+                )
+            digest.update(b"end-directory\0")
+            return
+
+        digest.update(f"non-file:{mode}\0".encode("ascii"))
+
     @staticmethod
-    def _stable_global_codex_config_bytes(contents: bytes) -> bytes:
-        """Ignore Codex's automatic per-cwd trust bookkeeping in drift checks.
+    def _stable_codex_profile_config_bytes(contents: bytes) -> bytes:
+        """Canonicalize valid profile-v2 TOML for semantic drift checks."""
+        try:
+            parsed = tomllib.loads(contents.decode("utf-8"))
+        except (UnicodeDecodeError, tomllib.TOMLDecodeError):
+            return contents
+        return json.dumps(
+            parsed,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            default=str,
+        ).encode("utf-8")
+
+    def _stable_global_codex_config_bytes(
+        self,
+        contents: bytes,
+        *,
+        reachable_profiles: set[str] | None = None,
+    ) -> bytes:
+        """Ignore only Codex's automatic first-use trust entry for this cwd.
 
         ``codex exec`` adds ``projects.<cwd>.trust_level`` on first use. That
         mutation cannot retarget a model/profile and must not invalidate the
-        thread handle created by the same command. Any other project-scoped key
-        remains fingerprinted, as do all non-project settings.
+        thread handle created by the same command. Existing trust entries and
+        trust changes for every other project remain authority-bearing drift,
+        as do all other project-scoped and non-project settings.
         """
         try:
             parsed = tomllib.loads(contents.decode("utf-8"))
@@ -553,15 +1020,39 @@ class CodexCliRuntime:
                 if not isinstance(raw_settings, dict):
                     retained_projects[str(project_path)] = raw_settings
                     continue
+                project_key = str(project_path)
+                canonical_project_key = self._canonical_codex_project_path(project_key)
+                automatic_current_cwd_trust = (
+                    self._codex_project_trust_baseline is not None
+                    and self._cwd is not None
+                    and canonical_project_key == self._cwd
+                    and canonical_project_key not in self._codex_project_trust_baseline
+                    and raw_settings.get("trust_level") == "trusted"
+                )
                 retained_settings = {
-                    str(key): value for key, value in raw_settings.items() if key != "trust_level"
+                    str(key): value
+                    for key, value in raw_settings.items()
+                    if key != "trust_level" or not automatic_current_cwd_trust
                 }
                 if retained_settings:
-                    retained_projects[str(project_path)] = retained_settings
+                    retained_projects[project_key] = retained_settings
             if retained_projects:
                 parsed["projects"] = retained_projects
             else:
                 parsed.pop("projects", None)
+
+        profiles = parsed.get("profiles")
+        if isinstance(profiles, dict):
+            resolved_reachable_profiles = reachable_profiles
+            retained_profiles = {
+                str(name): settings
+                for name, settings in profiles.items()
+                if resolved_reachable_profiles is None or str(name) in resolved_reachable_profiles
+            }
+            if retained_profiles:
+                parsed["profiles"] = retained_profiles
+            else:
+                parsed.pop("profiles", None)
 
         return json.dumps(
             parsed,
@@ -571,25 +1062,256 @@ class CodexCliRuntime:
             default=str,
         ).encode("utf-8")
 
-    def _assert_codex_config_files_unchanged(self) -> None:
+    def _runtime_handle_has_profile_selection(self, runtime_handle: RuntimeHandle) -> bool:
+        metadata = runtime_handle.metadata
+        if any(
+            isinstance(metadata.get(key), str) and bool(metadata[key].strip())
+            for key in (
+                *_RUNTIME_PROFILE_METADATA_KEYS,
+                *_RUNTIME_CODEX_PROFILE_METADATA_KEYS,
+                "llm_role",
+                "agent_runtime_role",
+                "session_role",
+            )
+        ):
+            return True
+        normalized_kind = (runtime_handle.kind or "").strip().lower().replace("-", "_")
+        return normalized_kind not in {"", _RUNTIME_PROFILE_ROLE_PREFIX}
+
+    def _runtime_handle_fingerprint_key(self, runtime_handle: RuntimeHandle | None) -> str | None:
+        if runtime_handle is None:
+            return None
+        if not self._runtime_handle_has_profile_selection(runtime_handle):
+            return None
+        selector = self.resume_handle_execution_identity_contract(runtime_handle)
+        return self._hash_json_payload(selector)
+
+    def _assert_codex_config_files_unchanged(
+        self,
+        runtime_handle: RuntimeHandle | None = None,
+    ) -> None:
         if self._runtime_backend != "codex":
             return
-        if self._fingerprint_codex_config_files() != self._codex_config_fingerprint:
+        key = self._runtime_handle_fingerprint_key(runtime_handle)
+        current = self._fingerprint_codex_config_files(runtime_handle if key is not None else None)
+        if key is not None:
+            previous = self._runtime_handle_codex_config_fingerprints.get(key)
+            if previous is None:
+                previous = self._codex_config_fingerprint
+                self._runtime_handle_codex_config_fingerprints[key] = previous
+            if current == previous:
+                return
+        elif current == self._codex_config_fingerprint:
+            return
+        raise RuntimeError(
+            "Codex configuration changed after runtime initialization; "
+            "start a new execution session"
+        )
+
+    def _assert_cli_executable_identity_unchanged(self) -> None:
+        """Fail closed if the selected CLI executable changed in place."""
+        if self._cli_executable_path_identity is None:
+            cli_path = str(self._cli_path)
+            cli_candidate = Path(cli_path).expanduser()
+            if not cli_candidate.is_absolute():
+                if self._runtime_backend == "codex":
+                    raise RuntimeError(
+                        "Codex CLI executable was unresolved at runtime initialization; "
+                        "start a new execution session"
+                    )
+                return
+            if cli_candidate.exists():
+                raise RuntimeError(
+                    "Codex CLI executable appeared after runtime initialization; "
+                    "start a new execution session"
+                )
+            return
+        if self._cli_executable_identity() != self._cli_executable_path_identity:
             raise RuntimeError(
-                "Codex configuration changed after runtime initialization; "
+                "Codex CLI executable changed after runtime initialization; "
+                "start a new execution session"
+            )
+        if (
+            self._cli_executable_content_identity()
+            != self._cli_executable_content_identity_snapshot
+        ):
+            raise RuntimeError(
+                "Codex CLI executable changed after runtime initialization; "
+                "start a new execution session"
+            )
+        if (
+            self._cli_executable_version_identity()
+            == self._cli_executable_version_identity_snapshot
+        ):
+            return
+        raise RuntimeError(
+            "Codex CLI executable changed after runtime initialization; "
+            "start a new execution session"
+        )
+
+    def _fingerprint_skill_dispatch_registry(self) -> str | None:
+        """Fingerprint the effective SKILL.md frontmatter dispatch registry."""
+        try:
+            mappings = discover_skill_tool_mappings(self._skills_dir)
+        except (OSError, ValueError):
+            return None
+        payload = [
+            {
+                "skill_name": mapping.skill_name,
+                "mcp_tool": mapping.mcp_tool,
+                "skill_path": mapping.skill_path,
+                "mcp_args": dict(mapping.mcp_args),
+                "context_keys": list(mapping.context_keys),
+            }
+            for mapping in mappings
+        ]
+        return self._hash_json_payload(payload)
+
+    def _fingerprint_skill_dispatcher(
+        self,
+        dispatcher: SkillDispatchHandler | None,
+    ) -> str:
+        """Fingerprint the process-local dispatch callable bound at startup."""
+        if dispatcher is None:
+            return "packaged"
+        owner = getattr(dispatcher, "__self__", None)
+        stable_identity = getattr(owner, "stable_identity_contract", None)
+        if callable(stable_identity):
+            try:
+                identity = stable_identity()
+            except Exception:
+                identity = None
+            if isinstance(identity, Mapping):
+                return self._hash_json_payload(
+                    {
+                        "module": getattr(dispatcher, "__module__", None),
+                        "qualname": getattr(dispatcher, "__qualname__", None),
+                        "stable_identity": dict(identity),
+                    }
+                )
+        return self._hash_json_payload(
+            {
+                "module": getattr(dispatcher, "__module__", None),
+                "qualname": getattr(dispatcher, "__qualname__", None),
+                "identity": id(dispatcher),
+            }
+        )
+
+    def _assert_skill_dispatcher_unchanged(self) -> None:
+        """Fail closed if process-local skill dispatch authority was replaced."""
+        if self._runtime_backend != "codex":
+            return
+        if (
+            self._fingerprint_skill_dispatcher(self._skill_dispatcher)
+            != self._skill_dispatcher_identity
+        ):
+            raise RuntimeError(
+                "Codex skill dispatcher changed after runtime initialization; "
                 "start a new execution session"
             )
 
-    def _assert_profile_resolution_config_unchanged(self) -> None:
+    def _handler_source_digest(self, handler: Any) -> str | None:
+        """Return a stable source-file digest for a built-in MCP handler."""
+        handler_type = type(handler)
+        module = sys.modules.get(handler_type.__module__)
+        module_file = getattr(module, "__file__", None)
+        if not module_file:
+            return None
+        try:
+            return hashlib.sha256(Path(module_file).read_bytes()).hexdigest()
+        except OSError:
+            return None
+
+    def _fingerprint_builtin_mcp_handler_registry(self) -> str | None:
+        """Fingerprint effectful built-in MCP handler authority."""
+        try:
+            handlers = self._get_builtin_mcp_handlers()
+        except Exception:
+            return None
+        payload: list[dict[str, Any]] = []
+        for name, handler in sorted(handlers.items()):
+            definition = getattr(handler, "definition", None)
+            try:
+                definition_payload = definition.model_dump(mode="json")
+            except AttributeError:
+                definition_payload = repr(definition)
+            handler_type = type(handler)
+            payload.append(
+                {
+                    "tool_name": name,
+                    "handler_module": handler_type.__module__,
+                    "handler_qualname": handler_type.__qualname__,
+                    "handler_source_sha256": self._handler_source_digest(handler),
+                    "definition": definition_payload,
+                }
+            )
+        return self._hash_json_payload(payload)
+
+    def _assert_builtin_mcp_handler_registry_unchanged(self) -> None:
+        """Fail closed if built-in MCP handler authority changes mid-run."""
         if self._runtime_backend != "codex":
             return
-        if self._fingerprint_profile_resolution_config() != self._profile_resolution_fingerprint:
+        if self._builtin_mcp_handler_registry_fingerprint is None:
             raise RuntimeError(
-                "Ouroboros Codex profile routing changed after runtime initialization; "
+                "Codex built-in MCP handler registry was unavailable at runtime initialization; "
+                "start a new execution session"
+            )
+        if (
+            self._fingerprint_builtin_mcp_handler_registry()
+            != self._builtin_mcp_handler_registry_fingerprint
+        ):
+            raise RuntimeError(
+                "Codex built-in MCP handler registry changed after runtime initialization; "
                 "start a new execution session"
             )
 
-    def execution_identity_contract(self) -> dict[str, Any]:
+    def _assert_skill_dispatch_registry_unchanged(self) -> None:
+        """Fail closed if packaged skill dispatch authority changes mid-run."""
+        if self._runtime_backend != "codex":
+            return
+        self._assert_skill_dispatcher_unchanged()
+        self._assert_builtin_mcp_handler_registry_unchanged()
+        if self._skill_dispatch_registry_fingerprint is None:
+            raise RuntimeError(
+                "Codex skill dispatch registry was unavailable at runtime initialization; "
+                "start a new execution session"
+            )
+        if self._fingerprint_skill_dispatch_registry() != self._skill_dispatch_registry_fingerprint:
+            raise RuntimeError(
+                "Codex skill dispatch registry changed after runtime initialization; "
+                "start a new execution session"
+            )
+
+    def _assert_profile_resolution_config_unchanged(
+        self,
+        runtime_handle: RuntimeHandle | None = None,
+    ) -> None:
+        if self._runtime_backend != "codex":
+            return
+        key = self._runtime_handle_fingerprint_key(runtime_handle)
+        if runtime_handle is not None and key is None:
+            return
+        current = self._fingerprint_profile_resolution_config(
+            runtime_handle if key is not None else None
+        )
+        if key is not None:
+            previous = self._runtime_handle_profile_fingerprints.get(key)
+            if previous is None:
+                previous = self._profile_resolution_fingerprint
+                self._runtime_handle_profile_fingerprints[key] = previous
+            if current == previous:
+                return
+        elif current == self._profile_resolution_fingerprint:
+            return
+        raise RuntimeError(
+            "Ouroboros Codex profile routing changed after runtime initialization; "
+            "start a new execution session"
+        )
+
+    def execution_identity_contract(
+        self,
+        runtime_handle: RuntimeHandle | None = None,
+    ) -> dict[str, Any]:
         """Return the resolved Codex execution identity used across resumes.
 
         ``_model`` alone is not a complete model pin for Codex.  When it is
@@ -615,11 +1337,23 @@ class CodexCliRuntime:
         # consume; an unpinned model remains explicitly unobserved and the
         # runner fails closed unless native per-call routing enforces it.
         if self._runtime_backend != "codex":
+            native_agent = getattr(self, "_copilot_agent", None)
+            if not isinstance(native_agent, str) or not native_agent.strip():
+                native_agent = None
             return {
                 "kind": f"{self._runtime_handle_backend}_v1",
-                "fallback_model": constructor_model,
-                "effective_model_observed": constructor_model is not None,
+                "cli_executable_path": self._cli_executable_identity(),
+                "cli_executable_content_sha256": self._cli_executable_content_identity(),
+                "cli_executable_version": self._cli_executable_version_identity(),
+                "fallback_model": None if native_agent else constructor_model,
+                "native_agent": native_agent,
+                "effective_model_observed": constructor_model is not None and native_agent is None,
                 "llm_backend": normalized_llm_backend,
+                "skills_dir": str(self._skills_dir) if self._skills_dir is not None else None,
+                "skill_dispatcher": "custom" if self._skill_dispatcher is not None else "packaged",
+                "skill_dispatcher_identity": self._skill_dispatcher_identity,
+                "startup_output_timeout_seconds": self._startup_output_timeout_seconds,
+                "stdout_idle_timeout_seconds": self._stdout_idle_timeout_seconds,
             }
 
         fallback_model = constructor_model
@@ -635,6 +1369,13 @@ class CodexCliRuntime:
 
         return {
             "kind": "codex_cli_v1",
+            # The automatic Codex default has no model argument.  Bind its
+            # durable identity to the selected executable as well as its
+            # profile/config inputs, otherwise a different Codex installation
+            # could resume the same native thread under different defaults.
+            "cli_executable_path": self._cli_executable_identity(),
+            "cli_executable_content_sha256": self._cli_executable_content_identity(),
+            "cli_executable_version": self._cli_executable_version_identity(),
             "runtime_profile": self._runtime_profile.strip()
             if isinstance(self._runtime_profile, str) and self._runtime_profile.strip()
             else None,
@@ -651,9 +1392,20 @@ class CodexCliRuntime:
             # can authorize a routing-disabled resume.
             "effective_model_observed": fallback_model is not None,
             "llm_backend": normalized_llm_backend,
+            "skills_dir": str(self._skills_dir) if self._skills_dir is not None else None,
+            "skill_dispatcher": "custom" if self._skill_dispatcher is not None else "packaged",
+            "skill_dispatcher_identity": self._skill_dispatcher_identity,
+            "skill_dispatch_registry_fingerprint": self._skill_dispatch_registry_fingerprint,
+            "builtin_mcp_handler_registry_fingerprint": (
+                self._builtin_mcp_handler_registry_fingerprint
+            ),
+            "startup_output_timeout_seconds": self._startup_output_timeout_seconds,
+            "stdout_idle_timeout_seconds": self._stdout_idle_timeout_seconds,
             "profile_resolution_fingerprint": self._profile_resolution_fingerprint,
             "codex_config_fingerprint": self._codex_config_fingerprint,
-            "resume_handle_selector": self.resume_handle_execution_identity_contract(None),
+            "resume_handle_selector": self.resume_handle_execution_identity_contract(
+                runtime_handle
+            ),
         }
 
     def resume_handle_execution_identity_contract(
@@ -742,11 +1494,11 @@ class CodexCliRuntime:
     def _resolve_runtime_codex_config_uncached(
         self,
         runtime_handle: RuntimeHandle | None,
-    ) -> tuple[str | None, str | None]:
-        """Resolve model/profile settings directly from mutable config."""
+    ) -> tuple[str | None, str | None, str | None]:
+        """Resolve model/profile/effort settings directly from mutable config."""
         native_profile = self._codex_profile_from_metadata(runtime_handle)
         if native_profile:
-            return None, native_profile
+            return None, native_profile, None
 
         profile_name = self._runtime_profile_from_metadata(runtime_handle)
         role = None if profile_name else self._runtime_profile_role(runtime_handle)
@@ -754,15 +1506,19 @@ class CodexCliRuntime:
             CompletionConfig(model="default", profile=profile_name, role=role),
             backend="codex",
         )
-        return resolved.config.model, resolved.backend_profile
+        return resolved.config.model, resolved.backend_profile, resolved.config.reasoning_effort
 
     def _resolve_runtime_codex_config(
         self,
         runtime_handle: RuntimeHandle | None,
-    ) -> tuple[str | None, str | None]:
+    ) -> tuple[str | None, str | None, str | None]:
         """Return frozen defaults unless the handle selects an explicit role/profile."""
         if runtime_handle is None:
-            return self._resolved_fallback_model, self._resolved_fallback_profile
+            return (
+                self._resolved_fallback_model,
+                self._resolved_fallback_profile,
+                self._resolved_fallback_reasoning_effort,
+            )
 
         metadata = runtime_handle.metadata
         has_explicit_selection = any(
@@ -777,8 +1533,12 @@ class CodexCliRuntime:
         )
         normalized_kind = (runtime_handle.kind or "").strip().lower().replace("-", "_")
         if not has_explicit_selection and normalized_kind in {"", _RUNTIME_PROFILE_ROLE_PREFIX}:
-            return self._resolved_fallback_model, self._resolved_fallback_profile
-        self._assert_profile_resolution_config_unchanged()
+            return (
+                self._resolved_fallback_model,
+                self._resolved_fallback_profile,
+                self._resolved_fallback_reasoning_effort,
+            )
+        self._assert_profile_resolution_config_unchanged(runtime_handle)
         return self._resolve_runtime_codex_config_uncached(runtime_handle)
 
     def _build_runtime_handle(
@@ -1194,6 +1954,7 @@ class CodexCliRuntime:
         current_handle: RuntimeHandle | None,
     ) -> tuple[AgentMessage, ...] | None:
         """Attempt deterministic skill dispatch before invoking Codex."""
+        self._assert_skill_dispatch_registry_unchanged()
         dispatch_result = resolve_skill_dispatch(
             ResolveRequest(
                 prompt=prompt,
@@ -1315,8 +2076,23 @@ class CodexCliRuntime:
         model: str | None = None,
     ) -> list[str]:
         """Build the CLI command args.  Prompt is fed via stdin separately."""
-        self._assert_codex_config_files_unchanged()
+        if runtime_handle is not None:
+            self._assert_profile_resolution_config_unchanged(runtime_handle)
+        self._assert_codex_config_files_unchanged(runtime_handle)
+        self._assert_cli_executable_identity_unchanged()
         command = [self._cli_path, "exec"]
+
+        normalized_model = self._normalize_model(model or self._model)
+        runtime_model: str | None = None
+        runtime_profile: str | None = None
+        runtime_effort: str | None = None
+        # Always resolve the role selection so an explicit model pin still
+        # inherits its selected reasoning effort. The pin below suppresses the
+        # role's model/profile, but must not silently fall back to Codex's
+        # unrelated global effort setting.
+        runtime_model, runtime_profile, runtime_effort = self._resolve_runtime_codex_config(
+            runtime_handle
+        )
 
         # Codex accepts one active --profile. The backend runtime profile is
         # the worker-isolation boundary, so it owns that singular flag when
@@ -1341,18 +2117,17 @@ class CodexCliRuntime:
         # ENFORCED (not advised) by overriding ``model_reasoning_effort``. Only
         # a known-safe token is forwarded, so an unexpected value can never be
         # injected into the ``key=value`` override.
-        if reasoning_effort and reasoning_effort in _CODEX_REASONING_EFFORT_LEVELS:
-            command.extend(["-c", f"model_reasoning_effort={reasoning_effort}"])
+        effective_effort = reasoning_effort or runtime_effort
+        if effective_effort and effective_effort in _CODEX_REASONING_EFFORT_LEVELS:
+            command.extend(["-c", f"model_reasoning_effort={effective_effort}"])
 
         # Per-call model-tier override (RFC #1405 sibling) wins over the
         # constructor pin; ``model is None`` falls back to ``self._model`` so
         # existing call sites are byte-identical. Only when neither yields a model
         # do we consult the runtime profile below (unchanged fallback order).
-        normalized_model = self._normalize_model(model or self._model)
         if normalized_model:
             command.extend(["--model", normalized_model])
         else:
-            runtime_model, runtime_profile = self._resolve_runtime_codex_config(runtime_handle)
             if runtime_profile and not self._codex_profile:
                 command.extend(["--profile", runtime_profile])
             else:
@@ -2699,11 +3474,22 @@ class CodexCliRuntime:
                 f"{self._log_namespace}.turn_failed",
                 error=error_msg,
             )
+            error_data: dict[str, Any] = {"subtype": "error", "error_type": "TurnFailed"}
+            error_data.update(
+                self._codex_model_failure_data(
+                    returncode=1,
+                    message=error_msg,
+                    stderr_lines=[],
+                )
+            )
+            guidance = error_data.get("model_guidance")
+            if isinstance(guidance, str) and guidance and guidance not in error_msg:
+                error_msg = f"{error_msg}\n\n{guidance}"
             return [
                 AgentMessage(
                     type="result",
                     content=error_msg,
-                    data={"subtype": "error", "error_type": "TurnFailed"},
+                    data=error_data,
                     resume_handle=current_handle,
                 )
             ]
@@ -2787,6 +3573,42 @@ class CodexCliRuntime:
         """
         del attempted_resume_session_id, current_handle, returncode, final_message, stderr_lines
         return None
+
+    def _codex_model_failure_data(
+        self,
+        *,
+        returncode: int,
+        message: str,
+        stderr_lines: list[str],
+    ) -> dict[str, object]:
+        """Reuse Codex model diagnostics for Execute-stage runtime failures.
+
+        Other runtimes inherit this process loop, so scope the App/CLI version
+        probe to actual Codex executions only.
+        """
+        if self._runtime_backend != "codex":
+            return {}
+        from ouroboros.providers.codex_cli_adapter import CodexCliLLMAdapter
+
+        details = CodexCliLLMAdapter._codex_failure_details(
+            returncode=returncode,
+            session_id=None,
+            stderr="\n".join(stderr_lines),
+            stdout_errors=[],
+            message=message,
+            cli_path=self._cli_path,
+        )
+        return {
+            key: details[key]
+            for key in (
+                "failure_category",
+                "model_guidance",
+                "codex_app_version",
+                "codex_cli_version",
+                "codex_app_cli_versions_match",
+            )
+            if key in details
+        }
 
     async def execute_task(
         self,
@@ -2901,6 +3723,16 @@ class CodexCliRuntime:
             )
             output_path.unlink(missing_ok=True)
             return
+
+        # This is deliberately separate from the durable execution identity:
+        # a configured/default model can make a command replay-safe without
+        # proving which model an automatic Codex runtime selected.  User-facing
+        # telemetry starts as ``automatic + unreported`` and is upgraded only
+        # by a stream event that explicitly names the model.
+        model_observation: dict[str, str | None] | None = (
+            self._initial_model_observation(command) if self._runtime_backend == "codex" else None
+        )
+        last_reported_model: str | None = None
 
         log.info(
             f"{self._log_namespace}.task_started",
@@ -3032,6 +3864,28 @@ class CodexCliRuntime:
                         session_rebound=session_rebound,
                     )
 
+                    if model_observation is not None:
+                        reported_model = self._runtime_reported_model(event)
+                        if reported_model is not None:
+                            observed_model, observation_source = reported_model
+                            model_observation = self._observed_model_observation(
+                                model_observation,
+                                model=observed_model,
+                                source=observation_source,
+                            )
+                            if observed_model != last_reported_model:
+                                last_reported_model = observed_model
+                                yield AgentMessage(
+                                    type="system",
+                                    content=f"Codex selected model: {observed_model}",
+                                    data={
+                                        "subtype": "model.observed",
+                                        "runtime_event_type": "model.observed",
+                                        "model_observation": dict(model_observation),
+                                    },
+                                    resume_handle=current_handle,
+                                )
+
                     extra_messages = await self._handle_runtime_event(
                         event,
                         current_handle,
@@ -3047,6 +3901,14 @@ class CodexCliRuntime:
                             )
                             message = replace(message, resume_handle=current_handle)
                         last_content = self._update_last_content(last_content, message)
+                        if message.is_final and model_observation is not None:
+                            message = replace(
+                                message,
+                                data={
+                                    **message.data,
+                                    "model_observation": dict(model_observation),
+                                },
+                            )
                         yield message
 
                     for message in self._convert_event(
@@ -3063,6 +3925,14 @@ class CodexCliRuntime:
                         last_content = self._update_last_content(last_content, message)
                         if message.is_final:
                             yielded_final = True
+                            if model_observation is not None:
+                                message = replace(
+                                    message,
+                                    data={
+                                        **message.data,
+                                        "model_observation": dict(model_observation),
+                                    },
+                                )
                         yield message
 
         except TimeoutError as e:
@@ -3176,10 +4046,21 @@ class CodexCliRuntime:
                 "subtype": "success" if returncode == 0 else "error",
                 "returncode": returncode,
             }
+            if model_observation is not None:
+                result_data["model_observation"] = dict(model_observation)
             if current_handle is not None and current_handle.native_session_id:
                 result_data["session_id"] = current_handle.native_session_id
             if returncode != 0:
                 result_data["error_type"] = self._runtime_error_type
+                model_failure_data = self._codex_model_failure_data(
+                    returncode=returncode,
+                    message="\n".join((final_message, *stderr_lines)),
+                    stderr_lines=stderr_lines,
+                )
+                result_data.update(model_failure_data)
+                guidance = model_failure_data.get("model_guidance")
+                if isinstance(guidance, str) and guidance and guidance not in final_message:
+                    final_message = f"{final_message}\n\n{guidance}"
                 if attempted_resume_session_id and not saw_runtime_event:
                     result_data.update(
                         self._build_resume_retry_metadata(attempted_resume_session_id)

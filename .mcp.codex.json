@@ -1,0 +1,18 @@
+{
+  "mcpServers": {
+    "ouroboros": {
+      "command": "uvx",
+      "args": [
+        "--from",
+        "ouroboros-ai[mcp,claude]",
+        "ouroboros",
+        "mcp",
+        "serve",
+        "--runtime",
+        "codex",
+        "--llm-backend",
+        "codex"
+      ]
+    }
+  }
+}

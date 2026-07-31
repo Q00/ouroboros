@@ -101,6 +101,19 @@ class TestBrownfieldListExtractionContract:
         'CONTEXT_REFERENCES: [{"path": "/repo/api", "role": "primary", "summary": "API layer"}]\n'
     )
 
+    def test_strict_rejects_pipe_list_context_references(self) -> None:
+        gen = _generator()
+        with pytest.raises(ValueError, match="CONTEXT_REFERENCES"):
+            gen._parse_extraction_response(
+                "GOAL: Extend service\n"
+                "ONTOLOGY_NAME: Svc\n"
+                "ONTOLOGY_DESCRIPTION: A service\n"
+                "PROJECT_TYPE: brownfield\n"
+                "CONTEXT_REFERENCES: /repo/api:primary:API layer\n"
+                'EXISTING_PATTERNS: ["repository pattern"]\n'
+                'EXISTING_DEPENDENCIES: ["fastapi"]'
+            )
+
     def test_strict_rejects_pipe_list_existing_patterns(self) -> None:
         gen = _generator()
         with pytest.raises(ValueError, match="EXISTING_PATTERNS"):
@@ -133,6 +146,24 @@ class TestBrownfieldListExtractionContract:
         assert "typer (CLI | completion extras)" in bf.existing_dependencies
         assert "structlog" in bf.existing_dependencies
 
+    def test_json_context_references_preserve_colons_and_pipes_end_to_end(self) -> None:
+        gen = _generator()
+        requirements = gen._parse_extraction_response(
+            "GOAL: Extend service\n"
+            "ONTOLOGY_NAME: Svc\n"
+            "ONTOLOGY_DESCRIPTION: A service\n"
+            "PROJECT_TYPE: brownfield\n"
+            'CONTEXT_REFERENCES: [{"path": "C:/repo/api", "role": "primary", '
+            '"summary": "API layer | owns http://localhost:8000"}]\n'
+            'EXISTING_PATTERNS: ["Repository pattern"]\n'
+            'EXISTING_DEPENDENCIES: ["fastapi"]'
+        )
+        seed = gen._build_seed(requirements, metadata=_metadata())
+        ref = seed.brownfield_context.context_references[0]
+        assert ref.path == "C:/repo/api"
+        assert ref.role == "primary"
+        assert ref.summary == "API layer | owns http://localhost:8000"
+
     def test_build_seed_keeps_legacy_pipe_lists_for_stored_data(self) -> None:
         gen = _generator()
         requirements = {
@@ -146,6 +177,9 @@ class TestBrownfieldListExtractionContract:
         }
         seed = gen._build_seed(requirements, metadata=_metadata())
         bf = seed.brownfield_context
+        assert bf.context_references[0].path == "/repo/api"
+        assert bf.context_references[0].role == "primary"
+        assert bf.context_references[0].summary == "API layer"
         assert bf.existing_patterns == ("repository pattern", "dependency injection")
         assert bf.existing_dependencies == ("fastapi", "sqlalchemy")
 

@@ -423,6 +423,11 @@ class PMInterviewHandler:
         if self.pm_engine is not None:
             return self.pm_engine
         backend = get_llm_backend_for_role("pm_interview", explicit_backend=self.llm_backend)
+        # ``strict_mcp_config=True`` mirrors InterviewHandler's #765 opt-in:
+        # the PM question-generation subprocess runs as a child of Claude
+        # Code's MCP host, and without strict isolation it re-discovers every
+        # plugin/project MCP server — under a heavy harness the front-loaded
+        # catalog alone overflows the context from round two (#1768).
         adapter = self.llm_adapter or create_llm_adapter(
             backend=backend,
             max_turns=1,
@@ -430,6 +435,7 @@ class PMInterviewHandler:
             allowed_tools=[]
             if backend_supports_tool_envelope(resolve_llm_backend(backend))
             else None,
+            strict_mcp_config=True,
         )
         model = get_llm_model_for_role("pm_interview", backend=backend)
         return PMInterviewEngine.create(

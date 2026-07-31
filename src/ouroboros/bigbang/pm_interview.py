@@ -5,7 +5,7 @@ Adds PM-specific behavior on top of the existing InterviewEngine:
 - Reframing technical questions for PM audience
 - Deferred item tracking for dev-only questions
 - PMSeed generation from completed interview
-- Brownfield repo management via ~/.ouroboros/ouroboros.db
+- Brownfield repo management via the configured runtime database
 - CodebaseExplorer scan-once semantics (shared context)
 
 Composition pattern: PMInterviewEngine *wraps* InterviewEngine without
@@ -146,7 +146,7 @@ class PMInterviewEngine:
     - Question classification via QuestionClassifier
     - Deferred item tracking (dev-only questions)
     - PMSeed extraction from completed interviews
-    - Brownfield repo registration (~/.ouroboros/ouroboros.db)
+    - Brownfield repo registration (configured runtime database)
     - Scan-once codebase context sharing
 
     Attributes:

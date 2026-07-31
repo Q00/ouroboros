@@ -119,9 +119,9 @@ python3 - <<'PY'
 import json
 import sqlite3
 from collections import Counter, defaultdict
-from pathlib import Path
+from ouroboros.config.models import resolve_event_store_path
 
-db = Path.home() / ".ouroboros" / "ouroboros.db"
+db = resolve_event_store_path()
 con = sqlite3.connect(db)
 
 rows = con.execute(

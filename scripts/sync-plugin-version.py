@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Sync .claude-plugin/ version fields with hatch-vcs (git tag) version.
+"""Sync plugin version fields with hatch-vcs (git tag) version.
 
 Usage:
     python scripts/sync-plugin-version.py          # dry-run
@@ -26,8 +26,11 @@ import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parent.parent
+_DEFAULT_ROOT = ROOT
 PLUGIN_JSON = ROOT / ".claude-plugin" / "plugin.json"
 MARKETPLACE_JSON = ROOT / ".claude-plugin" / "marketplace.json"
+CODEX_PLUGIN_JSON = ROOT / ".codex-plugin" / "plugin.json"
+_DEFAULT_CODEX_PLUGIN_JSON = CODEX_PLUGIN_JSON
 SETUP_SKILL_MD = ROOT / "skills" / "setup" / "SKILL.md"
 BUNDLED_SETUP_SKILL_MD = ROOT / ".claude-plugin" / "skills" / "setup" / "SKILL.md"
 VERSION_MARKER_RE = re.compile(r"<!-- ooo:VERSION:([0-9A-Za-z.]+) -->")
@@ -525,6 +528,13 @@ def _run() -> None:
         (PLUGIN_JSON, None),
         (MARKETPLACE_JSON, "plugins.0"),
     ]
+    codex_plugin_json = (
+        ROOT / ".codex-plugin" / "plugin.json"
+        if CODEX_PLUGIN_JSON == _DEFAULT_CODEX_PLUGIN_JSON and ROOT != _DEFAULT_ROOT
+        else CODEX_PLUGIN_JSON
+    )
+    if codex_plugin_json.exists():
+        targets.append((codex_plugin_json, None))
     originals: dict[Path, bytes] = {}
     original_generations: dict[Path, _PathGeneration] = {}
     setup_markers: dict[Path, tuple[str, str]] = {}

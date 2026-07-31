@@ -112,6 +112,15 @@ _RECOVERY_BLOCKED_CHOICES: str = (
 )
 
 
+class SeedQaRepairMappingError(RuntimeError):
+    def __init__(self, feedback: tuple[str, ...]) -> None:
+        self.feedback: tuple[str, ...] = feedback
+        super().__init__(
+            "Seed QA feedback could not be mapped to a bounded repair; "
+            "manual Seed revision is required"
+        )
+
+
 class SeedGenerator(Protocol):
     """Protocol for seed-generator callables.
 
@@ -2822,7 +2831,10 @@ class AutoPipeline:
                     current_review,
                 )
             except Exception as exc:
-                state.mark_blocked(f"Seed QA raised: {exc}", tool_name="seed_qa")
+                state.mark_blocked(
+                    f"Seed QA raised {type(exc).__name__}",
+                    tool_name="seed_qa",
+                )
                 self._save(state)
                 return (
                     self._result(state, ledger, review=current_review, blocker=state.last_error),
@@ -2832,7 +2844,7 @@ class AutoPipeline:
 
             if qa_result.error:
                 state.mark_blocked(
-                    f"Seed QA reported transient error: {qa_result.error}",
+                    "Seed QA reported a transient evaluator error",
                     tool_name="seed_qa",
                 )
                 self._save(state)
@@ -2843,10 +2855,10 @@ class AutoPipeline:
                 )
 
             state.last_qa_score = float(qa_result.score)
-            state.last_qa_verdict = str(qa_result.verdict)
+            state.last_qa_verdict = _safe_seed_qa_verdict(qa_result.verdict)
             state.last_qa_passed = bool(qa_result.passed)
-            state.last_qa_differences = list(qa_result.differences)
-            state.last_qa_suggestions = list(qa_result.suggestions)
+            state.last_qa_differences = _safe_seed_qa_evidence(qa_result.differences)
+            state.last_qa_suggestions = _safe_seed_qa_evidence(qa_result.suggestions)
             if qa_result.passed:
                 review_blocker = self._seed_review_gate_blocker(state, current_review)
                 if review_blocker is not None:
@@ -2858,18 +2870,48 @@ class AutoPipeline:
                         current_review,
                     )
                 state.mark_progress(
-                    f"Seed QA passed: {qa_result.verdict} (score {qa_result.score:.2f})",
+                    f"Seed QA passed: {state.last_qa_verdict} (score {qa_result.score:.2f})",
                     tool_name="seed_qa",
                 )
                 self._save(state)
                 return None, current_seed, current_review
 
             if attempt < max_attempts:
-                current_seed = normalize_execution_acceptance(
-                    await self._repair_seed_after_qa(
-                        state, current_seed, qa_result, attempt=attempt
+                try:
+                    current_seed = normalize_execution_acceptance(
+                        await self._repair_seed_after_qa(
+                            state, current_seed, qa_result, attempt=attempt
+                        )
                     )
-                )
+                except SeedQaRepairMappingError as exc:
+                    await self._emit_runtime_event(
+                        "auto.seed_qa.blocked",
+                        state.auto_session_id,
+                        {
+                            "schema_version": 1,
+                            "auto_session_id": state.auto_session_id,
+                            "seed_id": current_seed.metadata.seed_id,
+                            "attempts": attempt,
+                            "verdict": state.last_qa_verdict,
+                            "score": float(qa_result.score),
+                            "differences": state.last_qa_differences[:5],
+                            "suggestions": state.last_qa_suggestions[:5],
+                            "reason": "seed_qa_feedback_unmapped",
+                        },
+                    )
+                    state.mark_blocked(
+                        str(exc),
+                        tool_name="seed_qa",
+                        error_code="seed_qa_feedback_unmapped",
+                    )
+                    self._save(state)
+                    return (
+                        self._result(
+                            state, ledger, review=current_review, blocker=state.last_error
+                        ),
+                        current_seed,
+                        current_review,
+                    )
                 current_review = SeedReviewer(self.grade_gate).review(
                     current_seed,
                     ledger=ledger,
@@ -2902,12 +2944,10 @@ class AutoPipeline:
 
             details = [
                 f"Seed QA did not pass after {attempt} attempt(s): "
-                f"{qa_result.verdict} (score {qa_result.score:.2f})"
+                f"{state.last_qa_verdict} (score {qa_result.score:.2f})"
             ]
-            if qa_result.differences:
-                details.append("differences: " + "; ".join(qa_result.differences[:3]))
-            if qa_result.suggestions:
-                details.append("suggestions: " + "; ".join(qa_result.suggestions[:3]))
+            details.extend(state.last_qa_differences)
+            details.extend(state.last_qa_suggestions)
             await self._emit_runtime_event(
                 "auto.seed_qa.blocked",
                 state.auto_session_id,
@@ -2916,10 +2956,10 @@ class AutoPipeline:
                     "auto_session_id": state.auto_session_id,
                     "seed_id": current_seed.metadata.seed_id,
                     "attempts": attempt,
-                    "verdict": str(qa_result.verdict)[:80],
+                    "verdict": state.last_qa_verdict,
                     "score": float(qa_result.score),
-                    "differences": [str(item)[:320] for item in qa_result.differences[:5]],
-                    "suggestions": [str(item)[:320] for item in qa_result.suggestions[:5]],
+                    "differences": state.last_qa_differences[:5],
+                    "suggestions": state.last_qa_suggestions[:5],
                     "reason": "repair_budget_exhausted",
                 },
             )
@@ -2943,8 +2983,8 @@ class AutoPipeline:
     ) -> Seed:
         """Repair a Seed that failed the QA gate before the next re-judge.
 
-        When a ``lateral_thinker`` is wired, ask a lateral persona to turn the
-        QA differences/suggestions into one *concrete decision* and fold that
+        When a ``lateral_thinker`` is wired, ask a lateral persona to turn only
+        mapped repair constraints into one *concrete decision* and fold that
         decision into the Seed — this resolves substance blockers (e.g. "no
         binding contract chosen; a section is missing") that the mechanical
         feedback echo cannot, because the echo only restates the gap. Falls
@@ -2956,10 +2996,12 @@ class AutoPipeline:
         if self.lateral_thinker is None:
             return _seed_with_seed_qa_feedback(seed, qa_result, attempt=attempt)
 
+        safe_feedback = _normalized_seed_qa_feedback(qa_result)
+
         already_tried = tuple(ThinkingPersona(value) for value in state.personas_invoked)
         persona = select_persona_for_qa_failure(
-            qa_result.differences,
-            qa_result.suggestions,
+            safe_feedback,
+            (),
             already_tried_personas=already_tried,
         )
         if persona is None:
@@ -2972,8 +3014,8 @@ class AutoPipeline:
             lateral_result = await asyncio.wait_for(
                 self.lateral_thinker(
                     persona=persona,
-                    qa_differences=qa_result.differences,
-                    qa_suggestions=qa_result.suggestions,
+                    qa_differences=safe_feedback,
+                    qa_suggestions=(),
                     run_artifact=seed_yaml,
                 ),
                 timeout=self._deadline_capped_timeout(
@@ -2995,7 +3037,12 @@ class AutoPipeline:
             f"Seed QA lateral repair via {persona.value} (attempt {attempt})",
             tool_name="seed_qa",
         )
-        return _seed_with_seed_qa_lateral_feedback(seed, lateral_result, attempt=attempt)
+        return _seed_with_seed_qa_lateral_feedback(
+            seed,
+            lateral_result,
+            qa_result=qa_result,
+            attempt=attempt,
+        )
 
     def _seed_review_gate_blocker(
         self, state: AutoPipelineState, review: SeedReview | None
@@ -4853,14 +4900,15 @@ def _seed_with_seed_qa_lateral_feedback(
     seed: Seed,
     lateral_result: LateralResult,
     *,
+    qa_result: EvaluateResult,
     attempt: int,
 ) -> Seed:
     """Return a Seed revised with a lateral persona's concrete QA resolution.
 
-    Unlike :func:`_seed_with_seed_qa_feedback` (which echoes the QA differences
-    back verbatim), this folds the lateral persona's *decision* into the Seed so
-    the re-judged Seed carries an actionable resolution of the gap (e.g. a
-    chosen binding contract) rather than a restatement of the gap. The text is
+    Unlike :func:`_seed_with_seed_qa_feedback` (which encodes mapped QA
+    feedback), this folds the lateral persona's *decision* into the Seed so the
+    re-judged Seed carries an actionable resolution of the gap (e.g. a chosen
+    binding contract) rather than a restatement of the gap. The text is
     length-bounded so an overlong persona dump cannot bloat the Seed.
     """
     del attempt
@@ -4870,16 +4918,19 @@ def _seed_with_seed_qa_lateral_feedback(
         for constraint in seed.constraints
         if not _is_seed_qa_diagnostic_constraint(constraint)
     )
+    metadata_updates: dict[str, Any] = {
+        "seed_id": f"seed_{uuid4().hex[:12]}",
+        "created_at": datetime.now(UTC),
+        "parent_seed_id": seed.metadata.seed_id,
+    }
+    if _requests_seed_qa_ambiguity_repair(qa_result):
+        metadata_updates["ambiguity_score"] = min(
+            seed.metadata.ambiguity_score, _SEED_QA_AMBIGUITY_REPAIR_SCORE
+        )
     return seed.model_copy(
         update={
             "constraints": tuple(dict.fromkeys((*existing_constraints, *normalized_feedback))),
-            "metadata": seed.metadata.model_copy(
-                update={
-                    "seed_id": f"seed_{uuid4().hex[:12]}",
-                    "created_at": datetime.now(UTC),
-                    "parent_seed_id": seed.metadata.seed_id,
-                }
-            ),
+            "metadata": seed.metadata.model_copy(update=metadata_updates),
         }
     )
 
@@ -4893,16 +4944,19 @@ def _seed_with_seed_qa_feedback(seed: Seed, qa_result: EvaluateResult, *, attemp
         for constraint in seed.constraints
         if not _is_seed_qa_diagnostic_constraint(constraint)
     )
+    metadata_updates: dict[str, Any] = {
+        "seed_id": f"seed_{uuid4().hex[:12]}",
+        "created_at": datetime.now(UTC),
+        "parent_seed_id": seed.metadata.seed_id,
+    }
+    if _requests_seed_qa_ambiguity_repair(qa_result):
+        metadata_updates["ambiguity_score"] = min(
+            seed.metadata.ambiguity_score, _SEED_QA_AMBIGUITY_REPAIR_SCORE
+        )
     return seed.model_copy(
         update={
             "constraints": tuple(dict.fromkeys((*existing_constraints, *normalized_feedback))),
-            "metadata": seed.metadata.model_copy(
-                update={
-                    "seed_id": f"seed_{uuid4().hex[:12]}",
-                    "created_at": datetime.now(UTC),
-                    "parent_seed_id": seed.metadata.seed_id,
-                }
-            ),
+            "metadata": seed.metadata.model_copy(update=metadata_updates),
         },
     )
 
@@ -4919,6 +4973,7 @@ def _is_seed_qa_diagnostic_constraint(constraint: str) -> bool:
     )
 
 
+_SEED_QA_AMBIGUITY_REPAIR_SCORE = 0.19
 _SEED_QA_DIAGNOSTIC_PREFIX_RE = re.compile(
     r"\[seed qa(?: lateral)? repair attempt [^\]]+\]\s*",
     re.IGNORECASE,
@@ -5040,8 +5095,10 @@ def _normalized_seed_qa_feedback(qa_result: EvaluateResult) -> tuple[str, ...]:
         if item.strip()
     )
     lowered = "\n".join(feedback).casefold()
+    if re.search(r"\bexit[_\s-]*conditions?\b", lowered):
+        raise SeedQaRepairMappingError(feedback)
     repairs: list[str] = []
-    if "ambiguity_score" in lowered:
+    if _requests_seed_qa_ambiguity_repair(qa_result):
         repairs.append("Seed metadata must satisfy the readiness gate: ambiguity_score <= 0.20.")
     if "non_goals" in lowered or "non-goals" in lowered or "runtime_context" in lowered:
         repairs.append(
@@ -5058,6 +5115,8 @@ def _normalized_seed_qa_feedback(qa_result: EvaluateResult) -> tuple[str, ...]:
         repairs.append("Define explicit no-op scope for supported command behavior.")
     if "review-blocking" in lowered:
         repairs.append("Introduce the review-blocking post-QA constraint before execution.")
+    if "binding" in lowered and "contract" in lowered:
+        repairs.append("Define one explicit binding contract before execution.")
     if "templated" in lowered or "indirect" in lowered:
         repairs.append(
             "Acceptance criteria must be direct executable checks, not generic templates."
@@ -5067,19 +5126,42 @@ def _normalized_seed_qa_feedback(qa_result: EvaluateResult) -> tuple[str, ...]:
     ):
         repairs.append("Failure paths must leave no partial output artifacts.")
     if not repairs:
-        repairs.extend(_actionable_seed_qa_feedback_constraints(feedback))
-    if not repairs:
-        repairs.append("Resolve Seed QA feedback before execution without adding diagnostic prose.")
+        raise SeedQaRepairMappingError(feedback)
     return tuple(dict.fromkeys(repairs))
 
 
-def _actionable_seed_qa_feedback_constraints(feedback: tuple[str, ...]) -> tuple[str, ...]:
-    repairs: list[str] = []
-    for item in feedback[:5]:
-        cleaned = _clean_seed_qa_repair_text(item, limit=420)
-        if cleaned and not _is_seed_qa_diagnostic_constraint(cleaned):
-            repairs.append(f"Address this Seed QA finding before execution: {cleaned}")
-    return tuple(dict.fromkeys(repairs))
+def _requests_seed_qa_ambiguity_repair(qa_result: EvaluateResult) -> bool:
+    score = r"(?:metadata\.)?ambiguity_score"
+    target = r"0\.2(?:0)?"
+    patterns = (
+        rf"{score}\s*(?:<=|<)\s*{target}",
+        rf"{score}\s+(?:must|should|needs? to)\s+(?:be|remain)\s*(?:<=|<)\s*{target}",
+        rf"{score}\s+(?:must|should|needs? to)\s+be\s+reduced\s+to\s+{target}",
+        rf"{score}\s+(?:must|should|needs? to)\s+be\s+(?:at most|no greater than)\s+{target}",
+        rf"{score}\s+must\s+not\s+exceed\s+{target}",
+        rf"{score}\s+(?:must|should)\s+not\s+be\s+greater\s+than\s+{target}",
+        rf"{score}\s+(?:is|remains)\s+above\s+{target}\s+and\s+exceeds\s+(?:the\s+)?(?:required\s+)?(?:readiness\s+)?gate",
+        rf"{score}\s+(?:is|=)\s*(?:0\.\d+|1\.0+)\s*,?\s*(?:which\s+)?(?:exceeds?|exceeding|is above|is greater than)\s+(?:the\s+)?(?:required\s+)?(?:readiness\s+gate(?:\s+of)?\s*)?(?:<=?\s*)?{target}",
+    )
+    for item in (*qa_result.differences, *qa_result.suggestions):
+        lowered = item.strip().casefold()
+        if any(re.fullmatch(rf"{pattern}[.!]?", lowered) for pattern in patterns):
+            return True
+    return False
+
+
+def _safe_seed_qa_evidence(feedback: tuple[str, ...]) -> list[str]:
+    count = len(feedback[:5])
+    if count == 0:
+        return []
+    return [f"{count} Seed QA feedback item(s) withheld from durable state"]
+
+
+def _safe_seed_qa_verdict(verdict: str) -> str:
+    normalized = verdict.strip().casefold()
+    if normalized in {"fail", "pass", "revise"}:
+        return normalized
+    return "unknown"
 
 
 def _first_nonempty(*values: str | None) -> str | None:

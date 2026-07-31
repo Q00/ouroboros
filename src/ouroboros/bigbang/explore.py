@@ -45,6 +45,8 @@ _CONFIG_FILES: dict[str, str] = {
     "CMakeLists.txt": "C/C++",
     "Makefile": "Make-based",
 }
+_GITDIR_PREFIX = "gitdir: "
+_MAX_GIT_POINTER_BYTES = 4096
 
 # File extensions for type discovery
 _TYPE_PATTERNS: dict[str, list[str]] = {
@@ -487,21 +489,55 @@ Output a structured summary with sections: Tech Stack, Key Types, Patterns, Conv
         return result.value.content.strip()
 
 
+def _has_git_metadata(root: Path) -> bool:
+    marker = root / ".git"
+    if marker.is_dir():
+        return (marker / "HEAD").is_file()
+    if not marker.is_file():
+        return False
+    try:
+        if marker.stat().st_size > _MAX_GIT_POINTER_BYTES:
+            return False
+        pointer = marker.read_bytes().decode("utf-8")
+    except (OSError, UnicodeError):
+        return False
+    if pointer.endswith("\r\n"):
+        pointer = pointer[:-2]
+    elif pointer.endswith(("\n", "\r")):
+        pointer = pointer[:-1]
+    if "\n" in pointer or "\r" in pointer:
+        return False
+    if not pointer.startswith(_GITDIR_PREFIX):
+        return False
+    normalized_path = pointer.removeprefix(_GITDIR_PREFIX)
+    if not normalized_path or normalized_path != normalized_path.strip():
+        return False
+    target = Path(normalized_path)
+    if not target.is_absolute():
+        target = root / target
+    try:
+        git_dir = target.resolve()
+    except (OSError, RuntimeError, ValueError):
+        return False
+    return git_dir.is_dir() and (git_dir / "HEAD").is_file()
+
+
 def detect_brownfield(cwd: str | Path) -> bool:
     """Detect whether a directory is a brownfield project.
 
-    Checks for the presence of any recognised config file from ``_CONFIG_FILES``.
+    Checks for valid Git metadata or a recognised config file from ``_CONFIG_FILES``.
 
     Args:
         cwd: Directory to inspect.
 
     Returns:
-        ``True`` if at least one config file is found, ``False`` otherwise.
+        ``True`` if valid Git metadata or at least one config file is found,
+        ``False`` otherwise.
     """
     try:
         root = Path(cwd)
-        return any((root / name).exists() for name in _CONFIG_FILES)
-    except Exception:
+        return _has_git_metadata(root) or any((root / name).exists() for name in _CONFIG_FILES)
+    except OSError:
         return False
 
 

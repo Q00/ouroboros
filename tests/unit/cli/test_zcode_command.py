@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
 from importlib.metadata import entry_points
 import os
 from pathlib import Path
@@ -15,6 +16,18 @@ from ouroboros.cli.commands import zcode as zcode_command
 from ouroboros.cli.main import app
 
 runner = CliRunner(env={"COLUMNS": "240"})
+
+
+@pytest.fixture(autouse=True)
+def _isolate_zcode_command_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> Iterator[None]:
+    """Keep Zcode convenience command env writes from leaking across tests."""
+    monkeypatch.delenv("OUROBOROS_LLM_BACKEND", raising=False)
+    monkeypatch.delenv("OUROBOROS_ZCODE_CLI_PATH", raising=False)
+    yield
+    os.environ.pop("OUROBOROS_LLM_BACKEND", None)
+    os.environ.pop("OUROBOROS_ZCODE_CLI_PATH", None)
 
 
 def test_ozo_console_script_points_to_zcode_app() -> None:

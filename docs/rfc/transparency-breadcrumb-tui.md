@@ -34,7 +34,7 @@ the surfacing hooks the shell builds on.
 The TUI does not attach to a running process. It polls the shared event
 store and renders whatever sessions it finds:
 
-- `ouroboros tui monitor` connects to `~/.ouroboros/ouroboros.db` and runs
+- `ouroboros tui monitor` connects to the configured runtime EventStore and runs
   `OuroborosTUI(event_store=...)` (`src/ouroboros/cli/commands/tui.py`).
 - `ooo run` starts a background MCP job and relays compact progress in the
   main session (`skills/run/SKILL.md`, "Recommended monitoring stance").

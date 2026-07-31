@@ -13,8 +13,8 @@ re-attach (inspect with ``ouroboros tui monitor`` or resume execution with
 from __future__ import annotations
 
 import asyncio
-import os
 from pathlib import Path
+import shlex
 from typing import Annotated
 
 import typer
@@ -22,6 +22,7 @@ import typer
 from ouroboros.cli.formatters import console
 from ouroboros.cli.formatters.panels import print_error, print_info, print_success
 from ouroboros.cli.formatters.tables import create_table, print_table
+from ouroboros.config.models import resolve_event_store_path
 
 app = typer.Typer(
     name="resume",
@@ -42,7 +43,7 @@ EXIT_CORRUPTED_DB = 2
 
 def _default_db_path() -> str:
     """Return the canonical SQLite path used by the running CLI."""
-    return os.path.expanduser("~/.ouroboros/ouroboros.db")
+    return str(resolve_event_store_path())
 
 
 async def _get_event_store(db_path: str | None = None):
@@ -55,14 +56,14 @@ async def _get_event_store(db_path: str | None = None):
     so any accidental write path raises
     ``sqlite3.OperationalError: attempt to write a readonly database``.
     """
-    from ouroboros.persistence.event_store import EventStore
+    from ouroboros.persistence.event_store import EventStore, sqlite_database_url
 
     resolved = db_path or _default_db_path()
     if not Path(resolved).exists():
         return None
 
     event_store = EventStore(
-        f"sqlite+aiosqlite:///{resolved}",
+        sqlite_database_url(resolved),
         read_only=True,
     )
     try:
@@ -184,35 +185,44 @@ def _display_sessions(sessions: list) -> None:
 def _format_reattach_guidance(tracker) -> str:
     """Build the post-selection guidance block.
 
-    Prints two commands, matching the real CLI contracts:
+    Prints up to three commands, matching the real CLI contracts:
 
-    - Inspect:   ``ouroboros tui monitor`` (functional TUI; select the session)
+    - Inspect:   ``ouroboros status execution <exec_id> --events``
+    - Monitor:   ``ouroboros tui monitor``
     - Resume:    ``ouroboros run workflow --orchestrator --resume <session_id> <seed.yaml>``
 
     ``run workflow --resume`` takes a *session_id* (not an execution_id) and
     also requires the seed file, so both identifiers are surfaced explicitly.
 
-    Note: ``ouroboros status execution <exec_id>`` is *registered* but its
-    implementation is still a placeholder (see src/ouroboros/cli/commands/status.py),
-    so we deliberately do not surface it as an inspection path — it would
-    print misleading "Would show details" output.
     """
     exec_id = tracker.execution_id or "<unknown>"
     seed_hint = tracker.seed_id or "<seed.yaml>"
 
-    inspect_line = "ouroboros tui monitor"
+    monitor_line = f"ouroboros tui monitor --db-path {shlex.quote(_default_db_path())}"
     resume_line = f"ouroboros run workflow --orchestrator --resume {tracker.session_id} {seed_hint}"
 
     lines = [
         f"Session ID:   [bold cyan]{tracker.session_id}[/]",
         f"Execution ID: [bold cyan]{exec_id}[/]",
         "",
-        "[bold]Inspect[/] (read-only interactive monitor):",
-        f"    {inspect_line}",
-        "",
-        "[bold]Resume execution[/] (requires the original seed file):",
-        f"    {resume_line}",
     ]
+    if tracker.execution_id:
+        lines.extend(
+            [
+                "[bold]Inspect persisted execution[/] (read-only):",
+                f"    ouroboros status execution {tracker.execution_id} --events",
+                "",
+            ]
+        )
+    lines.extend(
+        [
+            "[bold]Monitor interactively[/] (read-only):",
+            f"    {monitor_line}",
+            "",
+            "[bold]Resume execution[/] (requires the original seed file):",
+            f"    {resume_line}",
+        ]
+    )
     if not tracker.seed_id:
         lines.append(
             "[dim]Seed ID was not recorded for this session — replace "
@@ -308,8 +318,8 @@ def resume(
 
     Re-attach paths surfaced after selection:
 
-        # Inspect (interactive monitor — the `status execution` placeholder is
-        # not wired up yet)
+        ouroboros status execution <execution_id> --events
+
         ouroboros tui monitor
 
         # Resume execution (requires the original seed file)

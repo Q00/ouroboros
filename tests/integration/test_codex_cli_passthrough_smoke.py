@@ -80,18 +80,6 @@ async def test_unhandled_ooo_commands_pass_through_to_codex_unchanged(
     expected_error: str | None,
 ) -> None:
     """Unsupported and plugin-only `ooo` commands should bypass intercept dispatch."""
-    runtime = create_agent_runtime(
-        backend="codex",
-        cli_path="/tmp/codex",
-        permission_mode="acceptEdits",
-        cwd=tmp_path,
-    )
-
-    assert isinstance(runtime, CodexCliRuntime)
-    assert runtime._skill_dispatcher is not None
-    with resolve_packaged_codex_skill_path("help", skills_dir=runtime._skills_dir) as skill_md_path:
-        assert skill_md_path.is_file()
-
     captured_processes: list[_FakeProcess] = []
 
     async def fake_create_subprocess_exec(*command: str, **kwargs: object) -> _FakeProcess:
@@ -113,6 +101,19 @@ async def test_unhandled_ooo_commands_pass_through_to_codex_unchanged(
             side_effect=fake_create_subprocess_exec,
         ) as mock_exec,
     ):
+        runtime = create_agent_runtime(
+            backend="codex",
+            cli_path="/tmp/codex",
+            permission_mode="acceptEdits",
+            cwd=tmp_path,
+        )
+
+        assert isinstance(runtime, CodexCliRuntime)
+        assert runtime._skill_dispatcher is not None
+        with resolve_packaged_codex_skill_path(
+            "help", skills_dir=runtime._skills_dir
+        ) as skill_md_path:
+            assert skill_md_path.is_file()
         messages = [message async for message in runtime.execute_task(prompt)]
 
     assert captured_processes[0].stdin.written == prompt.encode("utf-8")
@@ -134,19 +135,6 @@ async def test_packaged_ooo_auto_missing_mcp_tool_fails_closed_without_codex_fal
     tmp_path: Path,
 ) -> None:
     """Packaged `ooo auto` must not fall through to Codex when the MCP tool is absent."""
-    runtime = create_agent_runtime(
-        backend="codex",
-        cli_path="/tmp/codex",
-        permission_mode="acceptEdits",
-        cwd=tmp_path,
-    )
-
-    assert isinstance(runtime, CodexCliRuntime)
-    assert runtime._skill_dispatcher is not None
-    with resolve_packaged_codex_skill_path("auto", skills_dir=runtime._skills_dir) as skill_md_path:
-        content = skill_md_path.read_text(encoding="utf-8")
-    assert "mcp_tool: ouroboros_start_auto" in content
-
     fake_server = AsyncMock()
     fake_server.call_tool = AsyncMock(
         side_effect=LookupError("No local handler registered for tool: ouroboros_start_auto")
@@ -159,6 +147,20 @@ async def test_packaged_ooo_auto_missing_mcp_tool_fails_closed_without_codex_fal
             "ouroboros.orchestrator.codex_cli_runtime.asyncio.create_subprocess_exec"
         ) as mock_exec,
     ):
+        runtime = create_agent_runtime(
+            backend="codex",
+            cli_path="/tmp/codex",
+            permission_mode="acceptEdits",
+            cwd=tmp_path,
+        )
+
+        assert isinstance(runtime, CodexCliRuntime)
+        assert runtime._skill_dispatcher is not None
+        with resolve_packaged_codex_skill_path(
+            "auto", skills_dir=runtime._skills_dir
+        ) as skill_md_path:
+            content = skill_md_path.read_text(encoding="utf-8")
+        assert "mcp_tool: ouroboros_start_auto" in content
         messages = [message async for message in runtime.execute_task("ooo auto Build a CLI")]
 
     fake_server.call_tool.assert_awaited_once()

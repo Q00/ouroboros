@@ -39,9 +39,12 @@ claude = ["claude-agent-sdk==0.2.123", "anthropic==0.117.0"]
 copilot = []
 litellm = ["litellm==1.91.0; python_version < '3.14'"]
 dashboard = []
-mcp = ["mcp==1.28.1"]
+mcp = ["mcp==2.0.0"]
 tui = ["textual==8.2.8", "textual-serve==1.1.3"]
-all = ["ouroboros-ai[claude,copilot,litellm,mcp,tui,dashboard]"]
+# MCP 2.x and claude-agent-sdk currently require incompatible major versions
+# of the `mcp` distribution. Keep the agent runtime and the protocol server in
+# separate processes; setup registers the latter through `uvx ...[mcp]`.
+all = ["ouroboros-ai[claude,copilot,litellm,tui,dashboard]"]
 
 [project.scripts]
 ooo = "ouroboros.cli.main:app"
@@ -116,7 +119,7 @@ exclude = [
 
 [dependency-groups]
 dev = [
-    "ouroboros-ai[claude,mcp,tui]",
+    "ouroboros-ai[tui]",
     "mypy>=1.19.1",
     "pre-commit>=4.5.1",
     "pytest>=9.0.2",
@@ -129,9 +132,26 @@ dev = [
 litellm-test = [
     "ouroboros-ai[litellm]",
 ]
+mcp-test = [
+    "mcp==2.0.0",
+]
+claude-test = [
+    "ouroboros-ai[claude]",
+]
 
 [tool.uv.dependency-groups]
 litellm-test = { requires-python = ">=3.12,<3.14" }
+
+[tool.uv]
+# The official Claude Agent SDK still embeds MCP 1.x internals. Declaring the
+# incompatibility lets uv lock and test both profiles without pretending they
+# are safe to import into one interpreter.
+conflicts = [
+    [{ extra = "claude" }, { extra = "mcp" }],
+    [{ extra = "all" }, { extra = "mcp" }],
+    [{ extra = "claude" }, { group = "mcp-test" }],
+    [{ extra = "all" }, { group = "mcp-test" }],
+]
 
 [tool.mypy]
 python_version = "3.12"

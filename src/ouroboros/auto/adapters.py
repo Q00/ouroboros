@@ -840,6 +840,11 @@ class HandlerSeedQAEvaluator:
             "and runtime context in executable Seed surfaces. The Seed schema has no "
             "top-level non_goals/runtime_context fields; constraints, ontology fields, "
             "brownfield_context, or acceptance criteria are valid preservation surfaces. "
+            "Judge acceptance-criterion granularity semantically: each criterion must name "
+            "an observable state of the finished work, not an implementation means. Flag "
+            "and merge a criterion that is intelligible only as a step toward a sibling's "
+            "outcome. Preserve legitimately independent observable outcomes; never merge or "
+            "reject them merely to satisfy a criterion-count target. "
             "Avoid unsupported assumptions or missing requirements."
         )
         result = await self.qa_handler.handle(

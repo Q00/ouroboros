@@ -4,7 +4,11 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import UTC, datetime
+from functools import lru_cache
+import hashlib
+import json
 from pathlib import Path
+from types import CodeType
 from typing import TYPE_CHECKING, Any
 
 from ouroboros.observability.logging import get_logger
@@ -27,6 +31,20 @@ if TYPE_CHECKING:
 _INTERVIEW_SESSION_METADATA_KEY = "ouroboros_interview_session_id"
 
 
+@lru_cache(maxsize=1)
+def _ouroboros_package_build_digest() -> str:
+    """Hash the installed Ouroboros Python build using install-path-neutral names."""
+    package_root = Path(__file__).resolve().parents[1]
+    digest = hashlib.sha256()
+    for source_path in sorted(package_root.rglob("*.py")):
+        relative_path = source_path.relative_to(package_root).as_posix()
+        digest.update(relative_path.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(source_path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
 class CodexCommandDispatcher:
     """Dispatch exact-prefix Codex skill intercepts through Ouroboros MCP handlers."""
 
@@ -41,6 +59,167 @@ class CodexCommandDispatcher:
         self._runtime_backend = runtime_backend
         self._llm_backend = llm_backend
         self._server: MCPServerAdapter | None = None
+
+    def stable_identity_contract(self) -> dict[str, str | None]:
+        """Return the portable identity for Ouroboros-owned dispatch authority."""
+        return {
+            "kind": "ouroboros_codex_command_dispatcher_v1",
+            "cwd": self._cwd,
+            "runtime_backend": self._runtime_backend,
+            "llm_backend": self._llm_backend,
+            "implementation_sha256": self._dispatcher_implementation_digest(),
+        }
+
+    def _dispatcher_implementation_digest(self) -> str:
+        """Return a digest covering the transitive dispatch implementation."""
+        payload = {
+            name: self._callable_implementation_digest(getattr(self, name))
+            for name in (
+                "_resume_handle_backend",
+                "_get_server",
+                "_build_tool_arguments",
+                "_build_resume_handle",
+                "_build_tool_call_message",
+                "_build_recoverable_failure_messages",
+                "dispatch",
+            )
+        }
+        payload["globals"] = {
+            "_INTERVIEW_SESSION_METADATA_KEY": _INTERVIEW_SESSION_METADATA_KEY,
+        }
+        from ouroboros.mcp.server.adapter import MCPServerAdapter, create_ouroboros_server
+        from ouroboros.orchestrator.runner import OrchestratorRunner
+
+        payload.update(
+            {
+                "external:create_ouroboros_server": self._callable_implementation_digest(
+                    create_ouroboros_server
+                ),
+                "external:MCPServerAdapter.call_tool": self._callable_implementation_digest(
+                    MCPServerAdapter.call_tool
+                ),
+                "external:worker_cwd_failure_message": self._callable_implementation_digest(
+                    worker_cwd_failure_message
+                ),
+                "external:OrchestratorRunner": self._class_implementation_digest(
+                    OrchestratorRunner
+                ),
+                "package_build_sha256": _ouroboros_package_build_digest(),
+            }
+        )
+        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        return hashlib.sha256(encoded).hexdigest()
+
+    @staticmethod
+    def _callable_implementation_digest(callable_obj: object) -> str | None:
+        """Return a stable digest for a Python callable's implementation."""
+        function = getattr(callable_obj, "__func__", callable_obj)
+        code = getattr(function, "__code__", None)
+        if code is None:
+            return None
+        payload = {
+            "module": getattr(function, "__module__", None),
+            "qualname": getattr(function, "__qualname__", None),
+            "code": CodexCommandDispatcher._code_object_identity_payload(code),
+            "defaults": CodexCommandDispatcher._identity_value_payload(
+                getattr(function, "__defaults__", None)
+            ),
+            "kwdefaults": CodexCommandDispatcher._identity_value_payload(
+                getattr(function, "__kwdefaults__", None)
+            ),
+        }
+        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        return hashlib.sha256(encoded).hexdigest()
+
+    @staticmethod
+    def _class_implementation_digest(class_obj: type[object]) -> str:
+        """Hash every callable declared by a behavior-owning class."""
+        payload: dict[str, object] = {}
+        for name, member in sorted(vars(class_obj).items()):
+            if isinstance(member, staticmethod | classmethod):
+                member = member.__func__
+            if isinstance(member, property):
+                payload[name] = {
+                    accessor: CodexCommandDispatcher._callable_implementation_digest(function)
+                    for accessor, function in (
+                        ("get", member.fget),
+                        ("set", member.fset),
+                        ("delete", member.fdel),
+                    )
+                    if function is not None
+                }
+                continue
+            callable_digest = CodexCommandDispatcher._callable_implementation_digest(member)
+            if callable_digest is not None:
+                payload[name] = callable_digest
+        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        return hashlib.sha256(encoded).hexdigest()
+
+    @staticmethod
+    def _identity_value_payload(value: object) -> object:
+        """Serialize implementation values without process-local addresses."""
+        if isinstance(value, CodeType):
+            return {
+                "type": "code",
+                "payload": CodexCommandDispatcher._code_object_identity_payload(value),
+            }
+        if isinstance(value, tuple):
+            return {
+                "type": "tuple",
+                "items": [CodexCommandDispatcher._identity_value_payload(item) for item in value],
+            }
+        if isinstance(value, list):
+            return [CodexCommandDispatcher._identity_value_payload(item) for item in value]
+        if isinstance(value, dict):
+            return {
+                str(key): CodexCommandDispatcher._identity_value_payload(item)
+                for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+            }
+        if isinstance(value, frozenset):
+            return {
+                "type": "frozenset",
+                "items": sorted(
+                    (CodexCommandDispatcher._identity_value_payload(item) for item in value),
+                    key=lambda item: json.dumps(item, sort_keys=True, separators=(",", ":")),
+                ),
+            }
+        if isinstance(value, bytes):
+            return {"type": "bytes", "hex": value.hex()}
+        if isinstance(value, Path):
+            return {"type": "path", "value": value.as_posix()}
+        if value is None or isinstance(value, str | int | float | bool):
+            return value
+        value_type = type(value)
+        return {
+            "type": f"{value_type.__module__}.{value_type.__qualname__}",
+        }
+
+    @staticmethod
+    def _code_object_identity_payload(code: CodeType) -> dict[str, object]:
+        """Serialize a code object without process-local repr addresses.
+
+        ``repr(code.co_consts)`` includes memory addresses for nested code
+        objects.  Portable dispatcher identity must be stable across fresh
+        interpreters while still changing when nested implementation code
+        changes.
+        """
+
+        return {
+            "argcount": code.co_argcount,
+            "posonlyargcount": code.co_posonlyargcount,
+            "kwonlyargcount": code.co_kwonlyargcount,
+            "nlocals": code.co_nlocals,
+            "stacksize": code.co_stacksize,
+            "flags": code.co_flags,
+            "bytecode": code.co_code.hex(),
+            "consts": [
+                CodexCommandDispatcher._identity_value_payload(const) for const in code.co_consts
+            ],
+            "names": list(code.co_names),
+            "varnames": list(code.co_varnames),
+            "freevars": list(code.co_freevars),
+            "cellvars": list(code.co_cellvars),
+        }
 
     def _resume_handle_backend(self) -> str:
         """Map the configured runtime backend to a persisted runtime-handle backend."""

@@ -522,11 +522,7 @@ async def test_follow_up_dispatch_append_failure_keeps_last_durable_runtime_hand
         enable_decomposition=False,
         session_signal_hub=hub,
     )
-    target_resolver = EventStoreSessionSignalTargetResolver(
-        event_store=store,
-        capabilities_by_backend={runtime.runtime_backend: runtime.capabilities.session_signals},
-    )
-    mailbox = SessionSignalMailbox(event_store=store, target_resolver=target_resolver)
+    mailbox = SessionSignalMailbox(event_store=store, target_resolver=hub, delivery_queue=hub)
     execution_id = "exec_synapse_follow_up_failure"
     scope_id = f"{execution_id}_ac_1"
     attempt_id = f"{scope_id}_attempt_1"

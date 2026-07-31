@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
+import subprocess
+import sys
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -21,6 +24,157 @@ from ouroboros.router.types import Resolved
 
 class TestCodexCommandDispatcher:
     """Tests for the in-process dispatcher used by Codex runtimes."""
+
+    def test_stable_identity_tracks_dispatch_helper_implementation_drift(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Portable dispatcher identity must bind tool-authority implementation code."""
+        original = CodexCommandDispatcher(cwd="/tmp/project").stable_identity_contract()
+
+        def replacement_build_tool_arguments(self, intercept, current_handle):  # noqa: ANN001, ARG001
+            return {"changed": True}
+
+        monkeypatch.setattr(
+            CodexCommandDispatcher,
+            "_build_tool_arguments",
+            replacement_build_tool_arguments,
+        )
+
+        changed = CodexCommandDispatcher(cwd="/tmp/project").stable_identity_contract()
+
+        assert original["kind"] == changed["kind"]
+        assert original["implementation_sha256"]
+        assert original["implementation_sha256"] != changed["implementation_sha256"]
+
+    def test_stable_identity_tracks_mcp_call_tool_implementation_drift(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Portable dispatcher identity must bind the MCP adapter effect boundary."""
+        from ouroboros.mcp.server.adapter import MCPServerAdapter
+
+        original = CodexCommandDispatcher(cwd="/tmp/project").stable_identity_contract()
+
+        async def replacement_call_tool(self, name, arguments):  # noqa: ANN001, ARG001
+            return Result.err(RuntimeError("changed"))
+
+        monkeypatch.setattr(MCPServerAdapter, "call_tool", replacement_call_tool)
+
+        changed = CodexCommandDispatcher(cwd="/tmp/project").stable_identity_contract()
+
+        assert original["kind"] == changed["kind"]
+        assert original["implementation_sha256"]
+        assert original["implementation_sha256"] != changed["implementation_sha256"]
+
+    def test_stable_identity_tracks_mcp_server_factory_implementation_drift(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Portable dispatcher identity must bind server factory composition."""
+        import ouroboros.mcp.server.adapter as server_adapter
+
+        original = CodexCommandDispatcher(cwd="/tmp/project").stable_identity_contract()
+
+        def replacement_create_server(*args, **kwargs):  # noqa: ANN002, ANN003, ARG001
+            raise RuntimeError("changed")
+
+        monkeypatch.setattr(server_adapter, "create_ouroboros_server", replacement_create_server)
+
+        changed = CodexCommandDispatcher(cwd="/tmp/project").stable_identity_contract()
+
+        assert original["kind"] == changed["kind"]
+        assert original["implementation_sha256"]
+        assert original["implementation_sha256"] != changed["implementation_sha256"]
+
+    def test_stable_identity_tracks_mcp_server_factory_default_drift(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Portable identity must bind behavior-affecting factory defaults."""
+        from ouroboros.mcp.server.adapter import create_ouroboros_server
+
+        original = CodexCommandDispatcher(cwd="/tmp/project").stable_identity_contract()
+        assert create_ouroboros_server.__kwdefaults__ is not None
+        monkeypatch.setitem(create_ouroboros_server.__kwdefaults__, "durable_jobs", False)
+
+        changed = CodexCommandDispatcher(cwd="/tmp/project").stable_identity_contract()
+
+        assert original["implementation_sha256"] != changed["implementation_sha256"]
+
+    def test_stable_identity_tracks_worker_cwd_failure_helper_drift(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Portable identity must bind the dispatcher's fail-closed helper."""
+        from ouroboros.orchestrator import command_dispatcher
+
+        original = CodexCommandDispatcher(cwd="/tmp/project").stable_identity_contract()
+
+        def replacement_worker_cwd_failure_message(*args, **kwargs):  # noqa: ANN002, ANN003, ARG001
+            return None
+
+        monkeypatch.setattr(
+            command_dispatcher,
+            "worker_cwd_failure_message",
+            replacement_worker_cwd_failure_message,
+        )
+
+        changed = CodexCommandDispatcher(cwd="/tmp/project").stable_identity_contract()
+
+        assert original["implementation_sha256"] != changed["implementation_sha256"]
+
+    def test_stable_identity_tracks_orchestrator_resume_semantics_drift(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Portable identity must bind behavior behind registered resume handlers."""
+        from ouroboros.orchestrator.runner import OrchestratorRunner
+
+        original = CodexCommandDispatcher(cwd="/tmp/project").stable_identity_contract()
+
+        async def replacement_resume_session(self, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003, ARG001
+            return None
+
+        monkeypatch.setattr(OrchestratorRunner, "resume_session", replacement_resume_session)
+
+        changed = CodexCommandDispatcher(cwd="/tmp/project").stable_identity_contract()
+
+        assert original["implementation_sha256"] != changed["implementation_sha256"]
+
+    def test_stable_identity_is_stable_across_fresh_interpreters(self) -> None:
+        """Portable dispatcher identity must not include process-local code repr addresses."""
+        script = (
+            "import json;"
+            "from ouroboros.orchestrator.command_dispatcher import CodexCommandDispatcher;"
+            "print(json.dumps(CodexCommandDispatcher(cwd='/tmp/project').stable_identity_contract(), sort_keys=True))"
+        )
+
+        first = subprocess.check_output([sys.executable, "-c", script], text=True).strip()
+        second = subprocess.check_output([sys.executable, "-c", script], text=True).strip()
+
+        assert json.loads(first)["implementation_sha256"]
+        assert first == second
+
+    def test_stable_identity_tracks_dispatcher_global_semantics(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Behavior-affecting globals must be part of portable dispatcher identity."""
+        from ouroboros.orchestrator import command_dispatcher
+
+        dispatcher = CodexCommandDispatcher(cwd="/tmp/project")
+        original = dispatcher.stable_identity_contract()
+
+        monkeypatch.setattr(
+            command_dispatcher,
+            "_INTERVIEW_SESSION_METADATA_KEY",
+            "changed_session_metadata_key",
+        )
+
+        changed = dispatcher.stable_identity_contract()
+
+        assert original["implementation_sha256"] != changed["implementation_sha256"]
 
     @staticmethod
     def _write_skill(
@@ -107,16 +261,6 @@ class TestCodexCommandDispatcher:
                 )
             )
         )
-        runtime = CodexCliRuntime(
-            cli_path="codex",
-            cwd=tmp_path,
-            skills_dir=tmp_path,
-            skill_dispatcher=create_codex_command_dispatcher(
-                cwd=tmp_path,
-                runtime_backend="codex",
-            ),
-        )
-
         with (
             patch(
                 "ouroboros.mcp.server.adapter.create_ouroboros_server",
@@ -126,6 +270,15 @@ class TestCodexCommandDispatcher:
                 "ouroboros.orchestrator.codex_cli_runtime.asyncio.create_subprocess_exec"
             ) as mock_exec,
         ):
+            runtime = CodexCliRuntime(
+                cli_path="codex",
+                cwd=tmp_path,
+                skills_dir=tmp_path,
+                skill_dispatcher=create_codex_command_dispatcher(
+                    cwd=tmp_path,
+                    runtime_backend="codex",
+                ),
+            )
             messages = [message async for message in runtime.execute_task("ooo run seed.yaml")]
 
         fake_server.call_tool.assert_awaited_once_with(
@@ -169,15 +322,6 @@ class TestCodexCommandDispatcher:
                 )
             )
         )
-        runtime = CodexCliRuntime(
-            cli_path="codex",
-            cwd=tmp_path,
-            skills_dir=tmp_path,
-            skill_dispatcher=create_codex_command_dispatcher(
-                cwd=tmp_path,
-                runtime_backend="codex",
-            ),
-        )
         resume_handle = RuntimeHandle(
             backend="codex_cli",
             native_session_id="thread-123",
@@ -193,6 +337,15 @@ class TestCodexCommandDispatcher:
                 "ouroboros.orchestrator.codex_cli_runtime.asyncio.create_subprocess_exec"
             ) as mock_exec,
         ):
+            runtime = CodexCliRuntime(
+                cli_path="codex",
+                cwd=tmp_path,
+                skills_dir=tmp_path,
+                skill_dispatcher=create_codex_command_dispatcher(
+                    cwd=tmp_path,
+                    runtime_backend="codex",
+                ),
+            )
             messages = [
                 message
                 async for message in runtime.execute_task(

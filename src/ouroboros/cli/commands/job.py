@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Iterator
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
+import io
 import json
 import os
 from pathlib import Path
@@ -11,10 +14,11 @@ from typing import Annotated
 import typer
 
 from ouroboros.cli.formatters.panels import print_error
+from ouroboros.config.models import resolve_event_store_path
 from ouroboros.events.base import BaseEvent
 from ouroboros.mcp.tools.job_handlers import JobResultHandler, JobStatusHandler, JobWaitHandler
 from ouroboros.mcp.types import MCPToolResult
-from ouroboros.persistence.event_store import EventStore
+from ouroboros.persistence.event_store import EventStore, sqlite_database_url
 
 app = typer.Typer(
     name="job",
@@ -30,9 +34,47 @@ def _emit_result(result: MCPToolResult) -> None:
         typer.echo(text)
 
 
+def _env_flag(name: str) -> bool:
+    """Return True when an environment variable carries a truthy value."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return False
+    return raw.strip().lower() not in {"", "0", "false", "no", "off"}
+
+
+@contextmanager
+def _job_cli_console_log_boundary() -> Iterator[None]:
+    """Keep job command stdout/stderr reserved for user-facing job output.
+
+    The MCP job handlers emit debug logs for server/runtime observability. CLI
+    callers and Typer's test runner capture stderr alongside stdout, so those
+    diagnostics can leak timestamps and timing values into otherwise stable
+    `ouroboros job ...` output. Keep file logging intact and allow explicit
+    opt-in for diagnostics via ``OUROBOROS_JOB_VERBOSE=1``.
+    """
+    if _env_flag("OUROBOROS_JOB_VERBOSE"):
+        yield
+        return
+
+    from ouroboros.observability.logging import (
+        is_console_logging_enabled,
+        set_console_logging,
+    )
+
+    previous = is_console_logging_enabled()
+    set_console_logging(False)
+    try:
+        buffer = io.StringIO()
+        with redirect_stdout(buffer), redirect_stderr(buffer):
+            yield
+    finally:
+        set_console_logging(previous)
+
+
 def _run_job_handler(handler, arguments: dict[str, object]) -> None:
     """Run an async MCP job handler and map errors to CLI exit status."""
-    result = asyncio.run(handler.handle(arguments))
+    with _job_cli_console_log_boundary():
+        result = asyncio.run(handler.handle(arguments))
     if result.is_err:
         print_error(result.error.message)
         raise typer.Exit(1)
@@ -43,7 +85,7 @@ def _run_job_handler(handler, arguments: dict[str, object]) -> None:
 
 def _default_db_path() -> str:
     """Return the canonical SQLite EventStore path."""
-    return os.path.expanduser("~/.ouroboros/ouroboros.db")
+    return str(resolve_event_store_path())
 
 
 async def _open_read_only_event_store(db_path: str | None = None) -> EventStore:
@@ -51,7 +93,7 @@ async def _open_read_only_event_store(db_path: str | None = None) -> EventStore:
     resolved = os.path.expanduser(db_path or _default_db_path())
     if not Path(resolved).exists():
         raise FileNotFoundError(resolved)
-    event_store = EventStore(f"sqlite+aiosqlite:///{resolved}", read_only=True)
+    event_store = EventStore(sqlite_database_url(resolved), read_only=True)
     try:
         await event_store.initialize()
     except Exception:
@@ -184,7 +226,7 @@ def events(
         str | None,
         typer.Option(
             "--db-path",
-            help="Path to ouroboros.db; defaults to ~/.ouroboros/ouroboros.db.",
+            help="Path to ouroboros.db; defaults to the configured runtime database.",
         ),
     ] = None,
 ) -> None:

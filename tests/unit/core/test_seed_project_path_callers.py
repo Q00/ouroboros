@@ -86,7 +86,7 @@ class TestExecutionHandlerCaller:
         from ouroboros.mcp.tools.execution_handlers import ExecuteSeedHandler
 
         seed = self._seed(str(tmp_path.parent / "outside_project"))
-        with capture_logs() as cap_logs:
+        with patch("ouroboros.mcp.tools.execution_handlers.log.warning") as warning:
             result = ExecuteSeedHandler._resolve_verification_working_dir(
                 seed=seed,
                 dispatch_cwd=tmp_path,
@@ -94,14 +94,14 @@ class TestExecutionHandlerCaller:
                 delegated_parent_cwd=None,
             )
         assert result == tmp_path
-        events = [e.get("event") for e in cap_logs]
-        assert "execution_handlers.seed_project_path_rejected" in events
+        warning.assert_called_once()
+        assert warning.call_args.args[0] == "execution_handlers.seed_project_path_rejected"
 
     def test_empty_seed_falls_back_without_audit_log(self, tmp_path: Path) -> None:
         from ouroboros.mcp.tools.execution_handlers import ExecuteSeedHandler
 
         seed = self._seed(None)
-        with capture_logs() as cap_logs:
+        with patch("ouroboros.mcp.tools.execution_handlers.log.warning") as warning:
             result = ExecuteSeedHandler._resolve_verification_working_dir(
                 seed=seed,
                 dispatch_cwd=tmp_path,
@@ -109,8 +109,7 @@ class TestExecutionHandlerCaller:
                 delegated_parent_cwd=None,
             )
         assert result == tmp_path
-        events = [e.get("event") for e in cap_logs]
-        assert "execution_handlers.seed_project_path_rejected" not in events
+        warning.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

@@ -27,13 +27,15 @@ The rule has two halves:
    contributor to spend. The failure message prints the exact replacement
    line, so satisfying it is a one-line edit in the same PR.
 
-3. The policy itself may only tighten. GRANDFATHERED and SOFT_CAP are editable
+3. The policy itself may only tighten. GRANDFATHERED, SOFT_CAP, RESEED_SLACK,
+   and EXCLUDED are editable
    in the same commit they gate, so measuring source against the *proposed*
    table proves nothing on its own: a PR could grow a module and raise its
    budget together, or add a new oversized module and grandfather it, and the
    gate would report OK. So the proposed policy is also compared against the
-   base branch's: no key may be added, no budget may increase, and SOFT_CAP may
-   not rise. Removals and decreases are the only permitted direction.
+   base branch's: no key or exclusion may be added, no budget may increase,
+   and neither SOFT_CAP nor RESEED_SLACK may rise. Removals and decreases are
+   the only permitted direction.
 
 Physical lines are counted, including blanks and comments. That is gameable by
 writing longer lines. `line-length = 100` in pyproject.toml makes that awkward,
@@ -48,7 +50,8 @@ Run locally:
 
 CI:
     .github/workflows/module-size.yml runs this on every PR with
-    --baseline-ref origin/main and fetch-depth: 0.
+    the immutable PR base SHA, and on main pushes with the pre-push SHA.
+    checkout uses fetch-depth: 0 so either predecessor is available.
 
 Retiring an entry:
     When a grandfathered module falls to SOFT_CAP or below, delete its line
@@ -135,8 +138,11 @@ class BaselineUnavailable(Exception):
     """Raised when a requested baseline ref cannot be read."""
 
 
-def _policy_literals(source: str) -> tuple[dict[str, int], int]:
-    """Extract GRANDFATHERED and SOFT_CAP from a version of this script.
+Policy = tuple[dict[str, int], int, int, frozenset[str]]
+
+
+def _policy_literals(source: str) -> Policy:
+    """Extract every enforcement-semantic literal from this script.
 
     Parsed with ``ast`` rather than imported: the baseline comes from another
     commit, and a gate must never execute the code it is judging.
@@ -152,23 +158,54 @@ def _policy_literals(source: str) -> tuple[dict[str, int], int]:
             else []
         )
         for target in targets:
-            if isinstance(target, ast.Name) and target.id in {"GRANDFATHERED", "SOFT_CAP"}:
+            if isinstance(target, ast.Name) and target.id in {
+                "GRANDFATHERED",
+                "SOFT_CAP",
+                "RESEED_SLACK",
+                "EXCLUDED",
+            }:
                 if node.value is None:
                     continue
                 try:
-                    found[target.id] = ast.literal_eval(node.value)
-                except ValueError as exc:
+                    if (
+                        target.id == "EXCLUDED"
+                        and isinstance(node.value, ast.Call)
+                        and isinstance(node.value.func, ast.Name)
+                        and node.value.func.id == "frozenset"
+                        and len(node.value.args) == 1
+                        and not node.value.keywords
+                    ):
+                        found[target.id] = frozenset(ast.literal_eval(node.value.args[0]))
+                    else:
+                        found[target.id] = ast.literal_eval(node.value)
+                except (TypeError, ValueError) as exc:
                     raise BaselineUnavailable(
                         f"{target.id} is not a literal in the baseline copy"
                     ) from exc
     table = found.get("GRANDFATHERED")
     cap = found.get("SOFT_CAP")
-    if not isinstance(table, dict) or not isinstance(cap, int):
-        raise BaselineUnavailable("baseline copy does not define GRANDFATHERED and SOFT_CAP")
-    return {str(k): int(v) for k, v in table.items()}, cap
+    slack = found.get("RESEED_SLACK")
+    excluded = found.get("EXCLUDED")
+    if (
+        not isinstance(table, dict)
+        or not isinstance(cap, int)
+        or not isinstance(slack, int)
+        or not isinstance(excluded, frozenset)
+        or not all(isinstance(item, str) for item in excluded)
+    ):
+        raise BaselineUnavailable(
+            "baseline copy does not define GRANDFATHERED, SOFT_CAP, "
+            "RESEED_SLACK, and EXCLUDED as literals"
+        )
+    return (
+        {str(k): int(v) for k, v in table.items()},
+        cap,
+        slack,
+        frozenset(excluded),
+    )
 
 
-def _baseline_policy(ref: str) -> tuple[dict[str, int], int] | None:
+def _baseline_policy(ref: str) -> Policy | None:
     """Return the policy recorded at ``ref``, or None if the gate is new there.
 
     A ref that does not resolve is an error: a silently skipped comparison is
@@ -189,6 +226,20 @@ def _baseline_policy(ref: str) -> tuple[dict[str, int], int] | None:
             "fetch-depth: 0 and that the ref has been fetched"
         ) from exc
     try:
+        tree = subprocess.run(
+            ["git", "ls-tree", "-r", "--name-only", ref, "--", SELF_PATH],
+            cwd=REPO_ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (subprocess.CalledProcessError, OSError) as exc:
+        raise BaselineUnavailable(f"could not inspect {SELF_PATH} at {ref!r}: {exc}") from exc
+    if tree.stdout.strip() == "":
+        return None
+    if tree.stdout.splitlines() != [SELF_PATH]:
+        raise BaselineUnavailable(f"baseline tree returned an ambiguous path for {SELF_PATH}")
+    try:
         completed = subprocess.run(
             ["git", "show", f"{ref}:{SELF_PATH}"],
             cwd=REPO_ROOT,
@@ -196,18 +247,22 @@ def _baseline_policy(ref: str) -> tuple[dict[str, int], int] | None:
             capture_output=True,
             text=True,
         )
-    except subprocess.CalledProcessError:
-        return None
-    except OSError as exc:
+    except (subprocess.CalledProcessError, OSError) as exc:
         raise BaselineUnavailable(f"could not read {SELF_PATH} at {ref!r}: {exc}") from exc
     return _policy_literals(completed.stdout)
 
 
 def _policy_regressions(
-    baseline: tuple[dict[str, int], int],
-) -> tuple[list[str], list[tuple[str, int, int]], tuple[int, int] | None]:
+    baseline: Policy,
+) -> tuple[
+    list[str],
+    list[tuple[str, int, int]],
+    tuple[int, int] | None,
+    tuple[int, int] | None,
+    list[str],
+]:
     """Compare the proposed policy against the baseline's."""
-    baseline_table, baseline_cap = baseline
+    baseline_table, baseline_cap, baseline_slack, baseline_excluded = baseline
     added = sorted(set(GRANDFATHERED) - set(baseline_table))
     raised = sorted(
         (key, GRANDFATHERED[key], baseline_table[key])
@@ -215,7 +270,9 @@ def _policy_regressions(
         if GRANDFATHERED[key] > baseline_table[key]
     )
     cap_raised = (SOFT_CAP, baseline_cap) if baseline_cap < SOFT_CAP else None
-    return added, raised, cap_raised
+    slack_raised = (RESEED_SLACK, baseline_slack) if baseline_slack < RESEED_SLACK else None
+    exclusions_added = sorted(EXCLUDED - baseline_excluded)
+    return added, raised, cap_raised, slack_raised, exclusions_added
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -240,6 +297,8 @@ def main(argv: list[str] | None = None) -> int:
     added: list[str] = []
     raised: list[tuple[str, int, int]] = []
     cap_raised: tuple[int, int] | None = None
+    slack_raised: tuple[int, int] | None = None
+    exclusions_added: list[str] = []
     if args.baseline_ref is not None:
         try:
             baseline = _baseline_policy(args.baseline_ref)
@@ -255,7 +314,9 @@ def main(argv: list[str] | None = None) -> int:
                 "gate's introducing commit; skipping the tightening check."
             )
         else:
-            added, raised, cap_raised = _policy_regressions(baseline)
+            added, raised, cap_raised, slack_raised, exclusions_added = _policy_regressions(
+                baseline
+            )
 
     sizes = _measure()
 
@@ -284,8 +345,18 @@ def main(argv: list[str] | None = None) -> int:
             needs_reseed.append((rel, count, budget))
 
     if (
-        not (vanished or over_cap or over_budget or needs_reseed or retired or added or raised)
+        not (
+            vanished
+            or over_cap
+            or over_budget
+            or needs_reseed
+            or retired
+            or added
+            or raised
+            or exclusions_added
+        )
         and cap_raised is None
+        and slack_raised is None
     ):
         print(
             f"module-size: OK ({len(sizes)} modules, cap {SOFT_CAP}, "
@@ -303,6 +374,22 @@ def main(argv: list[str] | None = None) -> int:
             "policy this\ngate enforces; raising it in the commit it governs "
             "would let any module\nthrough. It may only be lowered.\n\n"
         )
+
+    if slack_raised is not None:
+        proposed, previous = slack_raised
+        write(
+            f"RESEED_SLACK was raised from {previous} to {proposed}. Raising the "
+            "slack\nreopens reclaimed headroom, so it may only be lowered.\n\n"
+        )
+
+    if exclusions_added:
+        write(
+            "Paths were added to EXCLUDED. Exclusions remove modules from all size\n"
+            "enforcement and may only be removed, never added:\n"
+        )
+        for rel in exclusions_added:
+            write(f"  {rel}\n")
+        write("\n")
 
     if added:
         write(

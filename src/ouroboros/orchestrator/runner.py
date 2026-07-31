@@ -59,8 +59,11 @@ from ouroboros.core.project_identity import (
     ProjectIdentity,
     ProjectIdentityError,
     ProjectIdentityUnavailableError,
+    active_publication_evidence_sink,
+    publication_evidence_sink,
     resolve_managed_project_identity,
     resolve_project_identity,
+    resolve_project_identity_for_publication,
 )
 from ouroboros.core.seed import AcceptanceCriterionSpec, ac_text, ac_texts
 from ouroboros.core.seed_contract import SeedContract
@@ -131,6 +134,7 @@ from ouroboros.orchestrator.execution_authority import (
     constructor_model_contract,
     request_process_local_cancellation,
     runtime_effect_capabilities_contract,
+    runtime_execution_identity_contract,
     runtime_execution_proves_effective_model,
     valid_constructor_model_contract,
     valid_process_local_authority_contract,
@@ -773,6 +777,7 @@ PRE_RESOLVED_EFFECT_INPUTS_EXECUTION_CONTRACT_VERSION = 6
 PRE_DURABLE_PAUSE_POLICY_EXECUTION_CONTRACT_VERSION = 7
 PRE_RUNTIME_EFFECT_CAPABILITIES_EXECUTION_CONTRACT_VERSION = 8
 FRUGALITY_PROOF_PROTOCOL_VERSION = 1
+_MISSING = object()
 EXECUTION_CONTRACT_PROGRESS_KEY = "execution_contract"
 FORCED_EXECUTION_PERMISSION_MODE = "bypassPermissions"
 
@@ -982,7 +987,7 @@ class OrchestratorRunner:
         # Effort-first investment dial (RFC #1405): base level for the runner's own
         # direct execution paths (single-AC / resume), which call execute_task
         # without going through ParallelACExecutor. Resolved once; None ⇒ dormant.
-        from ouroboros.config import get_agent_reasoning_effort
+        from ouroboros.config import get_agent_reasoning_effort, get_execution_model
 
         self._reasoning_effort = get_agent_reasoning_effort()
         # Model-tier investment router (the frugality sibling of reasoning_effort),
@@ -997,13 +1002,29 @@ class OrchestratorRunner:
             "false",
         }
         # An explicit user model pin disables routing (routing must never override
-        # it). The DEFAULT sonnet pin that execution_handlers/run.py pass to
-        # create_agent_runtime is a SHIPPED default, not a user pin — only the env
-        # var counts here.
-        _model_pin_env = os.environ.get("OUROBOROS_EXECUTION_MODEL")
-        _model_pin = _model_pin_env.strip() or None if _model_pin_env else None
+        # it). The DEFAULT sonnet fallback that execution_handlers/run.py pass to
+        # create_agent_runtime is a shipped default, not a user pin; explicit
+        # environment or persisted Execute-stage pins both count here.
+        _model_pin = get_execution_model()
         self._model_routing_disabled = _model_routing_disabled
         self._model_pin = _model_pin
+        _runtime_backend = str(getattr(adapter, "runtime_backend", "")).strip().lower()
+        _model_routing_explicit = bool(
+            _model_routing_env is not None and _model_routing_env.strip()
+        )
+        # ``None`` from get_execution_model() is not merely an absent pin for
+        # Codex: it is the user's explicit "follow the model selected in Codex"
+        # choice.  A tier router would turn that sentinel into an OpenAI tier
+        # model and emit ``codex exec --model ...``, silently overriding Codex.
+        # Keep routing dormant for that automatic Codex path.  Explicit pins,
+        # explicit tier requests, and an explicit routing policy retain the
+        # advanced-routing behavior.
+        _codex_automatic_model_selection = (
+            _runtime_backend in {"codex_cli", "codex_mcp"}
+            and _model_pin is None
+            and base_model_tier is None
+            and not _model_routing_explicit
+        )
         # Resume normally restores the run's persisted resolved router. These are
         # the existing user-facing controls that explicitly request a different
         # contract for this invocation, so only they may replace it.
@@ -1062,7 +1083,7 @@ class OrchestratorRunner:
         self._decomposition_mode: Literal["bounce_only", "off"] = (
             "off" if not enable_decomposition else configured_decomposition_mode
         )
-        if not _model_routing_disabled:
+        if not _model_routing_disabled and not _codex_automatic_model_selection:
             from ouroboros.orchestrator.model_routing import build_model_router
 
             self._model_router = build_model_router(
@@ -3317,7 +3338,10 @@ class OrchestratorRunner:
             effective_cwd = self._effective_cwd()
             if not isinstance(effective_cwd, str) or not effective_cwd.strip():
                 return None
-            return resolve_project_identity(effective_cwd)
+            if active_publication_evidence_sink() is None:
+                return resolve_project_identity(effective_cwd)
+            identity, _evidence = resolve_project_identity_for_publication(effective_cwd)
+            return identity
         except ProjectIdentityError as exc:
             raise self._project_identity_error(exc) from exc
 
@@ -4091,15 +4115,69 @@ class OrchestratorRunner:
         """Return whether a persisted constructor-model contract is canonical."""
         return valid_constructor_model_contract(value)
 
-    def _runtime_execution_identity_contract(self) -> dict[str, Any]:
-        """Return no cross-process identity for a legacy dynamic runtime.
+    def _runtime_execution_identity_contract(
+        self,
+        runtime_handle: RuntimeHandle | None = None,
+    ) -> dict[str, Any]:
+        """Return the adapter's canonical execution identity for resume."""
+        # Foundation A process-local authority intentionally does not ask
+        # arbitrary runtime providers for a portable identity.  The durable
+        # identity contract added for native CLI runtimes is only trustworthy
+        # for Ouroboros-owned process runtimes that define the fingerprinting
+        # surface; test doubles and legacy/custom adapters remain process-local.
+        from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime
+        from ouroboros.orchestrator.copilot_cli_runtime import CopilotCliRuntime
+        from ouroboros.orchestrator.gemini_cli_runtime import GeminiCLIRuntime
+        from ouroboros.orchestrator.goose_runtime import GooseCliRuntime
+        from ouroboros.orchestrator.grok_cli_runtime import GrokCliRuntime
 
-        Foundation A intentionally does not execute a runtime-owned identity
-        provider here.  That provider may itself resolve mutable helpers,
-        profile files, handler caches, or launcher state.  A live
-        process-local generation below controls same-process resume instead.
-        """
-        return {"version": 1, "observed": False}
+        trusted_runtime_types = (
+            CodexCliRuntime,
+            CopilotCliRuntime,
+            GeminiCLIRuntime,
+            GooseCliRuntime,
+            GrokCliRuntime,
+        )
+        if type(self._adapter) not in trusted_runtime_types:
+            return {"version": 1, "observed": False}
+        if getattr(self._adapter, "_skills_dir", None) is not None:
+            return {"version": 1, "observed": False}
+        dispatcher = getattr(self._adapter, "_skill_dispatcher", None)
+        if dispatcher is not None and not self._runtime_skill_dispatcher_is_portable(dispatcher):
+            return {"version": 1, "observed": False}
+        if runtime_handle is None:
+            return dict(runtime_execution_identity_contract(self._adapter))
+        provider = object.__getattribute__(self._adapter, "execution_identity_contract")
+        identity = provider(runtime_handle)
+        if not isinstance(identity, Mapping):
+            raise ValueError("runtime execution identity contract is not a mapping")
+        normalized = dict(identity)
+        if not normalized:
+            return {"version": 1, "observed": False}
+        return {"version": 1, "observed": True, "identity": normalized}
+
+    @staticmethod
+    def _runtime_skill_dispatcher_is_portable(dispatcher: object) -> bool:
+        """Return True for packaged dispatchers that expose stable identity."""
+        from ouroboros.orchestrator.command_dispatcher import CodexCommandDispatcher
+
+        owner = getattr(dispatcher, "__self__", None)
+        if (
+            type(owner) is not CodexCommandDispatcher
+            or getattr(dispatcher, "__func__", None) is not CodexCommandDispatcher.dispatch
+        ):
+            return False
+        stable_identity = getattr(owner, "stable_identity_contract", None)
+        if not callable(stable_identity):
+            return False
+        try:
+            identity = stable_identity()
+        except Exception:
+            return False
+        return (
+            isinstance(identity, Mapping)
+            and identity.get("kind") == "ouroboros_codex_command_dispatcher_v1"
+        )
 
     @staticmethod
     def _valid_runtime_execution_identity_contract(value: object) -> bool:
@@ -5310,6 +5388,19 @@ class OrchestratorRunner:
             )
         )
 
+    @staticmethod
+    def _runtime_execution_authorizes_automatic_codex_resume(_value: object) -> bool:
+        """Return whether an unpinned Codex default may resume portably.
+
+        It may not. Codex App/CLI can select a concrete model outside files that
+        Ouroboros can observe. Config/profile fingerprints are still useful drift
+        evidence, but they do not prove which model served the original run.
+        Until Codex exposes that concrete selection, durable resume must require
+        a pinned/observed model, native per-call routing, or process-local
+        authority from a prepared live execution.
+        """
+        return False
+
     def _validate_resume_handle_execution_identity(
         self,
         runtime_handle: RuntimeHandle | None,
@@ -5591,6 +5682,7 @@ class OrchestratorRunner:
         project_identity: ProjectIdentity | None | _UnresolvedProjectIdentity = (
             _UNRESOLVED_PROJECT_IDENTITY
         ),
+        runtime_handle: RuntimeHandle | None = None,
     ) -> dict[str, Any]:
         """Build the durable resolved inputs shared by resume and proof cohorting."""
         from ouroboros.orchestrator.model_routing import serialize_model_router
@@ -5627,8 +5719,14 @@ class OrchestratorRunner:
             effort=self._reasoning_effort,
         )
         routing_contract["route_compat"] = serialize_route_compat_contract(route_projection)
+        # This base effort reaches both direct runner dispatches and the
+        # parallel executor. Persist it beside model routing so a config/env
+        # change cannot silently alter ``model_reasoning_effort`` on resume.
+        routing_contract["base_reasoning_effort"] = self._reasoning_effort
         routing_contract["constructor_model"] = self._constructor_model_contract()
-        routing_contract["runtime_execution"] = self._runtime_execution_identity_contract()
+        routing_contract["runtime_execution"] = self._runtime_execution_identity_contract(
+            runtime_handle
+        )
         routing_contract["runtime_backend"] = self._runtime_backend_contract()
         routing_contract["llm_backend"] = self._llm_backend_contract()
         routing_contract["permission_mode"] = self._permission_mode_contract()
@@ -5688,6 +5786,7 @@ class OrchestratorRunner:
         *,
         seed: Seed,
         authority_generation: _ProcessLocalAuthorityGeneration,
+        runtime_handle: RuntimeHandle | None = None,
     ) -> tuple[dict[str, Any], ProjectIdentity]:
         """Resolve one project identity and bind it to both publication surfaces."""
         project_identity = self._project_identity()
@@ -5700,6 +5799,7 @@ class OrchestratorRunner:
             seed=seed,
             authority_generation=authority_generation,
             project_identity=project_identity,
+            runtime_handle=runtime_handle,
         )
         return contract, project_identity
 
@@ -6164,6 +6264,7 @@ class OrchestratorRunner:
         authority_generation: _ProcessLocalAuthorityGeneration | None = None,
         require_bound_execution_inputs: bool = True,
         prepared_live_execution: bool = False,
+        runtime_handle: RuntimeHandle | None = None,
     ) -> bool:
         """Restore the persisted router unless this invocation explicitly overrides it.
 
@@ -6233,6 +6334,7 @@ class OrchestratorRunner:
         raw_routing = raw_contract.get("model_routing")
         raw_resume = raw_contract.get("resume")
         raw_preferences = raw_contract.get("execution_preferences")
+        preferences_migrated = "execution_preferences" not in raw_contract
         raw_execution_semantics = raw_contract.get("execution_semantics")
         raw_execution_inputs = raw_contract.get("execution_inputs")
         raw_authority = raw_contract.get("foundation_a_authority")
@@ -6323,7 +6425,19 @@ class OrchestratorRunner:
         persisted_reasoning_effort = (
             self._reasoning_effort if migrate_v2_contract else raw_routing.get("reasoning_effort")
         )
+        persisted_base_reasoning_effort = raw_routing.get("base_reasoning_effort", _MISSING)
         persisted_resume_workspace = raw_resume.get("workspace")
+        base_reasoning_effort_missing = persisted_base_reasoning_effort is _MISSING
+        if base_reasoning_effort_missing and not migrate_v2_contract:
+            # Pre-base-effort contracts already persisted the same dispatch effort
+            # under model_routing.reasoning_effort.  Treat that value as the
+            # historical base effort instead of rejecting otherwise valid v9
+            # checkpoints.
+            persisted_base_reasoning_effort = persisted_reasoning_effort
+        valid_base_reasoning_effort = (persisted_base_reasoning_effort is None) or (
+            isinstance(persisted_base_reasoning_effort, str)
+            and persisted_base_reasoning_effort in {"low", "medium", "high", "xhigh"}
+        )
         valid_seed_fingerprint = (
             isinstance(persisted_seed_fingerprint, str)
             and len(persisted_seed_fingerprint) == 64
@@ -6409,6 +6523,7 @@ class OrchestratorRunner:
                 or prepared_live_execution
                 and persisted_resume_workspace is None
             )
+            or not valid_base_reasoning_effort
         ):
             raise OrchestratorError(
                 message="Cannot resume with an invalid execution contract",
@@ -6431,6 +6546,16 @@ class OrchestratorRunner:
                     "persisted_preferences": persisted_preferences.to_contract_data(),
                     "requested_preferences": self._execution_preferences.to_contract_data(),
                     "hint": "Start a new successor execution for an intentional change.",
+                },
+            )
+
+        if persisted_base_reasoning_effort != self._reasoning_effort:
+            raise OrchestratorError(
+                message="Cannot resume with a different reasoning effort",
+                details={
+                    "persisted_base_reasoning_effort": persisted_base_reasoning_effort,
+                    "current_base_reasoning_effort": self._reasoning_effort,
+                    "hint": "Start a new session after changing reasoning effort.",
                 },
             )
 
@@ -6570,7 +6695,7 @@ class OrchestratorRunner:
                     ),
                 },
             )
-        current_runtime_execution = self._runtime_execution_identity_contract()
+        current_runtime_execution = self._runtime_execution_identity_contract(runtime_handle)
         if persisted_runtime_execution != current_runtime_execution:
             raise OrchestratorError(
                 message="Cannot resume with a different runtime execution profile",
@@ -6699,17 +6824,22 @@ class OrchestratorRunner:
         effective_model_observed = self._runtime_execution_proves_effective_model(
             persisted_runtime_execution
         )
-        process_local_authority = valid_process_local_authority_contract(
-            raw_contract.get("foundation_a_authority")
+        process_local_authority = (
+            prepared_live_execution
+            and valid_process_local_authority_contract(raw_contract.get("foundation_a_authority"))
         )
         model_override_support = getattr(
             getattr(self._adapter, "capabilities", None),
             "model_override_support",
             ParamSupport.IGNORED,
         )
+        automatic_codex_default_authorized = (
+            self._runtime_execution_authorizes_automatic_codex_resume(persisted_runtime_execution)
+        )
         if (
             constructor_model_value is None
             and not effective_model_observed
+            and not automatic_codex_default_authorized
             and not (restored_router is not None and model_override_support is ParamSupport.NATIVE)
             and not process_local_authority
         ):
@@ -6723,6 +6853,7 @@ class OrchestratorRunner:
                         restored_router is not None
                         and model_override_support is ParamSupport.NATIVE
                     ),
+                    "automatic_codex_default_authorized": automatic_codex_default_authorized,
                     "hint": ("Pin the original runtime model/profile, or start a new session."),
                 },
             )
@@ -6760,6 +6891,7 @@ class OrchestratorRunner:
                 authority_generation=authority_generation,
                 execution_inputs_contract=normalized_execution_inputs,
                 project_identity=replacement_project_identity,
+                runtime_handle=runtime_handle,
             )
             # Only the public resume path reaches this branch with a live,
             # registry-issued generation.  Preserve the persisted diagnostics
@@ -6778,6 +6910,7 @@ class OrchestratorRunner:
                 seed_fingerprint=(persisted_seed_fingerprint if valid_seed_fingerprint else None),
                 authority_generation=authority_generation,
                 project_identity=replacement_project_identity,
+                runtime_handle=runtime_handle,
             )
             if authority_generation is None:
                 replacement["foundation_a_authority"] = dict(raw_contract["foundation_a_authority"])
@@ -6790,6 +6923,18 @@ class OrchestratorRunner:
         # router. Recomputing it from a resumed throwaway worktree would make the
         # same execution appear to be a different experiment.
         self._execution_contract = dict(raw_contract)
+        if preferences_migrated or base_reasoning_effort_missing:
+            self._execution_contract["execution_preferences"] = (
+                persisted_preferences.to_contract_data()
+            )
+            migrated_routing = dict(raw_routing)
+            if base_reasoning_effort_missing:
+                migrated_routing["base_reasoning_effort"] = persisted_base_reasoning_effort
+            self._execution_contract["model_routing"] = migrated_routing
+            migrated_proof = dict(raw_proof)
+            migrated_proof["routing_fingerprint"] = self._routing_fingerprint(migrated_routing)
+            self._execution_contract["frugality_proof"] = migrated_proof
+            return True
         return False
 
     def _restore_execution_contract_snapshot(
@@ -6800,6 +6945,7 @@ class OrchestratorRunner:
         authority_generation: _ProcessLocalAuthorityGeneration | None = None,
         require_bound_execution_inputs: bool = True,
         prepared_live_execution: bool = False,
+        runtime_handle: RuntimeHandle | None = None,
     ) -> tuple[bool, dict[str, Any]]:
         """Restore and return one immutable invocation-local contract snapshot.
 
@@ -6815,6 +6961,7 @@ class OrchestratorRunner:
                 authority_generation=authority_generation,
                 require_bound_execution_inputs=require_bound_execution_inputs,
                 prepared_live_execution=prepared_live_execution,
+                runtime_handle=runtime_handle,
             )
             if not isinstance(self._execution_contract, Mapping):
                 raise OrchestratorError(
@@ -8521,7 +8668,23 @@ class OrchestratorRunner:
 
         This allows callers such as MCP handlers to return stable tracking IDs
         immediately and then start the actual runtime work asynchronously.
+
+        Contract construction captures the resolver's repo-local input
+        closure, and the publication boundary revalidates from that evidence
+        by metadata alone when nothing observable changed — escalating to the
+        full re-resolution (probe included) otherwise (#1796 L2).
         """
+        with publication_evidence_sink():
+            return await self._prepare_session_scoped(
+                seed, execution_id=execution_id, session_id=session_id
+            )
+
+    async def _prepare_session_scoped(
+        self,
+        seed: Seed,
+        execution_id: str | None = None,
+        session_id: str | None = None,
+    ) -> Result[SessionTracker, OrchestratorError]:
         exec_id = execution_id or f"exec_{uuid4().hex[:12]}"
         resolved_session_id = session_id or f"orch_{uuid4().hex[:12]}"
         self._execution_guidance = None
@@ -8571,6 +8734,7 @@ class OrchestratorRunner:
                 self._build_new_session_contract,
                 seed=seed,
                 authority_generation=authority_generation,
+                runtime_handle=self._inherited_runtime_handle,
             )
             self._execution_guidance_delivery_mode()
             create_session_kwargs: dict[str, Any] = {
@@ -10986,11 +11150,16 @@ class OrchestratorRunner:
             )
 
         try:
+            runtime_handle = self._deserialize_runtime_handle(tracker.progress)
+            runtime_handle = self._force_runtime_handle_permission(runtime_handle)
+            self._validate_runtime_handle_backend(runtime_handle)
+            self._validate_bound_runtime_resume_identity(tracker.progress, runtime_handle)
             execution_contract_changed, execution_contract = await asyncio.to_thread(
                 self._restore_execution_contract_snapshot,
                 tracker.progress,
                 seed=seed,
                 authority_generation=authority_generation,
+                runtime_handle=runtime_handle,
             )
             execution_semantics = self._execution_semantics_snapshot(execution_contract)
             self._execution_guidance_delivery_mode()
@@ -11118,11 +11287,6 @@ class OrchestratorRunner:
 
 Note: This is a resumed session. Please continue from where execution was interrupted.
 """
-            # Get runtime resume state if stored
-            runtime_handle = self._deserialize_runtime_handle(tracker.progress)
-            runtime_handle = self._force_runtime_handle_permission(runtime_handle)
-            self._validate_runtime_handle_backend(runtime_handle)
-            self._validate_bound_runtime_resume_identity(tracker.progress, runtime_handle)
             self._validate_resume_handle_execution_identity(runtime_handle)
             if self._task_workspace is not None and "workspace" not in tracker.progress:
                 await self._persist_session_progress(

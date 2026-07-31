@@ -52,6 +52,23 @@ async def _cancel_manager_tasks(manager: JobManager) -> None:
         await asyncio.gather(*tasks, return_exceptions=True)
 
 
+async def _wait_for_job_status(
+    manager: JobManager,
+    job_id: str,
+    status: JobStatus,
+    *,
+    timeout: float = 5.0,
+) -> None:
+    """Wait for the persisted job status, not only runner task scheduling."""
+    deadline = asyncio.get_running_loop().time() + timeout
+    snapshot = await manager.get_snapshot(job_id)
+    while snapshot.status is not status:
+        if asyncio.get_running_loop().time() >= deadline:
+            raise AssertionError(f"job {job_id} did not become {status}; last={snapshot.status}")
+        await asyncio.sleep(0.01)
+        snapshot = await manager.get_snapshot(job_id)
+
+
 def _handoff_only_result(job_id: str) -> AutoPipelineResult:
     """A COMPLETE-but-handoff-only result, the state the wait path acts on.
 
@@ -319,6 +336,7 @@ async def test_wait_deadline_reopen_rearms_deadline_so_resume_is_not_dead_end(tm
             job_type="execute", initial_message="queued", runner=_wedged_runner()
         )
         await asyncio.wait_for(started_running.wait(), timeout=5)
+        await _wait_for_job_status(manager, started.job_id, JobStatus.RUNNING)
         state = _completed_handoff_state(tmp_path, started.job_id)
         # Mimic the pipeline: an armed absolute deadline that is already expired.
         state.deadline_at = time_module.monotonic() - 100.0
@@ -386,6 +404,7 @@ async def test_wait_interrupt_persists_resumable_durable_state(tmp_path) -> None
             job_type="execute", initial_message="queued", runner=_wedged_runner()
         )
         await asyncio.wait_for(started_running.wait(), timeout=5)
+        await _wait_for_job_status(manager, started.job_id, JobStatus.RUNNING)
         state = _completed_handoff_state(tmp_path, started.job_id)
         auto_store.save(state)
         assert auto_store.load(state.auto_session_id).phase is AutoPhase.COMPLETE
@@ -593,6 +612,7 @@ async def test_wait_prefers_linked_execution_terminal_over_live_wedged_job(
             links=JobLinks(session_id="orch_wait", execution_id="exec_wait"),
         )
         await asyncio.wait_for(started_running.wait(), timeout=5)
+        await _wait_for_job_status(manager, started.job_id, JobStatus.RUNNING)
 
         await store.append(
             BaseEvent(
@@ -662,6 +682,7 @@ async def test_wait_deadline_cancels_wedged_job_and_reports_bounded_verdict(tmp_
             job_type="execute", initial_message="queued", runner=_wedged_runner()
         )
         await asyncio.wait_for(started_running.wait(), timeout=5)
+        await _wait_for_job_status(manager, started.job_id, JobStatus.RUNNING)
         result = _handoff_only_result(started.job_id)
         assert result.resume_capability is AutoResumeCapability.NONE
 
