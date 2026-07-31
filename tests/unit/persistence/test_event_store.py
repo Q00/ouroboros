@@ -4,6 +4,7 @@ import asyncio
 from datetime import UTC, datetime, timedelta
 import logging
 from pathlib import Path
+import shutil
 
 import pytest
 
@@ -11,7 +12,11 @@ from ouroboros.core.errors import PersistenceError
 from ouroboros.events.base import BaseEvent
 from ouroboros.orchestrator.execution_runtime_scope import normalize_execution_scope_id
 from ouroboros.orchestrator.session import SessionRepository
-from ouroboros.persistence.event_store import EventStore, acceptance_generation_id_for_session
+from ouroboros.persistence.event_store import (
+    EventStore,
+    _await_sqlite_write_atomically,
+    acceptance_generation_id_for_session,
+)
 
 
 @pytest.fixture
@@ -45,6 +50,32 @@ class TestEventStoreInitialization:
         await store.initialize()
         # If we get here without error, tables were created
         await store.close()
+
+    async def test_sqlite_write_drain_survives_repeated_caller_cancellation(self) -> None:
+        """A second cancellation must not cancel the shielded write cleanup task."""
+        started = asyncio.Event()
+        release = asyncio.Event()
+        completed = False
+
+        async def _write() -> str:
+            nonlocal completed
+            started.set()
+            await release.wait()
+            completed = True
+            return "committed"
+
+        task = asyncio.create_task(_await_sqlite_write_atomically(_write()))
+        await asyncio.wait_for(started.wait(), timeout=1)
+
+        task.cancel()
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=1)
+        assert completed is True
 
     async def test_event_store_can_be_initialized_multiple_times(self, tmp_path) -> None:
         """Calling initialize() multiple times is safe."""
@@ -2060,6 +2091,61 @@ class TestEventStoreClose:
         ro = EventStore(f"sqlite+aiosqlite:///{db_path}", read_only=True)
         await ro.initialize()
         await ro.close()  # must not raise
+
+    async def test_read_only_store_preserves_literal_uri_characters_in_path(self, tmp_path) -> None:
+        template_path = tmp_path / "template.db"
+        writer = EventStore(f"sqlite+aiosqlite:///{template_path}")
+        await writer.initialize()
+        await writer.append(
+            BaseEvent(
+                type="execution.terminal",
+                aggregate_type="execution",
+                aggregate_id="exec_literal_path",
+                data={"status": "complete"},
+            )
+        )
+        await writer.close()
+
+        literal_path = tmp_path / "literal?mode=rw&fragment#.db"
+        shutil.copy2(template_path, literal_path)
+        store = EventStore(f"sqlite+aiosqlite:///{literal_path}", read_only=True)
+        await store.initialize(create_schema=False)
+        try:
+            events = await store.query_events(aggregate_id="exec_literal_path")
+            assert len(events) == 1
+            with pytest.raises(PersistenceError):
+                await store.append(
+                    BaseEvent(
+                        type="execution.started",
+                        aggregate_type="execution",
+                        aggregate_id="exec_must_not_write",
+                    )
+                )
+        finally:
+            await store.close()
+
+    async def test_read_only_store_overrides_writable_file_uri_mode(self, tmp_path) -> None:
+        db_path = tmp_path / "explicit-uri.db"
+        writer = EventStore(f"sqlite+aiosqlite:///{db_path}")
+        await writer.initialize()
+        await writer.close()
+
+        store = EventStore(
+            f"sqlite+aiosqlite:///file:{db_path}?mode=rw&uri=true",
+            read_only=True,
+        )
+        await store.initialize(create_schema=False)
+        try:
+            with pytest.raises(PersistenceError):
+                await store.append(
+                    BaseEvent(
+                        type="execution.started",
+                        aggregate_type="execution",
+                        aggregate_id="exec_must_stay_read_only",
+                    )
+                )
+        finally:
+            await store.close()
 
 
 class TestEventStoreTransactions:

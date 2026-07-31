@@ -7,6 +7,7 @@ import inspect
 import json
 import os
 from pathlib import Path
+import shlex
 import signal
 from typing import Any
 from unittest.mock import AsyncMock, patch
@@ -20,6 +21,7 @@ from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
 from ouroboros.orchestrator.adapter import AgentMessage, ParamSupport, RuntimeHandle
 import ouroboros.orchestrator.codex_cli_runtime as codex_cli_runtime_module
 from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime
+from ouroboros.orchestrator.skill_tool_mapping import SkillToolMapping
 from ouroboros.router import Resolved, ResolveRequest
 from ouroboros.router.dispatch import SkillDispatchRouter as SharedSkillDispatchRouter
 
@@ -46,20 +48,89 @@ def test_codex_config_fingerprint_ignores_automatic_project_trust(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    project_key = str(project_dir.resolve(strict=False))
     codex_home = tmp_path / "codex-home"
     codex_home.mkdir()
     config_path = codex_home / "config.toml"
     config_path.write_text('model = "gpt-test"\n', encoding="utf-8")
     monkeypatch.setenv("CODEX_HOME", str(codex_home))
-    runtime = CodexCliRuntime(cli_path="codex", cwd="/tmp/project")
+    runtime = CodexCliRuntime(cli_path="codex", cwd=project_key)
     original = runtime._codex_config_fingerprint
 
     config_path.write_text(
-        'model = "gpt-test"\n\n[projects."/tmp/project"]\ntrust_level = "trusted"\n',
+        f'model = "gpt-test"\n\n[projects.{json.dumps(project_key)}]\ntrust_level = "trusted"\n',
         encoding="utf-8",
     )
 
     assert runtime._fingerprint_codex_config_files() == original
+
+
+def test_codex_config_fingerprint_tracks_other_project_trust(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_dir = tmp_path / "project"
+    other_dir = tmp_path / "other"
+    project_dir.mkdir()
+    other_dir.mkdir()
+    project_key = str(project_dir.resolve(strict=False))
+    other_project_key = str(other_dir.resolve(strict=False))
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
+    config_path = codex_home / "config.toml"
+    config_path.write_text('model = "gpt-test"\n', encoding="utf-8")
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    runtime = CodexCliRuntime(cli_path="codex", cwd=project_key)
+
+    config_path.write_text(
+        f'model = "gpt-test"\n\n[projects.{json.dumps(other_project_key)}]\n'
+        'trust_level = "trusted"\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RuntimeError, match="Codex configuration changed"):
+        runtime._assert_codex_config_files_unchanged()
+
+
+@pytest.mark.parametrize(
+    "updated_trust_level",
+    [
+        None,
+        "untrusted",
+    ],
+)
+def test_codex_config_fingerprint_tracks_existing_current_project_trust_changes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    updated_trust_level: str | None,
+) -> None:
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    project_key = str(project_dir.resolve(strict=False))
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
+    config_path = codex_home / "config.toml"
+    config_path.write_text(
+        f'model = "gpt-test"\n\n[projects.{json.dumps(project_key)}]\ntrust_level = "trusted"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    runtime = CodexCliRuntime(cli_path="codex", cwd=project_key)
+
+    updated_project_config = (
+        ""
+        if updated_trust_level is None
+        else f"[projects.{json.dumps(project_key)}]\ntrust_level = {json.dumps(updated_trust_level)}\n"
+    )
+    config_path.write_text(
+        f'model = "gpt-test"\n\n{updated_project_config}',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RuntimeError, match="Codex configuration changed"):
+        runtime._assert_codex_config_files_unchanged()
 
 
 def test_codex_config_fingerprint_still_detects_project_runtime_overrides(
@@ -83,6 +154,703 @@ def test_codex_config_fingerprint_still_detects_project_runtime_overrides(
 
     with pytest.raises(RuntimeError, match="Codex configuration changed"):
         runtime._assert_codex_config_files_unchanged()
+
+
+def test_codex_profile_v2_fingerprint_ignores_comment_only_edits(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Profile-v2 TOML fingerprints should reflect semantics, not formatting."""
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
+    profile_path = codex_home / "qa.config.toml"
+    profile_path.write_text(
+        '# comment\nmodel = "gpt-test"\nreasoning_effort = "high"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    runtime = CodexCliRuntime(cli_path="codex", cwd="/tmp/project")
+
+    original = runtime._fingerprint_codex_config_files()
+    profile_path.write_text(
+        'reasoning_effort = "high"\n\n# another comment\nmodel = "gpt-test"\n',
+        encoding="utf-8",
+    )
+
+    assert runtime._fingerprint_codex_config_files() == original
+
+
+def test_codex_config_fingerprint_tracks_active_rules_and_skills(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Portable Codex identity must include active instruction assets."""
+    codex_home = tmp_path / "codex-home"
+    rules_dir = codex_home / "rules"
+    skill_dir = codex_home / "skills" / "ouroboros-welcome"
+    rules_dir.mkdir(parents=True)
+    skill_dir.mkdir(parents=True)
+    (rules_dir / "ouroboros.md").write_text("rule before\n", encoding="utf-8")
+    (skill_dir / "SKILL.md").write_text("---\nname: welcome\n---\nBefore\n", encoding="utf-8")
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    runtime = CodexCliRuntime(cli_path="codex", cwd="/tmp/project")
+
+    original = runtime.execution_identity_contract()["codex_config_fingerprint"]
+    (rules_dir / "ouroboros.md").write_text("rule after\n", encoding="utf-8")
+
+    assert runtime._fingerprint_codex_config_files() != original
+    with pytest.raises(RuntimeError, match="Codex configuration changed"):
+        runtime._assert_codex_config_files_unchanged()
+
+
+def test_codex_config_fingerprint_tracks_instruction_asset_symlink_targets(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Instruction identity must change when active rules/skills topology changes."""
+    codex_home = tmp_path / "codex-home"
+    rules_dir = codex_home / "rules"
+    rules_dir.mkdir(parents=True)
+    target = tmp_path / "rule-target.md"
+    target.write_text("external contents are not followed\n", encoding="utf-8")
+    (rules_dir / "ouroboros.md").symlink_to(target)
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    runtime = CodexCliRuntime(cli_path="codex", cwd="/tmp/project")
+
+    original = runtime.execution_identity_contract()["codex_config_fingerprint"]
+    replacement_target = tmp_path / "replacement-target.md"
+    (rules_dir / "ouroboros.md").unlink()
+    (rules_dir / "ouroboros.md").symlink_to(replacement_target)
+
+    assert runtime._fingerprint_codex_config_files() != original
+
+
+def test_codex_config_fingerprint_tracks_instruction_symlink_target_contents(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Instruction symlinks must bind the current target contents, not only pathnames."""
+    codex_home = tmp_path / "codex-home"
+    rules_dir = codex_home / "rules"
+    rules_dir.mkdir(parents=True)
+    target = tmp_path / "rule-target.md"
+    target.write_text("rule before\n", encoding="utf-8")
+    (rules_dir / "ouroboros.md").symlink_to(target)
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    runtime = CodexCliRuntime(cli_path="codex", cwd="/tmp/project")
+
+    original = runtime.execution_identity_contract()["codex_config_fingerprint"]
+    target.write_text("rule after\n", encoding="utf-8")
+
+    assert runtime._fingerprint_codex_config_files() != original
+    with pytest.raises(RuntimeError, match="Codex configuration changed"):
+        runtime._assert_codex_config_files_unchanged()
+
+
+def test_build_command_rejects_in_place_codex_cli_change(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Durable Codex identity must fail closed if the selected executable changes."""
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    cli_path = tmp_path / "codex"
+    cli_path.write_text("#!/bin/sh\necho codex 1.0\n", encoding="utf-8")
+    cli_path.chmod(0o755)
+
+    runtime = CodexCliRuntime(cli_path=cli_path, cwd="/tmp/project", model="gpt-5")
+    assert runtime._build_command("/tmp/last-message")
+
+    cli_path.write_text("#!/bin/sh\necho codex 2.0\n", encoding="utf-8")
+    cli_path.chmod(0o755)
+
+    with pytest.raises(RuntimeError, match="Codex CLI executable changed"):
+        runtime._build_command("/tmp/last-message")
+
+
+def test_build_command_rejects_cli_content_drift_before_version_probe(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A replaced executable must never be launched for its version string."""
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    cli_path = tmp_path / "codex"
+    side_effect = tmp_path / "replacement-ran"
+    cli_path.write_text("#!/bin/sh\necho codex 1.0\n", encoding="utf-8")
+    cli_path.chmod(0o755)
+
+    runtime = CodexCliRuntime(cli_path=cli_path, cwd="/tmp/project", model="gpt-5")
+
+    cli_path.write_text(
+        f"#!/bin/sh\ntouch {shlex.quote(str(side_effect))}\necho codex 2.0\n",
+        encoding="utf-8",
+    )
+    cli_path.chmod(0o755)
+
+    with pytest.raises(RuntimeError, match="Codex CLI executable changed"):
+        runtime._build_command("/tmp/last-message")
+    assert not side_effect.exists()
+
+
+def test_execution_identity_tracks_launch_symlink_target(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Retargeting an identical CLI symlink must change execution identity."""
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    target_a = tmp_path / "codex-a"
+    target_b = tmp_path / "codex-b"
+    script = "#!/bin/sh\necho codex 1.0\n"
+    target_a.write_text(script, encoding="utf-8")
+    target_b.write_text(script, encoding="utf-8")
+    target_a.chmod(0o755)
+    target_b.chmod(0o755)
+    link = tmp_path / "codex"
+    link.symlink_to(target_a)
+
+    first = CodexCliRuntime(cli_path=link, cwd="/tmp/project", model="gpt-5")
+    first_identity = first.execution_identity_contract()
+
+    link.unlink()
+    link.symlink_to(target_b)
+    second = CodexCliRuntime(cli_path=link, cwd="/tmp/project", model="gpt-5")
+    second_identity = second.execution_identity_contract()
+
+    assert (
+        first_identity["cli_executable_content_sha256"]
+        == second_identity["cli_executable_content_sha256"]
+    )
+    assert first_identity["cli_executable_version"] != second_identity["cli_executable_version"]
+
+
+def test_build_command_rejects_bare_cli_that_appears_after_initialization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A PATH command that was unresolved at init must not be launched later."""
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+
+    runtime = CodexCliRuntime(cli_path="late-codex", cwd="/tmp/project", model="gpt-5")
+
+    cli_path = tmp_path / "late-codex"
+    cli_path.write_text("#!/bin/sh\necho codex 1.0\n", encoding="utf-8")
+    cli_path.chmod(0o755)
+
+    with pytest.raises(RuntimeError, match="unresolved at runtime initialization"):
+        runtime._build_command("/tmp/last-message")
+
+
+def test_build_command_rejects_bare_cli_that_remains_unresolved(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A never-resolved PATH command still has no executable identity."""
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+
+    runtime = CodexCliRuntime(cli_path="missing-codex", cwd="/tmp/project", model="gpt-5")
+
+    with pytest.raises(RuntimeError, match="unresolved at runtime initialization"):
+        runtime._build_command("/tmp/last-message")
+
+
+def test_skill_dispatch_registry_fingerprint_tracks_mcp_tool_changes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Packaged skill frontmatter authority must participate in resume identity."""
+    first = (
+        SkillToolMapping(
+            skill_name="auto",
+            mcp_tool="ouroboros_start_auto",
+            skill_path="skills/auto/SKILL.md",
+            mcp_args={},
+            context_keys=(),
+        ),
+    )
+    changed = (
+        SkillToolMapping(
+            skill_name="auto",
+            mcp_tool="ouroboros_run_seed",
+            skill_path="skills/auto/SKILL.md",
+            mcp_args={},
+            context_keys=(),
+        ),
+    )
+    monkeypatch.setattr(
+        "ouroboros.orchestrator.codex_cli_runtime.discover_skill_tool_mappings",
+        lambda _skills_dir=None: first,
+    )
+    runtime = CodexCliRuntime(cli_path="/bin/echo", cwd="/tmp/project", model="gpt-5")
+    original = runtime.execution_identity_contract()["skill_dispatch_registry_fingerprint"]
+
+    monkeypatch.setattr(
+        "ouroboros.orchestrator.codex_cli_runtime.discover_skill_tool_mappings",
+        lambda _skills_dir=None: changed,
+    )
+
+    assert runtime._fingerprint_skill_dispatch_registry() != original
+    with pytest.raises(RuntimeError, match="skill dispatch registry changed"):
+        runtime._assert_skill_dispatch_registry_unchanged()
+
+
+def test_skill_dispatch_guard_rejects_process_local_dispatcher_replacement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same-process dispatch authority must not be replaceable after init."""
+
+    async def first_dispatcher(_intercept, _handle):
+        return ()
+
+    async def replacement_dispatcher(_intercept, _handle):
+        return ()
+
+    monkeypatch.setattr(
+        "ouroboros.orchestrator.codex_cli_runtime.discover_skill_tool_mappings",
+        lambda _skills_dir=None: (),
+    )
+    runtime = CodexCliRuntime(
+        cli_path="/bin/echo",
+        cwd="/tmp/project",
+        model="gpt-5",
+        skill_dispatcher=first_dispatcher,
+    )
+    original = runtime.execution_identity_contract()["skill_dispatcher_identity"]
+
+    runtime._skill_dispatcher = replacement_dispatcher
+
+    assert runtime._fingerprint_skill_dispatcher(runtime._skill_dispatcher) != original
+    with pytest.raises(RuntimeError, match="skill dispatcher changed"):
+        runtime._assert_skill_dispatch_registry_unchanged()
+
+
+def test_execution_identity_keeps_content_digest_when_version_unavailable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Portable identity must still bind executable bytes when --version fails."""
+    cli = tmp_path / "codex"
+    cli.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    cli.chmod(0o755)
+    monkeypatch.setattr(
+        "ouroboros.orchestrator.codex_cli_runtime.discover_skill_tool_mappings",
+        lambda _skills_dir=None: (),
+    )
+
+    first = CodexCliRuntime(cli_path=cli, cwd="/tmp/project", model="gpt-5")
+    first_identity = first.execution_identity_contract()
+
+    cli.write_text("#!/bin/sh\necho changed >&2\nexit 1\n", encoding="utf-8")
+    second = CodexCliRuntime(cli_path=cli, cwd="/tmp/project", model="gpt-5")
+    second_identity = second.execution_identity_contract()
+
+    assert first_identity["cli_executable_version"] is None
+    assert second_identity["cli_executable_version"] is None
+    assert first_identity["cli_executable_content_sha256"]
+    assert (
+        first_identity["cli_executable_content_sha256"]
+        != second_identity["cli_executable_content_sha256"]
+    )
+
+
+def test_builtin_mcp_handler_registry_fingerprint_rejects_replacement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Built-in MCP handler authority must participate in same-process guards."""
+    monkeypatch.setattr(
+        "ouroboros.orchestrator.codex_cli_runtime.discover_skill_tool_mappings",
+        lambda _skills_dir=None: (),
+    )
+    runtime = CodexCliRuntime(cli_path="/bin/echo", cwd="/tmp/project", model="gpt-5")
+    original = runtime.execution_identity_contract()["builtin_mcp_handler_registry_fingerprint"]
+
+    class _ReplacementHandler:
+        definition = {"name": "ouroboros_interview"}
+
+    runtime._builtin_mcp_handlers = {"ouroboros_interview": _ReplacementHandler()}
+
+    assert runtime._fingerprint_builtin_mcp_handler_registry() != original
+    with pytest.raises(RuntimeError, match="built-in MCP handler registry changed"):
+        runtime._assert_skill_dispatch_registry_unchanged()
+
+
+def test_codex_config_fingerprint_tracks_handle_selectable_embedded_profiles(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
+    config_path = codex_home / "config.toml"
+    config_path.write_text(
+        'model = "gpt-test"\n\n[profiles.unused]\nmodel = "unused-a"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    runtime = CodexCliRuntime(cli_path="codex", cwd="/tmp/project")
+    runtime._resolved_fallback_profile = "reachable"
+    original = runtime._fingerprint_codex_config_files()
+
+    config_path.write_text(
+        'model = "gpt-test"\n\n[profiles.unused]\nmodel = "unused-b"\n',
+        encoding="utf-8",
+    )
+
+    assert runtime._fingerprint_codex_config_files() != original
+
+
+def test_codex_config_fingerprint_tracks_reachable_embedded_profiles(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
+    config_path = codex_home / "config.toml"
+    config_path.write_text(
+        'model = "gpt-test"\n\n[profiles.reachable]\nmodel = "reachable-a"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    runtime = CodexCliRuntime(cli_path="codex", cwd="/tmp/project")
+    runtime._resolved_fallback_profile = "reachable"
+    original = runtime._fingerprint_codex_config_files()
+
+    config_path.write_text(
+        'model = "gpt-test"\n\n[profiles.reachable]\nmodel = "reachable-b"\n',
+        encoding="utf-8",
+    )
+
+    assert runtime._fingerprint_codex_config_files() != original
+
+
+def test_codex_config_fingerprint_tracks_handle_selectable_profile_v2_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
+    (codex_home / "config.toml").write_text('model = "gpt-test"\n', encoding="utf-8")
+    (codex_home / "reachable.config.toml").write_text(
+        'model_provider = "proxy-a"\n',
+        encoding="utf-8",
+    )
+    (codex_home / "unused.config.toml").write_text(
+        'model_provider = "proxy-a"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    runtime = CodexCliRuntime(cli_path="codex", cwd="/tmp/project")
+    runtime._resolved_fallback_profile = "reachable"
+    original = runtime._fingerprint_codex_config_files()
+
+    (codex_home / "unused.config.toml").write_text(
+        'model_provider = "proxy-b"\n',
+        encoding="utf-8",
+    )
+
+    assert runtime._fingerprint_codex_config_files() != original
+
+
+def test_codex_config_fingerprint_tracks_reachable_profile_v2_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
+    (codex_home / "config.toml").write_text('model = "gpt-test"\n', encoding="utf-8")
+    profile_path = codex_home / "reachable.config.toml"
+    profile_path.write_text('model_provider = "proxy-a"\n', encoding="utf-8")
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    runtime = CodexCliRuntime(cli_path="codex", cwd="/tmp/project")
+    runtime._resolved_fallback_profile = "reachable"
+    original = runtime._fingerprint_codex_config_files()
+
+    profile_path.write_text('model_provider = "proxy-b"\n', encoding="utf-8")
+
+    assert runtime._fingerprint_codex_config_files() != original
+
+
+def test_profile_fingerprint_preserves_v1_hash_when_effort_is_dormant() -> None:
+    """Null effort fields must not invalidate a pre-effort resume contract."""
+    config = OuroborosConfig(
+        llm_profiles={
+            "standard": {
+                "providers": {"codex": {"profile": "ouroboros-standard"}},
+            },
+        },
+        llm_role_profiles={"agent_runtime": "standard"},
+    )
+    legacy_payload = {
+        "version": 1,
+        "llm_profiles": {
+            "standard": {
+                "model": None,
+                "providers": {
+                    "codex": {
+                        "model": None,
+                        "profile": "ouroboros-standard",
+                    },
+                },
+            },
+        },
+        "llm_role_profiles": {"agent_runtime": "standard"},
+    }
+    runtime = CodexCliRuntime(cli_path="codex", cwd="/tmp/project")
+
+    with patch("ouroboros.providers.profiles.load_config", return_value=config):
+        assert runtime._fingerprint_profile_resolution_config() == runtime._hash_json_payload(
+            legacy_payload
+        )
+
+
+def test_profile_fingerprint_tracks_handle_selectable_ouroboros_profiles() -> None:
+    runtime = CodexCliRuntime(cli_path="codex", cwd="/tmp/project")
+    first = OuroborosConfig(
+        llm_profiles={
+            "standard": {"providers": {"codex": {"profile": "reachable"}}},
+        },
+        llm_role_profiles={"agent_runtime": "standard"},
+    )
+    second = OuroborosConfig(
+        llm_profiles={
+            "standard": {"providers": {"codex": {"profile": "reachable"}}},
+            "unused": {"providers": {"codex": {"profile": "unused"}}},
+        },
+        llm_role_profiles={"agent_runtime": "standard", "unused_role": "unused"},
+    )
+
+    with patch("ouroboros.providers.profiles.load_config", return_value=first):
+        original = runtime._fingerprint_profile_resolution_config()
+    with patch("ouroboros.providers.profiles.load_config", return_value=second):
+        assert runtime._fingerprint_profile_resolution_config() != original
+
+
+def test_profile_fingerprint_tracks_reachable_ouroboros_profile() -> None:
+    runtime = CodexCliRuntime(cli_path="codex", cwd="/tmp/project")
+    first = OuroborosConfig(
+        llm_profiles={
+            "standard": {"providers": {"codex": {"profile": "reachable-a"}}},
+        },
+        llm_role_profiles={"agent_runtime": "standard"},
+    )
+    second = OuroborosConfig(
+        llm_profiles={
+            "standard": {"providers": {"codex": {"profile": "reachable-b"}}},
+        },
+        llm_role_profiles={"agent_runtime": "standard"},
+    )
+
+    with patch("ouroboros.providers.profiles.load_config", return_value=first):
+        original = runtime._fingerprint_profile_resolution_config()
+    with patch("ouroboros.providers.profiles.load_config", return_value=second):
+        assert runtime._fingerprint_profile_resolution_config() != original
+
+
+def test_profile_fingerprint_tracks_runtime_profile_role_mapping_when_backend_profile_set() -> None:
+    """Runtime-profile sessions still re-resolve role profiles for child handles."""
+    first = OuroborosConfig(
+        llm_profiles={
+            "worker": {"providers": {"codex": {"profile": "ouroboros-worker"}}},
+            "standard": {"providers": {"codex": {"reasoning_effort": "low"}}},
+        },
+        llm_role_profiles={"agent_runtime_implementation": "standard"},
+    )
+    second = OuroborosConfig(
+        llm_profiles={
+            "worker": {"providers": {"codex": {"profile": "ouroboros-worker"}}},
+            "standard": {"providers": {"codex": {"reasoning_effort": "high"}}},
+        },
+        llm_role_profiles={"agent_runtime_implementation": "standard"},
+    )
+    runtime = CodexCliRuntime(cli_path="codex", cwd="/tmp/project", runtime_profile="worker")
+
+    with patch("ouroboros.providers.profiles.load_config", return_value=first):
+        original = runtime._fingerprint_profile_resolution_config()
+    with patch("ouroboros.providers.profiles.load_config", return_value=second):
+        assert runtime._fingerprint_profile_resolution_config() != original
+
+
+def test_handle_llm_profile_change_invalidates_cached_command_fingerprint() -> None:
+    """Profiles selected through runtime handle metadata must be frozen per selector."""
+    first = OuroborosConfig(
+        llm_profiles={
+            "implementation": {"providers": {"codex": {"model": "gpt-a"}}},
+        },
+    )
+    second = OuroborosConfig(
+        llm_profiles={
+            "implementation": {"providers": {"codex": {"model": "gpt-b"}}},
+        },
+    )
+    handle = RuntimeHandle(
+        backend="codex_cli",
+        kind="implementation",
+        metadata={"llm_profile": "implementation"},
+    )
+    with patch("ouroboros.providers.profiles.load_config", return_value=first):
+        runtime = CodexCliRuntime(cli_path="codex", cwd="/tmp/project")
+        command = runtime._build_command("/tmp/last-message", runtime_handle=handle)
+    assert "--model" in command
+    assert command[command.index("--model") + 1] == "gpt-a"
+
+    with patch("ouroboros.providers.profiles.load_config", return_value=second):
+        with pytest.raises(RuntimeError, match="profile routing changed"):
+            runtime._build_command("/tmp/last-message", runtime_handle=handle)
+
+
+def test_handle_selectable_llm_profile_enters_durable_identity() -> None:
+    """Runtime recreation must not accept changed direct handle profile inputs."""
+    first = OuroborosConfig(
+        llm_profiles={
+            "implementation": {"providers": {"codex": {"model": "gpt-a"}}},
+        },
+    )
+    second = OuroborosConfig(
+        llm_profiles={
+            "implementation": {"providers": {"codex": {"model": "gpt-b"}}},
+        },
+    )
+
+    with patch("ouroboros.providers.profiles.load_config", return_value=first):
+        original = CodexCliRuntime(
+            cli_path="/bin/echo", cwd="/tmp/project"
+        ).execution_identity_contract()
+    with patch("ouroboros.providers.profiles.load_config", return_value=second):
+        changed = CodexCliRuntime(
+            cli_path="/bin/echo", cwd="/tmp/project"
+        ).execution_identity_contract()
+
+    assert original["profile_resolution_fingerprint"] != changed["profile_resolution_fingerprint"]
+
+
+def test_runtime_execution_identity_tracks_constructor_execution_inputs(
+    tmp_path: Path,
+) -> None:
+    """Resume identity must include constructor inputs that affect execution behavior."""
+    first_skills = tmp_path / "skills-a"
+    second_skills = tmp_path / "skills-b"
+    first_skills.mkdir()
+    second_skills.mkdir()
+
+    first = CodexCliRuntime(
+        cli_path="/bin/echo",
+        cwd="/tmp/project",
+        skills_dir=first_skills,
+        startup_output_timeout_seconds=1,
+        stdout_idle_timeout_seconds=2,
+    ).execution_identity_contract()
+    second = CodexCliRuntime(
+        cli_path="/bin/echo",
+        cwd="/tmp/project",
+        skills_dir=second_skills,
+        startup_output_timeout_seconds=3,
+        stdout_idle_timeout_seconds=4,
+    ).execution_identity_contract()
+
+    assert first["skills_dir"] == str(first_skills)
+    assert first["startup_output_timeout_seconds"] == 1
+    assert first["stdout_idle_timeout_seconds"] == 2
+    assert first["skills_dir"] != second["skills_dir"]
+    assert first["startup_output_timeout_seconds"] != second["startup_output_timeout_seconds"]
+    assert first["stdout_idle_timeout_seconds"] != second["stdout_idle_timeout_seconds"]
+
+
+def test_handle_codex_profile_file_change_invalidates_cached_command_fingerprint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Codex-native profiles selected through handle metadata are command inputs."""
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    profile_path = codex_home / "custom.config.toml"
+    profile_path.write_text('model_provider = "proxy-a"\n', encoding="utf-8")
+    handle = RuntimeHandle(
+        backend="codex_cli",
+        kind="implementation",
+        metadata={"codex_profile": "custom"},
+    )
+    runtime = CodexCliRuntime(cli_path="codex", cwd="/tmp/project")
+
+    command = runtime._build_command("/tmp/last-message", runtime_handle=handle)
+    assert "--profile" in command
+    assert command[command.index("--profile") + 1] == "custom"
+
+    profile_path.write_text('model_provider = "proxy-b"\n', encoding="utf-8")
+    with pytest.raises(RuntimeError, match="Codex configuration changed"):
+        runtime._build_command("/tmp/last-message", runtime_handle=handle)
+
+
+def test_profile_resolution_fingerprint_canonicalizes_duplicate_codex_alias_order(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Duplicate Codex aliases are one invalid state regardless of insertion order."""
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    first = OuroborosConfig(
+        llm_profiles={
+            "qa": {
+                "providers": {
+                    "CODEX": {"model": "first-pin"},
+                    "codex_cli": {"model": "second-pin"},
+                }
+            }
+        },
+        llm_role_profiles={"agent_runtime": "qa"},
+    )
+    second = OuroborosConfig(
+        llm_profiles={
+            "qa": {
+                "providers": {
+                    "codex_cli": {"model": "second-pin"},
+                    "CODEX": {"model": "first-pin"},
+                }
+            }
+        },
+        llm_role_profiles={"agent_runtime": "qa"},
+    )
+    runtime = CodexCliRuntime(cli_path="codex", cwd="/tmp/project")
+
+    with patch("ouroboros.providers.profiles.load_config", return_value=first):
+        first_fingerprint = runtime._fingerprint_profile_resolution_config()
+    with patch("ouroboros.providers.profiles.load_config", return_value=second):
+        second_fingerprint = runtime._fingerprint_profile_resolution_config()
+
+    assert first_fingerprint == second_fingerprint
+
+
+def test_profile_resolution_fingerprint_canonicalizes_single_codex_alias(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Equivalent single Codex aliases must not cause replay fingerprint drift."""
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    lower = OuroborosConfig(
+        llm_profiles={"qa": {"providers": {"codex": {"model": "gpt-5"}}}},
+        llm_role_profiles={"agent_runtime": "qa"},
+    )
+    upper = OuroborosConfig(
+        llm_profiles={"qa": {"providers": {"CODEX": {"model": "gpt-5"}}}},
+        llm_role_profiles={"agent_runtime": "qa"},
+    )
+    runtime = CodexCliRuntime(cli_path="codex", cwd="/tmp/project")
+
+    with patch("ouroboros.providers.profiles.load_config", return_value=lower):
+        lower_fingerprint = runtime._fingerprint_profile_resolution_config()
+    with patch("ouroboros.providers.profiles.load_config", return_value=upper):
+        upper_fingerprint = runtime._fingerprint_profile_resolution_config()
+
+    assert lower_fingerprint == upper_fingerprint
 
 
 class TestComposePromptDirectiveFencing:
@@ -364,7 +1132,7 @@ class TestCodexCliRuntime:
             resume_session_id="thread-123",
         )
 
-        assert command[:2] == ["codex", "exec"]
+        assert command[1] == "exec"
         assert command[-2:] == ["resume", "thread-123"]
         resume_index = command.index("resume")
         assert command.index("--json") < resume_index
@@ -373,8 +1141,8 @@ class TestCodexCliRuntime:
         assert command.index("-C") < resume_index
         assert command[command.index("-C") + 1] == _EXPECTED_PROJECT_CWD
 
-    def test_build_command_uses_profile_for_runtime_session_role(self) -> None:
-        """Agent runtime sessions should resolve Codex profiles from session_role."""
+    def test_build_command_uses_effort_for_runtime_session_role(self) -> None:
+        """Agent runtime sessions should pass role effort without a Codex profile file."""
         runtime_handle = RuntimeHandle(
             backend="codex_cli",
             kind="implementation_session",
@@ -383,7 +1151,7 @@ class TestCodexCliRuntime:
         config = OuroborosConfig(
             llm_profiles={
                 "standard": {
-                    "providers": {"codex": {"profile": "ouroboros-standard"}},
+                    "providers": {"codex": {"reasoning_effort": "medium"}},
                 },
             },
             llm_role_profiles={"agent_runtime_implementation": "standard"},
@@ -396,9 +1164,36 @@ class TestCodexCliRuntime:
                 runtime_handle=runtime_handle,
             )
 
-        assert "--profile" in command
-        assert command[command.index("--profile") + 1] == "ouroboros-standard"
+        assert "--profile" not in command
+        assert "model_reasoning_effort=medium" in command
         assert "--model" not in command
+
+    def test_build_command_keeps_role_effort_with_explicit_model_pin(self) -> None:
+        """A stage model pin replaces only the role model, not its effort level."""
+        runtime_handle = RuntimeHandle(
+            backend="codex_cli",
+            kind="implementation_session",
+            metadata={"session_role": "implementation"},
+        )
+        config = OuroborosConfig(
+            llm_profiles={
+                "standard": {
+                    "providers": {"codex": {"reasoning_effort": "high"}},
+                },
+            },
+            llm_role_profiles={"agent_runtime_implementation": "standard"},
+        )
+
+        with patch("ouroboros.providers.profiles.load_config", return_value=config):
+            runtime = CodexCliRuntime(cli_path="codex", cwd="/tmp/project", model="terra")
+            command = runtime._build_command(
+                output_last_message_path="/tmp/out.txt",
+                runtime_handle=runtime_handle,
+            )
+
+        assert command[command.index("--model") + 1] == "terra"
+        assert "model_reasoning_effort=high" in command
+        assert "--profile" not in command
 
     def test_build_command_matches_codex_0134_unified_profile_v2_contract(self) -> None:
         """Codex 0.134 uses --profile to load ~/.codex/<name>.config.toml files."""
@@ -620,7 +1415,6 @@ class TestCodexCliRuntime:
 
     def test_build_command_explicit_model_wins_over_runtime_profile(self) -> None:
         """Explicit runtime model overrides keep existing --model behavior."""
-        runtime = CodexCliRuntime(cli_path="codex", model="gpt-5.5", cwd="/tmp/project")
         runtime_handle = RuntimeHandle(
             backend="codex_cli",
             kind="implementation_session",
@@ -636,6 +1430,7 @@ class TestCodexCliRuntime:
         )
 
         with patch("ouroboros.providers.profiles.load_config", return_value=config):
+            runtime = CodexCliRuntime(cli_path="codex", model="gpt-5.5", cwd="/tmp/project")
             command = runtime._build_command(
                 output_last_message_path="/tmp/out.txt",
                 runtime_handle=runtime_handle,
@@ -689,6 +1484,87 @@ class TestCodexCliRuntime:
         assert "--model" in command
         assert command[command.index("--model") + 1] == "gpt-5.5"
         assert "--profile" not in command
+
+    def test_build_command_rejects_first_use_explicit_llm_profile_drift(self) -> None:
+        """First use of handle-selected llm_profile must compare with init-time identity."""
+        runtime_handle = RuntimeHandle(
+            backend="codex_cli",
+            kind="evaluation_session",
+            metadata={"llm_profile": "deep"},
+        )
+        original_config = OuroborosConfig(llm_profiles={"deep": {"model": "gpt-a"}})
+        drifted_config = OuroborosConfig(llm_profiles={"deep": {"model": "gpt-b"}})
+
+        with patch("ouroboros.providers.profiles.load_config", return_value=original_config):
+            runtime = CodexCliRuntime(cli_path="codex", cwd="/tmp/project")
+
+        with (
+            patch("ouroboros.providers.profiles.load_config", return_value=drifted_config),
+            pytest.raises(RuntimeError, match="profile routing changed"),
+        ):
+            runtime._build_command(
+                output_last_message_path="/tmp/out.txt",
+                runtime_handle=runtime_handle,
+            )
+
+    def test_build_command_allows_first_use_arbitrary_llm_role_from_init_identity(self) -> None:
+        """Arbitrary llm_role metadata must be included in the initialization fingerprint."""
+        runtime_handle = RuntimeHandle(
+            backend="codex_cli",
+            kind="qa_session",
+            metadata={"llm_role": "qa"},
+        )
+        config = OuroborosConfig(
+            llm_profiles={"qa-profile": {"providers": {"codex": {"model": "gpt-qa"}}}},
+            llm_role_profiles={"qa": "qa-profile"},
+        )
+
+        with patch("ouroboros.providers.profiles.load_config", return_value=config):
+            runtime = CodexCliRuntime(cli_path="codex", cwd="/tmp/project")
+            command = runtime._build_command(
+                output_last_message_path="/tmp/out.txt",
+                runtime_handle=runtime_handle,
+            )
+
+        assert "--model" in command
+        assert command[command.index("--model") + 1] == "gpt-qa"
+
+    def test_build_command_rejects_first_use_explicit_codex_profile_drift(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """First use of handle-selected codex_profile must compare native profile files."""
+        codex_home = tmp_path / "codex-home"
+        codex_home.mkdir()
+        (codex_home / "config.toml").write_text("", encoding="utf-8")
+        (codex_home / "deep.config.toml").write_text('model = "gpt-a"\n', encoding="utf-8")
+        monkeypatch.setenv("CODEX_HOME", str(codex_home))
+        runtime_handle = RuntimeHandle(
+            backend="codex_cli",
+            kind="evaluation_session",
+            metadata={"codex_profile": "deep"},
+        )
+
+        with patch(
+            "ouroboros.providers.profiles.load_config",
+            return_value=OuroborosConfig(),
+        ):
+            runtime = CodexCliRuntime(cli_path="codex", cwd="/tmp/project")
+
+        (codex_home / "deep.config.toml").write_text('model = "gpt-b"\n', encoding="utf-8")
+
+        with (
+            patch(
+                "ouroboros.providers.profiles.load_config",
+                return_value=OuroborosConfig(),
+            ),
+            pytest.raises(RuntimeError, match="Codex configuration changed"),
+        ):
+            runtime._build_command(
+                output_last_message_path="/tmp/out.txt",
+                runtime_handle=runtime_handle,
+            )
 
     def test_build_command_omits_profile_flag_when_runtime_profile_unset(self) -> None:
         """Default runtime_profile=None preserves existing command shape (regression)."""
@@ -819,6 +1695,78 @@ class TestCodexCliRuntime:
         assert messages[0].data["recovery"]["resume_session_id"] == "thread-123"
 
     @pytest.mark.asyncio
+    async def test_execute_task_surfaces_model_pin_version_guidance(self) -> None:
+        """Execute-stage model pins receive the same App/CLI mismatch guidance."""
+        runtime = CodexCliRuntime(cli_path="/usr/local/bin/codex", cwd="/tmp/project")
+
+        async def fake_create_subprocess_exec(*command: str, **kwargs: Any) -> _FakeProcess:
+            del command, kwargs
+            return _FakeProcess(
+                stdout_lines=[],
+                stderr_lines=["Codex: model not found"],
+                returncode=1,
+            )
+
+        versions = {
+            "/usr/local/bin/codex": "codex-cli 0.139.0",
+            "/Applications/ChatGPT.app/Contents/Resources/codex": "codex-cli 0.140.0",
+        }
+        with (
+            patch(
+                "ouroboros.orchestrator.codex_cli_runtime.asyncio.create_subprocess_exec",
+                side_effect=fake_create_subprocess_exec,
+            ),
+            patch(
+                "ouroboros.providers.codex_cli_adapter.CodexCliLLMAdapter._codex_version",
+                side_effect=lambda path: versions.get(path),
+            ),
+        ):
+            messages = [message async for message in runtime.execute_task("run the task")]
+
+        result = messages[-1]
+        assert result.is_error
+        assert result.data["failure_category"] == "codex_model_unavailable"
+        assert result.data["codex_app_cli_versions_match"] is False
+        assert "Update both Codex installations" in result.content
+
+    @pytest.mark.asyncio
+    async def test_execute_task_surfaces_model_guidance_from_turn_failed_event(self) -> None:
+        """JSONL turn failures must not bypass App/CLI mismatch diagnostics."""
+        runtime = CodexCliRuntime(cli_path="/usr/local/bin/codex", cwd="/tmp/project")
+
+        async def fake_create_subprocess_exec(*command: str, **kwargs: Any) -> _FakeProcess:
+            del command, kwargs
+            return _FakeProcess(
+                stdout_lines=[
+                    json.dumps({"type": "turn.failed", "error": {"message": "model not found"}})
+                ],
+                stderr_lines=[],
+                returncode=1,
+            )
+
+        versions = {
+            "/usr/local/bin/codex": "codex-cli 0.139.0",
+            "/Applications/ChatGPT.app/Contents/Resources/codex": "codex-cli 0.140.0",
+        }
+        with (
+            patch(
+                "ouroboros.orchestrator.codex_cli_runtime.asyncio.create_subprocess_exec",
+                side_effect=fake_create_subprocess_exec,
+            ),
+            patch(
+                "ouroboros.providers.codex_cli_adapter.CodexCliLLMAdapter._codex_version",
+                side_effect=lambda path: versions.get(path),
+            ),
+        ):
+            messages = [message async for message in runtime.execute_task("run the task")]
+
+        result = messages[-1]
+        assert result.is_error
+        assert result.data["failure_category"] == "codex_model_unavailable"
+        assert result.data["codex_app_cli_versions_match"] is False
+        assert "Update both Codex installations" in result.content
+
+    @pytest.mark.asyncio
     async def test_execute_task_starts_codex_in_dedicated_process_session(self) -> None:
         """Codex workers run in their own session so cleanup can reap descendants."""
         runtime = CodexCliRuntime(cli_path="codex", cwd="/tmp/project")
@@ -898,6 +1846,41 @@ class TestCodexCliRuntime:
         assert message.resume_handle.cwd == seeded_handle.cwd
         assert message.resume_handle.approval_mode == "acceptEdits"
         assert message.resume_handle.metadata == seeded_handle.metadata
+
+    @pytest.mark.parametrize(
+        ("event", "expected"),
+        [
+            (
+                {"type": "thread.started", "thread_id": "thread-123", "model": "gpt-5.4"},
+                ("gpt-5.4", "runtime_stream:thread.started:event.model"),
+            ),
+            (
+                {
+                    "type": "turn.completed",
+                    "session": {"selected_model": "gpt-5.4-mini"},
+                },
+                ("gpt-5.4-mini", "runtime_stream:turn.completed:session.selected_model"),
+            ),
+            # Item payloads can contain arbitrary provider/tool metadata. They
+            # are not a Codex lifecycle declaration of the effective model.
+            (
+                {"type": "item.completed", "item": {"model": "gpt-pretend"}},
+                None,
+            ),
+            # A text sentence is never a model identifier, even on a lifecycle event.
+            (
+                {"type": "turn.started", "model": "the model is gpt-pretend"},
+                None,
+            ),
+        ],
+    )
+    def test_runtime_reported_model_requires_a_lifecycle_model_field(
+        self,
+        event: dict[str, object],
+        expected: tuple[str, str] | None,
+    ) -> None:
+        """Automatic-mode telemetry never promotes configuration or item text to fact."""
+        assert CodexCliRuntime._runtime_reported_model(event) == expected
 
     def test_convert_command_execution_event(self) -> None:
         """Completed-only command items synthesize a Bash start+result pair."""
@@ -1325,6 +2308,54 @@ class TestCodexCliRuntime:
         assert messages[-1].content == "Final answer"
         assert messages[-1].resume_handle is not None
         assert messages[-1].resume_handle.native_session_id == "thread-123"
+        assert messages[-1].data["model_observation"] == {
+            "mode": "automatic",
+            "status": "unreported",
+            "requested_model": None,
+            "effective_model": None,
+            "source": None,
+        }
+
+    @pytest.mark.asyncio
+    async def test_execute_task_surfaces_only_runtime_reported_effective_model(self) -> None:
+        """A stream declaration upgrades automatic mode from unreported to observed."""
+        runtime = CodexCliRuntime(cli_path="codex", cwd="/tmp/project")
+
+        async def fake_create_subprocess_exec(*command: str, **kwargs: object) -> _FakeProcess:
+            output_index = command.index("--output-last-message") + 1
+            Path(command[output_index]).write_text("Final answer", encoding="utf-8")
+            return _FakeProcess(
+                stdout_lines=[
+                    json.dumps(
+                        {
+                            "type": "thread.started",
+                            "thread_id": "thread-123",
+                            "model": "gpt-5.4",
+                        }
+                    ),
+                ],
+                stderr_lines=[],
+                returncode=0,
+            )
+
+        with patch(
+            "ouroboros.orchestrator.codex_cli_runtime.asyncio.create_subprocess_exec",
+            side_effect=fake_create_subprocess_exec,
+        ):
+            messages = [message async for message in runtime.execute_task("Do the work")]
+
+        model_message = next(
+            message for message in messages if message.data.get("subtype") == "model.observed"
+        )
+        assert model_message.content == "Codex selected model: gpt-5.4"
+        assert model_message.data["model_observation"] == {
+            "mode": "automatic",
+            "status": "observed",
+            "requested_model": None,
+            "effective_model": "gpt-5.4",
+            "source": "runtime_stream:thread.started:event.model",
+        }
+        assert messages[-1].data["model_observation"] == model_message.data["model_observation"]
 
     @pytest.mark.asyncio
     async def test_execute_task_handles_large_jsonl_events_without_readline(self) -> None:
@@ -1992,6 +3023,9 @@ class TestCodexCliRuntime:
             skills_dir=tmp_path,
         )
         runtime._builtin_mcp_handlers = {"ouroboros_interview": handler}
+        runtime._builtin_mcp_handler_registry_fingerprint = (
+            runtime._fingerprint_builtin_mcp_handler_registry()
+        )
 
         with patch(
             "ouroboros.orchestrator.codex_cli_runtime.asyncio.create_subprocess_exec",

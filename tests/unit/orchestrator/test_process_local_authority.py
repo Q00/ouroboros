@@ -6992,3 +6992,73 @@ def test_diagnostic_contract_builds_do_not_leak_registry_issuances() -> None:
         assert contract["foundation_a_authority"]["scope"] == "process_local"
 
     assert len(_PROCESS_LOCAL_AUTHORITY_REGISTRY._issued) == issued_before
+
+
+async def _prepare_session_counting_publication_resolves(
+    tmp_path: Path, workspace: Path, run_tag: str
+) -> int:
+    """Run prepare_session and count publication-boundary re-resolutions."""
+    from unittest.mock import patch as _patch
+
+    from ouroboros.core.project_identity import resolve_project_identity as _resolve
+    from ouroboros.orchestrator import session as session_module
+
+    event_store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'evidence.db'}")
+    await event_store.initialize()
+    runtime = _CountingRuntime()
+    runtime.working_directory = str(workspace)
+    runner = OrchestratorRunner(runtime, event_store, MagicMock(), fat_harness_mode=False)
+
+    resolves = {"n": 0}
+
+    def counting(effective_cwd):  # noqa: ANN001, ANN202
+        resolves["n"] += 1
+        return _resolve(effective_cwd)
+
+    try:
+        with _patch.object(session_module, "resolve_project_identity", counting):
+            prepared = await runner.prepare_session(
+                _seed(),
+                execution_id=f"exec-{run_tag}",
+                session_id=f"session-{run_tag}",
+            )
+        assert prepared.is_ok
+    finally:
+        await event_store.close()
+    return resolves["n"]
+
+
+@pytest.mark.asyncio
+async def test_prepare_session_publication_reuses_resolution_evidence(
+    tmp_path: Path,
+) -> None:
+    """#1796: with a stable input closure, publication never re-runs the resolver."""
+    import subprocess
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    subprocess.run(["git", "init", "-q", str(workspace)], check=True)
+
+    resolves = await _prepare_session_counting_publication_resolves(
+        tmp_path, workspace, "evidence-reuse"
+    )
+
+    assert resolves == 0, (
+        f"expected the publication boundary to accept captured evidence, got "
+        f"{resolves} re-resolution(s)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_prepare_session_publication_re_resolves_outside_the_closure(
+    tmp_path: Path,
+) -> None:
+    """Shapes outside the enumerable closure keep the full revalidation path."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    resolves = await _prepare_session_counting_publication_resolves(
+        tmp_path, workspace, "evidence-escalate"
+    )
+
+    assert resolves == 1, f"expected exactly one full publication re-resolution, got {resolves}"

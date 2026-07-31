@@ -29,7 +29,9 @@ from datetime import UTC, datetime, timedelta
 import json
 from pathlib import Path
 import sqlite3
+from urllib.parse import quote
 
+from ouroboros.config.models import resolve_event_store_path
 from ouroboros.observability.logging import get_logger
 
 log = get_logger(__name__)
@@ -45,7 +47,7 @@ _DEFAULT_WINDOW_DAYS = 30
 
 def _default_db_path() -> Path:
     """Standard Ouroboros event-store location (mirrors EventStore default)."""
-    return Path.home() / ".ouroboros" / "ouroboros.db"
+    return resolve_event_store_path()
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,7 +89,7 @@ def aggregate_backend_outcomes(
     """Tally completion vs failure per runtime backend from the event log.
 
     Args:
-        db_path: Event-store SQLite file; defaults to ``~/.ouroboros/ouroboros.db``.
+        db_path: Event-store SQLite file; defaults to the configured runtime database.
         row_limit: Maximum recent lifecycle rows to scan (cost bound).
         window_days: Only count events within this many days; ``None`` disables
             the day cutoff and relies on ``row_limit`` alone.
@@ -97,21 +99,22 @@ def aggregate_backend_outcomes(
         any error or when the store has no relevant events — callers treat an
         empty result as "no signal", never as a hard failure.
     """
-    path = Path(db_path) if db_path is not None else _default_db_path()
-    if not path.exists():
-        return {}
-
-    cutoff = (
-        datetime.now(UTC) - timedelta(days=window_days)
-        if window_days is not None and window_days > 0
-        else None
-    )
-
     tallies: dict[str, list[int]] = {}
     try:
+        path = Path(db_path) if db_path is not None else _default_db_path()
+        if not path.exists():
+            return {}
+
+        cutoff = (
+            datetime.now(UTC) - timedelta(days=window_days)
+            if window_days is not None and window_days > 0
+            else None
+        )
+
         # True read-only handle: mode=ro fails fast on any accidental write and
         # never creates the DB file.
-        uri = f"file:{path}?mode=ro"
+        encoded_path = quote(str(path), safe="/")
+        uri = f"file:{encoded_path}?mode=ro"
         with sqlite3.connect(uri, uri=True, timeout=1.0) as conn:
             rows = conn.execute(
                 "SELECT event_type, payload, timestamp FROM events "
@@ -119,7 +122,7 @@ def aggregate_backend_outcomes(
                 "ORDER BY timestamp DESC LIMIT ?",
                 (_COMPLETED_EVENT, _FAILED_EVENT, int(row_limit)),
             ).fetchall()
-    except (sqlite3.Error, ValueError, OSError) as exc:
+    except (sqlite3.Error, TypeError, ValueError, OSError, RuntimeError) as exc:
         log.debug("backend_outcomes.query_failed", error=str(exc))
         return {}
 

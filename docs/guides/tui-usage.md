@@ -176,7 +176,7 @@ Key message types:
 
 **TUI doesn't show any data**
 - Ensure a workflow is running or an execution ID was provided
-- Check that the EventStore database exists: `ls ~/.ouroboros/ouroboros.db`
+- Check the active EventStore path with `ouroboros config show`, then confirm that file exists.
 
 **AC tree doesn't update**
 - The TUI polls every 0.5s; brief delays are expected

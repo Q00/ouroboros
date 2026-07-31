@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from ouroboros import __version__
 from ouroboros.config.models import (
     EvaluationConfig,
     LLMConfig,
@@ -18,10 +19,19 @@ from ouroboros.config.models import (
     ResilienceConfig,
     RuntimeProfileConfig,
 )
+from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPResourceNotFoundError, MCPToolError
 from ouroboros.mcp.server.adapter import MCPServerAdapter, create_ouroboros_server
 from ouroboros.mcp.server.security import AuthConfig, AuthMethod, RateLimitConfig
 from ouroboros.mcp.types import (
+    ContentType,
+    MCPContentItem,
+    MCPPromptArgument,
+    MCPPromptDefinition,
+    MCPResourceContent,
+    MCPResourceDefinition,
+    MCPToolDefinition,
+    MCPToolResult,
     ToolInputType,
 )
 
@@ -43,7 +53,7 @@ class TestMCPServerAdapterLifecycle:
         server = MCPServerAdapter()
 
         assert server.info.name == "ouroboros-mcp"
-        assert server.info.version == "1.0.0"
+        assert server.info.version == __version__
         assert server.info.capabilities.tools is False
         assert server.info.capabilities.resources is False
         assert server.info.capabilities.prompts is False
@@ -383,6 +393,40 @@ class TestMCPServerAdapterPromptGeneration:
         assert len(prompts) == 1
         assert prompts[0].name == "greeting"
 
+    @pytest.mark.asyncio
+    async def test_public_v2_boundary_preserves_wire_argument_names(self) -> None:
+        """Prompt arguments are MCP wire names, not Python identifiers."""
+        from mcp import Client
+        from mcp.server import MCPServer
+
+        class FilePromptHandler:
+            @property
+            def definition(self) -> MCPPromptDefinition:
+                return MCPPromptDefinition(
+                    name="review-file",
+                    arguments=(MCPPromptArgument(name="file-path", required=True),),
+                )
+
+            async def handle(self, arguments: dict[str, str]):
+                return Result.ok(f"Review {arguments['file-path']}")
+
+        adapter = MCPServerAdapter()
+        adapter.register_prompt(FilePromptHandler())
+
+        with patch.object(MCPServer, "run_stdio_async", new=AsyncMock()):
+            await adapter.serve(transport="stdio")
+
+        async with Client(adapter._mcp_server, mode="auto") as client:
+            listed = (await client.list_prompts()).prompts[0]
+            rendered = await client.get_prompt(
+                "review-file",
+                {"file-path": "docs/seed.yaml"},
+            )
+
+        assert listed.arguments is not None
+        assert listed.arguments[0].name == "file-path"
+        assert rendered.messages[0].content.text == "Review docs/seed.yaml"
+
 
 class TestMCPServerAdapterIntegration:
     """Integration tests for complete server workflows."""
@@ -481,6 +525,139 @@ class TestMCPServerAdapterIntegration:
         assert prompt_result.is_ok
 
     @pytest.mark.asyncio
+    async def test_public_v2_client_discovers_and_invokes_all_primitives(
+        self,
+        echo_handler: EchoToolHandler,
+        static_resource_handler: StaticResourceHandler,
+        greeting_prompt_handler: GreetingPromptHandler,
+    ) -> None:
+        """The public v2 Client sees the adapter's complete MCP surface."""
+        from mcp import Client
+        from mcp.server import MCPServer
+
+        adapter = MCPServerAdapter(name="boundary-test", version="2.3.4")
+        adapter.register_tool(echo_handler)
+        adapter.register_resource(static_resource_handler)
+        adapter.register_prompt(greeting_prompt_handler)
+
+        with patch.object(MCPServer, "run_stdio_async", new=AsyncMock()):
+            await adapter.serve(transport="stdio")
+
+        async with Client(adapter._mcp_server, mode="auto") as client:
+            tools = await client.list_tools()
+            resources = await client.list_resources()
+            prompts = await client.list_prompts()
+            tool_result = await client.call_tool("echo", {"message": "v2"})
+            resource_result = await client.read_resource("test://static")
+            prompt_result = await client.get_prompt("greeting", {"name": "MCP"})
+
+        assert [tool.name for tool in tools.tools] == ["echo"]
+        assert [str(resource.uri) for resource in resources.resources] == ["test://static"]
+        assert [prompt.name for prompt in prompts.prompts] == ["greeting"]
+        assert tool_result.content[0].text == "Echo: v2"
+        assert resource_result.contents[0].text == "Static content"
+        assert prompt_result.messages[0].content.text == "Hello, MCP!"
+
+    @pytest.mark.asyncio
+    async def test_public_v2_boundary_preserves_canonical_schema_and_binary_resource(
+        self,
+    ) -> None:
+        """The production adapter path is lossless, not only the standalone mapper."""
+        from mcp import Client
+        from mcp.server import MCPServer
+
+        input_schema = {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "$defs": {"payload": {"type": "array", "items": {"type": "integer"}}},
+            "type": "object",
+            "properties": {"payload": {"$ref": "#/$defs/payload"}},
+            "required": ["payload"],
+            "additionalProperties": False,
+        }
+        output_schema = {
+            "type": "object",
+            "properties": {"result": {"$ref": "#/$defs/payload"}},
+            "$defs": input_schema["$defs"],
+            "required": ["result"],
+        }
+
+        class ComplexTool:
+            @property
+            def definition(self) -> MCPToolDefinition:
+                return MCPToolDefinition(
+                    name="complex",
+                    description="Preserve a canonical schema",
+                    input_schema=input_schema,
+                    output_schema=output_schema,
+                    title="Complex schema",
+                    meta={"owner": "ouroboros"},
+                )
+
+            async def handle(self, arguments: dict[str, object]):
+                payload = arguments["payload"]
+                return Result.ok(
+                    MCPToolResult(
+                        content=(MCPContentItem(type=ContentType.TEXT, text="ok"),),
+                        structured_content={"result": payload},
+                    )
+                )
+
+        class BinaryResource:
+            @property
+            def definitions(self):
+                return (
+                    MCPResourceDefinition(
+                        uri="test://binary",
+                        name="Binary payload",
+                        title="Binary",
+                        description="Three bytes",
+                        mime_type="application/octet-stream",
+                        size=3,
+                        meta={"owner": "ouroboros"},
+                    ),
+                )
+
+            async def handle(self, uri: str):
+                return Result.ok(
+                    MCPResourceContent(
+                        uri=uri,
+                        blob="AAEC",
+                        mime_type="application/octet-stream",
+                        meta={"owner": "ouroboros"},
+                    )
+                )
+
+        adapter = MCPServerAdapter()
+        adapter.register_tool(ComplexTool())
+        adapter.register_resource(BinaryResource())
+
+        with patch.object(MCPServer, "run_stdio_async", new=AsyncMock()):
+            await adapter.serve(transport="stdio")
+
+        async with Client(adapter._mcp_server, mode="auto") as client:
+            tool = (await client.list_tools()).tools[0]
+            resource = (await client.list_resources()).resources[0]
+            called = await client.call_tool("complex", {"payload": [1, 2, 3]})
+            read = await client.read_resource("test://binary")
+
+            assert client.server_info.version == __version__
+
+        assert tool.input_schema == input_schema
+        assert tool.output_schema == output_schema
+        assert tool.title == "Complex schema"
+        assert tool.meta == {"owner": "ouroboros"}
+        assert called.structured_content == {"result": [1, 2, 3]}
+        assert resource.name == "Binary payload"
+        assert resource.title == "Binary"
+        assert resource.description == "Three bytes"
+        assert resource.mime_type == "application/octet-stream"
+        assert resource.size == 3
+        assert resource.meta == {"owner": "ouroboros"}
+        assert read.contents[0].blob == "AAEC"
+        assert read.contents[0].mime_type == "application/octet-stream"
+        assert read.contents[0].meta == {"owner": "ouroboros"}
+
+    @pytest.mark.asyncio
     async def test_server_info_updates_dynamically(self) -> None:
         """Server info reflects current state as handlers are added."""
         server = MCPServerAdapter()
@@ -550,7 +727,7 @@ class TestCreateOuroborosServer:
         server = create_ouroboros_server()
 
         assert server.info.name == "ouroboros-mcp"
-        assert server.info.version == "1.0.0"
+        assert server.info.version == __version__
         tool_names = {tool.name for tool in server.info.tools}
         assert tool_names == self.EXPECTED_OUROBOROS_SERVER_TOOLS
 

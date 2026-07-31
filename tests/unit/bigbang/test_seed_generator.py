@@ -1371,8 +1371,24 @@ class TestGeneratedSeedImmutability:
 
 
 class TestAcceptanceCriteriaGranularityContract:
-    """Guard the seed-generation prompt against silent loss of the AC granularity
-    contract (the fix for Fable-5-style over-atomization at seed-gen time)."""
+    """Guard every surface that carries the AC granularity contract — the
+    extraction prompt, the retry prompt, the seed-architect contract, and the QA
+    quality bar — against silent loss of it (the fix for Fable-5-style
+    over-atomization at seed-gen time).
+
+    The contract hands the model a distinction to reason with — a criterion is a
+    state of the finished work, an implementation step is a means of reaching it
+    — rather than a quantity to comply with. These tests hold that shape: the
+    distinction must be stated, and the rule must carry no number, because a
+    number is satisfiable without making the judgment the rule exists to elicit.
+    """
+
+    @staticmethod
+    def _granularity_rule(prompt: str) -> str:
+        for line in prompt.splitlines():
+            if line.startswith("ACCEPTANCE_CRITERIA rule:"):
+                return line
+        raise AssertionError("prompt carries no ACCEPTANCE_CRITERIA granularity rule")
 
     def test_extraction_user_prompt_carries_granularity_contract(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -1382,8 +1398,12 @@ class TestAcceptanceCriteriaGranularityContract:
             )
             prompt = generator._build_extraction_user_prompt("Q: goal?\nA: build a thing")
 
-        assert "3-7" in prompt
-        assert "implementation step" in prompt.lower()
+        rule = self._granularity_rule(prompt).lower()
+        assert "acceptance criterion" in rule
+        assert "implementation step" in rule
+        # A criterion is weighed against its siblings, never against a quantity,
+        # so the rule states no count of any kind.
+        assert not any(char.isdigit() for char in rule)
 
     def test_extraction_user_prompt_requests_structured_ac_contracts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -1400,12 +1420,51 @@ class TestAcceptanceCriteriaGranularityContract:
         assert "python -c" in prompt
         assert "ACCEPTANCE_CRITERIA: <criterion 1> | <criterion 2>" not in prompt
 
+    def test_extraction_retry_prompt_carries_granularity_contract(self) -> None:
+        """The retry prompt is a parallel surface for the same contract: a parse
+        failure must not be the moment the model stops being told what a
+        criterion is, nor the crack a count creeps back in through."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            generator = SeedGenerator(
+                llm_adapter=AsyncMock(),
+                output_dir=Path(tmp_dir) / "seeds",
+            )
+            prompt = generator._build_retry_prompt(
+                "Q: goal?\nA: build a thing",
+                failed_response="not parseable",
+                error="missing GOAL",
+            )
+
+        rule = self._granularity_rule(prompt).lower()
+        assert "acceptance criterion" in rule
+        assert "implementation step" in rule
+        assert not any(char.isdigit() for char in rule)
+
+    def test_seed_qa_quality_bar_carries_granularity_contract(self) -> None:
+        """The QA quality bar is where the judgment actually lands once the
+        deterministic gate stopped counting, so it carries the same distinction
+        and, like the prompts, states no quantity."""
+        quality_bar = next(
+            line
+            for line in Path("skills/seed/SKILL.md").read_text(encoding="utf-8").splitlines()
+            if line.strip().startswith("quality_bar:")
+        ).lower()
+
+        assert "acceptance_criteria" in quality_bar
+        assert "implementation step" in quality_bar
+        assert "siblings" in quality_bar
+        assert not any(char.isdigit() for char in quality_bar)
+
     def test_seed_architect_agent_prompt_carries_granularity_contract(self) -> None:
         from ouroboros.agents.loader import load_agent_prompt
 
         system_prompt = load_agent_prompt("seed-architect")
-        assert "3-7" in system_prompt
-        assert "sub-step of a sibling" in system_prompt.lower()
+        assert "**Granularity contract (read carefully):**" in system_prompt
+        contract = system_prompt.split("**Granularity contract (read carefully):**", 1)[1]
+        contract = contract.split("### ", 1)[0].lower()
+        assert "acceptance criterion" in contract
+        assert "implementation step" in contract
+        assert not any(char.isdigit() for char in contract)
         assert "heredoc" in system_prompt.lower()
         assert "python -c" in system_prompt
 
@@ -1543,6 +1602,23 @@ class TestObjectArrayExtractionContract:
         assert _parse_evaluation_principles(
             ":description:0.5 | complete::0.4 | valid:Description:0.25"
         ) == (EvaluationPrinciple(name="valid", description="Description", weight=0.25),)
+
+    def test_lenient_nonfinite_tokens_all_default_to_one(self) -> None:
+        """#1766: every non-standard constant defaults to 1.0 in lenient mode.
+
+        The token marker must be recognized before numeric conversion so a
+        stored -Infinity literal is not conflated with genuine negative
+        overflow (which keeps saturating to 0.0 by sign).
+        """
+        for token in ("NaN", "Infinity", "-Infinity"):
+            principles = _parse_evaluation_principles(
+                f'[{{"name": "x", "description": "d", "weight": {token}}}]'
+            )
+            assert principles[0].weight == 1.0, f"token {token} did not default to 1.0"
+        overflow = _parse_evaluation_principles(
+            '[{"name": "x", "description": "d", "weight": -1e999}]'
+        )
+        assert overflow[0].weight == 0.0
 
     def test_weights_beyond_interpreter_digit_limit_never_raise(self) -> None:
         huge = "9" * 5000

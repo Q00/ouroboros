@@ -35,6 +35,8 @@ from uuid import uuid4
 from ouroboros.core.errors import PersistenceError
 from ouroboros.core.project_identity import (
     ProjectIdentity,
+    active_publication_evidence,
+    publication_evidence_is_stable,
     resolve_managed_project_identity,
     resolve_project_identity,
 )
@@ -122,6 +124,26 @@ async def _validate_project_identity_publication(
         raise ValueError("project identity conflicts with execution contract")
     if project_identity is not None and project_workspace is not None:
         if project_task_workspace is None:
+            # The runner deposits resolver-issued evidence in a scope it owns;
+            # nothing about the fast path is caller-suppliable through this
+            # module's API. Acceptance is still re-proven here: issuance,
+            # identity, workspace anchor, closure completeness, stability.
+            evidence = active_publication_evidence()
+            if (
+                evidence is not None
+                and evidence.identity == project_identity
+                and await asyncio.to_thread(
+                    publication_evidence_is_stable,
+                    evidence,
+                    project_workspace,
+                )
+            ):
+                # The resolver's whole repo-local input closure is unchanged
+                # since construction, so re-running it must reproduce the same
+                # identity; the recheck issues no Git query, so the V1 probe
+                # invariant is vacuously satisfied. Any doubt fell through to
+                # the full re-resolution below, which probes for itself.
+                return
             revalidated_identity = await asyncio.to_thread(
                 resolve_project_identity,
                 project_workspace,
@@ -1184,14 +1206,21 @@ class SessionRepository:
     async def reconstruct_session(
         self,
         session_id: str,
+        *,
+        strict_related_events: bool = False,
     ) -> Result[SessionTracker, PersistenceError]:
         """Reconstruct session state from events.
 
         Replays all events for the session to rebuild the current state.
-        This is used for session resumption.
+        This is used for session resumption. Read-only projections that must
+        never publish a status from incomplete history can require the related
+        execution-event read to succeed; ordinary resume retains the existing
+        best-effort compatibility behavior.
 
         Args:
             session_id: Session to reconstruct.
+            strict_related_events: Fail reconstruction when the complete
+                related execution-event stream cannot be read or represented.
 
         Returns:
             Result containing reconstructed SessionTracker.
@@ -1246,14 +1275,22 @@ class SessionRepository:
                         execution_id=execution_id or None,
                         limit=None,
                     )
-                    if isinstance(related_events, list) and related_events:
+                    if not isinstance(related_events, list):
+                        if strict_related_events:
+                            raise TypeError("related event query did not return a list")
+                        related_events = []
+                    if related_events:
                         all_events = self._merge_event_streams(events, related_events)
                 except Exception:
+                    if strict_related_events:
+                        raise
                     log.warning(
                         "orchestrator.session.related_event_query_failed",
                         session_id=session_id,
                         execution_id=execution_id,
                     )
+            elif strict_related_events:
+                raise RuntimeError("related event query is unavailable")
 
             # Replay subsequent events
             messages_processed = 0

@@ -8,7 +8,11 @@ repository while retaining a repository-relative workspace filter.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
+import hashlib
 import os
 from pathlib import Path, PurePosixPath
 import re
@@ -16,6 +20,7 @@ import stat
 import subprocess
 import tempfile
 from uuid import NAMESPACE_URL, uuid5
+import weakref
 
 PROJECT_ID_PREFIX = "project_"
 _MAX_PATH_LENGTH = 4096
@@ -500,12 +505,385 @@ def _resolve_canonical_project_identity(effective: Path) -> _ResolvedProjectIden
     )
 
 
+@dataclass(frozen=True, slots=True)
+class _TopologyFileEvidence:
+    """Generation-plus-content proof for one repo-local topology input."""
+
+    path: Path
+    kind: str  # "missing" | "file" | "dir"
+    device: int = 0
+    inode: int = 0
+    mtime_ns: int = 0
+    size: int = 0
+    content_hash: str | None = None
+
+
+@dataclass(frozen=True, slots=True, weakref_slot=True)
+class PublicationEvidence:
+    """Everything needed to accept a publication identity without Git.
+
+    Captured right after a successful direct resolution. ``escalate`` is set
+    whenever the checkout shape falls outside the enumerable input closure
+    (bare repositories, markerless discovery, config include directives,
+    unreadable inputs) — the publication boundary must then run the full
+    re-resolution exactly as before. The fast path may accept only when every
+    captured input is byte-for-byte stable, so it is fail-closed by
+    construction and runs no Git subprocess at all — which vacuously
+    satisfies the V1 rule that resolvers validate Git before topology
+    queries: there are none.
+    """
+
+    identity: ProjectIdentity
+    effective_directory: Path
+    directory_evidence: tuple[_LiveDirectoryEvidence, ...]
+    file_evidence: tuple[_TopologyFileEvidence, ...]
+    escalate: bool
+
+
+# A valid include or includeIf section header must contain these bytes, in
+# any position, casing, or after a BOM — so searching the raw content without
+# anchors over-approximates Git's config grammar instead of reimplementing
+# it. False positives (the substring inside a comment or value) merely
+# escalate to the full re-resolution, which is the safe direction.
+_CONFIG_INCLUDE_PATTERN = re.compile(rb"\[include", re.IGNORECASE)
+_CONFIG_FILE_NAMES = frozenset({"config", "config.worktree"})
+_TOPOLOGY_HASH_LIMIT = 1 << 20
+
+
+def _capture_topology_file(path: Path, *, hash_content: bool) -> _TopologyFileEvidence:
+    """Capture one repo-local topology input, raising on unclassifiable shapes."""
+    try:
+        status = path.lstat()
+    except FileNotFoundError:
+        return _TopologyFileEvidence(path=path, kind="missing")
+    except OSError as exc:
+        raise ProjectIdentityUnavailableError("topology input is unreadable") from exc
+    if stat.S_ISDIR(status.st_mode):
+        return _TopologyFileEvidence(
+            path=path,
+            kind="dir",
+            device=status.st_dev,
+            inode=status.st_ino,
+            mtime_ns=status.st_mtime_ns,
+            size=0,
+        )
+    if not stat.S_ISREG(status.st_mode):
+        raise ProjectIdentityUnavailableError("topology input has an unsupported shape")
+    digest: str | None = None
+    if hash_content:
+        if status.st_size > _TOPOLOGY_HASH_LIMIT:
+            raise ProjectIdentityUnavailableError("topology input exceeds its bound")
+        try:
+            content = path.read_bytes()
+        except OSError as exc:
+            raise ProjectIdentityUnavailableError("topology input is unreadable") from exc
+        if path.name in _CONFIG_FILE_NAMES and _CONFIG_INCLUDE_PATTERN.search(content):
+            # Config includes pull unbounded external files into Git's
+            # decision; that closure is not enumerable, so never fast-path it.
+            raise ProjectIdentityUnavailableError("config includes are outside the closure")
+        digest = hashlib.sha256(content).hexdigest()
+    return _TopologyFileEvidence(
+        path=path,
+        kind="file",
+        device=status.st_dev,
+        inode=status.st_ino,
+        mtime_ns=status.st_mtime_ns,
+        size=status.st_size,
+        content_hash=digest,
+    )
+
+
+_GIT_DIR_CLOSURE_NAMES = ("HEAD", "config", "config.worktree", "commondir", "gitdir")
+
+
+def _capture_publication_closure(
+    effective: Path, project_root: Path, checkout_root: Path
+) -> tuple[tuple[_TopologyFileEvidence, ...], bool]:
+    """Capture the repo-local input closure of the direct resolver's queries.
+
+    Returns the captured population and an escalate flag. The closure covers
+    exactly the inputs the five fixed topology queries consult for the
+    simple-checkout shape: every boundary candidate's ``.git`` marker between
+    the effective directory and the checkout root, and — when the marker is a
+    directory — its ``HEAD``, ``config``, ``config.worktree``, ``commondir``,
+    ``gitdir``, and the ``worktrees`` registry with each entry's ``gitdir``
+    link. Anything the capture cannot classify escalates.
+    """
+    population: list[_TopologyFileEvidence] = []
+    try:
+        marker = checkout_root / ".git"
+        marker_evidence = _capture_topology_file(marker, hash_content=True)
+        if marker_evidence.kind == "missing":
+            # Markerless discovery (bare candidates) is outside the closure.
+            return tuple(population), True
+        population.append(marker_evidence)
+        if marker_evidence.kind == "file":
+            # A gitdir-pointer checkout (linked worktree): the pointer content
+            # is hashed above, but the pointed-to administrative directory
+            # belongs to another tree whose closure we do not enumerate here.
+            return tuple(population), True
+        git_dir = marker
+        commondir: _TopologyFileEvidence | None = None
+        for name in _GIT_DIR_CLOSURE_NAMES:
+            entry = _capture_topology_file(git_dir / name, hash_content=True)
+            population.append(entry)
+            if name == "commondir":
+                commondir = entry
+        if commondir is None or commondir.kind != "missing":
+            # A commondir file means this administrative directory belongs to
+            # a linked-worktree constellation; keep to the full re-resolution.
+            return tuple(population), True
+        worktrees = git_dir / "worktrees"
+        registry = _capture_topology_file(worktrees, hash_content=False)
+        population.append(registry)
+        if registry.kind == "dir":
+            try:
+                entries = sorted(entry.name for entry in worktrees.iterdir())
+            except OSError as exc:
+                raise ProjectIdentityUnavailableError("topology input is unreadable") from exc
+            for entry in entries:
+                population.append(
+                    _capture_topology_file(worktrees / entry / "gitdir", hash_content=True)
+                )
+        # Boundary candidates strictly between the effective directory and the
+        # checkout root: a new marker appearing there changes the nearest
+        # boundary, so their absence is part of the proof.
+        for candidate in (effective, *effective.parents):
+            if candidate == checkout_root:
+                break
+            population.append(_capture_topology_file(candidate / ".git", hash_content=True))
+        if project_root != checkout_root:
+            # The primary worktree was derived through Git; pin its marker too.
+            population.append(_capture_topology_file(project_root / ".git", hash_content=True))
+    except ProjectIdentityError:
+        return tuple(population), True
+    return tuple(population), False
+
+
+_EVIDENCE_SINK: ContextVar[list[PublicationEvidence | None] | None] = ContextVar(
+    "publication_evidence_sink", default=None
+)
+
+
+def active_publication_evidence_sink() -> list[PublicationEvidence | None] | None:
+    """Return the ambient evidence sink, if a publication scope is active."""
+    return _EVIDENCE_SINK.get()
+
+
+def active_publication_evidence() -> PublicationEvidence | None:
+    """Return the evidence the resolver deposited in the active scope, if any."""
+    sink = _EVIDENCE_SINK.get()
+    if sink is None:
+        return None
+    return sink[0]
+
+
+# Evidence is trusted by issuance, not by shape: only the exact objects this
+# module created during a successful resolution are registered, keyed by
+# object identity and compared with ``is``. A caller-assembled object — even
+# one whose captured entries all match the live filesystem — was never
+# issued and is refused before any structural check runs. Weak values keep
+# the registry from outliving the evidence itself.
+_ISSUED_EVIDENCE: weakref.WeakValueDictionary[int, PublicationEvidence] = (
+    weakref.WeakValueDictionary()
+)
+
+
+def _evidence_is_resolver_issued(evidence: PublicationEvidence) -> bool:
+    return _ISSUED_EVIDENCE.get(id(evidence)) is evidence
+
+
+@contextmanager
+def publication_evidence_sink() -> Iterator[list[PublicationEvidence | None]]:
+    """Carry captured publication evidence out of a nested resolution.
+
+    Contract construction runs the resolver deep inside a worker thread; the
+    single-element mutable cell is shared by ``asyncio.to_thread`` context
+    copies, so evidence recorded there is visible to the caller afterwards.
+    The cell holds observations only — captured stat/hash metadata — never
+    capability trust, and it is discarded with the scope.
+    """
+    cell: list[PublicationEvidence | None] = [None]
+    token = _EVIDENCE_SINK.set(cell)
+    try:
+        yield cell
+    finally:
+        _EVIDENCE_SINK.reset(token)
+
+
+def resolve_project_identity_for_publication(
+    effective_cwd: str | Path,
+) -> tuple[ProjectIdentity, PublicationEvidence]:
+    """Resolve a direct identity and capture publication-reusable evidence.
+
+    Behaves exactly like :func:`resolve_project_identity`; additionally
+    captures the resolver's repo-local input closure so the publication
+    boundary can revalidate by metadata alone (#1796 L2). The closure is
+    captured both before and after the resolution and the evidence is usable
+    only when the two captures are identical, binding the recorded state to
+    the exact resolution that produced the identity. When the checkout shape
+    falls outside the enumerable closure — or the bracket detects any
+    interleaved change — the returned evidence demands escalation and
+    publication re-resolves in full, exactly as before.
+    """
+    effective = _canonical_directory(effective_cwd, require_exists=True)
+    pre_files: tuple[_TopologyFileEvidence, ...] = ()
+    pre_escalate = True
+    pre_marker_root: Path | None = None
+    try:
+        pre_marker_root, bare_candidate = _nearest_repository_boundary(effective)
+    except ProjectIdentityError:
+        bare_candidate = None
+    if pre_marker_root is not None and bare_candidate is None:
+        pre_files, pre_escalate = _capture_publication_closure(
+            effective, pre_marker_root, pre_marker_root
+        )
+    resolved = _resolve_with_evidence(effective)
+    project_root = Path(resolved.identity.project_root)
+    file_evidence: tuple[_TopologyFileEvidence, ...] = ()
+    escalate = True
+    if (
+        not pre_escalate
+        and resolved.checkout_root == pre_marker_root
+        and project_root == resolved.checkout_root
+    ):
+        # The closure was captured before the resolver's queries and is
+        # re-captured after them; only a byte-identical pair proves the state
+        # the resolver consumed is the state the evidence records. Any
+        # interleaved mutation perturbs a stat generation or a content hash
+        # and the pair differs, so publication escalates.
+        post_files, post_escalate = _capture_publication_closure(
+            effective, project_root, resolved.checkout_root
+        )
+        if not post_escalate and post_files == pre_files:
+            file_evidence = post_files
+            escalate = False
+    evidence = PublicationEvidence(
+        identity=resolved.identity,
+        effective_directory=effective,
+        directory_evidence=resolved.directory_evidence,
+        file_evidence=file_evidence,
+        escalate=escalate,
+    )
+    _ISSUED_EVIDENCE[id(evidence)] = evidence
+    sink = _EVIDENCE_SINK.get()
+    if sink is not None:
+        sink[0] = evidence
+    return resolved.identity, evidence
+
+
+def publication_evidence_is_stable(
+    evidence: PublicationEvidence, effective_cwd: str | Path
+) -> bool:
+    """Return True only when every captured publication input is unchanged.
+
+    Only evidence this module itself issued is considered at all — a
+    caller-assembled object is refused regardless of its contents, because a
+    structural match can prove only the current filesystem state, never that
+    Git produced the claimed identity from it. ``effective_cwd`` must
+    canonicalize to the directory the evidence was captured from — the proof
+    is about that resolution and transfers to no other workspace. Any doubt — an escalating capture, a changed or newly
+    unreadable input, a directory generation drift — returns False so the
+    caller escalates to the full re-resolution. This function runs no Git
+    subprocess.
+    """
+    if not _evidence_is_resolver_issued(evidence):
+        return False
+    if evidence.escalate:
+        return False
+    try:
+        effective = _canonical_directory(effective_cwd, require_exists=True)
+    except ProjectIdentityError:
+        return False
+    if effective != evidence.effective_directory:
+        return False
+    if not _publication_closure_is_complete(evidence):
+        return False
+    try:
+        _revalidate_live_directories(*evidence.directory_evidence)
+    except ProjectIdentityError:
+        return False
+    for expected in evidence.file_evidence:
+        try:
+            current = _capture_topology_file(
+                expected.path, hash_content=expected.content_hash is not None
+            )
+        except ProjectIdentityError:
+            return False
+        if current != expected:
+            return False
+    return True
+
+
+def _publication_closure_is_complete(evidence: PublicationEvidence) -> bool:
+    """Require the evidence to carry the full resolver-shaped closure.
+
+    The session boundary receives evidence as a call argument, so acceptance
+    cannot rest on where the object came from — it must rest on what it
+    proves. The captured population has to contain every input the closure
+    capture records for the simple-checkout shape anchored at exactly this
+    identity: the marker directory at the project root, each administrative
+    file, the worktrees registry with a link per currently present entry,
+    and a pinned-missing marker for every boundary candidate below the root.
+    Anything less — including the empty closure — is refused.
+    """
+    project_root = Path(evidence.identity.project_root)
+    try:
+        workspace_path = _relative_workspace_path(evidence.effective_directory, project_root)
+    except ProjectIdentityError:
+        return False
+    if workspace_path != evidence.identity.workspace_path:
+        return False
+    captured = {entry.path: entry for entry in evidence.file_evidence}
+    git_dir = project_root / ".git"
+    marker = captured.get(git_dir)
+    if marker is None or marker.kind != "dir":
+        return False
+    for name in _GIT_DIR_CLOSURE_NAMES:
+        if git_dir / name not in captured:
+            return False
+    if captured[git_dir / "HEAD"].kind != "file":
+        return False
+    if captured[git_dir / "commondir"].kind != "missing":
+        return False
+    registry = captured.get(git_dir / "worktrees")
+    if registry is None:
+        return False
+    if registry.kind == "dir":
+        try:
+            entries = sorted(entry.name for entry in (git_dir / "worktrees").iterdir())
+        except OSError:
+            return False
+        for entry in entries:
+            if git_dir / "worktrees" / entry / "gitdir" not in captured:
+                return False
+    elif registry.kind != "missing":
+        return False
+    for candidate in (evidence.effective_directory, *evidence.effective_directory.parents):
+        if candidate == project_root:
+            break
+        boundary = captured.get(candidate / ".git")
+        if boundary is None or boundary.kind != "missing":
+            return False
+    directories = {entry.path for entry in evidence.directory_evidence}
+    return evidence.effective_directory in directories and project_root in directories
+
+
 def _revalidate_live_directories(*expected_population: _LiveDirectoryEvidence) -> None:
     """Require every topology input and owner to remain the same live directory."""
     for expected in dict.fromkeys(expected_population):
         current = _capture_live_directory(expected.path)
         if current != expected:
             raise ProjectIdentityError("project identity path changed during resolution")
+
+
+def _resolve_with_evidence(effective: Path) -> _ResolvedProjectIdentity:
+    """Run the direct resolution pipeline and keep its evidence."""
+    effective_evidence = _capture_live_directory(effective)
+    _require_supported_git()
+    resolved = _resolve_canonical_project_identity(effective)
+    _revalidate_live_directories(effective_evidence, *resolved.directory_evidence)
+    return resolved
 
 
 def resolve_project_identity(effective_cwd: str | Path) -> ProjectIdentity:
@@ -520,11 +898,7 @@ def resolve_project_identity(effective_cwd: str | Path) -> ProjectIdentity:
     this direct resolver cannot attribute a caller-supplied source checkout.
     """
     effective = _canonical_directory(effective_cwd, require_exists=True)
-    effective_evidence = _capture_live_directory(effective)
-    _require_supported_git()
-    resolved = _resolve_canonical_project_identity(effective)
-    _revalidate_live_directories(effective_evidence, *resolved.directory_evidence)
-    return resolved.identity
+    return _resolve_with_evidence(effective).identity
 
 
 def _source_project_identity(

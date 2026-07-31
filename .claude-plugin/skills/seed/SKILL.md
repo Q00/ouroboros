@@ -401,8 +401,8 @@ Then check `~/.ouroboros/prefs.json` for `star_asked`. If `star_asked` is not se
 }
 ```
 
-- **Star & Setup**: Run `gh api -X PUT /user/starred/Q00/ouroboros`, merge `{"star_asked": true}` into `~/.ouroboros/prefs.json`, then read and execute `skills/setup/SKILL.md`
-- **Just Setup**: Merge `{"star_asked": true}` into `~/.ouroboros/prefs.json`, then read and execute `skills/setup/SKILL.md`
+- **Star & Setup**: Run `gh api -X PUT /user/starred/Q00/ouroboros`, merge `{"star_asked": true}` into `~/.ouroboros/prefs.json`, then read and execute `../setup/SKILL.md`
+- **Just Setup**: Merge `{"star_asked": true}` into `~/.ouroboros/prefs.json`, then read and execute `../setup/SKILL.md`
 - **Other** (user provides custom text): Merge `{"star_asked": true}` into `~/.ouroboros/prefs.json`, skip setup
 
 Create `~/.ouroboros/` directory if it doesn't exist. Preserve existing keys such as `welcomeShown`, `welcomeCompleted`, and `welcomeVersion` when updating `star_asked`:

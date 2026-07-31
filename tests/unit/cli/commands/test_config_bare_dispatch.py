@@ -10,6 +10,7 @@ from typer.testing import CliRunner
 import yaml
 
 from ouroboros.cli.commands.config import app
+from ouroboros.config._model_defaults import DEFAULT_SONNET_MODEL
 
 runner = CliRunner()
 
@@ -44,6 +45,39 @@ def test_config_show_unchanged(monkeypatch, tmp_path) -> None:
     result = runner.invoke(app, ["show"])
     assert result.exit_code == 0
     assert "codex" in result.output
+
+
+def test_config_show_text_resolves_explicit_stage_agents(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr("ouroboros.config.models.get_config_dir", lambda: tmp_path)
+    (tmp_path / "config.yaml").write_text(
+        yaml.dump(
+            {
+                "orchestrator": {
+                    "runtime_backend": "opencode",
+                    "runtime_profile": {
+                        "default": "opencode",
+                        "stages": {
+                            "interview": "codex",
+                            "execute": "claude",
+                        },
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "ouroboros.backends.model_catalog.installed_backends",
+        lambda: {"opencode": "/bin/opencode", "codex": "/bin/codex", "claude": "/bin/claude"},
+    )
+
+    result = runner.invoke(app, ["show"])
+
+    assert result.exit_code == 0, result.output
+    assert "interview" in result.output
+    assert "codex" in result.output
+    assert "execute" in result.output
+    assert "claude" in result.output
 
 
 def test_config_set_unknown_key_still_rejected(monkeypatch, tmp_path) -> None:
@@ -85,6 +119,9 @@ def _show_env(monkeypatch, tmp_path, config: dict) -> None:
         "OUROBOROS_RUNTIME",
         "OUROBOROS_LLM_BACKEND",
         "OUROBOROS_CLARIFICATION_MODEL",
+        "OUROBOROS_EXECUTION_MODEL",
+        "OUROBOROS_SEMANTIC_MODEL",
+        "OUROBOROS_REFLECT_MODEL",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -111,7 +148,7 @@ def test_show_effective_view_renders_stages_and_inheritance(monkeypatch, tmp_pat
     assert "Per-stage overrides" in out
     assert "(inherit)" in out and "opencode" in out  # inheriting stages resolved
     assert "codex" in out  # explicit execute override
-    assert "my-model" in out  # configured stage model
+    assert "backend" in out and "default" in out  # runtime-normalized stage model
     assert "interview" in out and "reflect" in out
 
 
@@ -163,6 +200,7 @@ def test_show_json_emits_machine_readable_effective_view(monkeypatch, tmp_path) 
         "ouroboros.backends.model_catalog.installed_backends",
         lambda: {"opencode": "/bin/opencode", "codex": "/bin/codex"},
     )
+    monkeypatch.setattr("ouroboros.backends.model_catalog.configured_default_model", lambda _: None)
     result = runner.invoke(app, ["show", "--json"])
     assert result.exit_code == 0
     payload = json.loads(result.output)
@@ -171,12 +209,228 @@ def test_show_json_emits_machine_readable_effective_view(monkeypatch, tmp_path) 
         "agent": "codex",
         "inherited": False,
         "agent_installed": True,
-        "model": None,
-        "model_source": "not configurable",
-        "model_key": None,
+        "model": "Codex current selected model (concrete model not reported by Codex)",
+        "model_source": "automatic Codex selection",
+        "model_key": "execution.default_model",
     }
     assert payload["stages"]["interview"]["inherited"] is True
     assert payload["stages"]["interview"]["agent"] == "opencode"
+
+
+def test_show_json_normalizes_runtime_env_backend(monkeypatch, tmp_path) -> None:
+    import json
+
+    _show_env(monkeypatch, tmp_path, {"orchestrator": {"runtime_backend": "claude"}})
+    monkeypatch.setenv("OUROBOROS_AGENT_RUNTIME", "CODEX")
+    monkeypatch.setattr(
+        "ouroboros.backends.model_catalog.installed_backends",
+        lambda: {"codex": "/bin/codex"},
+    )
+    monkeypatch.setattr("ouroboros.backends.model_catalog.configured_default_model", lambda _: None)
+
+    result = runner.invoke(app, ["show", "--json"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["defaults"]["default_agent"]["value"] == "codex"
+    assert payload["stages"]["interview"]["agent"] == "codex"
+    assert payload["stages"]["interview"]["agent_installed"] is True
+
+
+def test_show_json_renders_configured_claude_code_llm_backend(monkeypatch, tmp_path) -> None:
+    import json
+
+    _show_env(
+        monkeypatch,
+        tmp_path,
+        {
+            "orchestrator": {"runtime_backend": "codex"},
+            "llm": {"backend": "claude_code"},
+        },
+    )
+    monkeypatch.setattr(
+        "ouroboros.backends.model_catalog.installed_backends",
+        lambda: {"codex": "/bin/codex", "claude_code": "/bin/claude"},
+    )
+    monkeypatch.setattr("ouroboros.backends.model_catalog.configured_default_model", lambda _: None)
+
+    result = runner.invoke(app, ["show", "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["defaults"]["default_agent"]["value"] == "codex"
+    assert payload["defaults"]["llm_backend"]["value"] == "claude_code"
+    assert payload["defaults"]["llm_backend"]["source"] == "config"
+    assert payload["stages"]["interview"]["agent"] == "codex"
+
+
+def test_show_json_preserves_env_stage_model_pin_for_codex(monkeypatch, tmp_path) -> None:
+    import json
+
+    _show_env(monkeypatch, tmp_path, {"orchestrator": {"runtime_backend": "codex"}})
+    monkeypatch.setenv("OUROBOROS_CLARIFICATION_MODEL", "claude-opus-4-8")
+    monkeypatch.setattr(
+        "ouroboros.backends.model_catalog.installed_backends",
+        lambda: {"codex": "/bin/codex"},
+    )
+    monkeypatch.setattr("ouroboros.backends.model_catalog.configured_default_model", lambda _: None)
+
+    result = runner.invoke(app, ["show", "--json"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["stages"]["interview"]["model"] == "claude-opus-4-8"
+    assert payload["stages"]["interview"]["model_source"] == "env OUROBOROS_CLARIFICATION_MODEL ⚠"
+
+
+def test_show_json_uses_stage_llm_backend_for_inherited_internal_models(
+    monkeypatch, tmp_path
+) -> None:
+    import json
+
+    _show_env(
+        monkeypatch,
+        tmp_path,
+        {
+            "orchestrator": {"runtime_backend": "codex"},
+            "llm": {"backend": "litellm"},
+            "clarification": {"default_model": "claude-opus-4-8"},
+        },
+    )
+    monkeypatch.setattr(
+        "ouroboros.backends.model_catalog.installed_backends",
+        lambda: {"codex": "/bin/codex", "litellm": "/bin/litellm"},
+    )
+    monkeypatch.setattr("ouroboros.backends.model_catalog.configured_default_model", lambda _: None)
+
+    result = runner.invoke(app, ["show", "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["stages"]["interview"]["agent"] == "codex"
+    assert payload["stages"]["interview"]["model"] == "claude-opus-4-8"
+    assert payload["stages"]["interview"]["model_source"] == "config"
+
+
+def test_show_json_stage_override_beats_llm_backend_env(monkeypatch, tmp_path) -> None:
+    import json
+
+    _show_env(
+        monkeypatch,
+        tmp_path,
+        {
+            "orchestrator": {
+                "runtime_backend": "codex",
+                "runtime_profile": {"stages": {"interview": "opencode"}},
+            },
+            "llm": {"backend": "codex"},
+        },
+    )
+    monkeypatch.setenv("OUROBOROS_LLM_BACKEND", "claude_code")
+    monkeypatch.setattr(
+        "ouroboros.backends.model_catalog.installed_backends",
+        lambda: {"codex": "/bin/codex", "opencode": "/bin/opencode", "claude": "/bin/claude"},
+    )
+
+    result = runner.invoke(app, ["show", "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["defaults"]["llm_backend"] == {
+        "value": "claude_code",
+        "source": "env OUROBOROS_LLM_BACKEND ⚠",
+    }
+    assert payload["stages"]["interview"]["agent"] == "opencode"
+    assert payload["stages"]["interview"]["model"] == "default"
+    assert payload["stages"]["interview"]["model_source"] == "default → backend default"
+
+
+def test_show_json_uses_completion_backend_for_runtime_only_stage_agent(
+    monkeypatch, tmp_path
+) -> None:
+    import json
+
+    _show_env(
+        monkeypatch,
+        tmp_path,
+        {
+            "orchestrator": {
+                "runtime_backend": "claude",
+                "runtime_profile": {"stages": {"interview": "antigravity"}},
+            },
+            "llm": {"backend": "claude_code"},
+            "clarification": {"default_model": "claude-opus-4-8"},
+        },
+    )
+    monkeypatch.setattr(
+        "ouroboros.backends.model_catalog.installed_backends",
+        lambda: {"claude": "/bin/claude", "antigravity": "/bin/agy"},
+    )
+
+    result = runner.invoke(app, ["show", "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["stages"]["interview"]["agent"] == "antigravity"
+    assert payload["stages"]["interview"]["model"] == "claude-opus-4-8"
+    assert payload["stages"]["interview"]["model_source"] == "config"
+
+
+def test_show_json_uses_llm_fallback_for_inherited_runtime_only_agent(
+    monkeypatch, tmp_path
+) -> None:
+    import json
+
+    _show_env(
+        monkeypatch,
+        tmp_path,
+        {
+            "orchestrator": {"runtime_backend": "antigravity"},
+            "llm": {"backend": "claude_code"},
+            "clarification": {"default_model": "claude-opus-4-8"},
+        },
+    )
+    monkeypatch.setattr(
+        "ouroboros.backends.model_catalog.installed_backends",
+        lambda: {"claude": "/bin/claude", "antigravity": "/bin/agy"},
+    )
+
+    result = runner.invoke(app, ["show", "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["stages"]["interview"]["agent"] == "antigravity"
+    assert payload["stages"]["interview"]["model"] == "claude-opus-4-8"
+    assert payload["stages"]["interview"]["model_source"] == "config"
+
+
+def test_show_json_normalizes_execute_current_sentinel_through_loader(
+    monkeypatch, tmp_path
+) -> None:
+    import json
+
+    _show_env(
+        monkeypatch,
+        tmp_path,
+        {
+            "orchestrator": {
+                "runtime_backend": "claude",
+                "runtime_profile": {"stages": {"execute": "claude"}},
+            },
+            "execution": {"default_model": "current"},
+        },
+    )
+    monkeypatch.setattr(
+        "ouroboros.backends.model_catalog.installed_backends",
+        lambda: {"claude": "/bin/claude"},
+    )
+
+    result = runner.invoke(app, ["show", "--json"])
+
+    assert result.exit_code == 0, result.output
+    execute = json.loads(result.output)["stages"]["execute"]
+    assert execute["model"] == DEFAULT_SONNET_MODEL
+    assert execute["model_source"] == "config → backend default"
 
 
 def test_show_json_uses_runtime_env_as_llm_backend_fallback(monkeypatch, tmp_path) -> None:
@@ -204,6 +458,129 @@ def test_show_json_uses_runtime_env_as_llm_backend_fallback(monkeypatch, tmp_pat
         "value": "codex",
         "source": "env OUROBOROS_RUNTIME ⚠",
     }
+
+
+def test_show_json_normalizes_shipped_stage_defaults_for_codex(monkeypatch, tmp_path) -> None:
+    import json
+
+    _show_env(
+        monkeypatch,
+        tmp_path,
+        {
+            "orchestrator": {"runtime_backend": "codex"},
+            "clarification": {"default_model": "claude-opus-4-8"},
+            "evaluation": {"semantic_model": "claude-opus-4-8"},
+            "resilience": {"reflect_model": "claude-opus-4-8"},
+        },
+    )
+    monkeypatch.setattr(
+        "ouroboros.backends.model_catalog.installed_backends",
+        lambda: {"codex": "/bin/codex"},
+    )
+    monkeypatch.setattr("ouroboros.backends.model_catalog.configured_default_model", lambda _: None)
+
+    result = runner.invoke(app, ["show", "--json"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    for stage in ("interview", "evaluate", "reflect"):
+        assert payload["stages"][stage]["agent"] == "codex"
+        assert (
+            payload["stages"][stage]["model"]
+            == "Codex current selected model (concrete model not reported by Codex)"
+        )
+        assert payload["stages"][stage]["model_source"] == "automatic Codex selection"
+
+
+def test_show_json_treats_serialized_claude_llm_backend_as_config(monkeypatch, tmp_path) -> None:
+    import json
+
+    _show_env(
+        monkeypatch,
+        tmp_path,
+        {
+            "orchestrator": {"runtime_backend": "codex"},
+            "llm": {"backend": "claude_code"},
+            "clarification": {"default_model": "claude-opus-4-8"},
+        },
+    )
+    monkeypatch.setattr(
+        "ouroboros.backends.model_catalog.installed_backends",
+        lambda: {"codex": "/bin/codex", "claude_code": "/bin/claude"},
+    )
+    monkeypatch.setattr("ouroboros.backends.model_catalog.configured_default_model", lambda _: None)
+
+    result = runner.invoke(app, ["show", "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["defaults"]["llm_backend"] == {"value": "claude_code", "source": "config"}
+    assert payload["stages"]["interview"]["agent"] == "codex"
+    assert payload["stages"]["interview"]["model"] == (
+        "Codex current selected model (concrete model not reported by Codex)"
+    )
+    assert payload["stages"]["interview"]["model_source"] == "automatic Codex selection"
+
+
+def test_show_json_honors_explicit_claude_llm_env_under_codex_agent(monkeypatch, tmp_path) -> None:
+    import json
+
+    _show_env(
+        monkeypatch,
+        tmp_path,
+        {
+            "orchestrator": {"runtime_backend": "codex"},
+            "llm": {"backend": "codex"},
+            "clarification": {"default_model": "claude-opus-4-8"},
+        },
+    )
+    monkeypatch.setenv("OUROBOROS_LLM_BACKEND", "claude_code")
+    monkeypatch.setattr(
+        "ouroboros.backends.model_catalog.installed_backends",
+        lambda: {"codex": "/bin/codex", "claude": "/bin/claude"},
+    )
+
+    result = runner.invoke(app, ["show", "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["defaults"]["llm_backend"] == {
+        "value": "claude_code",
+        "source": "env OUROBOROS_LLM_BACKEND ⚠",
+    }
+    assert payload["stages"]["interview"]["agent"] == "codex"
+    assert payload["stages"]["interview"]["model"] == "claude-opus-4-8"
+    assert payload["stages"]["interview"]["model_source"] == "config"
+
+
+def test_show_json_cli_path_follows_effective_runtime_env(monkeypatch, tmp_path) -> None:
+    import json
+
+    _show_env(
+        monkeypatch,
+        tmp_path,
+        {
+            "orchestrator": {
+                "runtime_backend": "claude",
+                "cli_path": "/bin/claude",
+                "codex_cli_path": "/bin/codex-config",
+            }
+        },
+    )
+    monkeypatch.setenv("OUROBOROS_AGENT_RUNTIME", "codex")
+    monkeypatch.setenv("OUROBOROS_CODEX_CLI_PATH", "/bin/codex-env")
+    monkeypatch.setattr(
+        "ouroboros.backends.model_catalog.installed_backends",
+        lambda: {"codex": "/bin/codex-env"},
+    )
+    monkeypatch.setattr("ouroboros.backends.model_catalog.configured_default_model", lambda _: None)
+
+    result = runner.invoke(app, ["show", "--json"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["defaults"]["default_agent"]["value"] == "codex"
+    assert payload["environment"]["cli_path"] == "/bin/codex-env"
 
 
 def test_show_text_uses_runtime_env_as_llm_backend_fallback(monkeypatch, tmp_path) -> None:

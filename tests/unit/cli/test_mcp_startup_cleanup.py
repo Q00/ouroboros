@@ -15,12 +15,14 @@ from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import typer
 
 from ouroboros.orchestrator.session import (
     SessionRepository,
     SessionStatus,
     SessionTracker,
 )
+from ouroboros.persistence.event_store import sqlite_database_url
 
 
 def _make_tracker(
@@ -329,6 +331,7 @@ class TestMCPStartupAutoCleanup:
             except asyncio.CancelledError:
                 cleanup_cancelled.set()
                 raise
+            raise AssertionError("cleanup wait returned unexpectedly")
 
         mock_repo.cancel_orphaned_sessions = AsyncMock(side_effect=slow_cleanup)
 
@@ -612,7 +615,120 @@ class TestMCPStartupAutoCleanup:
 
             await _run_mcp_server("localhost", 8080, "stdio", db_path="/tmp/test.db")
 
-        MockEventStore.assert_called_once_with("sqlite+aiosqlite:////tmp/test.db")
+        MockEventStore.assert_called_once_with(sqlite_database_url("/tmp/test.db"))
+
+    @pytest.mark.asyncio
+    async def test_custom_db_path_expansion_failure_is_redacted(self, capsys) -> None:
+        from ouroboros.cli.commands.mcp import _run_mcp_server
+
+        private_user = "ouroboros_user_that_does_not_exist_1817"
+
+        with pytest.raises(typer.Exit) as exc_info:
+            await _run_mcp_server(
+                "localhost",
+                8080,
+                "stdio",
+                db_path=f"~{private_user}/db.sqlite",
+            )
+
+        output = capsys.readouterr().err
+        assert exc_info.value.exit_code == 1
+        assert "Invalid EventStore configuration" in output
+        assert private_user not in output
+        assert "Traceback" not in output
+
+    @pytest.mark.asyncio
+    async def test_custom_db_directory_target_is_rejected(self, tmp_path, capsys) -> None:
+        from ouroboros.cli.commands.mcp import _run_mcp_server
+
+        directory = tmp_path / "event-store-directory"
+        directory.mkdir()
+
+        with pytest.raises(typer.Exit) as exc_info:
+            await _run_mcp_server(
+                "localhost",
+                8080,
+                "stdio",
+                db_path=str(directory),
+            )
+
+        output = capsys.readouterr().err
+        assert exc_info.value.exit_code == 1
+        assert "Invalid EventStore configuration" in output
+        assert str(tmp_path) not in output
+        assert "Traceback" not in output
+
+    @pytest.mark.asyncio
+    async def test_default_db_path_uses_runtime_resolver(self, tmp_path) -> None:
+        resolved_db = tmp_path / "configured" / "events.db"
+        mock_es, mock_repo, mock_server = self._create_patches(cancelled_sessions=[])
+        mock_brownfield = AsyncMock()
+
+        with (
+            patch(
+                "ouroboros.persistence.event_store.EventStore",
+                return_value=mock_es,
+            ) as mock_event_store,
+            patch(
+                "ouroboros.orchestrator.session.SessionRepository",
+                return_value=mock_repo,
+            ),
+            patch(
+                "ouroboros.mcp.server.adapter.create_ouroboros_server",
+                return_value=mock_server,
+            ),
+            patch(
+                "ouroboros.persistence.brownfield.BrownfieldStore",
+                return_value=mock_brownfield,
+            ) as mock_brownfield_store,
+            patch(
+                "ouroboros.config.models.resolve_event_store_path",
+                return_value=resolved_db,
+            ),
+        ):
+            from ouroboros.cli.commands.mcp import _run_mcp_server
+
+            await _run_mcp_server("localhost", 8080, "stdio")
+
+        expected_url = sqlite_database_url(resolved_db)
+        assert mock_event_store.call_args_list[-1].args == (expected_url,)
+        assert mock_brownfield_store.call_args_list[-1].args == (expected_url,)
+
+    @pytest.mark.asyncio
+    async def test_configured_db_creates_missing_parent_with_real_stores(self, tmp_path) -> None:
+        from ouroboros.cli.commands.mcp import _run_mcp_server
+        from ouroboros.persistence.brownfield import BrownfieldStore
+
+        config_dir = tmp_path / "config"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            "persistence:\n  database_path: new/nested/events.db\n",
+            encoding="utf-8",
+        )
+        resolved_db = config_dir / "new" / "nested" / "events.db"
+        mock_server = MagicMock()
+        mock_server.info.tools = []
+        mock_server.serve = AsyncMock()
+        mock_server.shutdown = AsyncMock()
+
+        with (
+            patch(
+                "ouroboros.config.models.get_config_dir",
+                return_value=config_dir,
+            ),
+            patch(
+                "ouroboros.persistence.brownfield.BrownfieldStore",
+                BrownfieldStore,
+            ),
+            patch(
+                "ouroboros.mcp.server.adapter.create_ouroboros_server",
+                return_value=mock_server,
+            ),
+        ):
+            await _run_mcp_server("localhost", 8080, "stdio")
+
+        assert resolved_db.parent.is_dir()
+        assert resolved_db.is_file()
 
     @pytest.mark.asyncio
     async def test_single_orphan_reports_correct_count(self) -> None:

@@ -302,6 +302,13 @@ async def test_no_progress_timeout_emits_retry_directive(
        on the lineage aggregate, with ``emitted_by="generation.watchdog"`` so
        projectors can attribute the directive to its source.
     3. ``is_terminal`` matches the directive (RETRY is non-terminal).
+
+    The idempotency key embeds the timeout kind, so this test only holds
+    while the *right* threshold fires. On wall-clock time it did not: a
+    starved poll loop in the parallel CI run tripped ``idle_timeout``
+    first and produced ``...:1:idle_timeout:reflecting``. The fake clock
+    makes the threshold ordering a property of the scenario rather than of
+    machine load.
     """
     clock = _FakeMonotonicClock()
     monkeypatch.setattr(watchdog_module, "time", SimpleNamespace(monotonic=clock))
@@ -826,8 +833,18 @@ async def test_parent_cancellation_cancels_watched_generation() -> None:
 
 
 @pytest.mark.asyncio
-async def test_no_material_progress_timeout_emits_cancellation_mode() -> None:
-    """watchdog_decision event carries cancellation_mode after a no-progress timeout."""
+async def test_no_material_progress_timeout_emits_cancellation_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """watchdog_decision event carries cancellation_mode after a no-progress timeout.
+
+    Fake-clocked for the same reason as the other no-progress tests: the
+    asserted ``timeout_kind`` is only reachable when the no-progress
+    threshold beats the idle one, which wall-clock time does not
+    guarantee under parallel CI load.
+    """
+    clock = _FakeMonotonicClock()
+    monkeypatch.setattr(watchdog_module, "time", SimpleNamespace(monotonic=clock))
     event_store = await _store()
     lineage_id = "lin-cancel-mode"
     execution_id = "exec-cancel-mode"
@@ -842,6 +859,7 @@ async def test_no_material_progress_timeout_emits_cancellation_mode() -> None:
         try:
             while True:
                 await asyncio.sleep(0.02)
+                clock.advance(0.05)
                 await event_store.append(_workflow_progress(execution_id, completed_count=0))
         except asyncio.CancelledError:
             raise
