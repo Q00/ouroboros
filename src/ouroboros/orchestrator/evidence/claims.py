@@ -700,44 +700,284 @@ def _shell_command_mutation_targets(
         tokens = list(lexer)
     except (RuntimeError, ValueError):
         return ()
-    targets: list[str] = []
-    for index, token in enumerate(tokens[:-1]):
-        if token not in {">", ">>", "&>"}:
-            continue
-        target = tokens[index + 1]
-        if not _text_needs_shell_expansion(target):
-            targets.append(target)
+    mutation_arguments, targets = _shell_tokens_without_redirections(tokens)
     if redirections_only:
-        return tuple(targets)
+        return tuple(dict.fromkeys(targets))
 
     command_index = 0
-    while command_index < len(tokens) and re.match(
-        r"^[A-Za-z_][A-Za-z0-9_]*=", tokens[command_index]
+    while command_index < len(mutation_arguments) and re.match(
+        r"^[A-Za-z_][A-Za-z0-9_]*=", mutation_arguments[command_index]
     ):
         command_index += 1
-    if command_index >= len(tokens):
+    if command_index >= len(mutation_arguments):
         return tuple(targets)
-    executable = Path(tokens[command_index]).name.lower()
-    arguments = tokens[command_index + 1 :]
-    redirect_index = next(
-        (index for index, argument in enumerate(arguments) if argument in {">", ">>", "&>"}),
-        len(arguments),
-    )
-    mutation_arguments = arguments[:redirect_index]
-    if mutation_arguments and mutation_arguments[-1].isdigit() and redirect_index < len(arguments):
-        mutation_arguments = mutation_arguments[:-1]
-    in_place_editor = executable in {"sed", "perl"} and any(
-        argument.startswith("-") and "i" in argument[1:] for argument in mutation_arguments
-    )
-    if executable in {"touch", "truncate", "tee"} or in_place_editor:
-        candidates = tuple(
-            argument
-            for argument in mutation_arguments
-            if not argument.startswith("-") and not _text_needs_shell_expansion(argument)
+    executable = Path(mutation_arguments[command_index]).name.lower()
+    mutation_arguments = mutation_arguments[command_index + 1 :]
+    candidates: tuple[str, ...] = ()
+    if executable == "touch":
+        candidates = _mutation_operands_with_options(
+            mutation_arguments,
+            short_flags=frozenset("acfmh"),
+            short_values=frozenset("Adrt"),
+            long_flags=frozenset({"--no-create", "--no-dereference"}),
+            long_values=frozenset({"--date", "--reference", "--time"}),
         )
-        if candidates:
-            targets.append(candidates[-1])
-    return tuple(targets)
+    elif executable == "truncate":
+        candidates = _mutation_operands_with_options(
+            mutation_arguments,
+            short_flags=frozenset("co"),
+            short_values=frozenset("rs"),
+            long_flags=frozenset({"--io-blocks", "--no-create"}),
+            long_values=frozenset({"--reference", "--size"}),
+        )
+    elif executable == "tee":
+        candidates = _mutation_operands_with_options(
+            mutation_arguments,
+            short_flags=frozenset("aip"),
+            short_values=frozenset(),
+            long_flags=frozenset({"--append", "--ignore-interrupts", "--output-error"}),
+            long_values=frozenset(),
+            long_value_prefixes=("--output-error=",),
+        )
+    elif executable == "sed":
+        candidates = _sed_in_place_operands(mutation_arguments)
+    elif executable == "perl":
+        candidates = _perl_in_place_operands(mutation_arguments)
+    targets.extend(
+        candidate for candidate in candidates if not _text_needs_shell_expansion(candidate)
+    )
+    return tuple(dict.fromkeys(targets))
+
+
+def _shell_tokens_without_redirections(tokens: list[str]) -> tuple[list[str], list[str]]:
+    """Separate argv from shell redirections without treating fd copies as files."""
+    arguments: list[str] = []
+    file_targets: list[str] = []
+    output_operators = {">", ">>", ">&", "&>", ">|"}
+    non_file_operators = {"<", "<<", "<<<", "<&", "<>"}
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token not in output_operators | non_file_operators:
+            arguments.append(token)
+            index += 1
+            continue
+        if arguments and arguments[-1].isdigit():
+            # Token positions are unavailable after shlex parsing. Removing a
+            # preceding numeric word is conservative for ``2>file`` and avoids
+            # ever treating a descriptor selector as a mutation receiver.
+            arguments.pop()
+        if index + 1 >= len(tokens):
+            return [], []
+        target = tokens[index + 1]
+        if target in output_operators | non_file_operators | {";", "&", "|", "&&", "||"}:
+            return [], []
+        if token in {">", ">>", "&>", ">|"} and not _text_needs_shell_expansion(target):
+            file_targets.append(target)
+        # ``>&`` is descriptor duplication for the bounded proof grammar. Bash
+        # also accepts filename extensions of this form, but declining them is
+        # safer than confusing ``>&2`` with a file receiver.
+        index += 2
+    return arguments, file_targets
+
+
+def _mutation_operands_with_options(
+    arguments: list[str],
+    *,
+    short_flags: frozenset[str],
+    short_values: frozenset[str],
+    long_flags: frozenset[str],
+    long_values: frozenset[str],
+    long_value_prefixes: tuple[str, ...] = (),
+) -> tuple[str, ...]:
+    """Return positional receivers for a bounded conventional option grammar."""
+    operands: list[str] = []
+    options = True
+    index = 0
+    while index < len(arguments):
+        argument = arguments[index]
+        if options and argument == "--":
+            options = False
+            index += 1
+            continue
+        if options and argument.startswith("--"):
+            if argument in long_flags or any(
+                argument.startswith(prefix) and len(argument) > len(prefix)
+                for prefix in long_value_prefixes
+            ):
+                index += 1
+                continue
+            name, separator, _value = argument.partition("=")
+            if name in long_values:
+                if separator:
+                    index += 1
+                elif index + 1 < len(arguments):
+                    index += 2
+                else:
+                    return ()
+                continue
+            return ()
+        if options and argument.startswith("-") and argument != "-":
+            cluster = argument[1:]
+            cluster_index = 0
+            while cluster_index < len(cluster):
+                option = cluster[cluster_index]
+                if option in short_flags:
+                    cluster_index += 1
+                    continue
+                if option in short_values:
+                    if cluster_index + 1 < len(cluster):
+                        cluster_index = len(cluster)
+                    elif index + 1 < len(arguments):
+                        index += 1
+                        cluster_index = len(cluster)
+                    else:
+                        return ()
+                    continue
+                return ()
+            index += 1
+            continue
+        operands.append(argument)
+        index += 1
+    return tuple(operands)
+
+
+def _sed_in_place_operands(arguments: list[str]) -> tuple[str, ...]:
+    """Return sed input files for conservative GNU/BSD in-place forms."""
+    positionals: list[str] = []
+    in_place = False
+    script_from_option = False
+    options = True
+    index = 0
+    while index < len(arguments):
+        argument = arguments[index]
+        if options and argument == "--":
+            options = False
+            index += 1
+            continue
+        if options and argument.startswith("--"):
+            name, separator, _value = argument.partition("=")
+            if name == "--in-place":
+                in_place = True
+                index += 1
+                continue
+            if name in {"--expression", "--file"}:
+                script_from_option = True
+                if separator:
+                    index += 1
+                elif index + 1 < len(arguments):
+                    index += 2
+                else:
+                    return ()
+                continue
+            if name in {"--quiet", "--silent", "--regexp-extended", "--separate"}:
+                index += 1
+                continue
+            return ()
+        if options and argument.startswith("-") and argument != "-":
+            cluster = argument[1:]
+            cluster_index = 0
+            while cluster_index < len(cluster):
+                option = cluster[cluster_index]
+                if option in {"n", "E", "r", "s", "u", "z"}:
+                    cluster_index += 1
+                    continue
+                if option == "i":
+                    in_place = True
+                    if cluster_index + 1 < len(cluster):
+                        cluster_index = len(cluster)
+                    elif not sys.platform.startswith("linux"):
+                        if index + 1 >= len(arguments):
+                            return ()
+                        index += 1
+                        cluster_index = len(cluster)
+                    else:
+                        cluster_index += 1
+                    continue
+                if option in {"e", "f"}:
+                    script_from_option = True
+                    if cluster_index + 1 < len(cluster):
+                        cluster_index = len(cluster)
+                    elif index + 1 < len(arguments):
+                        index += 1
+                        cluster_index = len(cluster)
+                    else:
+                        return ()
+                    continue
+                return ()
+            index += 1
+            continue
+        positionals.append(argument)
+        index += 1
+    if not in_place:
+        return ()
+    if script_from_option:
+        return tuple(positionals)
+    return tuple(positionals[1:]) if len(positionals) >= 2 else ()
+
+
+def _perl_in_place_operands(arguments: list[str]) -> tuple[str, ...]:
+    """Return Perl input files for conservative in-place edit forms."""
+    positionals: list[str] = []
+    in_place = False
+    script_from_option = False
+    options = True
+    index = 0
+    while index < len(arguments):
+        argument = arguments[index]
+        if options and argument == "--":
+            options = False
+            index += 1
+            continue
+        if options and argument.startswith("--"):
+            return ()
+        if options and argument.startswith("-") and argument != "-":
+            cluster = argument[1:]
+            cluster_index = 0
+            while cluster_index < len(cluster):
+                option = cluster[cluster_index]
+                if option in {"a", "c", "l", "n", "p", "s", "w", "W", "X"}:
+                    cluster_index += 1
+                    continue
+                if option == "i":
+                    in_place = True
+                    # Any remainder is the backup extension, not more options.
+                    cluster_index = len(cluster)
+                    continue
+                if option in {"e", "E"}:
+                    script_from_option = True
+                    if cluster_index + 1 < len(cluster):
+                        cluster_index = len(cluster)
+                    elif index + 1 < len(arguments):
+                        index += 1
+                        cluster_index = len(cluster)
+                    else:
+                        return ()
+                    continue
+                if option in {"F", "I", "m", "M"}:
+                    if cluster_index + 1 < len(cluster):
+                        cluster_index = len(cluster)
+                    elif index + 1 < len(arguments):
+                        index += 1
+                        cluster_index = len(cluster)
+                    else:
+                        return ()
+                    continue
+                if option in {"0", "C", "d", "D", "V", "x"}:
+                    # These switches take optional attached values. A
+                    # standalone form must not swallow the next switch/operand.
+                    cluster_index = len(cluster)
+                    continue
+                return ()
+            index += 1
+            continue
+        positionals.append(argument)
+        index += 1
+    if not in_place:
+        return ()
+    if script_from_option:
+        return tuple(positionals)
+    return tuple(positionals[1:]) if len(positionals) >= 2 else ()
 
 
 def _strip_unquoted_shell_comment(command: str) -> str:
@@ -973,7 +1213,28 @@ def _source_mentions_pathlib(source: str) -> bool:
 
 
 def _text_needs_shell_expansion(value: str) -> bool:
-    return "$" in value or "`" in value
+    quote: str | None = None
+    escaped = False
+    for char in value:
+        if escaped:
+            escaped = False
+            continue
+        if quote == "'":
+            if char == "'":
+                quote = None
+            continue
+        if char == "\\":
+            escaped = True
+            continue
+        if char == '"':
+            quote = None if quote == '"' else '"'
+            continue
+        if char == "'" and quote is None:
+            quote = "'"
+            continue
+        if char in {"$", "`"}:
+            return True
+    return False
 
 
 def _argv_mentions_python_c_pathlib(argv: list[str]) -> bool:

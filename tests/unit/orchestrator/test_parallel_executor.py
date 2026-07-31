@@ -50,6 +50,7 @@ from ouroboros.orchestrator.evidence.claims import (
     _python_c_command_file_claim_match,
     _runtime_messages_support_file_claim,
     _shell_command_mutation_targets,
+    _text_needs_shell_expansion,
 )
 from ouroboros.orchestrator.evidence_schema import EvidenceRecord, ValidationResult
 from ouroboros.orchestrator.execution_runtime_scope import (
@@ -513,6 +514,287 @@ def test_files_touched_preserves_literal_hash_before_real_shell_redirect(
         (observed_call, observed_completion),
         task_cwd=str(tmp_path),
     )
+
+
+@pytest.mark.parametrize(
+    ("command", "stdin"),
+    (
+        ("touch first.py second.py", None),
+        ("truncate -s 0 first.py second.py", None),
+        ("tee first.py second.py", "generated\n"),
+    ),
+)
+def test_files_touched_authenticates_every_stable_multi_receiver(
+    tmp_path,
+    command,
+    stdin,
+) -> None:
+    """Every stable-identity operand receives its own execution-span lease."""
+    first = tmp_path / "first.py"
+    second = tmp_path / "second.py"
+    first.write_text("before first\n", encoding="utf-8")
+    second.write_text("before second\n", encoding="utf-8")
+    os.utime(first, ns=(1_000_000_000, 1_000_000_000))
+    os.utime(second, ns=(1_000_000_000, 1_000_000_000))
+    call = AgentMessage(
+        type="tool",
+        content=f"Bash: {command}",
+        tool_name="Bash",
+        data={"tool_input": {"command": command}, "tool_call_id": "multi-receiver"},
+    )
+    completion = AgentMessage(
+        type="tool_result",
+        content="command completed with exit code 0",
+        data={
+            "subtype": "tool_result",
+            "exit_code": 0,
+            "tool_call_id": "multi-receiver",
+        },
+    )
+
+    with _BashFilesystemLeaseTracker(task_cwd=str(tmp_path)) as tracker:
+        observed_call = tracker.observe(call)
+        completed = subprocess.run(  # noqa: S602
+            command,
+            cwd=tmp_path,
+            shell=True,
+            check=False,
+            input=stdin,
+            text=True,
+        )
+        observed_completion = tracker.observe(completion)
+
+    assert completed.returncode == 0
+    assert _shell_command_mutation_targets(command) == ("first.py", "second.py")
+    assert {effect["path"] for effect in observed_completion.data["filesystem_effects"]} == {
+        "first.py",
+        "second.py",
+    }
+    messages = (observed_call, observed_completion)
+    assert _runtime_messages_support_file_claim("first.py", messages, task_cwd=str(tmp_path))
+    assert _runtime_messages_support_file_claim("second.py", messages, task_cwd=str(tmp_path))
+
+
+@pytest.mark.parametrize(
+    ("command", "receivers"),
+    (
+        ("touch > log.txt first.py second.py", ("log.txt", "first.py", "second.py")),
+        ("touch first.py > log.txt second.py", ("log.txt", "first.py", "second.py")),
+        ("> log.txt touch first.py second.py", ("log.txt", "first.py", "second.py")),
+        ("touch first.py second.py 2> error.txt", ("error.txt", "first.py", "second.py")),
+        ("touch first.py second.py 2>&1", ("first.py", "second.py")),
+    ),
+)
+def test_files_touched_authenticates_interspersed_redirect_and_operands(
+    tmp_path,
+    command,
+    receivers,
+) -> None:
+    """Redirection clauses are removed without truncating later utility operands."""
+    for receiver in receivers:
+        target = tmp_path / receiver
+        target.write_text("before\n", encoding="utf-8")
+        os.utime(target, ns=(1_000_000_000, 1_000_000_000))
+    call = AgentMessage(
+        type="tool",
+        content=f"Bash: {command}",
+        tool_name="Bash",
+        data={"tool_input": {"command": command}},
+    )
+    completion = AgentMessage(
+        type="tool_result",
+        content="command completed with exit code 0",
+        data={"subtype": "tool_result", "exit_code": 0},
+    )
+
+    with _BashFilesystemLeaseTracker(task_cwd=str(tmp_path)) as tracker:
+        observed_call = tracker.observe(call)
+        completed = subprocess.run(command, cwd=tmp_path, shell=True, check=False)  # noqa: S602
+        observed_completion = tracker.observe(completion)
+
+    assert completed.returncode == 0
+    assert _shell_command_mutation_targets(command) == receivers
+    messages = (observed_call, observed_completion)
+    for receiver in receivers:
+        assert _runtime_messages_support_file_claim(receiver, messages, task_cwd=str(tmp_path))
+
+
+def test_tee_input_redirection_is_not_a_mutation_receiver(tmp_path) -> None:
+    """tee mutates every output operand but does not authenticate its stdin source."""
+    source = tmp_path / "source.py"
+    output = tmp_path / "output.py"
+    source.write_text("source\n", encoding="utf-8")
+    output.write_text("before\n", encoding="utf-8")
+    os.utime(output, ns=(1_000_000_000, 1_000_000_000))
+    command = "tee output.py < source.py"
+    call = AgentMessage(
+        type="tool",
+        content=f"Bash: {command}",
+        tool_name="Bash",
+        data={"tool_input": {"command": command}},
+    )
+    completion = AgentMessage(
+        type="tool_result",
+        content="command completed with exit code 0",
+        data={"subtype": "tool_result", "exit_code": 0},
+    )
+
+    with _BashFilesystemLeaseTracker(task_cwd=str(tmp_path)) as tracker:
+        observed_call = tracker.observe(call)
+        completed = subprocess.run(command, cwd=tmp_path, shell=True, check=False)  # noqa: S602
+        observed_completion = tracker.observe(completion)
+
+    assert completed.returncode == 0
+    assert _shell_command_mutation_targets(command) == ("output.py",)
+    messages = (observed_call, observed_completion)
+    assert _runtime_messages_support_file_claim("output.py", messages, task_cwd=str(tmp_path))
+    assert not _runtime_messages_support_file_claim("source.py", messages, task_cwd=str(tmp_path))
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    (
+        ("touch -r reference.py first.py second.py", ("first.py", "second.py")),
+        ("touch --date yesterday first.py second.py", ("first.py", "second.py")),
+        ("truncate -r reference.py first.py second.py", ("first.py", "second.py")),
+        ("truncate --size 0 first.py second.py", ("first.py", "second.py")),
+        ("tee --output-error=warn first.py second.py", ("first.py", "second.py")),
+    ),
+)
+def test_multi_receiver_parser_excludes_option_arguments(command, expected) -> None:
+    """Option values are inputs/configuration, never mutation receivers."""
+    assert _shell_command_mutation_targets(command) == expected
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    (
+        ("touch -- -first.py -second.py", ("-first.py", "-second.py")),
+        ("truncate -s0 -- -first.py -second.py", ("-first.py", "-second.py")),
+        (
+            "sed -i '' -f rewrite.sed first.py second.py",
+            ("first.py", "second.py"),
+        ),
+        (
+            "perl -I lib -M File::Path -F pattern -pi -e rewrite first.py second.py",
+            ("first.py", "second.py"),
+        ),
+        (
+            "perl -0 -C -d -D -V -x -pi -e rewrite first.py second.py",
+            ("first.py", "second.py"),
+        ),
+    ),
+)
+def test_multi_receiver_parser_honors_option_boundaries(command, expected) -> None:
+    """Required values, optional values, and ``--`` preserve real operands."""
+    assert _shell_command_mutation_targets(command) == expected
+
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        "touch --unknown first.py second.py",
+        "truncate --unknown first.py second.py",
+        "tee --unknown first.py second.py",
+        "sed --unknown -i '' rewrite first.py second.py",
+        "perl --unknown -pi -e rewrite first.py second.py",
+    ),
+)
+def test_multi_receiver_parser_rejects_unknown_option_grammars(command) -> None:
+    """Unknown utility options cannot donate their values as file receivers."""
+    assert _shell_command_mutation_targets(command) == ()
+
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        "sed -i '' 's/before/after/' first.py second.py",
+        "sed -i '' -e 's/before/after/' first.py second.py",
+        "perl -pi -e 's/before/after/' first.py second.py",
+        "perl -p -i.bak -e 's/before/after/' first.py second.py",
+    ),
+)
+def test_in_place_editor_parser_enumerates_every_file_operand(command) -> None:
+    """Scripts, backup suffixes, and option values are excluded from receivers."""
+    assert _shell_command_mutation_targets(command) == ("first.py", "second.py")
+
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        "sed -i '' 's/before/after/' first.py second.py",
+        "perl -pi -e 's/before/after/' first.py second.py",
+    ),
+)
+def test_in_place_editor_inode_replacement_remains_fail_closed(tmp_path, command) -> None:
+    """Enumerating all operands does not weaken regular-inode continuity."""
+    first = tmp_path / "first.py"
+    second = tmp_path / "second.py"
+    first.write_text("before\n", encoding="utf-8")
+    second.write_text("before\n", encoding="utf-8")
+    before = (first.stat().st_ino, second.stat().st_ino)
+    call = AgentMessage(
+        type="tool",
+        content=f"Bash: {command}",
+        tool_name="Bash",
+        data={"tool_input": {"command": command}},
+    )
+    completion = AgentMessage(
+        type="tool_result",
+        content="command completed with exit code 0",
+        data={"subtype": "tool_result", "exit_code": 0},
+    )
+
+    with _BashFilesystemLeaseTracker(task_cwd=str(tmp_path)) as tracker:
+        observed_call = tracker.observe(call)
+        completed = subprocess.run(command, cwd=tmp_path, shell=True, check=False)  # noqa: S602
+        observed_completion = tracker.observe(completion)
+
+    assert completed.returncode == 0
+    assert (first.stat().st_ino, second.stat().st_ino) != before
+    assert "filesystem_effects" not in observed_completion.data
+    messages = (observed_call, observed_completion)
+    assert not _runtime_messages_support_file_claim("first.py", messages, task_cwd=str(tmp_path))
+    assert not _runtime_messages_support_file_claim("second.py", messages, task_cwd=str(tmp_path))
+
+
+def test_perl_module_name_cannot_impersonate_in_place_switch(tmp_path) -> None:
+    """A lowercase i inside an unrelated option cannot lease Perl-internal writes."""
+    source = "open(F, q(>), q(claimed.py)); print F q(internal); close F"
+    command = shlex.join(["perl", "-MFile::Path", "-e", source, "claimed.py"])
+    call = AgentMessage(
+        type="tool",
+        content=f"Bash: {command}",
+        tool_name="Bash",
+        data={"tool_input": {"command": command}},
+    )
+    completion = AgentMessage(
+        type="tool_result",
+        content="command completed with exit code 0",
+        data={"subtype": "tool_result", "exit_code": 0},
+    )
+
+    with _BashFilesystemLeaseTracker(task_cwd=str(tmp_path)) as tracker:
+        observed_call = tracker.observe(call)
+        completed = subprocess.run(command, cwd=tmp_path, shell=True, check=False)  # noqa: S602
+        observed_completion = tracker.observe(completion)
+
+    assert completed.returncode == 0
+    assert (tmp_path / "claimed.py").read_text(encoding="utf-8") == "internal"
+    assert _shell_command_mutation_targets(command) == ()
+    assert "filesystem_effects" not in observed_completion.data
+    assert not _runtime_messages_support_file_claim(
+        "claimed.py",
+        (observed_call, observed_completion),
+        task_cwd=str(tmp_path),
+    )
+
+
+def test_shell_expansion_detection_respects_single_quoted_perl_source() -> None:
+    """A literal regex dollar does not mask otherwise valid receiver parsing."""
+    assert not _text_needs_shell_expansion("perl -pi -e 's/$/x/' first.py second.py")
+    assert _text_needs_shell_expansion('perl -pi -e "s/$/x/" first.py second.py')
+    assert _text_needs_shell_expansion("perl -pi -e s/$/x/ first.py second.py")
 
 
 def test_files_touched_rejects_shell_receiver_symlink_replaced_after_execution(tmp_path) -> None:
