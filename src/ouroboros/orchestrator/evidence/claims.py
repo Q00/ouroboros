@@ -648,7 +648,10 @@ def _normalize_absolute_path(path: Path) -> Path:
 
 def _raw_command_mentions_python_c_pathlib_write(command: str) -> bool:
     return re.search(
-        r"\bpython(?:3(?:\.\d+)?)?\s+-c\b", command, re.IGNORECASE
+        r"(?:^|[\s'\";|&])[\w./-]*python(?:3(?:\.\d+)?)?"
+        r"(?:\s+-(?!c\b)\S+)*\s+-c\b",
+        command,
+        re.IGNORECASE,
     ) is not None and _source_mentions_pathlib_write(command)
 
 
