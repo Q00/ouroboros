@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 from unittest.mock import patch
 
+import pytest
 from typer.testing import CliRunner
 
 from ouroboros.auto.pipeline import AutoPipelineResult
 from ouroboros.auto.state import AutoPhase, AutoPipelineState, AutoResumeCapability
-from ouroboros.cli.commands.auto import _print_result, _print_status
+from ouroboros.cli.commands.auto import _print_result, _print_status, _run_auto
 from ouroboros.cli.main import app
+from ouroboros.core.worktree import TaskWorkspace
 
 runner = CliRunner()
 
@@ -39,6 +42,98 @@ def test_auto_help_documents_detached_wait_and_retrieve_commands() -> None:
     assert "ouroboros job wait JOB_ID" in output
     assert "Retrieve completed results with:" in output
     assert "ouroboros job result JOB_ID" in output
+
+
+def _managed_workspace(tmp_path) -> TaskWorkspace:
+    return TaskWorkspace(
+        durable_id="auto_cleanup_test",
+        repo_root=str(tmp_path / "repo"),
+        repo_name="repo",
+        original_cwd=str(tmp_path / "repo"),
+        effective_cwd=str(tmp_path / "worktree"),
+        worktree_path=str(tmp_path / "worktree"),
+        branch="ooo/auto_cleanup_test",
+        lock_path=str(tmp_path / "cleanup.lock"),
+    )
+
+
+@pytest.mark.parametrize(
+    ("pipeline_result", "expected_cleanup"),
+    [
+        (
+            AutoPipelineResult(
+                status="complete",
+                auto_session_id="auto_terminal",
+                phase="complete",
+            ),
+            True,
+        ),
+        (
+            AutoPipelineResult(
+                status="complete",
+                auto_session_id="auto_handoff",
+                phase="complete",
+                job_id="job_live",
+                run_handoff_status="started",
+            ),
+            False,
+        ),
+    ],
+)
+def test_cli_auto_releases_with_result_based_cleanup_eligibility(
+    tmp_path, pipeline_result: AutoPipelineResult, expected_cleanup: bool
+) -> None:
+    workspace = _managed_workspace(tmp_path)
+
+    async def fake_run(_self, _state):
+        return pipeline_result
+
+    with (
+        patch("ouroboros.cli.commands.auto._safe_default_cwd", return_value=tmp_path),
+        patch("ouroboros.cli.commands.auto.ensure_auto_worktree", return_value=workspace),
+        patch("ouroboros.cli.commands.auto.release_auto_worktree") as release,
+        patch("ouroboros.cli.commands.auto.AutoPipeline.run", new=fake_run),
+    ):
+        result = asyncio.run(
+            _run_auto(
+                goal="build a CLI",
+                resume=None,
+                runtime=None,
+                max_interview_rounds=1,
+                max_repair_rounds=1,
+                skip_run=False,
+            )
+        )
+
+    assert result is pipeline_result
+    release.assert_called_once_with(workspace, cleanup=expected_cleanup)
+
+
+def test_cli_auto_exception_releases_without_cleanup(tmp_path) -> None:
+    workspace = _managed_workspace(tmp_path)
+
+    async def fail_run(_self, _state):
+        raise RuntimeError("pipeline interrupted")
+
+    with (
+        patch("ouroboros.cli.commands.auto._safe_default_cwd", return_value=tmp_path),
+        patch("ouroboros.cli.commands.auto.ensure_auto_worktree", return_value=workspace),
+        patch("ouroboros.cli.commands.auto.release_auto_worktree") as release,
+        patch("ouroboros.cli.commands.auto.AutoPipeline.run", new=fail_run),
+        pytest.raises(RuntimeError, match="pipeline interrupted"),
+    ):
+        asyncio.run(
+            _run_auto(
+                goal="build a CLI",
+                resume=None,
+                runtime=None,
+                max_interview_rounds=1,
+                max_repair_rounds=1,
+                skip_run=False,
+            )
+        )
+
+    release.assert_called_once_with(workspace, cleanup=False)
 
 
 def test_auto_goal_skip_run_does_not_require_subcommand() -> None:

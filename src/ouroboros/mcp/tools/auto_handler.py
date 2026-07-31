@@ -69,7 +69,11 @@ from ouroboros.auto.state import (
     parse_auto_worktree_policy,
     validate_complete_product_timeout,
 )
-from ouroboros.auto.worktree import ensure_auto_worktree, release_auto_worktree
+from ouroboros.auto.worktree import (
+    auto_worktree_cleanup_eligible,
+    ensure_auto_worktree,
+    release_auto_worktree,
+)
 from ouroboros.config import get_opencode_mode
 from ouroboros.core.execution_preferences import resolve_execution_preferences
 from ouroboros.core.file_lock import file_lock
@@ -643,10 +647,15 @@ class AutoHandler:
             watchdog=watchdog,
             probe_runner=EnvRuntimeProbeRunner() if complete_product else None,
         )
+        result: AutoPipelineResult | None = None
         try:
-            return await pipeline.run(state)
+            result = await pipeline.run(state)
+            return result
         finally:
-            release_auto_worktree(auto_workspace)
+            release_auto_worktree(
+                auto_workspace,
+                cleanup=auto_worktree_cleanup_eligible(result),
+            )
             if self.event_store is None:
                 await watchdog_event_store.close()
 
