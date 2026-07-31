@@ -46,6 +46,13 @@ class TestExtractJsonPayload:
 
         assert extract_json_payload(text) == actual
 
+    def test_indented_literal_fence_allows_varying_legal_line_indentation(self) -> None:
+        stale = '{"stale": true}'
+        actual = '{"actual": true}'
+        text = f"Example only:\n    ```json\n      {stale}\n     ```\nActual answer: {actual}"
+
+        assert extract_json_payload(text) == actual
+
     def test_json_in_code_fence(self):
         text = '```json\n{"score": 0.85}\n```'
         result = extract_json_payload(text)

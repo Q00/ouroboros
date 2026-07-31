@@ -194,10 +194,19 @@ def _wrap_unfenced_example_then_actual(example_payload: str, actual_payload: str
 
 
 def _wrap_indented_fence_example_then_actual(
-    example_payload: str, actual_payload: str, *, indentation: str = "    "
+    example_payload: str,
+    actual_payload: str,
+    *,
+    indentation: str | tuple[str, str, str] = "    ",
 ) -> str:
+    if isinstance(indentation, tuple):
+        opener_indent, body_indent, closer_indent = indentation
+    else:
+        opener_indent = body_indent = closer_indent = indentation
+    lines = f"```json\n{example_payload}\n```".splitlines()
     indented_example = "\n".join(
-        f"{indentation}{line}" for line in f"```json\n{example_payload}\n```".splitlines()
+        f"{opener_indent if index == 0 else closer_indent if index == len(lines) - 1 else body_indent}{line}"
+        for index, line in enumerate(lines)
     )
     return f"Example only:\n{indented_example}\nActual answer: {actual_payload}"
 
@@ -318,8 +327,14 @@ class TestWonderFenceRobustness:
             "What assumptions remain untested for goal: Build a login system?",
         )
 
-    @pytest.mark.parametrize("indentation", ["    ", "\t"], ids=["spaces", "tab"])
-    def test_indented_fence_example_cannot_override_unfenced_answer(self, indentation: str) -> None:
+    @pytest.mark.parametrize(
+        "indentation",
+        ["    ", "\t", ("    ", "      ", "     ")],
+        ids=["spaces", "tab", "varying-spaces"],
+    )
+    def test_indented_fence_example_cannot_override_unfenced_answer(
+        self, indentation: str | tuple[str, str, str]
+    ) -> None:
         stale_payload = json.dumps(
             {"questions": [], "should_continue": False, "reasoning": "stale example"}
         )
@@ -671,9 +686,13 @@ class TestReflectFenceRobustness:
         assert "failed to parse" in result.error.message.lower()
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("indentation", ["    ", "\t"], ids=["spaces", "tab"])
+    @pytest.mark.parametrize(
+        "indentation",
+        ["    ", "\t", ("    ", "      ", "     ")],
+        ids=["spaces", "tab", "varying-spaces"],
+    )
     async def test_indented_fence_example_cannot_override_unfenced_answer(
-        self, indentation: str
+        self, indentation: str | tuple[str, str, str]
     ) -> None:
         stale_payload = json.dumps(
             {
@@ -1079,8 +1098,14 @@ class TestAssertionExtractorFenceRobustness:
 
         assert assertions == ()
 
-    @pytest.mark.parametrize("indentation", ["    ", "\t"], ids=["spaces", "tab"])
-    def test_indented_fence_example_cannot_override_unfenced_answer(self, indentation: str) -> None:
+    @pytest.mark.parametrize(
+        "indentation",
+        ["    ", "\t", ("    ", "      ", "     ")],
+        ids=["spaces", "tab", "varying-spaces"],
+    )
+    def test_indented_fence_example_cannot_override_unfenced_answer(
+        self, indentation: str | tuple[str, str, str]
+    ) -> None:
         stale_payload = json.dumps(
             [
                 {

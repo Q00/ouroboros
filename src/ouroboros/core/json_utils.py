@@ -255,7 +255,7 @@ def _indented_fence_example_ranges(text: str) -> tuple[tuple[int, int], ...]:
         if opener is None:
             index += 1
             continue
-        prefix, marker, marker_length, _ = opener
+        _, marker, marker_length, _ = opener
 
         closing_index = index + 1
         while closing_index < len(lines):
@@ -263,7 +263,6 @@ def _indented_fence_example_ranges(text: str) -> tuple[tuple[int, int], ...]:
             closing = _indented_fence_line(text, closing_start, closing_end)
             if (
                 closing is not None
-                and closing[0] == prefix
                 and closing[1] == marker
                 and closing[2] >= marker_length
                 and closing[3] == ""
