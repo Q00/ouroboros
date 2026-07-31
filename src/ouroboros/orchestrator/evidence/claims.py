@@ -622,6 +622,28 @@ def _python_c_command_file_claim_match(
     """
     if task_cwd is None:
         return None
+    candidate = command
+    seen: set[str] = set()
+    for _ in range(16):
+        match = _direct_python_c_command_file_claim_match(candidate, task_cwd=task_cwd)
+        if match is not None:
+            return match
+        body = _shell_command_body(candidate)
+        if body is None or body == candidate or body in seen:
+            return None
+        seen.add(candidate)
+        candidate = body
+    # Excessive supported-wrapper nesting is not trustworthy command-text
+    # proof. Do not let inert inner argv reach generic shell heuristics.
+    return False
+
+
+def _direct_python_c_command_file_claim_match(
+    command: str,
+    *,
+    task_cwd: str,
+) -> bool | None:
+    """Classify one unwrapped command as Python ``-c`` or unrelated."""
     # Command text can never prove the historical identity of a pathlib
     # receiver. Detect the Python source itself before shell tokenization so
     # executable quoting/concatenation (for example ``py"thon"``) cannot move

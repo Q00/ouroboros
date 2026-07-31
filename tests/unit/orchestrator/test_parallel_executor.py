@@ -226,6 +226,50 @@ def test_files_touched_rejects_reconstructed_pathlib_with_inert_touch_argv(tmp_p
     )
 
 
+def test_files_touched_rejects_wrapped_reconstructed_pathlib_with_inert_touch_argv(
+    tmp_path,
+) -> None:
+    """A supported shell body receives the same Python ``-c`` classification."""
+    claimed_file = tmp_path / "claimed.py"
+    other_file = tmp_path / "other.py"
+    claimed_file.write_text("original\n", encoding="utf-8")
+    inner = shlex.join(
+        [
+            str(Path(sys.executable).resolve()),
+            "-I",
+            "-S",
+            "-c",
+            "getattr(__import__('path' 'lib'), 'Pa' 'th')('other.py').write_text('changed')",
+            "touch",
+            "claimed.py",
+        ]
+    )
+    command = f"/bin/bash -lc {shlex.quote(inner)}"
+
+    completed = subprocess.run(command, cwd=tmp_path, shell=True, check=False)  # noqa: S602
+
+    assert completed.returncode == 0
+    assert claimed_file.read_text(encoding="utf-8") == "original\n"
+    assert other_file.read_text(encoding="utf-8") == "changed"
+    messages = (
+        AgentMessage(
+            type="tool",
+            content=f"Bash: {command}",
+            tool_name="Bash",
+            data={"tool_input": {"command": command}},
+        ),
+        AgentMessage(
+            type="tool_result",
+            content="command completed with exit code 0",
+            data={"subtype": "tool_result", "exit_code": 0},
+        ),
+    )
+    assert (
+        _runtime_messages_support_file_claim("claimed.py", messages, task_cwd=str(tmp_path))
+        is False
+    )
+
+
 def test_files_touched_allows_expanded_payload_with_literal_redirect_target(tmp_path) -> None:
     """Payload expansion preserves direct proof from a literal output target."""
     command = "printf '%s\\n' \"$VALUE\" > claimed.py"
