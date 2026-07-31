@@ -7,6 +7,42 @@ import pytest
 from ouroboros.evaluation.json_utils import extract_json_payload
 
 LONG_FENCE_CASES = [(4, "json"), (4, ""), (5, "json"), (5, "")]
+MALFORMED_INDENTED_FENCE_CASES = (
+    "disconnected",
+    "unclosed-eof",
+    "wrong-marker",
+    "dirty-closer",
+    "shorter-closer",
+)
+
+
+def _malformed_indented_fence(
+    shape: str,
+    stale_payload: str,
+    *,
+    quote_prefix: str = "",
+    trailing: str = "",
+) -> str:
+    indent = "    "
+    opener = "````json" if shape == "shorter-closer" else "```json"
+    lines = [
+        "Example:",
+        f"{quote_prefix}{indent}{opener}",
+        f"{quote_prefix}{indent}{stale_payload}",
+    ]
+    if shape == "disconnected":
+        lines.extend([f"{quote_prefix}Outside block", f"{quote_prefix}{indent}```"])
+    elif shape == "wrong-marker":
+        lines.append(f"{quote_prefix}{indent}~~~")
+    elif shape == "dirty-closer":
+        lines.append(f"{quote_prefix}{indent}``` trailing")
+    elif shape == "shorter-closer":
+        lines.append(f"{quote_prefix}{indent}```")
+    elif shape != "unclosed-eof":
+        raise AssertionError(f"unknown malformed fence shape: {shape}")
+    if trailing:
+        lines.append(trailing)
+    return "\n".join(lines)
 
 
 class TestExtractJsonPayload:
@@ -69,6 +105,56 @@ class TestExtractJsonPayload:
         )
 
         assert extract_json_payload(text) == '{"actual": true}'
+
+    @pytest.mark.parametrize("shape", MALFORMED_INDENTED_FENCE_CASES)
+    @pytest.mark.parametrize("quote_prefix", ["", "> "], ids=["plain", "blockquote"])
+    def test_malformed_indented_literal_fence_stale_only_fails_closed(
+        self, shape: str, quote_prefix: str
+    ) -> None:
+        text = _malformed_indented_fence(
+            shape,
+            '{"stale": true}',
+            quote_prefix=quote_prefix,
+        )
+
+        assert extract_json_payload(text) is None
+
+    @pytest.mark.parametrize("shape", MALFORMED_INDENTED_FENCE_CASES)
+    @pytest.mark.parametrize("quote_prefix", ["", "> "], ids=["plain", "blockquote"])
+    @pytest.mark.parametrize(
+        "trailing",
+        [
+            'Actual: {"actual": true}',
+            'Actual: {"actual": true}\nLater: {"later": true}',
+        ],
+        ids=["actual", "actual-and-later"],
+    )
+    def test_malformed_indented_literal_fence_owns_later_payloads(
+        self, shape: str, quote_prefix: str, trailing: str
+    ) -> None:
+        text = _malformed_indented_fence(
+            shape,
+            '{"stale": true}',
+            quote_prefix=quote_prefix,
+            trailing=trailing,
+        )
+
+        assert extract_json_payload(text) is None
+
+    @pytest.mark.parametrize("indent", ["    ", "\t"], ids=["spaces", "tab"])
+    def test_blockquote_nested_indented_example_releases_real_payload(self, indent: str) -> None:
+        text = (
+            f'> {indent}```json\n> {indent}{{"stale": true}}\n> {indent}```\n'
+            'Actual: {"actual": true}'
+        )
+
+        assert extract_json_payload(text) == '{"actual": true}'
+
+    @pytest.mark.parametrize("indent", ["    ", "\t"], ids=["spaces", "tab"])
+    def test_blockquote_nested_indented_example_stale_only_is_excluded(self, indent: str) -> None:
+        text = f'> {indent}```json\n> {indent}{{"stale": true}}\n> {indent}```'
+
+        assert extract_json_payload(text) is None
 
     def test_json_in_code_fence(self):
         text = '```json\n{"score": 0.85}\n```'

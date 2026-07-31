@@ -229,6 +229,56 @@ def _wrap_indented_pseudo_closer(
     )
 
 
+MALFORMED_INDENTED_FENCE_CASES = (
+    "disconnected",
+    "unclosed-eof",
+    "wrong-marker",
+    "dirty-closer",
+    "shorter-closer",
+)
+
+
+def _wrap_malformed_indented_fence(
+    shape: str,
+    stale_payload: str,
+    *,
+    quote_prefix: str = "",
+    trailing: str = "",
+) -> str:
+    indent = "    "
+    opener = "````json" if shape == "shorter-closer" else "```json"
+    lines = [
+        "Example:",
+        f"{quote_prefix}{indent}{opener}",
+        f"{quote_prefix}{indent}{stale_payload}",
+    ]
+    if shape == "disconnected":
+        lines.extend([f"{quote_prefix}Outside block", f"{quote_prefix}{indent}```"])
+    elif shape == "wrong-marker":
+        lines.append(f"{quote_prefix}{indent}~~~")
+    elif shape == "dirty-closer":
+        lines.append(f"{quote_prefix}{indent}``` trailing")
+    elif shape == "shorter-closer":
+        lines.append(f"{quote_prefix}{indent}```")
+    elif shape != "unclosed-eof":
+        raise AssertionError(f"unknown malformed fence shape: {shape}")
+    if trailing:
+        lines.append(trailing)
+    return "\n".join(lines)
+
+
+def _wrap_blockquote_indented_example(
+    stale_payload: str,
+    *,
+    indent: str,
+    actual_payload: str = "",
+) -> str:
+    text = f"> {indent}```json\n> {indent}{stale_payload}\n> {indent}```"
+    if actual_payload:
+        text += f"\nActual: {actual_payload}"
+    return text
+
+
 # ``prose_prefix_fence`` and ``fence_trailing_prose`` are the two variants the
 # old heuristic got wrong; the remaining variants preserve plain, bare, and
 # longer supported-fence behavior.
@@ -393,6 +443,57 @@ class TestWonderFenceRobustness:
         )
 
         assert out.reasoning.startswith("Parse error, using seed-scoped fallback")
+
+    @pytest.mark.parametrize("shape", MALFORMED_INDENTED_FENCE_CASES)
+    @pytest.mark.parametrize("quote_prefix", ["", "> "], ids=["plain", "blockquote"])
+    def test_malformed_indented_fence_stale_only_fails_closed(
+        self, shape: str, quote_prefix: str
+    ) -> None:
+        stale_payload = json.dumps(
+            {"questions": [], "should_continue": False, "reasoning": "stale"}
+        )
+
+        out = WonderEngine(llm_adapter=AsyncMock(), model="test")._parse_response(
+            _wrap_malformed_indented_fence(
+                shape,
+                stale_payload,
+                quote_prefix=quote_prefix,
+            ),
+            _seed(),
+        )
+
+        assert out.reasoning.startswith("Parse error, using seed-scoped fallback")
+
+    @pytest.mark.parametrize("indent", ["    ", "\t"], ids=["spaces", "tab"])
+    def test_blockquote_indented_example_is_excluded_and_releases_actual(self, indent: str) -> None:
+        stale_payload = json.dumps(
+            {"questions": [], "should_continue": False, "reasoning": "stale"}
+        )
+        actual_payload = json.dumps(
+            {
+                "questions": [{"question": "actual question", "kind": "gap"}],
+                "should_continue": True,
+                "reasoning": "actual",
+            }
+        )
+        engine = WonderEngine(llm_adapter=AsyncMock(), model="test")
+
+        stale_only = engine._parse_response(
+            _wrap_blockquote_indented_example(stale_payload, indent=indent),
+            _seed(),
+        )
+        actual = engine._parse_response(
+            _wrap_blockquote_indented_example(
+                stale_payload,
+                indent=indent,
+                actual_payload=actual_payload,
+            ),
+            _seed(),
+        )
+
+        assert stale_only.reasoning.startswith("Parse error, using seed-scoped fallback")
+        assert actual.reasoning == "actual"
+        assert actual.questions == ("actual question",)
 
     def test_eight_space_pseudo_closer_does_not_release_nested_example(self) -> None:
         stale_payload = json.dumps(
@@ -716,6 +817,85 @@ class TestReflectFenceRobustness:
         else:
             assert result.is_err
             assert "failed to parse" in result.error.message.lower()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("shape", MALFORMED_INDENTED_FENCE_CASES)
+    @pytest.mark.parametrize("quote_prefix", ["", "> "], ids=["plain", "blockquote"])
+    async def test_malformed_indented_fence_stale_only_fails_closed(
+        self, shape: str, quote_prefix: str
+    ) -> None:
+        stale_payload = json.dumps(
+            {
+                "refined_goal": "Stale example",
+                "refined_constraints": ["stale"],
+                "ontology_mutations": [],
+                "reasoning": "stale reflect",
+            }
+        )
+        adapter = AsyncMock()
+        adapter.complete.return_value = Result.ok(
+            CompletionResponse(
+                content=_wrap_malformed_indented_fence(
+                    shape,
+                    stale_payload,
+                    quote_prefix=quote_prefix,
+                ),
+                model="test",
+                usage=UsageInfo(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+            )
+        )
+
+        result = await ReflectEngine(llm_adapter=adapter, model="test").reflect(
+            current_seed=_seed(1),
+            execution_output="",
+            evaluation_summary=EvaluationSummary(
+                final_approved=False,
+                highest_stage_passed=1,
+                score=0.0,
+                ac_results=(),
+            ),
+            wonder_output=WonderOutput(questions=("What remains unknown?",)),
+            lineage=OntologyLineage(lineage_id="lineage", goal="Build a login system"),
+        )
+
+        assert result.is_err
+        assert "failed to parse" in result.error.message.lower()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("indent", ["    ", "\t"], ids=["spaces", "tab"])
+    async def test_blockquote_indented_example_stale_only_fails_closed(self, indent: str) -> None:
+        stale_payload = json.dumps(
+            {
+                "refined_goal": "Stale example",
+                "refined_constraints": ["stale"],
+                "ontology_mutations": [],
+                "reasoning": "stale reflect",
+            }
+        )
+        adapter = AsyncMock()
+        adapter.complete.return_value = Result.ok(
+            CompletionResponse(
+                content=_wrap_blockquote_indented_example(stale_payload, indent=indent),
+                model="test",
+                usage=UsageInfo(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+            )
+        )
+
+        result = await ReflectEngine(llm_adapter=adapter, model="test").reflect(
+            current_seed=_seed(1),
+            execution_output="",
+            evaluation_summary=EvaluationSummary(
+                final_approved=False,
+                highest_stage_passed=1,
+                score=0.0,
+                ac_results=(),
+            ),
+            wonder_output=WonderOutput(questions=("What remains unknown?",)),
+            lineage=OntologyLineage(lineage_id="lineage", goal="Build a login system"),
+        )
+
+        assert result.is_err
+        assert "failed to parse" in result.error.message.lower()
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("fence_info", ["json", ""])
@@ -1204,6 +1384,53 @@ class TestAssertionExtractorFenceRobustness:
         else:
             assert len(assertions) == 1
             assert assertions[0].description == expected_description
+
+    @pytest.mark.parametrize("shape", MALFORMED_INDENTED_FENCE_CASES)
+    @pytest.mark.parametrize("quote_prefix", ["", "> "], ids=["plain", "blockquote"])
+    def test_malformed_indented_fence_stale_only_fails_closed(
+        self, shape: str, quote_prefix: str
+    ) -> None:
+        stale_payload = json.dumps(
+            [
+                {
+                    "ac_index": 0,
+                    "tier": "t4_unverifiable",
+                    "pattern": "",
+                    "description": "stale assertion",
+                }
+            ]
+        )
+
+        assertions = AssertionExtractor(llm_adapter=AsyncMock())._parse_response(
+            _wrap_malformed_indented_fence(
+                shape,
+                stale_payload,
+                quote_prefix=quote_prefix,
+            ),
+            ("AC number 1",),
+        )
+
+        assert assertions == ()
+
+    @pytest.mark.parametrize("indent", ["    ", "\t"], ids=["spaces", "tab"])
+    def test_blockquote_indented_example_stale_only_is_excluded(self, indent: str) -> None:
+        stale_payload = json.dumps(
+            [
+                {
+                    "ac_index": 0,
+                    "tier": "t4_unverifiable",
+                    "pattern": "",
+                    "description": "stale assertion",
+                }
+            ]
+        )
+
+        assertions = AssertionExtractor(llm_adapter=AsyncMock())._parse_response(
+            _wrap_blockquote_indented_example(stale_payload, indent=indent),
+            ("AC number 1",),
+        )
+
+        assert assertions == ()
 
     @pytest.mark.parametrize("fence_info", ["json", ""])
     def test_supported_fence_rejects_invalid_body_with_stale_nested_json(
