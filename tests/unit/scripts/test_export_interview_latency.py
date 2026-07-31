@@ -243,9 +243,7 @@ def test_exporter_uses_configured_default_database(tmp_path: Path) -> None:
     config_dir = home / ".ouroboros"
     db_path = config_dir / "data" / "events.db"
     db_path.parent.mkdir(parents=True)
-    (config_dir / "config.yaml").write_text(
-        "persistence:\n  database_path: data/events.db\n"
-    )
+    (config_dir / "config.yaml").write_text("persistence:\n  database_path: data/events.db\n")
     with _create_event_store(db_path):
         pass
 
