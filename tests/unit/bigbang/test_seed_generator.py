@@ -1895,6 +1895,109 @@ class TestSeedGeneratorExtraction:
         assert gated.verify_gate_outcome.passed is True
         assert gated.verify_gate_outcome.output_tail == "case-ok\n"
 
+    @pytest.mark.asyncio
+    async def test_extracted_dollar_case_survives_seed_grade_and_live_verify(self) -> None:
+        """Multi-pattern case bodies remain opaque inside modern command substitutions."""
+        if not Path("/bin/sh").exists():
+            pytest.skip("POSIX shell regression")
+        verify_command = (
+            """printf '%s\\n' "$(case y in (x) printf no;; """
+            '''(y | artifacts:) printf yes;; esac)"'''
+        )
+        syntax = subprocess.run(
+            ["/bin/sh", "-n", "-c", verify_command],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        assert syntax.returncode == 0, syntax.stderr
+
+        mock_adapter = AsyncMock()
+        mock_adapter.complete = AsyncMock(
+            return_value=Result.ok(
+                create_mock_completion_response(
+                    create_valid_extraction_response(
+                        acceptance_criteria=(
+                            "\nAC: Dollar case runs | "
+                            f"verify: {verify_command} | artifacts: NONE | expect: NONE\n"
+                        )
+                    )
+                )
+            )
+        )
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            generator = SeedGenerator(
+                llm_adapter=mock_adapter,
+                output_dir=Path(tmp_dir) / "seeds",
+            )
+            generated = await generator.generate(
+                create_interview_state_with_rounds(), create_low_ambiguity_score()
+            )
+            assert generated.is_ok
+            seed = generated.value
+            assert Seed.model_validate(seed.model_dump()) == seed
+            grade = GradeGate().grade_seed(seed)
+            assert grade.grade is SeedGrade.A
+            assert grade.may_run is True
+
+            gated = await create_runtime_verify_executor(tmp_dir)._apply_verify_gate(
+                seed=seed,
+                ac_index=0,
+                result=ACExecutionResult(
+                    ac_index=0,
+                    ac_content=seed.acceptance_criteria[0].description,
+                    success=True,
+                ),
+                session_id="dollar-case-test",
+                execution_id="dollar-case-test",
+            )
+
+        assert gated.success is True
+        assert gated.verify_gate_outcome is not None
+        assert gated.verify_gate_outcome.passed is True
+        assert gated.verify_gate_outcome.output_tail == "yes\n"
+
+    @pytest.mark.parametrize(
+        "verify_command",
+        (
+            "printf '%s\\n' $(case y in x) printf no;; y | artifacts:) printf yes;; esac)",
+            """printf '%s\\n' "$(case y in (x) printf no;; """
+            '''(y | artifacts:) (printf nested);; esac)"''',
+            """printf '%s\\n' "$(case y in (x) printf no;; (y | artifacts:) """
+            '''unset z; printf '%s' "${z:-$(printf nested)}";; esac)"''',
+            """printf '%s\\n' "$(case y in (x) printf no;; (y | artifacts:) """
+            '''printf '%s' `printf backtick`;; esac)"''',
+            '''printf '%s\\n' "$(case y in (y) printf '%s' esac;; esac)"''',
+            """printf '%s\\n' "$(case y in (y) case z in """
+            '''(z | artifacts:) printf nested;; esac;; esac)"''',
+            '''printf '%s\\n' "$(printf '%s' ordinary)"''',
+        ),
+    )
+    def test_dollar_case_boundaries_preserve_shell_frames(self, verify_command: str) -> None:
+        criterion = _parse_acceptance_criterion_contract(
+            f"AC: Dollar case boundary | verify: {verify_command} | artifacts: NONE | expect: NONE"
+        )
+
+        assert criterion is not None
+        assert criterion.verify_command == verify_command
+
+    @pytest.mark.parametrize(
+        "verify_command",
+        (
+            "printf $(case y in x) printf hidden;; y | artifacts:) printf hidden;;",
+            "printf $(case y in x) printf hidden;; y | artifacts:) printf $(unclosed",
+            "printf $(case y in x) printf hidden;; y | artifacts:) printf `unclosed",
+        ),
+    )
+    def test_unclosed_dollar_case_frames_cannot_hide_outer_fields(
+        self, verify_command: str
+    ) -> None:
+        with pytest.raises(ValueError, match="Unterminated quoted or escaped"):
+            _parse_acceptance_criterion_contract(
+                f"AC: Dollar case boundary | verify: {verify_command} | "
+                "artifacts: NONE | expect: NONE"
+            )
+
     @pytest.mark.parametrize(
         "verify_command",
         (

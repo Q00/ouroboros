@@ -119,10 +119,19 @@ def _starts_posix_shell_comment(char: str, *, word_started: bool) -> bool:
 
 
 def _posix_expansion_end(value: str, index: int) -> int | None:
-    """Return the end of one balanced ``$()``/``${}`` shell expansion."""
+    """Return the end of one balanced ``$()``/``${}`` shell expansion.
+
+    A command substitution is not merely parenthesis-balanced shell text:
+    each POSIX ``case`` pattern has an unmatched syntactic ``)``.  Track the
+    small reserved-word state needed to keep those pattern terminators inside
+    their substitution while leaving ordinary subshell parentheses on the
+    existing frame stack.
+    """
     if index + 1 >= len(value) or value[index] != "$" or value[index + 1] not in "({":
         return None
-    frames: list[tuple[str, str | None]] = [(")" if value[index + 1] == "(" else "}", None)]
+    frames: list[tuple[str, str | None, list[str] | None, bool]] = [
+        (")", None, [], True) if value[index + 1] == "(" else ("}", None, None, False)
+    ]
     quote: str | None = None
     escaped = False
     cursor = index + 2
@@ -147,9 +156,19 @@ def _posix_expansion_end(value: str, index: int) -> int | None:
                 cursor += 1
                 continue
             if char == "$" and cursor + 1 < len(value) and value[cursor + 1] in "({":
-                frames.append((")" if value[cursor + 1] == "(" else "}", quote))
+                frames.append(
+                    (")", quote, [], True)
+                    if value[cursor + 1] == "("
+                    else ("}", quote, None, False)
+                )
                 quote = None
                 cursor += 2
+                continue
+            if char == "`":
+                substitution_end = _posix_backtick_substitution_end(value, cursor)
+                if substitution_end is None:
+                    return None
+                cursor = substitution_end
                 continue
             cursor += 1
             continue
@@ -157,22 +176,89 @@ def _posix_expansion_end(value: str, index: int) -> int | None:
             quote = char
             cursor += 1
             continue
+        if char == "`":
+            substitution_end = _posix_backtick_substitution_end(value, cursor)
+            if substitution_end is None:
+                return None
+            cursor = substitution_end
+            continue
         if char == "$" and cursor + 1 < len(value) and value[cursor + 1] in "({":
-            frames.append((")" if value[cursor + 1] == "(" else "}", quote))
+            frames.append(
+                (")", quote, [], True) if value[cursor + 1] == "(" else ("}", quote, None, False)
+            )
             quote = None
             cursor += 2
             continue
+        closer, _, case_states, command_position = frames[-1]
+        if case_states is not None and (char.isascii() and (char.isalpha() or char == "_")):
+            word_end = cursor + 1
+            while word_end < len(value) and (
+                value[word_end].isascii() and (value[word_end].isalnum() or value[word_end] == "_")
+            ):
+                word_end += 1
+            word = value[cursor:word_end]
+            case_state = case_states[-1] if case_states else None
+            if case_state == "pattern" and word != "esac":
+                # Pattern words are not command-position reserved words.  In
+                # particular, a literal ``case)`` pattern must not open a
+                # nested compound command.
+                cursor = word_end
+                continue
+            if command_position and word == "case":
+                case_states.append("await_in")
+                command_position = False
+            elif case_states and case_states[-1] == "await_in" and word == "in":
+                case_states[-1] = "pattern"
+                command_position = True
+            elif (
+                case_states
+                and command_position
+                and word == "esac"
+                and case_states[-1] in {"pattern", "action"}
+            ):
+                case_states.pop()
+                command_position = False
+            elif word in {"then", "do", "else", "elif"}:
+                command_position = True
+            else:
+                command_position = False
+            frames[-1] = (closer, frames[-1][1], case_states, command_position)
+            cursor = word_end
+            continue
+        if case_states is not None and case_states and case_states[-1] == "action":
+            if value.startswith(";;", cursor):
+                case_states[-1] = "pattern"
+                frames[-1] = (closer, frames[-1][1], case_states, True)
+                cursor += 2
+                continue
+        if case_states is not None and case_states and case_states[-1] == "pattern":
+            if char == ")":
+                case_states[-1] = "action"
+                frames[-1] = (closer, frames[-1][1], case_states, True)
+                cursor += 1
+                continue
+            if char in "(|":
+                # POSIX permits an optional opening ``(`` before a case
+                # pattern.  Its closing ``)`` is still the pattern terminator,
+                # not a balanced subshell frame.
+                cursor += 1
+                continue
         if char == "(":
-            frames.append((")", quote))
+            arithmetic = cursor >= 2 and value[cursor - 2 : cursor] == "$("
+            frames.append((")", quote, None if arithmetic else [], not arithmetic))
             cursor += 1
             continue
         if char == frames[-1][0]:
-            _, return_quote = frames.pop()
+            _, return_quote, open_cases, _ = frames.pop()
+            if open_cases:
+                return None
             quote = return_quote
             cursor += 1
             if not frames:
                 return cursor
             continue
+        if case_states is not None and char in ";|&\n":
+            frames[-1] = (closer, frames[-1][1], case_states, True)
         cursor += 1
     return None
 
