@@ -1269,7 +1269,7 @@ class TestSeedGeneratorExtraction:
         extraction_response = create_valid_extraction_response(
             acceptance_criteria=(
                 "\n"
-                "AC: Operator documentation is ready | verify: test -f guide.md | "
+                "AC: Users don't lose files | verify: test -f guide.md | "
                 "artifacts: reports/user's guide.md | expect: operator's ready\n"
             )
         )
@@ -1286,6 +1286,7 @@ class TestSeedGeneratorExtraction:
 
         assert result.is_ok
         (criterion,) = result.value.acceptance_criteria
+        assert criterion.description == "Users don't lose files"
         assert criterion.expected_artifacts == ("reports/user's guide.md",)
         assert criterion.output_assertion == "operator's ready"
         assert Seed.model_validate(result.value.model_dump()) == result.value
@@ -1714,6 +1715,61 @@ class TestSeedGeneratorExtraction:
         grade = GradeGate().grade_seed(result.value)
         assert grade.grade is SeedGrade.A
         assert grade.may_run is True
+
+    @pytest.mark.asyncio
+    async def test_generate_preserves_reserved_command_name_in_verify_pipeline(self) -> None:
+        """A colonless reserved word in a verify pipeline is command payload."""
+        mock_adapter = AsyncMock()
+        state = create_interview_state_with_rounds()
+        low_ambiguity = create_low_ambiguity_score()
+        verify_command = "verify(){ cat; }; printf READY | verify"
+        extraction_response = create_valid_extraction_response(
+            acceptance_criteria=(
+                "\n"
+                "AC: Verify pipeline succeeds | "
+                f"verify: {verify_command} | artifacts: NONE | expect: READY\n"
+            )
+        )
+        mock_adapter.complete = AsyncMock(
+            return_value=Result.ok(create_mock_completion_response(extraction_response))
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            generator = SeedGenerator(
+                llm_adapter=mock_adapter,
+                output_dir=Path(tmp_dir) / "seeds",
+            )
+            result = await generator.generate(state, low_ambiguity)
+
+            assert result.is_ok
+            assert mock_adapter.complete.await_count == 1
+            (criterion,) = result.value.acceptance_criteria
+            assert isinstance(criterion, AcceptanceCriterionSpec)
+            assert criterion.verify_command == verify_command
+            assert criterion.expected_artifacts == ()
+            assert criterion.output_assertion == "READY"
+            assert Seed.model_validate(result.value.model_dump()) == result.value
+
+            grade = GradeGate().grade_seed(result.value)
+            assert grade.grade is SeedGrade.A
+            assert grade.may_run is True
+
+            executor = create_runtime_verify_executor(tmp_dir)
+            gated = await executor._apply_verify_gate(
+                seed=result.value,
+                ac_index=0,
+                result=ACExecutionResult(
+                    ac_index=0,
+                    ac_content=criterion.description,
+                    success=True,
+                ),
+                session_id="reserved-pipeline-test",
+                execution_id="reserved-pipeline-test",
+            )
+
+        assert gated.success is True
+        assert gated.verify_gate_outcome is not None
+        assert gated.verify_gate_outcome.passed is True
 
     @pytest.mark.asyncio
     async def test_generate_normalizes_output_assertion_condition_phrases(self) -> None:

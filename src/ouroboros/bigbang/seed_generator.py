@@ -60,6 +60,7 @@ EXTRACTION_TEMPERATURE = 0.2
 _MAX_EXTRACTION_RETRIES = 1
 _AC_RESERVED_FIELD_NAMES = ("verify", "artifacts", "expect")
 _AC_FIELD_NAME_OBFUSCATORS = frozenset({"'", '"', "\\"})
+_WORD_APOSTROPHE_SUFFIXES = frozenset({"d", "ll", "m", "re", "s", "t", "ve"})
 _UNSUPPORTED_VERIFY_HEREDOC_RE = re.compile(r"<<-?\s*['\"]?[A-Za-z_][\w-]*['\"]?")
 
 
@@ -88,11 +89,23 @@ def _is_word_apostrophe(value: str, index: int) -> bool:
     ):
         return True
 
+    # Recognize ordinary English contractions from the local word suffix.
+    # Looking for any later apostrophe is incorrect: a later artifact or
+    # assertion such as ``user's.txt`` must not turn the apostrophe in
+    # ``don't`` into a quote that hides the structured fields in between.
+    suffix_end = index + 1
+    while suffix_end < len(value) and value[suffix_end].isascii() and value[suffix_end].isalpha():
+        suffix_end += 1
+    suffix = value[index + 1 : suffix_end].lower()
+    if suffix in _WORD_APOSTROPHE_SUFFIXES and (
+        suffix_end == len(value) or not value[suffix_end].isalnum()
+    ):
+        return True
+
     # Shell permits a quoted word to be adjacent to its command/token
-    # (``printf'%s'`` and ``python -c'...'``). A non-possessive apostrophe is
-    # an opening quote only when the line contains its matching mate.
-    closing_quote = value.find("'", index + 1)
-    return closing_quote < 0
+    # (``printf'%s'`` and ``python -c'...'``). Other apostrophes with a local
+    # closing mate therefore remain quote delimiters.
+    return value.find("'", index + 1) < 0
 
 
 def _scan_pipe_led_ac_field_fragment(
@@ -149,6 +162,20 @@ def _find_pipe_led_ac_field_fragment(value: str) -> _ACReservedFieldFragment | N
             return fragment
         pipe_index = value.find("|", pipe_index + 1)
     return None
+
+
+def _is_bare_reserved_pipeline_command(
+    value: str,
+    fragment: _ACReservedFieldFragment,
+) -> bool:
+    """Return whether a colonless reserved word is a bare pipeline command."""
+    next_pipe = value.find("|", fragment.end)
+    segment_end = next_pipe if next_pipe >= 0 else len(value)
+    return (
+        fragment.canonical
+        and not fragment.has_colon
+        and not value[fragment.end : segment_end].strip()
+    )
 
 
 def _parse_string_array_values(
@@ -276,6 +303,17 @@ def _iter_outer_ac_field_markers(body: str) -> tuple[_ACFieldMarker, ...]:
                 )
             )
             index = fragment.end
+            continue
+        if (
+            fragment is not None
+            and structured_payload_started
+            and _is_bare_reserved_pipeline_command(body, fragment)
+        ):
+            # Once a structured payload has started, a canonical reserved word
+            # without ``:`` can be an ordinary shell pipeline command (for
+            # example ``printf READY | verify``). Only ``| name:`` is outer AC
+            # syntax; obfuscated spellings remain rejected below.
+            index += 1
             continue
         if fragment is not None:
             raise ValueError(f"Malformed {fragment.name} field in acceptance criterion")
