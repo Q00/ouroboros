@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from ouroboros.auto.handoff_contract import RUN_HANDOFF_STARTED_STATUS
+from ouroboros.auto.pipeline import AutoPipelineResult
 from ouroboros.auto.state import AutoPipelineState, AutoWorktreePolicy
 from ouroboros.core.worktree import (
     TaskWorkspace,
@@ -45,6 +47,24 @@ def ensure_auto_worktree(state: AutoPipelineState) -> TaskWorkspace | None:
     return workspace
 
 
-def release_auto_worktree(workspace: TaskWorkspace | None) -> None:
-    """Release the auto worktree and apply the configured cleanup policy."""
-    release_task_workspace(workspace)
+def auto_worktree_cleanup_eligible(result: AutoPipelineResult | None) -> bool:
+    """Return whether an Auto result positively proves workspace quiescence."""
+    if result is None or result.status != "complete":
+        return False
+    if result.ralph_dispatch_mode == "plugin":
+        return False
+    return not (
+        result.run_handoff_status == RUN_HANDOFF_STARTED_STATUS
+        and result.execution_job_status != "completed"
+        and not result.ralph_job_id
+        and not result.ralph_lineage_id
+    )
+
+
+def release_auto_worktree(
+    workspace: TaskWorkspace | None,
+    *,
+    cleanup: bool,
+) -> None:
+    """Release an Auto worktree with explicit cleanup eligibility."""
+    release_task_workspace(workspace, cleanup=cleanup)

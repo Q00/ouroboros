@@ -778,7 +778,11 @@ async def test_cli_auto_routes_interview_and_execute_from_stage_plan(monkeypatch
     monkeypatch.setattr(auto_command, "AutoStore", lambda: AutoStore(tmp_path / "store"))
     monkeypatch.setattr(auto_command, "AutoPipeline", FakePipeline)
     monkeypatch.setattr(auto_command, "ensure_auto_worktree", lambda _state: None)
-    monkeypatch.setattr(auto_command, "release_auto_worktree", lambda _workspace: None)
+    monkeypatch.setattr(
+        auto_command,
+        "release_auto_worktree",
+        lambda _workspace, **_kwargs: None,
+    )
     monkeypatch.setattr(
         auto_command, "resolve_agent_runtime_backend", lambda value=None: value or "opencode"
     )

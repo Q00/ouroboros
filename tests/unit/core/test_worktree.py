@@ -8,11 +8,14 @@ from unittest.mock import patch
 
 import pytest
 
+from ouroboros.config.models import OrchestratorConfig, OuroborosConfig
+from ouroboros.core.errors import ConfigError
 from ouroboros.core.worktree import (
     TaskWorkspace,
     WorktreeError,
     _acquire_lock,
     _branch_exists,
+    _worktree_cleanup_policy,
     cleanup_task_workspace,
     maybe_prepare_task_workspace,
     maybe_restore_task_workspace,
@@ -49,6 +52,34 @@ class TestMaybePrepareTaskWorkspace:
         assert result is None
         prepare_mock.assert_not_called()
 
+
+class TestWorktreeCleanupPolicy:
+    @pytest.mark.parametrize(
+        "failure",
+        [
+            FileNotFoundError("missing"),
+            PermissionError("unreadable"),
+            ConfigError("invalid"),
+        ],
+    )
+    def test_load_failure_fails_closed_to_keep(self, failure: Exception) -> None:
+        with patch("ouroboros.core.worktree.load_config", side_effect=failure):
+            assert _worktree_cleanup_policy() == "keep"
+
+    def test_explicit_keep_is_preserved(self) -> None:
+        config = OuroborosConfig(orchestrator=OrchestratorConfig(worktree_cleanup="keep"))
+        with patch("ouroboros.core.worktree.load_config", return_value=config):
+            assert _worktree_cleanup_policy() == "keep"
+
+    def test_valid_default_uses_prune_merged(self) -> None:
+        with patch(
+            "ouroboros.core.worktree.load_config",
+            return_value=OuroborosConfig(),
+        ):
+            assert _worktree_cleanup_policy() == "prune-merged"
+
+
+class TestMaybePrepareTaskWorkspaceContinued:
     def test_returns_none_when_source_cwd_is_not_git_repo(self, tmp_path: Path) -> None:
         with (
             patch("ouroboros.core.worktree._worktrees_enabled", return_value=True),
@@ -382,7 +413,7 @@ class TestWorktreeHardening:
             patch("ouroboros.core.worktree._worktree_cleanup_policy", return_value="prune-merged"),
         ):
             workspace = prepare_task_workspace(repo_root, "orch_test_cleanup")
-            release_task_workspace(workspace)
+            release_task_workspace(workspace, cleanup=True)
 
         assert not Path(workspace.worktree_path).exists()
         assert not Path(workspace.lock_path).exists()
@@ -431,7 +462,7 @@ class TestWorktreeHardening:
             self._git(worktree_path, "add", "feature.txt")
             self._git(worktree_path, "commit", "-m", "feature")
 
-            release_task_workspace(workspace)
+            release_task_workspace(workspace, cleanup=True)
 
         assert Path(workspace.worktree_path).exists()
         assert not Path(workspace.lock_path).exists()
@@ -471,7 +502,7 @@ class TestWorktreeHardening:
             worktree_path = Path(workspace.worktree_path)
             (worktree_path / "dirty.txt").write_text("dirty\n", encoding="utf-8")
 
-            release_task_workspace(workspace)
+            release_task_workspace(workspace, cleanup=True)
 
         assert Path(workspace.worktree_path).exists()
         assert not Path(workspace.lock_path).exists()
