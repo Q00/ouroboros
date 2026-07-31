@@ -35,10 +35,10 @@ from ouroboros.cli.formatters.tables import (
     print_table,
 )
 from ouroboros.config.loader import load_config
+from ouroboros.config.models import resolve_event_store_path
 from ouroboros.events.base import BaseEvent
 from ouroboros.mcp.tools.projection_handlers import ProjectionQueryHandler
 from ouroboros.persistence.event_store import EventStore
-from ouroboros.persistence.paths import resolve_event_store_path
 
 app = typer.Typer(
     name="status",

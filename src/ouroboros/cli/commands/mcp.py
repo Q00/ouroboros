@@ -530,11 +530,11 @@ async def _run_mcp_server(
     # Ensure login-shell environment is available (critical for gateway-spawned processes)
     _ensure_shell_env()
 
+    from ouroboros.config.models import resolve_event_store_path
     from ouroboros.mcp.server.adapter import create_ouroboros_server, validate_transport
     from ouroboros.orchestrator.session import SessionRepository
     from ouroboros.persistence.brownfield import BrownfieldStore
     from ouroboros.persistence.event_store import EventStore
-    from ouroboros.persistence.paths import resolve_event_store_path
 
     # Validate transport early, before any expensive startup work
     try:

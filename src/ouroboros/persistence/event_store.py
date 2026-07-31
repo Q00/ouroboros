@@ -499,7 +499,7 @@ class EventStore:
                 ``read_only=True``. ``read_only`` is a no-op for non-SQLite URLs.
         """
         if database_url is None:
-            from ouroboros.persistence.paths import resolve_event_store_path
+            from ouroboros.config.models import resolve_event_store_path
 
             db_path = resolve_event_store_path()
             if not read_only:

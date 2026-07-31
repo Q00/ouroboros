@@ -615,6 +615,42 @@ class TestMCPStartupAutoCleanup:
         MockEventStore.assert_called_once_with("sqlite+aiosqlite:////tmp/test.db")
 
     @pytest.mark.asyncio
+    async def test_default_db_path_uses_runtime_resolver(self, tmp_path) -> None:
+        resolved_db = tmp_path / "configured" / "events.db"
+        mock_es, mock_repo, mock_server = self._create_patches(cancelled_sessions=[])
+        mock_brownfield = AsyncMock()
+
+        with (
+            patch(
+                "ouroboros.persistence.event_store.EventStore",
+                return_value=mock_es,
+            ) as mock_event_store,
+            patch(
+                "ouroboros.orchestrator.session.SessionRepository",
+                return_value=mock_repo,
+            ),
+            patch(
+                "ouroboros.mcp.server.adapter.create_ouroboros_server",
+                return_value=mock_server,
+            ),
+            patch(
+                "ouroboros.persistence.brownfield.BrownfieldStore",
+                return_value=mock_brownfield,
+            ) as mock_brownfield_store,
+            patch(
+                "ouroboros.config.models.resolve_event_store_path",
+                return_value=resolved_db,
+            ),
+        ):
+            from ouroboros.cli.commands.mcp import _run_mcp_server
+
+            await _run_mcp_server("localhost", 8080, "stdio")
+
+        expected_url = f"sqlite+aiosqlite:///{resolved_db}"
+        assert mock_event_store.call_args_list[-1].args == (expected_url,)
+        assert mock_brownfield_store.call_args_list[-1].args == (expected_url,)
+
+    @pytest.mark.asyncio
     async def test_single_orphan_reports_correct_count(self) -> None:
         """Test correct stderr output when exactly 1 orphan is found."""
         single_orphan = [

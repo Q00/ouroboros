@@ -32,8 +32,8 @@ def test_resume_and_status_resolve_the_same_configured_event_store(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from ouroboros.cli.commands.status import _configured_event_store_path
+    from ouroboros.config.models import resolve_event_store_path
     from ouroboros.persistence.event_store import EventStore
-    from ouroboros.persistence.paths import resolve_event_store_path
 
     config_dir = tmp_path / "config"
     configured_db = config_dir / "data" / "events.db"

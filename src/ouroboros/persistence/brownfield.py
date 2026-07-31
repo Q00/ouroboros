@@ -134,7 +134,7 @@ class BrownfieldStore:
                          with the legacy ~/.ouroboros/ouroboros.db fallback.
         """
         if database_url is None:
-            from ouroboros.persistence.paths import resolve_event_store_path
+            from ouroboros.config.models import resolve_event_store_path
 
             db_path = resolve_event_store_path()
             db_path.parent.mkdir(parents=True, exist_ok=True)

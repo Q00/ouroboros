@@ -22,7 +22,7 @@ import typer
 from ouroboros.cli.formatters import console
 from ouroboros.cli.formatters.panels import print_error, print_info, print_success
 from ouroboros.cli.formatters.tables import create_table, print_table
-from ouroboros.persistence.paths import resolve_event_store_path
+from ouroboros.config.models import resolve_event_store_path
 
 app = typer.Typer(
     name="resume",

@@ -20,7 +20,7 @@ from ouroboros.backends import (
 from ouroboros.cli.formatters import console
 from ouroboros.cli.formatters.panels import print_error, print_info, print_success, print_warning
 from ouroboros.cli.formatters.tables import create_key_value_table, create_table, print_table
-from ouroboros.persistence.paths import event_store_path_from_config
+from ouroboros.config.models import event_store_path_from_config
 
 app = typer.Typer(
     name="config",
