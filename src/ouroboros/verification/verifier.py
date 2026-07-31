@@ -25,6 +25,75 @@ logger = logging.getLogger(__name__)
 MAX_FILE_SIZE = 50 * 1024  # 50KB per file
 MAX_FILES_PER_HINT = 100
 MAX_PATTERN_LENGTH = 200  # Limit LLM-generated regex length to reduce ReDoS risk
+MAX_SCALAR_LENGTH = 4096
+
+
+def _skip_inline_space(text: str, index: int) -> int:
+    while index < len(text) and text[index] in " \t\f\v":
+        index += 1
+    return index
+
+
+def _scan_scalar(text: str, index: int) -> tuple[str, int] | None:
+    """Read one bounded scalar without truncating quoted source values."""
+    index = _skip_inline_space(text, index)
+    if index >= len(text) or text[index] in "\r\n":
+        return None
+
+    quote = text[index]
+    if quote in {'"', "'"}:
+        index += 1
+        value: list[str] = []
+        consumed = 0
+        while index < len(text) and consumed <= MAX_SCALAR_LENGTH:
+            char = text[index]
+            if char in "\r\n":
+                return None
+            if char == quote:
+                return "".join(value), index + 1
+            if char == "\\":
+                if index + 1 >= len(text) or text[index + 1] in "\r\n":
+                    return None
+                escaped = text[index + 1]
+                if escaped in {quote, "\\"}:
+                    value.append(escaped)
+                else:
+                    value.extend(("\\", escaped))
+                index += 2
+                consumed += 2
+                continue
+            value.append(char)
+            index += 1
+            consumed += 1
+        return None
+
+    start = index
+    while (
+        index < len(text)
+        and index - start <= MAX_SCALAR_LENGTH
+        and text[index] not in "\"'\r\n\t ,;)]}{"
+    ):
+        index += 1
+    if index == start or index - start > MAX_SCALAR_LENGTH:
+        return None
+    return text[start:index], index
+
+
+def _extract_following_scalar(content: str, index: int) -> str:
+    """Extract a direct, assigned, or parenthesized scalar at index."""
+    index = _skip_inline_space(content, index)
+    if index < len(content) and content[index] in "=:":
+        scanned = _scan_scalar(content, index + 1)
+        return scanned[0] if scanned is not None else ""
+    if index < len(content) and content[index] == "(":
+        scanned = _scan_scalar(content, index + 1)
+        if scanned is None:
+            return ""
+        value, end = scanned
+        end = _skip_inline_space(content, end)
+        return value if end < len(content) and content[end] == ")" else ""
+    scanned = _scan_scalar(content, index)
+    return scanned[0] if scanned is not None else ""
 
 
 @dataclass
@@ -278,41 +347,4 @@ class SpecVerifier:
         - VAR(10)
         - "value"
         """
-        end = match.end()
-        rest = content[end : end + 100]
-
-        def scalar_value(value_match: re.Match[str] | None) -> str | None:
-            if value_match is None:
-                return None
-            return next(group for group in value_match.groups() if group is not None)
-
-        # Try to extract a value: number, quoted string, or identifier
-        value = scalar_value(
-            re.match(
-                r'\s*[=:]\s*(?:"([^"]*)"|\'([^\']*)\'|([^"\'\s,;)\]}{]+))',
-                rest,
-            )
-        )
-        if value is not None:
-            return value
-
-        # Try parenthesized value
-        value = scalar_value(
-            re.match(
-                r'\s*\(\s*(?:"([^"]*)"|\'([^\']*)\'|([^"\'\s,;)]+))\s*\)',
-                rest,
-            )
-        )
-        if value is not None:
-            return value
-
-        # The assertion pattern may already consume the assignment delimiter
-        # (for example ``NAME\s*=\s*``). Extract the next scalar token rather
-        # than returning an arbitrary source suffix that only supported
-        # substring comparison.
-        value = scalar_value(re.match(r'\s*(?:"([^"]*)"|\'([^\']*)\'|([^"\'\s,;)\]}{]+))', rest))
-        if value is not None:
-            return value
-
-        # Return first 50 chars of what follows
-        return rest.strip()[:50]
+        return _extract_following_scalar(content, match.end())

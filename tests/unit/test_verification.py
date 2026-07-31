@@ -218,6 +218,34 @@ class TestSpecVerifier:
         assert summary.verified_count == 1
         assert summary.failed_count == 0
 
+    @pytest.mark.parametrize(
+        ("source_value", "expected_value"),
+        [
+            (r"hello \"world\"", 'hello "world"'),
+            ("x" * 110, "x" * 110),
+        ],
+        ids=["escaped-quote", "beyond-old-lookahead"],
+    )
+    def test_t1_constant_preserves_complete_quoted_value(
+        self,
+        source_value: str,
+        expected_value: str,
+    ) -> None:
+        project = self._create_project({"config.py": f'GREETING = "{source_value}"\n'})
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="Greeting must match",
+            tier=VerificationTier.T1_CONSTANT,
+            pattern=r"GREETING\s*=\s*",
+            expected_value=expected_value,
+            file_hint="*.py",
+        )
+
+        summary = SpecVerifier(project_dir=project).verify_all((assertion,))
+
+        assert summary.verified_count == 1
+        assert summary.failed_count == 0
+
     @pytest.mark.parametrize("actual_value", ["50", "15"])
     def test_t1_constant_rejects_prefix_and_suffix_collisions(self, actual_value: str) -> None:
         """Expected constants require exact extracted-value equality."""
