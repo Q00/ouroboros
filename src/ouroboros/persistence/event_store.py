@@ -7,7 +7,7 @@ with aiosqlite backend.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Mapping
+from collections.abc import Callable, Coroutine, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 import hashlib
@@ -95,35 +95,6 @@ _AC_ACCEPTANCE_OUTCOMES = frozenset(
 )
 
 
-async def _await_sqlite_write_atomically[T](awaitable: Awaitable[T]) -> T:
-    """Let a SQLite write transaction finish even if its caller is cancelled.
-
-    aiosqlite performs DB work on a worker thread. If an asyncio task is
-    cancelled while a transaction is in flight, returning to the caller before
-    the worker has finished can leave SQLite's write lock visible to the next
-    operation on the same EventStore. The cancellation still wins; this helper
-    only waits for the transaction coroutine to finish its commit/rollback path
-    before re-raising ``CancelledError``.
-    """
-    task: asyncio.Task[T] = asyncio.create_task(awaitable)
-    try:
-        return await asyncio.shield(task)
-    except asyncio.CancelledError:
-        while not task.done():
-            try:
-                await asyncio.shield(task)
-            except asyncio.CancelledError:
-                continue
-        try:
-            task.result()
-        except Exception:
-            logger.debug(
-                "event_store.sqlite_write.cleanup_after_cancellation_failed",
-                exc_info=True,
-            )
-        raise
-
-
 _AC_ACCEPTANCE_DISPOSITIONS = frozenset(
     {
         "accepted",
@@ -134,6 +105,107 @@ _AC_ACCEPTANCE_DISPOSITIONS = frozenset(
         "invalid",
     }
 )
+
+
+async def _run_to_settlement[T](
+    coro: Coroutine[Any, Any, T],
+    *,
+    registry: set[asyncio.Task[Any]] | None = None,
+    refuse_when: Callable[[], bool] | None = None,
+    operation: str = "append",
+) -> T:
+    """Run a transactional coroutine, settling it before cancellation surfaces.
+
+    A write, once begun, must commit or roll back inside the caller's
+    lifetime: shield-only semantics let a cancelled caller (and even
+    ``EventStore.close()``) return while the transaction was still pending,
+    so durable history could change after shutdown. Cancellation is re-raised
+    only after the inner task completes, which both preserves the
+    cancellation-atomicity contract and keeps every write within the store
+    lifecycle (#1794 review rounds one and two).
+    """
+    if refuse_when is not None and refuse_when():
+        # Admission is synchronized with close(): this check and the registry
+        # add below run in one synchronous block on the event loop, so a
+        # write either registers before close() snapshots the registry or is
+        # refused outright — it can never slip past the drain (round five).
+        coro.close()
+        raise PersistenceError(
+            "EventStore is closing; write refused.",
+            operation=operation,
+        )
+    inner: asyncio.Task[T] = asyncio.ensure_future(coro)
+    if registry is not None:
+        # close() drains this registry so no settling write can escape the
+        # store lifecycle (review round four).
+        registry.add(inner)
+        inner.add_done_callback(registry.discard)
+    try:
+        return await asyncio.shield(inner)
+    except asyncio.CancelledError as caller_cancellation:
+        while not inner.done():
+            try:
+                await asyncio.shield(inner)
+            except asyncio.CancelledError:
+                # A further caller cancellation — keep settling.
+                continue
+            except Exception:
+                # The transaction settled by failing; the loop exits below.
+                break
+        settlement_error: BaseException | None = None
+        if not inner.cancelled():
+            settlement_error = inner.exception()
+        if settlement_error is not None:
+            # Cancellation outranks the write's own failure: lifecycle code
+            # awaiting a cancelled task must still observe CancelledError
+            # (e.g. the watchdog's decision batch depends on it). The
+            # transaction failure is preserved as the cause.
+            logger.debug(
+                "event_store.append.settled_with_error",
+                exc_info=settlement_error,
+            )
+            raise caller_cancellation from settlement_error
+        raise
+
+
+async def _await_sqlite_write_atomically[T](awaitable: Coroutine[Any, Any, T]) -> T:
+    """Compatibility wrapper for cancellation-atomic SQLite writes.
+
+    The lifecycle-aware settlement primitive now also supports write
+    registration and close admission fencing. Keep the narrower helper for
+    callers and regressions that only need transaction settlement.
+    """
+    return await _run_to_settlement(awaitable)
+
+
+async def _run_with_write_lifecycle[T](
+    coro: Coroutine[Any, Any, T],
+    *,
+    registry: set[asyncio.Task[Any]],
+    refuse_when: Callable[[], bool],
+    operation: str,
+) -> T:
+    """Keep a complete logical write registered across retries and backoff."""
+    if refuse_when():
+        coro.close()
+        raise PersistenceError(
+            "EventStore is closing; write refused.",
+            operation=operation,
+        )
+    task = asyncio.current_task()
+    if task is None:  # pragma: no cover - async functions always have a task here.
+        coro.close()
+        raise PersistenceError(
+            "EventStore write has no owning task.",
+            operation=operation,
+        )
+    already_registered = task in registry
+    registry.add(task)
+    try:
+        return await coro
+    finally:
+        if not already_registered:
+            registry.discard(task)
 
 
 def acceptance_generation_id_for_session(session_id: str, execution_id: str) -> str:
@@ -519,6 +591,8 @@ class EventStore:
         await store.close()
     """
 
+    _settling_writes: set[asyncio.Task[Any]]
+
     def __init__(
         self,
         database_url: str | None = None,
@@ -557,6 +631,9 @@ class EventStore:
             database_url = sqlite_database_url(db_path)
 
         self._read_only = read_only
+        self._settling_writes = set()
+        self._closing = False
+        self._lifecycle_lock = asyncio.Lock()
         if read_only:
             database_url = self._coerce_to_readonly_url(database_url)
         self._database_url = database_url
@@ -686,12 +763,20 @@ class EventStore:
         shared database with normal connection-scoped transactions, and a
         keepalive connection anchors the database's lifetime.
         """
+        # Mutually exclusive with close() in BOTH orders (review rounds
+        # seven and eight): initialization during an in-flight close waits for
+        # the full drain/checkpoint/dispose sequence, and a close started
+        # during initialization waits for initialization to finish.
+        async with self._lifecycle_lock:
+            self._closing = False
+            await self._initialize_locked(create_schema=create_schema)
+
+    async def _initialize_locked(self, *, create_schema: bool | None = None) -> None:
         if self._configuration_error is not None:
             raise PersistenceError(
                 "Invalid EventStore configuration.",
                 operation="initialize",
             ) from self._configuration_error
-
         if create_schema is None:
             create_schema = not self._read_only
 
@@ -825,6 +910,21 @@ class EventStore:
         return None
 
     async def append_session_start_if_absent(self, event: BaseEvent) -> None:
+        """Fenced wrapper: admission + settlement for the CAS below.
+
+        Session lifecycle appends dispatch above append()'s settlement
+        path, so they carry their own closing fence and registry entry —
+        a lifecycle event can neither start during close() nor commit
+        after it (review round six).
+        """
+        return await _run_to_settlement(
+            self._append_session_start_if_absent_unfenced(event),
+            registry=self._settling_writes,
+            refuse_when=lambda: self._closing,
+            operation="append_session_start_if_absent",
+        )
+
+    async def _append_session_start_if_absent_unfenced(self, event: BaseEvent) -> None:
         """Publish exactly one immutable start identity for a session ID."""
         if self._engine is None:
             raise PersistenceError(
@@ -934,6 +1034,21 @@ class EventStore:
         )
 
     async def append_session_terminal_if_active(self, event: BaseEvent) -> bool:
+        """Fenced wrapper: admission + settlement for the CAS below.
+
+        Session lifecycle appends dispatch above append()'s settlement
+        path, so they carry their own closing fence and registry entry —
+        a lifecycle event can neither start during close() nor commit
+        after it (review round six).
+        """
+        return await _run_to_settlement(
+            self._append_session_terminal_if_active_unfenced(event),
+            registry=self._settling_writes,
+            refuse_when=lambda: self._closing,
+            operation="append_session_terminal_if_active",
+        )
+
+    async def _append_session_terminal_if_active_unfenced(self, event: BaseEvent) -> bool:
         """Append one terminal session event only while no terminal event exists.
 
         Returns ``True`` when ``event`` was inserted and ``False`` when another
@@ -1188,6 +1303,21 @@ class EventStore:
         return True
 
     async def append_session_pause_if_active(self, event: BaseEvent) -> bool:
+        """Fenced wrapper: admission + settlement for the CAS below.
+
+        Session lifecycle appends dispatch above append()'s settlement
+        path, so they carry their own closing fence and registry entry —
+        a lifecycle event can neither start during close() nor commit
+        after it (review round six).
+        """
+        return await _run_to_settlement(
+            self._append_session_pause_if_active_unfenced(event),
+            registry=self._settling_writes,
+            refuse_when=lambda: self._closing,
+            operation="append_session_pause_if_active",
+        )
+
+    async def _append_session_pause_if_active_unfenced(self, event: BaseEvent) -> bool:
         """Append PAUSED only while no explicit terminal session event exists.
 
         Returns ``True`` when the pause event was inserted and ``False`` when
@@ -1296,6 +1426,23 @@ class EventStore:
         _skip_workflow_ir_guard: bool = False,
     ) -> int:
         """Append an event and return its exact SQLite rowid."""
+        return await _run_with_write_lifecycle(
+            self._append_with_rowid_registered(
+                event,
+                _skip_workflow_ir_guard=_skip_workflow_ir_guard,
+            ),
+            registry=self._settling_writes,
+            refuse_when=lambda: self._closing,
+            operation="append_with_rowid",
+        )
+
+    async def _append_with_rowid_registered(
+        self,
+        event: BaseEvent,
+        *,
+        _skip_workflow_ir_guard: bool = False,
+    ) -> int:
+        """Implement one registered append, including all retries and backoff."""
         if self._engine is None:
             raise PersistenceError(
                 "EventStore not initialized. Call initialize() first.",
@@ -1345,8 +1492,16 @@ class EventStore:
                 },
             )
 
-        async def _insert_event() -> int:
-            async with self._engine.begin() as conn:
+        engine = self._engine
+
+        async def _insert_once() -> int:
+            # Shielded by the caller: a transaction, once begun, must commit or
+            # roll back even when the awaiting task is cancelled mid-append.
+            # An abandoned in-flight transaction poisons the pooled connection
+            # and fails the next writer — e.g. a watchdog cancelling a
+            # generation mid-append could then lose its own decision events,
+            # violating the durable-replay contract (#1794).
+            async with engine.begin() as conn:
                 await conn.execute(events_table.insert().values(**event.to_db_dict()))
                 rowid = await conn.scalar(
                     select(text("rowid"))
@@ -1360,11 +1515,18 @@ class EventStore:
                         table="events",
                         details={"event_id": event.id, "event_type": event.type},
                     )
-            return rowid
+                return rowid
 
         for attempt in range(3):
             try:
-                return await _await_sqlite_write_atomically(_insert_event())
+                return await _run_to_settlement(
+                    _insert_once(),
+                    registry=self._settling_writes,
+                    refuse_when=lambda: self._closing,
+                    operation="append_with_rowid",
+                )
+            except PersistenceError:
+                raise
             except Exception as e:
                 if "database is locked" in str(e) and attempt < 2:
                     logger.warning(
@@ -1402,6 +1564,15 @@ class EventStore:
             PersistenceError: If the batch operation fails. No events
                              will be persisted if this is raised.
         """
+        await _run_with_write_lifecycle(
+            self._append_batch_registered(events),
+            registry=self._settling_writes,
+            refuse_when=lambda: self._closing,
+            operation="append_batch",
+        )
+
+    async def _append_batch_registered(self, events: list[BaseEvent]) -> None:
+        """Implement one registered batch, including all retries and backoff."""
         if self._engine is None:
             raise PersistenceError(
                 "EventStore not initialized. Call initialize() first.",
@@ -1472,8 +1643,13 @@ class EventStore:
                 details={"count": len(acceptance_events)},
             )
 
-        async def _insert_batch() -> None:
-            async with self._engine.begin() as conn:
+        engine = self._engine
+
+        async def _insert_batch_once() -> None:
+            # Same cancellation-atomicity contract as append_with_rowid: the
+            # batch transaction must complete or roll back even if the caller
+            # is cancelled mid-append (#1794).
+            async with engine.begin() as conn:
                 await conn.execute(
                     events_table.insert(),
                     [event.to_db_dict() for event in events],
@@ -1481,8 +1657,15 @@ class EventStore:
 
         for attempt in range(3):
             try:
-                await _await_sqlite_write_atomically(_insert_batch())
+                await _run_to_settlement(
+                    _insert_batch_once(),
+                    registry=self._settling_writes,
+                    refuse_when=lambda: self._closing,
+                    operation="append_batch",
+                )
                 return
+            except PersistenceError:
+                raise
             except Exception as e:
                 if "database is locked" in str(e) and attempt < 2:
                     logger.warning(
@@ -2865,20 +3048,45 @@ class EventStore:
         return True
 
     async def close(self) -> None:
-        """Close the database connection."""
-        if self._engine is not None:
-            # Collapse the WAL before disposing so the -wal file does not
-            # survive shutdown. Best effort — see checkpoint_wal().
-            await self.checkpoint_wal()
-            await self._engine.dispose()
-            self._engine = None
-        if self._memory_keepalive is not None:
-            # Release the shared in-memory database anchor last so pooled
-            # connections never observe the database disappearing mid-dispose.
+        """Close the database connection.
+
+        Drains settling writes first: a transaction that outlived a cancelled
+        caller must land before the WAL checkpoint and engine disposal, or
+        durable history could change after shutdown (review round four).
+        """
+        async with self._lifecycle_lock:
+            self._closing = True
             try:
-                self._memory_keepalive.close()
-            finally:
-                self._memory_keepalive = None
+                while self._settling_writes:
+                    done, _ = await asyncio.wait(tuple(self._settling_writes))
+                    for task in done:
+                        if not task.cancelled() and task.exception() is not None:
+                            logger.debug(
+                                "event_store.close.drained_failed_write",
+                                exc_info=task.exception(),
+                            )
+                if self._engine is not None:
+                    # Collapse the WAL before disposing so the -wal file does
+                    # not survive shutdown. Best effort — see checkpoint_wal().
+                    await self.checkpoint_wal()
+                    await self._engine.dispose()
+                    self._engine = None
+                if self._memory_keepalive is not None:
+                    # Release the shared in-memory database anchor last so
+                    # pooled connections never observe the database
+                    # disappearing mid-dispose.
+                    try:
+                        self._memory_keepalive.close()
+                    finally:
+                        self._memory_keepalive = None
+            except asyncio.CancelledError:
+                # A cancelled close must leave a recoverable lifecycle, not a
+                # permanently closing store: writes drained so far are
+                # durable, and if the engine still exists the store stays
+                # usable (review round eight).
+                if self._engine is not None:
+                    self._closing = False
+                raise
 
 
 @dataclass(frozen=True, slots=True)
