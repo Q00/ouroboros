@@ -67,6 +67,18 @@ class TestAggregate:
         assert outcomes["codex"].completed == 1
         assert outcomes["codex"].failed == 1
 
+    def test_reserved_path_characters_are_not_uri_delimiters(self, tmp_path: Path) -> None:
+        now = datetime.now(UTC)
+        db_path = tmp_path / "events?blue#100%.db"
+        _make_events_db(
+            db_path,
+            [("execution.session.completed", {"runtime_backend": "codex"}, now)],
+        )
+
+        outcomes = backend_outcomes.aggregate_backend_outcomes(db_path=db_path)
+
+        assert outcomes["codex"].completed == 1
+
     def test_ignores_unrelated_event_types(self, fixture_db: Path) -> None:
         outcomes = backend_outcomes.aggregate_backend_outcomes(db_path=fixture_db)
         # execution.ac.completed must not inflate claude's completed count (=2 not 3).

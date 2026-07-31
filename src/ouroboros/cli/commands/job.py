@@ -15,7 +15,7 @@ from ouroboros.config.models import resolve_event_store_path
 from ouroboros.events.base import BaseEvent
 from ouroboros.mcp.tools.job_handlers import JobResultHandler, JobStatusHandler, JobWaitHandler
 from ouroboros.mcp.types import MCPToolResult
-from ouroboros.persistence.event_store import EventStore
+from ouroboros.persistence.event_store import EventStore, sqlite_database_url
 
 app = typer.Typer(
     name="job",
@@ -52,7 +52,7 @@ async def _open_read_only_event_store(db_path: str | None = None) -> EventStore:
     resolved = os.path.expanduser(db_path or _default_db_path())
     if not Path(resolved).exists():
         raise FileNotFoundError(resolved)
-    event_store = EventStore(f"sqlite+aiosqlite:///{resolved}", read_only=True)
+    event_store = EventStore(sqlite_database_url(resolved), read_only=True)
     try:
         await event_store.initialize()
     except Exception:

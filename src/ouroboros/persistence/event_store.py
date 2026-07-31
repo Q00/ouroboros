@@ -13,6 +13,7 @@ from datetime import datetime
 import hashlib
 import json
 import logging
+from pathlib import Path
 import sqlite3
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote, unquote
@@ -37,6 +38,13 @@ from ouroboros.persistence.schema import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def sqlite_database_url(path: str | Path) -> str:
+    """Build an aiosqlite file URI without treating path characters as URI syntax."""
+    encoded_path = quote(str(Path(path).expanduser()), safe="/:")
+    return f"sqlite+aiosqlite:///file:{encoded_path}?uri=true"
+
 
 _RAW_SUBSCRIBED_EVENT_TYPE_KEYS = frozenset({"type", "event", "kind", "name"})
 _RAW_SUBSCRIBED_EVENT_SIGNAL_KEYS = frozenset(
@@ -509,7 +517,7 @@ class EventStore:
                 db_path = get_config_dir() / "ouroboros.db"
             if not read_only and self._configuration_error is None:
                 db_path.parent.mkdir(parents=True, exist_ok=True)
-            database_url = f"sqlite+aiosqlite:///{db_path}"
+            database_url = sqlite_database_url(db_path)
 
         self._read_only = read_only
         if read_only:

@@ -29,6 +29,7 @@ from datetime import UTC, datetime, timedelta
 import json
 from pathlib import Path
 import sqlite3
+from urllib.parse import quote
 
 from ouroboros.config.models import resolve_event_store_path
 from ouroboros.observability.logging import get_logger
@@ -112,7 +113,8 @@ def aggregate_backend_outcomes(
     try:
         # True read-only handle: mode=ro fails fast on any accidental write and
         # never creates the DB file.
-        uri = f"file:{path}?mode=ro"
+        encoded_path = quote(str(path), safe="/")
+        uri = f"file:{encoded_path}?mode=ro"
         with sqlite3.connect(uri, uri=True, timeout=1.0) as conn:
             rows = conn.execute(
                 "SELECT event_type, payload, timestamp FROM events "

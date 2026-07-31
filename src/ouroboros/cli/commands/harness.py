@@ -225,9 +225,9 @@ async def _open_event_store(db_path: Path):
     """
     if not db_path.exists():
         return None
-    from ouroboros.persistence.event_store import EventStore
+    from ouroboros.persistence.event_store import EventStore, sqlite_database_url
 
-    store = EventStore(f"sqlite+aiosqlite:///{db_path}", read_only=True)
+    store = EventStore(sqlite_database_url(db_path), read_only=True)
     try:
         await store.initialize()
     except Exception:

@@ -18,7 +18,7 @@ import typer
 
 from ouroboros.cli.formatters.panels import print_error, print_info, print_success
 from ouroboros.config.models import resolve_event_store_path
-from ouroboros.persistence.event_store import EventStore
+from ouroboros.persistence.event_store import EventStore, sqlite_database_url
 
 app = typer.Typer(
     name="tui",
@@ -80,7 +80,7 @@ def monitor_command(
 
     # Initialize EventStore
     resolved_db_path.parent.mkdir(parents=True, exist_ok=True)
-    event_store = EventStore(f"sqlite+aiosqlite:///{resolved_db_path}")
+    event_store = EventStore(sqlite_database_url(resolved_db_path))
 
     # Initialize and run the TUI
     async def init_and_run() -> None:

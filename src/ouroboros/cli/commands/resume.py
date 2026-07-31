@@ -56,14 +56,14 @@ async def _get_event_store(db_path: str | None = None):
     so any accidental write path raises
     ``sqlite3.OperationalError: attempt to write a readonly database``.
     """
-    from ouroboros.persistence.event_store import EventStore
+    from ouroboros.persistence.event_store import EventStore, sqlite_database_url
 
     resolved = db_path or _default_db_path()
     if not Path(resolved).exists():
         return None
 
     event_store = EventStore(
-        f"sqlite+aiosqlite:///{resolved}",
+        sqlite_database_url(resolved),
         read_only=True,
     )
     try:

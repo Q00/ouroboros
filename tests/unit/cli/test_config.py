@@ -211,6 +211,47 @@ def test_non_mapping_config_redacts_config_path(tmp_path: Path, arguments: list[
     assert "Traceback" not in output
 
 
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["config", "show", "--json"],
+        ["status", "executions"],
+        ["resume"],
+        ["tui", "open"],
+        ["mcp", "doctor", "--json"],
+        ["mcp", "serve", "--transport", "stdio"],
+    ],
+)
+def test_wrong_type_persistence_redacts_config_value(
+    tmp_path: Path,
+    arguments: list[str],
+) -> None:
+    home = tmp_path / "home"
+    config_dir = home / ".ouroboros"
+    config_dir.mkdir(parents=True)
+    private_value = "/Users/gate/private"
+    config_path = config_dir / "config.yaml"
+    config_path.write_text(f"persistence: {private_value}\n")
+    env = os.environ.copy()
+    env["HOME"] = str(home)
+
+    result = subprocess.run(
+        [sys.executable, "-m", "ouroboros", *arguments],
+        stdin=subprocess.DEVNULL,
+        text=True,
+        capture_output=True,
+        check=False,
+        env=env,
+        timeout=10,
+    )
+    output = result.stdout + result.stderr
+
+    assert result.returncode != 0
+    assert private_value not in output
+    assert str(config_path) not in output
+    assert "Traceback" not in output
+
+
 # ── config backend ───────────────────────────────────────────────
 
 
@@ -380,7 +421,7 @@ class TestConfigBackend:
         from ouroboros.cli.commands import setup as setup_mod
 
         def _failing_setup(cli_path: str) -> None:
-            setup_mod.print_error("Could not locate packaged Codex rules.")
+            setup_mod.__dict__["print_error"]("Could not locate packaged Codex rules.")
 
         with (
             patch("ouroboros.config.models.get_config_dir", return_value=config_dir),

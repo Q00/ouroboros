@@ -123,8 +123,7 @@ def _load_config() -> tuple[dict, Path]:
         val = data.get(section)
         if val is not None and not isinstance(val, dict):
             print_error(
-                f"Invalid config section '{section}' in {config_path} "
-                f"(expected mapping, got {type(val).__name__})"
+                f"Invalid config section '{section}' (expected mapping, got {type(val).__name__})"
             )
             raise typer.Exit(1)
 

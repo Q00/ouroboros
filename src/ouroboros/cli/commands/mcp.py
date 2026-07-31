@@ -534,7 +534,7 @@ async def _run_mcp_server(
     from ouroboros.mcp.server.adapter import create_ouroboros_server, validate_transport
     from ouroboros.orchestrator.session import SessionRepository
     from ouroboros.persistence.brownfield import BrownfieldStore
-    from ouroboros.persistence.event_store import EventStore
+    from ouroboros.persistence.event_store import EventStore, sqlite_database_url
 
     # Validate transport early, before any expensive startup work
     try:
@@ -558,7 +558,7 @@ async def _run_mcp_server(
         except ValueError:
             _console_out.print("[red]Invalid EventStore configuration.[/red]")
             raise typer.Exit(1) from None
-    database_url = f"sqlite+aiosqlite:///{resolved_db_path}"
+    database_url = sqlite_database_url(resolved_db_path)
     event_store = EventStore(database_url)
     brownfield_store = BrownfieldStore(database_url)
 

@@ -38,7 +38,7 @@ from ouroboros.config.loader import load_config
 from ouroboros.config.models import resolve_event_store_path
 from ouroboros.events.base import BaseEvent
 from ouroboros.mcp.tools.projection_handlers import ProjectionQueryHandler
-from ouroboros.persistence.event_store import EventStore
+from ouroboros.persistence.event_store import EventStore, sqlite_database_url
 
 app = typer.Typer(
     name="status",
@@ -203,7 +203,7 @@ async def _recent_execution_events(
     *,
     execution_limit: int | None,
 ) -> list[tuple[str, BaseEvent]]:
-    store = EventStore(f"sqlite+aiosqlite:///{db_path}", read_only=True)
+    store = EventStore(sqlite_database_url(db_path), read_only=True)
     await store.initialize(create_schema=False)
     try:
         persisted = await store.query_latest_events_per_aggregate(
@@ -283,7 +283,7 @@ async def _execution_events(
     *,
     include_all: bool,
 ) -> list[BaseEvent]:
-    store = EventStore(f"sqlite+aiosqlite:///{db_path}", read_only=True)
+    store = EventStore(sqlite_database_url(db_path), read_only=True)
     await store.initialize(create_schema=False)
     try:
         snapshots = await store.get_session_activity_snapshots()
@@ -326,7 +326,7 @@ async def _execution_events(
 
 
 async def _validate_event_store(db_path: Path) -> None:
-    store = EventStore(f"sqlite+aiosqlite:///{db_path}", read_only=True)
+    store = EventStore(sqlite_database_url(db_path), read_only=True)
     await store.initialize(create_schema=False)
     try:
         await store.query_events(limit=1)
