@@ -20,6 +20,8 @@ from datetime import UTC, datetime
 import hashlib
 import json
 import math
+import os
+from pathlib import PurePosixPath, PureWindowsPath
 import re
 from typing import Any, Literal
 from uuid import uuid4
@@ -40,6 +42,215 @@ _OUTPUT_ASSERTION_CONDITION_RE = re.compile(
     r"^(?:exit\s*(?:code|status)?\s*0|returns?\s*0|success|succeeds|passed|passes|ok exit|no errors?)$",
     re.IGNORECASE,
 )
+_WINDOWS_FORBIDDEN_COMPONENT_CHARS = frozenset('<>:"|?*')
+_WINDOWS_RESERVED_COMPONENT_STEMS = frozenset(
+    {
+        "CON",
+        "PRN",
+        "AUX",
+        "NUL",
+        "CONIN$",
+        "CONOUT$",
+        *(f"COM{index}" for index in range(1, 10)),
+        *(f"LPT{index}" for index in range(1, 10)),
+        "COM¹",
+        "COM²",
+        "COM³",
+        "LPT¹",
+        "LPT²",
+        "LPT³",
+    }
+)
+_EXPECTED_ARTIFACT_DELIMITER_RE = re.compile(r",\s+")
+_PORTABLE_PATH_COMPONENT_MAX_BYTES = 255
+_POSIX_PORTABLE_PATH_MAX_BYTES = 256
+_WINDOWS_CONSERVATIVE_PATH_MAX_UTF16_UNITS = 260
+MAX_AC_SUCCESS_CONTRACT_ARTIFACTS = 253
+# The capsule locator allows 2,048 characters including ``workspace:``.
+# Keep that historical character ceiling as an independent serialization
+# contract; filesystem materializability uses the stricter byte ceiling below.
+MAX_AC_SUCCESS_CONTRACT_ARTIFACT_CHARS = 2_038
+# POSIX guarantees PATH_MAX >= 256 including the terminating NUL. Limiting the
+# canonical relative payload to 255 bytes makes every schema-valid artifact
+# materializable as a standalone relative pathname on a conforming target;
+# capsule/runtime checks below also account for the actual workspace prefix.
+MAX_AC_SUCCESS_CONTRACT_ARTIFACT_PATH_BYTES = _POSIX_PORTABLE_PATH_MAX_BYTES - 1
+MAX_AC_SUCCESS_CONTRACT_CHARS = 64_000
+
+
+def _is_none_sentinel(value: str) -> bool:
+    return value.strip(" ").upper() == "NONE"
+
+
+def _windows_component_error(component: str) -> str | None:
+    if component.endswith((" ", ".")):
+        return "contains a Windows path component ending in a space or dot"
+    if any(character in _WINDOWS_FORBIDDEN_COMPONENT_CHARS for character in component):
+        return "contains a Windows-forbidden path character"
+    stem = component.split(".", 1)[0].rstrip(" ").upper()
+    if stem in _WINDOWS_RESERVED_COMPONENT_STEMS:
+        return "contains a Windows-reserved path component"
+    return None
+
+
+def expected_artifact_path_error(artifact: str) -> str | None:
+    """Return why an expected-artifact value is not a portable relative path."""
+
+    if not artifact or any(ord(character) < 32 or ord(character) == 127 for character in artifact):
+        return "contains an empty value or control character"
+    if _is_none_sentinel(artifact):
+        return "contains NONE mixed with artifact paths; use NONE only as the entire field"
+    if "\\" in artifact:
+        return "contains a backslash; use POSIX '/' separators"
+    if "," in artifact:
+        return "contains a comma; artifact list strings use comma+whitespace delimiters"
+    posix_path = PurePosixPath(artifact)
+    windows_path = PureWindowsPath(artifact)
+    if not posix_path.parts or not windows_path.parts:
+        return "resolves to the workspace root"
+    if (
+        posix_path.is_absolute()
+        or windows_path.is_absolute()
+        or bool(windows_path.drive)
+        or bool(windows_path.root)
+        or ".." in posix_path.parts
+        or ".." in windows_path.parts
+    ):
+        return "is absolute or escapes workspace"
+    for component in windows_path.parts:
+        component_error = _windows_component_error(component)
+        if component_error is not None:
+            return component_error
+    for component in posix_path.parts:
+        try:
+            encoded_component = component.encode("utf-8")
+        except UnicodeEncodeError:
+            return "contains text that cannot be encoded as UTF-8"
+        if len(encoded_component) > _PORTABLE_PATH_COMPONENT_MAX_BYTES:
+            return "contains a path component longer than 255 filesystem bytes"
+    encoded_artifact = posix_path.as_posix().encode("utf-8")
+    if len(encoded_artifact) > MAX_AC_SUCCESS_CONTRACT_ARTIFACT_PATH_BYTES:
+        return (
+            "contains a canonical path longer than "
+            f"{MAX_AC_SUCCESS_CONTRACT_ARTIFACT_PATH_BYTES} portable filesystem bytes"
+        )
+    if any(character.isspace() for character in artifact):
+        has_explicit_relative_structure = "/" in artifact or "\\" in artifact
+        if not has_explicit_relative_structure:
+            return "is ambiguous prose; prefix a top-level spaced path with ./"
+    return None
+
+
+def expected_artifact_workspace_path_error(
+    artifact: str,
+    workspace: str,
+    *,
+    platform: Literal["posix", "windows"] | None = None,
+    path_capacity: int | None = None,
+) -> str | None:
+    """Return why an artifact cannot materialize under a concrete workspace.
+
+    Schema validation owns the portable relative-path ceiling. Capsule and
+    runtime callers additionally use this function to include the workspace
+    prefix and the target platform's pathname capacity. Optional platform and
+    capacity parameters make Windows/POSIX fail-closed behavior deterministic
+    in tests without hard-coding the current machine.
+    """
+    path_error = expected_artifact_path_error(artifact)
+    if path_error is not None:
+        return path_error
+
+    selected_platform = platform or ("windows" if os.name == "nt" else "posix")
+    parts = PurePosixPath(artifact).parts
+    if selected_platform == "windows":
+        capacity = (
+            path_capacity
+            if path_capacity is not None
+            else _WINDOWS_CONSERVATIVE_PATH_MAX_UTF16_UNITS
+        )
+        candidate = str(PureWindowsPath(workspace, *parts))
+        path_units = len(candidate.encode("utf-16-le")) // 2 + 1
+        if path_units > capacity:
+            return f"workspace path exceeds Windows capacity ({capacity} UTF-16 units)"
+        return None
+
+    capacity = path_capacity
+    if capacity is None:
+        try:
+            discovered = os.pathconf(workspace, "PC_PATH_MAX")
+        except (AttributeError, OSError, ValueError):
+            discovered = _POSIX_PORTABLE_PATH_MAX_BYTES
+        capacity = discovered if discovered > 0 else _POSIX_PORTABLE_PATH_MAX_BYTES
+    candidate = str(PurePosixPath(workspace, *parts))
+    try:
+        path_bytes = len(os.fsencode(candidate)) + 1
+    except UnicodeEncodeError:
+        return "workspace path cannot be encoded for the POSIX filesystem"
+    if path_bytes > capacity:
+        return f"workspace path exceeds POSIX capacity ({capacity} bytes)"
+    return None
+
+
+def parse_expected_artifact_list(value: str) -> tuple[str, ...]:
+    """Parse a generated expected-artifacts list using the shared path grammar."""
+
+    if any(ord(character) < 32 or ord(character) == 127 for character in value):
+        raise ValueError("expected_artifacts entries cannot contain control characters")
+    stripped = value.strip(" ")
+    if not stripped or _is_none_sentinel(stripped):
+        return ()
+    artifacts = tuple(item.strip(" ") for item in _EXPECTED_ARTIFACT_DELIMITER_RE.split(value))
+    if any(not artifact for artifact in artifacts):
+        raise ValueError("expected_artifacts entries cannot be empty")
+    return artifacts
+
+
+def validate_ac_success_contract_values(
+    *,
+    verify_command: str | None,
+    expected_artifacts: tuple[str, ...],
+    output_assertion: str | None,
+) -> None:
+    """Enforce the execution capsule's complete success-contract budget.
+
+    This validator lives at the Seed boundary so every schema-valid contract
+    is guaranteed to be materializable by the downstream execution capsule.
+    The capsule calls the same function for low-level and replay inputs rather
+    than maintaining a second set of limits.
+    """
+    if verify_command is not None and not isinstance(verify_command, str):
+        raise ValueError("success contract verify command is invalid")
+    if output_assertion is not None and not isinstance(output_assertion, str):
+        raise ValueError("success contract output assertion is invalid")
+    try:
+        artifact_count = len(expected_artifacts)
+    except TypeError as exc:
+        raise ValueError("success contract artifacts are invalid") from exc
+    if artifact_count > MAX_AC_SUCCESS_CONTRACT_ARTIFACTS:
+        raise ValueError(
+            f"success contract artifact limit exceeded ({MAX_AC_SUCCESS_CONTRACT_ARTIFACTS})"
+        )
+
+    contract_chars = len(verify_command or "") + len(output_assertion or "")
+    for path in expected_artifacts:
+        try:
+            encoded_path = (
+                PurePosixPath(path).as_posix().encode("utf-8") if isinstance(path, str) else b""
+            )
+        except UnicodeEncodeError as exc:
+            raise ValueError("success contract artifacts are invalid") from exc
+        if (
+            not isinstance(path, str)
+            or not path
+            or len(path) > MAX_AC_SUCCESS_CONTRACT_ARTIFACT_CHARS
+            or len(encoded_path) > MAX_AC_SUCCESS_CONTRACT_ARTIFACT_PATH_BYTES
+        ):
+            raise ValueError("success contract artifacts are invalid")
+        contract_chars += len(path)
+    if contract_chars > MAX_AC_SUCCESS_CONTRACT_CHARS:
+        raise ValueError(
+            f"success contract character budget exceeded ({MAX_AC_SUCCESS_CONTRACT_CHARS})"
+        )
 
 
 class ExitCondition(BaseModel, frozen=True):
@@ -239,14 +450,51 @@ class InvestmentSpec(BaseModel, frozen=True):
 
 
 class AcceptanceCriterionSpec(BaseModel, frozen=True):
-    """Structured success contract for one acceptance criterion."""
+    """Structured success contract for one acceptance criterion.
+
+    ``expected_artifacts`` entries are exact file or directory paths relative
+    to the run workspace. They are not descriptive artifact labels: the
+    execution verifier resolves every entry literally and requires it to exist.
+    """
 
     description: str
     semantic_ac_key: str | None = Field(default=None, pattern=r"^ac_[a-f0-9]{16}$")
     verify_command: str | None = Field(default=None)
-    expected_artifacts: tuple[str, ...] = Field(default_factory=tuple)
-    output_assertion: str | None = Field(default=None)
+    expected_artifacts: tuple[str, ...] = Field(
+        default_factory=tuple,
+        description=(
+            "Exact file or directory paths relative to the run workspace; "
+            "each path is resolved literally and must exist; each component "
+            "is at most 255 UTF-8 bytes and the complete canonical path at most 255; "
+            "prefix top-level paths containing spaces with ./"
+        ),
+    )
+    output_assertion: str | None = Field(
+        default=None,
+        description="Literal string required in verify_command combined stdout and stderr",
+    )
     investment: InvestmentSpec | None = Field(default=None)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _validate_raw_success_contract(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        raw_assertion = data.get("output_assertion")
+        if (
+            not isinstance(raw_assertion, str)
+            or not raw_assertion.strip(" ")
+            or _is_none_sentinel(raw_assertion)
+        ):
+            return data
+        raw_verify = data.get("verify_command")
+        if (
+            not isinstance(raw_verify, str)
+            or not raw_verify.strip(" ")
+            or _is_none_sentinel(raw_verify)
+        ):
+            raise ValueError("output_assertion requires verify_command")
+        return data
 
     @field_validator("description", mode="before")
     @classmethod
@@ -260,7 +508,7 @@ class AcceptanceCriterionSpec(BaseModel, frozen=True):
     def _strip_optional_text(cls, value: Any) -> Any:
         if isinstance(value, str):
             stripped = value.strip()
-            if not stripped or stripped.upper() == "NONE":
+            if not stripped or _is_none_sentinel(stripped):
                 return None
             return stripped
         return value
@@ -270,7 +518,7 @@ class AcceptanceCriterionSpec(BaseModel, frozen=True):
     def _normalize_output_assertion(cls, value: Any) -> Any:
         if isinstance(value, str):
             stripped = value.strip()
-            if not stripped or stripped.upper() == "NONE":
+            if not stripped or _is_none_sentinel(stripped):
                 return None
             if _OUTPUT_ASSERTION_CONDITION_RE.fullmatch(stripped):
                 return None
@@ -283,12 +531,42 @@ class AcceptanceCriterionSpec(BaseModel, frozen=True):
         if value is None:
             return ()
         if isinstance(value, str):
-            if not value.strip() or value.strip().upper() == "NONE":
-                return ()
-            return tuple(item.strip() for item in value.split(",") if item.strip())
+            return parse_expected_artifact_list(value)
         if isinstance(value, list | tuple | set):
-            return tuple(str(item).strip() for item in value if str(item).strip())
+            if any(not isinstance(item, str) for item in value):
+                raise ValueError("expected_artifacts entries must be strings")
+            artifacts = tuple(value)
+            if any(
+                not artifact
+                or any(ord(character) < 32 or ord(character) == 127 for character in artifact)
+                for artifact in artifacts
+            ):
+                raise ValueError(
+                    "expected_artifacts entries cannot be empty or contain control characters"
+                )
+            return artifacts
         return value
+
+    @model_validator(mode="after")
+    def _validate_success_contract(self) -> AcceptanceCriterionSpec:
+        if self.output_assertion and not self.verify_command:
+            raise ValueError("output_assertion requires verify_command")
+        invalid_artifacts = tuple(
+            (artifact, error)
+            for artifact in self.expected_artifacts
+            if (error := expected_artifact_path_error(artifact)) is not None
+        )
+        if invalid_artifacts:
+            rendered = ", ".join(f"{artifact!r} ({error})" for artifact, error in invalid_artifacts)
+            raise ValueError(
+                f"expected_artifacts entries must be portable workspace-relative paths: {rendered}"
+            )
+        validate_ac_success_contract_values(
+            verify_command=self.verify_command,
+            expected_artifacts=self.expected_artifacts,
+            output_assertion=self.output_assertion,
+        )
+        return self
 
     @property
     def has_success_contract(self) -> bool:

@@ -50,18 +50,31 @@ Example: ["Python >= 3.12", "No external database", "Must work offline"]
 
 ### 3. ACCEPTANCE_CRITERIA
 Specific, measurable criteria for success.
-Format: one `AC:` line per criterion
-Example: "AC: Tasks can be created | verify: python -m pytest tests/test_tasks.py | artifacts: NONE | expect: created task"
+Format: exactly one non-empty, single-line JSON array. Every object contains
+exactly `description`, `verify`, `artifacts`, and `expect`. `artifacts` is a JSON
+array of paths or the string `NONE`; the other contract fields are strings.
+Example: `[{"description":"Tasks can be created","verify":"python -m pytest tests/test_tasks.py -q","artifacts":"NONE","expect":"NONE"}]`
+Multi-artifact example: `[{"description":"Build outputs exist","verify":"NONE","artifacts":["dist/app","docs/User Guide.md"],"expect":"NONE"}]`
 
 `verify` / `verify_command` semantics:
 - Use exactly one single-line shell command.
 - NEVER use heredoc or multiline shell syntax such as `<<`, `<<'PY'`, `cat <<EOF`, line-continuation scripts, or an unterminated command block. The AC contract format is one line, so multiline command bodies will be lost.
 - For Python snippets, use `python -c "..."` / `python3 -c "..."`; for longer checks, require a pytest-discoverable test artifact and use `python -m pytest -q`.
 
+`artifacts` / `expected_artifacts` semantics:
+- Every entry is an exact portable file or directory path relative to the run workspace. The runner resolves each entry literally and requires it to exist.
+- Encode multiple entries as one JSON array, for example
+  `"artifacts":["dist/app","docs/User Guide.md"]`.
+- Do not put commas or backslashes inside artifact paths.
+- NEVER use a descriptive label such as `schema v2 outputs` or `user approval record` as an artifact path.
+- Prefix a top-level file or directory containing spaces with `./`, for example `./Build Outputs`; nested paths such as `docs/User Guide.md` are already explicit.
+- If no exact path is known, write `artifacts: NONE` and provide a concrete `verify` command instead.
+- File or directory existence can be a complete contract. For a stateful artifact that can still be pending or blocked, also provide a `verify` command that checks its semantic state.
+
 `expect` / `output_assertion` semantics:
-- Use `expect` ONLY for a literal string that the verify command prints to stdout verbatim, such as `OK` or `5 passed`.
+- Use `expect` ONLY for a literal string present verbatim in the verify command's combined stdout and stderr, such as `OK` or `5 passed`.
 - NEVER use a condition, status, or exit-code description such as `exit code 0`, `exit 0`, `returns 0`, `success`, `no errors`, `passed`, or `passes`.
-- If the command has no distinctive stdout literal to assert, write `expect: NONE`. Exit-code 0 is already verified separately by the runner.
+- If the command has no distinctive output literal to assert, write `expect: NONE`. Exit-code 0 is already verified separately by the runner.
 
 **Granularity contract (read carefully):**
 
@@ -96,14 +109,13 @@ If the interview mentions existing codebases, extract:
 
 ## OUTPUT FORMAT
 
-Provide your analysis in this exact structure:
+Provide your analysis in this exact structure. In particular,
+`ACCEPTANCE_CRITERIA` is one field on one line; never emit nested `AC:` lines.
 
 ```
 GOAL: <clear goal statement>
 CONSTRAINTS: ["<constraint 1>", "<constraint 2>", ...]
-ACCEPTANCE_CRITERIA:
-AC: <description> | verify: <command or NONE> | artifacts: <comma-list or NONE> | expect: <output assertion or NONE>
-AC: <description> | verify: <command or NONE> | artifacts: <comma-list or NONE> | expect: <output assertion or NONE>
+ACCEPTANCE_CRITERIA: [{"description": "Observable outcome", "verify": "python -m pytest -q", "artifacts": ["path/to/artifact"], "expect": "NONE"}]
 ONTOLOGY_NAME: <name>
 ONTOLOGY_DESCRIPTION: <description>
 ONTOLOGY_FIELDS: [{"name": "<name>", "type": "<string|number|boolean|array|object>", "description": "<description>"}, ...]
@@ -124,8 +136,5 @@ For brownfield projects, ensure context references and patterns are extracted fr
 Few-shot examples:
 
 ```
-ACCEPTANCE_CRITERIA:
-AC: Task create/list flows pass automated verification | verify: python -m pytest tests/test_tasks.py -q && echo OK | artifacts: NONE | expect: OK
-AC: Greeting import check prints OK | verify: python -c "from hello import greet; assert greet('Alice') == 'Hello, Alice'; print('OK')" | artifacts: hello.py | expect: OK
-AC: README documents the CLI usage examples | verify: NONE | artifacts: README.md | expect: NONE
+ACCEPTANCE_CRITERIA: [{"description":"Task create/list flows pass automated verification","verify":"python -m pytest tests/test_tasks.py -q && echo OK","artifacts":"NONE","expect":"OK"},{"description":"Greeting import check prints OK","verify":"python -c \"from hello import greet; assert greet('Alice') == 'Hello, Alice'; print('OK')\"","artifacts":["hello.py"],"expect":"OK"},{"description":"README documents the CLI usage examples","verify":"NONE","artifacts":["README.md"],"expect":"NONE"}]
 ```

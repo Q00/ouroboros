@@ -4297,6 +4297,7 @@ class _FinalMessageRuntime:
         self._execute_support_commands = execute_support_commands
         self._cwd = cwd
         self._success = success
+        self.call_count = 0
         self.last_prompt: str | None = None
         self.last_system_prompt: str | None = None
 
@@ -4321,6 +4322,7 @@ class _FinalMessageRuntime:
         resume_session_id: str | None = None,
     ):
         del tools, resume_session_id
+        self.call_count += 1
         self.last_prompt = prompt
         self.last_system_prompt = system_prompt
         for message in self._support_messages:
@@ -4364,6 +4366,173 @@ class _FinalMessageRuntime:
                 metadata=dict(resume_handle.metadata) if resume_handle is not None else {},
             ),
         )
+
+
+def _deep_macos_workspace() -> str:
+    workspace = "/Users/developer/Library/Application Support/" + "/".join(
+        f"workspace-{index:03d}" for index in range(61)
+    )
+    assert len(os.fsencode(workspace)) < 1_024
+    return workspace
+
+
+@pytest.mark.asyncio
+async def test_atomic_admission_rejects_unmaterializable_contract_without_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = _deep_macos_workspace()
+    monkeypatch.setattr("ouroboros.core.seed.os.pathconf", lambda *_args: 1_024)
+    runtime = _FinalMessageRuntime("[TASK_COMPLETE]", native_session_id="must-not-dispatch")
+    executor = ParallelACExecutor(
+        adapter=runtime,
+        event_store=AsyncMock(),
+        console=MagicMock(),
+        enable_decomposition=False,
+        task_cwd=workspace,
+    )
+
+    result = await executor._execute_atomic_ac(
+        ac_index=0,
+        ac_content="Materialize the declared artifact",
+        session_id="sess_unmaterializable",
+        execution_id="exec_unmaterializable",
+        tools=["Read"],
+        system_prompt="system",
+        seed_goal="Ship the artifact",
+        depth=0,
+        start_time=datetime.now(UTC),
+        ac_spec=AcceptanceCriterionSpec(
+            description="Materialize the declared artifact",
+            expected_artifacts=("nested/" + "a" * 200,),
+        ),
+    )
+
+    assert result.success is False
+    assert result.outcome is ACExecutionOutcome.INVALID
+    assert result.error is not None
+    assert result.error.startswith("unmaterializable_success_contract:")
+    assert "workspace path exceeds POSIX capacity (1024 bytes)" in result.error
+    assert runtime.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_atomic_windows_capacity_rejection_does_not_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from ouroboros.core.seed import expected_artifact_workspace_path_error
+
+    monkeypatch.setattr(
+        "ouroboros.orchestrator.ac_execution_capsule.expected_artifact_workspace_path_error",
+        lambda artifact, workspace: expected_artifact_workspace_path_error(
+            artifact,
+            workspace,
+            platform="windows",
+            path_capacity=260,
+        ),
+    )
+    runtime = _FinalMessageRuntime("[TASK_COMPLETE]", native_session_id="must-not-dispatch")
+    executor = ParallelACExecutor(
+        adapter=runtime,
+        event_store=AsyncMock(),
+        console=MagicMock(),
+        enable_decomposition=False,
+        task_cwd=r"C:\Users\developer\source\ouroboros",
+    )
+
+    result = await executor._execute_atomic_ac(
+        ac_index=0,
+        ac_content="Materialize the declared artifact",
+        session_id="sess_windows_unmaterializable",
+        execution_id="exec_windows_unmaterializable",
+        tools=["Read"],
+        system_prompt="system",
+        seed_goal="Ship the artifact",
+        depth=0,
+        start_time=datetime.now(UTC),
+        ac_spec=AcceptanceCriterionSpec(
+            description="Materialize the declared artifact",
+            expected_artifacts=("nested/" + "a" * 200,),
+        ),
+    )
+
+    assert result.outcome is ACExecutionOutcome.INVALID
+    assert result.error is not None
+    assert "workspace path exceeds Windows capacity (260 UTF-16 units)" in result.error
+    assert runtime.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_unmaterializable_ac_is_judged_while_valid_sibling_completes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = _deep_macos_workspace()
+    monkeypatch.setattr("ouroboros.core.seed.os.pathconf", lambda *_args: 1_024)
+    seed = _make_seed(
+        AcceptanceCriterionSpec(
+            description="Materialize the declared artifact",
+            expected_artifacts=("nested/" + "a" * 200,),
+        ),
+        "Complete the independent sibling",
+    )
+    graph = DependencyGraph(
+        nodes=(
+            ACNode(index=0, content=seed.acceptance_criteria[0], depends_on=()),
+            ACNode(index=1, content=seed.acceptance_criteria[1], depends_on=()),
+        ),
+        execution_levels=((0, 1),),
+    )
+    event_store, appended_events = _make_replaying_event_store()
+    runtime = _FinalMessageRuntime("[TASK_COMPLETE]", native_session_id="valid-sibling")
+    executor = ParallelACExecutor(
+        adapter=runtime,
+        event_store=event_store,
+        console=MagicMock(),
+        enable_decomposition=False,
+        ac_retry_attempts=3,
+        task_cwd=workspace,
+    )
+    executor._coordinator.detect_file_conflicts = MagicMock(return_value=[])
+    executor._maybe_recover_with_bounce_decomposition = AsyncMock()  # type: ignore[method-assign]
+    executor._maybe_redispatch_alt_harness = AsyncMock()  # type: ignore[method-assign]
+    executor._maybe_redispatch_alt_harness_for_batch_ac = AsyncMock()  # type: ignore[method-assign]
+    executor._build_ac_retry_prompt = MagicMock()  # type: ignore[method-assign]
+
+    with patch("ouroboros.orchestrator.parallel_executor.log") as log_mock:
+        result = await executor.execute_parallel(
+            seed=seed,
+            execution_plan=graph.to_execution_plan(),
+            session_id="sess_sibling_admission",
+            execution_id="exec_sibling_admission",
+            tools=["Read"],
+            system_prompt="system",
+        )
+
+    by_index = {item.ac_index: item for item in result.results}
+    assert by_index[0].outcome is ACExecutionOutcome.INVALID
+    assert by_index[0].retry_attempt == 0
+    assert by_index[1].success is True
+    assert result.invalid_count == 1
+    assert result.success_count == 1
+    assert len(result.stages) == 1
+    assert result.stages[0].started is True
+    assert runtime.call_count == 1
+    judged = [event for event in appended_events if event.type == "execution.ac.attempt_judged"]
+    invalid_judgments = [event for event in judged if event.data["ac_index"] == 0]
+    assert len(invalid_judgments) == 1
+    invalid_judgment = invalid_judgments[0]
+    assert invalid_judgment.data["outcome"] == "invalid"
+    assert invalid_judgment.data["error_code"] == "unmaterializable_success_contract"
+    assert str(invalid_judgment.data["error"]).startswith("unmaterializable_success_contract:")
+    admission_rejections = [
+        call
+        for call in log_mock.warning.call_args_list
+        if call.args and call.args[0] == "parallel_executor.ac.admission_rejected"
+    ]
+    assert len(admission_rejections) == 1
+    executor._maybe_recover_with_bounce_decomposition.assert_not_awaited()
+    executor._maybe_redispatch_alt_harness.assert_not_awaited()
+    executor._maybe_redispatch_alt_harness_for_batch_ac.assert_not_awaited()
+    executor._build_ac_retry_prompt.assert_not_called()
 
 
 def test_command_claim_supports_exact_structured_shell_body() -> None:
@@ -8125,7 +8294,7 @@ class TestParallelACExecutor:
         tmp_path,
     ) -> None:
         """The verify gate owns artifact and command proof for contract ACs."""
-        command = "python3 -c \"print('OK')\""
+        command = f"{sys.executable} -c \"print('OK')\""
         (tmp_path / "hello.py").write_text(
             "def greet(name):\n    return f'Hello, {name}'\n",
             encoding="utf-8",

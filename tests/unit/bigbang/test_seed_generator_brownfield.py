@@ -11,6 +11,12 @@ import pytest
 from ouroboros.bigbang.interview import InterviewRound, InterviewState
 from ouroboros.bigbang.seed_generator import SeedGenerator
 
+_VALID_ACCEPTANCE_CRITERIA = (
+    'ACCEPTANCE_CRITERIA: [{"description":"Service extension is verified",'
+    '"verify":"printf ok",'
+    '"artifacts":"NONE","expect":"ok"}]\n'
+)
+
 
 def _generator() -> SeedGenerator:
     with tempfile.TemporaryDirectory() as tmp:
@@ -73,8 +79,7 @@ class TestBrownfieldParsingRoundTrip:
     def test_brownfield_requirements_populate_context(self) -> None:
         gen = _generator()
         requirements = gen._parse_extraction_response(
-            "GOAL: Extend service\n"
-            "ONTOLOGY_NAME: Svc\n"
+            "GOAL: Extend service\n" + _VALID_ACCEPTANCE_CRITERIA + "ONTOLOGY_NAME: Svc\n"
             "ONTOLOGY_DESCRIPTION: A service\n"
             "PROJECT_TYPE: brownfield\n"
             'CONTEXT_REFERENCES: [{"path": "/repo/api", "role": "primary", "summary": "API layer"}]\n'
@@ -94,8 +99,7 @@ class TestBrownfieldListExtractionContract:
     """EXISTING_PATTERNS/EXISTING_DEPENDENCIES follow the #1714 JSON-array contract (#1729)."""
 
     _BASE = (
-        "GOAL: Extend service\n"
-        "ONTOLOGY_NAME: Svc\n"
+        "GOAL: Extend service\n" + _VALID_ACCEPTANCE_CRITERIA + "ONTOLOGY_NAME: Svc\n"
         "ONTOLOGY_DESCRIPTION: A service\n"
         "PROJECT_TYPE: brownfield\n"
         'CONTEXT_REFERENCES: [{"path": "/repo/api", "role": "primary", "summary": "API layer"}]\n'
@@ -105,8 +109,7 @@ class TestBrownfieldListExtractionContract:
         gen = _generator()
         with pytest.raises(ValueError, match="CONTEXT_REFERENCES"):
             gen._parse_extraction_response(
-                "GOAL: Extend service\n"
-                "ONTOLOGY_NAME: Svc\n"
+                "GOAL: Extend service\n" + _VALID_ACCEPTANCE_CRITERIA + "ONTOLOGY_NAME: Svc\n"
                 "ONTOLOGY_DESCRIPTION: A service\n"
                 "PROJECT_TYPE: brownfield\n"
                 "CONTEXT_REFERENCES: /repo/api:primary:API layer\n"
@@ -149,8 +152,7 @@ class TestBrownfieldListExtractionContract:
     def test_json_context_references_preserve_colons_and_pipes_end_to_end(self) -> None:
         gen = _generator()
         requirements = gen._parse_extraction_response(
-            "GOAL: Extend service\n"
-            "ONTOLOGY_NAME: Svc\n"
+            "GOAL: Extend service\n" + _VALID_ACCEPTANCE_CRITERIA + "ONTOLOGY_NAME: Svc\n"
             "ONTOLOGY_DESCRIPTION: A service\n"
             "PROJECT_TYPE: brownfield\n"
             'CONTEXT_REFERENCES: [{"path": "C:/repo/api", "role": "primary", '

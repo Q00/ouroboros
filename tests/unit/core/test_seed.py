@@ -11,6 +11,10 @@ from pydantic import ValidationError as PydanticValidationError
 import pytest
 
 from ouroboros.core.seed import (
+    MAX_AC_SUCCESS_CONTRACT_ARTIFACT_CHARS,
+    MAX_AC_SUCCESS_CONTRACT_ARTIFACT_PATH_BYTES,
+    MAX_AC_SUCCESS_CONTRACT_ARTIFACTS,
+    MAX_AC_SUCCESS_CONTRACT_CHARS,
     AcceptanceCriterionSpec,
     EvaluationPrinciple,
     ExitCondition,
@@ -20,7 +24,17 @@ from ouroboros.core.seed import (
     Seed,
     SeedMetadata,
     ac_texts,
+    expected_artifact_path_error,
+    expected_artifact_workspace_path_error,
+    parse_expected_artifact_list,
 )
+
+
+def _multibyte_artifact_at_byte_budget(*, overflow_bytes: int = 0) -> str:
+    """Build a component-valid UTF-8 path at the total artifact budget."""
+    path = "/".join(("😀" * 62, "a" * (6 + overflow_bytes)))
+    assert len(path.encode("utf-8")) == MAX_AC_SUCCESS_CONTRACT_ARTIFACT_PATH_BYTES + overflow_bytes
+    return path
 
 
 class TestSeedMetadata:
@@ -407,6 +421,243 @@ class TestSeed:
         assert first.output_assertion == "No tasks"
         assert second.description == "Tasks can be created"
         assert second.verify_command is None
+
+    def test_expected_artifacts_schema_documents_literal_workspace_paths(self) -> None:
+        field = AcceptanceCriterionSpec.model_fields["expected_artifacts"]
+
+        assert field.description is not None
+        assert "Exact file or directory paths" in field.description
+        assert "relative to the run workspace" in field.description
+        assert "resolved literally" in field.description
+        assert "255 UTF-8 bytes" in field.description
+        assert "complete canonical path at most 255" in field.description
+        assert "prefix top-level paths containing spaces with ./" in field.description
+
+    def test_expected_artifact_path_grammar_is_portable(self) -> None:
+        for artifact in (
+            ".",
+            "./",
+            "././",
+            ".//",
+            r".\.",
+            ".\\",
+            "bad\x00path",
+            "../outside",
+            r"D:outside",
+            r"\outside.txt",
+            r"\\server\share\outside.txt",
+            r"docs\User Guide.md",
+            "schema v2 outputs.json",
+            "reports/summary,v2.json",
+            "NUL",
+            "nul.txt",
+            "dir/CON",
+            "COM1.log",
+            "foo.",
+            "docs/a:b",
+            "docs/a?.txt",
+            "a" * 256,
+            "docs/" + ("\u00e9" * 128),
+            "NONE",
+            "none",
+        ):
+            assert expected_artifact_path_error(artifact) is not None
+
+        for artifact in (
+            "README.md",
+            "docs",
+            "docs/User Guide.md",
+            "./Build Outputs",
+            "é" * 127 + "a",
+            _multibyte_artifact_at_byte_budget(),
+            "./" + _multibyte_artifact_at_byte_budget(),
+        ):
+            assert expected_artifact_path_error(artifact) is None
+
+    def test_expected_artifact_path_rejects_component_and_total_byte_overflow(self) -> None:
+        component_overflow = "é" * 128
+        total_overflow = _multibyte_artifact_at_byte_budget(overflow_bytes=1)
+
+        assert len(component_overflow.encode("utf-8")) == 256
+        assert "component longer than 255 filesystem bytes" in (
+            expected_artifact_path_error(component_overflow) or ""
+        )
+        assert "canonical path longer than 255 portable filesystem bytes" in (
+            expected_artifact_path_error(total_overflow) or ""
+        )
+
+    @pytest.mark.parametrize(
+        ("platform", "workspace", "artifact", "capacity", "expected_error"),
+        (
+            ("posix", "/" + "w" * 900, "a" * 200, 1_024, "POSIX capacity"),
+            ("windows", "C:\\" + "w" * 250, "out.txt", 260, "Windows capacity"),
+        ),
+    )
+    def test_expected_artifact_workspace_capacity_fails_closed_by_platform(
+        self,
+        platform: str,
+        workspace: str,
+        artifact: str,
+        capacity: int,
+        expected_error: str,
+    ) -> None:
+        error = expected_artifact_workspace_path_error(
+            artifact,
+            workspace,
+            platform=platform,  # type: ignore[arg-type]
+            path_capacity=capacity,
+        )
+
+        assert expected_error in (error or "")
+
+    def test_expected_artifact_list_uses_comma_whitespace_delimiter(self) -> None:
+        assert parse_expected_artifact_list("tasks.json, logs/task.log, ./Build Outputs") == (
+            "tasks.json",
+            "logs/task.log",
+            "./Build Outputs",
+        )
+
+    def test_success_contract_accepts_exact_capsule_artifact_limit(self) -> None:
+        spec = AcceptanceCriterionSpec(
+            description="bounded artifact contract",
+            expected_artifacts=tuple(
+                f"out/artifact-{index}.txt" for index in range(MAX_AC_SUCCESS_CONTRACT_ARTIFACTS)
+            ),
+        )
+
+        assert len(spec.expected_artifacts) == MAX_AC_SUCCESS_CONTRACT_ARTIFACTS
+
+    def test_success_contract_rejects_artifacts_beyond_capsule_limit(self) -> None:
+        with pytest.raises(PydanticValidationError, match="artifact limit exceeded"):
+            AcceptanceCriterionSpec(
+                description="oversized artifact contract",
+                expected_artifacts=tuple(
+                    f"out/artifact-{index}.txt"
+                    for index in range(MAX_AC_SUCCESS_CONTRACT_ARTIFACTS + 1)
+                ),
+            )
+
+    def test_success_contract_rejects_portable_path_overflow_before_capsule_locator(self) -> None:
+        artifact = "/".join(
+            "a" * 250 for _ in range(MAX_AC_SUCCESS_CONTRACT_ARTIFACT_CHARS // 251 + 1)
+        )
+        assert len(artifact) > MAX_AC_SUCCESS_CONTRACT_ARTIFACT_CHARS
+
+        with pytest.raises(
+            PydanticValidationError,
+            match="canonical path longer than 255 portable filesystem bytes",
+        ):
+            AcceptanceCriterionSpec(
+                description="oversized artifact locator",
+                expected_artifacts=(artifact,),
+            )
+
+    def test_success_contract_accepts_exact_multibyte_artifact_byte_budget(self) -> None:
+        artifact = _multibyte_artifact_at_byte_budget()
+
+        spec = AcceptanceCriterionSpec(
+            description="maximum encoded artifact locator",
+            expected_artifacts=(artifact,),
+        )
+
+        assert spec.expected_artifacts == (artifact,)
+
+    def test_success_contract_rejects_multibyte_artifact_byte_overflow(self) -> None:
+        artifact = _multibyte_artifact_at_byte_budget(overflow_bytes=1)
+
+        with pytest.raises(
+            PydanticValidationError,
+            match="canonical path longer than 255 portable filesystem bytes",
+        ):
+            AcceptanceCriterionSpec(
+                description="oversized encoded artifact locator",
+                expected_artifacts=(artifact,),
+            )
+
+    def test_success_contract_rejects_total_capsule_character_overflow(self) -> None:
+        with pytest.raises(PydanticValidationError, match="character budget exceeded"):
+            AcceptanceCriterionSpec(
+                description="oversized contract",
+                verify_command="x" * (MAX_AC_SUCCESS_CONTRACT_CHARS + 1),
+            )
+
+    @pytest.mark.parametrize(
+        "artifact",
+        (
+            ".",
+            "../outside",
+            r"D:outside",
+            r"\\server\share\outside.txt",
+            "schema v2 outputs.json",
+            "reports/summary,v2.json",
+            "NUL",
+            "nul.txt",
+            "dir/CON",
+            "foo.",
+            "docs/a:b",
+            r"docs\User Guide.md",
+        ),
+    )
+    def test_expected_artifacts_reject_nonportable_paths_at_schema_ingress(
+        self,
+        artifact: str,
+    ) -> None:
+        with pytest.raises(PydanticValidationError, match="portable workspace-relative paths"):
+            AcceptanceCriterionSpec(
+                description="artifact contract",
+                expected_artifacts=(artifact,),
+            )
+
+    @pytest.mark.parametrize(
+        "artifacts",
+        [
+            ("",),
+            ("report.txt\n",),
+            ("report.txt\t",),
+            ("report.txt\x7f",),
+            ("reports/summary,v2.json",),
+            (r"docs\User Guide.md",),
+            (None,),
+            ("NONE", "report.txt"),
+            "report.txt\n",
+            "reports/summary,v2.json",
+            "NONE, report.txt",
+            "report.txt, NONE",
+        ],
+    )
+    def test_expected_artifacts_reject_malformed_raw_entries(self, artifacts: object) -> None:
+        with pytest.raises(PydanticValidationError):
+            AcceptanceCriterionSpec(
+                description="artifact contract",
+                expected_artifacts=artifacts,  # type: ignore[arg-type]
+            )
+
+    def test_output_assertion_requires_verify_command_at_schema_ingress(self) -> None:
+        with pytest.raises(PydanticValidationError, match="requires verify_command"):
+            AcceptanceCriterionSpec(
+                description="Command output contains READY",
+                output_assertion="READY",
+            )
+
+    def test_output_assertion_condition_phrase_requires_raw_verify_command(self) -> None:
+        with pytest.raises(PydanticValidationError, match="requires verify_command"):
+            AcceptanceCriterionSpec(
+                description="Command exits successfully",
+                output_assertion="success",
+            )
+
+        with pytest.raises(PydanticValidationError, match="requires verify_command"):
+            AcceptanceCriterionSpec(
+                description="Command exits successfully",
+                verify_command="NONE",
+                output_assertion="exit code 0",
+            )
+
+    def test_output_assertion_schema_documents_combined_command_output(self) -> None:
+        field = AcceptanceCriterionSpec.model_fields["output_assertion"]
+
+        assert field.description is not None
+        assert "combined stdout and stderr" in field.description
 
     def test_output_assertion_normalizes_exit_status_conditions_to_none(self) -> None:
         """Exit-code success phrases are redundant with verify_command exit status."""
