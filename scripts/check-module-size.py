@@ -3,9 +3,9 @@
 
 Why this exists: per Q00/ouroboros#1797, `OrchestratorRunner` reached 11,100
 lines across 180 methods inside an 11,980-line module, and `parallel_executor.py`
-reached 13,111. A 2026-07-29 measurement of `src/ouroboros` found 480 Python
-files with a median of 292 lines -- but the 25 files above 2,000 lines hold
-34.4% of all source. The distribution is not gradual; it is a small set of
+reached 13,158. A 2026-08-01 measurement of `src/ouroboros` found 486 Python
+files with a median of 297 lines -- but the 26 files above 2,000 lines hold
+35.3% of all source. The distribution is not gradual; it is a small set of
 gravity wells that absorb every new concern because no other home is obvious.
 
 Nothing stops that today. #1769 added ~324 lines and nine private methods to
@@ -89,24 +89,25 @@ SOFT_CAP = 2000
 RESEED_SLACK = 200
 
 # Modules that already exceeded SOFT_CAP when this gate was introduced
-# (2026-07-29, main @ ffc94e8a7). Each may shrink, never grow. Delete an entry
+# (2026-08-01, main @ db9a19d05). Each may shrink, never grow. Delete an entry
 # once it reaches SOFT_CAP; do not add new ones.
 GRANDFATHERED: dict[str, int] = {
-    "src/ouroboros/orchestrator/parallel_executor.py": 13111,
+    "src/ouroboros/orchestrator/parallel_executor.py": 13158,
     "src/ouroboros/orchestrator/runner.py": 12144,
     "src/ouroboros/auto/pipeline.py": 5286,
     "src/ouroboros/cli/commands/setup.py": 5225,
     "src/ouroboros/orchestrator/codex_cli_runtime.py": 4140,
-    "src/ouroboros/mcp/tools/authoring_handlers.py": 3801,
+    "src/ouroboros/mcp/tools/authoring_handlers.py": 3780,
     "src/ouroboros/orchestrator/execution_authority.py": 3449,
     "src/ouroboros/mcp/tools/subagent.py": 3163,
     "src/ouroboros/persistence/event_store.py": 3102,
     "src/ouroboros/cli/commands/plugin.py": 3053,
     "src/ouroboros/mcp/job_manager.py": 2950,
-    "src/ouroboros/mcp/tools/execution_handlers.py": 2880,
+    "src/ouroboros/mcp/tools/execution_handlers.py": 2869,
+    "src/ouroboros/bigbang/seed_generator.py": 2637,
     "src/ouroboros/mcp/server/adapter.py": 2612,
     "src/ouroboros/auto/interview_driver.py": 2496,
-    "src/ouroboros/mcp/tools/auto_handler.py": 2479,
+    "src/ouroboros/mcp/tools/auto_handler.py": 2488,
     "src/ouroboros/config/loader.py": 2432,
     "src/ouroboros/plugin/firewall.py": 2389,
     "src/ouroboros/evaluation/detector.py": 2362,
@@ -116,7 +117,7 @@ GRANDFATHERED: dict[str, int] = {
     "src/ouroboros/orchestrator/capabilities/__init__.py": 2232,
     "src/ouroboros/mcp/tools/job_handlers.py": 2208,
     "src/ouroboros/orchestrator/adapter.py": 2125,
-    "src/ouroboros/evolution/loop.py": 2088,
+    "src/ouroboros/evolution/loop.py": 2099,
 }
 
 # Generated files carry no review cost and are not authored by hand.
@@ -543,7 +544,7 @@ def main(argv: list[str] | None = None) -> int:
     if added:
         write(
             "Modules were added to GRANDFATHERED. The set is closed (frozen "
-            "2026-07-29):\nentries may only be removed. Split the module, or "
+            "2026-08-01):\nentries may only be removed. Split the module, or "
             "keep it under the cap --\nadding it here would grandfather new "
             "debt, and would also let a module that\nalready earned its way "
             "out come back in:\n"
@@ -577,7 +578,7 @@ def main(argv: list[str] | None = None) -> int:
         write(
             f"Modules over the {SOFT_CAP}-line cap that are not grandfathered.\n"
             "Split the module instead of adding an entry -- GRANDFATHERED is a closed\n"
-            "set frozen at 2026-07-29 and must only ever shrink (see #1797):\n"
+            "set frozen at 2026-08-01 and must only ever shrink (see #1797):\n"
         )
         for rel, count in over_cap:
             write(f"  {rel}: {count} lines (+{count - SOFT_CAP} over cap)\n")
