@@ -16,7 +16,7 @@ import logging
 from pathlib import Path
 import sqlite3
 from typing import TYPE_CHECKING, Any
-from urllib.parse import unquote
+from urllib.parse import quote, unquote
 from uuid import uuid4
 
 from sqlalchemy import and_, case, event, func, or_, select, text
@@ -38,6 +38,18 @@ from ouroboros.persistence.schema import (
 )
 
 logger = logging.getLogger(__name__)
+
+_PYTHON_STRIP_WHITESPACE = (
+    "\t\n\v\f\r \x1c\x1d\x1e\x1f\x85\xa0\u1680"
+    "\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a"
+    "\u2028\u2029\u202f\u205f\u3000"
+)
+
+
+def sqlite_database_url(path: str | Path) -> str:
+    """Build an aiosqlite file URI without treating path characters as URI syntax."""
+    encoded_path = quote(str(Path(path).expanduser()), safe="/:")
+    return f"sqlite+aiosqlite:///file:{encoded_path}?uri=true"
 
 
 _RAW_SUBSCRIBED_EVENT_TYPE_KEYS = frozenset({"type", "event", "kind", "name"})
@@ -518,7 +530,8 @@ class EventStore:
         Args:
             database_url: SQLAlchemy database URL.
                          For async SQLite: "sqlite+aiosqlite:///path/to/db.sqlite"
-                         If not provided, defaults to ~/.ouroboros/ouroboros.db
+                         If not provided, uses the configured EventStore path
+                         with the legacy ~/.ouroboros/ouroboros.db fallback.
             read_only: When True, open the underlying SQLite database in true
                 read-only mode by rewriting the URL into the ``file:<path>?mode=ro&uri=true``
                 form and passing ``connect_args={"uri": True}`` to aiosqlite.
@@ -530,11 +543,18 @@ class EventStore:
                 ``initialize(create_schema=False)`` — this is the default when
                 ``read_only=True``. ``read_only`` is a no-op for non-SQLite URLs.
         """
+        self._configuration_error: ValueError | None = None
         if database_url is None:
-            db_path = Path.home() / ".ouroboros" / "ouroboros.db"
-            if not read_only:
+            from ouroboros.config.models import get_config_dir, resolve_event_store_path
+
+            try:
+                db_path = resolve_event_store_path()
+            except ValueError as exc:
+                self._configuration_error = exc
+                db_path = get_config_dir() / "ouroboros.db"
+            if not read_only and self._configuration_error is None:
                 db_path.parent.mkdir(parents=True, exist_ok=True)
-            database_url = f"sqlite+aiosqlite:///{db_path}"
+            database_url = sqlite_database_url(db_path)
 
         self._read_only = read_only
         if read_only:
@@ -549,8 +569,8 @@ class EventStore:
     def _coerce_to_readonly_url(database_url: str) -> str:
         """Rewrite a plain aiosqlite URL into a ``mode=ro`` URI form.
 
-        Leaves non-SQLite URLs untouched. Already-URI forms (starting with
-        ``file:``) are returned as-is so explicit callers keep full control.
+        Leaves non-SQLite URLs untouched. Existing ``file:`` URI forms are
+        rebuilt so caller-supplied query parameters cannot weaken read-only mode.
         """
         prefix = "sqlite+aiosqlite:///"
         if not database_url.startswith(prefix):
@@ -558,15 +578,16 @@ class EventStore:
 
         path_part = database_url[len(prefix) :]
         if path_part.startswith("file:"):
-            # Caller already provided a URI form — respect it verbatim.
-            return database_url
+            raw_uri_path = path_part[len("file:") :]
+            path_part = unquote(raw_uri_path.split("?", 1)[0].split("#", 1)[0])
 
         # ``:memory:`` has no filesystem and cannot be opened read-only
         # meaningfully; leave it alone.
         if path_part in (":memory:", ""):
             return database_url
 
-        return f"{prefix}file:{path_part}?mode=ro&uri=true"
+        encoded_path = quote(path_part, safe="/:")
+        return f"{prefix}file:{encoded_path}?mode=ro&uri=true"
 
     @staticmethod
     def _sqlite_path_from_url(database_url: str) -> str | None:
@@ -665,6 +686,12 @@ class EventStore:
         shared database with normal connection-scoped transactions, and a
         keepalive connection anchors the database's lifetime.
         """
+        if self._configuration_error is not None:
+            raise PersistenceError(
+                "Invalid EventStore configuration.",
+                operation="initialize",
+            ) from self._configuration_error
+
         if create_schema is None:
             create_schema = not self._read_only
 
@@ -1951,6 +1978,8 @@ class EventStore:
         event_type: str | None = None,
         limit: int = 50,
         offset: int = 0,
+        *,
+        aggregate_type: str | None = None,
     ) -> list[BaseEvent]:
         """Query events with optional filters.
 
@@ -1959,6 +1988,7 @@ class EventStore:
             event_type: Optional event type to filter by.
             limit: Maximum number of events to return.
             offset: Number of events to skip for pagination.
+            aggregate_type: Optional aggregate family filter.
 
         Returns:
             List of events matching the criteria, ordered by timestamp descending.
@@ -1974,13 +2004,19 @@ class EventStore:
 
         try:
             async with self._engine.begin() as conn:
-                query = select(events_table).order_by(events_table.c.timestamp.desc())
+                query = select(events_table).order_by(
+                    events_table.c.timestamp.desc(),
+                    events_table.c.id.desc(),
+                )
 
                 if aggregate_id:
                     query = query.where(events_table.c.aggregate_id == aggregate_id)
 
                 if event_type:
                     query = query.where(events_table.c.event_type == event_type)
+
+                if aggregate_type:
+                    query = query.where(events_table.c.aggregate_type == aggregate_type)
 
                 query = query.limit(limit).offset(offset)
 
@@ -1994,11 +2030,132 @@ class EventStore:
                 table="events",
                 details={
                     "aggregate_id": aggregate_id,
+                    "aggregate_type": aggregate_type,
                     "event_type": event_type,
                     "limit": limit,
                     "offset": offset,
                 },
             ) from e
+
+    async def query_latest_events_per_aggregate(
+        self,
+        *,
+        aggregate_type: str,
+        event_types: set[str],
+        preferred_event_type: str | None = None,
+        preferred_event_types: set[str] | None = None,
+        preferred_event_statuses: set[str] | None = None,
+        preserve_session_candidates: bool = False,
+        aggregate_id: str | None = None,
+        limit: int | None = None,
+    ) -> list[BaseEvent]:
+        """Return deterministic latest aggregate or aggregate-session events."""
+        if self._engine is None:
+            raise PersistenceError(
+                "EventStore not initialized. Call initialize() first.",
+                operation="query_latest_events_per_aggregate",
+            )
+
+        preferred_conditions = []
+        preferred_types = set(preferred_event_types or ())
+        if preferred_types:
+            preferred_conditions.append(events_table.c.event_type.in_(sorted(preferred_types)))
+        if preferred_event_type is not None:
+            preferred_condition = events_table.c.event_type == preferred_event_type
+            if preferred_event_statuses:
+                preferred_condition = and_(
+                    preferred_condition,
+                    func.lower(
+                        func.trim(
+                            func.json_extract(events_table.c.payload, "$.status"),
+                            _PYTHON_STRIP_WHITESPACE,
+                        )
+                    ).in_(sorted(preferred_event_statuses)),
+                )
+            preferred_conditions.append(preferred_condition)
+        priority = case((or_(*preferred_conditions), 0), else_=1) if preferred_conditions else 0
+        raw_session_id = func.json_extract(events_table.c.payload, "$.session_id")
+        normalized_session_id = func.nullif(
+            func.trim(raw_session_id, _PYTHON_STRIP_WHITESPACE),
+            "",
+        )
+        session_key = func.coalesce(
+            case(
+                (
+                    func.json_type(events_table.c.payload, "$.session_id") == "text",
+                    normalized_session_id,
+                ),
+                else_=None,
+            ),
+            events_table.c.aggregate_id,
+        )
+        session_rank = (
+            func.row_number()
+            .over(
+                partition_by=(events_table.c.aggregate_id, session_key),
+                order_by=(priority, events_table.c.timestamp.desc(), events_table.c.id.desc()),
+            )
+            .label("session_rank")
+        )
+        ranked_sessions_query = (
+            select(*events_table.c, session_rank)
+            .where(events_table.c.aggregate_type == aggregate_type)
+            .where(events_table.c.event_type.in_(sorted(event_types)))
+        )
+        if aggregate_id is not None:
+            ranked_sessions_query = ranked_sessions_query.where(
+                events_table.c.aggregate_id == aggregate_id
+            )
+        ranked_sessions = ranked_sessions_query.subquery()
+        session_events = (
+            select(ranked_sessions).where(ranked_sessions.c.session_rank == 1).subquery()
+        )
+        if preserve_session_candidates:
+            query = select(session_events).order_by(
+                session_events.c.timestamp.desc(),
+                session_events.c.id.desc(),
+            )
+        else:
+            aggregate_rank = (
+                func.row_number()
+                .over(
+                    partition_by=session_events.c.aggregate_id,
+                    order_by=(session_events.c.timestamp.desc(), session_events.c.id.desc()),
+                )
+                .label("aggregate_rank")
+            )
+            ranked_aggregates = select(session_events, aggregate_rank).subquery()
+            query = (
+                select(ranked_aggregates)
+                .where(ranked_aggregates.c.aggregate_rank == 1)
+                .order_by(
+                    ranked_aggregates.c.timestamp.desc(),
+                    ranked_aggregates.c.id.desc(),
+                )
+            )
+        if limit is not None:
+            query = query.limit(limit)
+
+        try:
+            async with self._engine.begin() as conn:
+                result = await conn.execute(query)
+                return [BaseEvent.from_db_row(dict(row)) for row in result.mappings().all()]
+        except Exception as exc:
+            raise PersistenceError(
+                f"Failed to query latest aggregate events: {exc}",
+                operation="select",
+                table="events",
+                details={
+                    "aggregate_type": aggregate_type,
+                    "event_types": sorted(event_types),
+                    "preferred_event_type": preferred_event_type,
+                    "preferred_event_types": sorted(preferred_event_types or ()),
+                    "preferred_event_statuses": sorted(preferred_event_statuses or ()),
+                    "preserve_session_candidates": preserve_session_candidates,
+                    "aggregate_id": aggregate_id,
+                    "limit": limit,
+                },
+            ) from exc
 
     async def query_session_related_events(
         self,

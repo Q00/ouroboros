@@ -19,7 +19,8 @@ import sys
 from typing import Any
 from urllib.parse import quote
 
-_DEFAULT_DB = Path.home() / ".ouroboros" / "ouroboros.db"
+from ouroboros.config.models import resolve_event_store_path
+
 _TIMING_FIELDS = (
     "total",
     "ambiguity_scoring",
@@ -181,8 +182,8 @@ def main() -> int:
     parser.add_argument(
         "--db",
         type=Path,
-        default=_DEFAULT_DB,
-        help="EventStore SQLite database (default: ~/.ouroboros/ouroboros.db).",
+        default=None,
+        help="EventStore SQLite database (default: configured runtime database).",
     )
     parser.add_argument(
         "--interview-id",
@@ -190,8 +191,13 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    db_path = args.db.expanduser()
-    if not db_path.is_file():
+    try:
+        db_path = (args.db if args.db is not None else resolve_event_store_path()).expanduser()
+        database_exists = db_path.is_file()
+    except (OSError, RuntimeError, ValueError):
+        print("export_interview_latency: invalid EventStore configuration", file=sys.stderr)
+        return 2
+    if not database_exists:
         print("export_interview_latency: EventStore database not found", file=sys.stderr)
         return 2
 

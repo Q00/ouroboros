@@ -58,17 +58,53 @@ class TestBrownfieldContextFromCwd:
         assert ctx.context_references[0].role == "primary"
 
     def test_brownfield_when_git_directory_present(self, tmp_path: Path) -> None:
-        (tmp_path / ".git").mkdir()
+        git_dir = tmp_path / ".git"
+        git_dir.mkdir()
+        (git_dir / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
         ctx = brownfield_context_from_cwd(tmp_path)
         assert ctx.project_type == "brownfield"
 
-    def test_brownfield_when_git_file_present(self, tmp_path: Path) -> None:
-        (tmp_path / ".git").write_text("gitdir: /tmp/example.git\n", encoding="utf-8")
+    def test_malformed_git_pointer_is_greenfield(self, tmp_path: Path) -> None:
+        (tmp_path / ".git").write_text("not-a-gitdir\n", encoding="utf-8")
         ctx = brownfield_context_from_cwd(tmp_path)
+        assert ctx.project_type == "greenfield"
+
+    def test_nonexistent_git_pointer_target_is_greenfield(self, tmp_path: Path) -> None:
+        (tmp_path / ".git").write_text(
+            "gitdir: missing/git-metadata\n",
+            encoding="utf-8",
+        )
+
+        ctx = brownfield_context_from_cwd(tmp_path)
+
+        assert ctx.project_type == "greenfield"
+
+    def test_valid_linked_worktree_is_brownfield(self, tmp_path: Path) -> None:
+        git_dir = tmp_path / "git-metadata"
+        git_dir.mkdir()
+        (git_dir / "HEAD").write_text("ref: refs/heads/worktree\n", encoding="utf-8")
+        worktree = tmp_path / "linked"
+        worktree.mkdir()
+        (worktree / ".git").write_text(f"gitdir: {git_dir}\n", encoding="utf-8")
+
+        ctx = brownfield_context_from_cwd(worktree)
+
         assert ctx.project_type == "brownfield"
+        assert ctx.context_references[0].path == str(worktree)
 
     def test_none_cwd_is_greenfield(self) -> None:
         assert brownfield_context_from_cwd(None).project_type == "greenfield"
+
+    def test_git_only_worktree_is_brownfield_context(self, tmp_path: Path) -> None:
+        git_dir = tmp_path / ".git"
+        git_dir.mkdir()
+        (git_dir / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+
+        ctx = brownfield_context_from_cwd(tmp_path)
+
+        assert ctx.project_type == "brownfield"
+        assert len(ctx.context_references) == 1
+        assert Path(ctx.context_references[0].path).resolve() == tmp_path.resolve()
 
 
 class TestSynthesizePassThrough:

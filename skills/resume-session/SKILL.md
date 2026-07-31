@@ -41,26 +41,30 @@ When the user invokes this skill:
    ouroboros resume
    ```
 
-   This reads `~/.ouroboros/ouroboros.db` directly — the MCP server does **not**
+   This reads the configured runtime EventStore directly — the MCP server does **not**
    need to be running.
 
 2. If sessions are listed, enter the number of the session you want to work
    with. The command prints both the `session_id` and the `exec_id`, along
-   with the two re-attach paths.
+   with the available re-attach paths.
 
 3. Pick the right re-attach path:
 
-   - **Inspect only** (read-only interactive monitor):
+   - **Inspect persisted events** (read-only):
+
+     ```
+     ouroboros status execution <exec_id> --events
+     ```
+
+     Reads the configured EventStore without starting an MCP server.
+
+   - **Inspect interactively** (read-only monitor):
 
      ```
      ouroboros tui monitor
      ```
 
-     Launches the TUI and lets you pick the session to inspect. The
-     `ouroboros status execution <exec_id>` command is *registered* but its
-     handler is still a placeholder in `src/ouroboros/cli/commands/status.py`
-     (it only prints "Would show details for execution: …"), so it is
-     intentionally not surfaced here. Follow-up tracked as a separate issue.
+     Launches the TUI and lets you pick the session to inspect.
 
    - **Resume execution** (requires the original seed file):
 

@@ -3,17 +3,30 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
+import subprocess
+import sys
 from unittest.mock import patch
 
 import pytest
 from typer.testing import CliRunner
 import yaml
 
-from ouroboros.cli.commands.config import app
+from ouroboros.cli.commands.config import _resolve_db_path, app
 from ouroboros.config._model_defaults import DEFAULT_SONNET_MODEL
 
 runner = CliRunner(env={"COLUMNS": "200"})
+
+_EVENT_STORE_CONFIG_COMMANDS = [
+    ["config", "show", "--json"],
+    ["status", "executions"],
+    ["resume"],
+    ["tui", "open"],
+    ["mcp", "doctor", "--json"],
+    ["mcp", "serve", "--transport", "stdio"],
+]
+_EVENT_STORE_CONFIG_TIMEOUT_SECONDS = 30
 
 
 @pytest.fixture()
@@ -123,7 +136,10 @@ class TestConfigShow:
         with patch("ouroboros.config.models.get_config_dir", return_value=config_dir):
             result = runner.invoke(app, ["show"])
         assert result.exit_code == 0
-        assert "data/ouroboros.db" in result.output
+        data = yaml.safe_load((config_dir / "config.yaml").read_text())
+        assert _resolve_db_path(data, config_dir / "config.yaml") == str(
+            config_dir / "data" / "ouroboros.db"
+        )
 
     def test_show_database_path_default(self, tmp_path: Path) -> None:
         """Without persistence.database_path, default is <config_dir>/ouroboros.db."""
@@ -137,7 +153,38 @@ class TestConfigShow:
         with patch("ouroboros.config.models.get_config_dir", return_value=tmp_path):
             result = runner.invoke(app, ["show"])
         assert result.exit_code == 0
-        assert "ouroboros.db" in result.output
+        assert _resolve_db_path(config, tmp_path / "config.yaml") == str(tmp_path / "ouroboros.db")
+
+    def test_show_database_path_uses_legacy_runtime_authority(self, config_dir: Path) -> None:
+        legacy_db = config_dir / "ouroboros.db"
+        legacy_db.touch()
+
+        with patch("ouroboros.config.models.get_config_dir", return_value=config_dir):
+            result = runner.invoke(app, ["show"])
+
+        assert result.exit_code == 0
+        data = yaml.safe_load((config_dir / "config.yaml").read_text())
+        assert _resolve_db_path(data, config_dir / "config.yaml") == str(legacy_db)
+
+    def test_show_invalid_database_path_exits_without_traceback(self, tmp_path: Path) -> None:
+        home = tmp_path / "home"
+        config_dir = home / ".ouroboros"
+        config_dir.mkdir(parents=True)
+        (config_dir / "config.yaml").write_text("persistence:\n  database_path:\n")
+        env = os.environ.copy()
+        env["HOME"] = str(home)
+
+        result = subprocess.run(
+            [sys.executable, "-m", "ouroboros", "config", "show", "--json"],
+            text=True,
+            capture_output=True,
+            check=False,
+            env=env,
+        )
+
+        assert result.returncode == 1
+        assert "persistence.database_path" in result.stdout
+        assert "Traceback" not in result.stdout + result.stderr
 
     def test_show_json_reports_blank_execution_model_env_as_a_cleared_override(
         self, config_dir: Path, monkeypatch: pytest.MonkeyPatch
@@ -186,6 +233,130 @@ class TestConfigShow:
             "Codex current selected model (config.toml: gpt-configured; not confirmed at runtime)"
         )
         assert execute["model_source"] == "automatic Codex selection"
+
+
+@pytest.mark.parametrize("arguments", _EVENT_STORE_CONFIG_COMMANDS)
+def test_invalid_yaml_commands_redact_config_contents(tmp_path: Path, arguments: list[str]) -> None:
+    home = tmp_path / "home"
+    config_dir = home / ".ouroboros"
+    config_dir.mkdir(parents=True)
+    secret = "sk-super-secret"
+    (config_dir / "config.yaml").write_text(
+        f"persistence:\n  database_path: [\napi_key: {secret}: exposed\n"
+    )
+    env = os.environ.copy()
+    env.pop("_OUROBOROS_NESTED", None)
+    env["HOME"] = str(home)
+
+    result = subprocess.run(
+        [sys.executable, "-m", "ouroboros", *arguments],
+        stdin=subprocess.DEVNULL,
+        text=True,
+        capture_output=True,
+        check=False,
+        env=env,
+        timeout=_EVENT_STORE_CONFIG_TIMEOUT_SECONDS,
+    )
+    output = result.stdout + result.stderr
+
+    assert result.returncode != 0
+    assert secret not in output
+    assert "Traceback" not in output
+    if arguments[:2] == ["mcp", "doctor"]:
+        checks = json.loads(result.stdout)
+        event_store = next(check for check in checks if check["name"] == "event_store")
+        assert event_store["message"] == "Invalid EventStore configuration."
+    else:
+        assert str(home) not in output
+
+
+@pytest.mark.parametrize("arguments", [["status", "executions"], ["resume"]])
+def test_non_mapping_config_redacts_config_path(tmp_path: Path, arguments: list[str]) -> None:
+    home = tmp_path / "home"
+    config_dir = home / ".ouroboros"
+    config_dir.mkdir(parents=True)
+    (config_dir / "config.yaml").write_text("- not-a-mapping\n")
+    env = os.environ.copy()
+    env["HOME"] = str(home)
+
+    result = subprocess.run(
+        [sys.executable, "-m", "ouroboros", *arguments],
+        stdin=subprocess.DEVNULL,
+        text=True,
+        capture_output=True,
+        check=False,
+        env=env,
+        timeout=_EVENT_STORE_CONFIG_TIMEOUT_SECONDS,
+    )
+    output = result.stdout + result.stderr
+
+    assert result.returncode != 0
+    assert str(home) not in output
+    assert "Traceback" not in output
+
+
+@pytest.mark.parametrize("arguments", _EVENT_STORE_CONFIG_COMMANDS)
+def test_wrong_type_persistence_redacts_config_value(
+    tmp_path: Path,
+    arguments: list[str],
+) -> None:
+    home = tmp_path / "home"
+    config_dir = home / ".ouroboros"
+    config_dir.mkdir(parents=True)
+    private_value = "/Users/gate/private"
+    config_path = config_dir / "config.yaml"
+    config_path.write_text(f"persistence: {private_value}\n")
+    env = os.environ.copy()
+    env.pop("_OUROBOROS_NESTED", None)
+    env["HOME"] = str(home)
+
+    result = subprocess.run(
+        [sys.executable, "-m", "ouroboros", *arguments],
+        stdin=subprocess.DEVNULL,
+        text=True,
+        capture_output=True,
+        check=False,
+        env=env,
+        timeout=_EVENT_STORE_CONFIG_TIMEOUT_SECONDS,
+    )
+    output = result.stdout + result.stderr
+
+    assert result.returncode != 0
+    assert private_value not in output
+    assert str(config_path) not in output
+    assert "Traceback" not in output
+
+
+@pytest.mark.parametrize("arguments", _EVENT_STORE_CONFIG_COMMANDS)
+def test_unresolvable_user_database_path_is_redacted(
+    tmp_path: Path,
+    arguments: list[str],
+) -> None:
+    home = tmp_path / "home"
+    config_dir = home / ".ouroboros"
+    config_dir.mkdir(parents=True)
+    private_user = "ouroboros-user-that-must-not-exist-1817"
+    config_path = config_dir / "config.yaml"
+    config_path.write_text(f"persistence:\n  database_path: '~{private_user}/events.db'\n")
+    env = os.environ.copy()
+    env.pop("_OUROBOROS_NESTED", None)
+    env["HOME"] = str(home)
+
+    result = subprocess.run(
+        [sys.executable, "-m", "ouroboros", *arguments],
+        stdin=subprocess.DEVNULL,
+        text=True,
+        capture_output=True,
+        check=False,
+        env=env,
+        timeout=_EVENT_STORE_CONFIG_TIMEOUT_SECONDS,
+    )
+    output = result.stdout + result.stderr
+
+    assert result.returncode != 0
+    assert private_user not in output
+    assert str(config_path) not in output
+    assert "Traceback" not in output
 
 
 # ── config backend ───────────────────────────────────────────────
@@ -399,7 +570,7 @@ class TestConfigBackend:
         from ouroboros.cli.commands import setup as setup_mod
 
         def _failing_setup(cli_path: str) -> None:
-            setup_mod.print_error("Could not locate packaged Codex rules.")
+            setup_mod.__dict__["print_error"]("Could not locate packaged Codex rules.")
 
         with (
             patch("ouroboros.config.models.get_config_dir", return_value=config_dir),
@@ -417,7 +588,7 @@ class TestConfigBackend:
         with patch("ouroboros.config.models.get_config_dir", return_value=tmp_path):
             result = runner.invoke(app, ["show"])
         assert result.exit_code == 1
-        assert "Cannot parse" in result.output
+        assert "Invalid YAML" in result.output
 
     def test_structurally_invalid_section_type(self, tmp_path: Path) -> None:
         """config commands should handle sections with wrong types (e.g. orchestrator: [])."""
@@ -450,6 +621,7 @@ class TestConfigValidate:
         with (
             patch("ouroboros.config.models.get_config_dir", return_value=config_dir),
             patch("pathlib.Path.exists", return_value=True),
+            patch("pathlib.Path.is_file", return_value=True),
             patch("ouroboros.config.loader.load_config"),
         ):
             result = runner.invoke(app, ["validate"])
@@ -512,6 +684,7 @@ class TestConfigValidate:
         with (
             patch("ouroboros.config.models.get_config_dir", return_value=tmp_path),
             patch("pathlib.Path.exists", return_value=True),
+            patch("pathlib.Path.is_file", return_value=True),
             patch("ouroboros.config.loader.load_config"),
         ):
             result = runner.invoke(app, ["validate"])
@@ -581,6 +754,52 @@ class TestConfigSet:
             result = runner.invoke(app, ["set", "logging.levle", "debug"])
         assert result.exit_code == 1
         assert "Unknown config key" in result.output
+
+    def test_set_rejects_empty_database_path_without_writing(self, config_dir: Path) -> None:
+        config_path = config_dir / "config.yaml"
+        original = config_path.read_text()
+
+        with patch("ouroboros.config.models.get_config_dir", return_value=config_dir):
+            result = runner.invoke(app, ["set", "persistence.database_path", ""])
+
+        assert result.exit_code == 1
+        assert "Invalid value" in result.output
+        assert config_path.read_text() == original
+
+    def test_set_repairs_existing_invalid_database_path(self, config_dir: Path) -> None:
+        config_path = config_dir / "config.yaml"
+        data = yaml.safe_load(config_path.read_text())
+        data["persistence"]["database_path"] = ""
+        config_path.write_text(yaml.dump(data))
+
+        with (
+            patch("ouroboros.config.models.get_config_dir", return_value=config_dir),
+            patch("ouroboros.config.loader.load_config"),
+        ):
+            result = runner.invoke(
+                app,
+                ["set", "persistence.database_path", "data/repaired.db"],
+            )
+
+        assert result.exit_code == 0
+        repaired = yaml.safe_load(config_path.read_text())
+        assert repaired["persistence"]["database_path"] == "data/repaired.db"
+
+    def test_set_rejects_existing_directory_database_path(self, config_dir: Path) -> None:
+        config_path = config_dir / "config.yaml"
+        original = config_path.read_text()
+        directory = config_dir / "event-store-directory"
+        directory.mkdir()
+
+        with patch("ouroboros.config.models.get_config_dir", return_value=config_dir):
+            result = runner.invoke(
+                app,
+                ["set", "persistence.database_path", str(directory)],
+            )
+
+        assert result.exit_code == 1
+        assert "Invalid value" in result.output
+        assert config_path.read_text() == original
 
 
 # ── config init ──────────────────────────────────────────────────

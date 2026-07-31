@@ -13,6 +13,7 @@ from typer.testing import CliRunner
 
 from ouroboros.cli.commands.resume import (
     EXIT_CORRUPTED_DB,
+    _default_db_path,
     _format_reattach_guidance,
     _get_event_store,
     _get_in_flight_sessions,
@@ -24,6 +25,46 @@ runner = CliRunner()
 
 # Patch target for SessionRepository — imported lazily inside the function
 _SESSION_REPO_PATH = "ouroboros.orchestrator.session.SessionRepository"
+
+
+def test_resume_and_status_resolve_the_same_configured_event_store(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from ouroboros.cli.commands.harness import _default_db_path as harness_db_path
+    from ouroboros.cli.commands.job import _default_db_path as job_db_path
+    from ouroboros.cli.commands.mcp_doctor import check_event_store
+    from ouroboros.cli.commands.status import _configured_event_store_path
+    from ouroboros.config.models import resolve_event_store_path
+    from ouroboros.dashboard_web.reader import default_db_path as dashboard_db_path
+    from ouroboros.orchestrator.backend_outcomes import _default_db_path as outcomes_db_path
+    from ouroboros.persistence.event_store import EventStore
+
+    config_dir = tmp_path / "config"
+    configured_db = config_dir / "data" / "events.db"
+    configured_db.parent.mkdir(parents=True)
+    configured_db.touch()
+    (config_dir / "config.yaml").write_text("persistence:\n  database_path: data/events.db\n")
+    monkeypatch.setattr("ouroboros.config.models.get_config_dir", lambda: config_dir)
+
+    runtime_store_path = EventStore().sqlite_path()
+    assert runtime_store_path is not None
+    assert (
+        Path(_default_db_path())
+        == _configured_event_store_path()
+        == resolve_event_store_path()
+        == Path(runtime_store_path)
+        == configured_db
+    )
+    assert Path(job_db_path()) == harness_db_path() == dashboard_db_path() == configured_db
+    assert outcomes_db_path() == configured_db
+    assert str(configured_db) in check_event_store().message
+    tracker = MagicMock(
+        session_id="orch_configured",
+        execution_id="exec_configured",
+        seed_id="seed_configured",
+    )
+    assert f"tui monitor --db-path {configured_db}" in _format_reattach_guidance(tracker)
 
 
 # ---------------------------------------------------------------------------
@@ -287,20 +328,11 @@ class TestFormatReattachGuidance:
         output = _format_reattach_guidance(tracker)
         assert "ouroboros run workflow --orchestrator --resume sess-abc123 seed-001" in output
 
-    def test_inspect_command_points_at_tui_monitor(self) -> None:
-        """Inspect guidance must point at a *functional* command.
-
-        ``ouroboros status execution <id>`` is registered but its handler is
-        still a placeholder (src/ouroboros/cli/commands/status.py) — it would
-        print "Would show details for execution: ..." instead of doing
-        anything useful. ``ouroboros tui monitor`` is the real working
-        inspection path today, so the guidance points there until
-        ``status execution`` is implemented.
-        """
+    def test_inspect_command_points_at_status_and_tui(self) -> None:
         tracker = _make_tracker()
         output = _format_reattach_guidance(tracker)
         assert "ouroboros tui monitor" in output
-        assert "ouroboros status execution" not in output
+        assert "ouroboros status execution exec-xyz789 --events" in output
 
     def test_surfaces_both_identifiers(self) -> None:
         tracker = _make_tracker()
@@ -312,6 +344,8 @@ class TestFormatReattachGuidance:
         tracker = _make_tracker(execution_id=None)
         output = _format_reattach_guidance(tracker)
         assert "<unknown>" in output
+        assert "ouroboros status execution" not in output
+        assert "ouroboros tui monitor" in output
         assert "ouroboros run workflow --orchestrator --resume sess-abc123" in output
 
     def test_missing_seed_id_surfaces_placeholder(self) -> None:
@@ -503,15 +537,10 @@ class TestResumeCLIWithSessions:
         result = self._invoke_with_sessions("99\n")
         assert result.exit_code == 1
 
-    def test_inspect_hint_points_at_functional_command(self) -> None:
-        """Inspect hint must be a *working* command (``tui monitor``).
-
-        Pinned contract: the resume output must not direct users at the
-        placeholder ``status execution`` handler (Finding #2).
-        """
+    def test_inspect_hint_points_at_functional_commands(self) -> None:
         result = self._invoke_with_sessions("1\n")
         assert "ouroboros tui monitor" in result.output
-        assert "ouroboros status execution" not in result.output
+        assert "ouroboros status execution exec-xyz789 --events" in result.output
 
     def test_resume_hint_matches_run_workflow_contract(self) -> None:
         """The output surfaces `ouroboros run workflow --orchestrator --resume <session_id>`."""
@@ -649,12 +678,6 @@ class TestResumeGuidanceIsCallable:
         assert "--resume" in result.output
         assert "--orchestrator" in result.output
 
-    def test_status_execution_is_not_surfaced_as_guidance(self) -> None:
-        """``status execution`` is a placeholder — guidance must not point there.
-
-        This pins Finding #2 (the printed re-attach hint used to claim
-        ``ouroboros status execution <id>`` but that handler is still
-        unimplemented — see src/ouroboros/cli/commands/status.py).
-        """
+    def test_status_execution_is_surfaced_as_guidance(self) -> None:
         tracker = _make_tracker()
-        assert "status execution" not in _format_reattach_guidance(tracker)
+        assert "status execution exec-xyz789 --events" in _format_reattach_guidance(tracker)

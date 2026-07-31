@@ -17,9 +17,8 @@ from typing import Annotated
 import typer
 
 from ouroboros.cli.formatters.panels import print_error, print_info, print_success
-from ouroboros.persistence.event_store import EventStore
-
-DEFAULT_DB_PATH = Path(os.path.expanduser("~/.ouroboros/ouroboros.db"))
+from ouroboros.config.models import resolve_event_store_path
+from ouroboros.persistence.event_store import EventStore, sqlite_database_url
 
 app = typer.Typer(
     name="tui",
@@ -28,17 +27,25 @@ app = typer.Typer(
 )
 
 
+def _resolve_event_store_path_or_exit() -> Path:
+    try:
+        return resolve_event_store_path()
+    except ValueError:
+        print_error("Invalid EventStore configuration.")
+        raise typer.Exit(1) from None
+
+
 @app.command(name="monitor")
 def monitor_command(
     db_path: Annotated[
-        Path,
+        Path | None,
         typer.Option(
             "--db-path",
             help="Path to the Ouroboros database file to monitor.",
             resolve_path=True,
             show_default=True,
         ),
-    ] = DEFAULT_DB_PATH,
+    ] = None,
     backend: Annotated[
         str,
         typer.Option(
@@ -52,11 +59,12 @@ def monitor_command(
     Starts a terminal UI that shows a list of all sessions found in the
     database. You can then select a session to monitor in real-time.
     """
+    resolved_db_path = db_path or _resolve_event_store_path_or_exit()
     if backend == "slt":
-        _run_slt_backend(db_path)
+        _run_slt_backend(resolved_db_path)
         return
 
-    print_info(f"Connecting to database: {db_path}")
+    print_info(f"Connecting to database: {resolved_db_path}")
 
     try:
         from ouroboros.tui import OuroborosTUI
@@ -71,8 +79,8 @@ def monitor_command(
         raise typer.Exit(1) from e
 
     # Initialize EventStore
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    event_store = EventStore(f"sqlite+aiosqlite:///{db_path}")
+    resolved_db_path.parent.mkdir(parents=True, exist_ok=True)
+    event_store = EventStore(sqlite_database_url(resolved_db_path))
 
     # Initialize and run the TUI
     async def init_and_run() -> None:
@@ -90,14 +98,14 @@ def monitor_command(
 @app.command(name="open")
 def open_command(
     db_path: Annotated[
-        Path,
+        Path | None,
         typer.Option(
             "--db-path",
             help="Path to the Ouroboros database file to monitor.",
             resolve_path=True,
             show_default=True,
         ),
-    ] = DEFAULT_DB_PATH,
+    ] = None,
     cwd: Annotated[
         Path | None,
         typer.Option(
@@ -152,13 +160,14 @@ class TUIOpenPlan:
 
 def build_tui_open_launch(
     *,
-    db_path: Path = DEFAULT_DB_PATH,
+    db_path: Path | None = None,
     cwd: Path | None = None,
     env: os._Environ[str] | dict[str, str] = os.environ,
 ) -> TUIOpenPlan:
     """Build the terminal-specific TUI launch plan."""
     resolved_cwd = (cwd or Path.cwd()).expanduser().resolve()
-    monitor_argv = _monitor_argv(db_path.expanduser())
+    resolved_db_path = (db_path or _resolve_event_store_path_or_exit()).expanduser()
+    monitor_argv = _monitor_argv(resolved_db_path)
     manual_command = _manual_command(resolved_cwd, monitor_argv)
 
     if _is_headless(env):

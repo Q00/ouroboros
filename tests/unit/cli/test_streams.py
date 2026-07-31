@@ -1,0 +1,88 @@
+"""Tests for Windows process-boundary stream normalization."""
+
+from __future__ import annotations
+
+from io import StringIO
+import sys
+from typing import Any
+
+from typer.testing import CliRunner
+
+from ouroboros.cli import streams
+from ouroboros.cli.formatters import console
+from ouroboros.cli.main import app
+
+
+class _ReconfigurableStream(StringIO):
+    def __init__(self, encoding: str, *, fail: bool = False) -> None:
+        super().__init__()
+        self._encoding = encoding
+        self.fail = fail
+        self.calls: list[dict[str, str]] = []
+
+    @property
+    def encoding(self) -> str:
+        return self._encoding
+
+    def reconfigure(self, **kwargs: str) -> None:
+        self.calls.append(kwargs)
+        if self.fail:
+            raise ValueError("detached")
+        self._encoding = kwargs["encoding"]
+
+
+def test_legacy_windows_streams_are_reconfigured_in_place(monkeypatch: Any) -> None:
+    stdout = _ReconfigurableStream("cp949")
+    stderr = _ReconfigurableStream("cp932")
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(sys, "stdout", stdout)
+    monkeypatch.setattr(sys, "stderr", stderr)
+
+    streams.normalize_windows_standard_streams()
+
+    expected = [{"encoding": "utf-8", "errors": "replace"}]
+    assert stdout.calls == expected
+    assert stderr.calls == expected
+    assert sys.stdout is stdout
+    assert sys.stderr is stderr
+
+
+def test_utf8_and_host_owned_streams_are_left_untouched(monkeypatch: Any) -> None:
+    stdout = _ReconfigurableStream("cp65001")
+    stderr = StringIO()
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(sys, "stdout", stdout)
+    monkeypatch.setattr(sys, "stderr", stderr)
+
+    streams.normalize_windows_standard_streams()
+
+    assert stdout.calls == []
+    assert sys.stderr is stderr
+
+
+def test_failed_reconfigure_preserves_embedded_stream(monkeypatch: Any) -> None:
+    stdout = _ReconfigurableStream("cp936", fail=True)
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(sys, "stdout", stdout)
+
+    streams.normalize_windows_standard_streams()
+
+    assert sys.stdout is stdout
+
+
+def test_shared_console_resolves_replaced_stdout_dynamically(monkeypatch: Any) -> None:
+    replacement = StringIO()
+    monkeypatch.setattr(sys, "stdout", replacement)
+
+    console.print("✓ → Unicode")
+
+    assert "✓ → Unicode" in replacement.getvalue()
+
+
+def test_cli_runner_captures_eager_version_output_on_windows(monkeypatch: Any) -> None:
+    monkeypatch.setattr(sys, "platform", "win32")
+
+    result = CliRunner().invoke(app, ["--version"])
+
+    assert result.exit_code == 0
+    assert "Ouroboros" in result.stdout
