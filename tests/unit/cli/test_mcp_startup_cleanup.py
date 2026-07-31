@@ -15,6 +15,7 @@ from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import typer
 
 from ouroboros.orchestrator.session import (
     SessionRepository,
@@ -615,6 +616,26 @@ class TestMCPStartupAutoCleanup:
             await _run_mcp_server("localhost", 8080, "stdio", db_path="/tmp/test.db")
 
         MockEventStore.assert_called_once_with(sqlite_database_url("/tmp/test.db"))
+
+    @pytest.mark.asyncio
+    async def test_custom_db_path_expansion_failure_is_redacted(self, capsys) -> None:
+        from ouroboros.cli.commands.mcp import _run_mcp_server
+
+        private_user = "ouroboros_user_that_does_not_exist_1817"
+
+        with pytest.raises(typer.Exit) as exc_info:
+            await _run_mcp_server(
+                "localhost",
+                8080,
+                "stdio",
+                db_path=f"~{private_user}/db.sqlite",
+            )
+
+        output = capsys.readouterr().err
+        assert exc_info.value.exit_code == 1
+        assert "Invalid EventStore configuration" in output
+        assert private_user not in output
+        assert "Traceback" not in output
 
     @pytest.mark.asyncio
     async def test_default_db_path_uses_runtime_resolver(self, tmp_path) -> None:

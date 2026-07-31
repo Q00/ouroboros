@@ -550,15 +550,15 @@ async def _run_mcp_server(
 
     # Resolve once so both stores share one durable authority even if config
     # changes while the long-lived MCP process is starting.
-    if db_path:
-        resolved_db_path = Path(db_path).expanduser()
-    else:
-        try:
+    try:
+        if db_path:
+            resolved_db_path = Path(db_path).expanduser()
+        else:
             resolved_db_path = resolve_event_store_path()
-        except ValueError:
-            _console_out.print("[red]Invalid EventStore configuration.[/red]")
-            raise typer.Exit(1) from None
-    database_url = sqlite_database_url(resolved_db_path)
+        database_url = sqlite_database_url(resolved_db_path)
+    except (OSError, RuntimeError, ValueError):
+        _console_out.print("[red]Invalid EventStore configuration.[/red]")
+        raise typer.Exit(1) from None
     event_store = EventStore(database_url)
     brownfield_store = BrownfieldStore(database_url)
 

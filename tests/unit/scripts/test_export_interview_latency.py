@@ -238,6 +238,18 @@ def test_exporter_fails_cleanly_when_database_is_missing(tmp_path: Path) -> None
     assert result.returncode == 2
 
 
+def test_explicit_database_path_expansion_failure_is_redacted() -> None:
+    private_user = "ouroboros_user_that_does_not_exist_1817"
+
+    result = _run_exporter(Path(f"~{private_user}/db.sqlite"))
+    output = result.stdout + result.stderr
+
+    assert result.returncode == 2
+    assert "invalid EventStore configuration" in result.stderr
+    assert private_user not in output
+    assert "Traceback" not in output
+
+
 def test_exporter_uses_configured_default_database(tmp_path: Path) -> None:
     home = tmp_path / "home"
     config_dir = home / ".ouroboros"
