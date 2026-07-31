@@ -2000,6 +2000,7 @@ class EventStore:
         aggregate_type: str,
         event_types: set[str],
         preferred_event_type: str | None = None,
+        preferred_event_types: set[str] | None = None,
         aggregate_id: str | None = None,
         limit: int | None = None,
     ) -> list[BaseEvent]:
@@ -2010,9 +2011,12 @@ class EventStore:
                 operation="query_latest_events_per_aggregate",
             )
 
+        preferred_types = set(preferred_event_types or ())
+        if preferred_event_type is not None:
+            preferred_types.add(preferred_event_type)
         priority = (
-            case((events_table.c.event_type == preferred_event_type, 0), else_=1)
-            if preferred_event_type is not None
+            case((events_table.c.event_type.in_(sorted(preferred_types)), 0), else_=1)
+            if preferred_types
             else 0
         )
         session_key = func.coalesce(
@@ -2073,6 +2077,7 @@ class EventStore:
                     "aggregate_type": aggregate_type,
                     "event_types": sorted(event_types),
                     "preferred_event_type": preferred_event_type,
+                    "preferred_event_types": sorted(preferred_event_types or ()),
                     "aggregate_id": aggregate_id,
                     "limit": limit,
                 },

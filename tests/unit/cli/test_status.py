@@ -335,6 +335,54 @@ def test_executions_keeps_terminal_status_after_late_progress(monkeypatch, tmp_p
     assert "failed" in detail_result.output
 
 
+@pytest.mark.parametrize(
+    ("terminal_type", "expected_status"),
+    (
+        ("execution.completed", "complete"),
+        ("execution.failed", "failed"),
+    ),
+)
+def test_executions_keeps_legacy_terminal_after_late_progress(
+    monkeypatch,
+    tmp_path: Path,
+    terminal_type: str,
+    expected_status: str,
+) -> None:
+    config_dir = tmp_path / "config"
+    db_path = config_dir / "data" / "ouroboros.db"
+    db_path.parent.mkdir(parents=True)
+    _write_config(config_dir)
+    now = datetime.now(UTC)
+    _write_execution_events(
+        db_path,
+        (
+            BaseEvent(
+                type=terminal_type,
+                timestamp=now - timedelta(seconds=1),
+                aggregate_type="execution",
+                aggregate_id="exec_legacy_terminal",
+                data={"session_id": "session_same"},
+            ),
+            BaseEvent(
+                type="workflow.progress.updated",
+                timestamp=now,
+                aggregate_type="execution",
+                aggregate_id="exec_legacy_terminal",
+                data={"session_id": "session_same"},
+            ),
+        ),
+    )
+    monkeypatch.setattr("ouroboros.config.models.get_config_dir", lambda: config_dir)
+
+    list_result = runner.invoke(app, ["executions"])
+    detail_result = runner.invoke(app, ["execution", "exec_legacy_terminal"])
+
+    assert list_result.exit_code == 0
+    assert expected_status in list_result.output
+    assert detail_result.exit_code == 0
+    assert expected_status in detail_result.output
+
+
 def test_executions_prefers_newer_session_for_shared_execution_id(
     monkeypatch, tmp_path: Path
 ) -> None:
