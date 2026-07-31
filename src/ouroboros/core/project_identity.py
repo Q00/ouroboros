@@ -20,6 +20,7 @@ import stat
 import subprocess
 import tempfile
 from uuid import NAMESPACE_URL, uuid5
+import weakref
 
 PROJECT_ID_PREFIX = "project_"
 _MAX_PATH_LENGTH = 4096
@@ -517,7 +518,7 @@ class _TopologyFileEvidence:
     content_hash: str | None = None
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, weakref_slot=True)
 class PublicationEvidence:
     """Everything needed to accept a publication identity without Git.
 
@@ -669,6 +670,29 @@ def active_publication_evidence_sink() -> list[PublicationEvidence | None] | Non
     return _EVIDENCE_SINK.get()
 
 
+def active_publication_evidence() -> PublicationEvidence | None:
+    """Return the evidence the resolver deposited in the active scope, if any."""
+    sink = _EVIDENCE_SINK.get()
+    if sink is None:
+        return None
+    return sink[0]
+
+
+# Evidence is trusted by issuance, not by shape: only the exact objects this
+# module created during a successful resolution are registered, keyed by
+# object identity and compared with ``is``. A caller-assembled object — even
+# one whose captured entries all match the live filesystem — was never
+# issued and is refused before any structural check runs. Weak values keep
+# the registry from outliving the evidence itself.
+_ISSUED_EVIDENCE: weakref.WeakValueDictionary[int, PublicationEvidence] = (
+    weakref.WeakValueDictionary()
+)
+
+
+def _evidence_is_resolver_issued(evidence: PublicationEvidence) -> bool:
+    return _ISSUED_EVIDENCE.get(id(evidence)) is evidence
+
+
 @contextmanager
 def publication_evidence_sink() -> Iterator[list[PublicationEvidence | None]]:
     """Carry captured publication evidence out of a nested resolution.
@@ -734,13 +758,18 @@ def resolve_project_identity_for_publication(
         if not post_escalate and post_files == pre_files:
             file_evidence = post_files
             escalate = False
-    return resolved.identity, PublicationEvidence(
+    evidence = PublicationEvidence(
         identity=resolved.identity,
         effective_directory=effective,
         directory_evidence=resolved.directory_evidence,
         file_evidence=file_evidence,
         escalate=escalate,
     )
+    _ISSUED_EVIDENCE[id(evidence)] = evidence
+    sink = _EVIDENCE_SINK.get()
+    if sink is not None:
+        sink[0] = evidence
+    return resolved.identity, evidence
 
 
 def publication_evidence_is_stable(
@@ -748,13 +777,18 @@ def publication_evidence_is_stable(
 ) -> bool:
     """Return True only when every captured publication input is unchanged.
 
-    ``effective_cwd`` must canonicalize to the directory the evidence was
-    captured from — the proof is about that resolution and transfers to no
-    other workspace. Any doubt — an escalating capture, a changed or newly
+    Only evidence this module itself issued is considered at all — a
+    caller-assembled object is refused regardless of its contents, because a
+    structural match can prove only the current filesystem state, never that
+    Git produced the claimed identity from it. ``effective_cwd`` must
+    canonicalize to the directory the evidence was captured from — the proof
+    is about that resolution and transfers to no other workspace. Any doubt — an escalating capture, a changed or newly
     unreadable input, a directory generation drift — returns False so the
     caller escalates to the full re-resolution. This function runs no Git
     subprocess.
     """
+    if not _evidence_is_resolver_issued(evidence):
+        return False
     if evidence.escalate:
         return False
     try:
@@ -808,6 +842,8 @@ def _publication_closure_is_complete(evidence: PublicationEvidence) -> bool:
     for name in _GIT_DIR_CLOSURE_NAMES:
         if git_dir / name not in captured:
             return False
+    if captured[git_dir / "HEAD"].kind != "file":
+        return False
     if captured[git_dir / "commondir"].kind != "missing":
         return False
     registry = captured.get(git_dir / "worktrees")

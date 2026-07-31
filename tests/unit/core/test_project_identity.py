@@ -1220,6 +1220,43 @@ class TestPublicationEvidence:
                 project_identity.publication_evidence_is_stable(partial, repo / "sub") is False
             ), f"dropping {dropped} from the closure must be refused"
 
+    def test_caller_assembled_closure_is_refused_even_when_structurally_complete(
+        self, tmp_path
+    ) -> None:
+        """Trust comes from issuance, not shape.
+
+        A closure assembled with the capture helpers over an invalid marker
+        shape matches the live filesystem entry for entry, but the resolver
+        never issued it — acceptance must refuse it and leave the shape to
+        the full re-resolution, which fails closed.
+        """
+        fake_root = (tmp_path / "fake").resolve()
+        fake_root.mkdir()
+        git_dir = fake_root / ".git"
+        git_dir.mkdir()
+        identity = project_identity.ProjectIdentity.from_root(
+            fake_root, workspace_path=".", require_exists=True
+        )
+        forged_files = [project_identity._capture_topology_file(git_dir, hash_content=True)]
+        for name in project_identity._GIT_DIR_CLOSURE_NAMES:
+            forged_files.append(
+                project_identity._capture_topology_file(git_dir / name, hash_content=True)
+            )
+        forged_files.append(
+            project_identity._capture_topology_file(git_dir / "worktrees", hash_content=False)
+        )
+        forged = project_identity.PublicationEvidence(
+            identity=identity,
+            effective_directory=fake_root,
+            directory_evidence=(project_identity._capture_live_directory(fake_root),),
+            file_evidence=tuple(forged_files),
+            escalate=False,
+        )
+
+        assert project_identity.publication_evidence_is_stable(forged, fake_root) is False
+        with pytest.raises(ProjectIdentityUnavailableError):
+            project_identity.resolve_project_identity(fake_root)
+
     def test_escalating_evidence_is_never_stable(self, tmp_path) -> None:
         repo = self._repo(tmp_path)
         _, evidence = project_identity.resolve_project_identity_for_publication(repo / "sub")
