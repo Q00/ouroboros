@@ -646,11 +646,15 @@ class PMInterviewEngine:
         original technical question with the PM's answer so the inner
         InterviewEngine retains full context for follow-up generation.
 
-        The bundled format recorded in the inner engine is::
+        The bundled question recorded in the inner engine is::
 
             [Original technical question: <original>]
             [PM was asked (reframed): <reframed>]
-            PM answer: <response>
+
+        The answer itself is preserved byte-for-byte.  In particular, a
+        leading provenance marker such as ``[from-code]`` must remain leading
+        so ``InterviewState.record_answer`` and persisted-state validation do
+        not accidentally promote an observation into a user decision.
 
         This ensures the LLM generating follow-up questions sees both
         the underlying technical concern and the PM's product-level answer.
@@ -666,12 +670,12 @@ class PMInterviewEngine:
         original_question = self._reframe_map.pop(question, None)
 
         if original_question is not None:
-            # Bundle the original technical question with the PM's answer
+            # Bundle the original and reframed questions, but do not decorate
+            # the response: provenance is encoded by a leading caller marker.
             bundled_question = (
                 f"[Original technical question: {original_question}]\n"
                 f"[PM was asked (reframed): {question}]"
             )
-            bundled_response = f"PM answer: {user_response}"
 
             log.info(
                 "pm.response_bundled",
@@ -679,7 +683,7 @@ class PMInterviewEngine:
                 reframed_question=question[:100],
             )
 
-            return await self.inner.record_response(state, bundled_response, bundled_question)
+            return await self.inner.record_response(state, user_response, bundled_question)
 
         return await self.inner.record_response(state, user_response, question)
 
