@@ -79,6 +79,14 @@ class TestAggregate:
 
         assert outcomes["codex"].completed == 1
 
+    def test_malformed_default_config_is_silent(self, tmp_path: Path, monkeypatch) -> None:
+        config_dir = tmp_path / "config"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text("persistence: []\n")
+        monkeypatch.setattr("ouroboros.config.models.get_config_dir", lambda: config_dir)
+
+        assert backend_outcomes.aggregate_backend_outcomes() == {}
+
     def test_ignores_unrelated_event_types(self, fixture_db: Path) -> None:
         outcomes = backend_outcomes.aggregate_backend_outcomes(db_path=fixture_db)
         # execution.ac.completed must not inflate claude's completed count (=2 not 3).

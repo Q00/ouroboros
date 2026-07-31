@@ -99,18 +99,18 @@ def aggregate_backend_outcomes(
         any error or when the store has no relevant events — callers treat an
         empty result as "no signal", never as a hard failure.
     """
-    path = Path(db_path) if db_path is not None else _default_db_path()
-    if not path.exists():
-        return {}
-
-    cutoff = (
-        datetime.now(UTC) - timedelta(days=window_days)
-        if window_days is not None and window_days > 0
-        else None
-    )
-
     tallies: dict[str, list[int]] = {}
     try:
+        path = Path(db_path) if db_path is not None else _default_db_path()
+        if not path.exists():
+            return {}
+
+        cutoff = (
+            datetime.now(UTC) - timedelta(days=window_days)
+            if window_days is not None and window_days > 0
+            else None
+        )
+
         # True read-only handle: mode=ro fails fast on any accidental write and
         # never creates the DB file.
         encoded_path = quote(str(path), safe="/")
@@ -122,7 +122,7 @@ def aggregate_backend_outcomes(
                 "ORDER BY timestamp DESC LIMIT ?",
                 (_COMPLETED_EVENT, _FAILED_EVENT, int(row_limit)),
             ).fetchall()
-    except (sqlite3.Error, ValueError, OSError) as exc:
+    except (sqlite3.Error, TypeError, ValueError, OSError, RuntimeError) as exc:
         log.debug("backend_outcomes.query_failed", error=str(exc))
         return {}
 
