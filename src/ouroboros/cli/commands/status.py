@@ -226,6 +226,7 @@ async def _recent_execution_events(
             preferred_event_type="execution.terminal",
             preferred_event_types=_ABSORBING_EXECUTION_EVENT_TYPES,
             preferred_event_statuses=_ABSORBING_TERMINAL_STATUSES,
+            preserve_session_candidates=True,
             # Session aggregates used by resumed executions must be collapsed
             # before applying the user-visible execution limit.
             limit=None,

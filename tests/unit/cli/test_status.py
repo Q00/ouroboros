@@ -653,6 +653,60 @@ def test_execution_status_keeps_cross_aggregate_terminal_after_late_progress(
     assert "execution.terminal" in events_result.output
 
 
+def test_execution_status_preserves_each_root_session_before_cross_aggregate_fold(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    config_dir = tmp_path / "config"
+    db_path = config_dir / "data" / "ouroboros.db"
+    db_path.parent.mkdir(parents=True)
+    _write_config(config_dir)
+    now = datetime.now(UTC)
+    _write_execution_events(
+        db_path,
+        (
+            BaseEvent(
+                type="orchestrator.session.started",
+                timestamp=now - timedelta(seconds=3),
+                aggregate_type="session",
+                aggregate_id="newer",
+                data={"execution_id": "exec_shared", "seed_id": "seed_resume"},
+            ),
+            BaseEvent(
+                type="execution.terminal",
+                timestamp=now - timedelta(seconds=2),
+                aggregate_type="execution",
+                aggregate_id="exec_shared",
+                data={"session_id": "newer", "status": "failed"},
+            ),
+            BaseEvent(
+                type="execution.terminal",
+                timestamp=now - timedelta(seconds=1),
+                aggregate_type="execution",
+                aggregate_id="exec_shared",
+                data={"session_id": "older", "status": "failed"},
+            ),
+            BaseEvent(
+                type="workflow.progress.updated",
+                timestamp=now,
+                aggregate_type="execution",
+                aggregate_id="newer",
+                data={"session_id": "newer", "completed_count": 1},
+            ),
+        ),
+    )
+    monkeypatch.setattr("ouroboros.config.models.get_config_dir", lambda: config_dir)
+
+    list_result = runner.invoke(app, ["executions"])
+    detail_result = runner.invoke(app, ["execution", "exec_shared"])
+
+    assert list_result.exit_code == 0
+    assert "exec_shared" in list_result.output
+    assert "failed" in list_result.output
+    assert detail_result.exit_code == 0
+    assert "failed" in detail_result.output
+
+
 def test_execution_finds_terminal_beyond_first_event_page(monkeypatch, tmp_path: Path) -> None:
     config_dir = tmp_path / "config"
     db_path = config_dir / "data" / "ouroboros.db"
