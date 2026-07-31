@@ -825,20 +825,32 @@ def test_bsd_empty_sed_suffix_is_portable_evidence_grammar(monkeypatch) -> None:
     )
 
 
-@pytest.mark.parametrize(
-    "command",
-    (
-        "sed -i '' 's/before/after/' first.py second.py",
-        "perl -pi -e 's/before/after/' first.py second.py",
-    ),
-)
-def test_in_place_editor_inode_replacement_remains_fail_closed(tmp_path, command) -> None:
+def test_gnu_sed_in_place_grammar_enumerates_every_operand(monkeypatch) -> None:
+    """GNU's suffix-free ``-i`` spelling retains both input receivers."""
+    monkeypatch.setattr(sys, "platform", "linux")
+
+    assert _shell_command_mutation_targets("sed -i 's/before/after/' first.py second.py") == (
+        "first.py",
+        "second.py",
+    )
+
+
+@pytest.mark.parametrize("editor", ("sed", "perl"))
+def test_in_place_editor_inode_replacement_remains_fail_closed(tmp_path, editor) -> None:
     """Enumerating all operands does not weaken regular-inode continuity."""
     first = tmp_path / "first.py"
     second = tmp_path / "second.py"
     first.write_text("before\n", encoding="utf-8")
     second.write_text("before\n", encoding="utf-8")
     before = (first.stat().st_ino, second.stat().st_ino)
+    if editor == "sed":
+        argv = ["sed", "-i"]
+        if not sys.platform.startswith("linux"):
+            argv.append("")
+        argv.extend(("s/before/after/", "first.py", "second.py"))
+    else:
+        argv = ["perl", "-pi", "-e", "s/before/after/", "first.py", "second.py"]
+    command = shlex.join(argv)
     call = AgentMessage(
         type="tool",
         content=f"Bash: {command}",
