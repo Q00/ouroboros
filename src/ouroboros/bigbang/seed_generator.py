@@ -1161,6 +1161,20 @@ def _contains_posix_heredoc_operator(command: str) -> bool:
                 quote = None
                 index += 1
                 continue
+            if char == "$" and index + 1 < len(command):
+                is_parameter = command[index + 1] == "{"
+                is_arithmetic = command.startswith("$((", index)
+                if is_parameter or is_arithmetic:
+                    expansion_end = _posix_expansion_end(command, index)
+                    if expansion_end is not None:
+                        inner_start = index + (3 if is_arithmetic else 2)
+                        inner_end = expansion_end - (2 if is_arithmetic else 1)
+                        if _contains_nested_shell_substitution_heredoc(
+                            command[inner_start:inner_end]
+                        ):
+                            return True
+                        index = expansion_end
+                        continue
             if (
                 char == "$"
                 and command.startswith("$(", index)
@@ -1204,6 +1218,10 @@ def _contains_posix_heredoc_operator(command: str) -> bool:
             if is_parameter or is_arithmetic:
                 expansion_end = _posix_expansion_end(command, index)
                 if expansion_end is not None:
+                    inner_start = index + (3 if is_arithmetic else 2)
+                    inner_end = expansion_end - (2 if is_arithmetic else 1)
+                    if _contains_nested_shell_substitution_heredoc(command[inner_start:inner_end]):
+                        return True
                     word_started = True
                     index = expansion_end
                     continue
@@ -1241,6 +1259,65 @@ def _posix_backtick_substitution_end(value: str, index: int) -> int | None:
             return cursor + 1
         cursor += 1
     return None
+
+
+def _contains_nested_shell_substitution_heredoc(value: str) -> bool:
+    """Inspect only executable substitutions inside parameter/arithmetic text.
+
+    Raw ``<<`` in these frames is data or an arithmetic shift, not shell
+    redirection. Nested ``$()`` and legacy backticks execute shell code and
+    must therefore be scanned with the full heredoc detector.
+    """
+    quote: str | None = None
+    escaped = False
+    index = 0
+    while index < len(value):
+        char = value[index]
+        if quote == "'":
+            if char == "'":
+                quote = None
+            index += 1
+            continue
+        if escaped:
+            escaped = False
+            index += 1
+            continue
+        if char == "\\":
+            escaped = True
+            index += 1
+            continue
+        if char == '"':
+            quote = None if quote == '"' else '"'
+            index += 1
+            continue
+        if char == "'" and quote is None:
+            quote = "'"
+            index += 1
+            continue
+        if char == "$" and index + 1 < len(value) and value[index + 1] in "({":
+            expansion_end = _posix_expansion_end(value, index)
+            if expansion_end is not None:
+                is_arithmetic = value.startswith("$((", index)
+                is_parameter = value[index + 1] == "{"
+                if is_arithmetic or is_parameter:
+                    inner_start = index + (3 if is_arithmetic else 2)
+                    inner_end = expansion_end - (2 if is_arithmetic else 1)
+                    if _contains_nested_shell_substitution_heredoc(value[inner_start:inner_end]):
+                        return True
+                elif _contains_posix_heredoc_operator(value[index + 2 : expansion_end - 1]):
+                    return True
+                index = expansion_end
+                continue
+        if char == "`":
+            substitution_end = _posix_backtick_substitution_end(value, index)
+            if substitution_end is None:
+                return True
+            if _contains_posix_heredoc_operator(value[index + 1 : substitution_end - 1]):
+                return True
+            index = substitution_end
+            continue
+        index += 1
+    return False
 
 
 @dataclass
@@ -1880,6 +1957,7 @@ EXIT_CONDITIONS: [{{"name": "<name>", "description": "<description>", "criteria"
                     break
             if matched_prefix:
                 continue
+            raise ValueError(f"Unrecognized extraction line after structured output began: {line}")
 
         if "acceptance_criteria" not in requirements:
             raise ValueError("Missing required field: acceptance_criteria")

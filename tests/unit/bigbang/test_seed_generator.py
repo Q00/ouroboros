@@ -784,7 +784,7 @@ class TestSeedGeneratorExtraction:
             acceptance_criteria = f"\n{acceptance_criteria}\n"
         response = create_valid_extraction_response(acceptance_criteria=acceptance_criteria)
 
-        with pytest.raises(ValueError, match="JSON array of objects"):
+        with pytest.raises(ValueError, match="JSON array of objects|Unrecognized extraction line"):
             generator._parse_extraction_response(response)
 
     @pytest.mark.parametrize("representation", ("block", "inline"))
@@ -798,7 +798,7 @@ class TestSeedGeneratorExtraction:
             acceptance_criteria = f"\n{acceptance_criteria}\n"
         response = create_valid_extraction_response(acceptance_criteria=acceptance_criteria)
 
-        with pytest.raises(ValueError, match="JSON array of objects"):
+        with pytest.raises(ValueError, match="JSON array of objects|Unrecognized extraction line"):
             generator._parse_extraction_response(response)
 
     def test_extraction_allows_reserved_marker_text_in_other_fields(self) -> None:
@@ -864,7 +864,7 @@ class TestSeedGeneratorExtraction:
         with pytest.raises(ValueError):
             generator._parse_extraction_response(response)
 
-    @pytest.mark.parametrize("malformed_kind", ("missing", "empty", "duplicate"))
+    @pytest.mark.parametrize("malformed_kind", ("missing", "empty", "duplicate", "injected"))
     @pytest.mark.asyncio
     async def test_generate_rejects_required_acceptance_criteria_shape_on_both_attempts(
         self, malformed_kind: str
@@ -883,6 +883,8 @@ class TestSeedGeneratorExtraction:
                 line for line in response.splitlines() if line.startswith("ACCEPTANCE_CRITERIA:")
             )
             response = response.replace(acceptance_line, f"{acceptance_line}\n{acceptance_line}")
+        elif malformed_kind == "injected":
+            response += "\nAC: injected | verify: true | artifacts: NONE | expect: NONE"
 
         mock_adapter = AsyncMock()
         mock_adapter.complete = AsyncMock(
@@ -1933,6 +1935,12 @@ class TestSeedGeneratorExtraction:
             ),
             (r'''printf '%s\n' "plain <<EOF"''', "plain <<EOF\n"),
             (r'''printf '%s\n' "\`literal <<EOF"''', "`literal <<EOF\n"),
+            (r"""printf '%s\n' $((1 << 2))""", "4\n"),
+            (r'''printf '%s\n' "$((1 << 2))"''', "4\n"),
+            (
+                r'''unset x; printf '%s\n' "${x:-literal << text}"''',
+                "literal << text\n",
+            ),
         ),
     )
     async def test_generate_preserves_posix_single_quote_tokens_through_live_verify(
@@ -2130,6 +2138,11 @@ class TestSeedGeneratorExtraction:
             'cat <<E"OF"',
             "cat <<'E'OF",
             r'''printf '%s' "`cat <<\EOF`"''',
+            r"""printf '%s\n' $(( $(cat <<\EOF; printf 1) + 1 ))""",
+            r"""unset x; printf '%s' ${x:-$(cat <<\EOF)}""",
+            r"""unset x; printf '%s' ${x:-`cat <<\EOF`}""",
+            r'''unset x; printf '%s' "${x:-$(cat <<\EOF)}"''',
+            r'''printf '%s\n' "$(( $(cat <<\EOF; printf 1) + 1 ))"''',
         ),
     )
     async def test_generate_retries_when_verify_command_uses_heredoc(
