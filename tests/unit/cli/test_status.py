@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 import sqlite3
@@ -41,7 +42,7 @@ API_ENV_KEYS = [
 
 
 @pytest.fixture(autouse=True)
-def _wide_rich_console() -> None:
+def _wide_rich_console() -> Iterator[None]:
     """Keep Rich health tables from truncating asserted status details."""
     previous_width = console._width  # noqa: SLF001
     previous_height = console._height  # noqa: SLF001
@@ -381,6 +382,45 @@ def test_executions_keeps_legacy_terminal_after_late_progress(
     assert expected_status in list_result.output
     assert detail_result.exit_code == 0
     assert expected_status in detail_result.output
+
+
+def test_executions_allows_progress_after_same_aggregate_pause(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    config_dir = tmp_path / "config"
+    db_path = config_dir / "data" / "ouroboros.db"
+    db_path.parent.mkdir(parents=True)
+    _write_config(config_dir)
+    now = datetime.now(UTC)
+    _write_execution_events(
+        db_path,
+        (
+            BaseEvent(
+                type="execution.terminal",
+                timestamp=now - timedelta(seconds=1),
+                aggregate_type="execution",
+                aggregate_id="exec_paused",
+                data={"session_id": "session_same", "status": "paused"},
+            ),
+            BaseEvent(
+                type="workflow.progress.updated",
+                timestamp=now,
+                aggregate_type="execution",
+                aggregate_id="exec_paused",
+                data={"session_id": "session_same"},
+            ),
+        ),
+    )
+    monkeypatch.setattr("ouroboros.config.models.get_config_dir", lambda: config_dir)
+
+    list_result = runner.invoke(app, ["executions"])
+    detail_result = runner.invoke(app, ["execution", "exec_paused"])
+
+    assert list_result.exit_code == 0
+    assert "running" in list_result.output
+    assert detail_result.exit_code == 0
+    assert "running" in detail_result.output
 
 
 def test_executions_prefers_newer_session_for_shared_execution_id(

@@ -2001,6 +2001,7 @@ class EventStore:
         event_types: set[str],
         preferred_event_type: str | None = None,
         preferred_event_types: set[str] | None = None,
+        preferred_event_statuses: set[str] | None = None,
         aggregate_id: str | None = None,
         limit: int | None = None,
     ) -> list[BaseEvent]:
@@ -2011,14 +2012,21 @@ class EventStore:
                 operation="query_latest_events_per_aggregate",
             )
 
+        preferred_conditions = []
         preferred_types = set(preferred_event_types or ())
+        if preferred_types:
+            preferred_conditions.append(events_table.c.event_type.in_(sorted(preferred_types)))
         if preferred_event_type is not None:
-            preferred_types.add(preferred_event_type)
-        priority = (
-            case((events_table.c.event_type.in_(sorted(preferred_types)), 0), else_=1)
-            if preferred_types
-            else 0
-        )
+            preferred_condition = events_table.c.event_type == preferred_event_type
+            if preferred_event_statuses:
+                preferred_condition = and_(
+                    preferred_condition,
+                    func.lower(func.json_extract(events_table.c.payload, "$.status")).in_(
+                        sorted(preferred_event_statuses)
+                    ),
+                )
+            preferred_conditions.append(preferred_condition)
+        priority = case((or_(*preferred_conditions), 0), else_=1) if preferred_conditions else 0
         session_key = func.coalesce(
             func.json_extract(events_table.c.payload, "$.session_id"),
             events_table.c.aggregate_id,
@@ -2078,6 +2086,7 @@ class EventStore:
                     "event_types": sorted(event_types),
                     "preferred_event_type": preferred_event_type,
                     "preferred_event_types": sorted(preferred_event_types or ()),
+                    "preferred_event_statuses": sorted(preferred_event_statuses or ()),
                     "aggregate_id": aggregate_id,
                     "limit": limit,
                 },

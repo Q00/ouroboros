@@ -169,7 +169,16 @@ _ROOT_EXECUTION_EVENT_STATUS = {
 _ABSORBING_EXECUTION_EVENT_TYPES = {
     "execution.completed",
     "execution.failed",
-    "execution.terminal",
+}
+_ABSORBING_TERMINAL_STATUSES = {
+    "cancelled",
+    "complete",
+    "completed",
+    "error",
+    "failed",
+    "failure",
+    "success",
+    "succeeded",
 }
 _TERMINAL_STATUS_ALIASES = {
     "active": "running",
@@ -214,7 +223,9 @@ async def _recent_execution_events(
         persisted = await store.query_latest_events_per_aggregate(
             aggregate_type="execution",
             event_types={"execution.terminal", *_ROOT_EXECUTION_EVENT_STATUS},
+            preferred_event_type="execution.terminal",
             preferred_event_types=_ABSORBING_EXECUTION_EVENT_TYPES,
+            preferred_event_statuses=_ABSORBING_TERMINAL_STATUSES,
             # Session aggregates used by resumed executions must be collapsed
             # before applying the user-visible execution limit.
             limit=None,
