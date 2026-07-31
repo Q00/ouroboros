@@ -10654,10 +10654,10 @@ Respond with either ATOMIC or the structured JSON object only.
         return None
 
     def _is_retryable_failure(self, result: ACExecutionResult | BaseException) -> bool:
-        """Whether a batch result is a non-stall, non-blocked AC failure (PR-V V3)."""
+        """Whether a batch result is a runnable non-stall AC failure (PR-V V3)."""
         if not isinstance(result, ACExecutionResult):
             return False
-        if result.success or result.is_blocked:
+        if result.success or result.is_blocked or result.is_invalid:
             return False
         # Stall retries are handled separately by the atomic leaf loop.
         return result.error != _STALL_SENTINEL

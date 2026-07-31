@@ -2170,21 +2170,28 @@ async def test_unmaterializable_ac_is_judged_while_valid_sibling_completes(
         event_store=event_store,
         console=MagicMock(),
         enable_decomposition=False,
+        ac_retry_attempts=3,
         task_cwd=workspace,
     )
     executor._coordinator.detect_file_conflicts = MagicMock(return_value=[])
+    executor._maybe_recover_with_bounce_decomposition = AsyncMock()  # type: ignore[method-assign]
+    executor._maybe_redispatch_alt_harness = AsyncMock()  # type: ignore[method-assign]
+    executor._maybe_redispatch_alt_harness_for_batch_ac = AsyncMock()  # type: ignore[method-assign]
+    executor._build_ac_retry_prompt = MagicMock()  # type: ignore[method-assign]
 
-    result = await executor.execute_parallel(
-        seed=seed,
-        execution_plan=graph.to_execution_plan(),
-        session_id="sess_sibling_admission",
-        execution_id="exec_sibling_admission",
-        tools=["Read"],
-        system_prompt="system",
-    )
+    with patch("ouroboros.orchestrator.parallel_executor.log") as log_mock:
+        result = await executor.execute_parallel(
+            seed=seed,
+            execution_plan=graph.to_execution_plan(),
+            session_id="sess_sibling_admission",
+            execution_id="exec_sibling_admission",
+            tools=["Read"],
+            system_prompt="system",
+        )
 
     by_index = {item.ac_index: item for item in result.results}
     assert by_index[0].outcome is ACExecutionOutcome.INVALID
+    assert by_index[0].retry_attempt == 0
     assert by_index[1].success is True
     assert result.invalid_count == 1
     assert result.success_count == 1
@@ -2192,10 +2199,22 @@ async def test_unmaterializable_ac_is_judged_while_valid_sibling_completes(
     assert result.stages[0].started is True
     assert runtime.call_count == 1
     judged = [event for event in appended_events if event.type == "execution.ac.attempt_judged"]
-    invalid_judgment = next(event for event in judged if event.data["ac_index"] == 0)
+    invalid_judgments = [event for event in judged if event.data["ac_index"] == 0]
+    assert len(invalid_judgments) == 1
+    invalid_judgment = invalid_judgments[0]
     assert invalid_judgment.data["outcome"] == "invalid"
     assert invalid_judgment.data["error_code"] == "unmaterializable_success_contract"
     assert str(invalid_judgment.data["error"]).startswith("unmaterializable_success_contract:")
+    admission_rejections = [
+        call
+        for call in log_mock.warning.call_args_list
+        if call.args and call.args[0] == "parallel_executor.ac.admission_rejected"
+    ]
+    assert len(admission_rejections) == 1
+    executor._maybe_recover_with_bounce_decomposition.assert_not_awaited()
+    executor._maybe_redispatch_alt_harness.assert_not_awaited()
+    executor._maybe_redispatch_alt_harness_for_batch_ac.assert_not_awaited()
+    executor._build_ac_retry_prompt.assert_not_called()
 
 
 def test_command_claim_supports_exact_structured_shell_body() -> None:
