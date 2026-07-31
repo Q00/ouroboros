@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from ouroboros.core.seed import (
+    MAX_AC_SUCCESS_CONTRACT_ARTIFACT_BYTES,
     AcceptanceCriterionSpec,
     OntologySchema,
     Seed,
@@ -94,6 +95,8 @@ async def test_verify_gate_passes_on_exit_zero(tmp_path: Any) -> None:
 def test_expected_artifact_runtime_uses_shared_portable_path_grammar(tmp_path: Any) -> None:
     spaced = tmp_path / "Build Outputs"
     spaced.mkdir()
+    encoded_overflow = "/".join(("😀" * 63,) * 8 + ("a" * 15,))
+    assert len(encoded_overflow.encode("utf-8")) == MAX_AC_SUCCESS_CONTRACT_ARTIFACT_BYTES + 1
 
     assert _missing_expected_artifacts(("./Build Outputs",), str(tmp_path)) == ()
     invalid = _missing_expected_artifacts(
@@ -108,12 +111,14 @@ def test_expected_artifact_runtime_uses_shared_portable_path_grammar(tmp_path: A
             "docs/a:b",
             "a" * 256,
             "docs/" + ("\u00e9" * 128),
+            encoded_overflow,
             "NONE",
         ),
         str(tmp_path),
     )
-    assert len(invalid) == 11
+    assert len(invalid) == 12
     assert any("longer than 255 filesystem bytes" in artifact for artifact in invalid)
+    assert any("path longer than 2038 filesystem bytes" in artifact for artifact in invalid)
     assert any("NONE mixed with artifact paths" in artifact for artifact in invalid)
     assert "control character" in invalid[0]
     assert "workspace root" in invalid[1]

@@ -164,17 +164,23 @@ def _find_pipe_led_ac_field_fragment(value: str) -> _ACReservedFieldFragment | N
     return None
 
 
-def _is_bare_reserved_pipeline_command(
-    value: str,
+def _is_reserved_verify_pipeline_command(
     fragment: _ACReservedFieldFragment,
+    *,
+    active_field: str | None,
 ) -> bool:
-    """Return whether a colonless reserved word is a bare pipeline command."""
-    next_pipe = value.find("|", fragment.end)
-    segment_end = next_pipe if next_pipe >= 0 else len(value)
+    """Return whether a reserved token is command payload, not outer syntax.
+
+    A colonless ``verify`` following an established ``verify:`` marker is
+    unambiguously part of that shell payload, including any arguments that
+    follow it. Colonless ``artifacts``/``expect`` tokens remain fail-closed
+    because they are ambiguous with malformed next-field markers.
+    """
     return (
-        fragment.canonical
+        active_field == "verify"
+        and fragment.name == "verify"
+        and fragment.canonical
         and not fragment.has_colon
-        and not value[fragment.end : segment_end].strip()
     )
 
 
@@ -253,6 +259,7 @@ def _iter_outer_ac_field_markers(body: str) -> tuple[_ACFieldMarker, ...]:
     quote: str | None = None
     quote_start: int | None = None
     structured_payload_started = False
+    active_field: str | None = None
     escaped = False
     index = 0
     while index < len(body):
@@ -295,6 +302,7 @@ def _iter_outer_ac_field_markers(body: str) -> tuple[_ACFieldMarker, ...]:
         fragment = _scan_pipe_led_ac_field_fragment(body, index)
         if fragment is not None and fragment.has_colon and fragment.canonical:
             structured_payload_started = True
+            active_field = fragment.name
             markers.append(
                 _ACFieldMarker(
                     name=fragment.name,
@@ -307,12 +315,12 @@ def _iter_outer_ac_field_markers(body: str) -> tuple[_ACFieldMarker, ...]:
         if (
             fragment is not None
             and structured_payload_started
-            and _is_bare_reserved_pipeline_command(body, fragment)
+            and _is_reserved_verify_pipeline_command(fragment, active_field=active_field)
         ):
             # Once a structured payload has started, a canonical reserved word
-            # without ``:`` can be an ordinary shell pipeline command (for
-            # example ``printf READY | verify``). Only ``| name:`` is outer AC
-            # syntax; obfuscated spellings remain rejected below.
+            # without ``:`` can be an ordinary verify pipeline command with
+            # arguments. Only ``| name:`` is outer AC syntax; obfuscated
+            # spellings and ambiguous artifacts/expect fragments stay rejected.
             index += 1
             continue
         if fragment is not None:

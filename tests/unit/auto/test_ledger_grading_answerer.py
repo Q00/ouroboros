@@ -7,6 +7,7 @@ from ouroboros.auto.gap_detector import GapDetector
 from ouroboros.auto.grading import GradeGate, SeedGrade
 from ouroboros.auto.ledger import LedgerEntry, LedgerSource, LedgerStatus, SeedDraftLedger
 from ouroboros.core.seed import (
+    MAX_AC_SUCCESS_CONTRACT_ARTIFACT_BYTES,
     MAX_AC_SUCCESS_CONTRACT_ARTIFACT_CHARS,
     MAX_AC_SUCCESS_CONTRACT_ARTIFACTS,
     MAX_AC_SUCCESS_CONTRACT_CHARS,
@@ -390,6 +391,10 @@ def test_grade_gate_accepts_expected_artifacts_success_contract() -> None:
                 ),
             ),
         ),
+        (
+            None,
+            ("/".join(("😀" * 63,) * 8 + ("a" * 15,)),),
+        ),
         ("x" * (MAX_AC_SUCCESS_CONTRACT_CHARS + 1), ()),
     ),
 )
@@ -397,6 +402,10 @@ def test_grade_gate_rejects_capsule_invalid_contract_before_grade_a(
     verify_command: str | None,
     expected_artifacts: tuple[str, ...],
 ) -> None:
+    if expected_artifacts and "😀" in expected_artifacts[0]:
+        assert len(expected_artifacts[0].encode("utf-8")) == (
+            MAX_AC_SUCCESS_CONTRACT_ARTIFACT_BYTES + 1
+        )
     ledger = SeedDraftLedger.from_goal("Create bounded execution artifacts")
     _fill_minimal_ready_ledger(ledger)
     invalid_spec = AcceptanceCriterionSpec.model_construct(

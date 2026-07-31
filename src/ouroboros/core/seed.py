@@ -63,7 +63,12 @@ _WINDOWS_RESERVED_COMPONENT_STEMS = frozenset(
 _EXPECTED_ARTIFACT_DELIMITER_RE = re.compile(r",\s+")
 _PORTABLE_PATH_COMPONENT_MAX_BYTES = 255
 MAX_AC_SUCCESS_CONTRACT_ARTIFACTS = 253
+# The capsule locator allows 2,048 characters including ``workspace:``.
+# Keep the historical character ceiling for ASCII/capsule compatibility and
+# separately enforce the same payload ceiling in UTF-8 bytes so a multibyte
+# path cannot pass schema validation while exceeding the runtime path budget.
 MAX_AC_SUCCESS_CONTRACT_ARTIFACT_CHARS = 2_038
+MAX_AC_SUCCESS_CONTRACT_ARTIFACT_BYTES = 2_038
 MAX_AC_SUCCESS_CONTRACT_CHARS = 64_000
 
 
@@ -93,7 +98,6 @@ def expected_artifact_path_error(artifact: str) -> str | None:
         return "contains a backslash; use POSIX '/' separators"
     if "," in artifact:
         return "contains a comma; artifact list strings use comma+whitespace delimiters"
-
     posix_path = PurePosixPath(artifact)
     windows_path = PureWindowsPath(artifact)
     if not posix_path.parts or not windows_path.parts:
@@ -107,6 +111,15 @@ def expected_artifact_path_error(artifact: str) -> str | None:
         or ".." in windows_path.parts
     ):
         return "is absolute or escapes workspace"
+    try:
+        encoded_artifact = posix_path.as_posix().encode("utf-8")
+    except UnicodeEncodeError:
+        return "contains text that cannot be encoded as UTF-8"
+    if len(encoded_artifact) > MAX_AC_SUCCESS_CONTRACT_ARTIFACT_BYTES:
+        return (
+            "contains a canonical path longer than "
+            f"{MAX_AC_SUCCESS_CONTRACT_ARTIFACT_BYTES} filesystem bytes"
+        )
     for component in windows_path.parts:
         component_error = _windows_component_error(component)
         if component_error is not None:
@@ -163,10 +176,17 @@ def validate_ac_success_contract_values(
 
     contract_chars = len(verify_command or "") + len(output_assertion or "")
     for path in expected_artifacts:
+        try:
+            encoded_path = (
+                PurePosixPath(path).as_posix().encode("utf-8") if isinstance(path, str) else b""
+            )
+        except UnicodeEncodeError as exc:
+            raise ValueError("success contract artifacts are invalid") from exc
         if (
             not isinstance(path, str)
             or not path
             or len(path) > MAX_AC_SUCCESS_CONTRACT_ARTIFACT_CHARS
+            or len(encoded_path) > MAX_AC_SUCCESS_CONTRACT_ARTIFACT_BYTES
         ):
             raise ValueError("success contract artifacts are invalid")
         contract_chars += len(path)
@@ -387,8 +407,9 @@ class AcceptanceCriterionSpec(BaseModel, frozen=True):
         default_factory=tuple,
         description=(
             "Exact file or directory paths relative to the run workspace; "
-            "each path is resolved literally and must exist; prefix top-level "
-            "paths containing spaces with ./"
+            "each path is resolved literally and must exist; each component "
+            "is at most 255 UTF-8 bytes and the complete canonical path at most 2038; "
+            "prefix top-level paths containing spaces with ./"
         ),
     )
     output_assertion: str | None = Field(

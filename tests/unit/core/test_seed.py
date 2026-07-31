@@ -11,6 +11,7 @@ from pydantic import ValidationError as PydanticValidationError
 import pytest
 
 from ouroboros.core.seed import (
+    MAX_AC_SUCCESS_CONTRACT_ARTIFACT_BYTES,
     MAX_AC_SUCCESS_CONTRACT_ARTIFACT_CHARS,
     MAX_AC_SUCCESS_CONTRACT_ARTIFACTS,
     MAX_AC_SUCCESS_CONTRACT_CHARS,
@@ -26,6 +27,13 @@ from ouroboros.core.seed import (
     expected_artifact_path_error,
     parse_expected_artifact_list,
 )
+
+
+def _multibyte_artifact_at_byte_budget(*, overflow_bytes: int = 0) -> str:
+    """Build a component-valid UTF-8 path at the total artifact budget."""
+    path = "/".join((*("😀" * 63 for _ in range(8)), "a" * (14 + overflow_bytes)))
+    assert len(path.encode("utf-8")) == MAX_AC_SUCCESS_CONTRACT_ARTIFACT_BYTES + overflow_bytes
+    return path
 
 
 class TestSeedMetadata:
@@ -420,6 +428,8 @@ class TestSeed:
         assert "Exact file or directory paths" in field.description
         assert "relative to the run workspace" in field.description
         assert "resolved literally" in field.description
+        assert "255 UTF-8 bytes" in field.description
+        assert "complete canonical path at most 2038" in field.description
         assert "prefix top-level paths containing spaces with ./" in field.description
 
     def test_expected_artifact_path_grammar_is_portable(self) -> None:
@@ -457,8 +467,23 @@ class TestSeed:
             "docs",
             "docs/User Guide.md",
             "./Build Outputs",
+            "é" * 127 + "a",
+            _multibyte_artifact_at_byte_budget(),
+            "./" + _multibyte_artifact_at_byte_budget(),
         ):
             assert expected_artifact_path_error(artifact) is None
+
+    def test_expected_artifact_path_rejects_component_and_total_byte_overflow(self) -> None:
+        component_overflow = "é" * 128
+        total_overflow = _multibyte_artifact_at_byte_budget(overflow_bytes=1)
+
+        assert len(component_overflow.encode("utf-8")) == 256
+        assert "component longer than 255 filesystem bytes" in (
+            expected_artifact_path_error(component_overflow) or ""
+        )
+        assert "path longer than 2038 filesystem bytes" in (
+            expected_artifact_path_error(total_overflow) or ""
+        )
 
     def test_expected_artifact_list_uses_comma_whitespace_delimiter(self) -> None:
         assert parse_expected_artifact_list("tasks.json, logs/task.log, ./Build Outputs") == (
@@ -493,9 +518,28 @@ class TestSeed:
         )
         assert len(artifact) > MAX_AC_SUCCESS_CONTRACT_ARTIFACT_CHARS
 
-        with pytest.raises(PydanticValidationError, match="artifacts are invalid"):
+        with pytest.raises(PydanticValidationError, match="path longer than 2038 filesystem bytes"):
             AcceptanceCriterionSpec(
                 description="oversized artifact locator",
+                expected_artifacts=(artifact,),
+            )
+
+    def test_success_contract_accepts_exact_multibyte_artifact_byte_budget(self) -> None:
+        artifact = _multibyte_artifact_at_byte_budget()
+
+        spec = AcceptanceCriterionSpec(
+            description="maximum encoded artifact locator",
+            expected_artifacts=(artifact,),
+        )
+
+        assert spec.expected_artifacts == (artifact,)
+
+    def test_success_contract_rejects_multibyte_artifact_byte_overflow(self) -> None:
+        artifact = _multibyte_artifact_at_byte_budget(overflow_bytes=1)
+
+        with pytest.raises(PydanticValidationError, match="path longer than 2038 filesystem bytes"):
+            AcceptanceCriterionSpec(
+                description="oversized encoded artifact locator",
                 expected_artifacts=(artifact,),
             )
 

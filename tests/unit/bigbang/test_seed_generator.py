@@ -35,6 +35,7 @@ from ouroboros.bigbang.seed_generator import (
 from ouroboros.config.loader import get_clarification_model
 from ouroboros.core.errors import ProviderError, ValidationError
 from ouroboros.core.seed import (
+    MAX_AC_SUCCESS_CONTRACT_ARTIFACT_BYTES,
     AcceptanceCriterionSpec,
     ContextReference,
     EvaluationPrinciple,
@@ -514,13 +515,22 @@ class TestSeedGeneratorExtraction:
 
         assert tuple(marker.name for marker in markers) == ("verify", "artifacts", "expect")
 
-    def test_ac_field_marker_scanner_rejects_unquoted_malformed_field_fragment(
+    @pytest.mark.parametrize(
+        ("body", "field_name"),
+        (
+            ("Files exist | verify: test -f output.txt | artifacts output.txt", "artifacts"),
+            ("Pipeline works | verify: printf READY | ver ify --mode strict", "verify"),
+            (r"Pipeline works | verify: printf READY | ver\ify --mode strict", "verify"),
+            ("Pipeline works | verify: printf READY | ver'ify --mode strict", "verify"),
+        ),
+    )
+    def test_ac_field_marker_scanner_rejects_malformed_or_obfuscated_operator(
         self,
+        body: str,
+        field_name: str,
     ) -> None:
-        with pytest.raises(ValueError, match="Malformed artifacts field"):
-            _iter_outer_ac_field_markers(
-                "Files exist | verify: test -f output.txt | artifacts output.txt"
-            )
+        with pytest.raises(ValueError, match=rf"Malformed {field_name} field"):
+            _iter_outer_ac_field_markers(body)
 
     @pytest.mark.parametrize(
         "line",
@@ -1722,7 +1732,7 @@ class TestSeedGeneratorExtraction:
         mock_adapter = AsyncMock()
         state = create_interview_state_with_rounds()
         low_ambiguity = create_low_ambiguity_score()
-        verify_command = "verify(){ cat; }; printf READY | verify"
+        verify_command = "verify(){ cat; }; printf READY | verify --mode strict"
         extraction_response = create_valid_extraction_response(
             acceptance_criteria=(
                 "\n"
@@ -2322,6 +2332,32 @@ class TestSeedGeneratorSaveAndLoad:
             result = await load_seed(file_path)
 
             assert result.is_err
+
+    @pytest.mark.asyncio
+    async def test_load_seed_rejects_persisted_legacy_multibyte_path_overflow(
+        self,
+        sample_seed: Seed,
+    ) -> None:
+        """Legacy replay fails explicitly when a persisted path is unmaterializable."""
+        artifact = "/".join(("😀" * 63,) * 8 + ("a" * 15,))
+        assert len(artifact.encode("utf-8")) == MAX_AC_SUCCESS_CONTRACT_ARTIFACT_BYTES + 1
+        seed_data = sample_seed.to_dict()
+        seed_data["acceptance_criteria"] = [
+            {
+                "description": "Persisted artifact exists",
+                "expected_artifacts": [artifact],
+            }
+        ]
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            file_path = Path(tmp_dir) / "legacy_oversized_seed.yaml"
+            file_path.write_text(yaml.safe_dump(seed_data), encoding="utf-8")
+
+            result = await load_seed(file_path)
+
+        assert result.is_err
+        assert isinstance(result.error, ValidationError)
+        assert "path longer than 2038 filesystem bytes" in result.error.message
 
     def test_save_seed_sync(self, sample_seed: Seed) -> None:
         """save_seed_sync() saves seed synchronously."""

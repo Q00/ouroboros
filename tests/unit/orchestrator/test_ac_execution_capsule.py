@@ -7,7 +7,10 @@ import json
 
 import pytest
 
-from ouroboros.core.seed import AcceptanceCriterionSpec
+from ouroboros.core.seed import (
+    MAX_AC_SUCCESS_CONTRACT_ARTIFACT_BYTES,
+    AcceptanceCriterionSpec,
+)
 from ouroboros.events.base import BaseEvent
 from ouroboros.orchestrator.ac_execution_capsule import (
     AC_EXECUTION_CAPSULE_VERSION,
@@ -287,6 +290,36 @@ def test_capsule_rejects_unbounded_success_contract_before_hashing(tmp_path) -> 
             authority_scope="authority:v1",
             seed_goal="Ship the feature",
             ac_content="Implement the bounded AC",
+            ac_spec=spec,
+        )
+
+
+def test_capsule_rejects_multibyte_artifact_byte_overflow_before_hashing(tmp_path) -> None:
+    identity = build_ac_runtime_identity(
+        0,
+        execution_context_id="execution-encoded-contract-limit",
+        retry_attempt=0,
+    )
+    artifact = "/".join(("😀" * 63,) * 8 + ("a" * 15,))
+    assert len(artifact.encode("utf-8")) == MAX_AC_SUCCESS_CONTRACT_ARTIFACT_BYTES + 1
+    spec = AcceptanceCriterionSpec.model_construct(
+        description="Implement the encoded bounded AC",
+        expected_artifacts=(artifact,),
+        verify_command=None,
+        output_assertion=None,
+        investment=None,
+        semantic_ac_key=None,
+    )
+
+    with pytest.raises(ValueError, match="success contract artifacts are invalid"):
+        compile_ac_execution_capsule(
+            runtime_identity=identity,
+            execution_id="execution-encoded-contract-limit",
+            semantic_ac_key="semantic-key",
+            workspace=str(tmp_path.resolve()),
+            authority_scope="authority:v1",
+            seed_goal="Ship the feature",
+            ac_content="Implement the encoded bounded AC",
             ac_spec=spec,
         )
 
