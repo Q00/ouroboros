@@ -1,5 +1,7 @@
 """Unit tests for ouroboros.config.models module."""
 
+from pathlib import Path
+
 from pydantic import ValidationError
 import pytest
 
@@ -536,6 +538,38 @@ def test_event_store_path_rejects_invalid_database_path(tmp_path, database_path)
             {"persistence": {"database_path": database_path}},
             config_path,
         )
+
+
+def test_event_store_path_rejects_existing_directory(tmp_path: Path) -> None:
+    directory = tmp_path / "events.db"
+    directory.mkdir()
+
+    with pytest.raises(ValueError, match="EventStore"):
+        event_store_path_from_config(
+            {"persistence": {"database_path": str(directory)}},
+            tmp_path / "config.yaml",
+        )
+
+
+def test_event_store_path_rejects_directory_at_default_target(tmp_path: Path) -> None:
+    (tmp_path / "ouroboros.db").mkdir()
+
+    with pytest.raises(ValueError, match="EventStore"):
+        event_store_path_from_config({}, tmp_path / "config.yaml")
+
+
+def test_event_store_path_ignores_non_file_legacy_when_new_target_is_configured(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "ouroboros.db").mkdir()
+
+    assert (
+        event_store_path_from_config(
+            {"persistence": {"database_path": "data/events.db"}},
+            tmp_path / "config.yaml",
+        )
+        == tmp_path / "data" / "events.db"
+    )
 
 
 def test_event_store_path_redacts_unknown_user_expansion(tmp_path) -> None:

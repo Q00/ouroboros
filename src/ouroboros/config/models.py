@@ -838,6 +838,18 @@ def get_config_dir() -> Path:
     return Path.home() / ".ouroboros"
 
 
+def _existing_event_store_target(path: Path) -> bool:
+    """Return whether *path* exists, rejecting entries SQLite cannot open as a file."""
+    try:
+        exists = path.exists() or path.is_symlink()
+        is_file = path.is_file() if exists else False
+    except (OSError, RuntimeError, ValueError):
+        raise ValueError("invalid EventStore configuration") from None
+    if exists and not is_file:
+        raise ValueError("invalid EventStore configuration")
+    return exists
+
+
 def event_store_path_from_config(data: Mapping[str, Any], config_path: Path) -> Path:
     """Resolve the EventStore path while preserving an existing legacy database."""
     persistence = data.get("persistence")
@@ -846,6 +858,7 @@ def event_store_path_from_config(data: Mapping[str, Any], config_path: Path) -> 
 
     legacy_path = config_path.parent / "ouroboros.db"
     if not persistence or "database_path" not in persistence:
+        _existing_event_store_target(legacy_path)
         return legacy_path
     configured = persistence["database_path"]
     if not isinstance(configured, str) or not configured.strip():
@@ -855,8 +868,8 @@ def event_store_path_from_config(data: Mapping[str, Any], config_path: Path) -> 
         configured_path = Path(configured).expanduser()
         if not configured_path.is_absolute():
             configured_path = config_path.parent / configured_path
-        configured_exists = configured_path.exists()
-        legacy_exists = legacy_path.exists()
+        configured_exists = _existing_event_store_target(configured_path)
+        legacy_exists = legacy_path.is_file()
     except (OSError, RuntimeError, ValueError):
         raise ValueError("invalid EventStore configuration") from None
     if configured_exists or not legacy_exists:

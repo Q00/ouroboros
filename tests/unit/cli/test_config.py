@@ -621,6 +621,7 @@ class TestConfigValidate:
         with (
             patch("ouroboros.config.models.get_config_dir", return_value=config_dir),
             patch("pathlib.Path.exists", return_value=True),
+            patch("pathlib.Path.is_file", return_value=True),
             patch("ouroboros.config.loader.load_config"),
         ):
             result = runner.invoke(app, ["validate"])
@@ -683,6 +684,7 @@ class TestConfigValidate:
         with (
             patch("ouroboros.config.models.get_config_dir", return_value=tmp_path),
             patch("pathlib.Path.exists", return_value=True),
+            patch("pathlib.Path.is_file", return_value=True),
             patch("ouroboros.config.loader.load_config"),
         ):
             result = runner.invoke(app, ["validate"])
@@ -782,6 +784,22 @@ class TestConfigSet:
         assert result.exit_code == 0
         repaired = yaml.safe_load(config_path.read_text())
         assert repaired["persistence"]["database_path"] == "data/repaired.db"
+
+    def test_set_rejects_existing_directory_database_path(self, config_dir: Path) -> None:
+        config_path = config_dir / "config.yaml"
+        original = config_path.read_text()
+        directory = config_dir / "event-store-directory"
+        directory.mkdir()
+
+        with patch("ouroboros.config.models.get_config_dir", return_value=config_dir):
+            result = runner.invoke(
+                app,
+                ["set", "persistence.database_path", str(directory)],
+            )
+
+        assert result.exit_code == 1
+        assert "Invalid value" in result.output
+        assert config_path.read_text() == original
 
 
 # ── config init ──────────────────────────────────────────────────
