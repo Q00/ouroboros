@@ -2058,9 +2058,9 @@ class EventStore:
             if preferred_event_statuses:
                 preferred_condition = and_(
                     preferred_condition,
-                    func.lower(func.json_extract(events_table.c.payload, "$.status")).in_(
-                        sorted(preferred_event_statuses)
-                    ),
+                    func.lower(
+                        func.trim(func.json_extract(events_table.c.payload, "$.status"))
+                    ).in_(sorted(preferred_event_statuses)),
                 )
             preferred_conditions.append(preferred_condition)
         priority = case((or_(*preferred_conditions), 0), else_=1) if preferred_conditions else 0

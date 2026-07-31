@@ -423,6 +423,45 @@ def test_executions_allows_progress_after_same_aggregate_pause(
     assert "running" in detail_result.output
 
 
+def test_executions_normalizes_absorbing_terminal_status_whitespace(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    config_dir = tmp_path / "config"
+    db_path = config_dir / "data" / "ouroboros.db"
+    db_path.parent.mkdir(parents=True)
+    _write_config(config_dir)
+    now = datetime.now(UTC)
+    _write_execution_events(
+        db_path,
+        (
+            BaseEvent(
+                type="execution.terminal",
+                timestamp=now - timedelta(seconds=1),
+                aggregate_type="execution",
+                aggregate_id="exec_whitespace",
+                data={"session_id": "session_same", "status": " FAILED "},
+            ),
+            BaseEvent(
+                type="workflow.progress.updated",
+                timestamp=now,
+                aggregate_type="execution",
+                aggregate_id="exec_whitespace",
+                data={"session_id": "session_same"},
+            ),
+        ),
+    )
+    monkeypatch.setattr("ouroboros.config.models.get_config_dir", lambda: config_dir)
+
+    list_result = runner.invoke(app, ["executions"])
+    detail_result = runner.invoke(app, ["execution", "exec_whitespace"])
+
+    assert list_result.exit_code == 0
+    assert "failed" in list_result.output
+    assert detail_result.exit_code == 0
+    assert "failed" in detail_result.output
+
+
 def test_executions_prefers_newer_session_for_shared_execution_id(
     monkeypatch, tmp_path: Path
 ) -> None:
