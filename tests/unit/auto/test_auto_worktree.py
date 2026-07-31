@@ -101,6 +101,7 @@ def test_release_auto_worktree_delegates_to_task_workspace_release(monkeypatch) 
         lock_path="/tmp/worktrees/.locks/repo/auto_test.json",
     )
     released = []
+
     def capture(candidate, *, cleanup: bool) -> None:
         released.append((candidate, cleanup))
 
@@ -130,9 +131,7 @@ def test_auto_cleanup_requires_positive_terminal_result() -> None:
 
 def test_auto_cleanup_rejects_live_handoff_and_plugin_delegation() -> None:
     assert (
-        auto_worktree_cleanup_eligible(
-            _result(run_handoff_status="started", job_id="job_live")
-        )
+        auto_worktree_cleanup_eligible(_result(run_handoff_status="started", job_id="job_live"))
         is False
     )
     assert auto_worktree_cleanup_eligible(_result(ralph_dispatch_mode="plugin")) is False
