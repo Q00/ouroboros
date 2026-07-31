@@ -23,19 +23,20 @@ def _normalize_stream(stream: Any) -> None:
         if _is_utf8_stream(stream):
             return
         reconfigure = getattr(stream, "reconfigure", None)
-    except (AttributeError, OSError, TypeError, ValueError):
+    except Exception:
         # Host-owned streams may expose stale or intentionally opaque
         # capability properties. Treat those capabilities as unavailable
-        # instead of preventing Click from dispatching the command.
+        # instead of preventing Click from dispatching the command. Deliberately
+        # do not catch BaseException: interrupts and process exits must propagate.
         return
     if not callable(reconfigure):
         return
     try:
         reconfigure(encoding="utf-8", errors="replace")
-    except (AttributeError, OSError, TypeError, ValueError):
+    except Exception:
         # Captured, embedded, or already-detached streams may expose a
         # non-functional reconfigure method. Preserve their ownership and let
-        # the host decide how output is encoded.
+        # the host decide how output is encoded. BaseException still propagates.
         return
 
 

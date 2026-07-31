@@ -54,6 +54,11 @@ class _OpaqueReconfigureStream(StringIO):
         raise OSError("host-owned")
 
 
+class _UnsupportedReconfigureStream(_ReconfigurableStream):
+    def reconfigure(self, **kwargs: str) -> None:
+        raise NotImplementedError("reconfiguration is unsupported")
+
+
 def test_legacy_windows_streams_are_reconfigured_in_place(monkeypatch: Any) -> None:
     stdout = _ReconfigurableStream("cp949")
     stderr = _ReconfigurableStream("cp932")
@@ -116,6 +121,16 @@ def test_root_entry_tolerates_opaque_encoding_property(monkeypatch: Any) -> None
     get_command(app).main(args=["--version"], prog_name="ouroboros", standalone_mode=False)
 
     assert any("Ouroboros" in message for message in messages)
+
+
+def test_root_entry_tolerates_unsupported_reconfigure(monkeypatch: Any) -> None:
+    stdout = _UnsupportedReconfigureStream("cp949")
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(sys, "stdout", stdout)
+
+    get_command(app).main(args=["--version"], prog_name="ouroboros", standalone_mode=False)
+
+    assert "Ouroboros" in stdout.getvalue()
 
 
 def test_shared_console_resolves_replaced_stdout_dynamically(monkeypatch: Any) -> None:
