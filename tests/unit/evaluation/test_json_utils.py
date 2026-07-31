@@ -258,6 +258,13 @@ class TestExtractJsonPayload:
         assert extract_json_payload(stale_only) is None
         assert extract_json_payload(with_actual) == '{"actual": true}'
 
+    def test_overpadded_tab_list_is_literal_example_and_releases_actual(self) -> None:
+        stale_only = '-\t\t```json\n\t    {"stale": true}\n\t    ```'
+        with_actual = f'{stale_only}\nActual: {{"actual": true}}'
+
+        assert extract_json_payload(stale_only) is None
+        assert extract_json_payload(with_actual) == '{"actual": true}'
+
     def test_json_in_code_fence(self):
         text = '```json\n{"score": 0.85}\n```'
         result = extract_json_payload(text)
