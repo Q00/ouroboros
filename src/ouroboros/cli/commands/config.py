@@ -125,7 +125,7 @@ class _ConfigStageModelField:
     stage: str | None = None
 
 
-def _load_config() -> tuple[dict, Path]:
+def _load_config(*, validate_event_store: bool = True) -> tuple[dict, Path]:
     """Load config.yaml and return (dict, path).
 
     All top-level sections that should be mappings are validated to be dicts.
@@ -169,11 +169,12 @@ def _load_config() -> tuple[dict, Path]:
             )
             raise typer.Exit(1)
 
-    try:
-        event_store_path_from_config(data, config_path)
-    except ValueError as exc:
-        print_error(str(exc))
-        raise typer.Exit(1) from None
+    if validate_event_store:
+        try:
+            event_store_path_from_config(data, config_path)
+        except ValueError as exc:
+            print_error(str(exc))
+            raise typer.Exit(1) from None
 
     return data, config_path
 
@@ -963,7 +964,8 @@ def set_value(
     [dim]    ouroboros config set logging.level debug[/dim]
     [dim]    ouroboros config set orchestrator.runtime_backend codex[/dim]
     """
-    data, config_path = _load_config()
+    repairing_event_store_path = key == "persistence.database_path"
+    data, config_path = _load_config(validate_event_store=not repairing_event_store_path)
 
     # Validate key path against schema
     keys = key.split(".")
@@ -999,6 +1001,13 @@ def set_value(
                 pass
 
     target[keys[-1]] = parsed_value
+
+    try:
+        event_store_path_from_config(data, config_path)
+    except ValueError as exc:
+        print_error(f"Invalid value — not saved.\n{exc}")
+        raise typer.Exit(1) from None
+
     _save_config(data, config_path)
 
     # Validate the written config loads without errors

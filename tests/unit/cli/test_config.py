@@ -753,6 +753,36 @@ class TestConfigSet:
         assert result.exit_code == 1
         assert "Unknown config key" in result.output
 
+    def test_set_rejects_empty_database_path_without_writing(self, config_dir: Path) -> None:
+        config_path = config_dir / "config.yaml"
+        original = config_path.read_text()
+
+        with patch("ouroboros.config.models.get_config_dir", return_value=config_dir):
+            result = runner.invoke(app, ["set", "persistence.database_path", ""])
+
+        assert result.exit_code == 1
+        assert "Invalid value" in result.output
+        assert config_path.read_text() == original
+
+    def test_set_repairs_existing_invalid_database_path(self, config_dir: Path) -> None:
+        config_path = config_dir / "config.yaml"
+        data = yaml.safe_load(config_path.read_text())
+        data["persistence"]["database_path"] = ""
+        config_path.write_text(yaml.dump(data))
+
+        with (
+            patch("ouroboros.config.models.get_config_dir", return_value=config_dir),
+            patch("ouroboros.config.loader.load_config"),
+        ):
+            result = runner.invoke(
+                app,
+                ["set", "persistence.database_path", "data/repaired.db"],
+            )
+
+        assert result.exit_code == 0
+        repaired = yaml.safe_load(config_path.read_text())
+        assert repaired["persistence"]["database_path"] == "data/repaired.db"
+
 
 # ── config init ──────────────────────────────────────────────────
 
