@@ -1848,6 +1848,87 @@ class TestSeedGeneratorExtraction:
         assert grade.may_run is True
 
     @pytest.mark.asyncio
+    async def test_stored_legacy_unquoted_backtick_case_survives_live_verify(self) -> None:
+        """Legacy line contracts keep shell syntax inside backtick substitutions."""
+        if not Path("/bin/sh").exists():
+            pytest.skip("POSIX shell regression")
+        verify_command = "printf '%s\\n' `case x in x | artifacts:) printf case-ok;; esac`"
+        syntax = subprocess.run(
+            ["/bin/sh", "-n", "-c", verify_command],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        assert syntax.returncode == 0, syntax.stderr
+
+        criterion = _parse_acceptance_criterion_contract(
+            "AC: Legacy backtick case runs | "
+            f"verify: {verify_command} | artifacts: NONE | expect: NONE"
+        )
+        assert criterion is not None
+        assert criterion.verify_command == verify_command
+
+        generator = SeedGenerator(llm_adapter=AsyncMock())
+        requirements = generator._parse_extraction_response(create_valid_extraction_response())
+        requirements["acceptance_criteria"] = (criterion,)
+        seed = generator._build_seed(requirements, SeedMetadata(interview_id="legacy-backtick"))
+        assert Seed.model_validate(seed.model_dump()) == seed
+        grade = GradeGate().grade_seed(seed)
+        assert grade.grade is SeedGrade.A
+        assert grade.may_run is True
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            gated = await create_runtime_verify_executor(tmp_dir)._apply_verify_gate(
+                seed=seed,
+                ac_index=0,
+                result=ACExecutionResult(
+                    ac_index=0,
+                    ac_content=criterion.description,
+                    success=True,
+                ),
+                session_id="legacy-backtick-test",
+                execution_id="legacy-backtick-test",
+            )
+
+        assert gated.success is True
+        assert gated.verify_gate_outcome is not None
+        assert gated.verify_gate_outcome.passed is True
+        assert gated.verify_gate_outcome.output_tail == "case-ok\n"
+
+    @pytest.mark.parametrize(
+        "verify_command",
+        (
+            '''printf '%s\n' "`case x in x | artifacts:) printf case-ok;; esac`"''',
+            r"""printf '%s\n' `printf '%s' \`case x in x | artifacts:) printf nested;; esac\``""",
+            r"printf '%s\n' '` | artifacts: literal'",
+        ),
+    )
+    def test_legacy_backtick_boundaries_preserve_inner_reserved_pipes(
+        self, verify_command: str
+    ) -> None:
+        if Path("/bin/sh").exists():
+            syntax = subprocess.run(
+                ["/bin/sh", "-n", "-c", verify_command],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            assert syntax.returncode == 0, syntax.stderr
+        criterion = _parse_acceptance_criterion_contract(
+            f"AC: Backtick boundary | verify: {verify_command} | artifacts: NONE | expect: NONE"
+        )
+
+        assert criterion is not None
+        assert criterion.verify_command == verify_command
+
+    def test_legacy_unclosed_backtick_cannot_hide_outer_fields(self) -> None:
+        with pytest.raises(ValueError, match="Unterminated quoted or escaped"):
+            _parse_acceptance_criterion_contract(
+                "AC: Backtick boundary | verify: printf `case x in x | artifacts:) "
+                "printf hidden;; esac | artifacts: NONE | expect: NONE"
+            )
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize(
         ("verify_command", "expected_output"),
         (

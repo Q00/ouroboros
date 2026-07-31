@@ -408,6 +408,23 @@ def _iter_outer_ac_field_markers(body: str) -> tuple[_ACFieldMarker, ...]:
             shell_word_started = True
             index = expansion_end
             continue
+        if (
+            structured_payload_started
+            and active_field == "verify"
+            and char == "`"
+            and quote in {None, '"'}
+        ):
+            substitution_end = _posix_backtick_substitution_end(body, index)
+            if substitution_end is None:
+                # A legacy command substitution may contain shell syntax that
+                # resembles the outer AC fields. Fail closed instead of
+                # exposing that payload to the field scanner.
+                quote = quote or "`"
+                index = len(body)
+                continue
+            shell_word_started = True
+            index = substitution_end
+            continue
         if quote is not None:
             if char == quote:
                 if not structured_payload_started and quote_start is not None:
