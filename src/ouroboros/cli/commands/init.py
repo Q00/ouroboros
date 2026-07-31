@@ -252,9 +252,7 @@ async def _get_init_event_store():
 
     event_store = None
     try:
-        db_path = Path.home() / ".ouroboros" / "ouroboros.db"
-        db_path.parent.mkdir(parents=True, exist_ok=True)
-        event_store = EventStore(f"sqlite+aiosqlite:///{db_path}")
+        event_store = EventStore()
         await event_store.initialize()
     except Exception as exc:  # noqa: BLE001 - init interview must not depend on telemetry.
         if event_store is not None:

@@ -1027,7 +1027,7 @@ for server_config in config.servers:
 await manager.connect_all()
 
 # Create runner with MCP integration
-event_store = EventStore("sqlite+aiosqlite:///~/.ouroboros/ouroboros.db")
+event_store = EventStore()
 await event_store.initialize()
 
 adapter = ClaudeAgentAdapter()

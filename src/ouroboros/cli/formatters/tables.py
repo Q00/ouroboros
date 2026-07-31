@@ -7,6 +7,7 @@ for displaying structured data in the Ouroboros CLI.
 from typing import Any
 
 from rich.table import Table
+from rich.text import Text
 
 from ouroboros.cli.formatters import console
 
@@ -81,7 +82,7 @@ def create_key_value_table(
     table.add_column("Value", style=value_style)
 
     for key, value in data.items():
-        table.add_row(str(key), str(value))
+        table.add_row(Text(str(key), style=key_style), Text(str(value), style=value_style or None))
 
     return table
 
@@ -125,7 +126,7 @@ def create_status_table(
         name = str(item.get(name_key, ""))
         status = str(item.get(status_key, ""))
         status_style = _get_status_style(status)
-        table.add_row(name, f"[{status_style}]{status}[/]")
+        table.add_row(Text(name), Text(status, style=status_style or None))
 
     return table
 

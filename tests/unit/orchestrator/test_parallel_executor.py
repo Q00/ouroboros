@@ -343,6 +343,36 @@ def test_files_touched_rejects_wrapped_python_options_comment_shell_fallback(
     )
 
 
+def test_files_touched_rejects_shell_quoted_absolute_python_fallback(tmp_path) -> None:
+    """Shell quotes around an absolute interpreter cannot hide Python evidence."""
+    claimed_file = tmp_path / "claimed.py"
+    other_file = tmp_path / "other.py"
+    claimed_file.write_text("VALUE = 1\n", encoding="utf-8")
+    other_file.write_text("VALUE = 2\n", encoding="utf-8")
+    source = "from pathlib import Path; # touch claimed.py\nPath('other.py').write_text('x')"
+    inner = f'"{Path(sys.executable).resolve()}" -I -S -c {shlex.quote(source)}'
+    command = f"/bin/bash -c {shlex.quote(inner)}"
+    messages = (
+        AgentMessage(
+            type="tool",
+            content=f"Bash: {command}",
+            tool_name="Bash",
+            data={"tool_input": {"command": command}},
+        ),
+        AgentMessage(
+            type="tool_result",
+            content="command completed with exit code 0",
+            data={"subtype": "tool_result", "exit_code": 0},
+        ),
+    )
+
+    assert not _runtime_messages_support_file_claim(
+        "claimed.py",
+        messages,
+        task_cwd=str(tmp_path),
+    )
+
+
 def test_files_touched_treats_python_wrapper_transcript_text_as_inert_data(tmp_path) -> None:
     """Instruction-like command text is parsed as evidence data and never executed."""
     claimed_file = tmp_path / "claimed.py"

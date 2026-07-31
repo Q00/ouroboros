@@ -665,9 +665,7 @@ async def _run_orchestrator(
         mcp_manager = await _initialize_mcp_manager(mcp_config, mcp_tool_prefix)
 
     # Initialize components
-    db_path = os.path.expanduser("~/.ouroboros/ouroboros.db")
-    os.makedirs(os.path.dirname(db_path), exist_ok=True)
-    event_store = EventStore(f"sqlite+aiosqlite:///{db_path}")
+    event_store = EventStore()
     await event_store.initialize()
 
     project_dir = _resolve_cli_project_dir(

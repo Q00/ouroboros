@@ -24,6 +24,7 @@ from ouroboros.cli.formatters import console
 from ouroboros.cli.formatters.panels import print_error, print_info, print_success, print_warning
 from ouroboros.cli.formatters.tables import create_key_value_table, create_table, print_table
 from ouroboros.codex.cli_policy import resolve_codex_cli_path
+from ouroboros.config.models import event_store_path_from_config
 
 app = typer.Typer(
     name="config",
@@ -124,7 +125,7 @@ class _ConfigStageModelField:
     stage: str | None = None
 
 
-def _load_config() -> tuple[dict, Path]:
+def _load_config(*, validate_event_store: bool = True) -> tuple[dict, Path]:
     """Load config.yaml and return (dict, path).
 
     All top-level sections that should be mappings are validated to be dicts.
@@ -139,13 +140,11 @@ def _load_config() -> tuple[dict, Path]:
         raise typer.Exit(1)
     try:
         data = yaml.safe_load(config_path.read_text()) or {}
-    except (yaml.YAMLError, OSError) as exc:
-        print_error(f"Cannot parse {config_path}: {exc}")
+    except (yaml.YAMLError, OSError):
+        print_error("Invalid YAML in configuration file.")
         raise typer.Exit(1) from None
     if not isinstance(data, dict):
-        print_error(
-            f"Invalid config format in {config_path} (expected mapping, got {type(data).__name__})"
-        )
+        print_error(f"Invalid config format (expected mapping, got {type(data).__name__})")
         raise typer.Exit(1)
 
     # Guard against sections that should be dicts but aren't (e.g. orchestrator: [])
@@ -166,12 +165,22 @@ def _load_config() -> tuple[dict, Path]:
         val = data.get(section)
         if val is not None and not isinstance(val, dict):
             print_error(
-                f"Invalid config section '{section}' in {config_path} "
-                f"(expected mapping, got {type(val).__name__})"
+                f"Invalid config section '{section}' (expected mapping, got {type(val).__name__})"
             )
             raise typer.Exit(1)
 
+    if validate_event_store:
+        try:
+            event_store_path_from_config(data, config_path)
+        except ValueError as exc:
+            print_error(str(exc))
+            raise typer.Exit(1) from None
+
     return data, config_path
+
+
+def _database_file_path(data: dict, config_path: Path) -> Path:
+    return event_store_path_from_config(data, config_path)
 
 
 def _save_config(data: dict, path: Path) -> None:
@@ -215,16 +224,7 @@ def _resolve_cli_path(data: dict) -> str | None:
 
 def _resolve_db_path(data: dict, config_path: Path) -> str:
     """Return a user-facing database path summary."""
-    db_path = data.get("persistence", {}).get("database_path")
-    if db_path:
-        path = Path(db_path)
-        if not path.is_absolute():
-            resolved = config_path.parent / path
-            return f"{db_path} ({resolved})"
-        return str(path)
-
-    resolved = config_path.parent / "ouroboros.db"
-    return f"ouroboros.db ({resolved})"
+    return str(_database_file_path(data, config_path))
 
 
 def _effective_value(
@@ -964,7 +964,8 @@ def set_value(
     [dim]    ouroboros config set logging.level debug[/dim]
     [dim]    ouroboros config set orchestrator.runtime_backend codex[/dim]
     """
-    data, config_path = _load_config()
+    repairing_event_store_path = key == "persistence.database_path"
+    data, config_path = _load_config(validate_event_store=not repairing_event_store_path)
 
     # Validate key path against schema
     keys = key.split(".")
@@ -1000,6 +1001,13 @@ def set_value(
                 pass
 
     target[keys[-1]] = parsed_value
+
+    try:
+        event_store_path_from_config(data, config_path)
+    except ValueError as exc:
+        print_error(f"Invalid value — not saved.\n{exc}")
+        raise typer.Exit(1) from None
+
     _save_config(data, config_path)
 
     # Validate the written config loads without errors

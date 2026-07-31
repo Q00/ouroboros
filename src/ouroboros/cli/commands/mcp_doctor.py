@@ -17,11 +17,14 @@ import json
 import os
 from pathlib import Path
 import platform
+import shlex
 import sys
 from typing import Annotated, Literal
 
 from rich.console import Console
 import typer
+
+from ouroboros.config.models import resolve_event_store_path
 
 # ---------------------------------------------------------------------------
 # Data model
@@ -52,7 +55,7 @@ class CheckResult:
 
 _PID_FILE = Path.home() / ".ouroboros" / "mcp-server.pid"
 _PID_REGISTRY_DIR = Path.home() / ".ouroboros" / "mcp-servers"
-_EVENT_STORE_PATH = Path.home() / ".ouroboros" / "ouroboros.db"
+_EVENT_STORE_PATH: Path | None = None
 _EVENT_STORE_WARN_BYTES = 500 * 1024 * 1024  # 500 MB
 
 
@@ -336,19 +339,28 @@ def check_codex_oauth_auth() -> CheckResult:
 
 def check_event_store() -> CheckResult:
     """Check EventStore path existence and warn if it exceeds 500 MB."""
-    if not _EVENT_STORE_PATH.exists():
+    try:
+        event_store_path = _EVENT_STORE_PATH or resolve_event_store_path()
+    except ValueError:
+        return CheckResult(
+            name="event_store",
+            status="fail",
+            message="Invalid EventStore configuration.",
+            remediation="Fix persistence.database_path in the Ouroboros configuration.",
+        )
+    if not event_store_path.exists():
         return CheckResult(
             name="event_store",
             status="pass",
-            message=f"{_EVENT_STORE_PATH} not found (will be created on first use)",
+            message=f"{event_store_path} not found (will be created on first use)",
         )
     try:
-        size_bytes = _EVENT_STORE_PATH.stat().st_size
+        size_bytes = event_store_path.stat().st_size
     except OSError as exc:
         return CheckResult(
             name="event_store",
             status="warn",
-            message=f"Cannot stat {_EVENT_STORE_PATH}: {exc}",
+            message=f"Cannot stat {event_store_path}: {exc}",
         )
 
     size_mb = size_bytes / (1024 * 1024)
@@ -356,16 +368,16 @@ def check_event_store() -> CheckResult:
         return CheckResult(
             name="event_store",
             status="warn",
-            message=f"{_EVENT_STORE_PATH} is {size_mb:.1f} MB (>500 MB)",
+            message=f"{event_store_path} is {size_mb:.1f} MB (>500 MB)",
             remediation=(
                 "Consider archiving or pruning old sessions. "
-                "The DB can be vacuumed with: sqlite3 ~/.ouroboros/ouroboros.db VACUUM;"
+                f"The DB can be vacuumed with: sqlite3 {shlex.quote(str(event_store_path))} VACUUM;"
             ),
         )
     return CheckResult(
         name="event_store",
         status="pass",
-        message=f"{_EVENT_STORE_PATH} ({size_mb:.1f} MB)",
+        message=f"{event_store_path} ({size_mb:.1f} MB)",
     )
 
 

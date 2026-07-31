@@ -530,10 +530,11 @@ async def _run_mcp_server(
     # Ensure login-shell environment is available (critical for gateway-spawned processes)
     _ensure_shell_env()
 
+    from ouroboros.config.models import resolve_event_store_path
     from ouroboros.mcp.server.adapter import create_ouroboros_server, validate_transport
     from ouroboros.orchestrator.session import SessionRepository
     from ouroboros.persistence.brownfield import BrownfieldStore
-    from ouroboros.persistence.event_store import EventStore
+    from ouroboros.persistence.event_store import EventStore, sqlite_database_url
 
     # Validate transport early, before any expensive startup work
     try:
@@ -547,13 +548,23 @@ async def _run_mcp_server(
 
     _console_out = _stderr_console if transport == "stdio" else Console()
 
-    # Create EventStore with custom path if provided
-    if db_path:
-        event_store = EventStore(f"sqlite+aiosqlite:///{db_path}")
-        brownfield_store = BrownfieldStore(f"sqlite+aiosqlite:///{db_path}")
-    else:
-        event_store = EventStore()
-        brownfield_store = BrownfieldStore()
+    # Resolve once so both stores share one durable authority even if config
+    # changes while the long-lived MCP process is starting.
+    try:
+        if db_path:
+            resolved_db_path = Path(db_path).expanduser()
+        else:
+            resolved_db_path = resolve_event_store_path()
+        resolved_db_path.parent.mkdir(parents=True, exist_ok=True)
+        resolved_exists = resolved_db_path.exists() or resolved_db_path.is_symlink()
+        if resolved_exists and not resolved_db_path.is_file():
+            raise ValueError("invalid EventStore target")
+        database_url = sqlite_database_url(resolved_db_path)
+    except (OSError, RuntimeError, ValueError):
+        _console_out.print("[red]Invalid EventStore configuration.[/red]")
+        raise typer.Exit(1) from None
+    event_store = EventStore(database_url)
+    brownfield_store = BrownfieldStore(database_url)
 
     cleanup_task: asyncio.Task[None] | None = None
 
@@ -908,7 +919,10 @@ def serve(
         str,
         typer.Option(
             "--db",
-            help="Path to EventStore database (default: ~/.ouroboros/ouroboros.db)",
+            help=(
+                "Override the shared EventStore path "
+                "(default: persistence.database_path with legacy fallback)."
+            ),
         ),
     ] = "",
     runtime: Annotated[

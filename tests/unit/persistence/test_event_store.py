@@ -3,6 +3,7 @@
 import asyncio
 from datetime import UTC, datetime, timedelta
 import logging
+import shutil
 
 import pytest
 
@@ -2089,6 +2090,61 @@ class TestEventStoreClose:
         ro = EventStore(f"sqlite+aiosqlite:///{db_path}", read_only=True)
         await ro.initialize()
         await ro.close()  # must not raise
+
+    async def test_read_only_store_preserves_literal_uri_characters_in_path(self, tmp_path) -> None:
+        template_path = tmp_path / "template.db"
+        writer = EventStore(f"sqlite+aiosqlite:///{template_path}")
+        await writer.initialize()
+        await writer.append(
+            BaseEvent(
+                type="execution.terminal",
+                aggregate_type="execution",
+                aggregate_id="exec_literal_path",
+                data={"status": "complete"},
+            )
+        )
+        await writer.close()
+
+        literal_path = tmp_path / "literal?mode=rw&fragment#.db"
+        shutil.copy2(template_path, literal_path)
+        store = EventStore(f"sqlite+aiosqlite:///{literal_path}", read_only=True)
+        await store.initialize(create_schema=False)
+        try:
+            events = await store.query_events(aggregate_id="exec_literal_path")
+            assert len(events) == 1
+            with pytest.raises(PersistenceError):
+                await store.append(
+                    BaseEvent(
+                        type="execution.started",
+                        aggregate_type="execution",
+                        aggregate_id="exec_must_not_write",
+                    )
+                )
+        finally:
+            await store.close()
+
+    async def test_read_only_store_overrides_writable_file_uri_mode(self, tmp_path) -> None:
+        db_path = tmp_path / "explicit-uri.db"
+        writer = EventStore(f"sqlite+aiosqlite:///{db_path}")
+        await writer.initialize()
+        await writer.close()
+
+        store = EventStore(
+            f"sqlite+aiosqlite:///file:{db_path}?mode=rw&uri=true",
+            read_only=True,
+        )
+        await store.initialize(create_schema=False)
+        try:
+            with pytest.raises(PersistenceError):
+                await store.append(
+                    BaseEvent(
+                        type="execution.started",
+                        aggregate_type="execution",
+                        aggregate_id="exec_must_stay_read_only",
+                    )
+                )
+        finally:
+            await store.close()
 
 
 class TestEventStoreTransactions:

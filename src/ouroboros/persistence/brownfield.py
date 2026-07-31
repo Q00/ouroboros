@@ -9,13 +9,13 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import Any
 
 from sqlalchemy import delete, literal_column, select, update
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from ouroboros.core.errors import PersistenceError
+from ouroboros.persistence.event_store import sqlite_database_url
 from ouroboros.persistence.schema import brownfield_repos_table, metadata
 
 
@@ -131,12 +131,15 @@ class BrownfieldStore:
         Args:
             database_url: SQLAlchemy database URL.
                          For async SQLite: "sqlite+aiosqlite:///path/to/db.sqlite"
-                         If not provided, defaults to ~/.ouroboros/ouroboros.db
+                         If not provided, uses the configured EventStore path
+                         with the legacy ~/.ouroboros/ouroboros.db fallback.
         """
         if database_url is None:
-            db_path = Path.home() / ".ouroboros" / "ouroboros.db"
+            from ouroboros.config.models import resolve_event_store_path
+
+            db_path = resolve_event_store_path()
             db_path.parent.mkdir(parents=True, exist_ok=True)
-            database_url = f"sqlite+aiosqlite:///{db_path}"
+            database_url = sqlite_database_url(db_path)
         self._database_url = database_url
         self._engine: AsyncEngine | None = None
         self._initialized: bool = False

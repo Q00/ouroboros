@@ -97,7 +97,7 @@ ouroboros job events JOB_ID --since 0 --limit 100
 ```
 
 `ouroboros job events` is the low-cost external observability surface for
-dashboards and schedulers. It opens `~/.ouroboros/ouroboros.db` read-only,
+dashboards and schedulers. It opens the configured runtime EventStore read-only,
 does not create schema or write WAL/checkpoint state, and prints cursor-paged
 JSON for the job aggregate. Pass the returned `cursor` back as `--since` on
 the next poll.
@@ -811,7 +811,7 @@ See [UNINSTALL.md](../UNINSTALL.md) for the full guide.
 
 Check Ouroboros system status.
 
-> **Current state:** `status auto`, `status run`, and `status health` are live read-only status surfaces. The `status executions` and `status execution` subcommands still return lightweight placeholder summaries and should not be treated as authoritative orchestration state.
+> **Current state:** all status subcommands are read-only. `status executions` and `status execution` read the configured EventStore when it exists, falling back to the default runtime store at `~/.ouroboros/ouroboros.db`; `status run` provides the richer Run/Stage/Step projection.
 
 ### `status auto`
 
@@ -966,7 +966,7 @@ ouroboros tui [monitor] [OPTIONS]
 
 | Option | Description |
 |--------|-------------|
-| `--db-path PATH` | Path to the Ouroboros database file (default: `~/.ouroboros/ouroboros.db`) |
+| `--db-path PATH` | Override the shared EventStore path (default: resolved from `persistence.database_path`, with the legacy database fallback) |
 | `--backend TEXT` | TUI backend to use: `python` (Textual, default) or `slt` (native Rust binary) |
 
 **Examples:**
@@ -975,7 +975,7 @@ ouroboros tui [monitor] [OPTIONS]
 # Launch TUI monitor (default Textual backend)
 ouroboros tui monitor
 
-# Monitor with a specific database file
+# Override the shared database path for this monitor
 ouroboros tui monitor --db-path ~/.ouroboros/ouroboros.db
 
 # Use the native SLT backend (requires ouroboros-tui binary)
@@ -1182,7 +1182,7 @@ Ouroboros stores configuration in `~/.ouroboros/`:
 |------|-------------|
 | `config.yaml` | Main configuration — see [config-reference.md](config-reference.md) for all options |
 | `credentials.yaml` | API keys (chmod 600; created by `ouroboros config init`) |
-| `ouroboros.db` | SQLite database for event sourcing (actual path: `~/.ouroboros/ouroboros.db`; the `persistence.database_path` config key is currently not honored — see [config-reference.md](config-reference.md#persistence)) |
+| `ouroboros.db` | SQLite database for event sourcing. The runtime, status/resume commands, and TUI share `persistence.database_path`; legacy installs continue using `~/.ouroboros/ouroboros.db` until the configured target exists. |
 | `logs/ouroboros.log` | Log output (path configurable via `logging.log_path`) |
 
 ---

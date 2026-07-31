@@ -19,9 +19,10 @@ Complete reference for `~/.ouroboros/config.yaml` and all related environment va
 ~/.ouroboros/
 ├── config.yaml          # Main configuration (this document)
 ├── credentials.yaml     # API keys (chmod 600, do not put secrets in config.yaml)
-├── ouroboros.db         # SQLite event store (EventStore hardcoded default)
+├── ouroboros.db         # Legacy SQLite event store (preserved when present)
 ├── seeds/               # Generated seed YAML files
-├── data/                # Created by ensure_config_dir() — reserved for future use
+├── data/
+│   └── ouroboros.db     # Default configured SQLite event store for new installs
 ├── logs/
 │   └── ouroboros.log    # Log output
 └── .env                 # Optional; loaded automatically by the CLI
@@ -489,7 +490,7 @@ persistence:
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `enabled` | `bool` | `true` | Whether event sourcing is active. Setting to `false` disables all persistence — not recommended for production use. |
-| `database_path` | `string` | `"data/ouroboros.db"` | **Currently not honored by the EventStore.** The `EventStore` uses a hardcoded default of `~/.ouroboros/ouroboros.db` regardless of this value. This config key is reserved for a future configurable path feature. The TUI `--db-path` option also defaults to `~/.ouroboros/ouroboros.db`. |
+| `database_path` | `string` | `"data/ouroboros.db"` | Path shared by the MCP runtime, status/resume recovery commands, and TUI. Relative paths resolve from `~/.ouroboros/`. Existing installs keep using a legacy `~/.ouroboros/ouroboros.db` until the configured target exists, preserving prior history during migration. |
 
 ---
 
