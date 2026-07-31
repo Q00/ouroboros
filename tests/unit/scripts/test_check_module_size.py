@@ -55,7 +55,7 @@ def _isolate(
 ) -> None:
     """Point the module at a fabricated repository with a controlled table."""
     monkeypatch.setattr(module, "REPO_ROOT", repo)
-    monkeypatch.setattr(module, "SOURCE_ROOT", repo / "src" / "ouroboros")
+    monkeypatch.setattr(module, "__file__", str(repo / "scripts" / "check-module-size.py"))
     monkeypatch.setattr(module, "GRANDFATHERED", grandfathered)
 
 
@@ -73,6 +73,8 @@ def _baseline_repo(
     """
     entries = "\n".join(f'    "{k}": {v},' for k, v in grandfathered.items())
     body = (
+        'SOURCE_ROOT = "src/ouroboros"\n'
+        'MODULE_GLOB = "*.py"\n'
         f"SOFT_CAP = {soft_cap}\n"
         f"RESEED_SLACK = {reseed_slack}\n"
         f"GRANDFATHERED: dict[str, int] = {{\n{entries}\n}}\n"
@@ -170,6 +172,35 @@ class TestPolicyTightening:
         err = capsys.readouterr().err
         assert "added to EXCLUDED" in err
         assert "src/ouroboros/hidden.py" in err
+
+    @pytest.mark.parametrize(
+        ("name", "proposed"),
+        [("SOURCE_ROOT", "src/ouroboros/mcp"), ("MODULE_GLOB", "tools/*.py")],
+    )
+    def test_narrowing_measurement_scope_fails(
+        self, module, monkeypatch, tmp_path, capsys, name, proposed
+    ):
+        ref = _baseline_repo(tmp_path, {})
+        _write(tmp_path, "src/ouroboros/kept.py", 10)
+        _write(tmp_path, "src/ouroboros/mcp/tools/visible.py", 10)
+        _isolate(module, monkeypatch, tmp_path, {})
+        monkeypatch.setattr(module, name, proposed)
+
+        assert module.main(["--baseline-ref", ref]) == 1
+        err = capsys.readouterr().err
+        assert "Measurement scope changed" in err
+        assert name in err
+
+    def test_legacy_self_path_override_cannot_hide_predecessor_policy(
+        self, module, monkeypatch, tmp_path, capsys
+    ):
+        ref = _baseline_repo(tmp_path, {"src/ouroboros/god.py": 5000})
+        _write(tmp_path, "src/ouroboros/god.py", 5500)
+        _isolate(module, monkeypatch, tmp_path, {"src/ouroboros/god.py": 5500})
+        monkeypatch.setattr(module, "SELF_PATH", "missing/check.py", raising=False)
+
+        assert module.main(["--baseline-ref", ref]) == 1
+        assert "budgets were raised" in capsys.readouterr().err
 
     def test_lowering_is_allowed(self, module, monkeypatch, tmp_path):
         """Tightening is the whole point; it must not be mistaken for drift."""

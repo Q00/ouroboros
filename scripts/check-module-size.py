@@ -28,14 +28,14 @@ The rule has two halves:
    line, so satisfying it is a one-line edit in the same PR.
 
 3. The policy itself may only tighten. GRANDFATHERED, SOFT_CAP, RESEED_SLACK,
-   and EXCLUDED are editable
-   in the same commit they gate, so measuring source against the *proposed*
-   table proves nothing on its own: a PR could grow a module and raise its
-   budget together, or add a new oversized module and grandfather it, and the
-   gate would report OK. So the proposed policy is also compared against the
-   base branch's: no key or exclusion may be added, no budget may increase,
-   and neither SOFT_CAP nor RESEED_SLACK may rise. Removals and decreases are
-   the only permitted direction.
+   EXCLUDED, SOURCE_ROOT, and MODULE_GLOB are editable in the same commit they
+   gate, so measuring source against the *proposed* policy proves nothing on
+   its own: a PR could grow a module and raise its budget together, add a new
+   oversized module and grandfather it, or simply narrow the measured tree.
+   The proposed policy is therefore compared with the base branch's: no key or
+   exclusion may be added, no budget may increase, neither numeric limit may
+   rise, and measurement scope must remain identical. Removals and decreases
+   are the only permitted directions for debt and numeric limits.
 
 Physical lines are counted, including blanks and comments. That is gameable by
 writing longer lines. `line-length = 100` in pyproject.toml makes that awkward,
@@ -69,7 +69,12 @@ import subprocess
 import sys
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-SOURCE_ROOT = REPO_ROOT / "src" / "ouroboros"
+
+# Measurement scope is policy, not implementation detail. Both literals are
+# compared with the predecessor before current source is measured, so a PR
+# cannot make the gate green by narrowing the root or file selection.
+SOURCE_ROOT = "src/ouroboros"
+MODULE_GLOB = "*.py"
 
 # Universal ceiling for any module not listed below.
 SOFT_CAP = 2000
@@ -124,21 +129,19 @@ def _relative(path: Path) -> str:
 
 
 def _measure() -> dict[str, int]:
+    source_root = REPO_ROOT / SOURCE_ROOT
     return {
         rel: _line_count(path)
-        for path in sorted(SOURCE_ROOT.rglob("*.py"))
+        for path in sorted(source_root.rglob(MODULE_GLOB))
         if (rel := _relative(path)) not in EXCLUDED
     }
-
-
-SELF_PATH = "scripts/check-module-size.py"
 
 
 class BaselineUnavailable(Exception):
     """Raised when a requested baseline ref cannot be read."""
 
 
-Policy = tuple[dict[str, int], int, int, frozenset[str]]
+Policy = tuple[dict[str, int], int, int, frozenset[str], str, str]
 
 
 def _policy_literals(source: str) -> Policy:
@@ -163,6 +166,8 @@ def _policy_literals(source: str) -> Policy:
                 "SOFT_CAP",
                 "RESEED_SLACK",
                 "EXCLUDED",
+                "SOURCE_ROOT",
+                "MODULE_GLOB",
             }:
                 if node.value is None:
                     continue
@@ -186,22 +191,30 @@ def _policy_literals(source: str) -> Policy:
     cap = found.get("SOFT_CAP")
     slack = found.get("RESEED_SLACK")
     excluded = found.get("EXCLUDED")
+    source_root = found.get("SOURCE_ROOT")
+    module_glob = found.get("MODULE_GLOB")
     if (
         not isinstance(table, dict)
         or not isinstance(cap, int)
         or not isinstance(slack, int)
         or not isinstance(excluded, frozenset)
         or not all(isinstance(item, str) for item in excluded)
+        or not isinstance(source_root, str)
+        or not source_root
+        or not isinstance(module_glob, str)
+        or not module_glob
     ):
         raise BaselineUnavailable(
             "baseline copy does not define GRANDFATHERED, SOFT_CAP, "
-            "RESEED_SLACK, and EXCLUDED as literals"
+            "RESEED_SLACK, EXCLUDED, SOURCE_ROOT, and MODULE_GLOB as literals"
         )
     return (
         {str(k): int(v) for k, v in table.items()},
         cap,
         slack,
         frozenset(excluded),
+        source_root,
+        module_glob,
     )
 
 
@@ -225,30 +238,31 @@ def _baseline_policy(ref: str) -> Policy | None:
             f"baseline ref {ref!r} does not resolve; ensure the checkout uses "
             "fetch-depth: 0 and that the ref has been fetched"
         ) from exc
+    self_path = _relative(Path(__file__).resolve())
     try:
         tree = subprocess.run(
-            ["git", "ls-tree", "-r", "--name-only", ref, "--", SELF_PATH],
+            ["git", "ls-tree", "-r", "--name-only", ref, "--", self_path],
             cwd=REPO_ROOT,
             check=True,
             capture_output=True,
             text=True,
         )
     except (subprocess.CalledProcessError, OSError) as exc:
-        raise BaselineUnavailable(f"could not inspect {SELF_PATH} at {ref!r}: {exc}") from exc
+        raise BaselineUnavailable(f"could not inspect {self_path} at {ref!r}: {exc}") from exc
     if tree.stdout.strip() == "":
         return None
-    if tree.stdout.splitlines() != [SELF_PATH]:
-        raise BaselineUnavailable(f"baseline tree returned an ambiguous path for {SELF_PATH}")
+    if tree.stdout.splitlines() != [self_path]:
+        raise BaselineUnavailable(f"baseline tree returned an ambiguous path for {self_path}")
     try:
         completed = subprocess.run(
-            ["git", "show", f"{ref}:{SELF_PATH}"],
+            ["git", "show", f"{ref}:{self_path}"],
             cwd=REPO_ROOT,
             check=True,
             capture_output=True,
             text=True,
         )
     except (subprocess.CalledProcessError, OSError) as exc:
-        raise BaselineUnavailable(f"could not read {SELF_PATH} at {ref!r}: {exc}") from exc
+        raise BaselineUnavailable(f"could not read {self_path} at {ref!r}: {exc}") from exc
     return _policy_literals(completed.stdout)
 
 
@@ -260,9 +274,17 @@ def _policy_regressions(
     tuple[int, int] | None,
     tuple[int, int] | None,
     list[str],
+    list[tuple[str, str, str]],
 ]:
     """Compare the proposed policy against the baseline's."""
-    baseline_table, baseline_cap, baseline_slack, baseline_excluded = baseline
+    (
+        baseline_table,
+        baseline_cap,
+        baseline_slack,
+        baseline_excluded,
+        baseline_source_root,
+        baseline_module_glob,
+    ) = baseline
     added = sorted(set(GRANDFATHERED) - set(baseline_table))
     raised = sorted(
         (key, GRANDFATHERED[key], baseline_table[key])
@@ -272,7 +294,15 @@ def _policy_regressions(
     cap_raised = (SOFT_CAP, baseline_cap) if baseline_cap < SOFT_CAP else None
     slack_raised = (RESEED_SLACK, baseline_slack) if baseline_slack < RESEED_SLACK else None
     exclusions_added = sorted(EXCLUDED - baseline_excluded)
-    return added, raised, cap_raised, slack_raised, exclusions_added
+    scope_changes = [
+        (name, previous, proposed)
+        for name, previous, proposed in (
+            ("SOURCE_ROOT", baseline_source_root, SOURCE_ROOT),
+            ("MODULE_GLOB", baseline_module_glob, MODULE_GLOB),
+        )
+        if proposed != previous
+    ]
+    return added, raised, cap_raised, slack_raised, exclusions_added, scope_changes
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -287,9 +317,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    if not SOURCE_ROOT.is_dir():
+    source_root = REPO_ROOT / SOURCE_ROOT
+    if not source_root.is_dir():
         sys.stderr.write(
-            f"module-size: FAILED -- source root {_relative(SOURCE_ROOT)} does not exist.\n"
+            f"module-size: FAILED -- source root {SOURCE_ROOT} does not exist.\n"
             "This gate cannot verify anything; fix the checkout or update SOURCE_ROOT.\n"
         )
         return 1
@@ -299,6 +330,7 @@ def main(argv: list[str] | None = None) -> int:
     cap_raised: tuple[int, int] | None = None
     slack_raised: tuple[int, int] | None = None
     exclusions_added: list[str] = []
+    scope_changes: list[tuple[str, str, str]] = []
     if args.baseline_ref is not None:
         try:
             baseline = _baseline_policy(args.baseline_ref)
@@ -314,9 +346,14 @@ def main(argv: list[str] | None = None) -> int:
                 "gate's introducing commit; skipping the tightening check."
             )
         else:
-            added, raised, cap_raised, slack_raised, exclusions_added = _policy_regressions(
-                baseline
-            )
+            (
+                added,
+                raised,
+                cap_raised,
+                slack_raised,
+                exclusions_added,
+                scope_changes,
+            ) = _policy_regressions(baseline)
 
     sizes = _measure()
 
@@ -354,6 +391,7 @@ def main(argv: list[str] | None = None) -> int:
             or added
             or raised
             or exclusions_added
+            or scope_changes
         )
         and cap_raised is None
         and slack_raised is None
@@ -389,6 +427,15 @@ def main(argv: list[str] | None = None) -> int:
         )
         for rel in exclusions_added:
             write(f"  {rel}\n")
+        write("\n")
+
+    if scope_changes:
+        write(
+            "Measurement scope changed. SOURCE_ROOT and MODULE_GLOB define which\n"
+            "modules the gate can see and must match the predecessor exactly:\n"
+        )
+        for name, previous, proposed in scope_changes:
+            write(f"  {name}: {previous!r} -> {proposed!r}\n")
         write("\n")
 
     if added:
