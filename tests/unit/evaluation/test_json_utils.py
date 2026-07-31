@@ -14,6 +14,14 @@ MALFORMED_INDENTED_FENCE_CASES = (
     "dirty-closer",
     "shorter-closer",
 )
+BLOCKQUOTE_INDENTED_PREFIX_VARIANTS = (
+    pytest.param(">     ", ">     ", " >     ", id="mixed-leading-one"),
+    pytest.param(" >     ", ">     ", "  >     ", id="mixed-leading-two"),
+    pytest.param("  >     ", " >     ", "   >     ", id="mixed-leading-three"),
+    pytest.param(">     ", " >      ", "  >       ", id="mixed-padding"),
+    pytest.param(">   \t", "  > \t", ">   \t", id="tab-padding"),
+    pytest.param("> >     ", " >  >     ", "  >>     ", id="nested-mixed"),
+)
 
 
 def _malformed_indented_fence(
@@ -141,18 +149,28 @@ class TestExtractJsonPayload:
 
         assert extract_json_payload(text) is None
 
-    @pytest.mark.parametrize("indent", ["    ", "\t"], ids=["spaces", "tab"])
-    def test_blockquote_nested_indented_example_releases_real_payload(self, indent: str) -> None:
+    @pytest.mark.parametrize(
+        ("opener_prefix", "body_prefix", "closer_prefix"),
+        BLOCKQUOTE_INDENTED_PREFIX_VARIANTS,
+    )
+    def test_blockquote_nested_indented_example_releases_real_payload(
+        self, opener_prefix: str, body_prefix: str, closer_prefix: str
+    ) -> None:
         text = (
-            f'> {indent}```json\n> {indent}{{"stale": true}}\n> {indent}```\n'
+            f'{opener_prefix}```json\n{body_prefix}{{"stale": true}}\n{closer_prefix}```\n'
             'Actual: {"actual": true}'
         )
 
         assert extract_json_payload(text) == '{"actual": true}'
 
-    @pytest.mark.parametrize("indent", ["    ", "\t"], ids=["spaces", "tab"])
-    def test_blockquote_nested_indented_example_stale_only_is_excluded(self, indent: str) -> None:
-        text = f'> {indent}```json\n> {indent}{{"stale": true}}\n> {indent}```'
+    @pytest.mark.parametrize(
+        ("opener_prefix", "body_prefix", "closer_prefix"),
+        BLOCKQUOTE_INDENTED_PREFIX_VARIANTS,
+    )
+    def test_blockquote_nested_indented_example_stale_only_is_excluded(
+        self, opener_prefix: str, body_prefix: str, closer_prefix: str
+    ) -> None:
+        text = f'{opener_prefix}```json\n{body_prefix}{{"stale": true}}\n{closer_prefix}```'
 
         assert extract_json_payload(text) is None
 

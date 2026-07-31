@@ -236,6 +236,14 @@ MALFORMED_INDENTED_FENCE_CASES = (
     "dirty-closer",
     "shorter-closer",
 )
+BLOCKQUOTE_INDENTED_PREFIX_VARIANTS = (
+    pytest.param((">     ", ">     ", " >     "), id="mixed-leading-one"),
+    pytest.param((" >     ", ">     ", "  >     "), id="mixed-leading-two"),
+    pytest.param(("  >     ", " >     ", "   >     "), id="mixed-leading-three"),
+    pytest.param((">     ", " >      ", "  >       "), id="mixed-padding"),
+    pytest.param((">   \t", "  > \t", ">   \t"), id="tab-padding"),
+    pytest.param(("> >     ", " >  >     ", "  >>     "), id="nested-mixed"),
+)
 
 
 def _wrap_malformed_indented_fence(
@@ -270,10 +278,11 @@ def _wrap_malformed_indented_fence(
 def _wrap_blockquote_indented_example(
     stale_payload: str,
     *,
-    indent: str,
+    prefixes: tuple[str, str, str],
     actual_payload: str = "",
 ) -> str:
-    text = f"> {indent}```json\n> {indent}{stale_payload}\n> {indent}```"
+    opener_prefix, body_prefix, closer_prefix = prefixes
+    text = f"{opener_prefix}```json\n{body_prefix}{stale_payload}\n{closer_prefix}```"
     if actual_payload:
         text += f"\nActual: {actual_payload}"
     return text
@@ -464,8 +473,10 @@ class TestWonderFenceRobustness:
 
         assert out.reasoning.startswith("Parse error, using seed-scoped fallback")
 
-    @pytest.mark.parametrize("indent", ["    ", "\t"], ids=["spaces", "tab"])
-    def test_blockquote_indented_example_is_excluded_and_releases_actual(self, indent: str) -> None:
+    @pytest.mark.parametrize("prefixes", BLOCKQUOTE_INDENTED_PREFIX_VARIANTS)
+    def test_blockquote_indented_example_is_excluded_and_releases_actual(
+        self, prefixes: tuple[str, str, str]
+    ) -> None:
         stale_payload = json.dumps(
             {"questions": [], "should_continue": False, "reasoning": "stale"}
         )
@@ -479,13 +490,13 @@ class TestWonderFenceRobustness:
         engine = WonderEngine(llm_adapter=AsyncMock(), model="test")
 
         stale_only = engine._parse_response(
-            _wrap_blockquote_indented_example(stale_payload, indent=indent),
+            _wrap_blockquote_indented_example(stale_payload, prefixes=prefixes),
             _seed(),
         )
         actual = engine._parse_response(
             _wrap_blockquote_indented_example(
                 stale_payload,
-                indent=indent,
+                prefixes=prefixes,
                 actual_payload=actual_payload,
             ),
             _seed(),
@@ -862,8 +873,10 @@ class TestReflectFenceRobustness:
         assert "failed to parse" in result.error.message.lower()
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("indent", ["    ", "\t"], ids=["spaces", "tab"])
-    async def test_blockquote_indented_example_stale_only_fails_closed(self, indent: str) -> None:
+    @pytest.mark.parametrize("prefixes", BLOCKQUOTE_INDENTED_PREFIX_VARIANTS)
+    async def test_blockquote_indented_example_stale_only_fails_closed(
+        self, prefixes: tuple[str, str, str]
+    ) -> None:
         stale_payload = json.dumps(
             {
                 "refined_goal": "Stale example",
@@ -875,7 +888,10 @@ class TestReflectFenceRobustness:
         adapter = AsyncMock()
         adapter.complete.return_value = Result.ok(
             CompletionResponse(
-                content=_wrap_blockquote_indented_example(stale_payload, indent=indent),
+                content=_wrap_blockquote_indented_example(
+                    stale_payload,
+                    prefixes=prefixes,
+                ),
                 model="test",
                 usage=UsageInfo(prompt_tokens=1, completion_tokens=1, total_tokens=2),
             )
@@ -1412,8 +1428,10 @@ class TestAssertionExtractorFenceRobustness:
 
         assert assertions == ()
 
-    @pytest.mark.parametrize("indent", ["    ", "\t"], ids=["spaces", "tab"])
-    def test_blockquote_indented_example_stale_only_is_excluded(self, indent: str) -> None:
+    @pytest.mark.parametrize("prefixes", BLOCKQUOTE_INDENTED_PREFIX_VARIANTS)
+    def test_blockquote_indented_example_stale_only_is_excluded(
+        self, prefixes: tuple[str, str, str]
+    ) -> None:
         stale_payload = json.dumps(
             [
                 {
@@ -1426,7 +1444,7 @@ class TestAssertionExtractorFenceRobustness:
         )
 
         assertions = AssertionExtractor(llm_adapter=AsyncMock())._parse_response(
-            _wrap_blockquote_indented_example(stale_payload, indent=indent),
+            _wrap_blockquote_indented_example(stale_payload, prefixes=prefixes),
             ("AC number 1",),
         )
 

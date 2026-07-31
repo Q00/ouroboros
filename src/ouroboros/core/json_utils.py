@@ -17,7 +17,6 @@ class _FenceScanState(Enum):
 
 _FENCE_MARKERS = ("`", "~")
 _BLOCKQUOTE_FENCE_PREFIX = re.compile(r"^[ \t]{0,3}(?:>[ \t]?)+$")
-_BLOCKQUOTE_FENCE_PREFIX_START = re.compile(r"^[ \t]{0,3}(?:>[ \t]?)+")
 _PLAIN_FENCE_PREFIX = re.compile(r"^ {0,3}$")
 
 
@@ -209,14 +208,14 @@ def _decode_fenced_body(body: str, *, quote_prefix: str | None) -> str | None:
 
 def _indented_fence_line(
     text: str, line_start: int, line_end: int
-) -> tuple[str | None, str, int, str] | None:
+) -> tuple[int, str, int, str] | None:
     """Describe a literal fence line inside a Markdown indented-code block."""
     marker_start = line_start
     while marker_start < line_end and text[marker_start] not in _FENCE_MARKERS:
         marker_start += 1
     prefix = text[line_start:marker_start]
-    prefix_matches, quote_prefix = _indented_fence_quote_prefix(prefix)
-    if not prefix_matches or marker_start >= line_end:
+    quote_depth = _indented_fence_quote_depth(prefix)
+    if quote_depth is None or marker_start >= line_end:
         return None
 
     marker = text[marker_start]
@@ -226,28 +225,56 @@ def _indented_fence_line(
     if marker_length < 3:
         return None
     suffix = text[marker_start + marker_length : line_end].strip()
-    return quote_prefix, marker, marker_length, suffix
+    return quote_depth, marker, marker_length, suffix
 
 
-def _indented_fence_quote_prefix(prefix: str) -> tuple[bool, str | None]:
-    """Return the surrounding quote prefix for one indented fence line."""
-    candidates: list[str | None] = []
-    if _is_code_indented_prefix(prefix):
-        candidates.append(None)
-    quote_match = _BLOCKQUOTE_FENCE_PREFIX_START.match(prefix)
-    if quote_match is not None:
-        matched_prefix = quote_match.group()
-        quote_prefixes = [matched_prefix]
-        if matched_prefix[-1] in " \t":
-            quote_prefixes.append(matched_prefix[:-1])
-        for quote_prefix in quote_prefixes:
-            if _BLOCKQUOTE_FENCE_PREFIX.fullmatch(quote_prefix) is None:
+def _next_blockquote_prefix_positions(text: str, positions: set[int]) -> set[int]:
+    """Advance normalized CommonMark blockquote prefixes by one marker."""
+    next_positions: set[int] = set()
+    for position in positions:
+        marker_positions = [position]
+        cursor = position
+        for _ in range(3):
+            if cursor >= len(text) or text[cursor] not in " \t":
+                break
+            cursor += 1
+            marker_positions.append(cursor)
+        for marker_position in marker_positions:
+            if marker_position >= len(text) or text[marker_position] != ">":
                 continue
-            if _is_code_indented_prefix(prefix[len(quote_prefix) :]):
-                candidates.append(quote_prefix)
-    if not candidates:
-        return False, None
-    return True, max(candidates, key=lambda candidate: len(candidate or ""))
+            after_marker = marker_position + 1
+            next_positions.add(after_marker)
+            if after_marker < len(text) and text[after_marker] in " \t":
+                next_positions.add(after_marker + 1)
+    return next_positions
+
+
+def _blockquote_remainders(text: str, quote_depth: int) -> tuple[str, ...]:
+    """Strip one normalized blockquote depth and return legal remainders."""
+    positions = {0}
+    for _ in range(quote_depth):
+        positions = _next_blockquote_prefix_positions(text, positions)
+        if not positions:
+            return ()
+    return tuple(text[position:] for position in positions)
+
+
+def _indented_fence_quote_depth(prefix: str) -> int | None:
+    """Return normalized blockquote depth for an indented fence prefix."""
+    if _is_code_indented_prefix(prefix):
+        return 0
+
+    positions = {0}
+    quote_depth = 0
+    matched_depth: int | None = None
+    while positions:
+        positions = _next_blockquote_prefix_positions(prefix, positions)
+        if not positions:
+            break
+        quote_depth += 1
+        if any(_is_code_indented_prefix(prefix[position:]) for position in positions):
+            matched_depth = quote_depth
+    return matched_depth
 
 
 def _is_code_indented_prefix(prefix: str) -> bool:
@@ -273,18 +300,18 @@ def _is_indented_code_content_line(
     line_start: int,
     line_end: int,
     *,
-    quote_prefix: str | None,
+    quote_depth: int,
 ) -> bool:
     """Return whether a nonblank line remains inside an indented code block."""
     content = text[line_start:line_end]
-    if quote_prefix is not None:
-        if not content.startswith(quote_prefix):
-            return False
-        content = content[len(quote_prefix) :]
-    if not content.strip():
-        return True
-    prefix_length = len(content) - len(content.lstrip(" \t"))
-    return _deindent_code_prefix(content[:prefix_length]) is not None
+    remainders = (content,) if quote_depth == 0 else _blockquote_remainders(content, quote_depth)
+    for remainder in remainders:
+        if not remainder.strip():
+            return True
+        prefix_length = len(remainder) - len(remainder.lstrip(" \t"))
+        if _deindent_code_prefix(remainder[:prefix_length]) is not None:
+            return True
+    return False
 
 
 def _indented_fence_example_ranges(text: str) -> tuple[tuple[int, int], ...]:
@@ -316,7 +343,7 @@ def _indented_fence_example_ranges(text: str) -> tuple[tuple[int, int], ...]:
         if opener is None:
             index += 1
             continue
-        quote_prefix, marker, marker_length, _ = opener
+        quote_depth, marker, marker_length, _ = opener
 
         closing_index = index + 1
         while closing_index < len(lines):
@@ -324,7 +351,7 @@ def _indented_fence_example_ranges(text: str) -> tuple[tuple[int, int], ...]:
             closing = _indented_fence_line(text, closing_start, closing_end)
             if (
                 closing is not None
-                and closing[0] == quote_prefix
+                and closing[0] == quote_depth
                 and closing[1] == marker
                 and closing[2] >= marker_length
                 and closing[3] == ""
@@ -336,7 +363,7 @@ def _indented_fence_example_ranges(text: str) -> tuple[tuple[int, int], ...]:
                 text,
                 closing_start,
                 closing_end,
-                quote_prefix=quote_prefix,
+                quote_depth=quote_depth,
             ):
                 raise _MalformedJsonBoundary
             closing_index += 1
