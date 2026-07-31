@@ -11,6 +11,7 @@ from typing import Annotated
 import typer
 
 from ouroboros.cli.formatters.panels import print_error
+from ouroboros.config.models import resolve_event_store_path
 from ouroboros.events.base import BaseEvent
 from ouroboros.mcp.tools.job_handlers import JobResultHandler, JobStatusHandler, JobWaitHandler
 from ouroboros.mcp.types import MCPToolResult
@@ -43,7 +44,7 @@ def _run_job_handler(handler, arguments: dict[str, object]) -> None:
 
 def _default_db_path() -> str:
     """Return the canonical SQLite EventStore path."""
-    return os.path.expanduser("~/.ouroboros/ouroboros.db")
+    return str(resolve_event_store_path())
 
 
 async def _open_read_only_event_store(db_path: str | None = None) -> EventStore:
@@ -184,7 +185,7 @@ def events(
         str | None,
         typer.Option(
             "--db-path",
-            help="Path to ouroboros.db; defaults to ~/.ouroboros/ouroboros.db.",
+            help="Path to ouroboros.db; defaults to the configured runtime database.",
         ),
     ] = None,
 ) -> None:

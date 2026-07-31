@@ -30,6 +30,7 @@ import json
 from pathlib import Path
 import sqlite3
 
+from ouroboros.config.models import resolve_event_store_path
 from ouroboros.observability.logging import get_logger
 
 log = get_logger(__name__)
@@ -45,7 +46,7 @@ _DEFAULT_WINDOW_DAYS = 30
 
 def _default_db_path() -> Path:
     """Standard Ouroboros event-store location (mirrors EventStore default)."""
-    return Path.home() / ".ouroboros" / "ouroboros.db"
+    return resolve_event_store_path()
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,7 +88,7 @@ def aggregate_backend_outcomes(
     """Tally completion vs failure per runtime backend from the event log.
 
     Args:
-        db_path: Event-store SQLite file; defaults to ``~/.ouroboros/ouroboros.db``.
+        db_path: Event-store SQLite file; defaults to the configured runtime database.
         row_limit: Maximum recent lifecycle rows to scan (cost bound).
         window_days: Only count events within this many days; ``None`` disables
             the day cutoff and relies on ``row_limit`` alone.

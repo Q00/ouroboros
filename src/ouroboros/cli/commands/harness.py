@@ -46,6 +46,7 @@ from ouroboros.auto.trace_export import (
     export_interview_trace,
 )
 from ouroboros.cli.formatters.panels import print_error
+from ouroboros.config.models import resolve_event_store_path
 
 app = typer.Typer(
     name="harness",
@@ -78,7 +79,7 @@ def _default_traces_root() -> Path:
 
 def _default_db_path() -> Path:
     """Return the canonical EventStore path used by the running CLI."""
-    return Path.home() / ".ouroboros" / "ouroboros.db"
+    return resolve_event_store_path()
 
 
 def _auto_store(data_root: Path | None) -> AutoStore:
@@ -347,7 +348,7 @@ DbPathOpt = Annotated[
     Path | None,
     typer.Option(
         "--db-path",
-        help="EventStore path for on-demand export (default: ~/.ouroboros/ouroboros.db).",
+        help="EventStore path for on-demand export (default: configured runtime database).",
     ),
 ]
 

@@ -29,6 +29,7 @@ from ouroboros.config.models import (
     RuntimeControlsConfig,
     RuntimeProfileConfig,
     TierConfig,
+    event_store_path_from_config,
     get_config_dir,
     get_default_config,
     get_default_credentials,
@@ -504,6 +505,17 @@ def test_resolve_event_store_path_prefers_existing_configured_database(tmp_path)
     (tmp_path / "ouroboros.db").touch()
 
     assert resolve_event_store_path(config_path) == configured_path
+
+
+@pytest.mark.parametrize("database_path", [True, 1, ["events.db"], {"path": "events.db"}, ""])
+def test_event_store_path_rejects_invalid_database_path(tmp_path, database_path) -> None:
+    config_path = tmp_path / "config.yaml"
+
+    with pytest.raises(ValueError, match="database_path"):
+        event_store_path_from_config(
+            {"persistence": {"database_path": database_path}},
+            config_path,
+        )
 
 
 class TestDriftConfig:

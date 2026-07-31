@@ -823,10 +823,12 @@ def event_store_path_from_config(data: Mapping[str, Any], config_path: Path) -> 
 
     configured = persistence.get("database_path") if persistence else None
     legacy_path = config_path.parent / "ouroboros.db"
-    if not configured:
+    if configured is None:
         return legacy_path
+    if not isinstance(configured, str) or not configured.strip():
+        raise ValueError("config field 'persistence.database_path' must be a non-empty string")
 
-    configured_path = Path(str(configured)).expanduser()
+    configured_path = Path(configured).expanduser()
     if not configured_path.is_absolute():
         configured_path = config_path.parent / configured_path
     if configured_path.exists() or not legacy_path.exists():

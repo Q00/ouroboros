@@ -31,8 +31,13 @@ def test_resume_and_status_resolve_the_same_configured_event_store(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from ouroboros.cli.commands.harness import _default_db_path as harness_db_path
+    from ouroboros.cli.commands.job import _default_db_path as job_db_path
+    from ouroboros.cli.commands.mcp_doctor import check_event_store
     from ouroboros.cli.commands.status import _configured_event_store_path
     from ouroboros.config.models import resolve_event_store_path
+    from ouroboros.dashboard_web.reader import default_db_path as dashboard_db_path
+    from ouroboros.orchestrator.backend_outcomes import _default_db_path as outcomes_db_path
     from ouroboros.persistence.event_store import EventStore
 
     config_dir = tmp_path / "config"
@@ -51,6 +56,9 @@ def test_resume_and_status_resolve_the_same_configured_event_store(
         == Path(runtime_store_path)
         == configured_db
     )
+    assert Path(job_db_path()) == harness_db_path() == dashboard_db_path() == configured_db
+    assert outcomes_db_path() == configured_db
+    assert str(configured_db) in check_event_store().message
     tracker = MagicMock(
         session_id="orch_configured",
         execution_id="exec_configured",
