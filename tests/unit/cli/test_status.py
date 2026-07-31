@@ -392,7 +392,7 @@ def test_execution_status_joins_pause_then_resume_session_cluster(
                 type="orchestrator.session.started",
                 timestamp=now - timedelta(seconds=3),
                 aggregate_type="session",
-                aggregate_id="session_original",
+                aggregate_id="orch_resume",
                 data={"execution_id": "exec_original", "seed_id": "seed_resume"},
             ),
             BaseEvent(
@@ -400,14 +400,7 @@ def test_execution_status_joins_pause_then_resume_session_cluster(
                 timestamp=now - timedelta(seconds=2),
                 aggregate_type="execution",
                 aggregate_id="exec_original",
-                data={"session_id": "session_original", "status": "paused"},
-            ),
-            BaseEvent(
-                type="orchestrator.session.started",
-                timestamp=now - timedelta(seconds=1),
-                aggregate_type="session",
-                aggregate_id="orch_resume",
-                data={"execution_id": "exec_original", "seed_id": "seed_resume"},
+                data={"session_id": "orch_resume", "status": "paused"},
             ),
             BaseEvent(
                 type="workflow.progress.updated",

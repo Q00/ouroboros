@@ -252,9 +252,18 @@ def _latest_execution_lifecycle(events: list[BaseEvent]) -> BaseEvent | None:
         current = latest_by_session.get(session_id)
         should_replace = current is None
         if current is not None:
-            should_replace = current.type != "execution.terminal" and (
-                event.type == "execution.terminal"
-                or (event.timestamp, event.id) > (current.timestamp, current.id)
+            current_absorbing = _root_execution_status(current) in {
+                "cancelled",
+                "complete",
+                "failed",
+            }
+            event_absorbing = _root_execution_status(event) in {
+                "cancelled",
+                "complete",
+                "failed",
+            }
+            should_replace = not current_absorbing and (
+                event_absorbing or (event.timestamp, event.id) > (current.timestamp, current.id)
             )
         if should_replace:
             latest_by_session[session_id] = event
