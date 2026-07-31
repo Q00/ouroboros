@@ -18,7 +18,6 @@ class _FenceScanState(Enum):
 _FENCE_MARKERS = ("`", "~")
 _BLOCKQUOTE_FENCE_PREFIX = re.compile(r"^[ \t]{0,3}(?:>[ \t]?)+$")
 _PLAIN_FENCE_PREFIX = re.compile(r"^ {0,3}$")
-_INDENTED_CODE_PREFIX = re.compile(r"^(?: {4}| {0,3}\t)")
 
 
 class _MalformedJsonBoundary(ValueError):
@@ -215,7 +214,12 @@ def _indented_fence_line(
     while marker_start < line_end and text[marker_start] in " \t":
         marker_start += 1
     prefix = text[line_start:marker_start]
-    if _INDENTED_CODE_PREFIX.match(prefix) is None or marker_start >= line_end:
+    deindented_prefix = _deindent_code_prefix(prefix)
+    if (
+        deindented_prefix is None
+        or _PLAIN_FENCE_PREFIX.fullmatch(deindented_prefix) is None
+        or marker_start >= line_end
+    ):
         return None
 
     marker = text[marker_start]
@@ -226,6 +230,25 @@ def _indented_fence_line(
         return None
     suffix = text[marker_start + marker_length : line_end].strip()
     return prefix, marker, marker_length, suffix
+
+
+def _deindent_code_prefix(prefix: str) -> str | None:
+    """Remove exactly one Markdown indented-code indentation unit."""
+    tab_index = prefix.find("\t")
+    if 0 <= tab_index <= 3 and prefix[:tab_index] == " " * tab_index:
+        return prefix[tab_index + 1 :]
+    if prefix.startswith("    "):
+        return prefix[4:]
+    return None
+
+
+def _is_indented_code_content_line(text: str, line_start: int, line_end: int) -> bool:
+    """Return whether a nonblank line remains inside an indented code block."""
+    content = text[line_start:line_end]
+    if not content.strip():
+        return True
+    prefix_length = len(content) - len(content.lstrip(" \t"))
+    return _deindent_code_prefix(content[:prefix_length]) is not None
 
 
 def _indented_fence_example_ranges(text: str) -> tuple[tuple[int, int], ...]:
@@ -269,6 +292,9 @@ def _indented_fence_example_ranges(text: str) -> tuple[tuple[int, int], ...]:
             ):
                 ranges.append((opener_start, closing_stop))
                 index = closing_index + 1
+                break
+            if not _is_indented_code_content_line(text, closing_start, closing_end):
+                index += 1
                 break
             closing_index += 1
         else:

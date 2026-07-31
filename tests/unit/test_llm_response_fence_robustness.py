@@ -211,6 +211,24 @@ def _wrap_indented_fence_example_then_actual(
     return f"Example only:\n{indented_example}\nActual answer: {actual_payload}"
 
 
+def _wrap_disconnected_indented_closer(
+    example_payload: str, actual_payload: str, later_payload: str
+) -> str:
+    return (
+        f"Example:\n    ```json\n    {example_payload}\n"
+        f"Actual: {actual_payload}\n    ```\nLater stale: {later_payload}"
+    )
+
+
+def _wrap_indented_pseudo_closer(
+    example_payload: str, nested_payload: str, actual_payload: str
+) -> str:
+    return (
+        f"Example:\n    ```json\n    {example_payload}\n"
+        f"        ```\n      {nested_payload}\n     ```\nActual: {actual_payload}"
+    )
+
+
 # ``prose_prefix_fence`` and ``fence_trailing_prose`` are the two variants the
 # old heuristic got wrong; the remaining variants preserve plain, bare, and
 # longer supported-fence behavior.
@@ -356,6 +374,45 @@ class TestWonderFenceRobustness:
         assert out.reasoning == "actual answer"
         assert out.should_continue is True
         assert out.questions == ("actual token question",)
+
+    def test_disconnected_indented_closer_fails_closed(self) -> None:
+        stale_payload = json.dumps(
+            {"questions": [], "should_continue": False, "reasoning": "stale"}
+        )
+        actual_payload = json.dumps(
+            {
+                "questions": [{"question": "actual question", "kind": "gap"}],
+                "should_continue": True,
+                "reasoning": "actual",
+            }
+        )
+
+        out = WonderEngine(llm_adapter=AsyncMock(), model="test")._parse_response(
+            _wrap_disconnected_indented_closer(stale_payload, actual_payload, stale_payload),
+            _seed(),
+        )
+
+        assert out.reasoning.startswith("Parse error, using seed-scoped fallback")
+
+    def test_eight_space_pseudo_closer_does_not_release_nested_example(self) -> None:
+        stale_payload = json.dumps(
+            {"questions": [], "should_continue": False, "reasoning": "stale"}
+        )
+        actual_payload = json.dumps(
+            {
+                "questions": [{"question": "actual question", "kind": "gap"}],
+                "should_continue": True,
+                "reasoning": "actual",
+            }
+        )
+
+        out = WonderEngine(llm_adapter=AsyncMock(), model="test")._parse_response(
+            _wrap_indented_pseudo_closer(stale_payload, stale_payload, actual_payload),
+            _seed(),
+        )
+
+        assert out.reasoning == "actual"
+        assert out.questions == ("actual question",)
 
     def test_unsupported_fence_pair_does_not_let_later_prose_example_win(self) -> None:
         example_payload = json.dumps(
@@ -601,6 +658,64 @@ class TestReflectFenceRobustness:
         assert result.is_ok
         assert result.value.reasoning == "actual reflect"
         assert result.value.refined_goal == "Build a login system with refresh-token clarity"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("boundary_case", "expect_success"),
+        [("disconnected", False), ("pseudo-closer", True)],
+    )
+    async def test_indented_fence_block_boundaries_are_structural(
+        self, boundary_case: str, expect_success: bool
+    ) -> None:
+        stale_payload = json.dumps(
+            {
+                "refined_goal": "Stale example",
+                "refined_constraints": ["stale"],
+                "ontology_mutations": [],
+                "reasoning": "stale reflect",
+            }
+        )
+        actual_payload = json.dumps(
+            {
+                "refined_goal": "Actual goal",
+                "refined_constraints": ["actual"],
+                "ontology_mutations": [],
+                "reasoning": "actual reflect",
+            }
+        )
+        content = (
+            _wrap_disconnected_indented_closer(stale_payload, actual_payload, stale_payload)
+            if boundary_case == "disconnected"
+            else _wrap_indented_pseudo_closer(stale_payload, stale_payload, actual_payload)
+        )
+        adapter = AsyncMock()
+        adapter.complete.return_value = Result.ok(
+            CompletionResponse(
+                content=content,
+                model="test",
+                usage=UsageInfo(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+            )
+        )
+
+        result = await ReflectEngine(llm_adapter=adapter, model="test").reflect(
+            current_seed=_seed(1),
+            execution_output="",
+            evaluation_summary=EvaluationSummary(
+                final_approved=False,
+                highest_stage_passed=1,
+                score=0.0,
+                ac_results=(),
+            ),
+            wonder_output=WonderOutput(questions=("What remains unknown?",)),
+            lineage=OntologyLineage(lineage_id="lineage", goal="Build a login system"),
+        )
+
+        if expect_success:
+            assert result.is_ok
+            assert result.value.reasoning == "actual reflect"
+        else:
+            assert result.is_err
+            assert "failed to parse" in result.error.message.lower()
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("fence_info", ["json", ""])
@@ -1046,6 +1161,49 @@ class TestAssertionExtractorFenceRobustness:
 
         assert len(assertions) == 1
         assert assertions[0].description == "actual assertion"
+
+    @pytest.mark.parametrize(
+        ("boundary_case", "expected_description"),
+        [("disconnected", None), ("pseudo-closer", "actual assertion")],
+    )
+    def test_indented_fence_block_boundaries_are_structural(
+        self, boundary_case: str, expected_description: str | None
+    ) -> None:
+        stale_payload = json.dumps(
+            [
+                {
+                    "ac_index": 0,
+                    "tier": "t4_unverifiable",
+                    "pattern": "",
+                    "description": "stale assertion",
+                }
+            ]
+        )
+        actual_payload = json.dumps(
+            [
+                {
+                    "ac_index": 0,
+                    "tier": "t4_unverifiable",
+                    "pattern": "",
+                    "description": "actual assertion",
+                }
+            ]
+        )
+        content = (
+            _wrap_disconnected_indented_closer(stale_payload, actual_payload, stale_payload)
+            if boundary_case == "disconnected"
+            else _wrap_indented_pseudo_closer(stale_payload, stale_payload, actual_payload)
+        )
+
+        assertions = AssertionExtractor(llm_adapter=AsyncMock())._parse_response(
+            content, ("AC number 1",)
+        )
+
+        if expected_description is None:
+            assert assertions == ()
+        else:
+            assert len(assertions) == 1
+            assert assertions[0].description == expected_description
 
     @pytest.mark.parametrize("fence_info", ["json", ""])
     def test_supported_fence_rejects_invalid_body_with_stale_nested_json(

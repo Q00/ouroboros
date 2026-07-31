@@ -53,6 +53,23 @@ class TestExtractJsonPayload:
 
         assert extract_json_payload(text) == actual
 
+    def test_indented_literal_fence_cannot_close_across_unindented_content(self) -> None:
+        text = (
+            'Example:\n    ```json\n    {"example": true}\n'
+            'Actual: {"actual": true}\n    ```\nLater stale: {"stale": true}'
+        )
+
+        assert extract_json_payload(text) is None
+
+    def test_eight_space_pseudo_closer_remains_inside_indented_block(self) -> None:
+        text = (
+            'Example:\n    ```json\n    {"example": true}\n'
+            '        ```\n      {"nested_stale": true}\n     ```\n'
+            'Actual: {"actual": true}'
+        )
+
+        assert extract_json_payload(text) == '{"actual": true}'
+
     def test_json_in_code_fence(self):
         text = '```json\n{"score": 0.85}\n```'
         result = extract_json_payload(text)
