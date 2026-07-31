@@ -506,7 +506,20 @@ def _bash_command_mutates_file_reference(
             task_cwd=effective_cwd,
         )
         if python_command_match is not None:
-            return python_command_match
+            if python_command_match:
+                return True
+            # Python source is never command-text evidence for its own file
+            # receiver.  A distinct, literal shell output redirection remains
+            # authoritative, however: the execution-span lease above proves
+            # that the shell opened and changed that receiver independently of
+            # anything the ``-c`` source may have done.
+            return _shell_command_targets_file_claim(
+                command,
+                reference=reference,
+                task_cwd=task_cwd,
+                effective_cwd=effective_cwd,
+                redirections_only=True,
+            )
         if _text_needs_shell_expansion(command):
             # Expansion in a payload does not weaken a literal shell output
             # redirection: a successful shell necessarily opened that target.
@@ -594,19 +607,31 @@ def _runtime_message_correlated_completions(
     index: int,
 ) -> tuple[AgentMessage, ...]:
     """Return only unambiguous completion messages correlated to a call."""
+    if _runtime_message_has_conflicting_tool_call_ids(message):
+        return ()
     call_id = _runtime_message_tool_call_id(message)
     if call_id is not None:
+        if any(
+            _runtime_message_is_tool_completion(candidate)
+            and _runtime_message_has_conflicting_tool_call_ids(candidate)
+            and call_id in _runtime_message_tool_call_ids(candidate)
+            for candidate in messages[index + 1 :]
+        ):
+            return ()
         completions = tuple(
             candidate
             for candidate in messages[index + 1 :]
             if _runtime_message_is_tool_completion(candidate)
+            and not _runtime_message_has_conflicting_tool_call_ids(candidate)
             and _runtime_message_tool_call_id(candidate) == call_id
         )
         return completions if len(completions) == 1 else ()
     for candidate in messages[index + 1 :]:
         if _runtime_message_is_tool_completion(candidate):
-            if _runtime_message_tool_call_id(candidate) is None and (
-                candidate.tool_name is None or candidate.tool_name == message.tool_name
+            if (
+                not _runtime_message_has_conflicting_tool_call_ids(candidate)
+                and _runtime_message_tool_call_id(candidate) is None
+                and (candidate.tool_name is None or candidate.tool_name == message.tool_name)
             ):
                 return (candidate,)
             break
@@ -1050,25 +1075,36 @@ def _runtime_message_has_success_signal(message: AgentMessage) -> bool:
     return success_signal
 
 
-def _runtime_message_tool_call_id(message: AgentMessage) -> str | None:
-    """Return the normalized tool-call correlation id carried by a message."""
-    for key in ("tool_call_id", "tool_use_id", "call_id"):
-        value = message.data.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
+def _runtime_message_tool_call_ids(message: AgentMessage) -> frozenset[str]:
+    """Return every normalized correlation-id alias carried by a message."""
+    values: set[str] = set()
+    containers: list[dict[str, object]] = [message.data]
+    message_meta = message.data.get("meta")
+    if isinstance(message_meta, dict):
+        containers.append(message_meta)
     tool_result = message.data.get("tool_result")
     if isinstance(tool_result, dict):
-        for key in ("tool_call_id", "tool_use_id", "call_id"):
-            value = tool_result.get(key)
-            if isinstance(value, str) and value.strip():
-                return value.strip()
+        containers.append(tool_result)
         meta = tool_result.get("meta")
         if isinstance(meta, dict):
-            for key in ("tool_call_id", "tool_use_id", "call_id"):
-                value = meta.get(key)
-                if isinstance(value, str) and value.strip():
-                    return value.strip()
-    return None
+            containers.append(meta)
+    for container in containers:
+        for key in ("tool_call_id", "tool_use_id", "call_id"):
+            value = container.get(key)
+            if isinstance(value, str) and value.strip():
+                values.add(value.strip())
+    return frozenset(values)
+
+
+def _runtime_message_has_conflicting_tool_call_ids(message: AgentMessage) -> bool:
+    """Return whether aliases disagree, making correlation fail closed."""
+    return len(_runtime_message_tool_call_ids(message)) > 1
+
+
+def _runtime_message_tool_call_id(message: AgentMessage) -> str | None:
+    """Return the sole normalized correlation id, or ``None`` if absent/ambiguous."""
+    values = _runtime_message_tool_call_ids(message)
+    return next(iter(values)) if len(values) == 1 else None
 
 
 def _runtime_message_is_tool_completion(message: AgentMessage) -> bool:
@@ -1096,8 +1132,16 @@ def _runtime_message_has_success_evidence(
     for the same named tool (or an unnamed adjacent result). Missing, failed, or
     ambiguous completion evidence fails closed.
     """
+    if _runtime_message_has_conflicting_tool_call_ids(message):
+        return False
     call_id = _runtime_message_tool_call_id(message)
     if call_id is not None:
+        if any(
+            _runtime_message_has_conflicting_tool_call_ids(candidate)
+            and call_id in _runtime_message_tool_call_ids(candidate)
+            for candidate in messages
+        ):
+            return False
         matching_starts = tuple(
             candidate
             for candidate in messages
@@ -1115,8 +1159,16 @@ def _runtime_message_has_success_evidence(
 def _runtime_message_has_following_success(messages: tuple[AgentMessage, ...], index: int) -> bool:
     """Return True when a tool call has one correlated successful completion."""
     start = messages[index]
+    if _runtime_message_has_conflicting_tool_call_ids(start):
+        return False
     start_call_id = _runtime_message_tool_call_id(start)
     if start_call_id is not None:
+        if any(
+            _runtime_message_has_conflicting_tool_call_ids(candidate)
+            and start_call_id in _runtime_message_tool_call_ids(candidate)
+            for candidate in messages
+        ):
+            return False
         matching_starts = tuple(
             candidate
             for candidate in messages
@@ -1130,6 +1182,7 @@ def _runtime_message_has_following_success(messages: tuple[AgentMessage, ...], i
             candidate
             for candidate in messages[index + 1 :]
             if _runtime_message_is_tool_completion(candidate)
+            and not _runtime_message_has_conflicting_tool_call_ids(candidate)
             and _runtime_message_tool_call_id(candidate) == start_call_id
         )
         return (
@@ -1142,6 +1195,8 @@ def _runtime_message_has_following_success(messages: tuple[AgentMessage, ...], i
         )
 
     for candidate in messages[index + 1 :]:
+        if _runtime_message_has_conflicting_tool_call_ids(candidate):
+            return False
         candidate_call_id = _runtime_message_tool_call_id(candidate)
         if _runtime_message_is_tool_completion(candidate):
             # An id-bearing result cannot be safely assigned to an id-less

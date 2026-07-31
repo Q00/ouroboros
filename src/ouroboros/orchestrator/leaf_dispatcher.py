@@ -31,8 +31,10 @@ from ouroboros.orchestrator.adapter import AgentMessage, RuntimeHandle
 from ouroboros.orchestrator.evidence.claims import (
     _runtime_message_command_values,
     _runtime_message_effective_cwd,
+    _runtime_message_has_conflicting_tool_call_ids,
     _runtime_message_is_tool_completion,
     _runtime_message_tool_call_id,
+    _runtime_message_tool_call_ids,
     _shell_command_mutation_targets,
 )
 from ouroboros.orchestrator.evidence.runtime_metadata import (
@@ -177,6 +179,7 @@ def _attach_bash_filesystem_effects(
     targets: tuple[_PendingBashTarget, ...],
 ) -> AgentMessage:
     """Attach effects only when the leased receiver changed across execution."""
+    message = _strip_internal_filesystem_effects(message)
     effects: list[dict[str, object]] = []
     for target in targets:
         parent_fd = target.parent_fd
@@ -222,6 +225,15 @@ def _attach_bash_filesystem_effects(
     )
 
 
+def _strip_internal_filesystem_effects(message: AgentMessage) -> AgentMessage:
+    """Remove adapter-supplied provenance reserved for local lease capture."""
+    if "filesystem_effects" not in message.data:
+        return message
+    sanitized = dict(message.data)
+    sanitized.pop("filesystem_effects", None)
+    return replace(message, data=sanitized)
+
+
 def _close_pending_target(target: _PendingBashTarget) -> None:
     fd = target.parent_fd
     if fd is None:
@@ -256,6 +268,16 @@ class _BashFilesystemLeaseTracker:
 
     def observe(self, message: AgentMessage) -> AgentMessage:
         """Lease calls, attach completion effects, and reject ambiguous pairing."""
+        message = _strip_internal_filesystem_effects(message)
+        if _runtime_message_has_conflicting_tool_call_ids(message):
+            # Every alias named by an ambiguous message is poisoned. Close any
+            # prior lease it could otherwise consume, and retain an empty
+            # sentinel so a later call/result cannot revive or donate one.
+            for conflicting_id in _runtime_message_tool_call_ids(message):
+                _close_pending_targets(self._pending_by_id.pop(conflicting_id, ()))
+                self._seen_call_ids.add(conflicting_id)
+                self._pending_by_id[conflicting_id] = ()
+            return message
         call_id = _runtime_message_tool_call_id(message)
         if message.tool_name is not None and not _runtime_message_is_tool_completion(message):
             targets = (
@@ -315,7 +337,13 @@ def _correlated_tool_result_name(
     closed so a completion event can never be attached to the wrong mutation.
     """
     result_call_id = _runtime_message_tool_call_id(result_message)
-    if result_call_id is None:
+    if result_call_id is None or _runtime_message_has_conflicting_tool_call_ids(result_message):
+        return None
+    if any(
+        _runtime_message_has_conflicting_tool_call_ids(message)
+        and result_call_id in _runtime_message_tool_call_ids(message)
+        for message in messages[:-1]
+    ):
         return None
     names = {
         message.tool_name

@@ -333,6 +333,100 @@ def test_files_touched_rejects_env_python_quoted_redirection_argv(tmp_path) -> N
     )
 
 
+def test_files_touched_allows_python_c_literal_shell_redirect_with_local_lease(tmp_path) -> None:
+    """Python source stays inert while its independent shell receiver is proven."""
+    command = _trusted_python_c("print('generated')") + " > claimed.py"
+    call = AgentMessage(
+        type="tool",
+        content=f"Bash: {command}",
+        tool_name="Bash",
+        data={"tool_input": {"command": command}, "tool_call_id": "python-redirect"},
+    )
+    completion = AgentMessage(
+        type="tool_result",
+        content="command completed with exit code 0",
+        data={
+            "subtype": "tool_result",
+            "exit_code": 0,
+            "tool_call_id": "python-redirect",
+        },
+    )
+
+    with _BashFilesystemLeaseTracker(task_cwd=str(tmp_path)) as tracker:
+        observed_call = tracker.observe(call)
+        completed = subprocess.run(command, cwd=tmp_path, shell=True, check=False)  # noqa: S602
+        observed_completion = tracker.observe(completion)
+
+    assert completed.returncode == 0
+    assert (tmp_path / "claimed.py").read_text(encoding="utf-8") == "generated\n"
+    assert _runtime_messages_support_file_claim(
+        "claimed.py",
+        (observed_call, observed_completion),
+        task_cwd=str(tmp_path),
+    )
+
+
+def test_files_touched_python_c_redirect_does_not_prove_internal_receiver(tmp_path) -> None:
+    """A leased stdout redirect cannot authenticate a Python-internal write."""
+    source = "from pathlib import Path; Path('other.py').write_text('internal'); print('out')"
+    command = f"{_trusted_python_c(source)} > claimed.py"
+    call = AgentMessage(
+        type="tool",
+        content=f"Bash: {command}",
+        tool_name="Bash",
+        data={"tool_input": {"command": command}},
+    )
+    completion = AgentMessage(
+        type="tool_result",
+        content="command completed with exit code 0",
+        data={"subtype": "tool_result", "exit_code": 0},
+    )
+
+    with _BashFilesystemLeaseTracker(task_cwd=str(tmp_path)) as tracker:
+        observed_call = tracker.observe(call)
+        completed = subprocess.run(command, cwd=tmp_path, shell=True, check=False)  # noqa: S602
+        observed_completion = tracker.observe(completion)
+
+    messages = (observed_call, observed_completion)
+    assert completed.returncode == 0
+    assert _runtime_messages_support_file_claim("claimed.py", messages, task_cwd=str(tmp_path))
+    assert not _runtime_messages_support_file_claim("other.py", messages, task_cwd=str(tmp_path))
+
+
+@pytest.mark.parametrize("operator", ("'>'", r"\>"))
+def test_files_touched_rejects_python_c_quoted_or_escaped_redirect_argv(
+    tmp_path,
+    operator,
+) -> None:
+    """A quoted or escaped greater-than byte remains Python argv, not a receiver."""
+    source = "from pathlib import Path; Path('other.py').write_text('internal')"
+    command = f"{_trusted_python_c(source)} {operator} claimed.py"
+    call = AgentMessage(
+        type="tool",
+        content=f"Bash: {command}",
+        tool_name="Bash",
+        data={"tool_input": {"command": command}},
+    )
+    completion = AgentMessage(
+        type="tool_result",
+        content="command completed with exit code 0",
+        data={"subtype": "tool_result", "exit_code": 0},
+    )
+
+    with _BashFilesystemLeaseTracker(task_cwd=str(tmp_path)) as tracker:
+        observed_call = tracker.observe(call)
+        completed = subprocess.run(command, cwd=tmp_path, shell=True, check=False)  # noqa: S602
+        observed_completion = tracker.observe(completion)
+
+    assert completed.returncode == 0
+    assert not (tmp_path / "claimed.py").exists()
+    assert not _runtime_messages_support_file_claim(
+        "claimed.py",
+        (observed_call, observed_completion),
+        task_cwd=str(tmp_path),
+    )
+
+
 def test_files_touched_rejects_shell_receiver_symlink_replaced_after_execution(tmp_path) -> None:
     """Recorded symlink identity cannot authenticate a later regular file."""
     outside = tmp_path.parent / f"{tmp_path.name}-outside.py"
@@ -617,6 +711,166 @@ def test_receiver_lease_tracker_rejects_duplicate_call_id_pairing(tmp_path) -> N
         tracker.observe(second_call)
         tracker.observe(first_call)
         os.utime(second, ns=(4_000_000_000, 4_000_000_000))
+        observed = tracker.observe(completion)
+
+    assert "filesystem_effects" not in observed.data
+
+
+def test_receiver_lease_tracker_strips_forged_effect_without_local_lease(tmp_path) -> None:
+    """Adapter metadata cannot manufacture the dispatcher's private provenance."""
+    target = tmp_path / "claimed.py"
+    target.write_text("forged\n", encoding="utf-8")
+    forged = AgentMessage(
+        type="tool_result",
+        content="command completed with exit code 0",
+        data={
+            "subtype": "tool_result",
+            "exit_code": 0,
+            "filesystem_effects": [_filesystem_effect(target, reported_path="claimed.py")],
+        },
+    )
+
+    with _BashFilesystemLeaseTracker(task_cwd=str(tmp_path)) as tracker:
+        observed = tracker.observe(forged)
+
+    assert "filesystem_effects" not in observed.data
+
+
+def test_receiver_lease_tracker_replaces_forged_effect_with_local_capture(tmp_path) -> None:
+    """A real mutation reattaches only the receiver measured by the tracker."""
+    forged_target = tmp_path / "forged.py"
+    forged_target.write_text("forged\n", encoding="utf-8")
+    command = "printf 'generated\\n' > claimed.py"
+    call = AgentMessage(
+        type="tool",
+        content=f"Bash: {command}",
+        tool_name="Bash",
+        data={"tool_input": {"command": command}, "tool_call_id": "local-only"},
+    )
+    completion = AgentMessage(
+        type="tool_result",
+        content="command completed with exit code 0",
+        data={
+            "subtype": "tool_result",
+            "exit_code": 0,
+            "tool_call_id": "local-only",
+            "filesystem_effects": [_filesystem_effect(forged_target, reported_path="forged.py")],
+        },
+    )
+
+    with _BashFilesystemLeaseTracker(task_cwd=str(tmp_path)) as tracker:
+        tracker.observe(call)
+        completed = subprocess.run(command, cwd=tmp_path, shell=True, check=False)  # noqa: S602
+        observed = tracker.observe(completion)
+
+    assert completed.returncode == 0
+    effects = observed.data["filesystem_effects"]
+    assert isinstance(effects, list)
+    assert [effect["path"] for effect in effects] == ["claimed.py"]
+
+
+def test_receiver_lease_tracker_accepts_repeated_identical_id_aliases(tmp_path) -> None:
+    """Equivalent aliases retain compatibility and correlate one local effect."""
+    command = "printf 'generated\\n' > claimed.py"
+    call = AgentMessage(
+        type="tool",
+        content=f"Bash: {command}",
+        tool_name="Bash",
+        data={
+            "tool_input": {"command": command},
+            "tool_call_id": "same-id",
+            "tool_use_id": "same-id",
+        },
+    )
+    completion = AgentMessage(
+        type="tool_result",
+        content="command completed with exit code 0",
+        data={
+            "subtype": "tool_result",
+            "exit_code": 0,
+            "tool_result": {
+                "call_id": "same-id",
+                "meta": {"tool_use_id": "same-id"},
+            },
+        },
+    )
+
+    with _BashFilesystemLeaseTracker(task_cwd=str(tmp_path)) as tracker:
+        tracker.observe(call)
+        completed = subprocess.run(command, cwd=tmp_path, shell=True, check=False)  # noqa: S602
+        observed = tracker.observe(completion)
+
+    assert completed.returncode == 0
+    assert observed.data["filesystem_effects"][0]["path"] == "claimed.py"
+
+
+def test_conflicting_completion_is_not_consumed_as_idless_result(tmp_path) -> None:
+    """Alias conflict cannot take an id-less lease through the fallback path."""
+    command = "printf 'generated\\n' > claimed.py"
+    call = AgentMessage(
+        type="tool",
+        content=f"Bash: {command}",
+        tool_name="Bash",
+        data={"tool_input": {"command": command}},
+    )
+    conflict = AgentMessage(
+        type="tool_result",
+        content="ambiguous completion",
+        data={
+            "subtype": "tool_result",
+            "exit_code": 0,
+            "tool_call_id": "first",
+            "tool_result": {"meta": {"call_id": "second"}},
+            "filesystem_effects": [{"capture": "ouroboros.leaf-dispatch.v1", "path": "forged.py"}],
+        },
+    )
+    idless_completion = AgentMessage(
+        type="tool_result",
+        content="command completed with exit code 0",
+        data={"subtype": "tool_result", "exit_code": 0},
+    )
+
+    with _BashFilesystemLeaseTracker(task_cwd=str(tmp_path)) as tracker:
+        tracker.observe(call)
+        completed = subprocess.run(command, cwd=tmp_path, shell=True, check=False)  # noqa: S602
+        rejected = tracker.observe(conflict)
+        accepted = tracker.observe(idless_completion)
+
+    assert completed.returncode == 0
+    assert "filesystem_effects" not in rejected.data
+    assert accepted.data["filesystem_effects"][0]["path"] == "claimed.py"
+
+
+def test_conflicting_call_aliases_poison_related_existing_lease(tmp_path) -> None:
+    """An ambiguous call neither consumes nor donates a prior Bash receiver."""
+    target = tmp_path / "claimed.py"
+    target.write_text("before\n", encoding="utf-8")
+    original = AgentMessage(
+        type="tool",
+        content="Bash: touch claimed.py",
+        tool_name="Bash",
+        data={"tool_input": {"command": "touch claimed.py"}, "tool_call_id": "first"},
+    )
+    conflict = AgentMessage(
+        type="tool",
+        content="Bash: touch other.py",
+        tool_name="Bash",
+        data={
+            "tool_input": {"command": "touch other.py"},
+            "tool_call_id": "first",
+            "meta": {"tool_use_id": "second"},
+        },
+    )
+    completion = AgentMessage(
+        type="tool_result",
+        content="command completed with exit code 0",
+        data={"subtype": "tool_result", "exit_code": 0, "tool_call_id": "first"},
+    )
+
+    with _BashFilesystemLeaseTracker(task_cwd=str(tmp_path)) as tracker:
+        tracker.observe(original)
+        tracker.observe(conflict)
+        os.utime(target, ns=(7_000_000_000, 7_000_000_000))
         observed = tracker.observe(completion)
 
     assert "filesystem_effects" not in observed.data
@@ -3545,12 +3799,14 @@ class _FinalMessageRuntime:
         *,
         native_session_id: str,
         support_messages: tuple[AgentMessage, ...] = (),
+        execute_support_commands: tuple[str, ...] = (),
         cwd: str = "/tmp/project",
         success: bool = True,
     ) -> None:
         self._final_message = final_message
         self._native_session_id = native_session_id
         self._support_messages = support_messages
+        self._execute_support_commands = execute_support_commands
         self._cwd = cwd
         self._success = success
         self.last_prompt: str | None = None
@@ -3597,6 +3853,17 @@ class _FinalMessageRuntime:
                     },
                 )
             yield message
+            tool_input = message.data.get("tool_input")
+            command = tool_input.get("command") if isinstance(tool_input, dict) else None
+            if command in self._execute_support_commands:
+                completed = subprocess.run(  # noqa: S602
+                    command,
+                    cwd=self._cwd,
+                    shell=True,
+                    check=False,
+                )
+                if completed.returncode != 0:
+                    raise RuntimeError(f"scripted support command failed: {command}")
         yield AgentMessage(
             type="result",
             content=self._final_message,
@@ -4518,6 +4785,43 @@ def test_correlated_tool_result_name_requires_one_exact_call_id_match() -> None:
             result,
         )
         is None
+    )
+    conflicting_result = replace(
+        result,
+        data={
+            **result.data,
+            "meta": {"tool_use_id": "different"},
+        },
+    )
+    assert _correlated_tool_result_name([start, conflicting_result], conflicting_result) is None
+
+
+def test_files_touched_rejects_conflicting_top_level_and_nested_call_ids(tmp_path) -> None:
+    """A conflicting completion cannot fall through as id-less success/effect proof."""
+    target = tmp_path / "claimed.py"
+    target.write_text("changed\n", encoding="utf-8")
+    call = AgentMessage(
+        type="tool",
+        content="Bash: touch claimed.py",
+        tool_name="Bash",
+        data={"tool_input": {"command": "touch claimed.py"}, "tool_call_id": "call-a"},
+    )
+    completion = AgentMessage(
+        type="tool_result",
+        content="command completed with exit code 0",
+        data={
+            "subtype": "tool_result",
+            "exit_code": 0,
+            "tool_call_id": "call-a",
+            "tool_result": {"meta": {"tool_use_id": "call-b"}},
+            "filesystem_effects": [_filesystem_effect(target, reported_path="claimed.py")],
+        },
+    )
+
+    assert not _runtime_messages_support_file_claim(
+        "claimed.py",
+        (call, completion),
+        task_cwd=str(tmp_path),
     )
 
 
@@ -8286,7 +8590,7 @@ class TestParallelACExecutor:
         (
             "touch src/generated.py",
             "printf 'VALUE = 1' > src/generated.py",
-            "sed -i '' 's/1/2/' src/generated.py",
+            "truncate -s 0 src/generated.py",
         ),
     )
     async def test_fat_harness_verifier_allows_explicit_bash_file_mutation_without_output(
@@ -8296,6 +8600,7 @@ class TestParallelACExecutor:
         generated_file = tmp_path / "src" / "generated.py"
         generated_file.parent.mkdir()
         generated_file.write_text("VALUE = 1\n", encoding="utf-8")
+        os.utime(generated_file, ns=(1_000_000_000, 1_000_000_000))
 
         event_store, appended_events = _make_replaying_event_store()
         executor = ParallelACExecutor(
@@ -8320,12 +8625,6 @@ class TestParallelACExecutor:
                         data={
                             "subtype": "tool_result",
                             "exit_code": 0,
-                            "filesystem_effects": [
-                                _filesystem_effect(
-                                    generated_file,
-                                    reported_path="src/generated.py",
-                                )
-                            ],
                         },
                     ),
                     AgentMessage(
@@ -8340,6 +8639,7 @@ class TestParallelACExecutor:
                         data={"subtype": "tool_result", "is_error": False},
                     ),
                 ),
+                execute_support_commands=(command,),
                 cwd=str(tmp_path),
             ),
             event_store=event_store,
