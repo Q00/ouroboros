@@ -691,7 +691,7 @@ def _shell_command_mutation_targets(
     candidate = _strip_unquoted_shell_comment(candidate)
     try:
         lexer = shlex.shlex(
-            _mask_quoted_output_operators(candidate),
+            _mask_quoted_output_operators(_mark_adjacent_fd_selectors(candidate)),
             posix=True,
             punctuation_chars=";&|<>",
         )
@@ -762,10 +762,7 @@ def _shell_tokens_without_redirections(tokens: list[str]) -> tuple[list[str], li
             arguments.append(token)
             index += 1
             continue
-        if arguments and arguments[-1].isdigit():
-            # Token positions are unavailable after shlex parsing. Removing a
-            # preceding numeric word is conservative for ``2>file`` and avoids
-            # ever treating a descriptor selector as a mutation receiver.
+        if arguments and arguments[-1].startswith(_FD_SELECTOR_MARKER):
             arguments.pop()
         if index + 1 >= len(tokens):
             return [], []
@@ -778,7 +775,71 @@ def _shell_tokens_without_redirections(tokens: list[str]) -> tuple[list[str], li
         # also accepts filename extensions of this form, but declining them is
         # safer than confusing ``>&2`` with a file receiver.
         index += 2
+    if any(argument.startswith(_FD_SELECTOR_MARKER) for argument in arguments):
+        return [], []
     return arguments, file_targets
+
+
+_FD_SELECTOR_MARKER = "\uf001ouroboros-fd:"
+
+
+def _mark_adjacent_fd_selectors(command: str) -> str:
+    """Mark shell IO-number tokens only when lexically adjacent to ``<``/``>``."""
+    marked: list[str] = []
+    quote: str | None = None
+    escaped = False
+    at_word_start = True
+    index = 0
+    while index < len(command):
+        char = command[index]
+        if escaped:
+            marked.append(char)
+            escaped = False
+            at_word_start = False
+            index += 1
+            continue
+        if quote == "'":
+            marked.append(char)
+            if char == "'":
+                quote = None
+            index += 1
+            continue
+        if char == "\\":
+            marked.append(char)
+            escaped = True
+            index += 1
+            continue
+        if quote == '"':
+            marked.append(char)
+            if char == '"':
+                quote = None
+            index += 1
+            continue
+        if char in {"'", '"'}:
+            marked.append(char)
+            quote = char
+            at_word_start = False
+            index += 1
+            continue
+        if at_word_start and char.isascii() and char.isdigit():
+            end = index + 1
+            while end < len(command) and command[end].isascii() and command[end].isdigit():
+                end += 1
+            digits = command[index:end]
+            if end < len(command) and command[end] in {"<", ">"}:
+                marked.append(f"{_FD_SELECTOR_MARKER}{digits}")
+            else:
+                marked.append(digits)
+            at_word_start = False
+            index = end
+            continue
+        marked.append(char)
+        if char.isspace() or char in ";&|()<>":
+            at_word_start = True
+        else:
+            at_word_start = False
+        index += 1
+    return "".join(marked)
 
 
 def _mutation_operands_with_options(
@@ -1084,6 +1145,9 @@ def _has_unquoted_compound_shell_control(command: str) -> bool:
             continue
         if char in {"'", '"'}:
             quote = char
+            continue
+        if char == "|" and index > 0 and command[index - 1] == ">":
+            # ``>|`` is the shell's clobber redirection operator, not a pipe.
             continue
         if char in {"|", ";", "\n", "\r"}:
             return True

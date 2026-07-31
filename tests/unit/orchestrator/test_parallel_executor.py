@@ -652,6 +652,102 @@ def test_tee_input_redirection_is_not_a_mutation_receiver(tmp_path) -> None:
 
 
 @pytest.mark.parametrize(
+    ("command", "receivers", "stdin"),
+    (
+        ("touch 123 > log.txt", ("log.txt", "123"), None),
+        ("tee 123 < source.txt", ("123",), None),
+    ),
+)
+def test_numeric_filename_separated_from_redirect_remains_receiver(
+    tmp_path,
+    command,
+    receivers,
+    stdin,
+) -> None:
+    """Whitespace-separated digits are argv operands, never IO-number selectors."""
+    source = tmp_path / "source.txt"
+    source.write_text("source\n", encoding="utf-8")
+    for receiver in receivers:
+        target = tmp_path / receiver
+        target.write_text("before\n", encoding="utf-8")
+        os.utime(target, ns=(1_000_000_000, 1_000_000_000))
+    call = AgentMessage(
+        type="tool",
+        content=f"Bash: {command}",
+        tool_name="Bash",
+        data={"tool_input": {"command": command}},
+    )
+    completion = AgentMessage(
+        type="tool_result",
+        content="command completed with exit code 0",
+        data={"subtype": "tool_result", "exit_code": 0},
+    )
+
+    with _BashFilesystemLeaseTracker(task_cwd=str(tmp_path)) as tracker:
+        observed_call = tracker.observe(call)
+        completed = subprocess.run(  # noqa: S602
+            command,
+            cwd=tmp_path,
+            shell=True,
+            check=False,
+            input=stdin,
+            text=True,
+        )
+        observed_completion = tracker.observe(completion)
+
+    assert completed.returncode == 0
+    assert _shell_command_mutation_targets(command) == receivers
+    messages = (observed_call, observed_completion)
+    for receiver in receivers:
+        assert _runtime_messages_support_file_claim(receiver, messages, task_cwd=str(tmp_path))
+    assert not _runtime_messages_support_file_claim("source.txt", messages, task_cwd=str(tmp_path))
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    (
+        ("touch first.py 2> error.txt", ("error.txt", "first.py")),
+        ("touch first.py 2>&1", ("first.py",)),
+        ("touch first.py 2 > log.txt", ("log.txt", "first.py", "2")),
+        ("tee 123<source.txt", ()),
+    ),
+)
+def test_fd_selector_requires_lexical_adjacency(command, expected) -> None:
+    """Only an adjacent IO-number is stripped from utility argv."""
+    assert _shell_command_mutation_targets(command) == expected
+
+
+def test_clobber_redirection_authenticates_without_becoming_pipeline(tmp_path) -> None:
+    """The pipe byte in ``>|`` is redirection syntax, not compound control."""
+    command = "printf x >| log.txt"
+    call = AgentMessage(
+        type="tool",
+        content=f"Bash: {command}",
+        tool_name="Bash",
+        data={"tool_input": {"command": command}},
+    )
+    completion = AgentMessage(
+        type="tool_result",
+        content="command completed with exit code 0",
+        data={"subtype": "tool_result", "exit_code": 0},
+    )
+
+    with _BashFilesystemLeaseTracker(task_cwd=str(tmp_path)) as tracker:
+        observed_call = tracker.observe(call)
+        completed = subprocess.run(command, cwd=tmp_path, shell=True, check=False)  # noqa: S602
+        observed_completion = tracker.observe(completion)
+
+    assert completed.returncode == 0
+    assert (tmp_path / "log.txt").read_text(encoding="utf-8") == "x"
+    assert _shell_command_mutation_targets(command) == ("log.txt",)
+    assert _runtime_messages_support_file_claim(
+        "log.txt",
+        (observed_call, observed_completion),
+        task_cwd=str(tmp_path),
+    )
+
+
+@pytest.mark.parametrize(
     ("command", "expected"),
     (
         ("touch -r reference.py first.py second.py", ("first.py", "second.py")),
