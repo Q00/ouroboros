@@ -821,10 +821,10 @@ def event_store_path_from_config(data: Mapping[str, Any], config_path: Path) -> 
     if persistence is not None and not isinstance(persistence, Mapping):
         raise ValueError("config section 'persistence' must be a mapping")
 
-    configured = persistence.get("database_path") if persistence else None
     legacy_path = config_path.parent / "ouroboros.db"
-    if configured is None:
+    if not persistence or "database_path" not in persistence:
         return legacy_path
+    configured = persistence["database_path"]
     if not isinstance(configured, str) or not configured.strip():
         raise ValueError("config field 'persistence.database_path' must be a non-empty string")
 

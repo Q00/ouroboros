@@ -507,7 +507,10 @@ def test_resolve_event_store_path_prefers_existing_configured_database(tmp_path)
     assert resolve_event_store_path(config_path) == configured_path
 
 
-@pytest.mark.parametrize("database_path", [True, 1, ["events.db"], {"path": "events.db"}, ""])
+@pytest.mark.parametrize(
+    "database_path",
+    [None, True, 1, ["events.db"], {"path": "events.db"}, ""],
+)
 def test_event_store_path_rejects_invalid_database_path(tmp_path, database_path) -> None:
     config_path = tmp_path / "config.yaml"
 
@@ -516,6 +519,14 @@ def test_event_store_path_rejects_invalid_database_path(tmp_path, database_path)
             {"persistence": {"database_path": database_path}},
             config_path,
         )
+
+
+def test_resolve_event_store_path_rejects_explicit_yaml_null(tmp_path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("persistence:\n  database_path:\n")
+
+    with pytest.raises(ValueError, match="database_path"):
+        resolve_event_store_path(config_path)
 
 
 class TestDriftConfig:
