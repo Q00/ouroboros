@@ -114,14 +114,9 @@ def _is_word_apostrophe(value: str, index: int, *, shell_context: bool = False) 
     return value.find("'", index + 1) < 0
 
 
-def _starts_posix_shell_comment(value: str, index: int) -> bool:
-    """Return whether ``#`` begins an unquoted POSIX shell comment token."""
-    if value[index] != "#":
-        return False
-    if index == 0:
-        return True
-    previous = value[index - 1]
-    return previous.isspace() or previous in ";&|()"
+def _starts_posix_shell_comment(char: str, *, word_started: bool) -> bool:
+    """Return whether an unquoted ``#`` begins a fresh POSIX comment token."""
+    return char == "#" and not word_started
 
 
 def _scan_pipe_led_ac_field_fragment(
@@ -291,6 +286,7 @@ def _iter_outer_ac_field_markers(body: str) -> tuple[_ACFieldMarker, ...]:
     active_field: str | None = None
     escaped = False
     unquoted_comment = False
+    shell_word_started = False
     index = 0
     while index < len(body):
         char = body[index]
@@ -329,6 +325,11 @@ def _iter_outer_ac_field_markers(body: str) -> tuple[_ACFieldMarker, ...]:
                 escaped_marker = _scan_pipe_led_ac_field_fragment(escaped_remainder, 0)
                 if escaped_marker is not None:
                     raise ValueError(f"Escaped {escaped_marker.name} field in acceptance criterion")
+            if structured_payload_started and active_field == "verify" and quote is None:
+                # The escaped byte belongs to the current word even when its
+                # raw spelling is whitespace or a control operator. Preserve
+                # that provenance so a following # cannot become a comment.
+                shell_word_started = True
             escaped = True
             index += 1
             continue
@@ -348,8 +349,7 @@ def _iter_outer_ac_field_markers(body: str) -> tuple[_ACFieldMarker, ...]:
         if (
             structured_payload_started
             and active_field == "verify"
-            and char == "#"
-            and _starts_posix_shell_comment(body, index)
+            and _starts_posix_shell_comment(char, word_started=shell_word_started)
         ):
             unquoted_comment = True
             index += 1
@@ -362,11 +362,18 @@ def _iter_outer_ac_field_markers(body: str) -> tuple[_ACFieldMarker, ...]:
                 shell_context=structured_payload_started and active_field == "verify",
             )
         ):
+            if structured_payload_started and active_field == "verify":
+                shell_word_started = True
             quote = char
             quote_start = index + 1
             index += 1
             continue
         if char != "|":
+            if structured_payload_started and active_field == "verify":
+                if char.isspace() or char in ";&()":
+                    shell_word_started = False
+                else:
+                    shell_word_started = True
             index += 1
             continue
 
@@ -374,6 +381,7 @@ def _iter_outer_ac_field_markers(body: str) -> tuple[_ACFieldMarker, ...]:
         if fragment is not None and fragment.has_colon and fragment.canonical:
             structured_payload_started = True
             active_field = fragment.name
+            shell_word_started = False
             markers.append(
                 _ACFieldMarker(
                     name=fragment.name,
@@ -396,6 +404,8 @@ def _iter_outer_ac_field_markers(body: str) -> tuple[_ACFieldMarker, ...]:
             continue
         if fragment is not None:
             raise ValueError(f"Malformed {fragment.name} field in acceptance criterion")
+        if active_field == "verify":
+            shell_word_started = False
         index += 1
     if (quote is not None or escaped) and _find_pipe_led_ac_field_fragment(body):
         raise ValueError("Unterminated quoted or escaped acceptance criterion contract")

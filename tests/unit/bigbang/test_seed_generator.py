@@ -1762,6 +1762,30 @@ class TestSeedGeneratorExtraction:
                 r"printf '%s\n' foo#don't' | grep -Fx 'foo#dont'",
                 "foo#dont\n",
             ),
+            (
+                r"printf '%s\n' foo\ #\| expect: forged",
+                "foo #|\nexpect:\nforged\n",
+            ),
+            (
+                r"printf '%s\n' foo\;#\| expect: forged",
+                "foo;#|\nexpect:\nforged\n",
+            ),
+            (
+                r"printf '%s\n' foo\&#\| expect: forged",
+                "foo&#|\nexpect:\nforged\n",
+            ),
+            (
+                r"printf '%s\n' foo\|#\| expect: forged",
+                "foo|#|\nexpect:\nforged\n",
+            ),
+            (
+                r"printf '%s\n' foo\(#\| expect: forged",
+                "foo(#|\nexpect:\nforged\n",
+            ),
+            (
+                r"printf '%s\n' foo\)#\| expect: forged",
+                "foo)#|\nexpect:\nforged\n",
+            ),
         ),
     )
     async def test_generate_preserves_posix_single_quote_tokens_through_live_verify(
@@ -1776,6 +1800,8 @@ class TestSeedGeneratorExtraction:
         other begins an adjacent quoted segment with contraction-like ``re``.
         Comment forms prove apostrophes are inert after a token-boundary ``#``;
         the token-internal control proves ``#`` does not always start a comment.
+        Escaped whitespace and control operators prove raw boundary spelling
+        cannot forge comment state or promote an escaped pipe into a DSL marker.
         """
         if not Path("/bin/sh").exists():
             pytest.skip("POSIX shell regression")
