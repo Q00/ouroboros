@@ -236,6 +236,28 @@ class TestExtractJsonPayload:
 
         assert extract_json_payload(text) is None
 
+    def test_disconnected_quoted_list_closer_cannot_release_later_stale(self) -> None:
+        text = (
+            'Example:\n> - ```json\n>   {"example": true}\n'
+            'Actual: {"actual": true}\n>   ```\nLater: {"stale": true}'
+        )
+
+        assert extract_json_payload(text) is None
+
+    def test_tab_continued_plain_list_fence_is_authoritative(self) -> None:
+        text = '- ```json\n\t{"actual": true}\n\t```'
+
+        assert extract_json_payload(text) == '{"actual": true}'
+
+    def test_tab_continued_quoted_list_example_is_excluded_and_releases_actual(
+        self,
+    ) -> None:
+        stale_only = '> - ```json\n>\t{"stale": true}\n>\t```'
+        with_actual = f'{stale_only}\nActual: {{"actual": true}}'
+
+        assert extract_json_payload(stale_only) is None
+        assert extract_json_payload(with_actual) == '{"actual": true}'
+
     def test_json_in_code_fence(self):
         text = '```json\n{"score": 0.85}\n```'
         result = extract_json_payload(text)

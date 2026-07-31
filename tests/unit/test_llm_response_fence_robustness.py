@@ -323,6 +323,15 @@ def _wrap_plain_list_fenced_answer(payload: str, *, prefixes: tuple[str, str]) -
     return f"{opener_prefix}```json\n{continuation}{payload}\n{continuation}```"
 
 
+def _wrap_disconnected_quoted_list_closer(
+    example_payload: str, actual_payload: str, later_payload: str
+) -> str:
+    return (
+        f"> - ```json\n>   {example_payload}\nActual: {actual_payload}\n"
+        f">   ```\nLater: {later_payload}"
+    )
+
+
 async def _reflect_wrapped_content(content: str):
     adapter = AsyncMock()
     adapter.complete.return_value = Result.ok(
@@ -646,6 +655,80 @@ class TestWonderFenceRobustness:
         )
 
         assert out.reasoning.startswith("Parse error, using seed-scoped fallback")
+
+    def test_disconnected_quoted_list_closer_cannot_release_later_stale(self) -> None:
+        stale_payload = json.dumps(
+            {"questions": [], "should_continue": False, "reasoning": "stale"}
+        )
+        actual_payload = json.dumps(
+            {
+                "questions": [{"question": "actual question", "kind": "gap"}],
+                "should_continue": True,
+                "reasoning": "actual",
+            }
+        )
+
+        out = WonderEngine(llm_adapter=AsyncMock(), model="test")._parse_response(
+            _wrap_disconnected_quoted_list_closer(
+                stale_payload,
+                actual_payload,
+                stale_payload,
+            ),
+            _seed(),
+        )
+
+        assert out.reasoning.startswith("Parse error, using seed-scoped fallback")
+
+    def test_tab_continued_plain_list_fence_is_authoritative(self) -> None:
+        actual_payload = json.dumps(
+            {
+                "questions": [{"question": "actual question", "kind": "gap"}],
+                "should_continue": True,
+                "reasoning": "actual",
+            }
+        )
+
+        out = WonderEngine(llm_adapter=AsyncMock(), model="test")._parse_response(
+            _wrap_plain_list_fenced_answer(actual_payload, prefixes=("- ", "\t")),
+            _seed(),
+        )
+
+        assert out.reasoning == "actual"
+        assert out.questions == ("actual question",)
+
+    def test_tab_continued_quoted_list_example_is_excluded_and_releases_actual(
+        self,
+    ) -> None:
+        stale_payload = json.dumps(
+            {"questions": [], "should_continue": False, "reasoning": "stale"}
+        )
+        actual_payload = json.dumps(
+            {
+                "questions": [{"question": "actual question", "kind": "gap"}],
+                "should_continue": True,
+                "reasoning": "actual",
+            }
+        )
+        engine = WonderEngine(llm_adapter=AsyncMock(), model="test")
+
+        stale_only = engine._parse_response(
+            _wrap_quoted_list_fence_example(
+                stale_payload,
+                prefixes=("> - ", ">\t", ">\t"),
+            ),
+            _seed(),
+        )
+        actual = engine._parse_response(
+            _wrap_quoted_list_fence_example(
+                stale_payload,
+                prefixes=("> - ", ">\t", ">\t"),
+                actual_payload=actual_payload,
+            ),
+            _seed(),
+        )
+
+        assert stale_only.reasoning.startswith("Parse error, using seed-scoped fallback")
+        assert actual.reasoning == "actual"
 
     def test_eight_space_pseudo_closer_does_not_release_nested_example(self) -> None:
         stale_payload = json.dumps(
@@ -1012,6 +1095,94 @@ class TestReflectFenceRobustness:
 
         assert result.is_err
         assert "failed to parse" in result.error.message.lower()
+
+    @pytest.mark.asyncio
+    async def test_disconnected_quoted_list_closer_cannot_release_later_stale(
+        self,
+    ) -> None:
+        stale_payload = json.dumps(
+            {
+                "refined_goal": "Stale example",
+                "refined_constraints": ["stale"],
+                "ontology_mutations": [],
+                "reasoning": "stale reflect",
+            }
+        )
+        actual_payload = json.dumps(
+            {
+                "refined_goal": "Actual goal",
+                "refined_constraints": ["actual"],
+                "ontology_mutations": [],
+                "reasoning": "actual reflect",
+            }
+        )
+
+        result = await _reflect_wrapped_content(
+            _wrap_disconnected_quoted_list_closer(
+                stale_payload,
+                actual_payload,
+                stale_payload,
+            )
+        )
+
+        assert result.is_err
+
+    @pytest.mark.asyncio
+    async def test_tab_continued_plain_list_fence_is_authoritative(self) -> None:
+        actual_payload = json.dumps(
+            {
+                "refined_goal": "Actual goal",
+                "refined_constraints": ["actual"],
+                "ontology_mutations": [],
+                "reasoning": "actual reflect",
+            }
+        )
+
+        result = await _reflect_wrapped_content(
+            _wrap_plain_list_fenced_answer(actual_payload, prefixes=("- ", "\t"))
+        )
+
+        assert result.is_ok
+        assert result.value.reasoning == "actual reflect"
+
+    @pytest.mark.asyncio
+    async def test_tab_continued_quoted_list_example_is_excluded_and_releases_actual(
+        self,
+    ) -> None:
+        stale_payload = json.dumps(
+            {
+                "refined_goal": "Stale example",
+                "refined_constraints": ["stale"],
+                "ontology_mutations": [],
+                "reasoning": "stale reflect",
+            }
+        )
+        actual_payload = json.dumps(
+            {
+                "refined_goal": "Actual goal",
+                "refined_constraints": ["actual"],
+                "ontology_mutations": [],
+                "reasoning": "actual reflect",
+            }
+        )
+
+        stale_only = await _reflect_wrapped_content(
+            _wrap_quoted_list_fence_example(
+                stale_payload,
+                prefixes=("> - ", ">\t", ">\t"),
+            )
+        )
+        actual = await _reflect_wrapped_content(
+            _wrap_quoted_list_fence_example(
+                stale_payload,
+                prefixes=("> - ", ">\t", ">\t"),
+                actual_payload=actual_payload,
+            )
+        )
+
+        assert stale_only.is_err
+        assert actual.is_ok
+        assert actual.value.reasoning == "actual reflect"
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("prefixes", QUOTED_LIST_FENCE_VARIANTS)
@@ -1793,6 +1964,104 @@ class TestAssertionExtractorFenceRobustness:
         )
 
         assert assertions == ()
+
+    def test_disconnected_quoted_list_closer_cannot_release_later_stale(self) -> None:
+        stale_payload = json.dumps(
+            [
+                {
+                    "ac_index": 0,
+                    "tier": "t4_unverifiable",
+                    "pattern": "",
+                    "description": "stale assertion",
+                }
+            ]
+        )
+        actual_payload = json.dumps(
+            [
+                {
+                    "ac_index": 0,
+                    "tier": "t4_unverifiable",
+                    "pattern": "",
+                    "description": "actual assertion",
+                }
+            ]
+        )
+
+        assertions = AssertionExtractor(llm_adapter=AsyncMock())._parse_response(
+            _wrap_disconnected_quoted_list_closer(
+                stale_payload,
+                actual_payload,
+                stale_payload,
+            ),
+            ("AC number 1",),
+        )
+
+        assert assertions == ()
+
+    def test_tab_continued_plain_list_fence_is_authoritative(self) -> None:
+        actual_payload = json.dumps(
+            [
+                {
+                    "ac_index": 0,
+                    "tier": "t4_unverifiable",
+                    "pattern": "",
+                    "description": "actual assertion",
+                }
+            ]
+        )
+
+        assertions = AssertionExtractor(llm_adapter=AsyncMock())._parse_response(
+            _wrap_plain_list_fenced_answer(actual_payload, prefixes=("- ", "\t")),
+            ("AC number 1",),
+        )
+
+        assert len(assertions) == 1
+        assert assertions[0].description == "actual assertion"
+
+    def test_tab_continued_quoted_list_example_is_excluded_and_releases_actual(
+        self,
+    ) -> None:
+        stale_payload = json.dumps(
+            [
+                {
+                    "ac_index": 0,
+                    "tier": "t4_unverifiable",
+                    "pattern": "",
+                    "description": "stale assertion",
+                }
+            ]
+        )
+        actual_payload = json.dumps(
+            [
+                {
+                    "ac_index": 0,
+                    "tier": "t4_unverifiable",
+                    "pattern": "",
+                    "description": "actual assertion",
+                }
+            ]
+        )
+        extractor = AssertionExtractor(llm_adapter=AsyncMock())
+
+        stale_only = extractor._parse_response(
+            _wrap_quoted_list_fence_example(
+                stale_payload,
+                prefixes=("> - ", ">\t", ">\t"),
+            ),
+            ("AC number 1",),
+        )
+        actual = extractor._parse_response(
+            _wrap_quoted_list_fence_example(
+                stale_payload,
+                prefixes=("> - ", ">\t", ">\t"),
+                actual_payload=actual_payload,
+            ),
+            ("AC number 1",),
+        )
+
+        assert stale_only == ()
+        assert len(actual) == 1
+        assert actual[0].description == "actual assertion"
 
     @pytest.mark.parametrize("fence_info", ["json", ""])
     def test_supported_fence_rejects_invalid_body_with_stale_nested_json(

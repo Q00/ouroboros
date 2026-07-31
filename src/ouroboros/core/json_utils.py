@@ -172,6 +172,27 @@ def _list_marker_end(text: str, start: int) -> int | None:
     return end + 1
 
 
+def _markdown_column_width(text: str) -> int:
+    """Return CommonMark indentation columns with four-column tab stops."""
+    column = 0
+    for char in text:
+        column = (column // 4 + 1) * 4 if char == "\t" else column + 1
+    return column
+
+
+def _strip_indentation_columns(text: str, columns: int) -> str | None:
+    """Remove indentation columns, preserving a tab's virtual overshoot."""
+    column = 0
+    position = 0
+    while column < columns:
+        if position >= len(text) or text[position] not in " \t":
+            return None
+        char = text[position]
+        column = column + 1 if char == " " else (column // 4 + 1) * 4
+        position += 1
+    return " " * (column - columns) + text[position:]
+
+
 def _list_content_indent(prefix: str) -> int | None:
     """Return the continuation indentation for nested list-marker prefixes."""
     position = 0
@@ -193,7 +214,7 @@ def _list_content_indent(prefix: str) -> int | None:
         padding_width = padding_width if padding_width <= 4 else 1
         position = marker_end + padding_width
         if _PLAIN_FENCE_PREFIX.fullmatch(prefix[position:]) is not None:
-            return position
+            return _markdown_column_width(prefix[:position])
 
 
 def _fence_containers(prefix: str) -> tuple[_FenceContainer, ...]:
@@ -236,10 +257,9 @@ def _container_line_remainders(line: str, container: _FenceContainer) -> tuple[s
 
     decoded: set[str] = set()
     for remainder in remainders:
-        indent = container.list_content_indent
-        if len(remainder) < indent or any(char not in " \t" for char in remainder[:indent]):
-            continue
-        decoded.add(remainder[indent:])
+        stripped = _strip_indentation_columns(remainder, container.list_content_indent)
+        if stripped is not None:
+            decoded.add(stripped)
     return tuple(sorted(decoded, key=len))
 
 
@@ -281,28 +301,41 @@ def _find_closing_fence(
     *,
     container: _FenceContainer,
 ) -> tuple[int, int, int] | None:
-    """Return a clean same-marker fence at least as long as the opener."""
-    pos = start
-    while True:
-        candidate = text.find(marker * 3, pos)
-        if candidate == -1:
+    """Return a clean closer without crossing a container discontinuity."""
+    line_start = start
+    while line_start <= len(text):
+        line_stop = text.find("\n", line_start)
+        if line_stop == -1:
+            line_stop = len(text)
+        line_end = line_stop
+        if line_end > line_start and text[line_end - 1] == "\r":
+            line_end -= 1
+
+        fence_candidates = sorted(
+            (candidate, candidate_marker)
+            for candidate_marker in _FENCE_MARKERS
+            if (candidate := text.find(candidate_marker * 3, line_start, line_end)) != -1
+        )
+        for candidate, candidate_marker in fence_candidates:
+            prefix = text[line_start:candidate]
+            if not _container_fence_prefix_matches(prefix, container):
+                continue
+            candidate_length = _fence_run_length(text, candidate, candidate_marker)
+            suffix = text[candidate + candidate_length : line_end]
+            if (
+                candidate_marker == marker
+                and candidate_length >= opener_length
+                and suffix.strip() == ""
+            ):
+                return candidate, candidate_length, line_start
             return None
 
-        candidate_length = _fence_run_length(text, candidate, marker)
-        line_start = text.rfind("\n", 0, candidate) + 1
-        line_end = text.find("\n", candidate + candidate_length)
-        if line_end == -1:
-            line_end = len(text)
-        prefix = text[line_start:candidate]
-        suffix = text[candidate + candidate_length : line_end]
-        if (
-            candidate_length >= opener_length
-            and _container_fence_prefix_matches(prefix, container)
-            and suffix.strip() == ""
-        ):
-            return candidate, candidate_length, line_start
-
-        pos = candidate + candidate_length
+        if not _container_line_remainders(text[line_start:line_end], container):
+            return None
+        if line_stop == len(text):
+            return None
+        line_start = line_stop + 1
+    return None
 
 
 def _decode_fenced_body(body: str, *, container: _FenceContainer) -> str | None:
