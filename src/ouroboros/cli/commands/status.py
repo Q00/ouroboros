@@ -223,12 +223,15 @@ async def _recent_execution_events(
         for snapshot in snapshots
         if snapshot.execution_id
     }
-    latest_by_execution: dict[str, BaseEvent] = {}
+    events_by_execution: dict[str, list[BaseEvent]] = {}
     for event in persisted:
         execution_id = execution_by_session.get(event.aggregate_id, event.aggregate_id)
-        current = latest_by_execution.get(execution_id)
-        if current is None or (event.timestamp, event.id) > (current.timestamp, current.id):
-            latest_by_execution[execution_id] = event
+        events_by_execution.setdefault(execution_id, []).append(event)
+    latest_by_execution = {
+        execution_id: latest
+        for execution_id, events in events_by_execution.items()
+        if (latest := _latest_execution_lifecycle(events)) is not None
+    }
     ordered = sorted(
         latest_by_execution.items(),
         key=lambda item: (item[1].timestamp, item[1].id),
