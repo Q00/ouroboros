@@ -22,6 +22,19 @@ BLOCKQUOTE_INDENTED_PREFIX_VARIANTS = (
     pytest.param(">   \t", "  > \t", ">   \t", id="tab-padding"),
     pytest.param("> >     ", " >  >     ", "  >>     ", id="nested-mixed"),
 )
+QUOTED_LIST_FENCE_VARIANTS = (
+    pytest.param(("> - ", ">   ", ">   "), id="exact"),
+    pytest.param((" > - ", "  >   ", "   >   "), id="mixed-leading"),
+    pytest.param(("> - - ", ">     ", ">     "), id="nested-list"),
+    pytest.param(("> 1. ", ">    ", ">    "), id="ordered"),
+    pytest.param(("> > - ", "> >   ", " > >   "), id="nested-quote"),
+    pytest.param(("> -  ", ">    ", ">    "), id="marker-padding"),
+)
+PLAIN_LIST_FENCE_VARIANTS = (
+    pytest.param("- ", "  ", id="unordered"),
+    pytest.param("1. ", "   ", id="ordered"),
+    pytest.param("- - ", "    ", id="nested"),
+)
 
 
 def _malformed_indented_fence(
@@ -171,6 +184,55 @@ class TestExtractJsonPayload:
         self, opener_prefix: str, body_prefix: str, closer_prefix: str
     ) -> None:
         text = f'{opener_prefix}```json\n{body_prefix}{{"stale": true}}\n{closer_prefix}```'
+
+        assert extract_json_payload(text) is None
+
+    @pytest.mark.parametrize("prefixes", QUOTED_LIST_FENCE_VARIANTS)
+    def test_quoted_list_fence_example_stale_only_is_excluded(
+        self, prefixes: tuple[str, str, str]
+    ) -> None:
+        opener_prefix, body_prefix, closer_prefix = prefixes
+        text = f'{opener_prefix}```json\n{body_prefix}{{"stale": true}}\n{closer_prefix}```'
+
+        assert extract_json_payload(text) is None
+
+    @pytest.mark.parametrize("prefixes", QUOTED_LIST_FENCE_VARIANTS)
+    def test_quoted_list_fence_example_releases_actual_payload(
+        self, prefixes: tuple[str, str, str]
+    ) -> None:
+        opener_prefix, body_prefix, closer_prefix = prefixes
+        text = (
+            f'{opener_prefix}```json\n{body_prefix}{{"stale": true}}\n'
+            f'{closer_prefix}```\nActual: {{"actual": true}}'
+        )
+
+        assert extract_json_payload(text) == '{"actual": true}'
+
+    @pytest.mark.parametrize(("opener_prefix", "continuation"), PLAIN_LIST_FENCE_VARIANTS)
+    def test_plain_list_fenced_answer_is_authoritative(
+        self, opener_prefix: str, continuation: str
+    ) -> None:
+        text = f'{opener_prefix}```json\n{continuation}{{"actual": true}}\n{continuation}```'
+
+        assert extract_json_payload(text) == '{"actual": true}'
+
+    @pytest.mark.parametrize(
+        ("opener", "closer"),
+        [
+            ("```", None),
+            ("```", "~~~"),
+            ("````", "```"),
+            ("```", "``` trailing"),
+        ],
+        ids=["eof", "wrong-marker", "shorter", "dirty"],
+    )
+    def test_malformed_quoted_list_fence_owns_stale_and_later_payloads(
+        self, opener: str, closer: str | None
+    ) -> None:
+        text = f'> - {opener}json\n>   {{"stale": true}}'
+        if closer is not None:
+            text += f"\n>   {closer}"
+        text += '\nActual: {"actual": true}'
 
         assert extract_json_payload(text) is None
 

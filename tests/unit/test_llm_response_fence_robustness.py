@@ -244,6 +244,19 @@ BLOCKQUOTE_INDENTED_PREFIX_VARIANTS = (
     pytest.param((">   \t", "  > \t", ">   \t"), id="tab-padding"),
     pytest.param(("> >     ", " >  >     ", "  >>     "), id="nested-mixed"),
 )
+QUOTED_LIST_FENCE_VARIANTS = (
+    pytest.param(("> - ", ">   ", ">   "), id="exact"),
+    pytest.param((" > - ", "  >   ", "   >   "), id="mixed-leading"),
+    pytest.param(("> - - ", ">     ", ">     "), id="nested-list"),
+    pytest.param(("> 1. ", ">    ", ">    "), id="ordered"),
+    pytest.param(("> > - ", "> >   ", " > >   "), id="nested-quote"),
+    pytest.param(("> -  ", ">    ", ">    "), id="marker-padding"),
+)
+PLAIN_LIST_FENCE_VARIANTS = (
+    pytest.param(("- ", "  "), id="unordered"),
+    pytest.param(("1. ", "   "), id="ordered"),
+    pytest.param(("- - ", "    "), id="nested"),
+)
 
 
 def _wrap_malformed_indented_fence(
@@ -286,6 +299,51 @@ def _wrap_blockquote_indented_example(
     if actual_payload:
         text += f"\nActual: {actual_payload}"
     return text
+
+
+def _wrap_quoted_list_fence_example(
+    stale_payload: str,
+    *,
+    prefixes: tuple[str, str, str],
+    actual_payload: str = "",
+    opener: str = "```",
+    closer: str | None = "```",
+) -> str:
+    opener_prefix, body_prefix, closer_prefix = prefixes
+    text = f"{opener_prefix}{opener}json\n{body_prefix}{stale_payload}"
+    if closer is not None:
+        text += f"\n{closer_prefix}{closer}"
+    if actual_payload:
+        text += f"\nActual: {actual_payload}"
+    return text
+
+
+def _wrap_plain_list_fenced_answer(payload: str, *, prefixes: tuple[str, str]) -> str:
+    opener_prefix, continuation = prefixes
+    return f"{opener_prefix}```json\n{continuation}{payload}\n{continuation}```"
+
+
+async def _reflect_wrapped_content(content: str):
+    adapter = AsyncMock()
+    adapter.complete.return_value = Result.ok(
+        CompletionResponse(
+            content=content,
+            model="test",
+            usage=UsageInfo(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+        )
+    )
+    return await ReflectEngine(llm_adapter=adapter, model="test").reflect(
+        current_seed=_seed(1),
+        execution_output="",
+        evaluation_summary=EvaluationSummary(
+            final_approved=False,
+            highest_stage_passed=1,
+            score=0.0,
+            ac_results=(),
+        ),
+        wonder_output=WonderOutput(questions=("What remains unknown?",)),
+        lineage=OntologyLineage(lineage_id="lineage", goal="Build a login system"),
+    )
 
 
 # ``prose_prefix_fence`` and ``fence_trailing_prose`` are the two variants the
@@ -505,6 +563,89 @@ class TestWonderFenceRobustness:
         assert stale_only.reasoning.startswith("Parse error, using seed-scoped fallback")
         assert actual.reasoning == "actual"
         assert actual.questions == ("actual question",)
+
+    @pytest.mark.parametrize("prefixes", QUOTED_LIST_FENCE_VARIANTS)
+    def test_quoted_list_example_is_excluded_and_releases_actual(
+        self, prefixes: tuple[str, str, str]
+    ) -> None:
+        stale_payload = json.dumps(
+            {"questions": [], "should_continue": False, "reasoning": "stale"}
+        )
+        actual_payload = json.dumps(
+            {
+                "questions": [{"question": "actual question", "kind": "gap"}],
+                "should_continue": True,
+                "reasoning": "actual",
+            }
+        )
+        engine = WonderEngine(llm_adapter=AsyncMock(), model="test")
+
+        stale_only = engine._parse_response(
+            _wrap_quoted_list_fence_example(stale_payload, prefixes=prefixes),
+            _seed(),
+        )
+        actual = engine._parse_response(
+            _wrap_quoted_list_fence_example(
+                stale_payload,
+                prefixes=prefixes,
+                actual_payload=actual_payload,
+            ),
+            _seed(),
+        )
+
+        assert stale_only.reasoning.startswith("Parse error, using seed-scoped fallback")
+        assert actual.reasoning == "actual"
+        assert actual.questions == ("actual question",)
+
+    @pytest.mark.parametrize("prefixes", PLAIN_LIST_FENCE_VARIANTS)
+    def test_plain_list_fenced_answer_is_authoritative(self, prefixes: tuple[str, str]) -> None:
+        actual_payload = json.dumps(
+            {
+                "questions": [{"question": "actual question", "kind": "gap"}],
+                "should_continue": True,
+                "reasoning": "actual",
+            }
+        )
+
+        out = WonderEngine(llm_adapter=AsyncMock(), model="test")._parse_response(
+            _wrap_plain_list_fenced_answer(actual_payload, prefixes=prefixes),
+            _seed(),
+        )
+
+        assert out.reasoning == "actual"
+        assert out.questions == ("actual question",)
+
+    @pytest.mark.parametrize(
+        ("opener", "closer"),
+        [("```", None), ("```", "~~~"), ("````", "```"), ("```", "``` trailing")],
+        ids=["eof", "wrong-marker", "shorter", "dirty"],
+    )
+    def test_malformed_quoted_list_fence_fails_closed(
+        self, opener: str, closer: str | None
+    ) -> None:
+        stale_payload = json.dumps(
+            {"questions": [], "should_continue": False, "reasoning": "stale"}
+        )
+        actual_payload = json.dumps(
+            {
+                "questions": [{"question": "actual question", "kind": "gap"}],
+                "should_continue": True,
+                "reasoning": "actual",
+            }
+        )
+
+        out = WonderEngine(llm_adapter=AsyncMock(), model="test")._parse_response(
+            _wrap_quoted_list_fence_example(
+                stale_payload,
+                prefixes=("> - ", ">   ", ">   "),
+                actual_payload=actual_payload,
+                opener=opener,
+                closer=closer,
+            ),
+            _seed(),
+        )
+
+        assert out.reasoning.startswith("Parse error, using seed-scoped fallback")
 
     def test_eight_space_pseudo_closer_does_not_release_nested_example(self) -> None:
         stale_payload = json.dumps(
@@ -867,6 +1008,103 @@ class TestReflectFenceRobustness:
             ),
             wonder_output=WonderOutput(questions=("What remains unknown?",)),
             lineage=OntologyLineage(lineage_id="lineage", goal="Build a login system"),
+        )
+
+        assert result.is_err
+        assert "failed to parse" in result.error.message.lower()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("prefixes", QUOTED_LIST_FENCE_VARIANTS)
+    async def test_quoted_list_example_is_excluded_and_releases_actual(
+        self, prefixes: tuple[str, str, str]
+    ) -> None:
+        stale_payload = json.dumps(
+            {
+                "refined_goal": "Stale example",
+                "refined_constraints": ["stale"],
+                "ontology_mutations": [],
+                "reasoning": "stale reflect",
+            }
+        )
+        actual_payload = json.dumps(
+            {
+                "refined_goal": "Actual goal",
+                "refined_constraints": ["actual"],
+                "ontology_mutations": [],
+                "reasoning": "actual reflect",
+            }
+        )
+
+        stale_only = await _reflect_wrapped_content(
+            _wrap_quoted_list_fence_example(stale_payload, prefixes=prefixes)
+        )
+        actual = await _reflect_wrapped_content(
+            _wrap_quoted_list_fence_example(
+                stale_payload,
+                prefixes=prefixes,
+                actual_payload=actual_payload,
+            )
+        )
+
+        assert stale_only.is_err
+        assert actual.is_ok
+        assert actual.value.reasoning == "actual reflect"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("prefixes", PLAIN_LIST_FENCE_VARIANTS)
+    async def test_plain_list_fenced_answer_is_authoritative(
+        self, prefixes: tuple[str, str]
+    ) -> None:
+        actual_payload = json.dumps(
+            {
+                "refined_goal": "Actual goal",
+                "refined_constraints": ["actual"],
+                "ontology_mutations": [],
+                "reasoning": "actual reflect",
+            }
+        )
+
+        result = await _reflect_wrapped_content(
+            _wrap_plain_list_fenced_answer(actual_payload, prefixes=prefixes)
+        )
+
+        assert result.is_ok
+        assert result.value.reasoning == "actual reflect"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("opener", "closer"),
+        [("```", None), ("```", "~~~"), ("````", "```"), ("```", "``` trailing")],
+        ids=["eof", "wrong-marker", "shorter", "dirty"],
+    )
+    async def test_malformed_quoted_list_fence_fails_closed(
+        self, opener: str, closer: str | None
+    ) -> None:
+        stale_payload = json.dumps(
+            {
+                "refined_goal": "Stale example",
+                "refined_constraints": ["stale"],
+                "ontology_mutations": [],
+                "reasoning": "stale reflect",
+            }
+        )
+        actual_payload = json.dumps(
+            {
+                "refined_goal": "Actual goal",
+                "refined_constraints": ["actual"],
+                "ontology_mutations": [],
+                "reasoning": "actual reflect",
+            }
+        )
+
+        result = await _reflect_wrapped_content(
+            _wrap_quoted_list_fence_example(
+                stale_payload,
+                prefixes=("> - ", ">   ", ">   "),
+                actual_payload=actual_payload,
+                opener=opener,
+                closer=closer,
+            )
         )
 
         assert result.is_err
@@ -1445,6 +1683,112 @@ class TestAssertionExtractorFenceRobustness:
 
         assertions = AssertionExtractor(llm_adapter=AsyncMock())._parse_response(
             _wrap_blockquote_indented_example(stale_payload, prefixes=prefixes),
+            ("AC number 1",),
+        )
+
+        assert assertions == ()
+
+    @pytest.mark.parametrize("prefixes", QUOTED_LIST_FENCE_VARIANTS)
+    def test_quoted_list_example_is_excluded_and_releases_actual(
+        self, prefixes: tuple[str, str, str]
+    ) -> None:
+        stale_payload = json.dumps(
+            [
+                {
+                    "ac_index": 0,
+                    "tier": "t4_unverifiable",
+                    "pattern": "",
+                    "description": "stale assertion",
+                }
+            ]
+        )
+        actual_payload = json.dumps(
+            [
+                {
+                    "ac_index": 0,
+                    "tier": "t4_unverifiable",
+                    "pattern": "",
+                    "description": "actual assertion",
+                }
+            ]
+        )
+        extractor = AssertionExtractor(llm_adapter=AsyncMock())
+
+        stale_only = extractor._parse_response(
+            _wrap_quoted_list_fence_example(stale_payload, prefixes=prefixes),
+            ("AC number 1",),
+        )
+        actual = extractor._parse_response(
+            _wrap_quoted_list_fence_example(
+                stale_payload,
+                prefixes=prefixes,
+                actual_payload=actual_payload,
+            ),
+            ("AC number 1",),
+        )
+
+        assert stale_only == ()
+        assert len(actual) == 1
+        assert actual[0].description == "actual assertion"
+
+    @pytest.mark.parametrize("prefixes", PLAIN_LIST_FENCE_VARIANTS)
+    def test_plain_list_fenced_answer_is_authoritative(self, prefixes: tuple[str, str]) -> None:
+        actual_payload = json.dumps(
+            [
+                {
+                    "ac_index": 0,
+                    "tier": "t4_unverifiable",
+                    "pattern": "",
+                    "description": "actual assertion",
+                }
+            ]
+        )
+
+        assertions = AssertionExtractor(llm_adapter=AsyncMock())._parse_response(
+            _wrap_plain_list_fenced_answer(actual_payload, prefixes=prefixes),
+            ("AC number 1",),
+        )
+
+        assert len(assertions) == 1
+        assert assertions[0].description == "actual assertion"
+
+    @pytest.mark.parametrize(
+        ("opener", "closer"),
+        [("```", None), ("```", "~~~"), ("````", "```"), ("```", "``` trailing")],
+        ids=["eof", "wrong-marker", "shorter", "dirty"],
+    )
+    def test_malformed_quoted_list_fence_fails_closed(
+        self, opener: str, closer: str | None
+    ) -> None:
+        stale_payload = json.dumps(
+            [
+                {
+                    "ac_index": 0,
+                    "tier": "t4_unverifiable",
+                    "pattern": "",
+                    "description": "stale assertion",
+                }
+            ]
+        )
+        actual_payload = json.dumps(
+            [
+                {
+                    "ac_index": 0,
+                    "tier": "t4_unverifiable",
+                    "pattern": "",
+                    "description": "actual assertion",
+                }
+            ]
+        )
+
+        assertions = AssertionExtractor(llm_adapter=AsyncMock())._parse_response(
+            _wrap_quoted_list_fence_example(
+                stale_payload,
+                prefixes=("> - ", ">   ", ">   "),
+                actual_payload=actual_payload,
+                opener=opener,
+                closer=closer,
+            ),
             ("AC number 1",),
         )
 

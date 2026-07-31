@@ -4,6 +4,7 @@ Provides a robust bracket-matching JSON extractor used by semantic,
 consensus, and QA evaluation stages.
 """
 
+from dataclasses import dataclass
 from enum import Enum
 import json
 import re
@@ -15,8 +16,15 @@ class _FenceScanState(Enum):
     MALFORMED = "malformed"
 
 
+@dataclass(frozen=True)
+class _FenceContainer:
+    """Canonical Markdown containers owning one fenced code block."""
+
+    quote_depth: int = 0
+    list_content_indent: int = 0
+
+
 _FENCE_MARKERS = ("`", "~")
-_BLOCKQUOTE_FENCE_PREFIX = re.compile(r"^[ \t]{0,3}(?:>[ \t]?)+$")
 _PLAIN_FENCE_PREFIX = re.compile(r"^ {0,3}$")
 
 
@@ -70,20 +78,34 @@ def _extract_fenced_json_payload(
                 return (_FenceScanState.MALFORMED, None, ())
             return (_FenceScanState.NO_FENCE, None, tuple(fallback_parts))
 
-        opener, opener_length, marker, quote_prefix = opening
+        opener, opener_length, marker, container = opening
         info_start = opener + opener_length
         line_end = text.find("\n", info_start)
         if line_end == -1:
             return (_FenceScanState.MALFORMED, None, ())
 
         info = text[info_start:line_end].strip().lower()
+        if container.quote_depth > 0 and container.list_content_indent > 0:
+            closing = _find_closing_fence(
+                text,
+                line_end + 1,
+                opener_length,
+                marker,
+                container=container,
+            )
+            if closing is None:
+                return (_FenceScanState.MALFORMED, None, ())
+            closing_start, closing_length, _ = closing
+            fallback_parts.append(text[fence_start:opener])
+            fence_start = closing_start + closing_length
+            continue
         if info not in ("", "json"):
             closing = _find_closing_fence(
                 text,
                 line_end + 1,
                 opener_length,
                 marker,
-                quote_prefix=quote_prefix,
+                container=container,
             )
             if closing is None:
                 return (_FenceScanState.MALFORMED, None, ())
@@ -98,7 +120,7 @@ def _extract_fenced_json_payload(
             body_start,
             opener_length,
             marker,
-            quote_prefix=quote_prefix,
+            container=container,
         )
         if closing is None:
             return (_FenceScanState.MALFORMED, None, ())
@@ -106,7 +128,7 @@ def _extract_fenced_json_payload(
 
         body = _decode_fenced_body(
             text[body_start:closing_line_start],
-            quote_prefix=quote_prefix,
+            container=container,
         )
         if body is None:
             return (_FenceScanState.MALFORMED, None, ())
@@ -132,7 +154,103 @@ def _fence_run_length(text: str, start: int, marker: str) -> int:
     return end - start
 
 
-def _find_opening_fence(text: str, start: int) -> tuple[int, int, str, str | None] | None:
+def _list_marker_end(text: str, start: int) -> int | None:
+    """Return the end of one CommonMark list marker without its padding."""
+    if start >= len(text):
+        return None
+    if text[start] in "*+-":
+        return start + 1
+    if not text[start].isdigit():
+        return None
+    end = start
+    while end < len(text) and text[end].isdigit() and end - start < 9:
+        end += 1
+    if end < len(text) and text[end].isdigit():
+        return None
+    if end == start or end >= len(text) or text[end] not in ".)":
+        return None
+    return end + 1
+
+
+def _list_content_indent(prefix: str) -> int | None:
+    """Return the continuation indentation for nested list-marker prefixes."""
+    position = 0
+    while True:
+        marker_start = position
+        for _ in range(3):
+            if marker_start >= len(prefix) or prefix[marker_start] not in " \t":
+                break
+            marker_start += 1
+        marker_end = _list_marker_end(prefix, marker_start)
+        if marker_end is None or marker_end >= len(prefix):
+            return None
+        padding_end = marker_end
+        while padding_end < len(prefix) and prefix[padding_end] in " \t":
+            padding_end += 1
+        padding_width = padding_end - marker_end
+        if padding_width == 0:
+            return None
+        padding_width = padding_width if padding_width <= 4 else 1
+        position = marker_end + padding_width
+        if _PLAIN_FENCE_PREFIX.fullmatch(prefix[position:]) is not None:
+            return position
+
+
+def _fence_containers(prefix: str) -> tuple[_FenceContainer, ...]:
+    """Parse canonical quote/list containers before one opening fence."""
+    containers: set[_FenceContainer] = set()
+    quote_depth = 0
+    positions = {0}
+    while positions:
+        for position in positions:
+            remainder = prefix[position:]
+            if _PLAIN_FENCE_PREFIX.fullmatch(remainder) is not None:
+                containers.add(_FenceContainer(quote_depth=quote_depth))
+            list_indent = _list_content_indent(remainder)
+            if list_indent is not None:
+                containers.add(
+                    _FenceContainer(
+                        quote_depth=quote_depth,
+                        list_content_indent=list_indent,
+                    )
+                )
+        positions = _next_blockquote_prefix_positions(prefix, positions)
+        quote_depth += 1
+    return tuple(
+        sorted(
+            containers,
+            key=lambda container: (-container.quote_depth, container.list_content_indent),
+        )
+    )
+
+
+def _container_line_remainders(line: str, container: _FenceContainer) -> tuple[str, ...]:
+    """Remove a canonical fence container from one body or closer line."""
+    remainders = (
+        (line,)
+        if container.quote_depth == 0
+        else _blockquote_remainders(line, container.quote_depth)
+    )
+    if container.list_content_indent == 0:
+        return remainders
+
+    decoded: set[str] = set()
+    for remainder in remainders:
+        indent = container.list_content_indent
+        if len(remainder) < indent or any(char not in " \t" for char in remainder[:indent]):
+            continue
+        decoded.add(remainder[indent:])
+    return tuple(sorted(decoded, key=len))
+
+
+def _container_fence_prefix_matches(prefix: str, container: _FenceContainer) -> bool:
+    return any(
+        _PLAIN_FENCE_PREFIX.fullmatch(remainder) is not None
+        for remainder in _container_line_remainders(prefix, container)
+    )
+
+
+def _find_opening_fence(text: str, start: int) -> tuple[int, int, str, _FenceContainer] | None:
     """Return the next line-start backtick or tilde fence."""
     pos = start
     while True:
@@ -148,9 +266,9 @@ def _find_opening_fence(text: str, start: int) -> tuple[int, int, str, str | Non
         candidate_length = _fence_run_length(text, candidate, marker)
         line_start = text.rfind("\n", 0, candidate) + 1
         prefix = text[line_start:candidate]
-        quote_prefix = _blockquote_prefix(prefix)
-        if _PLAIN_FENCE_PREFIX.fullmatch(prefix) is not None or quote_prefix is not None:
-            return candidate, candidate_length, marker, quote_prefix
+        containers = _fence_containers(prefix)
+        if containers:
+            return candidate, candidate_length, marker, containers[0]
 
         pos = candidate + candidate_length
 
@@ -161,7 +279,7 @@ def _find_closing_fence(
     opener_length: int,
     marker: str,
     *,
-    quote_prefix: str | None,
+    container: _FenceContainer,
 ) -> tuple[int, int, int] | None:
     """Return a clean same-marker fence at least as long as the opener."""
     pos = start
@@ -177,32 +295,35 @@ def _find_closing_fence(
             line_end = len(text)
         prefix = text[line_start:candidate]
         suffix = text[candidate + candidate_length : line_end]
-        prefix_matches = (
-            prefix == quote_prefix
-            if quote_prefix is not None
-            else _PLAIN_FENCE_PREFIX.fullmatch(prefix) is not None
-        )
-        if candidate_length >= opener_length and prefix_matches and suffix.strip() == "":
+        if (
+            candidate_length >= opener_length
+            and _container_fence_prefix_matches(prefix, container)
+            and suffix.strip() == ""
+        ):
             return candidate, candidate_length, line_start
 
         pos = candidate + candidate_length
 
 
-def _blockquote_prefix(prefix: str) -> str | None:
-    """Return the exact Markdown quote prefix used by a fence line."""
-    return prefix if _BLOCKQUOTE_FENCE_PREFIX.fullmatch(prefix) is not None else None
-
-
-def _decode_fenced_body(body: str, *, quote_prefix: str | None) -> str | None:
-    """Strip one fence's exact quote prefix from every quoted body line."""
-    if quote_prefix is None:
+def _decode_fenced_body(body: str, *, container: _FenceContainer) -> str | None:
+    """Strip one fence's canonical quote/list containers from its body."""
+    if container == _FenceContainer():
         return body.strip()
 
     decoded: list[str] = []
     for line in body.splitlines():
-        if not line.startswith(quote_prefix):
+        remainders = _container_line_remainders(line, container)
+        if not remainders:
             return None
-        decoded.append(line[len(quote_prefix) :])
+        decoded.append(
+            min(
+                remainders,
+                key=lambda remainder: (
+                    len(remainder) - len(remainder.lstrip(" \t")),
+                    len(remainder),
+                ),
+            )
+        )
     return "\n".join(decoded).strip()
 
 
