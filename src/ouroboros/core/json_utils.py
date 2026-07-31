@@ -51,10 +51,15 @@ def _extract_fenced_json_payload(
     """Extract fenced JSON and return safe outside-fence fallback segments."""
     fence_start = 0
     fallback_parts: list[str] = []
+    supported_payloads: list[str] = []
     while True:
         opening = _find_opening_fence(text, fence_start)
         if opening is None:
             fallback_parts.append(text[fence_start:])
+            if len(supported_payloads) == 1:
+                return (_FenceScanState.PAYLOAD, supported_payloads[0], ())
+            if supported_payloads:
+                return (_FenceScanState.MALFORMED, None, ())
             return (_FenceScanState.NO_FENCE, None, tuple(fallback_parts))
 
         opener, opener_length, marker, quote_prefix = opening
@@ -89,7 +94,7 @@ def _extract_fenced_json_payload(
         )
         if closing is None:
             return (_FenceScanState.MALFORMED, None, ())
-        _, _, closing_line_start = closing
+        closing_start, closing_length, closing_line_start = closing
 
         body = _decode_fenced_body(
             text[body_start:closing_line_start],
@@ -102,7 +107,10 @@ def _extract_fenced_json_payload(
         except (json.JSONDecodeError, ValueError):
             parsed = None
         if isinstance(parsed, dict | list):
-            return (_FenceScanState.PAYLOAD, body, ())
+            supported_payloads.append(body)
+            fallback_parts.append(text[fence_start:opener])
+            fence_start = closing_start + closing_length
+            continue
 
         # A supported fence is an explicit JSON answer boundary. If it cannot
         # be parsed, do not let stale examples elsewhere in the response win.

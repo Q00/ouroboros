@@ -152,8 +152,11 @@ class TestExtractJsonPayload:
         text = 'prefix {"a": 1} middle {"b": 2} suffix'
         assert extract_json_payload(text) is None
 
-    def test_blockquoted_json_fence_strips_exact_quote_prefix(self) -> None:
-        text = '> ```json\n> {"questions": [], "should_continue": false}\n> ```'
+    @pytest.mark.parametrize("prefix", ["> ", ">> "])
+    def test_blockquoted_json_fence_strips_exact_quote_prefix(self, prefix: str) -> None:
+        text = (
+            f'{prefix}```json\n{prefix}{{"questions": [], "should_continue": false}}\n{prefix}```'
+        )
         assert extract_json_payload(text) == '{"questions": [], "should_continue": false}'
 
     def test_blockquoted_json_fence_rejects_unquoted_body_line(self) -> None:
@@ -162,6 +165,10 @@ class TestExtractJsonPayload:
 
     def test_blockquoted_json_fence_requires_matching_closer_prefix(self) -> None:
         text = '> ```json\n> {"actual": true}\n>> ```\nLater: {"stale": true}'
+        assert extract_json_payload(text) is None
+
+    def test_multiple_supported_json_fences_fail_closed(self) -> None:
+        text = '```json\n{"example": true}\n```\n```json\n{"actual": true}\n```'
         assert extract_json_payload(text) is None
 
     def test_invalid_json_with_valid_later(self):
