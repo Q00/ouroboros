@@ -118,6 +118,11 @@ def _starts_posix_shell_comment(char: str, *, word_started: bool) -> bool:
     return char == "#" and not word_started
 
 
+def _ends_posix_shell_word(value: str, index: int) -> bool:
+    """Return whether ``index`` starts a shell token boundary after a word."""
+    return index >= len(value) or value[index].isspace() or value[index] in ";&|(){}<>"
+
+
 @dataclass
 class _PosixCaseTracker:
     """Track the reserved-word and pattern phases of nested POSIX case commands."""
@@ -125,18 +130,23 @@ class _PosixCaseTracker:
     states: list[str] = field(default_factory=list)
     command_position: bool = True
     word_started: bool = False
+    function_name_candidate: bool = False
+    awaiting_function_body: bool = False
 
     def consume_segment(self) -> None:
         """Record a quote, escape, or expansion joined to the current shell word."""
         self.word_started = True
+        self.function_name_candidate = False
 
-    def consume_word(self, word: str) -> None:
+    def consume_word(self, word: str, *, token_ends: bool) -> None:
         """Consume one unquoted identifier while preserving token provenance."""
-        reserved = not self.word_started
+        reserved = not self.word_started and token_ends
         state = self.states[-1] if self.states else None
         if state == "pattern" and not (reserved and self.command_position and word == "esac"):
             self.word_started = True
+            self.function_name_candidate = False
             return
+        was_command_position = self.command_position
         if reserved and self.command_position and word == "case":
             self.states.append("await_in")
             self.command_position = False
@@ -152,11 +162,59 @@ class _PosixCaseTracker:
         ):
             self.states.pop()
             self.command_position = False
-        elif reserved and word in {"then", "do", "else", "elif"}:
+        elif (
+            reserved
+            and self.command_position
+            and word
+            in {
+                "if",
+                "then",
+                "elif",
+                "else",
+                "while",
+                "until",
+                "do",
+                "for",
+            }
+        ):
             self.command_position = True
         else:
             self.command_position = False
+        self.function_name_candidate = (
+            was_command_position
+            and token_ends
+            and not (
+                reserved
+                and word in {"case", "if", "then", "elif", "else", "while", "until", "do", "for"}
+            )
+        )
         self.word_started = True
+
+    def consume_function_header(self, value: str, index: int) -> int:
+        """Consume the ``()`` after a plain command-position function name."""
+        if self.function_name_candidate and value.startswith("()", index):
+            self.function_name_candidate = False
+            self.awaiting_function_body = True
+            self.command_position = False
+            self.word_started = False
+            return 2
+        return 0
+
+    def consume_grouping(self, char: str) -> None:
+        """Enter or leave a brace/subshell compound-command boundary."""
+        if char == "{" and (self.command_position or self.awaiting_function_body):
+            self.awaiting_function_body = False
+            self.command_position = True
+            self.word_started = False
+            self.function_name_candidate = False
+        elif char == "(":
+            self.command_position = True
+            self.word_started = False
+            self.function_name_candidate = False
+        else:
+            self.command_position = False
+            self.word_started = False
+            self.function_name_candidate = False
 
     def consume_case_operator(self, value: str, index: int) -> int:
         """Consume case-only syntax and return the number of bytes claimed."""
@@ -164,6 +222,7 @@ class _PosixCaseTracker:
             self.states[-1] = "pattern"
             self.command_position = True
             self.word_started = False
+            self.function_name_candidate = False
             return 2
         if self.states and self.states[-1] == "pattern":
             char = value[index]
@@ -171,9 +230,11 @@ class _PosixCaseTracker:
                 self.states[-1] = "action"
                 self.command_position = True
                 self.word_started = False
+                self.function_name_candidate = False
                 return 1
             if char in "(|":
                 self.word_started = False
+                self.function_name_candidate = False
                 return 1
         return 0
 
@@ -181,11 +242,13 @@ class _PosixCaseTracker:
         """Update token position for non-case shell text."""
         if char.isspace():
             self.word_started = False
-        elif char in ";|&\n":
+        elif char in ";|&\n" or (char == "!" and self.command_position and not self.word_started):
             self.command_position = True
             self.word_started = False
+            self.function_name_candidate = False
         else:
             self.word_started = True
+            self.function_name_candidate = False
 
 
 def _posix_expansion_end(value: str, index: int) -> int | None:
@@ -295,11 +358,18 @@ def _posix_expansion_end(value: str, index: int) -> int | None:
                 value[word_end].isascii() and (value[word_end].isalnum() or value[word_end] == "_")
             ):
                 word_end += 1
-            tracker.consume_word(value[cursor:word_end])
+            tracker.consume_word(
+                value[cursor:word_end],
+                token_ends=_ends_posix_shell_word(value, word_end),
+            )
             cursor = word_end
             continue
         if tracker is not None:
             claimed = tracker.consume_case_operator(value, cursor)
+            if claimed:
+                cursor += claimed
+                continue
+            claimed = tracker.consume_function_header(value, cursor)
             if claimed:
                 cursor += claimed
                 continue
@@ -321,6 +391,10 @@ def _posix_expansion_end(value: str, index: int) -> int | None:
                 parent_tracker.consume_segment()
             continue
         if tracker is not None:
+            if char in "{}":
+                tracker.consume_grouping(char)
+                cursor += 1
+                continue
             tracker.consume_ordinary(char)
         cursor += 1
     return None
@@ -620,13 +694,24 @@ def _iter_outer_ac_field_markers(body: str) -> tuple[_ACFieldMarker, ...]:
                 body[word_end].isascii() and (body[word_end].isalnum() or body[word_end] == "_")
             ):
                 word_end += 1
-            shell_tracker.consume_word(body[index:word_end])
+            shell_tracker.consume_word(
+                body[index:word_end],
+                token_ends=_ends_posix_shell_word(body, word_end),
+            )
             index = word_end
             continue
         if structured_payload_started and active_field == "verify":
             claimed = shell_tracker.consume_case_operator(body, index)
             if claimed:
                 index += claimed
+                continue
+            claimed = shell_tracker.consume_function_header(body, index)
+            if claimed:
+                index += claimed
+                continue
+            if char in "(){}":
+                shell_tracker.consume_grouping(char)
+                index += 1
                 continue
         if char != "|":
             if structured_payload_started and active_field == "verify":

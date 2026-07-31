@@ -1897,17 +1897,37 @@ class TestSeedGeneratorExtraction:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        "verify_command",
+        ("verify_command", "expected_output"),
         (
-            """printf '%s\\n' "$(case y in (x) printf no;; """
-            '''(y | artifacts:) printf yes;; esac)"''',
-            "printf '%s\\n' $(case z in (x) :;; (''esac) printf no;; "
-            "(z | artifacts:) printf yes;; esac)",
-            "case y in x) printf no;; y | artifacts:) printf '%s\\n' yes;; esac",
+            (
+                """printf '%s\\n' "$(case y in (x) printf no;; """
+                '''(y | artifacts:) printf yes;; esac)"''',
+                "yes\n",
+            ),
+            (
+                "printf '%s\\n' $(case z in (x) :;; (''esac) printf no;; "
+                "(z | artifacts:) printf yes;; esac)",
+                "yes\n",
+            ),
+            (
+                "case y in x) printf no;; y | artifacts:) printf '%s\\n' yes;; esac",
+                "yes\n",
+            ),
+            (
+                "while case y in (x) true;; (y | artifacts:) false;; esac; do :; done; printf ok",
+                "ok",
+            ),
+            (
+                "if case y in (x) true;; (y | verify:) true;; esac; then printf ok; fi",
+                "ok",
+            ),
+            ("f() { case y in (y | artifacts:) printf yes;; esac; }; f", "yes"),
+            ("(case y in (y | verify:) printf yes;; esac)", "yes"),
+            ("case esac in (esac'') printf yes;; esac", "yes"),
         ),
     )
     async def test_extracted_case_survives_seed_grade_and_live_verify(
-        self, verify_command: str
+        self, verify_command: str, expected_output: str
     ) -> None:
         """Top-level and substituted case bodies survive through the live shell gate."""
         if not Path("/bin/sh").exists():
@@ -1963,7 +1983,7 @@ class TestSeedGeneratorExtraction:
         assert gated.success is True
         assert gated.verify_gate_outcome is not None
         assert gated.verify_gate_outcome.passed is True
-        assert gated.verify_gate_outcome.output_tail == "yes\n"
+        assert gated.verify_gate_outcome.output_tail == expected_output
 
     @pytest.mark.parametrize(
         "verify_command",
@@ -1984,6 +2004,16 @@ class TestSeedGeneratorExtraction:
             "(z | artifacts:) printf yes;; esac)",
             r"printf '%s\n' $(case esac in (\esac) printf escaped;; esac)",
             "printf '%s\\n' ''case",
+            "printf '%s\\n' ''if ''while ''until ''for ''then ''do ''case ''esac",
+            "printf '%s\\n' case'' esac'' if-x while: until_name then.word do/value",
+            """printf '%s\\n' "$(f() { case y in """
+            '''(y | artifacts:) printf nested;; esac; }; f)"''',
+            "until case y in (y | artifacts:) false;; esac; do :; done",
+            "for x in y; do case $x in (y | artifacts:) :;; esac; done",
+            "{ case y in (y | artifacts:) :;; esac; }",
+            "true && case y in (y | artifacts:) :;; esac",
+            "false || case y in (y | artifacts:) :;; esac",
+            "printf x | case x in (x | artifacts:) :;; esac",
             '''printf '%s\\n' "$(printf '%s' ordinary)"''',
         ),
     )
