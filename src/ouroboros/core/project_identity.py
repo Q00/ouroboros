@@ -539,7 +539,13 @@ class PublicationEvidence:
     escalate: bool
 
 
-_CONFIG_INCLUDE_PATTERN = re.compile(rb"^\s*\[include", re.IGNORECASE | re.MULTILINE)
+# A valid include or includeIf section header must contain these bytes, in
+# any position, casing, or after a BOM — so searching the raw content without
+# anchors over-approximates Git's config grammar instead of reimplementing
+# it. False positives (the substring inside a comment or value) merely
+# escalate to the full re-resolution, which is the safe direction.
+_CONFIG_INCLUDE_PATTERN = re.compile(rb"\[include", re.IGNORECASE)
+_CONFIG_FILE_NAMES = frozenset({"config", "config.worktree"})
 _TOPOLOGY_HASH_LIMIT = 1 << 20
 
 
@@ -570,7 +576,7 @@ def _capture_topology_file(path: Path, *, hash_content: bool) -> _TopologyFileEv
             content = path.read_bytes()
         except OSError as exc:
             raise ProjectIdentityUnavailableError("topology input is unreadable") from exc
-        if path.name == "config" and _CONFIG_INCLUDE_PATTERN.search(content):
+        if path.name in _CONFIG_FILE_NAMES and _CONFIG_INCLUDE_PATTERN.search(content):
             # Config includes pull unbounded external files into Git's
             # decision; that closure is not enumerable, so never fast-path it.
             raise ProjectIdentityUnavailableError("config includes are outside the closure")
@@ -586,6 +592,9 @@ def _capture_topology_file(path: Path, *, hash_content: bool) -> _TopologyFileEv
     )
 
 
+_GIT_DIR_CLOSURE_NAMES = ("HEAD", "config", "config.worktree", "commondir", "gitdir")
+
+
 def _capture_publication_closure(
     effective: Path, project_root: Path, checkout_root: Path
 ) -> tuple[tuple[_TopologyFileEvidence, ...], bool]:
@@ -595,9 +604,9 @@ def _capture_publication_closure(
     exactly the inputs the five fixed topology queries consult for the
     simple-checkout shape: every boundary candidate's ``.git`` marker between
     the effective directory and the checkout root, and — when the marker is a
-    directory — its ``HEAD``, ``config``, ``commondir``, ``gitdir``, and the
-    ``worktrees`` registry with each entry's ``gitdir`` link. Anything the
-    capture cannot classify escalates.
+    directory — its ``HEAD``, ``config``, ``config.worktree``, ``commondir``,
+    ``gitdir``, and the ``worktrees`` registry with each entry's ``gitdir``
+    link. Anything the capture cannot classify escalates.
     """
     population: list[_TopologyFileEvidence] = []
     try:
@@ -613,14 +622,13 @@ def _capture_publication_closure(
             # belongs to another tree whose closure we do not enumerate here.
             return tuple(population), True
         git_dir = marker
-        for name, hashed in (
-            ("HEAD", True),
-            ("config", True),
-            ("commondir", True),
-            ("gitdir", True),
-        ):
-            population.append(_capture_topology_file(git_dir / name, hash_content=hashed))
-        if population[-2].kind != "missing":
+        commondir: _TopologyFileEvidence | None = None
+        for name in _GIT_DIR_CLOSURE_NAMES:
+            entry = _capture_topology_file(git_dir / name, hash_content=True)
+            population.append(entry)
+            if name == "commondir":
+                commondir = entry
+        if commondir is None or commondir.kind != "missing":
             # A commondir file means this administrative directory belongs to
             # a linked-worktree constellation; keep to the full re-resolution.
             return tuple(population), True
@@ -686,15 +694,46 @@ def resolve_project_identity_for_publication(
 
     Behaves exactly like :func:`resolve_project_identity`; additionally
     captures the resolver's repo-local input closure so the publication
-    boundary can revalidate by metadata alone (#1796 L2). When the checkout
-    shape falls outside the enumerable closure, the returned evidence demands
-    escalation and publication re-resolves in full, exactly as before.
+    boundary can revalidate by metadata alone (#1796 L2). The closure is
+    captured both before and after the resolution and the evidence is usable
+    only when the two captures are identical, binding the recorded state to
+    the exact resolution that produced the identity. When the checkout shape
+    falls outside the enumerable closure — or the bracket detects any
+    interleaved change — the returned evidence demands escalation and
+    publication re-resolves in full, exactly as before.
     """
     effective = _canonical_directory(effective_cwd, require_exists=True)
+    pre_files: tuple[_TopologyFileEvidence, ...] = ()
+    pre_escalate = True
+    pre_marker_root: Path | None = None
+    try:
+        pre_marker_root, bare_candidate = _nearest_repository_boundary(effective)
+    except ProjectIdentityError:
+        bare_candidate = None
+    if pre_marker_root is not None and bare_candidate is None:
+        pre_files, pre_escalate = _capture_publication_closure(
+            effective, pre_marker_root, pre_marker_root
+        )
     resolved = _resolve_with_evidence(effective)
-    file_evidence, escalate = _capture_publication_closure(
-        effective, Path(resolved.identity.project_root), resolved.checkout_root
-    )
+    project_root = Path(resolved.identity.project_root)
+    file_evidence: tuple[_TopologyFileEvidence, ...] = ()
+    escalate = True
+    if (
+        not pre_escalate
+        and resolved.checkout_root == pre_marker_root
+        and project_root == resolved.checkout_root
+    ):
+        # The closure was captured before the resolver's queries and is
+        # re-captured after them; only a byte-identical pair proves the state
+        # the resolver consumed is the state the evidence records. Any
+        # interleaved mutation perturbs a stat generation or a content hash
+        # and the pair differs, so publication escalates.
+        post_files, post_escalate = _capture_publication_closure(
+            effective, project_root, resolved.checkout_root
+        )
+        if not post_escalate and post_files == pre_files:
+            file_evidence = post_files
+            escalate = False
     return resolved.identity, PublicationEvidence(
         identity=resolved.identity,
         effective_directory=effective,
@@ -724,6 +763,8 @@ def publication_evidence_is_stable(
         return False
     if effective != evidence.effective_directory:
         return False
+    if not _publication_closure_is_complete(evidence):
+        return False
     try:
         _revalidate_live_directories(*evidence.directory_evidence)
     except ProjectIdentityError:
@@ -738,6 +779,58 @@ def publication_evidence_is_stable(
         if current != expected:
             return False
     return True
+
+
+def _publication_closure_is_complete(evidence: PublicationEvidence) -> bool:
+    """Require the evidence to carry the full resolver-shaped closure.
+
+    The session boundary receives evidence as a call argument, so acceptance
+    cannot rest on where the object came from — it must rest on what it
+    proves. The captured population has to contain every input the closure
+    capture records for the simple-checkout shape anchored at exactly this
+    identity: the marker directory at the project root, each administrative
+    file, the worktrees registry with a link per currently present entry,
+    and a pinned-missing marker for every boundary candidate below the root.
+    Anything less — including the empty closure — is refused.
+    """
+    project_root = Path(evidence.identity.project_root)
+    try:
+        workspace_path = _relative_workspace_path(evidence.effective_directory, project_root)
+    except ProjectIdentityError:
+        return False
+    if workspace_path != evidence.identity.workspace_path:
+        return False
+    captured = {entry.path: entry for entry in evidence.file_evidence}
+    git_dir = project_root / ".git"
+    marker = captured.get(git_dir)
+    if marker is None or marker.kind != "dir":
+        return False
+    for name in _GIT_DIR_CLOSURE_NAMES:
+        if git_dir / name not in captured:
+            return False
+    if captured[git_dir / "commondir"].kind != "missing":
+        return False
+    registry = captured.get(git_dir / "worktrees")
+    if registry is None:
+        return False
+    if registry.kind == "dir":
+        try:
+            entries = sorted(entry.name for entry in (git_dir / "worktrees").iterdir())
+        except OSError:
+            return False
+        for entry in entries:
+            if git_dir / "worktrees" / entry / "gitdir" not in captured:
+                return False
+    elif registry.kind != "missing":
+        return False
+    for candidate in (evidence.effective_directory, *evidence.effective_directory.parents):
+        if candidate == project_root:
+            break
+        boundary = captured.get(candidate / ".git")
+        if boundary is None or boundary.kind != "missing":
+            return False
+    directories = {entry.path for entry in evidence.directory_evidence}
+    return evidence.effective_directory in directories and project_root in directories
 
 
 def _revalidate_live_directories(*expected_population: _LiveDirectoryEvidence) -> None:

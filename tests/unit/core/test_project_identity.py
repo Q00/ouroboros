@@ -1076,6 +1076,10 @@ class TestPublicationEvidence:
             (repo / ".git" / "worktrees" / "wt").mkdir(parents=True)
             (repo / ".git" / "worktrees" / "wt" / "gitdir").write_text("x\n")
 
+        @case("worktree-scoped config appears")
+        def _(repo):
+            (repo / ".git" / "config.worktree").write_text("[core]\n\tbare = true\n")
+
         for name, mutate in cases:
             repo = self._repo(tmp_path / name.replace(" ", "-"))
             _, evidence = project_identity.resolve_project_identity_for_publication(repo / "sub")
@@ -1101,7 +1105,20 @@ class TestPublicationEvidence:
 
         linked_base = self._repo(tmp_path / "base")
         sp.run(
-            ["git", "-C", str(linked_base), "commit", "--allow-empty", "-q", "-m", "x"],
+            [
+                "git",
+                "-C",
+                str(linked_base),
+                "-c",
+                "user.name=Project Identity Test",
+                "-c",
+                "user.email=project-identity@example.com",
+                "commit",
+                "--allow-empty",
+                "-q",
+                "-m",
+                "x",
+            ],
             check=True,
         )
         linked = tmp_path / "linked"
@@ -1113,6 +1130,95 @@ class TestPublicationEvidence:
         assert linked_evidence.escalate is True, (
             "a gitdir-pointer checkout must not take the fast path"
         )
+
+    def test_mutation_between_resolution_and_capture_escalates(self, tmp_path, monkeypatch) -> None:
+        """Evidence must be bound to the exact resolution that produced it.
+
+        A closure mutated after the resolver's queries but before the capture
+        would otherwise record the new state against the old identity; the
+        pre/post capture bracket detects the interleaving and escalates.
+        """
+        repo = self._repo(tmp_path)
+        original = project_identity._resolve_canonical_project_identity
+
+        def resolve_then_mutate(effective):
+            resolved = original(effective)
+            config = repo / ".git" / "config"
+            config.write_text(config.read_text() + "[user]\n\tname = other-owner\n")
+            return resolved
+
+        monkeypatch.setattr(
+            project_identity, "_resolve_canonical_project_identity", resolve_then_mutate
+        )
+        _, evidence = project_identity.resolve_project_identity_for_publication(repo / "sub")
+        assert evidence.escalate is True, (
+            "a closure change between resolution and capture must not produce usable evidence"
+        )
+
+    def test_worktree_scoped_config_is_part_of_the_closure(self, tmp_path) -> None:
+        """config.worktree can carry topology-affecting values; pin it."""
+        repo = self._repo(tmp_path / "edit")
+        worktree_config = repo / ".git" / "config.worktree"
+        worktree_config.write_text("[core]\n")
+        _, evidence = project_identity.resolve_project_identity_for_publication(repo / "sub")
+        assert evidence.escalate is False
+        assert project_identity.publication_evidence_is_stable(evidence, repo / "sub") is True
+        worktree_config.write_text("[core]\n\tbare = true\n")
+        assert project_identity.publication_evidence_is_stable(evidence, repo / "sub") is False, (
+            "an in-place config.worktree edit must destabilize the evidence"
+        )
+
+        include_repo = self._repo(tmp_path / "include")
+        (include_repo / ".git" / "config.worktree").write_text("[include]\n\tpath = other\n")
+        _, include_evidence = project_identity.resolve_project_identity_for_publication(
+            include_repo / "sub"
+        )
+        assert include_evidence.escalate is True
+
+    def test_include_detection_is_position_and_bom_insensitive(self, tmp_path) -> None:
+        """Include escalation must over-approximate Git's grammar, never under."""
+        bom_repo = self._repo(tmp_path / "bom")
+        (bom_repo / ".git" / "config").write_bytes(b"\xef\xbb\xbf[include]\n\tpath = other\n")
+        _, bom_evidence = project_identity.resolve_project_identity_for_publication(
+            bom_repo / "sub"
+        )
+        assert bom_evidence.escalate is True, "a BOM must not hide an include section"
+
+        mid_repo = self._repo(tmp_path / "mid")
+        config = mid_repo / ".git" / "config"
+        config.write_text(config.read_text() + '[includeIf "gitdir:/x"]\n\tpath = other\n')
+        _, mid_evidence = project_identity.resolve_project_identity_for_publication(
+            mid_repo / "sub"
+        )
+        assert mid_evidence.escalate is True
+
+    def test_incomplete_or_forged_evidence_is_refused(self, tmp_path) -> None:
+        """Acceptance rests on what the evidence proves, not where it came from."""
+        import dataclasses
+
+        repo = self._repo(tmp_path)
+        identity, real = project_identity.resolve_project_identity_for_publication(repo / "sub")
+
+        forged = project_identity.PublicationEvidence(
+            identity=identity,
+            effective_directory=real.effective_directory,
+            directory_evidence=(),
+            file_evidence=(),
+            escalate=False,
+        )
+        assert project_identity.publication_evidence_is_stable(forged, repo / "sub") is False, (
+            "an empty closure must never be accepted"
+        )
+
+        for index in range(len(real.file_evidence)):
+            partial = dataclasses.replace(
+                real,
+                file_evidence=real.file_evidence[:index] + real.file_evidence[index + 1 :],
+            )
+            dropped = real.file_evidence[index].path
+            assert (
+                project_identity.publication_evidence_is_stable(partial, repo / "sub") is False
+            ), f"dropping {dropped} from the closure must be refused"
 
     def test_escalating_evidence_is_never_stable(self, tmp_path) -> None:
         repo = self._repo(tmp_path)
