@@ -7,6 +7,7 @@ import re
 from ouroboros.orchestrator.adapter import AgentMessage
 from ouroboros.orchestrator.evidence.claims import (
     _runtime_message_command_values,
+    _runtime_message_has_conflicting_tool_call_ids,
     _runtime_message_has_success_evidence,
     _runtime_message_supports_command_claim,
     _runtime_message_tool_call_id,
@@ -40,6 +41,8 @@ def _runtime_messages_have_masked_test_command_for_test_claim(
     """
     for index, message in enumerate(messages):
         if message.tool_name != "Bash":
+            continue
+        if _runtime_message_has_conflicting_tool_call_ids(message):
             continue
         masked_invocations: list[str] = []
         for runtime_command in _runtime_message_command_values(message):
@@ -357,6 +360,8 @@ def _runtime_messages_support_test_claim(
     for index, message in enumerate(messages):
         if message.tool_name != "Bash":
             continue
+        if _runtime_message_has_conflicting_tool_call_ids(message):
+            continue
         # Candidate test commands are drawn from two transcript-grounded
         # sources: (1) ``commands_run`` evidence entries already proven against
         # the transcript, and (2) the Bash message's own recorded command. The
@@ -420,6 +425,8 @@ def _successful_runtime_test_commands(messages: tuple[AgentMessage, ...]) -> set
     commands: set[str] = set()
     for index, message in enumerate(messages):
         if message.tool_name != "Bash":
+            continue
+        if _runtime_message_has_conflicting_tool_call_ids(message):
             continue
         message_commands = {
             alias

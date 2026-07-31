@@ -7,6 +7,9 @@ from dataclasses import replace
 from datetime import UTC, datetime
 import json
 import os
+from pathlib import Path
+import shlex
+import subprocess
 import sys
 from types import SimpleNamespace
 from typing import Any
@@ -43,13 +46,24 @@ from ouroboros.orchestrator.decomposition_policy import (
     StructuralCheckStatus,
 )
 from ouroboros.orchestrator.dependency_analyzer import ACNode, DependencyGraph
-from ouroboros.orchestrator.evidence.claims import _runtime_messages_support_file_claim
+from ouroboros.orchestrator.evidence.claims import (
+    _python_c_command_file_claim_match,
+    _runtime_messages_support_file_claim,
+    _shell_command_mutation_targets,
+    _text_needs_shell_expansion,
+)
 from ouroboros.orchestrator.evidence_schema import EvidenceRecord, ValidationResult
 from ouroboros.orchestrator.execution_runtime_scope import (
     ExecutionNodeIdentity,
     build_level_coordinator_runtime_scope,
 )
-from ouroboros.orchestrator.leaf_dispatcher import _correlated_tool_result_name
+from ouroboros.orchestrator.leaf_dispatcher import (
+    _attach_bash_filesystem_effects,
+    _BashFilesystemLeaseTracker,
+    _close_pending_targets,
+    _correlated_tool_result_name,
+    _pending_bash_filesystem_targets,
+)
 from ouroboros.orchestrator.level_context import ACContextSummary, LevelContext
 from ouroboros.orchestrator.parallel_executor import (
     MAX_STALL_RETRIES,
@@ -75,6 +89,21 @@ from ouroboros.orchestrator.parallel_executor import (
 from ouroboros.orchestrator.profile_loader import EvidenceSchema, load_profile
 from ouroboros.orchestrator.verifier import VerifierVerdict
 from tests.unit.orchestrator.parallel_executor_test_support import ProcessLocalTestExecutor
+
+
+def _trusted_python_c(source: str) -> str:
+    return shlex.join([str(Path(sys.executable).resolve()), "-I", "-S", "-c", source])
+
+
+def _filesystem_effect(path: Path, *, reported_path: str) -> dict[str, object]:
+    identity = path.lstat()
+    return {
+        "capture": "ouroboros.leaf-dispatch.v1",
+        "path": reported_path,
+        "st_dev": identity.st_dev,
+        "st_ino": identity.st_ino,
+        "st_mode": identity.st_mode,
+    }
 
 
 def _trusted_preflight_split(
@@ -151,6 +180,2282 @@ def test_deliver_matching_uses_verifier_command_aliases() -> None:
     )
 
     assert tuple(entry.handle for entry in matches) == ("ev_wrapped",)
+
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        _trusted_python_c("from pathlib import Path; Path('src/generated.py').write_text('x')"),
+        _trusted_python_c("from pathlib import Path; Path('src/generated.py').write_bytes(b'x')"),
+    ),
+)
+def test_python_c_pathlib_static_proof_rejects_command_text_only_write(tmp_path, command) -> None:
+    """Python command text alone cannot prove historical filesystem identity."""
+    generated = tmp_path / "src" / "generated.py"
+    generated.parent.mkdir()
+    generated.write_text("VALUE = 1\n", encoding="utf-8")
+
+    assert (
+        _python_c_command_file_claim_match(
+            command,
+            task_cwd=str(tmp_path),
+        )
+        is False
+    )
+
+
+def test_files_touched_rejects_reconstructed_pathlib_with_inert_touch_argv(tmp_path) -> None:
+    """Python ``-c`` argv cannot fall through to generic shell mutation proof."""
+    claimed_file = tmp_path / "claimed.py"
+    other_file = tmp_path / "other.py"
+    claimed_file.write_text("original\n", encoding="utf-8")
+    command = shlex.join(
+        [
+            str(Path(sys.executable).resolve()),
+            "-I",
+            "-S",
+            "-c",
+            "getattr(__import__('path' 'lib'), 'Pa' 'th')('other.py').write_text('changed')",
+            "touch",
+            "claimed.py",
+        ]
+    )
+
+    completed = subprocess.run(command, cwd=tmp_path, shell=True, check=False)  # noqa: S602
+
+    assert completed.returncode == 0
+    assert claimed_file.read_text(encoding="utf-8") == "original\n"
+    assert other_file.read_text(encoding="utf-8") == "changed"
+    assert _shell_command_mutation_targets(command) == ()
+    messages = (
+        AgentMessage(
+            type="tool",
+            content=f"Bash: {command}",
+            tool_name="Bash",
+            data={"tool_input": {"command": command}},
+        ),
+        AgentMessage(
+            type="tool_result",
+            content="command completed with exit code 0",
+            data={"subtype": "tool_result", "exit_code": 0},
+        ),
+    )
+    assert (
+        _runtime_messages_support_file_claim("claimed.py", messages, task_cwd=str(tmp_path))
+        is False
+    )
+
+
+def test_files_touched_rejects_wrapped_reconstructed_pathlib_with_inert_touch_argv(
+    tmp_path,
+) -> None:
+    """A supported shell body receives the same Python ``-c`` classification."""
+    claimed_file = tmp_path / "claimed.py"
+    other_file = tmp_path / "other.py"
+    claimed_file.write_text("original\n", encoding="utf-8")
+    inner = shlex.join(
+        [
+            str(Path(sys.executable).resolve()),
+            "-I",
+            "-S",
+            "-c",
+            "getattr(__import__('path' 'lib'), 'Pa' 'th')('other.py').write_text('changed')",
+            "touch",
+            "claimed.py",
+        ]
+    )
+    command = f"/bin/bash -lc {shlex.quote(inner)}"
+
+    completed = subprocess.run(command, cwd=tmp_path, shell=True, check=False)  # noqa: S602
+
+    assert completed.returncode == 0
+    assert claimed_file.read_text(encoding="utf-8") == "original\n"
+    assert other_file.read_text(encoding="utf-8") == "changed"
+    messages = (
+        AgentMessage(
+            type="tool",
+            content=f"Bash: {command}",
+            tool_name="Bash",
+            data={"tool_input": {"command": command}},
+        ),
+        AgentMessage(
+            type="tool_result",
+            content="command completed with exit code 0",
+            data={"subtype": "tool_result", "exit_code": 0},
+        ),
+    )
+    assert (
+        _runtime_messages_support_file_claim("claimed.py", messages, task_cwd=str(tmp_path))
+        is False
+    )
+
+
+def test_files_touched_rejects_env_python_quoted_redirection_argv(tmp_path) -> None:
+    """System ``env`` cannot expose a quoted Python argv value as redirection."""
+    claimed_file = tmp_path / "claimed.py"
+    other_file = tmp_path / "other.py"
+    claimed_file.write_text("original\n", encoding="utf-8")
+    command = shlex.join(
+        [
+            "/usr/bin/env",
+            str(Path(sys.executable).resolve()),
+            "-I",
+            "-S",
+            "-c",
+            "getattr(__import__('path' 'lib'), 'Pa' 'th')('other.py').write_text('changed')",
+            ">",
+            "claimed.py",
+        ]
+    )
+
+    completed = subprocess.run(command, cwd=tmp_path, shell=True, check=False)  # noqa: S602
+
+    assert completed.returncode == 0
+    assert claimed_file.read_text(encoding="utf-8") == "original\n"
+    assert other_file.read_text(encoding="utf-8") == "changed"
+    assert _shell_command_mutation_targets(command) == ()
+    messages = (
+        AgentMessage(
+            type="tool",
+            content=f"Bash: {command}",
+            tool_name="Bash",
+            data={"tool_input": {"command": command}},
+        ),
+        AgentMessage(
+            type="tool_result",
+            content="command completed with exit code 0",
+            data={"subtype": "tool_result", "exit_code": 0},
+        ),
+    )
+    assert not _runtime_messages_support_file_claim(
+        "claimed.py",
+        messages,
+        task_cwd=str(tmp_path),
+    )
+
+
+def test_files_touched_allows_python_c_literal_shell_redirect_with_local_lease(tmp_path) -> None:
+    """Python source stays inert while its independent shell receiver is proven."""
+    command = _trusted_python_c("print('generated')") + " > claimed.py"
+    call = AgentMessage(
+        type="tool",
+        content=f"Bash: {command}",
+        tool_name="Bash",
+        data={"tool_input": {"command": command}, "tool_call_id": "python-redirect"},
+    )
+    completion = AgentMessage(
+        type="tool_result",
+        content="command completed with exit code 0",
+        data={
+            "subtype": "tool_result",
+            "exit_code": 0,
+            "tool_call_id": "python-redirect",
+        },
+    )
+
+    with _BashFilesystemLeaseTracker(task_cwd=str(tmp_path)) as tracker:
+        observed_call = tracker.observe(call)
+        completed = subprocess.run(command, cwd=tmp_path, shell=True, check=False)  # noqa: S602
+        observed_completion = tracker.observe(completion)
+
+    assert completed.returncode == 0
+    assert (tmp_path / "claimed.py").read_text(encoding="utf-8") == "generated\n"
+    assert _runtime_messages_support_file_claim(
+        "claimed.py",
+        (observed_call, observed_completion),
+        task_cwd=str(tmp_path),
+    )
+
+
+def test_files_touched_python_c_redirect_does_not_prove_internal_receiver(tmp_path) -> None:
+    """A leased stdout redirect cannot authenticate a Python-internal write."""
+    source = "from pathlib import Path; Path('other.py').write_text('internal'); print('out')"
+    command = f"{_trusted_python_c(source)} > claimed.py"
+    call = AgentMessage(
+        type="tool",
+        content=f"Bash: {command}",
+        tool_name="Bash",
+        data={"tool_input": {"command": command}},
+    )
+    completion = AgentMessage(
+        type="tool_result",
+        content="command completed with exit code 0",
+        data={"subtype": "tool_result", "exit_code": 0},
+    )
+
+    with _BashFilesystemLeaseTracker(task_cwd=str(tmp_path)) as tracker:
+        observed_call = tracker.observe(call)
+        completed = subprocess.run(command, cwd=tmp_path, shell=True, check=False)  # noqa: S602
+        observed_completion = tracker.observe(completion)
+
+    messages = (observed_call, observed_completion)
+    assert completed.returncode == 0
+    assert _runtime_messages_support_file_claim("claimed.py", messages, task_cwd=str(tmp_path))
+    assert not _runtime_messages_support_file_claim("other.py", messages, task_cwd=str(tmp_path))
+
+
+@pytest.mark.parametrize("operator", ("'>'", r"\>"))
+def test_files_touched_rejects_python_c_quoted_or_escaped_redirect_argv(
+    tmp_path,
+    operator,
+) -> None:
+    """A quoted or escaped greater-than byte remains Python argv, not a receiver."""
+    source = "from pathlib import Path; Path('other.py').write_text('internal')"
+    command = f"{_trusted_python_c(source)} {operator} claimed.py"
+    call = AgentMessage(
+        type="tool",
+        content=f"Bash: {command}",
+        tool_name="Bash",
+        data={"tool_input": {"command": command}},
+    )
+    completion = AgentMessage(
+        type="tool_result",
+        content="command completed with exit code 0",
+        data={"subtype": "tool_result", "exit_code": 0},
+    )
+
+    with _BashFilesystemLeaseTracker(task_cwd=str(tmp_path)) as tracker:
+        observed_call = tracker.observe(call)
+        completed = subprocess.run(command, cwd=tmp_path, shell=True, check=False)  # noqa: S602
+        observed_completion = tracker.observe(completion)
+
+    assert completed.returncode == 0
+    assert not (tmp_path / "claimed.py").exists()
+    assert not _runtime_messages_support_file_claim(
+        "claimed.py",
+        (observed_call, observed_completion),
+        task_cwd=str(tmp_path),
+    )
+
+
+@pytest.mark.parametrize("comment_prefix", (" ", " \\\n"))
+def test_files_touched_rejects_python_c_redirection_inside_shell_comment(
+    tmp_path,
+    comment_prefix,
+) -> None:
+    """A comment cannot turn a Python-internal write into shell receiver proof."""
+    source = "from pathlib import Path; Path('claimed.py').write_text('internal')"
+    command = f"{_trusted_python_c(source)}{comment_prefix}# > claimed.py"
+    call = AgentMessage(
+        type="tool",
+        content=f"Bash: {command}",
+        tool_name="Bash",
+        data={"tool_input": {"command": command}, "tool_call_id": "commented-redirect"},
+    )
+    completion = AgentMessage(
+        type="tool_result",
+        content="command completed with exit code 0",
+        data={
+            "subtype": "tool_result",
+            "exit_code": 0,
+            "tool_call_id": "commented-redirect",
+        },
+    )
+
+    with _BashFilesystemLeaseTracker(task_cwd=str(tmp_path)) as tracker:
+        observed_call = tracker.observe(call)
+        completed = subprocess.run(command, cwd=tmp_path, shell=True, check=False)  # noqa: S602
+        observed_completion = tracker.observe(completion)
+
+    assert completed.returncode == 0
+    assert (tmp_path / "claimed.py").read_text(encoding="utf-8") == "internal"
+    assert _shell_command_mutation_targets(command, redirections_only=True) == ()
+    assert "filesystem_effects" not in observed_completion.data
+    assert not _runtime_messages_support_file_claim(
+        "claimed.py",
+        (observed_call, observed_completion),
+        task_cwd=str(tmp_path),
+    )
+
+
+def test_shell_comment_parser_rejects_redirect_after_backslash_crlf() -> None:
+    """Non-POSIX CRLF continuation remains fail-closed for receiver discovery."""
+    source = "from pathlib import Path; Path('claimed.py').write_text('internal')"
+    command = f"{_trusted_python_c(source)} \\\r\n# > claimed.py"
+
+    assert _shell_command_mutation_targets(command, redirections_only=True) == ()
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    (
+        ("printf '%s\\n' 'quoted # value' > claimed.py", "quoted # value\n"),
+        (r"printf '%s\n' escaped\#value > claimed.py", "escaped#value\n"),
+        ("printf '%s\\n' foo#bar > claimed.py", "foo#bar\n"),
+    ),
+)
+def test_files_touched_preserves_literal_hash_before_real_shell_redirect(
+    tmp_path,
+    command,
+    expected,
+) -> None:
+    """Quoted, escaped, and token-internal hashes remain ordinary argv data."""
+    call = AgentMessage(
+        type="tool",
+        content=f"Bash: {command}",
+        tool_name="Bash",
+        data={"tool_input": {"command": command}},
+    )
+    completion = AgentMessage(
+        type="tool_result",
+        content="command completed with exit code 0",
+        data={"subtype": "tool_result", "exit_code": 0},
+    )
+
+    with _BashFilesystemLeaseTracker(task_cwd=str(tmp_path)) as tracker:
+        observed_call = tracker.observe(call)
+        completed = subprocess.run(command, cwd=tmp_path, shell=True, check=False)  # noqa: S602
+        observed_completion = tracker.observe(completion)
+
+    assert completed.returncode == 0
+    assert (tmp_path / "claimed.py").read_text(encoding="utf-8") == expected
+    assert _runtime_messages_support_file_claim(
+        "claimed.py",
+        (observed_call, observed_completion),
+        task_cwd=str(tmp_path),
+    )
+
+
+@pytest.mark.parametrize(
+    ("command", "stdin"),
+    (
+        ("touch first.py second.py", None),
+        ("truncate -s 0 first.py second.py", None),
+        ("tee first.py second.py", "generated\n"),
+    ),
+)
+def test_files_touched_authenticates_every_stable_multi_receiver(
+    tmp_path,
+    command,
+    stdin,
+) -> None:
+    """Every stable-identity operand receives its own execution-span lease."""
+    first = tmp_path / "first.py"
+    second = tmp_path / "second.py"
+    first.write_text("before first\n", encoding="utf-8")
+    second.write_text("before second\n", encoding="utf-8")
+    os.utime(first, ns=(1_000_000_000, 1_000_000_000))
+    os.utime(second, ns=(1_000_000_000, 1_000_000_000))
+    call = AgentMessage(
+        type="tool",
+        content=f"Bash: {command}",
+        tool_name="Bash",
+        data={"tool_input": {"command": command}, "tool_call_id": "multi-receiver"},
+    )
+    completion = AgentMessage(
+        type="tool_result",
+        content="command completed with exit code 0",
+        data={
+            "subtype": "tool_result",
+            "exit_code": 0,
+            "tool_call_id": "multi-receiver",
+        },
+    )
+
+    with _BashFilesystemLeaseTracker(task_cwd=str(tmp_path)) as tracker:
+        observed_call = tracker.observe(call)
+        completed = subprocess.run(  # noqa: S602
+            command,
+            cwd=tmp_path,
+            shell=True,
+            check=False,
+            input=stdin,
+            text=True,
+        )
+        observed_completion = tracker.observe(completion)
+
+    assert completed.returncode == 0
+    assert _shell_command_mutation_targets(command) == ("first.py", "second.py")
+    assert {effect["path"] for effect in observed_completion.data["filesystem_effects"]} == {
+        "first.py",
+        "second.py",
+    }
+    messages = (observed_call, observed_completion)
+    assert _runtime_messages_support_file_claim("first.py", messages, task_cwd=str(tmp_path))
+    assert _runtime_messages_support_file_claim("second.py", messages, task_cwd=str(tmp_path))
+
+
+@pytest.mark.parametrize(
+    ("command", "receivers"),
+    (
+        ("touch > log.txt first.py second.py", ("log.txt", "first.py", "second.py")),
+        ("touch first.py > log.txt second.py", ("log.txt", "first.py", "second.py")),
+        ("> log.txt touch first.py second.py", ("log.txt", "first.py", "second.py")),
+        ("touch first.py second.py 2> error.txt", ("error.txt", "first.py", "second.py")),
+        ("touch first.py second.py 2>&1", ("first.py", "second.py")),
+    ),
+)
+def test_files_touched_authenticates_interspersed_redirect_and_operands(
+    tmp_path,
+    command,
+    receivers,
+) -> None:
+    """Redirection clauses are removed without truncating later utility operands."""
+    for receiver in receivers:
+        target = tmp_path / receiver
+        target.write_text("before\n", encoding="utf-8")
+        os.utime(target, ns=(1_000_000_000, 1_000_000_000))
+    call = AgentMessage(
+        type="tool",
+        content=f"Bash: {command}",
+        tool_name="Bash",
+        data={"tool_input": {"command": command}},
+    )
+    completion = AgentMessage(
+        type="tool_result",
+        content="command completed with exit code 0",
+        data={"subtype": "tool_result", "exit_code": 0},
+    )
+
+    with _BashFilesystemLeaseTracker(task_cwd=str(tmp_path)) as tracker:
+        observed_call = tracker.observe(call)
+        completed = subprocess.run(command, cwd=tmp_path, shell=True, check=False)  # noqa: S602
+        observed_completion = tracker.observe(completion)
+
+    assert completed.returncode == 0
+    assert _shell_command_mutation_targets(command) == receivers
+    messages = (observed_call, observed_completion)
+    for receiver in receivers:
+        assert _runtime_messages_support_file_claim(receiver, messages, task_cwd=str(tmp_path))
+
+
+def test_tee_input_redirection_is_not_a_mutation_receiver(tmp_path) -> None:
+    """tee mutates every output operand but does not authenticate its stdin source."""
+    source = tmp_path / "source.py"
+    output = tmp_path / "output.py"
+    source.write_text("source\n", encoding="utf-8")
+    output.write_text("before\n", encoding="utf-8")
+    os.utime(output, ns=(1_000_000_000, 1_000_000_000))
+    command = "tee output.py < source.py"
+    call = AgentMessage(
+        type="tool",
+        content=f"Bash: {command}",
+        tool_name="Bash",
+        data={"tool_input": {"command": command}},
+    )
+    completion = AgentMessage(
+        type="tool_result",
+        content="command completed with exit code 0",
+        data={"subtype": "tool_result", "exit_code": 0},
+    )
+
+    with _BashFilesystemLeaseTracker(task_cwd=str(tmp_path)) as tracker:
+        observed_call = tracker.observe(call)
+        completed = subprocess.run(command, cwd=tmp_path, shell=True, check=False)  # noqa: S602
+        observed_completion = tracker.observe(completion)
+
+    assert completed.returncode == 0
+    assert _shell_command_mutation_targets(command) == ("output.py",)
+    messages = (observed_call, observed_completion)
+    assert _runtime_messages_support_file_claim("output.py", messages, task_cwd=str(tmp_path))
+    assert not _runtime_messages_support_file_claim("source.py", messages, task_cwd=str(tmp_path))
+
+
+@pytest.mark.parametrize(
+    ("command", "receivers", "stdin"),
+    (
+        ("touch 123 > log.txt", ("log.txt", "123"), None),
+        ("tee 123 < source.txt", ("123",), None),
+    ),
+)
+def test_numeric_filename_separated_from_redirect_remains_receiver(
+    tmp_path,
+    command,
+    receivers,
+    stdin,
+) -> None:
+    """Whitespace-separated digits are argv operands, never IO-number selectors."""
+    source = tmp_path / "source.txt"
+    source.write_text("source\n", encoding="utf-8")
+    for receiver in receivers:
+        target = tmp_path / receiver
+        target.write_text("before\n", encoding="utf-8")
+        os.utime(target, ns=(1_000_000_000, 1_000_000_000))
+    call = AgentMessage(
+        type="tool",
+        content=f"Bash: {command}",
+        tool_name="Bash",
+        data={"tool_input": {"command": command}},
+    )
+    completion = AgentMessage(
+        type="tool_result",
+        content="command completed with exit code 0",
+        data={"subtype": "tool_result", "exit_code": 0},
+    )
+
+    with _BashFilesystemLeaseTracker(task_cwd=str(tmp_path)) as tracker:
+        observed_call = tracker.observe(call)
+        completed = subprocess.run(  # noqa: S602
+            command,
+            cwd=tmp_path,
+            shell=True,
+            check=False,
+            input=stdin,
+            text=True,
+        )
+        observed_completion = tracker.observe(completion)
+
+    assert completed.returncode == 0
+    assert _shell_command_mutation_targets(command) == receivers
+    messages = (observed_call, observed_completion)
+    for receiver in receivers:
+        assert _runtime_messages_support_file_claim(receiver, messages, task_cwd=str(tmp_path))
+    assert not _runtime_messages_support_file_claim("source.txt", messages, task_cwd=str(tmp_path))
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    (
+        ("touch first.py 2> error.txt", ("error.txt", "first.py")),
+        ("touch first.py 2>&1", ("first.py",)),
+        ("touch first.py 2 > log.txt", ("log.txt", "first.py", "2")),
+        ("tee 123<source.txt", ()),
+    ),
+)
+def test_fd_selector_requires_lexical_adjacency(command, expected) -> None:
+    """Only an adjacent IO-number is stripped from utility argv."""
+    assert _shell_command_mutation_targets(command) == expected
+
+
+def test_clobber_redirection_authenticates_without_becoming_pipeline(tmp_path) -> None:
+    """The pipe byte in ``>|`` is redirection syntax, not compound control."""
+    command = "printf x >| log.txt"
+    call = AgentMessage(
+        type="tool",
+        content=f"Bash: {command}",
+        tool_name="Bash",
+        data={"tool_input": {"command": command}},
+    )
+    completion = AgentMessage(
+        type="tool_result",
+        content="command completed with exit code 0",
+        data={"subtype": "tool_result", "exit_code": 0},
+    )
+
+    with _BashFilesystemLeaseTracker(task_cwd=str(tmp_path)) as tracker:
+        observed_call = tracker.observe(call)
+        completed = subprocess.run(command, cwd=tmp_path, shell=True, check=False)  # noqa: S602
+        observed_completion = tracker.observe(completion)
+
+    assert completed.returncode == 0
+    assert (tmp_path / "log.txt").read_text(encoding="utf-8") == "x"
+    assert _shell_command_mutation_targets(command) == ("log.txt",)
+    assert _runtime_messages_support_file_claim(
+        "log.txt",
+        (observed_call, observed_completion),
+        task_cwd=str(tmp_path),
+    )
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    (
+        ("touch -r reference.py first.py second.py", ("first.py", "second.py")),
+        ("touch --date yesterday first.py second.py", ("first.py", "second.py")),
+        ("truncate -r reference.py first.py second.py", ("first.py", "second.py")),
+        ("truncate --size 0 first.py second.py", ("first.py", "second.py")),
+        ("tee --output-error=warn first.py second.py", ("first.py", "second.py")),
+    ),
+)
+def test_multi_receiver_parser_excludes_option_arguments(command, expected) -> None:
+    """Option values are inputs/configuration, never mutation receivers."""
+    assert _shell_command_mutation_targets(command) == expected
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    (
+        ("touch -- -first.py -second.py", ("-first.py", "-second.py")),
+        ("truncate -s0 -- -first.py -second.py", ("-first.py", "-second.py")),
+        (
+            "sed -i '' -f rewrite.sed first.py second.py",
+            ("first.py", "second.py"),
+        ),
+        (
+            "perl -I lib -M File::Path -F pattern -pi -e rewrite first.py second.py",
+            ("first.py", "second.py"),
+        ),
+        (
+            "perl -0 -C -d -D -V -x -pi -e rewrite first.py second.py",
+            ("first.py", "second.py"),
+        ),
+    ),
+)
+def test_multi_receiver_parser_honors_option_boundaries(command, expected) -> None:
+    """Required values, optional values, and ``--`` preserve real operands."""
+    assert _shell_command_mutation_targets(command) == expected
+
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        "touch --unknown first.py second.py",
+        "truncate --unknown first.py second.py",
+        "tee --unknown first.py second.py",
+        "sed --unknown -i '' rewrite first.py second.py",
+        "perl --unknown -pi -e rewrite first.py second.py",
+    ),
+)
+def test_multi_receiver_parser_rejects_unknown_option_grammars(command) -> None:
+    """Unknown utility options cannot donate their values as file receivers."""
+    assert _shell_command_mutation_targets(command) == ()
+
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        "sed -i '' 's/before/after/' first.py second.py",
+        "sed -i '' -e 's/before/after/' first.py second.py",
+        "perl -pi -e 's/before/after/' first.py second.py",
+        "perl -p -i.bak -e 's/before/after/' first.py second.py",
+    ),
+)
+def test_in_place_editor_parser_enumerates_every_file_operand(command) -> None:
+    """Scripts, backup suffixes, and option values are excluded from receivers."""
+    assert _shell_command_mutation_targets(command) == ("first.py", "second.py")
+
+
+def test_bsd_empty_sed_suffix_is_portable_evidence_grammar(monkeypatch) -> None:
+    """An explicit empty ``-i`` suffix stays unambiguous on Linux reviewers."""
+    monkeypatch.setattr(sys, "platform", "linux")
+
+    assert _shell_command_mutation_targets("sed -i '' 's/before/after/' first.py second.py") == (
+        "first.py",
+        "second.py",
+    )
+
+
+def test_gnu_sed_in_place_grammar_enumerates_every_operand(monkeypatch) -> None:
+    """GNU's suffix-free ``-i`` spelling retains both input receivers."""
+    monkeypatch.setattr(sys, "platform", "linux")
+
+    assert _shell_command_mutation_targets("sed -i 's/before/after/' first.py second.py") == (
+        "first.py",
+        "second.py",
+    )
+
+
+@pytest.mark.parametrize("editor", ("sed", "perl"))
+def test_in_place_editor_inode_replacement_remains_fail_closed(tmp_path, editor) -> None:
+    """Enumerating all operands does not weaken regular-inode continuity."""
+    first = tmp_path / "first.py"
+    second = tmp_path / "second.py"
+    first.write_text("before\n", encoding="utf-8")
+    second.write_text("before\n", encoding="utf-8")
+    before = (first.stat().st_ino, second.stat().st_ino)
+    if editor == "sed":
+        argv = ["sed", "-i"]
+        if not sys.platform.startswith("linux"):
+            argv.append("")
+        argv.extend(("s/before/after/", "first.py", "second.py"))
+    else:
+        argv = ["perl", "-pi", "-e", "s/before/after/", "first.py", "second.py"]
+    command = shlex.join(argv)
+    call = AgentMessage(
+        type="tool",
+        content=f"Bash: {command}",
+        tool_name="Bash",
+        data={"tool_input": {"command": command}},
+    )
+    completion = AgentMessage(
+        type="tool_result",
+        content="command completed with exit code 0",
+        data={"subtype": "tool_result", "exit_code": 0},
+    )
+
+    with _BashFilesystemLeaseTracker(task_cwd=str(tmp_path)) as tracker:
+        observed_call = tracker.observe(call)
+        completed = subprocess.run(command, cwd=tmp_path, shell=True, check=False)  # noqa: S602
+        observed_completion = tracker.observe(completion)
+
+    assert completed.returncode == 0
+    assert (first.stat().st_ino, second.stat().st_ino) != before
+    assert "filesystem_effects" not in observed_completion.data
+    messages = (observed_call, observed_completion)
+    assert not _runtime_messages_support_file_claim("first.py", messages, task_cwd=str(tmp_path))
+    assert not _runtime_messages_support_file_claim("second.py", messages, task_cwd=str(tmp_path))
+
+
+def test_perl_module_name_cannot_impersonate_in_place_switch(tmp_path) -> None:
+    """A lowercase i inside an unrelated option cannot lease Perl-internal writes."""
+    source = "open(F, q(>), q(claimed.py)); print F q(internal); close F"
+    command = shlex.join(["perl", "-MFile::Path", "-e", source, "claimed.py"])
+    call = AgentMessage(
+        type="tool",
+        content=f"Bash: {command}",
+        tool_name="Bash",
+        data={"tool_input": {"command": command}},
+    )
+    completion = AgentMessage(
+        type="tool_result",
+        content="command completed with exit code 0",
+        data={"subtype": "tool_result", "exit_code": 0},
+    )
+
+    with _BashFilesystemLeaseTracker(task_cwd=str(tmp_path)) as tracker:
+        observed_call = tracker.observe(call)
+        completed = subprocess.run(command, cwd=tmp_path, shell=True, check=False)  # noqa: S602
+        observed_completion = tracker.observe(completion)
+
+    assert completed.returncode == 0
+    assert (tmp_path / "claimed.py").read_text(encoding="utf-8") == "internal"
+    assert _shell_command_mutation_targets(command) == ()
+    assert "filesystem_effects" not in observed_completion.data
+    assert not _runtime_messages_support_file_claim(
+        "claimed.py",
+        (observed_call, observed_completion),
+        task_cwd=str(tmp_path),
+    )
+
+
+def test_shell_expansion_detection_respects_single_quoted_perl_source() -> None:
+    """A literal regex dollar does not mask otherwise valid receiver parsing."""
+    assert not _text_needs_shell_expansion("perl -pi -e 's/$/x/' first.py second.py")
+    assert _text_needs_shell_expansion('perl -pi -e "s/$/x/" first.py second.py')
+    assert _text_needs_shell_expansion("perl -pi -e s/$/x/ first.py second.py")
+
+
+def test_files_touched_rejects_shell_receiver_symlink_replaced_after_execution(tmp_path) -> None:
+    """Recorded symlink identity cannot authenticate a later regular file."""
+    outside = tmp_path.parent / f"{tmp_path.name}-outside.py"
+    claimed_file = tmp_path / "claimed.py"
+    outside.write_text("outside\n", encoding="utf-8")
+    try:
+        os.symlink(outside, claimed_file)
+    except (OSError, NotImplementedError):  # pragma: no cover - unprivileged/Windows
+        pytest.skip("symlink creation not permitted in this environment")
+    command = "touch claimed.py"
+    call = AgentMessage(
+        type="tool",
+        content=f"Bash: {command}",
+        tool_name="Bash",
+        data={"tool_input": {"command": command}},
+    )
+    pending_targets = _pending_bash_filesystem_targets(call, task_cwd=str(tmp_path))
+
+    completed = subprocess.run(command, cwd=tmp_path, shell=True, check=False)  # noqa: S602
+    claimed_file.unlink()
+    claimed_file.write_text("replacement\n", encoding="utf-8")
+    result = _attach_bash_filesystem_effects(
+        AgentMessage(
+            type="tool_result",
+            content="command completed with exit code 0",
+            data={"subtype": "tool_result", "exit_code": 0},
+        ),
+        pending_targets,
+    )
+
+    assert completed.returncode == 0
+    assert "filesystem_effects" not in result.data
+    messages = (call, result)
+    assert not _runtime_messages_support_file_claim(
+        "claimed.py",
+        messages,
+        task_cwd=str(tmp_path),
+    )
+
+
+def test_files_touched_rejects_parent_symlink_swap_restored_before_completion(tmp_path) -> None:
+    """A held parent dirfd detects swap/restore around the actual shell execution."""
+    link_dir = tmp_path / "link"
+    original_dir = tmp_path / "original-link"
+    outside_dir = tmp_path.parent / f"{tmp_path.name}-outside"
+    link_dir.mkdir()
+    outside_dir.mkdir()
+    inside_file = link_dir / "claimed.py"
+    outside_file = outside_dir / "claimed.py"
+    inside_file.write_text("inside\n", encoding="utf-8")
+    outside_file.write_text("outside\n", encoding="utf-8")
+    os.utime(inside_file, ns=(1_000_000_000, 1_000_000_000))
+    os.utime(outside_file, ns=(1_000_000_000, 1_000_000_000))
+    inside_before = inside_file.stat()
+    outside_before = outside_file.stat()
+    command = "touch link/claimed.py"
+    call = AgentMessage(
+        type="tool",
+        content=f"Bash: {command}",
+        tool_name="Bash",
+        data={"tool_input": {"command": command}},
+    )
+    pending_targets = _pending_bash_filesystem_targets(call, task_cwd=str(tmp_path))
+    if not pending_targets:  # pragma: no cover - fail-closed platform fallback
+        pytest.skip("dirfd/no-follow receiver leases are unavailable")
+    link_dir.rename(original_dir)
+    try:
+        os.symlink(outside_dir, link_dir)
+    except (OSError, NotImplementedError):  # pragma: no cover - unprivileged/Windows
+        original_dir.rename(link_dir)
+        _close_pending_targets(pending_targets)
+        pytest.skip("symlink creation not permitted in this environment")
+
+    completed = subprocess.run(command, cwd=tmp_path, shell=True, check=False)  # noqa: S602
+    link_dir.unlink()
+    original_dir.rename(link_dir)
+    result = _attach_bash_filesystem_effects(
+        AgentMessage(
+            type="tool_result",
+            content="command completed with exit code 0",
+            data={"subtype": "tool_result", "exit_code": 0},
+        ),
+        pending_targets,
+    )
+
+    assert completed.returncode == 0
+    assert inside_file.read_text(encoding="utf-8") == "inside\n"
+    assert inside_file.stat().st_mtime_ns == inside_before.st_mtime_ns
+    assert outside_file.stat().st_mtime_ns > outside_before.st_mtime_ns
+    assert "filesystem_effects" not in result.data
+    assert not _runtime_messages_support_file_claim(
+        "link/claimed.py",
+        (call, result),
+        task_cwd=str(tmp_path),
+    )
+
+
+def test_bash_receiver_lease_cleanup_is_idempotent(tmp_path) -> None:
+    """Unmatched/cancelled dispatch cleanup closes every held receiver dirfd."""
+    target = tmp_path / "claimed.py"
+    target.write_text("value\n", encoding="utf-8")
+    call = AgentMessage(
+        type="tool",
+        content="Bash: touch claimed.py",
+        tool_name="Bash",
+        data={"tool_input": {"command": "touch claimed.py"}},
+    )
+    pending_targets = _pending_bash_filesystem_targets(call, task_cwd=str(tmp_path))
+    if not pending_targets:  # pragma: no cover - fail-closed platform fallback
+        pytest.skip("dirfd/no-follow receiver leases are unavailable")
+    fds = tuple(target.parent_fd for target in pending_targets)
+
+    _close_pending_targets(pending_targets)
+    _close_pending_targets(pending_targets)
+
+    for fd in fds:
+        with pytest.raises(OSError):
+            os.fstat(fd)
+
+
+def test_completed_receiver_lease_cannot_close_reused_fd(tmp_path) -> None:
+    """A completed lease invalidates ownership before its fd number is reused."""
+    target = tmp_path / "claimed.py"
+    target.write_text("before\n", encoding="utf-8")
+    call = AgentMessage(
+        type="tool",
+        content="Bash: touch claimed.py",
+        tool_name="Bash",
+        data={"tool_input": {"command": "touch claimed.py"}},
+    )
+    pending_targets = _pending_bash_filesystem_targets(call, task_cwd=str(tmp_path))
+    if not pending_targets:  # pragma: no cover - fail-closed platform fallback
+        pytest.skip("dirfd/no-follow receiver leases are unavailable")
+    leased_fd = pending_targets[0].parent_fd
+    assert leased_fd is not None
+    os.utime(target, ns=(3_000_000_000, 3_000_000_000))
+    _attach_bash_filesystem_effects(
+        AgentMessage(
+            type="tool_result",
+            content="command completed with exit code 0",
+            data={"subtype": "tool_result", "exit_code": 0},
+        ),
+        pending_targets,
+    )
+    assert pending_targets[0].parent_fd is None
+    probe_fd = os.open(os.devnull, os.O_RDONLY)
+    if probe_fd != leased_fd:
+        os.dup2(probe_fd, leased_fd)
+        os.close(probe_fd)
+    try:
+        _close_pending_targets(pending_targets)
+        os.fstat(leased_fd)
+    finally:
+        os.close(leased_fd)
+
+
+def test_receiver_lease_rejects_regular_inode_replacement(tmp_path) -> None:
+    """A different post-execution inode is not mutation proof for the pre receiver."""
+    target = tmp_path / "claimed.py"
+    original = tmp_path / "original.py"
+    target.write_text("before\n", encoding="utf-8")
+    call = AgentMessage(
+        type="tool",
+        content="Bash: touch claimed.py",
+        tool_name="Bash",
+        data={"tool_input": {"command": "touch claimed.py"}},
+    )
+    pending_targets = _pending_bash_filesystem_targets(call, task_cwd=str(tmp_path))
+    if not pending_targets:  # pragma: no cover - fail-closed platform fallback
+        pytest.skip("dirfd/no-follow receiver leases are unavailable")
+    target.rename(original)
+    target.write_text("replacement\n", encoding="utf-8")
+
+    result = _attach_bash_filesystem_effects(
+        AgentMessage(
+            type="tool_result",
+            content="command completed with exit code 0",
+            data={"subtype": "tool_result", "exit_code": 0},
+        ),
+        pending_targets,
+    )
+
+    assert "filesystem_effects" not in result.data
+
+
+@pytest.mark.parametrize("exit_kind", ("normal", "exception", "cancellation"))
+def test_receiver_lease_tracker_closes_unmatched_calls_on_every_exit(
+    tmp_path,
+    exit_kind,
+) -> None:
+    """Normal end, adapter failure, and cancellation all release unmatched dirfds."""
+    target = tmp_path / "claimed.py"
+    target.write_text("value\n", encoding="utf-8")
+    call = AgentMessage(
+        type="tool",
+        content="Bash: touch claimed.py",
+        tool_name="Bash",
+        data={"tool_input": {"command": "touch claimed.py"}, "tool_call_id": "call-1"},
+    )
+    tracker = _BashFilesystemLeaseTracker(task_cwd=str(tmp_path))
+    captured_fds: tuple[int, ...] = ()
+    try:
+        with tracker:
+            tracker.observe(call)
+            leased = tracker._pending_by_id["call-1"]
+            captured_fds = tuple(
+                pending.parent_fd for pending in leased if pending.parent_fd is not None
+            )
+            if exit_kind == "exception":
+                raise RuntimeError("adapter failed")
+            if exit_kind == "cancellation":
+                raise asyncio.CancelledError
+    except (RuntimeError, asyncio.CancelledError):
+        pass
+
+    assert captured_fds
+    for fd in captured_fds:
+        with pytest.raises(OSError):
+            os.fstat(fd)
+
+
+def test_receiver_lease_tracker_rejects_duplicate_idless_pairing(tmp_path) -> None:
+    """Two id-less Bash starts cannot donate either receiver to one completion."""
+    first = tmp_path / "first.py"
+    second = tmp_path / "second.py"
+    first.write_text("first\n", encoding="utf-8")
+    second.write_text("second\n", encoding="utf-8")
+    first_call = AgentMessage(
+        type="tool",
+        content="Bash: touch first.py",
+        tool_name="Bash",
+        data={"tool_input": {"command": "touch first.py"}},
+    )
+    second_call = AgentMessage(
+        type="tool",
+        content="Bash: touch second.py",
+        tool_name="Bash",
+        data={"tool_input": {"command": "touch second.py"}},
+    )
+    completion = AgentMessage(
+        type="tool_result",
+        content="command completed with exit code 0",
+        data={"subtype": "tool_result", "exit_code": 0},
+    )
+
+    with _BashFilesystemLeaseTracker(task_cwd=str(tmp_path)) as tracker:
+        tracker.observe(first_call)
+        tracker.observe(second_call)
+        os.utime(first, None)
+        os.utime(second, None)
+        observed = tracker.observe(completion)
+
+    assert "filesystem_effects" not in observed.data
+
+
+def test_receiver_lease_tracker_rejects_duplicate_call_id_pairing(tmp_path) -> None:
+    """A repeated call id makes its single completion irreducibly ambiguous."""
+    first = tmp_path / "first.py"
+    second = tmp_path / "second.py"
+    first.write_text("first\n", encoding="utf-8")
+    second.write_text("second\n", encoding="utf-8")
+    first_call = AgentMessage(
+        type="tool",
+        content="Bash: touch first.py",
+        tool_name="Bash",
+        data={"tool_input": {"command": "touch first.py"}, "tool_call_id": "same"},
+    )
+    second_call = AgentMessage(
+        type="tool",
+        content="Bash: touch second.py",
+        tool_name="Bash",
+        data={"tool_input": {"command": "touch second.py"}, "tool_call_id": "same"},
+    )
+    completion = AgentMessage(
+        type="tool_result",
+        content="command completed with exit code 0",
+        data={"subtype": "tool_result", "exit_code": 0, "tool_call_id": "same"},
+    )
+
+    with _BashFilesystemLeaseTracker(task_cwd=str(tmp_path)) as tracker:
+        tracker.observe(first_call)
+        tracker.observe(second_call)
+        tracker.observe(first_call)
+        os.utime(second, ns=(4_000_000_000, 4_000_000_000))
+        observed = tracker.observe(completion)
+
+    assert "filesystem_effects" not in observed.data
+
+
+def test_receiver_lease_tracker_strips_forged_effect_without_local_lease(tmp_path) -> None:
+    """Adapter metadata cannot manufacture the dispatcher's private provenance."""
+    target = tmp_path / "claimed.py"
+    target.write_text("forged\n", encoding="utf-8")
+    forged = AgentMessage(
+        type="tool_result",
+        content="command completed with exit code 0",
+        data={
+            "subtype": "tool_result",
+            "exit_code": 0,
+            "filesystem_effects": [_filesystem_effect(target, reported_path="claimed.py")],
+        },
+    )
+
+    with _BashFilesystemLeaseTracker(task_cwd=str(tmp_path)) as tracker:
+        observed = tracker.observe(forged)
+
+    assert "filesystem_effects" not in observed.data
+
+
+def test_receiver_lease_tracker_replaces_forged_effect_with_local_capture(tmp_path) -> None:
+    """A real mutation reattaches only the receiver measured by the tracker."""
+    forged_target = tmp_path / "forged.py"
+    forged_target.write_text("forged\n", encoding="utf-8")
+    command = "printf 'generated\\n' > claimed.py"
+    call = AgentMessage(
+        type="tool",
+        content=f"Bash: {command}",
+        tool_name="Bash",
+        data={"tool_input": {"command": command}, "tool_call_id": "local-only"},
+    )
+    completion = AgentMessage(
+        type="tool_result",
+        content="command completed with exit code 0",
+        data={
+            "subtype": "tool_result",
+            "exit_code": 0,
+            "tool_call_id": "local-only",
+            "filesystem_effects": [_filesystem_effect(forged_target, reported_path="forged.py")],
+        },
+    )
+
+    with _BashFilesystemLeaseTracker(task_cwd=str(tmp_path)) as tracker:
+        tracker.observe(call)
+        completed = subprocess.run(command, cwd=tmp_path, shell=True, check=False)  # noqa: S602
+        observed = tracker.observe(completion)
+
+    assert completed.returncode == 0
+    effects = observed.data["filesystem_effects"]
+    assert isinstance(effects, list)
+    assert [effect["path"] for effect in effects] == ["claimed.py"]
+
+
+def test_receiver_lease_tracker_accepts_repeated_identical_id_aliases(tmp_path) -> None:
+    """Equivalent aliases retain compatibility and correlate one local effect."""
+    command = "printf 'generated\\n' > claimed.py"
+    call = AgentMessage(
+        type="tool",
+        content=f"Bash: {command}",
+        tool_name="Bash",
+        data={
+            "tool_input": {"command": command},
+            "tool_call_id": "same-id",
+            "tool_use_id": "same-id",
+        },
+    )
+    completion = AgentMessage(
+        type="tool_result",
+        content="command completed with exit code 0",
+        data={
+            "subtype": "tool_result",
+            "exit_code": 0,
+            "tool_result": {
+                "call_id": "same-id",
+                "meta": {"tool_use_id": "same-id"},
+            },
+        },
+    )
+
+    with _BashFilesystemLeaseTracker(task_cwd=str(tmp_path)) as tracker:
+        tracker.observe(call)
+        completed = subprocess.run(command, cwd=tmp_path, shell=True, check=False)  # noqa: S602
+        observed = tracker.observe(completion)
+
+    assert completed.returncode == 0
+    assert observed.data["filesystem_effects"][0]["path"] == "claimed.py"
+
+
+def test_conflicting_completion_is_not_consumed_as_idless_result(tmp_path) -> None:
+    """Alias conflict cannot take an id-less lease through the fallback path."""
+    command = "printf 'generated\\n' > claimed.py"
+    call = AgentMessage(
+        type="tool",
+        content=f"Bash: {command}",
+        tool_name="Bash",
+        data={"tool_input": {"command": command}},
+    )
+    conflict = AgentMessage(
+        type="tool_result",
+        content="ambiguous completion",
+        data={
+            "subtype": "tool_result",
+            "exit_code": 0,
+            "tool_call_id": "first",
+            "tool_result": {"meta": {"call_id": "second"}},
+            "filesystem_effects": [{"capture": "ouroboros.leaf-dispatch.v1", "path": "forged.py"}],
+        },
+    )
+    idless_completion = AgentMessage(
+        type="tool_result",
+        content="command completed with exit code 0",
+        data={"subtype": "tool_result", "exit_code": 0},
+    )
+
+    with _BashFilesystemLeaseTracker(task_cwd=str(tmp_path)) as tracker:
+        tracker.observe(call)
+        completed = subprocess.run(command, cwd=tmp_path, shell=True, check=False)  # noqa: S602
+        rejected = tracker.observe(conflict)
+        accepted = tracker.observe(idless_completion)
+
+    assert completed.returncode == 0
+    assert "filesystem_effects" not in rejected.data
+    assert accepted.data["filesystem_effects"][0]["path"] == "claimed.py"
+
+
+def test_conflicting_call_aliases_poison_related_existing_lease(tmp_path) -> None:
+    """An ambiguous call neither consumes nor donates a prior Bash receiver."""
+    target = tmp_path / "claimed.py"
+    target.write_text("before\n", encoding="utf-8")
+    original = AgentMessage(
+        type="tool",
+        content="Bash: touch claimed.py",
+        tool_name="Bash",
+        data={"tool_input": {"command": "touch claimed.py"}, "tool_call_id": "first"},
+    )
+    conflict = AgentMessage(
+        type="tool",
+        content="Bash: touch other.py",
+        tool_name="Bash",
+        data={
+            "tool_input": {"command": "touch other.py"},
+            "tool_call_id": "first",
+            "meta": {"tool_use_id": "second"},
+        },
+    )
+    completion = AgentMessage(
+        type="tool_result",
+        content="command completed with exit code 0",
+        data={"subtype": "tool_result", "exit_code": 0, "tool_call_id": "first"},
+    )
+
+    with _BashFilesystemLeaseTracker(task_cwd=str(tmp_path)) as tracker:
+        tracker.observe(original)
+        tracker.observe(conflict)
+        os.utime(target, ns=(7_000_000_000, 7_000_000_000))
+        observed = tracker.observe(completion)
+
+    assert "filesystem_effects" not in observed.data
+
+
+@pytest.mark.parametrize("call_id", (None, "call-1"))
+def test_receiver_lease_tracker_rejects_explicit_non_bash_completion(
+    tmp_path,
+    call_id,
+) -> None:
+    """An Edit completion cannot consume a Bash lease even with the same id."""
+    target = tmp_path / "claimed.py"
+    target.write_text("before\n", encoding="utf-8")
+    call_data: dict[str, object] = {"tool_input": {"command": "touch claimed.py"}}
+    completion_data: dict[str, object] = {
+        "subtype": "tool_result",
+        "exit_code": 0,
+    }
+    if call_id is not None:
+        call_data["tool_call_id"] = call_id
+        completion_data["tool_call_id"] = call_id
+    call = AgentMessage(
+        type="tool",
+        content="Bash: touch claimed.py",
+        tool_name="Bash",
+        data=call_data,
+    )
+    completion = AgentMessage(
+        type="tool_result",
+        content="Edit completed",
+        tool_name="Edit",
+        data=completion_data,
+    )
+
+    with _BashFilesystemLeaseTracker(task_cwd=str(tmp_path)) as tracker:
+        tracker.observe(call)
+        os.utime(target, ns=(5_000_000_000, 5_000_000_000))
+        observed = tracker.observe(completion)
+
+    assert "filesystem_effects" not in observed.data
+
+
+@pytest.mark.parametrize("call_id", (None, "shared-call"))
+@pytest.mark.parametrize("bash_first", (False, True))
+def test_receiver_lease_tracker_rejects_mixed_tool_call_ownership(
+    tmp_path,
+    call_id,
+    bash_first,
+) -> None:
+    """A mixed Bash/Edit call identity cannot feed a nameless completion."""
+    target = tmp_path / "claimed.py"
+    target.write_text("before\n", encoding="utf-8")
+    bash_data: dict[str, object] = {"tool_input": {"command": "touch claimed.py"}}
+    edit_data: dict[str, object] = {"tool_input": {"file_path": "other.py"}}
+    completion_data: dict[str, object] = {
+        "subtype": "tool_result",
+        "exit_code": 0,
+    }
+    if call_id is not None:
+        bash_data["tool_call_id"] = call_id
+        edit_data["tool_call_id"] = call_id
+        completion_data["tool_call_id"] = call_id
+    bash_call = AgentMessage(
+        type="tool",
+        content="Bash: touch claimed.py",
+        tool_name="Bash",
+        data=bash_data,
+    )
+    edit_call = AgentMessage(
+        type="tool",
+        content="Edit: other.py",
+        tool_name="Edit",
+        data=edit_data,
+    )
+    completion = AgentMessage(
+        type="tool_result",
+        content="completed",
+        data=completion_data,
+    )
+    calls = (bash_call, edit_call) if bash_first else (edit_call, bash_call)
+
+    with _BashFilesystemLeaseTracker(task_cwd=str(tmp_path)) as tracker:
+        for call in calls:
+            tracker.observe(call)
+        os.utime(target, ns=(6_000_000_000, 6_000_000_000))
+        observed = tracker.observe(completion)
+
+    assert "filesystem_effects" not in observed.data
+
+
+def test_bash_receiver_leases_do_not_leak_fds_across_repeated_completions(tmp_path) -> None:
+    """Repeated successful capture/close cycles retain no receiver descriptors."""
+    fd_directory = Path("/proc/self/fd")
+    if not fd_directory.exists():
+        fd_directory = Path("/dev/fd")
+    if not fd_directory.exists():  # pragma: no cover - platform-specific observability
+        pytest.skip("open descriptor directory is unavailable")
+    target = tmp_path / "claimed.py"
+    target.write_text("value\n", encoding="utf-8")
+    call = AgentMessage(
+        type="tool",
+        content="Bash: touch claimed.py",
+        tool_name="Bash",
+        data={"tool_input": {"command": "touch claimed.py"}},
+    )
+    before = len(tuple(fd_directory.iterdir()))
+
+    for iteration in range(64):
+        pending_targets = _pending_bash_filesystem_targets(call, task_cwd=str(tmp_path))
+        if not pending_targets:  # pragma: no cover - fail-closed platform fallback
+            pytest.skip("dirfd/no-follow receiver leases are unavailable")
+        timestamp = 2_000_000_000 + iteration
+        os.utime(target, ns=(timestamp, timestamp))
+        _attach_bash_filesystem_effects(
+            AgentMessage(
+                type="tool_result",
+                content="command completed with exit code 0",
+                data={"subtype": "tool_result", "exit_code": 0},
+            ),
+            pending_targets,
+        )
+
+    after = len(tuple(fd_directory.iterdir()))
+    assert after <= before + 1
+
+
+def test_bash_receiver_lease_fails_closed_without_dirfd_support(tmp_path, monkeypatch) -> None:
+    """Platforms without safe dirfd traversal do not emit command-text proof."""
+    target = tmp_path / "claimed.py"
+    target.write_text("value\n", encoding="utf-8")
+    call = AgentMessage(
+        type="tool",
+        content="Bash: touch claimed.py",
+        tool_name="Bash",
+        data={"tool_input": {"command": "touch claimed.py"}},
+    )
+    monkeypatch.setattr(os, "supports_dir_fd", set())
+
+    assert _pending_bash_filesystem_targets(call, task_cwd=str(tmp_path)) == ()
+
+
+def test_files_touched_allows_expanded_payload_with_literal_redirect_target(tmp_path) -> None:
+    """Payload expansion preserves direct proof from a literal output target."""
+    command = "printf '%s\\n' \"$VALUE\" > claimed.py"
+    call = AgentMessage(
+        type="tool",
+        content=f"Bash: {command}",
+        tool_name="Bash",
+        data={"tool_input": {"command": command}},
+    )
+    pending_targets = _pending_bash_filesystem_targets(call, task_cwd=str(tmp_path))
+    completed = subprocess.run(  # noqa: S602
+        command,
+        cwd=tmp_path,
+        shell=True,
+        check=False,
+        env={**os.environ, "VALUE": "expanded"},
+    )
+
+    assert completed.returncode == 0
+    assert (tmp_path / "claimed.py").read_text(encoding="utf-8") == "expanded\n"
+    result = _attach_bash_filesystem_effects(
+        AgentMessage(
+            type="tool_result",
+            content="command completed with exit code 0",
+            data={"subtype": "tool_result", "exit_code": 0},
+        ),
+        pending_targets,
+    )
+    messages = (
+        call,
+        result,
+    )
+    assert (
+        _runtime_messages_support_file_claim("claimed.py", messages, task_cwd=str(tmp_path)) is True
+    )
+
+
+def test_files_touched_resolves_shell_target_from_recorded_command_cwd(tmp_path) -> None:
+    """A relative shell target authenticates only its command-cwd path."""
+    root_claim = tmp_path / "claimed.py"
+    command_cwd = tmp_path / "sub"
+    root_claim.write_text("original\n", encoding="utf-8")
+    command_cwd.mkdir()
+    command = "touch claimed.py"
+
+    completed = subprocess.run(command, cwd=command_cwd, shell=True, check=False)  # noqa: S602
+
+    assert completed.returncode == 0
+    assert root_claim.read_text(encoding="utf-8") == "original\n"
+    assert (command_cwd / "claimed.py").exists()
+    messages = (
+        AgentMessage(
+            type="tool",
+            content=f"Bash: {command}",
+            tool_name="Bash",
+            data={"tool_input": {"command": command, "cwd": "sub"}},
+        ),
+        AgentMessage(
+            type="tool_result",
+            content="command completed with exit code 0",
+            data={
+                "subtype": "tool_result",
+                "exit_code": 0,
+                "filesystem_effects": [
+                    _filesystem_effect(
+                        command_cwd / "claimed.py",
+                        reported_path="claimed.py",
+                    )
+                ],
+            },
+        ),
+    )
+    assert not _runtime_messages_support_file_claim(
+        "claimed.py",
+        messages,
+        task_cwd=str(tmp_path),
+    )
+    assert _runtime_messages_support_file_claim(
+        "sub/claimed.py",
+        messages,
+        task_cwd=str(tmp_path),
+    )
+
+
+def test_files_touched_allows_non_c_python_literal_redirect(tmp_path) -> None:
+    """A normal Python script may retain path-aware shell redirection proof."""
+    generator = tmp_path / "generator.py"
+    generator.write_text("print('generated')\n", encoding="utf-8")
+    command = f"{shlex.quote(str(Path(sys.executable).resolve()))} generator.py > claimed.py"
+
+    completed = subprocess.run(command, cwd=tmp_path, shell=True, check=False)  # noqa: S602
+
+    assert completed.returncode == 0
+    assert (tmp_path / "claimed.py").read_text(encoding="utf-8") == "generated\n"
+    messages = (
+        AgentMessage(
+            type="tool",
+            content=f"Bash: {command}",
+            tool_name="Bash",
+            data={"tool_input": {"command": command}},
+        ),
+        AgentMessage(
+            type="tool_result",
+            content="command completed with exit code 0",
+            data={
+                "subtype": "tool_result",
+                "exit_code": 0,
+                "filesystem_effects": [
+                    _filesystem_effect(tmp_path / "claimed.py", reported_path="claimed.py")
+                ],
+            },
+        ),
+    )
+    assert _runtime_messages_support_file_claim(
+        "claimed.py",
+        messages,
+        task_cwd=str(tmp_path),
+    )
+
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        "python -c \"from pathlib import Path as P; P('src/generated.py').write_text('x')\"",
+        "python -c \"from pathlib import Path; p = Path('src/generated.py'); p.write_text('x')\"",
+        "python -c \"from pathlib import Path; 'src/generated.py'; Path('other.py').write_text('x')\"",
+        "python -c \"from pathlib import Path; # Path('src/generated.py').write_text('x')\"",
+        "python -c \"from pathlib import Path; raise SystemExit(0); Path('src/generated.py').write_text('x')\"",
+        "python -c \"from pathlib import Path; Path := object; Path('src/generated.py').write_text('x')\"",
+        "python -c \"from pathlib import Path; Path.write_text = lambda *args: None; Path('src/generated.py').write_text('x')\"",
+        "python -c \"from pathlib import Path; import os; os.chdir('src'); Path('generated.py').write_text('x')\"",
+        "python -c \"from pathlib import Path; other = 1; Path('src/generated.py').write_text('x')\"",
+        "PAYLOAD=x python -c \"from pathlib import Path; Path('src/generated.py').write_text('$PAYLOAD')\"",
+        "python -c \"from pathlib import Path; Path('src/generated.py').write_text('x')\" | cat",
+        "python -c \"from pathlib import Path; Path('src/generated.py').write_text('x')",
+        "/tmp/fake/python -c \"from pathlib import Path; Path('src/generated.py').write_text('x')\"",
+        "./python3 -c \"from pathlib import Path; Path('src/generated.py').write_text('x')\"",
+        "python -c \"from pathlib import Path; Path('other.py') . write_text('x')\"",
+        'python -c ""',
+        "python -c from pathlib import Path",
+        'python -c "' + ("(" * 5000) + '"',
+        "python -c \"from pathlib import Path; Path('src/\\x00generated.py').write_text('x')\"",
+    ),
+)
+def test_python_c_pathlib_static_proof_rejects_alias_variable_and_malformed_payloads(
+    tmp_path, command
+) -> None:
+    """Static pathlib proof rejects aliases, variable writes, injections, and bad payloads."""
+    generated = tmp_path / "src" / "generated.py"
+    generated.parent.mkdir()
+    generated.write_text("VALUE = 1\n", encoding="utf-8")
+
+    assert (
+        _python_c_command_file_claim_match(
+            command,
+            task_cwd=str(tmp_path),
+        )
+        is False
+    )
+
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        'python -c "from pathlib import Path; Path = lambda _value: None; '
+        "from pathlib import Path; Path('src/generated.py').write_text('x')\"",
+        'python -c "from pathlib import Path; def helper():\n'
+        "    Path = lambda _value: None\nPath('src/generated.py').write_text('x')\"",
+    ),
+)
+def test_python_c_pathlib_static_proof_rejects_rebinding_and_nested_statements(
+    tmp_path,
+    command,
+) -> None:
+    """Static pathlib proof rejects broader Python programs that need runtime evidence."""
+    generated = tmp_path / "src" / "generated.py"
+    generated.parent.mkdir()
+    generated.write_text("VALUE = 1\n", encoding="utf-8")
+
+    assert (
+        _python_c_command_file_claim_match(
+            command,
+            task_cwd=str(tmp_path),
+        )
+        is False
+    )
+
+
+def test_files_touched_rejects_python_wrapper_comment_shell_fallback(tmp_path) -> None:
+    """A Python-looking wrapper cannot smuggle ``touch`` text through a comment."""
+    claimed_file = tmp_path / "claimed.py"
+    other_file = tmp_path / "other.py"
+    claimed_file.write_text("VALUE = 1\n", encoding="utf-8")
+    other_file.write_text("VALUE = 2\n", encoding="utf-8")
+    command = (
+        "/usr/bin/env python -c "
+        "\"from pathlib import Path; # touch claimed.py ; Path('other.py').write_text('x')\""
+    )
+    messages = (
+        AgentMessage(
+            type="tool",
+            content=f"Bash: {command}",
+            tool_name="Bash",
+            data={"tool_input": {"command": command}},
+        ),
+        AgentMessage(
+            type="tool_result",
+            content="command completed with exit code 0",
+            data={"subtype": "tool_result", "exit_code": 0},
+        ),
+    )
+
+    assert (
+        _runtime_messages_support_file_claim(
+            "claimed.py",
+            messages,
+            task_cwd=str(tmp_path),
+        )
+        is False
+    )
+
+
+@pytest.mark.parametrize(
+    "command_prefix",
+    (
+        "/bin/bash -c ",
+        "/usr/bin/env ",
+    ),
+)
+def test_files_touched_rejects_wrapped_python_options_comment_shell_fallback(
+    tmp_path,
+    command_prefix,
+) -> None:
+    """Wrapped Python with options still blocks generic shell fallback."""
+    claimed_file = tmp_path / "claimed.py"
+    other_file = tmp_path / "other.py"
+    claimed_file.write_text("VALUE = 1\n", encoding="utf-8")
+    other_file.write_text("VALUE = 2\n", encoding="utf-8")
+    inner = shlex.join(
+        [
+            str(Path(sys.executable).resolve()),
+            "-I",
+            "-S",
+            "-c",
+            "from pathlib import Path; # touch claimed.py\nPath('other.py').write_text('x')",
+        ]
+    )
+    command = (
+        command_prefix + shlex.quote(inner)
+        if command_prefix == "/bin/bash -c "
+        else command_prefix + inner
+    )
+    messages = (
+        AgentMessage(
+            type="tool",
+            content=f"Bash: {command}",
+            tool_name="Bash",
+            data={"tool_input": {"command": command}},
+        ),
+        AgentMessage(
+            type="tool_result",
+            content="command completed with exit code 0",
+            data={"subtype": "tool_result", "exit_code": 0},
+        ),
+    )
+
+    assert (
+        _runtime_messages_support_file_claim(
+            "claimed.py",
+            messages,
+            task_cwd=str(tmp_path),
+        )
+        is False
+    )
+
+
+def test_files_touched_rejects_shell_quoted_absolute_python_fallback(tmp_path) -> None:
+    """Shell quotes around an absolute interpreter cannot hide Python evidence."""
+    claimed_file = tmp_path / "claimed.py"
+    other_file = tmp_path / "other.py"
+    claimed_file.write_text("VALUE = 1\n", encoding="utf-8")
+    other_file.write_text("VALUE = 2\n", encoding="utf-8")
+    source = "from pathlib import Path; # touch claimed.py\nPath('other.py').write_text('x')"
+    inner = f'"{Path(sys.executable).resolve()}" -I -S -c {shlex.quote(source)}'
+    command = f"/bin/bash -c {shlex.quote(inner)}"
+    messages = (
+        AgentMessage(
+            type="tool",
+            content=f"Bash: {command}",
+            tool_name="Bash",
+            data={"tool_input": {"command": command}},
+        ),
+        AgentMessage(
+            type="tool_result",
+            content="command completed with exit code 0",
+            data={"subtype": "tool_result", "exit_code": 0},
+        ),
+    )
+
+    assert not _runtime_messages_support_file_claim(
+        "claimed.py",
+        messages,
+        task_cwd=str(tmp_path),
+    )
+
+
+def test_files_touched_rejects_fragment_quoted_python_fallback(tmp_path) -> None:
+    """Shell-concatenated interpreter spelling cannot reach generic touch matching."""
+    claimed_file = tmp_path / "claimed.py"
+    other_file = tmp_path / "other.py"
+    claimed_file.write_text("VALUE = 1\n", encoding="utf-8")
+    other_file.write_text("VALUE = 2\n", encoding="utf-8")
+    source = "from pathlib import Path; # touch claimed.py\nPath('other.py').write_text('changed')"
+    executable = str(Path(sys.executable).resolve())
+    fragmented_executable = executable.replace("python", 'py"thon"', 1)
+    assert fragmented_executable != executable
+    inner = f"{fragmented_executable} -c {shlex.quote(source)}"
+    command = f"/bin/bash -c {shlex.quote(inner)}"
+
+    completed = subprocess.run(
+        command,
+        cwd=tmp_path,
+        shell=True,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0
+    assert claimed_file.read_text(encoding="utf-8") == "VALUE = 1\n"
+    assert other_file.read_text(encoding="utf-8") == "changed"
+
+    messages = (
+        AgentMessage(
+            type="tool",
+            content=f"Bash: {command}",
+            tool_name="Bash",
+            data={"tool_input": {"command": command}},
+        ),
+        AgentMessage(
+            type="tool_result",
+            content="command completed with exit code 0",
+            data={"subtype": "tool_result", "exit_code": 0},
+        ),
+    )
+    assert not _runtime_messages_support_file_claim(
+        "claimed.py",
+        messages,
+        task_cwd=str(tmp_path),
+    )
+
+
+def test_files_touched_rejects_dead_compound_mutation_branch(tmp_path) -> None:
+    """A successful compound command cannot prove an unexecuted write branch."""
+    claimed_file = tmp_path / "claimed.py"
+    other_file = tmp_path / "other.py"
+    claimed_file.write_text("VALUE = 1\n", encoding="utf-8")
+    other_file.write_text("VALUE = 2\n", encoding="utf-8")
+    source = "from pathlib import Path; getattr(Path('other.py'), 'write_' + 'text')('changed')"
+    python_command = shlex.join([str(Path(sys.executable).resolve()), "-I", "-S", "-c", source])
+    inner = f"false && touch claimed.py; {python_command}"
+    command = f"/bin/bash -c {shlex.quote(inner)}"
+
+    completed = subprocess.run(
+        command,
+        cwd=tmp_path,
+        shell=True,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0
+    assert claimed_file.read_text(encoding="utf-8") == "VALUE = 1\n"
+    assert other_file.read_text(encoding="utf-8") == "changed"
+
+    messages = (
+        AgentMessage(
+            type="tool",
+            content=f"Bash: {command}",
+            tool_name="Bash",
+            data={"tool_input": {"command": command}},
+        ),
+        AgentMessage(
+            type="tool_result",
+            content="command completed with exit code 0",
+            data={"subtype": "tool_result", "exit_code": 0},
+        ),
+    )
+    assert not _runtime_messages_support_file_claim(
+        "claimed.py",
+        messages,
+        task_cwd=str(tmp_path),
+    )
+
+
+def test_files_touched_rejects_shell_expanded_python_pathlib_tokens(tmp_path) -> None:
+    """Dynamic shell tokens cannot fall through to generic mutation matching."""
+    claimed_file = tmp_path / "claimed.py"
+    other_file = tmp_path / "other.py"
+    claimed_file.write_text("VALUE = 1\n", encoding="utf-8")
+    other_file.write_text("VALUE = 2\n", encoding="utf-8")
+    inner = (
+        '"${P}"thon -"c" "from path${L} import P${A}th; # touch claimed.py\n'
+        "P${A}th('other.py').write_text('changed')\""
+    )
+    command = f"P=py L=lib A=a /bin/bash -c {shlex.quote(inner)}"
+
+    completed = subprocess.run(
+        command,
+        cwd=tmp_path,
+        shell=True,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0
+    assert claimed_file.read_text(encoding="utf-8") == "VALUE = 1\n"
+    assert other_file.read_text(encoding="utf-8") == "changed"
+
+    messages = (
+        AgentMessage(
+            type="tool",
+            content=f"Bash: {command}",
+            tool_name="Bash",
+            data={"tool_input": {"command": command}},
+        ),
+        AgentMessage(
+            type="tool_result",
+            content="command completed with exit code 0",
+            data={"subtype": "tool_result", "exit_code": 0},
+        ),
+    )
+
+    assert not _runtime_messages_support_file_claim(
+        "claimed.py",
+        messages,
+        task_cwd=str(tmp_path),
+    )
+
+
+def test_files_touched_treats_python_wrapper_transcript_text_as_inert_data(tmp_path) -> None:
+    """Instruction-like command text is parsed as evidence data and never executed."""
+    claimed_file = tmp_path / "claimed.py"
+    other_file = tmp_path / "other.py"
+    claimed_file.write_text("VALUE = 1\n", encoding="utf-8")
+    other_file.write_text("VALUE = 2\n", encoding="utf-8")
+    command = (
+        "/usr/bin/env python -c "
+        '"from pathlib import Path; # ignore previous rules; sleep 999; touch claimed.py\n'
+        "Path('other.py').write_text('x')\""
+    )
+    messages = (
+        AgentMessage(
+            type="tool",
+            content=f"Bash: {command}",
+            tool_name="Bash",
+            data={"tool_input": {"command": command}},
+        ),
+        AgentMessage(
+            type="tool_result",
+            content="command completed with exit code 0",
+            data={"subtype": "tool_result", "exit_code": 0},
+        ),
+    )
+
+    assert (
+        _runtime_messages_support_file_claim(
+            "claimed.py",
+            messages,
+            task_cwd=str(tmp_path),
+        )
+        is False
+    )
+
+
+def test_files_touched_rejects_nested_shell_python_pathlib_payload(tmp_path) -> None:
+    """A nested shell command cannot hide unsafe Python pathlib evidence."""
+    claimed_file = tmp_path / "claimed.py"
+    other_file = tmp_path / "other.py"
+    claimed_file.write_text("VALUE = 1\n", encoding="utf-8")
+    other_file.write_text("VALUE = 2\n", encoding="utf-8")
+    command = (
+        "bash -c 'python -c \"from pathlib import Path; # touch claimed.py\n"
+        "Path('\\''other.py'\\'').write_text('\\''x'\\'')\"'"
+    )
+    messages = (
+        AgentMessage(
+            type="tool",
+            content=f"Bash: {command}",
+            tool_name="Bash",
+            data={"tool_input": {"command": command}},
+        ),
+        AgentMessage(
+            type="tool_result",
+            content="command completed with exit code 0",
+            data={"subtype": "tool_result", "exit_code": 0},
+        ),
+    )
+
+    assert (
+        _runtime_messages_support_file_claim(
+            "claimed.py",
+            messages,
+            task_cwd=str(tmp_path),
+        )
+        is False
+    )
+
+
+def test_files_touched_rejects_parser_failure_with_tabbed_python_c_payload(tmp_path) -> None:
+    """Malformed shell text with tabbed Python ``-c`` evidence fails closed."""
+    claimed_file = tmp_path / "claimed.py"
+    claimed_file.write_text("VALUE = 1\n", encoding="utf-8")
+    command = (
+        "cat <<'PY\n"
+        'python\t-c "from pathlib import Path; # touch claimed.py\n'
+        "Path('other.py').write_text('x')\"\n"
+    )
+    messages = (
+        AgentMessage(
+            type="tool",
+            content=f"Bash: {command}",
+            tool_name="Bash",
+            data={"tool_input": {"command": command}},
+        ),
+        AgentMessage(
+            type="tool_result",
+            content="command completed with exit code 0",
+            data={"subtype": "tool_result", "exit_code": 0},
+        ),
+    )
+
+    assert (
+        _runtime_messages_support_file_claim(
+            "claimed.py",
+            messages,
+            task_cwd=str(tmp_path),
+        )
+        is False
+    )
+
+
+def test_python_c_pathlib_static_proof_rejects_isolated_without_no_site(tmp_path) -> None:
+    """``-I`` alone can still run site customization, so it is not static proof."""
+    generated = tmp_path / "src" / "generated.py"
+    generated.parent.mkdir()
+    generated.write_text("VALUE = 1\n", encoding="utf-8")
+    command = shlex.join(
+        [
+            sys.executable,
+            "-I",
+            "-c",
+            "from pathlib import Path; Path('src/generated.py').write_text('x')",
+        ]
+    )
+
+    assert (
+        _python_c_command_file_claim_match(
+            command,
+            task_cwd=str(tmp_path),
+        )
+        is False
+    )
+
+
+def test_files_touched_rejects_relative_python_executable_even_when_final_state_matches(
+    tmp_path, monkeypatch
+) -> None:
+    """Workspace-controlled Python executable paths are mutable final-state evidence."""
+    command_cwd = tmp_path / "runner"
+    command_cwd.mkdir()
+    claimed_file = command_cwd / "claimed.py"
+    claimed_file.write_text("VALUE = 1\n", encoding="utf-8")
+    fake_python = command_cwd / "python3"
+    fake_python.write_text("#!/bin/sh\n", encoding="utf-8")
+    monkeypatch.setattr(sys, "executable", str(fake_python))
+    command = "./python3 -I -S -c \"from pathlib import Path; Path('claimed.py').write_text('x')\""
+    messages = (
+        AgentMessage(
+            type="tool",
+            content=f"Bash: {command}",
+            tool_name="Bash",
+            data={"tool_input": {"command": command, "cwd": "runner"}},
+        ),
+        AgentMessage(
+            type="tool_result",
+            content="command completed with exit code 0",
+            data={"subtype": "tool_result", "exit_code": 0},
+        ),
+    )
+
+    assert (
+        _runtime_messages_support_file_claim(
+            "runner/claimed.py",
+            messages,
+            task_cwd=str(tmp_path),
+        )
+        is False
+    )
+
+
+def test_files_touched_rejects_absolute_python_symlink_final_state_spoof(tmp_path) -> None:
+    """An arbitrary absolute symlink cannot authenticate an earlier executable."""
+    claimed_file = tmp_path / "claimed.py"
+    claimed_file.write_text("VALUE = 1\n", encoding="utf-8")
+    fake_python = tmp_path / "python3"
+    try:
+        os.symlink(Path(sys.executable).resolve(), fake_python)
+    except (OSError, NotImplementedError):  # pragma: no cover - unprivileged/Windows
+        pytest.skip("symlink creation not permitted in this environment")
+    command = shlex.join(
+        [
+            str(fake_python),
+            "-I",
+            "-S",
+            "-c",
+            "from pathlib import Path; Path('claimed.py').write_text('x')",
+        ]
+    )
+    messages = (
+        AgentMessage(
+            type="tool",
+            content=f"Bash: {command}",
+            tool_name="Bash",
+            data={"tool_input": {"command": command}},
+        ),
+        AgentMessage(
+            type="tool_result",
+            content="command completed with exit code 0",
+            data={"subtype": "tool_result", "exit_code": 0},
+        ),
+    )
+
+    assert (
+        _runtime_messages_support_file_claim(
+            "claimed.py",
+            messages,
+            task_cwd=str(tmp_path),
+        )
+        is False
+    )
+
+
+def test_files_touched_rejects_exact_sys_executable_symlink_final_state_spoof(
+    tmp_path, monkeypatch
+) -> None:
+    """Even the exact sys.executable path is unsafe when it is a mutable symlink."""
+    claimed_file = tmp_path / "claimed.py"
+    claimed_file.write_text("VALUE = 1\n", encoding="utf-8")
+    fake_python = tmp_path / "python3"
+    try:
+        os.symlink(Path(sys.executable).resolve(), fake_python)
+    except (OSError, NotImplementedError):  # pragma: no cover - unprivileged/Windows
+        pytest.skip("symlink creation not permitted in this environment")
+    monkeypatch.setattr(sys, "executable", str(fake_python))
+    command = shlex.join(
+        [
+            str(fake_python),
+            "-I",
+            "-S",
+            "-c",
+            "from pathlib import Path; Path('claimed.py').write_text('x')",
+        ]
+    )
+    messages = (
+        AgentMessage(
+            type="tool",
+            content=f"Bash: {command}",
+            tool_name="Bash",
+            data={"tool_input": {"command": command}},
+        ),
+        AgentMessage(
+            type="tool_result",
+            content="command completed with exit code 0",
+            data={"subtype": "tool_result", "exit_code": 0},
+        ),
+    )
+
+    assert (
+        _runtime_messages_support_file_claim(
+            "claimed.py",
+            messages,
+            task_cwd=str(tmp_path),
+        )
+        is False
+    )
+
+
+def test_files_touched_rejects_command_cwd_symlink_final_state_spoof(tmp_path) -> None:
+    """A retargetable cwd symlink cannot prove where a historical command ran."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    subdir = tmp_path / "sub"
+    subdir.mkdir()
+    claimed_file = subdir / "claimed.py"
+    claimed_file.write_text("VALUE = 1\n", encoding="utf-8")
+    run_link = tmp_path / "run"
+    try:
+        os.symlink(outside, run_link)
+        run_link.unlink()
+        os.symlink(subdir, run_link)
+    except (OSError, NotImplementedError):  # pragma: no cover - unprivileged/Windows
+        pytest.skip("symlink creation not permitted in this environment")
+    command = _trusted_python_c("from pathlib import Path; Path('claimed.py').write_text('x')")
+    messages = (
+        AgentMessage(
+            type="tool",
+            content=f"Bash: {command}",
+            tool_name="Bash",
+            data={"tool_input": {"command": command, "cwd": "run"}},
+        ),
+        AgentMessage(
+            type="tool_result",
+            content="command completed with exit code 0",
+            data={"subtype": "tool_result", "exit_code": 0},
+        ),
+    )
+
+    assert (
+        _runtime_messages_support_file_claim(
+            "sub/claimed.py",
+            messages,
+            task_cwd=str(tmp_path),
+        )
+        is False
+    )
+
+
+def test_files_touched_rejects_command_cwd_symlink_replaced_by_directory(tmp_path) -> None:
+    """A cwd symlink replaced by a real directory still lacks execution-time identity."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    run_path = tmp_path / "run"
+    try:
+        os.symlink(outside, run_path)
+        run_path.unlink()
+    except (OSError, NotImplementedError):  # pragma: no cover - unprivileged/Windows
+        pytest.skip("symlink creation not permitted in this environment")
+    run_path.mkdir()
+    claimed_file = run_path / "claimed.py"
+    claimed_file.write_text("VALUE = 1\n", encoding="utf-8")
+    command = _trusted_python_c("from pathlib import Path; Path('claimed.py').write_text('x')")
+    messages = (
+        AgentMessage(
+            type="tool",
+            content=f"Bash: {command}",
+            tool_name="Bash",
+            data={"tool_input": {"command": command, "cwd": "run"}},
+        ),
+        AgentMessage(
+            type="tool_result",
+            content="command completed with exit code 0",
+            data={"subtype": "tool_result", "exit_code": 0},
+        ),
+    )
+
+    assert (
+        _runtime_messages_support_file_claim(
+            "run/claimed.py",
+            messages,
+            task_cwd=str(tmp_path),
+        )
+        is False
+    )
+
+
+def test_files_touched_rejects_receiver_symlink_replaced_by_regular_file(tmp_path) -> None:
+    """The exact claimed receiver can be replaced after execution, so text fails closed."""
+    outside = tmp_path / "outside.py"
+    outside.write_text("VALUE = 1\n", encoding="utf-8")
+    claimed_file = tmp_path / "claimed.py"
+    try:
+        os.symlink(outside, claimed_file)
+        claimed_file.unlink()
+    except (OSError, NotImplementedError):  # pragma: no cover - unprivileged/Windows
+        pytest.skip("symlink creation not permitted in this environment")
+    claimed_file.write_text("VALUE = 2\n", encoding="utf-8")
+    command = _trusted_python_c("from pathlib import Path; Path('claimed.py').write_text('x')")
+    messages = (
+        AgentMessage(
+            type="tool",
+            content=f"Bash: {command}",
+            tool_name="Bash",
+            data={"tool_input": {"command": command}},
+        ),
+        AgentMessage(
+            type="tool_result",
+            content="command completed with exit code 0",
+            data={"subtype": "tool_result", "exit_code": 0},
+        ),
+    )
+
+    assert (
+        _runtime_messages_support_file_claim(
+            "claimed.py",
+            messages,
+            task_cwd=str(tmp_path),
+        )
+        is False
+    )
+
+
+def test_files_touched_rejects_pathlib_receiver_symlink_final_state_spoof(tmp_path) -> None:
+    """A symlink retargeted after execution must not authenticate the old receiver."""
+    claimed_file = tmp_path / "claimed.py"
+    other_file = tmp_path / "other.py"
+    alias = tmp_path / "alias.py"
+    claimed_file.write_text("VALUE = 1\n", encoding="utf-8")
+    other_file.write_text("VALUE = 2\n", encoding="utf-8")
+    try:
+        os.symlink(other_file, alias)
+        alias.unlink()
+        os.symlink(claimed_file, alias)
+    except (OSError, NotImplementedError):  # pragma: no cover - unprivileged/Windows
+        pytest.skip("symlink creation not permitted in this environment")
+    command = _trusted_python_c("from pathlib import Path; Path('alias.py').write_text('x')")
+    messages = (
+        AgentMessage(
+            type="tool",
+            content=f"Bash: {command}",
+            tool_name="Bash",
+            data={"tool_input": {"command": command}},
+        ),
+        AgentMessage(
+            type="tool_result",
+            content="command completed with exit code 0",
+            data={"subtype": "tool_result", "exit_code": 0},
+        ),
+    )
+
+    assert (
+        _runtime_messages_support_file_claim(
+            "claimed.py",
+            messages,
+            task_cwd=str(tmp_path),
+        )
+        is False
+    )
+
+
+def test_files_touched_rejects_production_shaped_goose_command_text_only(tmp_path) -> None:
+    """Goose success correlation does not make command text a file proof."""
+    generated_file = tmp_path / "src" / "generated.py"
+    generated_file.parent.mkdir()
+    generated_file.write_text("VALUE = 1\n", encoding="utf-8")
+    command = _trusted_python_c(
+        "from pathlib import Path; Path('src/generated.py').write_text('VALUE = 2')"
+    )
+    messages = (
+        AgentMessage(
+            type="tool",
+            content="tool.started Bash",
+            tool_name="Bash",
+            data={
+                "runtime_event_type": "tool.started",
+                "tool_call_id": "goose-call-1",
+                "tool_input": {"cmd": command},
+            },
+        ),
+        AgentMessage(
+            type="tool_result",
+            content="tool.output",
+            data={
+                "runtime_event_type": "tool.output",
+                "tool_call_id": "goose-call-1",
+                "is_error": False,
+                "output": "",
+            },
+        ),
+    )
+
+    assert (
+        _runtime_messages_support_file_claim(
+            "src/generated.py",
+            messages,
+            task_cwd=str(tmp_path),
+        )
+        is False
+    )
+
+
+def test_python_c_pathlib_static_proof_rejects_deep_receiver_without_exception(
+    tmp_path,
+) -> None:
+    """Receiver extraction fails closed when the pathlib AST is too deep."""
+    generated = tmp_path / "src" / "generated.py"
+    generated.parent.mkdir()
+    generated.write_text("VALUE = 1\n", encoding="utf-8")
+    source = (
+        "from pathlib import Path; "
+        + ("Path('src')" + " / 'nested'" * 1_000 + " / 'generated.py'")
+        + ".write_text('x')"
+    )
+
+    assert (
+        _python_c_command_file_claim_match(
+            _trusted_python_c(source),
+            task_cwd=str(tmp_path),
+        )
+        is False
+    )
+
+
+def test_files_touched_rejects_symlink_loop_claim_without_exception(tmp_path) -> None:
+    """Symlink-loop resolution errors are malformed evidence, not verifier crashes."""
+    loop = tmp_path / "a"
+    try:
+        os.symlink(tmp_path / "b", loop)
+        os.symlink(loop, tmp_path / "b")
+    except (OSError, NotImplementedError):  # pragma: no cover - unprivileged/Windows
+        pytest.skip("symlink creation not permitted in this environment")
+    message = AgentMessage(
+        type="tool",
+        content="Edit: a/generated.py",
+        tool_name="Edit",
+        data={
+            "tool_input": {"file_path": "a/generated.py"},
+            "exit_code": 0,
+        },
+    )
+
+    assert (
+        _runtime_messages_support_file_claim(
+            "a/generated.py",
+            (message,),
+            task_cwd=str(tmp_path),
+        )
+        is False
+    )
+
+
+def test_files_touched_accepts_structured_bash_output_proof(tmp_path) -> None:
+    """Structured Bash output remains valid when command text is not a direct write."""
+    generated = tmp_path / "src" / "generated.py"
+    generated.parent.mkdir()
+    generated.write_text("VALUE = 1\n", encoding="utf-8")
+    messages = (
+        AgentMessage(
+            type="tool",
+            content="Bash: python scripts/generate.py",
+            tool_name="Bash",
+            data={
+                "tool_input": {"command": "python scripts/generate.py"},
+                "output": "generated src/generated.py",
+                "exit_code": 0,
+            },
+        ),
+    )
+
+    assert (
+        _runtime_messages_support_file_claim(
+            "src/generated.py",
+            messages,
+            task_cwd=str(tmp_path),
+        )
+        is True
+    )
 
 
 @pytest.mark.parametrize(
@@ -1982,12 +4287,14 @@ class _FinalMessageRuntime:
         *,
         native_session_id: str,
         support_messages: tuple[AgentMessage, ...] = (),
+        execute_support_commands: tuple[str, ...] = (),
         cwd: str = "/tmp/project",
         success: bool = True,
     ) -> None:
         self._final_message = final_message
         self._native_session_id = native_session_id
         self._support_messages = support_messages
+        self._execute_support_commands = execute_support_commands
         self._cwd = cwd
         self._success = success
         self.call_count = 0
@@ -2036,6 +4343,17 @@ class _FinalMessageRuntime:
                     },
                 )
             yield message
+            tool_input = message.data.get("tool_input")
+            command = tool_input.get("command") if isinstance(tool_input, dict) else None
+            if command in self._execute_support_commands:
+                completed = subprocess.run(  # noqa: S602
+                    command,
+                    cwd=self._cwd,
+                    shell=True,
+                    check=False,
+                )
+                if completed.returncode != 0:
+                    raise RuntimeError(f"scripted support command failed: {command}")
         yield AgentMessage(
             type="result",
             content=self._final_message,
@@ -2785,6 +5103,152 @@ def test_files_touched_accepts_in_workspace_relative_vs_absolute_edit(tmp_path) 
     )
 
 
+def test_files_touched_rejects_unexecuted_python_c_pathlib_write(tmp_path) -> None:
+    """A successful process exit before the write is not mutation evidence."""
+    workspace = tmp_path / "work"
+    workspace.mkdir()
+    message = AgentMessage(
+        type="tool",
+        content="python write",
+        tool_name="Bash",
+        data={
+            "tool_input": {
+                "command": (
+                    'python -c "from pathlib import Path; raise SystemExit(0); '
+                    "Path('generated.py').write_text('x')\""
+                )
+            },
+            "exit_code": 0,
+        },
+    )
+
+    assert not _runtime_messages_support_file_claim(
+        "generated.py",
+        (message,),
+        task_cwd=str(workspace),
+    )
+
+
+def test_files_touched_rejects_python_c_pathlib_command_text_only_with_command_cwd(
+    tmp_path,
+) -> None:
+    """Command cwd cannot make Python command text prove file mutation."""
+    workspace = tmp_path / "work"
+    subdir = workspace / "subdir"
+    subdir.mkdir(parents=True)
+    message = AgentMessage(
+        type="tool",
+        content="python write",
+        tool_name="Bash",
+        data={
+            "tool_input": {
+                "command": _trusted_python_c(
+                    "from pathlib import Path; Path('generated.py').write_text('x')"
+                ),
+                "cwd": str(subdir),
+            },
+            "exit_code": 0,
+        },
+    )
+
+    assert not _runtime_messages_support_file_claim(
+        "subdir/generated.py",
+        (message,),
+        task_cwd=str(workspace),
+    )
+    assert not _runtime_messages_support_file_claim(
+        "generated.py",
+        (message,),
+        task_cwd=str(workspace),
+    )
+
+
+def test_files_touched_rejects_python_c_pathlib_command_cwd_outside_workspace(tmp_path) -> None:
+    """An outside command cwd cannot prove a workspace files_touched claim."""
+    workspace = tmp_path / "work"
+    outside = tmp_path / "outside"
+    workspace.mkdir()
+    outside.mkdir()
+    message = AgentMessage(
+        type="tool",
+        content="python write",
+        tool_name="Bash",
+        data={
+            "tool_input": {
+                "command": "python -c \"from pathlib import Path; Path('generated.py').write_text('x')\"",
+                "cwd": str(outside),
+            },
+            "exit_code": 0,
+        },
+    )
+
+    assert not _runtime_messages_support_file_claim(
+        "generated.py",
+        (message,),
+        task_cwd=str(workspace),
+    )
+
+
+@pytest.mark.parametrize(
+    "tool_input",
+    (
+        {
+            "cmd": _trusted_python_c(
+                "from pathlib import Path; Path('generated.py').write_text('x')"
+            )
+        },
+        {
+            "cmd": [
+                str(Path(sys.executable).resolve()),
+                "-I",
+                "-S",
+                "-c",
+                "from pathlib import Path; Path('generated.py').write_text('x')",
+            ]
+        },
+    ),
+)
+def test_files_touched_rejects_python_c_pathlib_goose_cmd_text_only(tmp_path, tool_input) -> None:
+    """Goose cmd string and argv list shapes still need separate file proof."""
+    workspace = tmp_path / "work"
+    workspace.mkdir()
+    message = AgentMessage(
+        type="tool",
+        content="python write",
+        tool_name="Bash",
+        data={"tool_input": tool_input, "exit_code": 0},
+    )
+
+    assert not _runtime_messages_support_file_claim(
+        "generated.py",
+        (message,),
+        task_cwd=str(workspace),
+    )
+
+
+def test_files_touched_rejects_invalid_python_c_pathlib_literal_without_exception(tmp_path) -> None:
+    """Invalid literal paths fail closed instead of aborting verification."""
+    workspace = tmp_path / "work"
+    workspace.mkdir()
+    message = AgentMessage(
+        type="tool",
+        content="python write",
+        tool_name="Bash",
+        data={
+            "tool_input": {
+                "command": "python -c \"from pathlib import Path; Path('src/\\x00generated.py').write_text('x')\""
+            },
+            "exit_code": 0,
+        },
+    )
+
+    assert not _runtime_messages_support_file_claim(
+        "src/generated.py",
+        (message,),
+        task_cwd=str(workspace),
+    )
+
+
 def test_files_touched_task_cwd_none_rejects_touch_command_text() -> None:
     """Workspace unknown: only structured Edit/Write proves files, not ``touch`` text."""
     touch = AgentMessage(
@@ -2978,6 +5442,43 @@ def test_correlated_tool_result_name_requires_one_exact_call_id_match() -> None:
             result,
         )
         is None
+    )
+    conflicting_result = replace(
+        result,
+        data={
+            **result.data,
+            "meta": {"tool_use_id": "different"},
+        },
+    )
+    assert _correlated_tool_result_name([start, conflicting_result], conflicting_result) is None
+
+
+def test_files_touched_rejects_conflicting_top_level_and_nested_call_ids(tmp_path) -> None:
+    """A conflicting completion cannot fall through as id-less success/effect proof."""
+    target = tmp_path / "claimed.py"
+    target.write_text("changed\n", encoding="utf-8")
+    call = AgentMessage(
+        type="tool",
+        content="Bash: touch claimed.py",
+        tool_name="Bash",
+        data={"tool_input": {"command": "touch claimed.py"}, "tool_call_id": "call-a"},
+    )
+    completion = AgentMessage(
+        type="tool_result",
+        content="command completed with exit code 0",
+        data={
+            "subtype": "tool_result",
+            "exit_code": 0,
+            "tool_call_id": "call-a",
+            "tool_result": {"meta": {"tool_use_id": "call-b"}},
+            "filesystem_effects": [_filesystem_effect(target, reported_path="claimed.py")],
+        },
+    )
+
+    assert not _runtime_messages_support_file_claim(
+        "claimed.py",
+        (call, completion),
+        task_cwd=str(tmp_path),
     )
 
 
@@ -6746,7 +9247,7 @@ class TestParallelACExecutor:
         (
             "touch src/generated.py",
             "printf 'VALUE = 1' > src/generated.py",
-            "sed -i '' 's/1/2/' src/generated.py",
+            "truncate -s 0 src/generated.py",
         ),
     )
     async def test_fat_harness_verifier_allows_explicit_bash_file_mutation_without_output(
@@ -6756,6 +9257,7 @@ class TestParallelACExecutor:
         generated_file = tmp_path / "src" / "generated.py"
         generated_file.parent.mkdir()
         generated_file.write_text("VALUE = 1\n", encoding="utf-8")
+        os.utime(generated_file, ns=(1_000_000_000, 1_000_000_000))
 
         event_store, appended_events = _make_replaying_event_store()
         executor = ParallelACExecutor(
@@ -6777,7 +9279,10 @@ class TestParallelACExecutor:
                     AgentMessage(
                         type="tool_result",
                         content="command completed with exit code 0",
-                        data={"subtype": "tool_result", "exit_code": 0},
+                        data={
+                            "subtype": "tool_result",
+                            "exit_code": 0,
+                        },
                     ),
                     AgentMessage(
                         type="tool",
@@ -6791,6 +9296,7 @@ class TestParallelACExecutor:
                         data={"subtype": "tool_result", "is_error": False},
                     ),
                 ),
+                execute_support_commands=(command,),
                 cwd=str(tmp_path),
             ),
             event_store=event_store,
@@ -6937,6 +9443,848 @@ class TestParallelACExecutor:
                         type="result",
                         content="tests/test_generated.py passed\n1 passed in 0.01s",
                         data={"subtype": "success"},
+                    ),
+                ),
+                cwd=str(tmp_path),
+            ),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+            execution_profile=load_profile("code"),
+            fat_harness_mode=True,
+        )
+
+        result = await executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content="Implement AC 1",
+            session_id="orch_123",
+            tools=["Read"],
+            tool_catalog=(MCPToolDefinition(name="Read", description="Read a file."),),
+            system_prompt="system",
+            seed_goal="Ship the feature",
+            depth=0,
+            start_time=datetime.now(UTC),
+        )
+
+        assert result.success is False
+        assert result.error is not None
+        assert "files_touched: src/generated.py" in result.error
+        evidence_event = next(
+            event
+            for event in appended_events
+            if event.type == "execution.ac.typed_evidence.observed"
+        )
+        assert evidence_event.data["verifier_passed"] is False
+
+    @pytest.mark.asyncio
+    async def test_fat_harness_verifier_rejects_pathlib_command_text_only(self, tmp_path) -> None:
+        """Python/pathlib command text alone is not execution-bound file proof."""
+        generated_file = tmp_path / "src" / "generated.py"
+        generated_file.parent.mkdir()
+        generated_file.write_text("VALUE = 1\n", encoding="utf-8")
+        command = _trusted_python_c(
+            "from pathlib import Path; Path('src/generated.py').write_text('VALUE = 2')"
+        )
+        evidence_json = json.dumps(
+            {
+                "files_touched": ["src/generated.py"],
+                "commands_run": [command, "pytest tests/test_generated.py"],
+                "tests_passed": ["tests/test_generated.py"],
+            }
+        )
+
+        event_store, appended_events = _make_replaying_event_store()
+        executor = ParallelACExecutor(
+            adapter=_FinalMessageRuntime(
+                f"Done.\n```json\n{evidence_json}\n```",
+                native_session_id="opencode-session-evidence",
+                support_messages=(
+                    AgentMessage(
+                        type="tool",
+                        content=f"Bash: {command}",
+                        tool_name="Bash",
+                        data={"tool_input": {"command": command}},
+                    ),
+                    AgentMessage(
+                        type="tool_result",
+                        content="command completed with exit code 0",
+                        data={"subtype": "tool_result", "exit_code": 0},
+                    ),
+                    AgentMessage(
+                        type="tool",
+                        content="Bash: pytest tests/test_generated.py",
+                        tool_name="Bash",
+                        data={"tool_input": {"command": "pytest tests/test_generated.py"}},
+                    ),
+                    AgentMessage(
+                        type="tool_result",
+                        content="tests/test_generated.py passed\n1 passed in 0.01s",
+                        data={"subtype": "tool_result", "is_error": False},
+                    ),
+                ),
+                cwd=str(tmp_path),
+            ),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+            execution_profile=load_profile("code"),
+            fat_harness_mode=True,
+        )
+
+        result = await executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content="Implement AC 1",
+            session_id="orch_123",
+            tools=["Read"],
+            tool_catalog=(MCPToolDefinition(name="Read", description="Read a file."),),
+            system_prompt="system",
+            seed_goal="Ship the feature",
+            depth=0,
+            start_time=datetime.now(UTC),
+        )
+
+        assert result.success is False
+        assert result.error is not None
+        assert "files_touched: src/generated.py" in result.error
+        evidence_event = next(
+            event
+            for event in appended_events
+            if event.type == "execution.ac.typed_evidence.observed"
+        )
+        assert evidence_event.data["verifier_passed"] is False
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "command_factory",
+        (
+            lambda _tmp_path: _trusted_python_c(
+                "from pathlib import Path; Path('./src/generated.py').write_text('VALUE = 2')"
+            ),
+            lambda _tmp_path: _trusted_python_c(
+                "from pathlib import Path; (Path('src') / 'generated.py').write_text('VALUE = 2')"
+            ),
+            lambda _tmp_path: _trusted_python_c(
+                "from pathlib import Path; Path('src', 'generated.py').write_text('VALUE = 2')"
+            ),
+            lambda tmp_path: _trusted_python_c(
+                f"from pathlib import Path; Path('{tmp_path / 'src' / 'generated.py'}').write_text('VALUE = 2')"
+            ),
+        ),
+    )
+    async def test_fat_harness_verifier_rejects_equivalent_pathlib_command_text_only(
+        self, tmp_path, command_factory
+    ) -> None:
+        """Equivalent pathlib spellings still need execution-bound file proof."""
+        generated_file = tmp_path / "src" / "generated.py"
+        generated_file.parent.mkdir()
+        generated_file.write_text("VALUE = 1\n", encoding="utf-8")
+        command = command_factory(tmp_path)
+        evidence_json = json.dumps(
+            {
+                "files_touched": ["src/generated.py"],
+                "commands_run": [command, "pytest tests/test_generated.py"],
+                "tests_passed": ["tests/test_generated.py"],
+            }
+        )
+
+        event_store, appended_events = _make_replaying_event_store()
+        executor = ParallelACExecutor(
+            adapter=_FinalMessageRuntime(
+                f"Done.\n```json\n{evidence_json}\n```",
+                native_session_id="opencode-session-evidence",
+                support_messages=(
+                    AgentMessage(
+                        type="tool",
+                        content=f"Bash: {command}",
+                        tool_name="Bash",
+                        data={"tool_input": {"command": command}},
+                    ),
+                    AgentMessage(
+                        type="tool_result",
+                        content="command completed with exit code 0",
+                        data={"subtype": "tool_result", "exit_code": 0},
+                    ),
+                    AgentMessage(
+                        type="tool",
+                        content="Bash: pytest tests/test_generated.py",
+                        tool_name="Bash",
+                        data={"tool_input": {"command": "pytest tests/test_generated.py"}},
+                    ),
+                    AgentMessage(
+                        type="tool_result",
+                        content="tests/test_generated.py passed\n1 passed in 0.01s",
+                        data={"subtype": "tool_result", "is_error": False},
+                    ),
+                ),
+                cwd=str(tmp_path),
+            ),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+            execution_profile=load_profile("code"),
+            fat_harness_mode=True,
+        )
+
+        result = await executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content="Implement AC 1",
+            session_id="orch_123",
+            tools=["Read"],
+            tool_catalog=(MCPToolDefinition(name="Read", description="Read a file."),),
+            system_prompt="system",
+            seed_goal="Ship the feature",
+            depth=0,
+            start_time=datetime.now(UTC),
+        )
+
+        assert result.success is False
+        assert result.error is not None
+        assert "files_touched: src/generated.py" in result.error
+        evidence_event = next(
+            event
+            for event in appended_events
+            if event.type == "execution.ac.typed_evidence.observed"
+        )
+        assert evidence_event.data["verifier_passed"] is False
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "command",
+        (
+            'python -c "from pathlib import Path; '
+            "unused = lambda: Path('src/generated.py').write_text('VALUE = 2')\"",
+            'python -c "from pathlib import Path; '
+            "\nif False:\n    Path('src/generated.py').write_text('VALUE = 2')\"",
+            'python -c "from pathlib import Path; '
+            "\nif True:\n    Path('src/generated.py').write_text('VALUE = 2')\"",
+            'python -c "from pathlib import Path; '
+            "Path = lambda _value: type('Noop', (), {'write_text': lambda self, _text: None})(); "
+            "Path('src/generated.py').write_text('VALUE = 2')\"",
+            'python -c "from pathlib import Path; '
+            "Path = lambda _value: None; from pathlib import Path; "
+            "Path('src/generated.py').write_text('VALUE = 2')\"",
+            'python -c "from pathlib import Path; if"',
+            'python -c "from pathlib import Path; '
+            "Path('src /generated.py').write_text('VALUE = 2')\"",
+            "python -c \"from pathlib import Path; Path('src') / 'generated.py'\"",
+        ),
+    )
+    async def test_fat_harness_verifier_rejects_unexecuted_or_unbound_pathlib_syntax(
+        self, tmp_path, command
+    ) -> None:
+        """Pathlib syntax is not proof unless a top-level pathlib.Path write executed."""
+        generated_file = tmp_path / "src" / "generated.py"
+        generated_file.parent.mkdir()
+        generated_file.write_text("VALUE = 1\n", encoding="utf-8")
+        evidence_json = json.dumps(
+            {
+                "files_touched": ["src/generated.py"],
+                "commands_run": [command, "pytest tests/test_generated.py"],
+                "tests_passed": ["tests/test_generated.py"],
+            }
+        )
+
+        event_store, appended_events = _make_replaying_event_store()
+        executor = ParallelACExecutor(
+            adapter=_FinalMessageRuntime(
+                f"Done.\n```json\n{evidence_json}\n```",
+                native_session_id="opencode-session-evidence",
+                support_messages=(
+                    AgentMessage(
+                        type="tool",
+                        content=f"Bash: {command}",
+                        tool_name="Bash",
+                        data={"tool_input": {"command": command}},
+                    ),
+                    AgentMessage(
+                        type="tool_result",
+                        content="command completed with exit code 0",
+                        data={"subtype": "tool_result", "exit_code": 0},
+                    ),
+                    AgentMessage(
+                        type="tool",
+                        content="Bash: pytest tests/test_generated.py",
+                        tool_name="Bash",
+                        data={"tool_input": {"command": "pytest tests/test_generated.py"}},
+                    ),
+                    AgentMessage(
+                        type="tool_result",
+                        content="tests/test_generated.py passed\n1 passed in 0.01s",
+                        data={"subtype": "tool_result", "is_error": False},
+                    ),
+                ),
+                cwd=str(tmp_path),
+            ),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+            execution_profile=load_profile("code"),
+            fat_harness_mode=True,
+        )
+
+        result = await executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content="Implement AC 1",
+            session_id="orch_123",
+            tools=["Read"],
+            tool_catalog=(MCPToolDefinition(name="Read", description="Read a file."),),
+            system_prompt="system",
+            seed_goal="Ship the feature",
+            depth=0,
+            start_time=datetime.now(UTC),
+        )
+
+        assert result.success is False
+        assert result.error is not None
+        assert "files_touched: src/generated.py" in result.error
+        evidence_event = next(
+            event
+            for event in appended_events
+            if event.type == "execution.ac.typed_evidence.observed"
+        )
+        assert evidence_event.data["verifier_passed"] is False
+
+    @pytest.mark.asyncio
+    async def test_fat_harness_verifier_preserves_pathlib_literal_space_identity(
+        self, tmp_path
+    ) -> None:
+        """Literal spaces are part of the pathlib receiver's filesystem identity."""
+        generated_file = tmp_path / "src" / "generated.py"
+        spaced_file = tmp_path / " src" / "generated.py "
+        generated_file.parent.mkdir()
+        spaced_file.parent.mkdir()
+        generated_file.write_text("VALUE = 1\n", encoding="utf-8")
+        spaced_file.write_text("VALUE = 2\n", encoding="utf-8")
+        command = (
+            'python -c "from pathlib import Path; '
+            "Path(' src/generated.py ').write_text('VALUE = 3')\""
+        )
+        evidence_json = json.dumps(
+            {
+                "files_touched": ["src/generated.py"],
+                "commands_run": [command, "pytest tests/test_generated.py"],
+                "tests_passed": ["tests/test_generated.py"],
+            }
+        )
+
+        event_store, appended_events = _make_replaying_event_store()
+        executor = ParallelACExecutor(
+            adapter=_FinalMessageRuntime(
+                f"Done.\n```json\n{evidence_json}\n```",
+                native_session_id="opencode-session-evidence",
+                support_messages=(
+                    AgentMessage(
+                        type="tool",
+                        content=f"Bash: {command}",
+                        tool_name="Bash",
+                        data={"tool_input": {"command": command}},
+                    ),
+                    AgentMessage(
+                        type="tool_result",
+                        content="command completed with exit code 0",
+                        data={"subtype": "tool_result", "exit_code": 0},
+                    ),
+                    AgentMessage(
+                        type="tool",
+                        content="Bash: pytest tests/test_generated.py",
+                        tool_name="Bash",
+                        data={"tool_input": {"command": "pytest tests/test_generated.py"}},
+                    ),
+                    AgentMessage(
+                        type="tool_result",
+                        content="tests/test_generated.py passed\n1 passed in 0.01s",
+                        data={"subtype": "tool_result", "is_error": False},
+                    ),
+                ),
+                cwd=str(tmp_path),
+            ),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+            execution_profile=load_profile("code"),
+            fat_harness_mode=True,
+        )
+
+        result = await executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content="Implement AC 1",
+            session_id="orch_123",
+            tools=["Read"],
+            tool_catalog=(MCPToolDefinition(name="Read", description="Read a file."),),
+            system_prompt="system",
+            seed_goal="Ship the feature",
+            depth=0,
+            start_time=datetime.now(UTC),
+        )
+
+        assert result.success is False
+        assert result.error is not None
+        assert "files_touched: src/generated.py" in result.error
+        evidence_event = next(
+            event
+            for event in appended_events
+            if event.type == "execution.ac.typed_evidence.observed"
+        )
+        assert evidence_event.data["verifier_passed"] is False
+
+    @pytest.mark.asyncio
+    async def test_fat_harness_verifier_rejects_pathlib_write_to_different_file(
+        self, tmp_path
+    ) -> None:
+        """A pathlib write must bind to the receiver, not any mentioned file."""
+        claimed_file = tmp_path / "src" / "preexisting.py"
+        generated_file = tmp_path / "src" / "generated.py"
+        claimed_file.parent.mkdir()
+        claimed_file.write_text("VALUE = 1\n", encoding="utf-8")
+        generated_file.write_text("VALUE = 2\n", encoding="utf-8")
+        command = (
+            'python -c "from pathlib import Path; '
+            "Path('src/preexisting.py').read_text(); "
+            "Path('src/generated.py').write_text('VALUE = 3')\""
+        )
+        evidence_json = json.dumps(
+            {
+                "files_touched": ["src/preexisting.py"],
+                "commands_run": [command, "pytest tests/test_generated.py"],
+                "tests_passed": ["tests/test_generated.py"],
+            }
+        )
+
+        event_store, appended_events = _make_replaying_event_store()
+        executor = ParallelACExecutor(
+            adapter=_FinalMessageRuntime(
+                f"Done.\n```json\n{evidence_json}\n```",
+                native_session_id="opencode-session-evidence",
+                support_messages=(
+                    AgentMessage(
+                        type="tool",
+                        content=f"Bash: {command}",
+                        tool_name="Bash",
+                        data={"tool_input": {"command": command}},
+                    ),
+                    AgentMessage(
+                        type="tool_result",
+                        content="command completed with exit code 0",
+                        data={"subtype": "tool_result", "exit_code": 0},
+                    ),
+                    AgentMessage(
+                        type="tool",
+                        content="Bash: pytest tests/test_generated.py",
+                        tool_name="Bash",
+                        data={"tool_input": {"command": "pytest tests/test_generated.py"}},
+                    ),
+                    AgentMessage(
+                        type="tool_result",
+                        content="tests/test_generated.py passed\n1 passed in 0.01s",
+                        data={"subtype": "tool_result", "is_error": False},
+                    ),
+                ),
+                cwd=str(tmp_path),
+            ),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+            execution_profile=load_profile("code"),
+            fat_harness_mode=True,
+        )
+
+        result = await executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content="Implement AC 1",
+            session_id="orch_123",
+            tools=["Read"],
+            tool_catalog=(MCPToolDefinition(name="Read", description="Read a file."),),
+            system_prompt="system",
+            seed_goal="Ship the feature",
+            depth=0,
+            start_time=datetime.now(UTC),
+        )
+
+        assert result.success is False
+        assert result.error is not None
+        assert "files_touched: src/preexisting.py" in result.error
+        evidence_event = next(
+            event
+            for event in appended_events
+            if event.type == "execution.ac.typed_evidence.observed"
+        )
+        assert evidence_event.data["verifier_passed"] is False
+
+    @pytest.mark.asyncio
+    async def test_fat_harness_verifier_rejects_nonmatching_pathlib_without_shell_fallback(
+        self, tmp_path
+    ) -> None:
+        """A Python comment cannot make a nonmatching pathlib write prove the claim."""
+        claimed_file = tmp_path / "claimed.py"
+        other_file = tmp_path / "other.py"
+        claimed_file.write_text("VALUE = 1\n", encoding="utf-8")
+        other_file.write_text("VALUE = 2\n", encoding="utf-8")
+        command = (
+            'python -c "from pathlib import Path; # touch claimed.py\n'
+            "Path('other.py') . write_text('VALUE = 3')\""
+        )
+        evidence_json = json.dumps(
+            {
+                "files_touched": ["claimed.py"],
+                "commands_run": [command, "pytest tests/test_generated.py"],
+                "tests_passed": ["tests/test_generated.py"],
+            }
+        )
+
+        event_store, appended_events = _make_replaying_event_store()
+        executor = ParallelACExecutor(
+            adapter=_FinalMessageRuntime(
+                f"Done.\n```json\n{evidence_json}\n```",
+                native_session_id="opencode-session-evidence",
+                support_messages=(
+                    AgentMessage(
+                        type="tool",
+                        content=f"Bash: {command}",
+                        tool_name="Bash",
+                        data={"tool_input": {"command": command}},
+                    ),
+                    AgentMessage(
+                        type="tool_result",
+                        content="command completed with exit code 0",
+                        data={"subtype": "tool_result", "exit_code": 0},
+                    ),
+                    AgentMessage(
+                        type="tool",
+                        content="Bash: pytest tests/test_generated.py",
+                        tool_name="Bash",
+                        data={"tool_input": {"command": "pytest tests/test_generated.py"}},
+                    ),
+                    AgentMessage(
+                        type="tool_result",
+                        content="tests/test_generated.py passed\n1 passed in 0.01s",
+                        data={"subtype": "tool_result", "is_error": False},
+                    ),
+                ),
+                cwd=str(tmp_path),
+            ),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+            execution_profile=load_profile("code"),
+            fat_harness_mode=True,
+        )
+
+        result = await executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content="Implement AC 1",
+            session_id="orch_123",
+            tools=["Read"],
+            tool_catalog=(MCPToolDefinition(name="Read", description="Read a file."),),
+            system_prompt="system",
+            seed_goal="Ship the feature",
+            depth=0,
+            start_time=datetime.now(UTC),
+        )
+
+        assert result.success is False
+        assert result.error is not None
+        assert "files_touched: claimed.py" in result.error
+        evidence_event = next(
+            event
+            for event in appended_events
+            if event.type == "execution.ac.typed_evidence.observed"
+        )
+        assert evidence_event.data["verifier_passed"] is False
+
+    @pytest.mark.asyncio
+    async def test_fat_harness_verifier_rejects_shell_expanded_pathlib_source(
+        self, tmp_path
+    ) -> None:
+        """Raw shell text with expansion is not proof of the executed Python source."""
+        generated_file = tmp_path / "generated.py"
+        generated_file.write_text("VALUE = 1\n", encoding="utf-8")
+        command = (
+            'PAYLOAD=x python -c "from pathlib import Path; '
+            "Path('generated.py').write_text('$PAYLOAD')\""
+        )
+        evidence_json = json.dumps(
+            {
+                "files_touched": ["generated.py"],
+                "commands_run": [command, "pytest tests/test_generated.py"],
+                "tests_passed": ["tests/test_generated.py"],
+            }
+        )
+
+        event_store, appended_events = _make_replaying_event_store()
+        executor = ParallelACExecutor(
+            adapter=_FinalMessageRuntime(
+                f"Done.\n```json\n{evidence_json}\n```",
+                native_session_id="opencode-session-evidence",
+                support_messages=(
+                    AgentMessage(
+                        type="tool",
+                        content=f"Bash: {command}",
+                        tool_name="Bash",
+                        data={"tool_input": {"command": command}},
+                    ),
+                    AgentMessage(
+                        type="tool_result",
+                        content="command completed with exit code 0",
+                        data={"subtype": "tool_result", "exit_code": 0},
+                    ),
+                    AgentMessage(
+                        type="tool",
+                        content="Bash: pytest tests/test_generated.py",
+                        tool_name="Bash",
+                        data={"tool_input": {"command": "pytest tests/test_generated.py"}},
+                    ),
+                    AgentMessage(
+                        type="tool_result",
+                        content="tests/test_generated.py passed\n1 passed in 0.01s",
+                        data={"subtype": "tool_result", "is_error": False},
+                    ),
+                ),
+                cwd=str(tmp_path),
+            ),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+            execution_profile=load_profile("code"),
+            fat_harness_mode=True,
+        )
+
+        result = await executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content="Implement AC 1",
+            session_id="orch_123",
+            tools=["Read"],
+            tool_catalog=(MCPToolDefinition(name="Read", description="Read a file."),),
+            system_prompt="system",
+            seed_goal="Ship the feature",
+            depth=0,
+            start_time=datetime.now(UTC),
+        )
+
+        assert result.success is False
+        assert result.error is not None
+        assert "files_touched: generated.py" in result.error
+        evidence_event = next(
+            event
+            for event in appended_events
+            if event.type == "execution.ac.typed_evidence.observed"
+        )
+        assert evidence_event.data["verifier_passed"] is False
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "command",
+        (
+            "/tmp/fake/python -c \"from pathlib import Path; Path('claimed.py').write_text('x')\"",
+            "./python3 -c \"from pathlib import Path; Path('claimed.py').write_text('x')\"",
+        ),
+    )
+    async def test_fat_harness_verifier_rejects_untrusted_python_executable(
+        self, tmp_path, command
+    ) -> None:
+        """A Python-looking executable path is not an authenticated interpreter."""
+        claimed_file = tmp_path / "claimed.py"
+        claimed_file.write_text("VALUE = 1\n", encoding="utf-8")
+        evidence_json = json.dumps(
+            {
+                "files_touched": ["claimed.py"],
+                "commands_run": [command, "pytest tests/test_generated.py"],
+                "tests_passed": ["tests/test_generated.py"],
+            }
+        )
+
+        event_store, appended_events = _make_replaying_event_store()
+        executor = ParallelACExecutor(
+            adapter=_FinalMessageRuntime(
+                f"Done.\n```json\n{evidence_json}\n```",
+                native_session_id="opencode-session-evidence",
+                support_messages=(
+                    AgentMessage(
+                        type="tool",
+                        content=f"Bash: {command}",
+                        tool_name="Bash",
+                        data={"tool_input": {"command": command}},
+                    ),
+                    AgentMessage(
+                        type="tool_result",
+                        content="command completed with exit code 0",
+                        data={"subtype": "tool_result", "exit_code": 0},
+                    ),
+                    AgentMessage(
+                        type="tool",
+                        content="Bash: pytest tests/test_generated.py",
+                        tool_name="Bash",
+                        data={"tool_input": {"command": "pytest tests/test_generated.py"}},
+                    ),
+                    AgentMessage(
+                        type="tool_result",
+                        content="tests/test_generated.py passed\n1 passed in 0.01s",
+                        data={"subtype": "tool_result", "is_error": False},
+                    ),
+                ),
+                cwd=str(tmp_path),
+            ),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+            execution_profile=load_profile("code"),
+            fat_harness_mode=True,
+        )
+
+        result = await executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content="Implement AC 1",
+            session_id="orch_123",
+            tools=["Read"],
+            tool_catalog=(MCPToolDefinition(name="Read", description="Read a file."),),
+            system_prompt="system",
+            seed_goal="Ship the feature",
+            depth=0,
+            start_time=datetime.now(UTC),
+        )
+
+        assert result.success is False
+        assert result.error is not None
+        assert "files_touched: claimed.py" in result.error
+        evidence_event = next(
+            event
+            for event in appended_events
+            if event.type == "execution.ac.typed_evidence.observed"
+        )
+        assert evidence_event.data["verifier_passed"] is False
+
+    @pytest.mark.asyncio
+    async def test_fat_harness_verifier_rejects_nonisolated_local_pathlib_shadow(
+        self, tmp_path
+    ) -> None:
+        """Bare Python can import a workspace pathlib.py, so it is not static proof."""
+        claimed_file = tmp_path / "claimed.py"
+        claimed_file.write_text("VALUE = 1\n", encoding="utf-8")
+        (tmp_path / "pathlib.py").write_text(
+            "class Path:\n"
+            "    def __init__(self, value):\n"
+            "        self.value = value\n"
+            "    def write_text(self, value):\n"
+            "        return None\n",
+            encoding="utf-8",
+        )
+        command = "python -c \"from pathlib import Path; Path('claimed.py').write_text('x')\""
+        evidence_json = json.dumps(
+            {
+                "files_touched": ["claimed.py"],
+                "commands_run": [command, "pytest tests/test_generated.py"],
+                "tests_passed": ["tests/test_generated.py"],
+            }
+        )
+
+        event_store, appended_events = _make_replaying_event_store()
+        executor = ParallelACExecutor(
+            adapter=_FinalMessageRuntime(
+                f"Done.\n```json\n{evidence_json}\n```",
+                native_session_id="opencode-session-evidence",
+                support_messages=(
+                    AgentMessage(
+                        type="tool",
+                        content=f"Bash: {command}",
+                        tool_name="Bash",
+                        data={"tool_input": {"command": command}},
+                    ),
+                    AgentMessage(
+                        type="tool_result",
+                        content="command completed with exit code 0",
+                        data={"subtype": "tool_result", "exit_code": 0},
+                    ),
+                    AgentMessage(
+                        type="tool",
+                        content="Bash: pytest tests/test_generated.py",
+                        tool_name="Bash",
+                        data={"tool_input": {"command": "pytest tests/test_generated.py"}},
+                    ),
+                    AgentMessage(
+                        type="tool_result",
+                        content="tests/test_generated.py passed\n1 passed in 0.01s",
+                        data={"subtype": "tool_result", "is_error": False},
+                    ),
+                ),
+                cwd=str(tmp_path),
+            ),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+            execution_profile=load_profile("code"),
+            fat_harness_mode=True,
+        )
+
+        result = await executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content="Implement AC 1",
+            session_id="orch_123",
+            tools=["Read"],
+            tool_catalog=(MCPToolDefinition(name="Read", description="Read a file."),),
+            system_prompt="system",
+            seed_goal="Ship the feature",
+            depth=0,
+            start_time=datetime.now(UTC),
+        )
+
+        assert result.success is False
+        assert result.error is not None
+        assert "files_touched: claimed.py" in result.error
+        evidence_event = next(
+            event
+            for event in appended_events
+            if event.type == "execution.ac.typed_evidence.observed"
+        )
+        assert evidence_event.data["verifier_passed"] is False
+
+    @pytest.mark.asyncio
+    async def test_fat_harness_verifier_rejects_pathlib_write_outside_workspace(
+        self, tmp_path
+    ) -> None:
+        """An out-of-workspace pathlib write must not prove a same-basename claim."""
+        generated_file = tmp_path / "src" / "generated.py"
+        outside = tmp_path.parent / f"{tmp_path.name}-outside" / "generated.py"
+        generated_file.parent.mkdir()
+        outside.parent.mkdir()
+        generated_file.write_text("VALUE = 1\n", encoding="utf-8")
+        outside.write_text("VALUE = 2\n", encoding="utf-8")
+        command = (
+            f"python -c \"from pathlib import Path; Path('{outside}').write_text('VALUE = 3')\""
+        )
+        evidence_json = json.dumps(
+            {
+                "files_touched": ["src/generated.py"],
+                "commands_run": [command, "pytest tests/test_generated.py"],
+                "tests_passed": ["tests/test_generated.py"],
+            }
+        )
+
+        event_store, appended_events = _make_replaying_event_store()
+        executor = ParallelACExecutor(
+            adapter=_FinalMessageRuntime(
+                f"Done.\n```json\n{evidence_json}\n```",
+                native_session_id="opencode-session-evidence",
+                support_messages=(
+                    AgentMessage(
+                        type="tool",
+                        content=f"Bash: {command}",
+                        tool_name="Bash",
+                        data={"tool_input": {"command": command}},
+                    ),
+                    AgentMessage(
+                        type="tool_result",
+                        content="command completed with exit code 0",
+                        data={"subtype": "tool_result", "exit_code": 0},
+                    ),
+                    AgentMessage(
+                        type="tool",
+                        content="Bash: pytest tests/test_generated.py",
+                        tool_name="Bash",
+                        data={"tool_input": {"command": "pytest tests/test_generated.py"}},
+                    ),
+                    AgentMessage(
+                        type="tool_result",
+                        content="tests/test_generated.py passed\n1 passed in 0.01s",
+                        data={"subtype": "tool_result", "is_error": False},
                     ),
                 ),
                 cwd=str(tmp_path),
