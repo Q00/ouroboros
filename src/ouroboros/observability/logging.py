@@ -335,7 +335,10 @@ class _LoggingGeneration:
     """One atomically published logging pipeline generation."""
 
     min_level: int
-    processors: tuple[Any, ...]
+    # structlog.testing.capture_logs() temporarily mutates the configured list
+    # in place.  Sharing that exact container preserves structlog's public test
+    # hook; production transitions still publish a fresh list per generation.
+    processors: list[Any]
     file_handler: TimedRotatingFileHandler | None
 
 
@@ -346,7 +349,7 @@ class _LoggingGeneration:
 _sink_lock = RLock()
 _live_generation = _LoggingGeneration(
     min_level=logging.INFO,
-    processors=tuple(_get_console_processors(LogMode.DEV)),
+    processors=_get_console_processors(LogMode.DEV),
     file_handler=None,
 )
 
@@ -581,7 +584,7 @@ def configure_logging(config: LoggingConfig | None = None) -> None:
         config = LoggingConfig(mode=_get_mode_from_env())
 
     log_level = _get_log_level(config.log_level)
-    processors = tuple(_get_console_processors(config.mode))
+    processors = _get_console_processors(config.mode)
 
     with _sink_lock:
         # Publish a handler-free transition generation before touching the old
@@ -769,7 +772,7 @@ def reset_logging() -> None:
         baseline_level = max(logging.INFO, outgoing_level)
         _configured = False
         _current_config = None
-        processors = tuple(_get_console_processors(LogMode.DEV))
+        processors = _get_console_processors(LogMode.DEV)
         _live_generation = _LoggingGeneration(
             min_level=baseline_level,
             processors=processors,

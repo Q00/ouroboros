@@ -847,6 +847,24 @@ class TestResetLogging:
         assert payload["event"] == "bound-follows-prod-debug"
         assert payload["component"] == "worker"
 
+    def test_structlog_capture_logs_observes_live_generation(self) -> None:
+        """The public structlog capture hook can replace processors in place."""
+        from structlog.testing import capture_logs
+
+        configure_logging(LoggingConfig(enable_file_logging=False))
+        bound = structlog.get_logger("capture-generation").bind(component="worker")
+
+        with capture_logs() as captured:
+            bound.warning("captured-through-live-generation")
+
+        assert captured == [
+            {
+                "component": "worker",
+                "event": "captured-through-live-generation",
+                "log_level": "warning",
+            }
+        ]
+
     def test_cached_proxies_follow_reconfiguration_after_reset(
         self, capsys: Any, tmp_path: Any
     ) -> None:
