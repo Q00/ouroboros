@@ -70,6 +70,10 @@ import sys
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
+# Unique discovery sentinel. Generic names such as SOURCE_ROOT or
+# GRANDFATHERED may legitimately appear in unrelated repository utilities.
+MODULE_SIZE_POLICY_ID = "ouroboros.module-size.v1"
+
 # Measurement scope is policy, not implementation detail. Both literals are
 # compared with the predecessor before current source is measured, so a PR
 # cannot make the gate green by narrowing the root or file selection.
@@ -142,6 +146,18 @@ class BaselineUnavailable(Exception):
 
 
 Policy = tuple[dict[str, int], int, int, frozenset[str], str, str]
+_POLICY_SENTINEL = "ouroboros.module-size.v1"
+_POLICY_NAMES = frozenset(
+    {
+        "MODULE_SIZE_POLICY_ID",
+        "GRANDFATHERED",
+        "SOFT_CAP",
+        "RESEED_SLACK",
+        "EXCLUDED",
+        "SOURCE_ROOT",
+        "MODULE_GLOB",
+    }
+)
 
 
 def _policy_literals(source: str) -> Policy | None:
@@ -151,7 +167,7 @@ def _policy_literals(source: str) -> Policy | None:
     commit, and a gate must never execute the code it is judging.
     """
     module = ast.parse(source)
-    found: dict[str, object] = {}
+    assignments: dict[str, ast.expr] = {}
     for node in module.body:
         targets = (
             [node.target]
@@ -161,37 +177,42 @@ def _policy_literals(source: str) -> Policy | None:
             else []
         )
         for target in targets:
-            if isinstance(target, ast.Name) and target.id in {
-                "GRANDFATHERED",
-                "SOFT_CAP",
-                "RESEED_SLACK",
-                "EXCLUDED",
-                "SOURCE_ROOT",
-                "MODULE_GLOB",
-            }:
-                if node.value is None:
-                    continue
-                try:
-                    if (
-                        target.id == "EXCLUDED"
-                        and isinstance(node.value, ast.Call)
-                        and isinstance(node.value.func, ast.Name)
-                        and node.value.func.id == "frozenset"
-                        and len(node.value.args) == 1
-                        and not node.value.keywords
-                    ):
-                        found[target.id] = frozenset(ast.literal_eval(node.value.args[0]))
-                    else:
-                        found[target.id] = ast.literal_eval(node.value)
-                except (TypeError, ValueError) as exc:
-                    raise BaselineUnavailable(
-                        f"{target.id} is not a literal in the baseline copy"
-                    ) from exc
-    # GRANDFATHERED uniquely identifies this policy among repository scripts.
-    # Its absence means this is an unrelated Python utility, not a malformed
-    # copy of the module-size gate.
-    if "GRANDFATHERED" not in found:
+            if not isinstance(target, ast.Name) or target.id not in _POLICY_NAMES:
+                continue
+            if node.value is None:
+                continue
+            if target.id in assignments:
+                raise BaselineUnavailable(f"policy assigns {target.id} more than once")
+            assignments[target.id] = node.value
+
+    sentinel_node = assignments.get("MODULE_SIZE_POLICY_ID")
+    if sentinel_node is None:
         return None
+    try:
+        sentinel = ast.literal_eval(sentinel_node)
+    except (TypeError, ValueError) as exc:
+        raise BaselineUnavailable("MODULE_SIZE_POLICY_ID is not a literal") from exc
+    if sentinel != _POLICY_SENTINEL:
+        raise BaselineUnavailable(f"unknown module-size policy id {sentinel!r}")
+
+    found: dict[str, object] = {}
+    for name, value in assignments.items():
+        if name == "MODULE_SIZE_POLICY_ID":
+            continue
+        try:
+            if (
+                name == "EXCLUDED"
+                and isinstance(value, ast.Call)
+                and isinstance(value.func, ast.Name)
+                and value.func.id == "frozenset"
+                and len(value.args) == 1
+                and not value.keywords
+            ):
+                found[name] = frozenset(ast.literal_eval(value.args[0]))
+            else:
+                found[name] = ast.literal_eval(value)
+        except (TypeError, ValueError) as exc:
+            raise BaselineUnavailable(f"{name} is not a literal in the policy copy") from exc
     table = found.get("GRANDFATHERED")
     cap = found.get("SOFT_CAP")
     slack = found.get("RESEED_SLACK")
@@ -228,7 +249,7 @@ def _baseline_policy(ref: str) -> Policy | None:
 
     A ref that does not resolve is an error: a silently skipped comparison is
     exactly the hole this check exists to close. A ref that resolves but has no
-    script declaring GRANDFATHERED is the gate's own introducing PR, which has
+    script declaring the policy sentinel is the gate's own introducing PR, which has
     no predecessor policy to tighten. Scanning the predecessor's scripts tree
     instead of using the current ``__file__`` path prevents a rename plus
     workflow edit from masquerading as a new gate.
@@ -285,6 +306,37 @@ def _baseline_policy(ref: str) -> Policy | None:
     return candidates[0][1]
 
 
+def _validate_current_policy_location() -> None:
+    """Require one current policy, in the script that is actually executing."""
+    scripts_root = REPO_ROOT / "scripts"
+    try:
+        paths = sorted(scripts_root.rglob("*.py"))
+    except OSError as exc:
+        raise BaselineUnavailable("could not enumerate current scripts tree") from exc
+
+    candidates: list[Path] = []
+    for path in paths:
+        try:
+            policy = _policy_literals(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, SyntaxError) as exc:
+            raise BaselineUnavailable(
+                f"could not inspect current policy candidate {_relative(path)!r}"
+            ) from exc
+        if policy is not None:
+            candidates.append(path.resolve())
+
+    if len(candidates) != 1:
+        rendered = ", ".join(_relative(path) for path in candidates) or "none"
+        raise BaselineUnavailable(
+            f"current scripts tree must contain exactly one module-size policy; found {rendered}"
+        )
+    active = Path(__file__).resolve()
+    if candidates[0] != active:
+        raise BaselineUnavailable(
+            "the unique current module-size policy is not the script being executed"
+        )
+
+
 def _policy_regressions(
     baseline: Policy,
 ) -> tuple[
@@ -335,6 +387,12 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     args = parser.parse_args(argv)
+
+    try:
+        _validate_current_policy_location()
+    except BaselineUnavailable as exc:
+        sys.stderr.write(f"module-size: FAILED -- {exc}.\n")
+        return 1
 
     source_root = REPO_ROOT / SOURCE_ROOT
     if not source_root.is_dir():

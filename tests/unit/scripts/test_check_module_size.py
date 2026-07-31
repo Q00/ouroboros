@@ -54,7 +54,12 @@ def _isolate(
     grandfathered: dict[str, int],
 ) -> None:
     """Point the module at a fabricated repository with a controlled table."""
+    policy_path = repo / "scripts" / "check-module-size.py"
+    if not policy_path.exists():
+        policy_path.parent.mkdir(parents=True, exist_ok=True)
+        policy_path.write_text(SCRIPT.read_text(encoding="utf-8"), encoding="utf-8")
     monkeypatch.setattr(module, "REPO_ROOT", repo)
+    monkeypatch.setattr(module, "__file__", str(policy_path))
     monkeypatch.setattr(module, "GRANDFATHERED", grandfathered)
 
 
@@ -72,6 +77,7 @@ def _baseline_repo(
     """
     entries = "\n".join(f'    "{k}": {v},' for k, v in grandfathered.items())
     body = (
+        'MODULE_SIZE_POLICY_ID = "ouroboros.module-size.v1"\n'
         'SOURCE_ROOT = "src/ouroboros"\n'
         'MODULE_GLOB = "*.py"\n'
         f"SOFT_CAP = {soft_cap}\n"
@@ -196,12 +202,54 @@ class TestPolicyTightening:
         ref = _baseline_repo(tmp_path, {"src/ouroboros/god.py": 5000})
         _write(tmp_path, "src/ouroboros/god.py", 5500)
         _isolate(module, monkeypatch, tmp_path, {"src/ouroboros/god.py": 5500})
+        canonical = tmp_path / "scripts" / "check-module-size.py"
         renamed = tmp_path / "scripts" / "check-size.py"
-        renamed.write_text("# renamed current gate\n", encoding="utf-8")
+        canonical.rename(renamed)
         monkeypatch.setattr(module, "__file__", str(renamed))
 
         assert module.main(["--baseline-ref", ref]) == 1
         assert "budgets were raised" in capsys.readouterr().err
+
+    def test_duplicate_current_policy_fails_before_merge(
+        self, module, monkeypatch, tmp_path, capsys
+    ):
+        ref = _baseline_repo(tmp_path, {})
+        _write(tmp_path, "src/ouroboros/ok.py", 10)
+        _isolate(module, monkeypatch, tmp_path, {})
+        decoy = tmp_path / "scripts" / "decoy.py"
+        decoy.write_text(
+            (tmp_path / "scripts" / "check-module-size.py").read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+
+        assert module.main(["--baseline-ref", ref]) == 1
+        assert "exactly one module-size policy" in capsys.readouterr().err
+
+    def test_unrelated_nonliteral_source_root_is_not_a_policy_candidate(
+        self, module, monkeypatch, tmp_path
+    ):
+        ref = _baseline_repo(tmp_path, {})
+        _write(tmp_path, "src/ouroboros/ok.py", 10)
+        _isolate(module, monkeypatch, tmp_path, {})
+        (tmp_path / "scripts" / "unrelated.py").write_text(
+            "from pathlib import Path\nSOURCE_ROOT = Path(__file__).parent\n",
+            encoding="utf-8",
+        )
+
+        assert module.main(["--baseline-ref", ref]) == 0
+
+    def test_policy_outside_scripts_is_rejected(self, module, monkeypatch, tmp_path, capsys):
+        ref = _baseline_repo(tmp_path, {})
+        _write(tmp_path, "src/ouroboros/ok.py", 10)
+        _isolate(module, monkeypatch, tmp_path, {})
+        canonical = tmp_path / "scripts" / "check-module-size.py"
+        moved = tmp_path / "tools" / "check-module-size.py"
+        moved.parent.mkdir()
+        canonical.rename(moved)
+        monkeypatch.setattr(module, "__file__", str(moved))
+
+        assert module.main(["--baseline-ref", ref]) == 1
+        assert "found none" in capsys.readouterr().err
 
     def test_lowering_is_allowed(self, module, monkeypatch, tmp_path):
         """Tightening is the whole point; it must not be mistaken for drift."""
