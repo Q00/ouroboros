@@ -647,12 +647,72 @@ async def test_converged_action_still_completes_on_an_uncontradicted_qa_pass() -
 
 
 @pytest.mark.asyncio
-async def test_converged_without_qa_numbers_keeps_completing() -> None:
-    """A payload with no computed QA fields keeps its legacy terminal behaviour."""
+async def test_converged_without_any_qa_attempt_keeps_completing() -> None:
+    """A payload from a generation where QA never ran keeps its legacy behaviour.
+
+    Narrow on purpose: no ``executed`` marker means the producer never reached its
+    QA branch, so there is no missing verdict to fail closed on. Contrast with
+    ``test_converged_fails_when_qa_ran_but_returned_no_verdict``, where QA did run
+    and the absent block is the evidence that it failed.
+    """
     evolve = _ScriptedEvolveHandler(metas=[{"action": "converged"}])
     runner = RalphLoopRunner(evolve)
 
     result = await runner.run(RalphLoopConfig(lineage_id="lin_converged_legacy", max_generations=3))
+
+    assert result.status == "completed"
+    assert result.stop_reason == "converged"
+    assert result.to_tool_result().is_error is False
+
+
+@pytest.mark.asyncio
+async def test_exhaustion_fails_when_qa_ran_but_returned_no_verdict() -> None:
+    """Absent QA evidence must fail closed when QA was actually attempted.
+
+    ``evolution_handlers`` drops the whole ``qa`` block when ``QAHandler`` returns
+    an error, which is exactly what a malformed or truncated QA completion
+    produces. Gating on "did QA authoritatively fail?" would then make a garbled
+    QA response *safer* than a parseable failing one, so the gate has to key on
+    evidence of a pass. ``executed`` marks the runs where QA was in fact run.
+    """
+    evolve = _ScriptedEvolveHandler(
+        metas=[
+            {"action": "continue", "executed": True, "qa": _qa_meta(0.1, "fail")},
+            # QA ran again but its completion could not be parsed → no `qa` key.
+            {"action": "continue", "executed": True},
+        ]
+    )
+    runner = RalphLoopRunner(evolve)
+
+    result = await runner.run(RalphLoopConfig(lineage_id="lin_qa_unparseable", max_generations=2))
+
+    assert result.status == "failed"
+    assert result.stop_reason == "max_generations reached"
+    assert result.to_tool_result().is_error is True
+
+
+@pytest.mark.asyncio
+async def test_converged_fails_when_qa_ran_but_returned_no_verdict() -> None:
+    """The converged exit must not mint a success out of a missing QA verdict."""
+    evolve = _ScriptedEvolveHandler(metas=[{"action": "converged", "executed": True}])
+    runner = RalphLoopRunner(evolve)
+
+    result = await runner.run(RalphLoopConfig(lineage_id="lin_converged_no_qa", max_generations=3))
+
+    assert result.status == "failed"
+    assert result.stop_reason == "qa_failed"
+    assert result.to_tool_result().is_error is True
+
+
+@pytest.mark.asyncio
+async def test_skip_qa_keeps_completing_without_any_qa_evidence() -> None:
+    """The legitimate QA-disabled opt-out must stay intact."""
+    evolve = _ScriptedEvolveHandler(metas=[{"action": "converged", "executed": True}])
+    runner = RalphLoopRunner(evolve)
+
+    result = await runner.run(
+        RalphLoopConfig(lineage_id="lin_skip_qa", max_generations=3, skip_qa=True)
+    )
 
     assert result.status == "completed"
     assert result.stop_reason == "converged"

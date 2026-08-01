@@ -303,7 +303,7 @@ class RalphLoopRunner:
                 # arrive carrying an authoritative QA failure. Guarding only the
                 # `qa passed` branch above would leave this exit reporting a
                 # terminal success for the very payload that branch rejected.
-                if _qa_authoritative_failure(final_result.meta):
+                if _qa_authoritative_failure(final_result.meta, config.skip_qa):
                     status = "failed"
                     stop_reason = "qa_failed"
                 else:
@@ -333,7 +333,11 @@ class RalphLoopRunner:
                 # BLOCKED stop_reason downstream (`auto/pipeline.py`), so only the
                 # status changes: the run stays retryable, it just stops claiming
                 # it succeeded.
-                status = "failed" if _qa_authoritative_failure(final_result.meta) else "completed"
+                status = (
+                    "failed"
+                    if _qa_authoritative_failure(final_result.meta, config.skip_qa)
+                    else "completed"
+                )
                 stop_reason = "max_generations reached"
 
         if final_result is None:
@@ -388,16 +392,33 @@ def _qa_result_contradicts_pass(qa: dict[str, Any]) -> bool:
     return not score >= threshold
 
 
-def _qa_authoritative_failure(meta: dict[str, Any]) -> bool:
-    """Return True when this generation's QA payload authoritatively failed it.
+def _qa_was_attempted(meta: dict[str, Any], skip_qa: bool) -> bool:
+    """Return True when the producer ran post-execution QA for this generation.
 
-    Distinct from ``not _qa_passed(...)``: a payload with no QA block, or one
-    carrying only a verdict string, is *not* an authoritative failure and keeps
-    its legacy terminal behaviour. Only the gate's own computed fields count.
+    Mirrors the condition in ``evolution_handlers`` that decides whether to run
+    QA at all, using the fields that same producer publishes. Payloads that
+    predate those fields answer False and keep their legacy terminal behaviour.
+    """
+    return (
+        not skip_qa
+        and meta.get("executed") is True
+        and meta.get("action") in _TERMINAL_SUCCESS_ACTIONS | {"continue"}
+    )
+
+
+def _qa_authoritative_failure(meta: dict[str, Any], skip_qa: bool = False) -> bool:
+    """Return True when this generation carries no authoritative QA pass.
+
+    Deliberately not `not _qa_passed(...)`: a payload from a run where QA never
+    ran keeps its legacy terminal behaviour. But absence of the block is *not*
+    evidence of success when QA did run — ``evolution_handlers`` drops the whole
+    ``qa`` key whenever ``QAHandler`` errors, which is exactly what a truncated or
+    malformed QA completion produces. Keying only on a parsed failure would make a
+    garbled QA response safer for the run than an honest failing one.
     """
     qa = meta.get("qa")
     if not isinstance(qa, dict):
-        return False
+        return _qa_was_attempted(meta, skip_qa)
     return _qa_result_contradicts_pass(qa)
 
 
