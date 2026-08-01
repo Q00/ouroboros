@@ -364,6 +364,84 @@ def test_required_lane_that_never_ran_can_be_declared(tmp_path: Any) -> None:
     assert "data_context" not in aggregated
 
 
+@pytest.mark.parametrize(
+    ("declaration", "why"),
+    [
+        ({"undispatched": "false"}, "a non-empty string is truthy and says the opposite"),
+        ({"undispatched": "true"}, "the string, not the literal"),
+        ({"undispatched": 1}, "a number is not the documented boolean"),
+        ({"undispatched": True, "content": "advice"}, "never ran, and here is what it said"),
+        ({}, "neither what the child said nor that there was nothing to say"),
+    ],
+)
+def test_a_lane_is_not_excused_by_a_value_that_only_looks_true(
+    tmp_path: Any, declaration: dict[str, Any], why: str
+) -> None:
+    """The one key that excuses a required lane cannot be satisfied by accident.
+
+    `undispatched` was read for truthiness, so `"false"` — a non-empty string —
+    declared the lane never ran and completed the fan-out without it. That is
+    the required evidence lane silently skipped by a value that says the
+    opposite of what it did (Q00/ouroboros#1754).
+
+    The empty entry is the same hole one door over, found while auditing this
+    fix rather than in the finding: an entry carrying neither `content` nor the
+    declaration satisfied a required lane with nothing at all — cheaper than
+    inventing the missing output, which is the incentive the declaration exists
+    to remove.
+    """
+    registry = FanoutRegistry(tmp_path)
+    fanout_id, lane_ids, identity = _registered_advisory(registry)
+    results = [
+        entry for entry in _required_results(lane_ids, identity) if entry["key"] != "data_context"
+    ]
+    results.append({"key": "data_context", **declaration})
+
+    outcome = _submit(registry, fanout_id, results)
+
+    assert outcome["status"] == "invalid_result_entry", why
+    assert outcome["invalid_keys"] == ["data_context"], why
+
+
+@pytest.mark.asyncio
+async def test_the_public_submit_tool_also_refuses_a_malformed_declaration(tmp_path: Any) -> None:
+    """Through the tool that accepts the unconstrained result objects."""
+    from ouroboros.mcp.tools.evaluation_handlers import SubmitFanoutResultsHandler
+
+    registry = FanoutRegistry(tmp_path)
+    fanout_id, lane_ids, identity = _registered_advisory(registry)
+    required = [entry["key"] for entry in _required_results(lane_ids, identity)]
+    submit = SubmitFanoutResultsHandler(fanout_registry=registry)
+
+    malformed = await submit.handle(
+        {
+            "session_id": "sess-data",
+            "correlation_key": "context.lane_id",
+            "fanout_id": fanout_id,
+            "results": [{"key": key, "undispatched": "false"} for key in required],
+        }
+    )
+
+    assert malformed.is_ok, malformed
+    assert malformed.unwrap().meta["status"] == "invalid_result_entry"
+
+    # The honest declaration still completes: refusing the malformed shape must
+    # not cost the host the escape the shape exists to provide.
+    honest = await submit.handle(
+        {
+            "session_id": "sess-data",
+            "correlation_key": "context.lane_id",
+            "fanout_id": fanout_id,
+            "results": [{"key": key, "undispatched": True} for key in required],
+        }
+    )
+
+    assert honest.is_ok, honest
+    meta = honest.unwrap().meta
+    assert meta["status"] == "complete"
+    assert sorted(meta["undispatched_keys"]) == sorted(required)
+
+
 def test_absent_required_lane_still_returns_partial(tmp_path: Any) -> None:
     registry = FanoutRegistry(tmp_path)
     fanout_id, lane_ids, identity = _registered_advisory(registry)

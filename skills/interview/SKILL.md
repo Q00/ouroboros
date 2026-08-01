@@ -237,6 +237,12 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
    - `results`: one `{ "key": <correlation value>, "content": <child output> }`
      per subagent, where `key` is that child's correlation value (its lane id,
      persona, or `code_facts`).
+   Every result must be either `{ "key": <lane>, "content": ... }` or exactly
+   `{ "key": <lane>, "undispatched": true }` — the literal `true`, no `content`
+   beside it, and never an entry carrying neither. Anything else comes back as
+   `status="invalid_result_entry"` with `invalid_keys`, listing every bad entry
+   at once so one resubmission fixes them all.
+
    A complete set returns the correlated synthesis to continue with; a partial
    set returns `status="partial"` with `missing_required_keys`. **Retry with
    every lane you hold, not only the missing ones** — no submitted output is

@@ -575,7 +575,10 @@ def submit_fanout_results(
     reported, which is the difference between a consultation that concluded with
     nothing to say and one that never happened. It travels in ``results`` rather
     than a separate argument so the host reports every lane it was asked to
-    spawn through one list, whatever became of it.
+    spawn through one list, whatever became of it. Exactly that shape, though:
+    an ``undispatched`` that is not the literal ``true``, or one arriving with
+    ``content``, returns ``status="invalid_result_entry"`` rather than being
+    read for what it might have meant.
     """
     record = registry.load(fanout_id)
     if record is None:
@@ -615,6 +618,7 @@ def submit_fanout_results(
 
     provided: dict[str, Any] = {}
     declared: set[str] = set()
+    invalid: list[str] = []
     for result in results:
         key = result.get("key")
         if key is None:
@@ -622,10 +626,44 @@ def submit_fanout_results(
         # A child that never ran is declared in the same list its siblings
         # report through: one entry per lane the host was asked to spawn,
         # carrying either what it said or the fact that it could not be asked.
-        if result.get("undispatched"):
+        #
+        # The declaration is read as the JSON literal it is documented to be,
+        # not for truthiness. `"undispatched": "false"` is a non-empty string
+        # and would otherwise have declared the lane undispatched -- a required
+        # lane excused by a value that says the opposite of what it does. A key
+        # whose whole job is to excuse a lane cannot be satisfied by accident,
+        # so anything other than `true` is refused rather than interpreted, and
+        # an entry claiming both that its child never ran and what it returned
+        # is refused with it: those are opposite reports of the same lane.
+        if "undispatched" in result:
+            if result["undispatched"] is not True or "content" in result:
+                invalid.append(str(key))
+                continue
             declared.add(str(key))
             continue
-        provided[str(key)] = result.get("content")
+        # An entry that reports neither is a lane satisfied by nothing: no
+        # output, and no statement that there was none to have. That is cheaper
+        # than inventing the missing output, which is the incentive the
+        # undispatched declaration exists to remove.
+        if "content" not in result:
+            invalid.append(str(key))
+            continue
+        provided[str(key)] = result["content"]
+
+    # Every bad entry at once. Reporting the first would make a host with three
+    # malformed entries send three submissions to learn three facts, which is
+    # the loop the cumulative-retry contract above exists to avoid.
+    if invalid:
+        return {
+            "status": "invalid_result_entry",
+            "fanout_id": fanout_id,
+            "kind": record.kind,
+            "error": (
+                'each result must be either {"key": <lane>, "content": ...} '
+                'or exactly {"key": <lane>, "undispatched": true}.'
+            ),
+            "invalid_keys": invalid,
+        }
 
     # A declaration only counts for a lane this fan-out actually asked for, and
     # never for one whose output arrived anyway.
