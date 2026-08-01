@@ -495,7 +495,7 @@ def _advisory_lane_outputs(meta: Mapping[str, Any], lane_keys: list[str]) -> dic
             "lane_id": "data_context",
             "data_needed": False,
             "read_requests": [],
-            "no_evidence_reason": "the question asks for a decision, not a measurement",
+            "no_evidence_reason": "not_a_measurement",
         }
     return outputs
 

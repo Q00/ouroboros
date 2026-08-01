@@ -420,6 +420,25 @@ DATA_AGGREGATIONS: tuple[str, ...] = (
 )
 
 
+#: Why a data-driven read is not being proposed.  A closed set, because the
+#: reasons are known in advance -- and because a free-text reason is a channel
+#: for the observation this lane must not carry.  A child that ran a lookup and
+#: wanted to report "observed 41 accounts" had a sentence-shaped field to put it
+#: in; now it has a choice of four constants (Q00/ouroboros#1754).
+DATA_NO_EVIDENCE_REASONS: tuple[str, ...] = (
+    "not_a_measurement",
+    "no_data_tool_available",
+    "answer_would_not_be_an_aggregate",
+    "question_too_ambiguous_to_measure",
+)
+
+#: Names of things in the data source -- a tool, a column, a grouping key.  They
+#: are identifiers, so they are constrained like identifiers: no whitespace, no
+#: quotes, no parentheses.  A query cannot be spelled in a field shaped this way,
+#: which is cheaper than looking for one in a field that has no shape.
+_DATA_IDENTIFIER_PATTERN = r"^[A-Za-z0-9_.:\-]{1,128}$"
+
+
 def _interview_data_read_request_schema() -> dict[str, Any]:
     """Return the schema for one proposed, unexecuted data read.
 
@@ -449,8 +468,7 @@ def _interview_data_read_request_schema() -> dict[str, Any]:
             },
             "tool_name": {
                 "type": "string",
-                "minLength": 1,
-                "maxLength": 128,
+                "pattern": _DATA_IDENTIFIER_PATTERN,
                 "description": "Host tool the parent session would run this read through.",
             },
             "metric": {
@@ -465,8 +483,7 @@ def _interview_data_read_request_schema() -> dict[str, Any]:
                 "maxItems": 4,
                 "items": {
                     "type": "string",
-                    "minLength": 1,
-                    "maxLength": 80,
+                    "pattern": _DATA_IDENTIFIER_PATTERN,
                     "description": (
                         "Categorical key only. Grouping by an identifier turns "
                         "an aggregate back into a row list, which this lane "
@@ -482,7 +499,7 @@ def _interview_data_read_request_schema() -> dict[str, Any]:
                     "additionalProperties": False,
                     "required": ["field", "comparator", "value"],
                     "properties": {
-                        "field": {"type": "string", "minLength": 1, "maxLength": 80},
+                        "field": {"type": "string", "pattern": _DATA_IDENTIFIER_PATTERN},
                         "comparator": {
                             "type": "string",
                             "enum": ["eq", "neq", "gt", "gte", "lt", "lte", "in", "between"],
@@ -516,11 +533,27 @@ def _interview_data_evidence_answer_contract() -> dict[str, Any]:
 
     Three properties this schema holds by shape rather than by rule.
 
-    **The child cannot report a measurement.** There is no field for an observed
-    value, a row, or a timestamp of observation -- only proposals. A child that
-    ran a lookup anyway has nowhere to put the result, so "the child executes
-    nothing" is a property of what can be expressed rather than something a
-    later check has to detect (Q00/ouroboros#1754).
+    **A measurement cannot be reported as a measurement.** There is no field for
+    an observed value, a row, or a timestamp of observation -- only proposals --
+    so a child that ran a lookup has no way to hand the result back *as a
+    result*, and no consumer can read one out of this shape.
+
+    Say that precisely, because the stronger sentence is not true. Every field
+    that had a shape now has one: ``no_evidence_reason`` is a choice from
+    ``DATA_NO_EVIDENCE_REASONS`` rather than a sentence, and ``tool_name``,
+    ``group_by`` and a filter's ``field`` are identifiers, so a query cannot be
+    spelled in them. What is left free is ``metric``, ``informs_decision`` and a
+    filter's ``value`` -- the fields whose entire purpose is to be read by the
+    user before they approve the read. Any string a human must read can contain
+    a number, and looking for one is the search that ten rounds of #1703 showed
+    does not converge; a ``caveats`` array was removed rather than watched for
+    exactly this reason.
+
+    So the boundary is not that prose cannot mention a number. It is that
+    nothing here becomes an interview answer, a requirement, or durable state:
+    the user answers in their own words, ``[from-data]`` is withheld from
+    extraction, and the record keeps no child-authored content
+    (Q00/ouroboros#1754).
 
     **A no-op is an answer, not an absence.** ``data_needed: false`` is a
     complete, valid response and forces ``read_requests`` empty. The lane is
@@ -570,22 +603,11 @@ def _interview_data_evidence_answer_contract() -> dict[str, Any]:
             },
             "no_evidence_reason": {
                 "type": "string",
-                "minLength": 1,
-                "maxLength": 400,
+                "enum": list(DATA_NO_EVIDENCE_REASONS),
                 "description": (
-                    "Why no read is proposed: the question is not data-driven, "
-                    "no data tool is reachable, or the answer would be a row "
-                    "list, a name, an identifier, or an error message rather "
-                    "than an aggregate."
-                ),
-            },
-            "caveats": {
-                "type": "array",
-                "maxItems": 5,
-                "items": {"type": "string", "minLength": 1, "maxLength": 300},
-                "description": (
-                    "What the user should hold in mind when reading these "
-                    "numbers. A measurement is point-in-time; a Seed is not."
+                    "Why no read is proposed. Chosen from a closed set: the "
+                    "reasons this lane can have are known in advance, so this "
+                    "is a choice rather than a sentence."
                 ),
             },
         },
@@ -1036,6 +1058,7 @@ def _interview_question_advisory_fanout_metadata() -> dict[str, Any]:
 
 __all__ = [
     "DATA_AGGREGATIONS",
+    "DATA_NO_EVIDENCE_REASONS",
     "DATA_SOURCE_CLASSES",
     "_code_investigation_repo_inspection_tool_capabilities",
     "_interview_code_investigation_answer_contract",

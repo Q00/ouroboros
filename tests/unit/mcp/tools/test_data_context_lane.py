@@ -55,7 +55,7 @@ def _valid_no_op(identity: str) -> dict[str, Any]:
         "lane_id": "data_context",
         "data_needed": False,
         "read_requests": [],
-        "no_evidence_reason": "the question asks for a decision, not a measurement",
+        "no_evidence_reason": "not_a_measurement",
     }
 
 
@@ -108,6 +108,73 @@ def test_data_lane_is_the_only_required_optional_split_completion_reads() -> Non
 # --------------------------------------------------------------------------- #
 # What the child can express
 # --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    ("field", "smuggled", "closed_by"),
+    [
+        (
+            "no_evidence_reason",
+            "I ran the query: observed 41 accounts; bob@example.com",
+            "the reason is a choice from a closed set, not a sentence",
+        ),
+        (
+            "caveats",
+            ["observed 41 accounts"],
+            "the field was removed; a closed schema rejects what it does not name",
+        ),
+    ],
+)
+def test_a_field_that_could_be_closed_was_closed(field: str, smuggled: Any, closed_by: str) -> None:
+    """Every field that could stop being free text has stopped being one.
+
+    A child that ran a lookup has no field designated for the result, but prose
+    fields were still sentence-shaped and a result fits in a sentence. Rather
+    than look for results in them — the search #1754 records as not converging
+    over ten rounds — the fields that did not need to be prose were closed.
+    """
+    schema = interview_data_evidence_answer_contract()["response_model_schema"]
+    answer = _valid_no_op("interview-question:0123456789abcdef")
+    answer[field] = smuggled
+
+    assert list(Draft202012Validator(schema).iter_errors(answer)) != [], closed_by
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["tool_name", "group_by", "filters"],
+)
+def test_a_name_in_the_source_cannot_be_spelled_as_a_query(field: str) -> None:
+    """Identifiers are shaped like identifiers, so a query is unspellable.
+
+    `tool_name`, a grouping key and a filter's field name all name something in
+    the data source. Constraining them to an identifier alphabet is cheaper than
+    looking for SQL in a field that has no shape, and it does not depend on
+    recognising which dialect the SQL is in.
+    """
+    schema = interview_data_evidence_answer_contract()["response_model_schema"]
+    injected = "SELECT count(*) FROM accounts -- observed 41"
+    request: dict[str, Any] = {
+        "operation": "read",
+        "tool_name": "warehouse_query",
+        "metric": "enterprise accounts",
+        "aggregation": "count",
+        "source_class": "local",
+        "informs_decision": "whether SSO ships first",
+    }
+    if field == "tool_name":
+        request["tool_name"] = injected
+    elif field == "group_by":
+        request["group_by"] = [injected]
+    else:
+        request["filters"] = [{"field": injected, "comparator": "eq", "value": "x"}]
+
+    answer = _valid_no_op("interview-question:0123456789abcdef")
+    answer["data_needed"] = True
+    answer.pop("no_evidence_reason")
+    answer["read_requests"] = [request]
+
+    assert list(Draft202012Validator(schema).iter_errors(answer)) != []
 
 
 def test_a_fetched_value_has_nowhere_to_go() -> None:
@@ -383,11 +450,17 @@ def test_the_record_never_holds_what_a_child_said(tmp_path: Any) -> None:
     """
     registry = FanoutRegistry(tmp_path)
     fanout_id, lane_ids, identity = _registered_advisory(registry)
-    secret = "41 enterprise accounts, contact bob@example.com"
-    results = _required_results(lane_ids, identity)
-    for entry in results:
-        if entry["key"] == "data_context":
-            entry["content"]["no_evidence_reason"] = secret
+    # Placed in `metric`, which is one of the three fields still free: they
+    # exist to be read by the user before approving a read, so they cannot be
+    # closed without removing the confirmation surface. What protects the user
+    # is where this can travel, and the assertions below are that boundary.
+    secret = "accounts, observed 41, contact bob@example.com"
+    proposal = _fully_populated_proposal(identity)
+    proposal["read_requests"][0]["metric"] = secret
+    results = [
+        entry for entry in _required_results(lane_ids, identity) if entry["key"] != "data_context"
+    ]
+    results.append({"key": "data_context", "content": proposal})
 
     outcome = _submit(registry, fanout_id, results)
     assert outcome["status"] == "complete"
