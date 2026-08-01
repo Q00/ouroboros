@@ -167,9 +167,8 @@ def _advisory_output_section(answer_contract: Any) -> str:
     its output section must ask for that contract and nothing else. The generic
     shape below asks for ``finding`` / ``evidence`` / ``suggested_options`` —
     fields a closed contract forbids — while omitting the ones it requires, so
-    emitting both told the child two incompatible things and let the last one
-    win. A required lane that obeys the wrong one is rejected at re-entry and
-    pins the fan-out at ``partial`` forever.
+    emitting both told the child two incompatible things. A required lane that
+    obeys the wrong one is rejected and pins the fan-out at ``partial`` forever.
 
     The branch is on the contract's presence rather than on the lane id so the
     shape is written once. A second hand-authored block would agree with the
@@ -181,8 +180,9 @@ def _advisory_output_section(answer_contract: Any) -> str:
     return f"""## Output
 Return one JSON object satisfying `{contract_id}`, rendered in full above. It is
 a closed schema: every field it requires must be present, and any field it does
-not name is rejected. Do not add the generic advisory fields — no `finding`, no
-`evidence`, no `suggested_options`.
+not name is rejected — the generic advisory fields (`finding`, `evidence`,
+`suggested_options`) as much as a value this prompt showed you as context. What
+the Session block tells you is for your reasoning, not for your output.
 
 Your output is validated against that contract when the parent submits it. An
 answer in any other shape is discarded, and because this lane is required, the

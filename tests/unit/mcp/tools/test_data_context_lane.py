@@ -50,7 +50,6 @@ def _data_payload() -> dict[str, Any]:
 
 def _valid_no_op(identity: str) -> dict[str, Any]:
     return {
-        "session_id": "sess-data",
         "question_identity": identity,
         "lane_id": "data_context",
         "data_needed": False,
@@ -316,7 +315,6 @@ def test_violating_output_is_excluded_and_reported_without_echoing_it(tmp_path: 
         {
             "key": "data_context",
             "content": {
-                "session_id": "sess-data",
                 "question_identity": identity,
                 "lane_id": "data_context",
                 "data_needed": True,
@@ -420,7 +418,6 @@ def test_a_proposal_for_another_question_is_refused(tmp_path: Any) -> None:
         entry for entry in _required_results(lane_ids, identity) if entry["key"] != "data_context"
     ]
     foreign = _valid_no_op("interview-question:ffffffffffffffff")
-    foreign["session_id"] = "sess-someone-else"
     results.append({"key": "data_context", "content": foreign})
 
     outcome = _submit(registry, fanout_id, results)
@@ -428,10 +425,65 @@ def test_a_proposal_for_another_question_is_refused(tmp_path: Any) -> None:
     assert outcome["status"] == "partial"
     violations = outcome["contract_violations"]["data_context"]
     assert "question_identity: does not belong to this fan-out" in violations
-    assert "session_id: does not belong to this fan-out" in violations
     # Named, never quoted — the error channel must not become a second copy of
     # the submission.
     assert "ffffffffffffffff" not in repr(outcome)
+
+
+def test_a_session_the_child_asserts_is_not_a_field_at_all(tmp_path: Any) -> None:
+    """The contract holds no session, so a child cannot half-assert one.
+
+    A session field the child fills is checked only when the child chose to fill
+    it, which reads as a binding and holds as an option. The session is bound by
+    the submission envelope instead — `_submit` above carries it, and a
+    submission under another session is refused before any content is read. So
+    the field is absent rather than lenient, and the closed schema is what makes
+    absent enforceable (Q00/ouroboros#1754).
+    """
+    contract = interview_data_evidence_answer_contract()
+    schema = contract["response_model_schema"]
+    assert "session_id" not in schema["properties"]
+    assert "session_id" not in schema["required"]
+
+    registry = FanoutRegistry(tmp_path)
+    fanout_id, lane_ids, identity = _registered_advisory(registry)
+    results = [
+        entry for entry in _required_results(lane_ids, identity) if entry["key"] != "data_context"
+    ]
+    asserted = _valid_no_op(identity)
+    asserted["session_id"] = "sess-data"
+    results.append({"key": "data_context", "content": asserted})
+
+    outcome = _submit(registry, fanout_id, results)
+
+    assert outcome["status"] == "partial"
+    assert "data_context" in outcome["contract_violations"]
+
+
+def test_a_second_issuance_of_the_same_question_is_not_a_mismatch(tmp_path: Any) -> None:
+    """Two fan-outs for the same question text share one identity, by design.
+
+    A question re-emitted on resume, or asked twice in one session, produces the
+    same `question_identity` because that identity is a digest of the question
+    text — and a proposal drafted for the first issuance names the same
+    measurement as one drafted for the second, because it was drafted from the
+    same question. Nothing false can be rendered: the child returns a proposal
+    and never a measurement, and the read runs after confirmation, at the time
+    it is confirmed. Binding per issuance would demand a token echoed by the
+    child, buying detection of a case that carries no harm (Q00/ouroboros#1754).
+    """
+    registry = FanoutRegistry(tmp_path)
+    first_id, lane_ids, identity = _registered_advisory(registry)
+    second_id, _second_lanes, second_identity = _registered_advisory(registry)
+
+    assert first_id != second_id
+    assert second_identity == identity
+
+    drafted_for_the_first = _required_results(lane_ids, identity)
+    outcome = _submit(registry, second_id, drafted_for_the_first)
+
+    assert outcome["status"] == "complete"
+    assert outcome["contract_violations"] == {}
 
 
 def test_a_proposal_for_this_question_is_accepted(tmp_path: Any) -> None:

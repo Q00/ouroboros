@@ -419,7 +419,6 @@ def _advisory_lane_outputs(meta: Mapping[str, Any], lane_keys: list[str]) -> dic
     outputs: dict[str, Any] = {key: f"{key}-advice" for key in lane_keys}
     if "data_context" in outputs:
         outputs["data_context"] = {
-            "session_id": str(meta["session_id"]) if "session_id" in meta else "",
             "question_identity": identity,
             "lane_id": "data_context",
             "data_needed": False,

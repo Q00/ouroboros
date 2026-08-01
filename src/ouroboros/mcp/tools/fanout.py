@@ -703,6 +703,14 @@ def _provenance_violations(record: FanoutRecord, output: Any) -> list[str]:
     Compared against the record rather than against the submission's arguments,
     because both are attacker-supplied in the same call; only the record was
     written by the producer.
+
+    The question is the only thing checked here. A contracted answer carries no
+    session field for the same reason this function exists at all: the session
+    is already bound by the submission envelope above, which compares the
+    caller's session against the record before any content is read, and a second
+    copy the child asserts about itself is that check restated by the weaker
+    party. A field checked only when the child chose to fill it is worse than no
+    field -- it reads as a binding and holds as an option.
     """
     if not isinstance(output, Mapping):
         return []
@@ -710,9 +718,6 @@ def _provenance_violations(record: FanoutRecord, output: Any) -> list[str]:
     claimed_identity = str(output.get("question_identity") or "")
     if record.question_identity and claimed_identity != record.question_identity:
         problems.append("question_identity: does not belong to this fan-out")
-    claimed_session = str(output.get("session_id") or "")
-    if record.session_id and claimed_session and claimed_session != record.session_id:
-        problems.append("session_id: does not belong to this fan-out")
     return problems
 
 

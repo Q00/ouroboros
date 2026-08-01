@@ -514,7 +514,7 @@ def _interview_data_read_request_schema() -> dict[str, Any]:
 def _interview_data_evidence_answer_contract() -> dict[str, Any]:
     """Return the answer contract for the ``data_context`` advisory lane.
 
-    Two properties this schema holds by shape rather than by rule.
+    Three properties this schema holds by shape rather than by rule.
 
     **The child cannot report a measurement.** There is no field for an observed
     value, a row, or a timestamp of observation -- only proposals. A child that
@@ -527,22 +527,28 @@ def _interview_data_evidence_answer_contract() -> dict[str, Any]:
     ``required: true`` precisely because this response always exists, so a
     question that is not data-driven completes the fan-out rather than stalling
     it.
+
+    **The answer names the question it was drafted for, and nothing else.**
+    There is no ``session_id`` here. The session is settled by the submission
+    envelope, which rejects a fan-out submitted under a different session before
+    any content is examined; a session the child asserts about itself restates
+    that check in the weaker of the two directions, since the assertion and the
+    envelope arrive in the same call and only one of them was written by the
+    producer. The sibling ``code_investigation`` contract carries a session
+    because its output becomes a ``[from-code]`` interview answer; this lane's
+    output is a proposal shown beside the question, so ``question_identity`` is
+    the whole of what has to match (Q00/ouroboros#1754).
     """
     answer_schema: dict[str, Any] = {
         "type": "object",
         "additionalProperties": False,
         "required": [
-            "session_id",
             "question_identity",
             "lane_id",
             "data_needed",
             "read_requests",
         ],
         "properties": {
-            "session_id": {
-                "type": "string",
-                "description": "Current Ouroboros interview session ID.",
-            },
             "question_identity": {
                 "type": "string",
                 "pattern": r"^interview-question:[0-9a-f]{16}$",
