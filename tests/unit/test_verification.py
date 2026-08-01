@@ -456,6 +456,150 @@ class TestSpecVerifier:
         summary = verifier.verify_all((assertion,))
         assert summary.verified_count == 1
 
+    # A pattern that matches the empty string matches every subject, so it verifies
+    # whatever criterion it is pointed at. All of these compile, which is the only
+    # question the gate used to ask.
+    @pytest.mark.parametrize("pattern", [".*", "x?", r"\s*", "(?:)", "|", "^", r"\A\Z"])
+    def test_t2_pattern_matching_any_input_is_not_evidence(self, pattern: str) -> None:
+        """Such a pattern must not verify an AC the project does not satisfy."""
+        project = self._create_project({"main.py": "print('hello')\n"})
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="MUST define a CameraProvider interface",
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern=pattern,
+            file_hint="*.py",
+        )
+
+        summary = SpecVerifier(project_dir=project).verify_all(
+            (assertion,), agent_results={0: False}
+        )
+
+        assert summary.verified_count == 0
+        assert summary.reports[0].verified_pass is False
+
+    @pytest.mark.parametrize("pattern", [".*", "x?", r"\s*", "(?:)", "|", "^", r"\A\Z"])
+    def test_t1_pattern_matching_any_input_is_not_evidence(self, pattern: str) -> None:
+        """The T1 constant path consumes matches too and needs the same guard."""
+        project = self._create_project({"config.py": "FPS = 60\n"})
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="MUST set WARMUP_FRAMES to 10",
+            tier=VerificationTier.T1_CONSTANT,
+            pattern=pattern,
+            file_hint="*.py",
+        )
+
+        summary = SpecVerifier(project_dir=project).verify_all(
+            (assertion,), agent_results={0: False}
+        )
+
+        assert summary.verified_count == 0
+        assert summary.reports[0].verified_pass is False
+
+    def test_empty_matching_pattern_fails_closed_against_an_agent_pass_claim(self) -> None:
+        """Refusing the pattern must raise a discrepancy, not silently skip the AC.
+
+        With the agent claiming PASS, a refused pattern has to leave a result behind:
+        an empty report list would make ``verified_pass`` fall back to the agent's own
+        self-report, turning a refused pattern into an unchecked pass.
+        """
+        project = self._create_project({"main.py": "print('hello')\n"})
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="MUST define a CameraProvider interface",
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern=".*",
+            file_hint="*.py",
+        )
+
+        summary = SpecVerifier(project_dir=project).verify_all(
+            (assertion,), agent_results={0: True}
+        )
+        report = summary.reports[0]
+
+        assert report.results, "a refused pattern must still produce a result"
+        assert report.verified_pass is False
+        assert report.has_discrepancy is True
+        assert summary.discrepancy_count == 1
+        assert summary.override_approval is False
+        assert "Unusable regex pattern" in report.results[0].detail
+
+    def test_empty_matching_pattern_does_not_overturn_an_agent_fail(self) -> None:
+        """The spec verifier exists to catch agent lies, not to promote an honest FAIL.
+
+        ``has_discrepancy`` is False here because that flag means "agent claimed PASS
+        but verification disagreed", and there is no such claim to contradict — the
+        point is that ``verified_pass`` stays False instead of overturning the agent.
+        """
+        project = self._create_project({"main.py": "print('hello')\n"})
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="MUST define a CameraProvider interface",
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern=".*",
+            file_hint="*.py",
+        )
+
+        report = (
+            SpecVerifier(project_dir=project)
+            .verify_all((assertion,), agent_results={0: False})
+            .reports[0]
+        )
+
+        assert report.verified_pass is False
+        assert report.has_discrepancy is False
+        assert report.results[0].verified is False
+
+    @pytest.mark.parametrize(
+        "pattern",
+        [
+            r"class\s+CameraProvider",
+            r"\bCameraProvider\b",
+            "(?=class CameraProvider)",
+            r"^(?=[\s\S]*CameraProvider)",
+        ],
+    )
+    def test_discriminating_pattern_still_verifies(self, pattern: str) -> None:
+        """The guard must not refuse patterns that really discriminate.
+
+        The lookahead forms matter: they consume nothing, so a guard written in terms
+        of match width would refuse them and report a genuine PASS as a discrepancy —
+        the same failure this change fixes, running the other way.
+        """
+        project = self._create_project({"camera.py": "class CameraProvider:\n    pass\n"})
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="MUST define a CameraProvider interface",
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern=pattern,
+            file_hint="*.py",
+        )
+
+        summary = SpecVerifier(project_dir=project).verify_all(
+            (assertion,), agent_results={0: True}
+        )
+
+        assert summary.verified_count == 1
+        assert summary.reports[0].has_discrepancy is False
+        assert summary.override_approval is None
+
+    def test_genuine_constant_match_still_verifies(self) -> None:
+        """The same on the T1 path, so the guard is not proven only through T2."""
+        project = self._create_project({"config.py": "WARMUP_FRAMES = 10\n"})
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="Warmup frames should be 10",
+            tier=VerificationTier.T1_CONSTANT,
+            pattern=r"WARMUP_FRAMES\s*=\s*",
+            expected_value="10",
+            file_hint="*.py",
+        )
+
+        summary = SpecVerifier(project_dir=project).verify_all((assertion,))
+
+        assert summary.verified_count == 1
+
 
 # -- Extractor Tests --
 

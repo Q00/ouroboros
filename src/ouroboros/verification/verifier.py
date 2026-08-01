@@ -186,15 +186,23 @@ class SpecVerifier:
         )
 
     def _safe_compile(self, pattern: str, flags: int = 0) -> re.Pattern | None:
-        """Compile regex with length guard against ReDoS from LLM-generated patterns."""
+        """Compile a model-supplied regex, refusing one that cannot be evidence."""
         if len(pattern) > MAX_PATTERN_LENGTH:
             logger.warning("Regex pattern too long (%d chars), skipping", len(pattern))
             return None
         try:
-            return re.compile(pattern, flags)
+            compiled = re.compile(pattern, flags)
         except (re.error, OverflowError) as e:
             logger.warning("Invalid regex pattern: %s", e)
             return None
+        if compiled.search("") is not None:
+            # A pattern that matches the empty string matches every subject, so a hit
+            # on a real file is not evidence about the criterion — it is evidence that
+            # the file exists. `.*`, `x?`, `\s*`, `(?:)`, `|`, `^` and `\A\Z` all
+            # compile, and all verified whatever criterion they were pointed at.
+            logger.warning("Regex pattern matches any input, skipping: %r", pattern)
+            return None
+        return compiled
 
     def _verify_one(self, assertion: SpecAssertion) -> SpecVerificationResult | None:
         """Verify a single assertion. Returns None for skipped tiers."""
@@ -231,7 +239,7 @@ class SpecVerifier:
                 assertion=assertion,
                 verified=False,
                 discrepancy=True,
-                detail="Invalid or too-long regex pattern",
+                detail="Unusable regex pattern: invalid, too long, or matches any input",
             )
 
         for file_path in files:
@@ -307,7 +315,7 @@ class SpecVerifier:
                 assertion=assertion,
                 verified=False,
                 discrepancy=True,
-                detail="Invalid or too-long regex pattern",
+                detail="Unusable regex pattern: invalid, too long, or matches any input",
             )
 
         for file_path in files:
