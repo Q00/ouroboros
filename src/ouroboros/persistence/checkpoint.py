@@ -286,8 +286,12 @@ class CheckpointStore:
                     self._publish_staged_checkpoint(checkpoint.seed_id, staged, checkpoint_path)
                 finally:
                     # A successful publish consumed the staged file via
-                    # rename; anything still here is failure debris.
-                    staged.unlink(missing_ok=True)
+                    # rename; anything still here is failure debris. The
+                    # cleanup itself must never fail a committed save.
+                    try:
+                        staged.unlink(missing_ok=True)
+                    except OSError:
+                        pass
 
             return Result.ok(None)
         except Exception as e:
@@ -324,20 +328,34 @@ class CheckpointStore:
         except Exception:
             # Undo in reverse order; a rename that fails mid-undo aborts the
             # walk but destroys nothing — every checkpoint still exists at
-            # some level, and load()'s rollback walk will find it.
+            # some level or in the retired file, and load()'s rollback walk
+            # finds the levels.
+            undo_complete = True
             for source, target in reversed(shifted):
                 try:
                     os.replace(target, source)
                 except OSError:
+                    undo_complete = False
                     break
-            if retired is not None and retired.exists():
+            # The retired checkpoint may be restored only into a provably
+            # vacated oldest slot. After a partial undo that slot can still
+            # hold an unshifted generation, and restoring over it would
+            # destroy that generation — the retired file then stays on disk
+            # as recoverable debris instead.
+            if retired is not None and retired.exists() and undo_complete and not oldest.exists():
                 try:
                     os.replace(retired, oldest)
                 except OSError:
                     pass
             raise
         if retired is not None:
-            retired.unlink(missing_ok=True)
+            try:
+                retired.unlink(missing_ok=True)
+            except OSError:
+                # Promotion is the commit point; cleanup debris after a
+                # committed save is preferable to reporting failure and
+                # inviting a retry of a transaction that already happened.
+                pass
 
     def load(self, seed_id: str) -> Result[CheckpointData, PersistenceError]:
         """Load latest valid checkpoint with automatic rollback on corruption.

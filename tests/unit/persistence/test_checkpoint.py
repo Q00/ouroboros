@@ -551,6 +551,87 @@ class TestCheckpointStoreAtomicSave:
         assert loaded.is_ok
         assert loaded.value.state == {"step": 5}
 
+    @pytest.mark.parametrize("failing_undo_step", [1, 2, 3])
+    def test_partial_undo_never_overwrites_a_generation(
+        self, checkpoint_store: CheckpointStore, failing_undo_step: int
+    ) -> None:
+        """No committed generation may be lost, whichever undo rename fails.
+
+        After a failed promotion the rotation is undone in reverse; if an
+        undo rename itself fails, the retired oldest checkpoint must not be
+        restored over a level that still holds an unshifted generation.
+        Every pre-save generation has to survive somewhere on disk.
+        """
+        for step in range(1, 6):
+            assert checkpoint_store.save(
+                CheckpointData.create("undo-fail", "execution", {"step": step})
+            ).is_ok
+        real_replace = os.replace
+        state = {"publish_failed": False, "undo_calls": 0}
+
+        def faulty_replace(src, dst):
+            if ".tmp-" in Path(src).name:
+                state["publish_failed"] = True
+                raise OSError("simulated promotion failure")
+            if state["publish_failed"]:
+                state["undo_calls"] += 1
+                if state["undo_calls"] == failing_undo_step:
+                    raise OSError("simulated undo failure")
+            return real_replace(src, dst)
+
+        sixth = CheckpointData.create("undo-fail", "execution", {"step": 6})
+        with patch("ouroboros.persistence.checkpoint.os.replace", side_effect=faulty_replace):
+            result = checkpoint_store.save(sixth)
+
+        assert result.is_err
+        surviving_steps = set()
+        for entry in checkpoint_store._base_path.iterdir():
+            if entry.name.endswith(".lock"):
+                continue
+            try:
+                surviving_steps.add(json.loads(entry.read_text())["state"]["step"])
+            except (OSError, ValueError, KeyError):
+                continue
+        assert {2, 3, 4, 5} <= surviving_steps, (
+            f"failed undo step {failing_undo_step} lost generations: "
+            f"only {sorted(surviving_steps)} survive"
+        )
+
+    def test_post_commit_cleanup_failure_still_reports_success(
+        self, checkpoint_store: CheckpointStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Promotion is the commit point; later cleanup must not fail the save.
+
+        Once the staged checkpoint is promoted, a failure while unlinking the
+        retired oldest checkpoint has to surface as debris, not as an error —
+        otherwise callers retry a transaction that already committed.
+        """
+        for step in range(1, 6):
+            assert checkpoint_store.save(
+                CheckpointData.create("cleanup-fail", "execution", {"step": step})
+            ).is_ok
+        real_unlink = Path.unlink
+
+        def failing_retire_unlink(self, *args, **kwargs):
+            if ".retire-" in self.name:
+                raise OSError("simulated cleanup failure")
+            return real_unlink(self, *args, **kwargs)
+
+        monkeypatch.setattr("ouroboros.persistence.checkpoint.Path.unlink", failing_retire_unlink)
+        sixth = CheckpointData.create("cleanup-fail", "execution", {"step": 6})
+        result = checkpoint_store.save(sixth)
+
+        assert result.is_ok, "a committed save must not be reported as failed"
+        loaded = checkpoint_store.load("cleanup-fail")
+        assert loaded.is_ok
+        assert loaded.value.state == {"step": 6}
+        debris = [
+            entry.name
+            for entry in checkpoint_store._base_path.iterdir()
+            if ".retire-" in entry.name
+        ]
+        assert debris, "expected the retired checkpoint to remain as debris"
+
     def test_successful_save_rotates_and_leaves_no_temp_files(
         self, checkpoint_store: CheckpointStore
     ) -> None:
