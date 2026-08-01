@@ -8,6 +8,7 @@ to an output that breaks its contract.
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from jsonschema import Draft202012Validator
@@ -688,6 +689,122 @@ def test_a_record_issued_before_contracts_were_pinned_still_enforces(tmp_path: A
 
     assert outcome["status"] == "partial"
     assert "data_context" in outcome["contract_violations"]
+
+
+@pytest.mark.parametrize(
+    ("corruption", "why"),
+    [
+        ({"contract_id": "data_evidence_answer.v1"}, "no schema at all"),
+        (
+            {"contract_id": "data_evidence_answer.v1", "response_model_schema": "not-an-object"},
+            "schema is not an object",
+        ),
+        (
+            {
+                "contract_id": "data_evidence_answer.v1",
+                "response_model_schema": {"type": "not-a-type"},
+            },
+            "no validator will accept the schema",
+        ),
+        ("not-a-contract-at-all", "the contract is not even an object"),
+    ],
+)
+def test_a_contract_that_cannot_be_checked_is_not_a_contract_that_passed(
+    tmp_path: Any, corruption: Any, why: str
+) -> None:
+    """Being unable to check and having checked out must not share an answer.
+
+    An unenforceable persisted contract used to return no violations, and the
+    caller reads no violations as *validated* — so a lane whose contract had
+    rotted was accepted with whatever fields it carried, `status="complete"`.
+    A record can only reach this state by being corrupted underneath the
+    registry, but the response says the output was judged against its issued
+    contract, and that has to stay true or say nothing.
+    """
+    registry = FanoutRegistry(tmp_path)
+    fanout_id, lane_ids, identity = _registered_advisory(registry)
+    record = registry.load(fanout_id)
+    assert record is not None
+    assert record.answer_contracts is not None
+    record.answer_contracts["data_context"] = corruption
+    (tmp_path / f"{fanout_id}.json").write_text(
+        json.dumps(record.to_dict(), ensure_ascii=False), encoding="utf-8"
+    )
+
+    results = [
+        entry for entry in _required_results(lane_ids, identity) if entry["key"] != "data_context"
+    ]
+    smuggled = _valid_no_op(identity)
+    smuggled["arbitrary_child_value"] = 42
+    results.append({"key": "data_context", "content": smuggled})
+
+    outcome = _submit(registry, fanout_id, results)
+
+    assert outcome["status"] == "partial", why
+    assert "data_context" in outcome["contract_violations"], why
+    # The lane is excluded from aggregation, so nothing it smuggled reaches the
+    # host — and the report names the condition without quoting the output.
+    assert "42" not in repr(outcome["contract_violations"]), why
+
+
+@pytest.mark.asyncio
+async def test_the_public_submit_tool_also_refuses_an_uncheckable_contract(tmp_path: Any) -> None:
+    """Through the tool a host actually calls, not only the core function."""
+    from ouroboros.mcp.tools.evaluation_handlers import SubmitFanoutResultsHandler
+
+    registry = FanoutRegistry(tmp_path)
+    fanout_id, lane_ids, identity = _registered_advisory(registry)
+    record = registry.load(fanout_id)
+    assert record is not None
+    assert record.answer_contracts is not None
+    record.answer_contracts["data_context"] = {
+        "contract_id": "data_evidence_answer.v1",
+        "response_model_schema": {"type": "not-a-type"},
+    }
+    (tmp_path / f"{fanout_id}.json").write_text(
+        json.dumps(record.to_dict(), ensure_ascii=False), encoding="utf-8"
+    )
+
+    results = [
+        entry for entry in _required_results(lane_ids, identity) if entry["key"] != "data_context"
+    ]
+    smuggled = _valid_no_op(identity)
+    smuggled["arbitrary_child_value"] = 42
+    results.append({"key": "data_context", "content": smuggled})
+
+    submitted = await SubmitFanoutResultsHandler(fanout_registry=registry).handle(
+        {
+            "session_id": "sess-data",
+            "correlation_key": "context.lane_id",
+            "fanout_id": fanout_id,
+            "results": results,
+        }
+    )
+
+    assert submitted.is_ok, submitted
+    meta = submitted.unwrap().meta
+    assert meta["status"] == "partial"
+    assert "data_context" in meta["contract_violations"]
+
+
+def test_every_contract_this_build_advertises_is_enforceable() -> None:
+    """Advertised iff enforced, checked at the source rather than at replay.
+
+    Failing closed above is only correct because a contract this build issues is
+    never unenforceable; if one were, every fan-out carrying it would fail on a
+    server defect rather than a corrupt record. This is where that is caught.
+    """
+    from jsonschema import Draft202012Validator
+
+    contracted = [
+        lane
+        for lane in _interview_question_advisory_fanout_metadata()["lanes"]
+        if isinstance(lane.get("answer_contract"), dict)
+    ]
+    assert contracted, "the parametrisation below proves nothing if no lane is contracted"
+    for lane in contracted:
+        schema = lane["answer_contract"]["response_model_schema"]
+        Draft202012Validator.check_schema(schema)
 
 
 def test_the_contract_carries_only_what_is_enforced_or_instructed() -> None:

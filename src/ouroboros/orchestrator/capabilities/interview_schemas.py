@@ -1024,7 +1024,8 @@ def _interview_question_advisory_fanout_metadata() -> dict[str, Any]:
         "runtime_instruction": (
             "Show the MCP interview question to the user first, then fan out "
             "advisory lanes for code context, current web facts when needed, "
-            "ambiguity critique, simplification, and architecture implications. "
+            "proposed measurements, ambiguity critique, simplification, and "
+            "architecture implications. "
             "Read child task results as they complete and synthesize them into "
             "two or three answer options or one recommended draft. Do not forward advisory text to "
             "ouroboros_interview until the user approves, edits, or explicitly "

@@ -490,10 +490,14 @@ def _enforceable_contracts(record: FanoutRecord) -> dict[str, Mapping[str, Any]]
     let an old record accept anything.
     """
     if record.answer_contracts is not None:
+        # A contract that is not even an object is kept rather than skipped, as
+        # an empty one that no output can satisfy. Dropping it would remove the
+        # lane from this map, and a lane absent from it is a lane nobody
+        # validates -- the same fail-open the validator below was just closed
+        # against, reached by a different route.
         return {
-            lane_id: contract
+            lane_id: contract if isinstance(contract, Mapping) else {}
             for lane_id, contract in record.answer_contracts.items()
-            if isinstance(contract, Mapping)
         }
     return _canonical_lane_contracts()
 
@@ -516,19 +520,29 @@ def _validate_against_contract(
     output: Any,
     contract: Mapping[str, Any],
 ) -> list[str]:
-    """Return contract violations for one lane's submitted output."""
+    """Return contract violations for one lane's submitted output.
+
+    **An unenforceable contract fails closed.** A persisted contract with no
+    schema, or one no validator will accept, used to return "no violations" —
+    the child had done nothing wrong, so nothing was reported. But the caller
+    reads an empty list as *validated*, and the lane then reaches the host
+    carrying whatever it liked. The two conditions are opposite: "this output
+    satisfies its contract" and "this contract cannot say" must not share an
+    answer. Not being able to check is reported as the violation it is, which
+    excludes the lane from aggregation through the channel that already exists.
+    """
     from jsonschema import Draft202012Validator
 
     schema = contract.get("response_model_schema")
     if not isinstance(schema, Mapping):
-        return []
+        return ["<contract>: response_model_schema is missing or is not an object"]
     if not isinstance(output, Mapping):
         return ["output is not a JSON object"]
     try:
         Draft202012Validator.check_schema(dict(schema))
-    except Exception:  # noqa: BLE001 - an unenforceable contract is not a violation
+    except Exception:  # noqa: BLE001 - any rejection makes the contract unenforceable
         log.warning("fanout.contract.unenforceable", contract_id=contract.get("contract_id"))
-        return []
+        return ["<contract>: response_model_schema is not an enforceable schema"]
     validator = Draft202012Validator(dict(schema))
     # Report the JSON path and the rule that failed, never the offending value:
     # a violation report that echoes its input turns the error channel into a
