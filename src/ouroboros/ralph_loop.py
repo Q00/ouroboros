@@ -350,9 +350,45 @@ def _extract_qa_verdict(meta: dict[str, Any]) -> str | None:
     return str(verdict).lower() if verdict is not None else None
 
 
+def _numeric(value: Any) -> float | None:
+    """Return ``value`` as a float, rejecting bools (a subclass of int)."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
+
+
+def _qa_result_contradicts_pass(qa: dict[str, Any]) -> bool:
+    """Return True when the QA gate's own numbers refute a ``pass`` verdict.
+
+    ``verdict`` is kept verbatim from the model whenever it is one of the valid
+    tokens, while ``passed``/``score``/``pass_threshold`` are computed by the QA
+    gate itself. Only the computed fields are authoritative here.
+    """
+    if qa.get("passed") is False:
+        return True
+    score = _numeric(qa.get("score"))
+    threshold = _numeric(qa.get("pass_threshold"))
+    if score is None or threshold is None:
+        return False
+    # A NaN score compares False here, which lands on the fail-closed side.
+    return not score >= threshold
+
+
 def _qa_passed(meta: dict[str, Any]) -> bool:
-    verdict = _extract_qa_verdict(meta)
-    return verdict in {"pass", "passed"}
+    """Return True only when the QA verdict *and* its own numbers agree on a pass.
+
+    Stopping the loop here reports the run as ``completed``, which downstream
+    (``auto/pipeline.py``) reads as a terminal success, so a model-authored
+    ``verdict`` string must never outrank the gate's computed result. Every
+    other reader of this payload already gates on ``passed`` (``auto/adapters.py``,
+    ``auto/pipeline.py``); this brings the loop's stop decision in line.
+    """
+    qa = meta.get("qa")
+    if not isinstance(qa, dict):
+        return False
+    if _extract_qa_verdict(meta) not in {"pass", "passed"}:
+        return False
+    return not _qa_result_contradicts_pass(qa)
 
 
 def _extract_findings_hash(meta: dict[str, Any]) -> str | None:

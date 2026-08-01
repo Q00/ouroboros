@@ -538,3 +538,65 @@ async def test_plugin_dispatch_uses_default_progress_windows_when_omitted(
     sub = body["_subagent"]
     assert sub["context"]["oscillation_window"] == DEFAULT_OSCILLATION_WINDOW
     assert sub["context"]["grade_regression_window"] == DEFAULT_GRADE_REGRESSION_WINDOW
+
+
+def _qa_meta(score: float, verdict: str, pass_threshold: float = 0.8) -> dict[str, Any]:
+    """Build the ``meta["qa"]`` payload exactly as ``QAHandler.handle`` publishes it.
+
+    ``passed`` is derived from the score, never from the model's ``verdict``
+    string (``src/ouroboros/mcp/tools/qa.py``), which is what makes the two
+    fields capable of contradicting each other.
+    """
+    return {
+        "score": score,
+        "verdict": verdict,
+        "pass_threshold": pass_threshold,
+        "passed": score >= pass_threshold,
+        "loop_action": "escalate" if score < pass_threshold else "complete",
+    }
+
+
+@pytest.mark.asyncio
+async def test_sub_threshold_score_does_not_stop_the_loop_on_a_pass_verdict() -> None:
+    """A model-authored ``verdict: "pass"`` must not outrank the QA gate's own numbers.
+
+    The verdict string comes straight from the model whenever it is one of the
+    valid tokens; ``passed``/``score``/``pass_threshold`` are computed by the QA
+    gate itself. When they contradict, the computed result wins — otherwise one
+    string field converts a failed generation into a terminal success.
+    """
+    evolve = _ScriptedEvolveHandler(
+        metas=[
+            {"action": "continue", "qa": _qa_meta(0.1, "pass")},
+            {"action": "continue", "qa": _qa_meta(0.1, "pass")},
+        ]
+    )
+    runner = RalphLoopRunner(evolve)
+
+    result = await runner.run(
+        RalphLoopConfig(lineage_id="lin_contradicted_pass", max_generations=2)
+    )
+
+    assert result.stop_reason != "qa passed"
+    assert result.stop_reason == "max_generations reached"
+    assert result.iteration_count == 2
+    assert evolve.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_uncontradicted_pass_verdict_still_stops_the_loop() -> None:
+    """The guard must only fire on contradiction: an honest pass still stops at once."""
+    evolve = _ScriptedEvolveHandler(
+        metas=[
+            {"action": "continue", "qa": _qa_meta(0.95, "pass")},
+            {"action": "continue", "qa": _qa_meta(0.95, "pass")},
+        ]
+    )
+    runner = RalphLoopRunner(evolve)
+
+    result = await runner.run(RalphLoopConfig(lineage_id="lin_honest_pass", max_generations=2))
+
+    assert result.status == "completed"
+    assert result.stop_reason == "qa passed"
+    assert result.iteration_count == 1
+    assert evolve.calls == 1
