@@ -555,7 +555,24 @@ def submit_fanout_results(
     * A ``session_id`` / ``correlation_key`` that disagrees with the persisted
       record → ``status="correlation_mismatch"`` (clean error).
     * Missing required keys → ``status="partial"`` + ``missing_required_keys``
-      (the host may resubmit with the remaining lanes).
+      (the host may retry with the complete set — see below).
+
+    **Every call is judged whole.** ``provided`` is built from this call's
+    ``results`` alone; nothing a previous call carried is retained, because
+    retaining it would make the record hold child-authored output. That is the
+    durable result state RFC #1754 defers to a later slice along with the
+    sanitization obligation it brings -- a submitted lane can carry a name or an
+    address inside its content, and the record on ``main`` has never held
+    anything a child wrote.
+
+    So a retry after ``partial`` resubmits every lane the host holds, not only
+    the ones just reported missing. The host is the one place all of them exist
+    at once, and asking it to send what it already has costs nothing; the
+    alternative buys convenience with a durable copy of unsanitized child text.
+    This is stated in the tool description, the ``results`` parameter, and
+    ``skills/interview/SKILL.md`` in the same words, because a partial reply
+    that reads as "send the rest" traps a sequential host in a loop that never
+    completes.
     * Otherwise → route to the revived synthesizer for the record ``kind`` and
       return its structured outcome under ``status="complete"``, reporting any
       ``missing_optional_keys``, ``undispatched_keys`` and ``contract_violations``.
@@ -642,6 +659,15 @@ def submit_fanout_results(
             "received_keys": sorted(provided),
             "expected_keys": list(record.expected_keys),
             "contract_violations": contract_violations,
+            # A list of what is missing reads as a list of what to send next.
+            # It is not: this call retained nothing, so a retry carrying only
+            # these keys reports the ones just received as missing instead --
+            # a loop that never completes. Said here as a constant because the
+            # reply is the one place a host is certainly reading.
+            "retry_contract": (
+                "Resubmit every lane you hold, not only the missing ones. "
+                "No submitted output is retained between calls."
+            ),
         }
 
     completion_report = {

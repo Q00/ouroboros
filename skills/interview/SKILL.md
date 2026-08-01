@@ -238,10 +238,15 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
      per subagent, where `key` is that child's correlation value (its lane id,
      persona, or `code_facts`).
    A complete set returns the correlated synthesis to continue with; a partial
-   set returns `status="partial"` with `missing_required_keys` so you can
-   resubmit the remaining lanes. Sequential hosts submit after processing
-   payloads one-by-one — same tool, same contract. Continue the interview from
-   the returned synthesis; keep the user-facing question visible throughout.
+   set returns `status="partial"` with `missing_required_keys`. **Retry with
+   every lane you hold, not only the missing ones** — no submitted output is
+   kept between calls, so each call is judged on what it carries. (The record
+   stores only what was *asked*; retaining what children *answered* is durable
+   result state, deferred with its sanitization duties to a later slice.)
+   Sequential hosts submit after processing payloads one-by-one — same tool,
+   same contract, so accumulate the outputs on your side and send the growing
+   set. Continue the interview from the returned synthesis; keep the
+   user-facing question visible throughout.
 
    Only lanes marked `required: true` in the request block completion. A lane
    you ran that had nothing to say still submits its output — that is an answer.

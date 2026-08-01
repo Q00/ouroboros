@@ -860,6 +860,67 @@ async def test_submit_tool_rejects_forged_ids_and_still_redeems_issued_ones(
 
 
 @pytest.mark.asyncio
+async def test_submit_tool_partial_retry_is_judged_on_the_whole_set(tmp_path: Any) -> None:
+    """A retry carries every lane, and the docs say so in the same words.
+
+    `provided` is built from the current call alone; nothing an earlier call
+    carried is kept, because keeping it would put child-authored output in the
+    record — the durable result state RFC #1754 defers to a later slice with its
+    sanitization duties. The failure this pins is not the statelessness but the
+    instruction that contradicted it: a partial reply that reads as "send the
+    rest" traps a sequential host in a loop that never completes.
+    """
+    registry = FanoutRegistry(tmp_path)
+    handler = LateralThinkHandler(agent_runtime_backend="gemini", fanout_registry=registry)
+    personas = ["researcher", "contrarian"]
+    produced = await handler.handle(
+        {
+            "problem_context": "stuck",
+            "current_approach": "same",
+            "personas": personas,
+            "session_id": "sess-partial",
+        }
+    )
+    assert produced.is_ok, produced
+    fanout_id = produced.unwrap().meta["fanout_id"]
+    submit = SubmitFanoutResultsHandler(fanout_registry=registry)
+
+    async def send(*keys: str) -> dict[str, Any]:
+        result = await submit.handle(
+            {
+                "session_id": "sess-partial",
+                "correlation_key": "context.persona",
+                "fanout_id": fanout_id,
+                "results": [{"key": key, "content": f"{key}-out"} for key in keys],
+            }
+        )
+        assert result.is_ok, result
+        return dict(result.unwrap().meta)
+
+    first = await send("researcher")
+    assert first["status"] == "partial"
+    assert first["missing_keys"] == ["contrarian"]
+    # The reply is the one place a host is certainly reading, so it carries the
+    # contract rather than leaving a list of missing keys to be read as a list
+    # of what to send.
+    assert "not only the missing ones" in first["retry_contract"]
+
+    # The remaining-lanes-only retry the old wording invited: still partial, and
+    # now the lane the first call carried is the one reported missing.
+    remaining_only = await send("contrarian")
+    assert remaining_only["status"] == "partial"
+    assert remaining_only["missing_keys"] == ["researcher"]
+
+    whole = await send(*personas)
+    assert whole["status"] == "complete"
+    assert whole["result"]["ready_for_synthesis"] is True
+    # Both lanes reach synthesis from this one call — the retry is what carried
+    # them, not anything the registry remembered.
+    rendered = repr(whole["result"])
+    assert all(f"{persona}-out" in rendered for persona in personas)
+
+
+@pytest.mark.asyncio
 async def test_submit_tool_requires_fanout_id() -> None:
     submit = SubmitFanoutResultsHandler()
     result = await submit.handle({"results": []})

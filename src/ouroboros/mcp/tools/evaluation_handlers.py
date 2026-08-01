@@ -1941,7 +1941,7 @@ class SubmitFanoutResultsHandler:
                 "one {key, content} per child output — `key` is the value of the "
                 "correlation field for that child. A child you could not spawn "
                 "at all is {key, undispatched: true}; never invent its output. "
-                "Missing required keys return `status=partial` so you resubmit."
+                "Missing required keys return `status=partial`; retry with EVERY lane."
             ),
             parameters=(
                 MCPToolParameter(
