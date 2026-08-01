@@ -196,11 +196,15 @@ class SpecVerifier:
             logger.warning("Invalid regex pattern: %s", e)
             return None
         if compiled.search("") is not None:
-            # A pattern that matches the empty string matches every subject, so a hit
-            # on a real file is not evidence about the criterion — it is evidence that
-            # the file exists. `.*`, `x?`, `\s*`, `(?:)`, `|`, `^` and `\A\Z` all
-            # compile, and all verified whatever criterion they were pointed at.
-            logger.warning("Regex pattern matches any input, skipping: %r", pattern)
+            # A pattern that can match the empty string can succeed without any
+            # criterion-specific content, so a hit is evidence that a file was read,
+            # not evidence about the criterion. `.*`, `x?`, `\s*`, `(?:)`, `|` and `^`
+            # succeed against any file; `\A\Z` succeeds against an empty one, which an
+            # ordinary `__init__.py` supplies. All compile, and all verified whatever
+            # criterion they were pointed at.
+            logger.warning(
+                "Regex pattern can match without criterion content, skipping: %r", pattern
+            )
             return None
         return compiled
 

@@ -456,10 +456,14 @@ class TestSpecVerifier:
         summary = verifier.verify_all((assertion,))
         assert summary.verified_count == 1
 
-    # A pattern that matches the empty string matches every subject, so it verifies
-    # whatever criterion it is pointed at. All of these compile, which is the only
-    # question the gate used to ask.
-    @pytest.mark.parametrize("pattern", [".*", "x?", r"\s*", "(?:)", "|", "^", r"\A\Z"])
+    # A pattern that matches the empty string can succeed without any
+    # criterion-specific content, so it verifies whatever it is pointed at. All of
+    # these compile, which is the only question the gate used to ask.
+    #
+    # Split by which subject exposes each one: the patterns below also match ordinary
+    # non-empty files, while `\A\Z` succeeds only against an empty one — so proving
+    # that case needs a project that has such a file.
+    @pytest.mark.parametrize("pattern", [".*", "x?", r"\s*", "(?:)", "|", "^"])
     def test_t2_pattern_matching_any_input_is_not_evidence(self, pattern: str) -> None:
         """Such a pattern must not verify an AC the project does not satisfy."""
         project = self._create_project({"main.py": "print('hello')\n"})
@@ -478,7 +482,7 @@ class TestSpecVerifier:
         assert summary.verified_count == 0
         assert summary.reports[0].verified_pass is False
 
-    @pytest.mark.parametrize("pattern", [".*", "x?", r"\s*", "(?:)", "|", "^", r"\A\Z"])
+    @pytest.mark.parametrize("pattern", [".*", "x?", r"\s*", "(?:)", "|", "^"])
     def test_t1_pattern_matching_any_input_is_not_evidence(self, pattern: str) -> None:
         """The T1 constant path consumes matches too and needs the same guard."""
         project = self._create_project({"config.py": "FPS = 60\n"})
@@ -488,6 +492,31 @@ class TestSpecVerifier:
             tier=VerificationTier.T1_CONSTANT,
             pattern=pattern,
             file_hint="*.py",
+        )
+
+        summary = SpecVerifier(project_dir=project).verify_all(
+            (assertion,), agent_results={0: False}
+        )
+
+        assert summary.verified_count == 0
+        assert summary.reports[0].verified_pass is False
+
+    @pytest.mark.parametrize("tier", [VerificationTier.T2_STRUCTURAL, VerificationTier.T1_CONSTANT])
+    def test_anchored_empty_pattern_is_not_evidence(self, tier: VerificationTier) -> None:
+        """`\\A\\Z` succeeds only on an empty file, so only an empty file exposes it.
+
+        An empty ``__init__.py`` is ordinary in a Python package, and against it the
+        old verifier reported `Pattern found in __init__.py` on both tiers. Against a
+        non-empty fixture this pattern matches nothing either way, so a test without
+        an empty candidate would pass with the guard removed and prove nothing.
+        """
+        project = self._create_project({"pkg/__init__.py": "", "main.py": "print('hello')\n"})
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="MUST define a CameraProvider interface",
+            tier=tier,
+            pattern=r"\A\Z",
+            file_hint="**/*.py",
         )
 
         summary = SpecVerifier(project_dir=project).verify_all(
