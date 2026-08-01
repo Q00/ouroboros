@@ -28,13 +28,15 @@ indefinite ``partial``. The host can declare the second case, which completes
 the fan-out with that lane marked undispatched. Without this, the cheapest way
 for a host to finish is to invent the missing output.
 
-**Contracted lanes are validated against the contract they were issued.** A
-lane that shipped an ``answer_contract`` has its submitted output checked
-against the copy persisted with the record, not against whatever the current
-build advertises — a record outlives the process that wrote it, and judging a
-child by a contract it was never given rejects work done exactly as asked. A
-violating lane is excluded from the aggregation and reported, so a malformed or
-over-reaching answer does not reach the parent session as if it were advice.
+**Which lanes are contracted is read from the code, never from the record.** A
+lane that declares an ``answer_contract`` has its submitted output checked
+against what this build declares, and the record has no say in it. Persisting
+the contract alongside the record was tried and removed: it turned a fact the
+code guarantees into a value that could be absent, and an absent contract read
+as "nothing to check" rather than as the anomaly it is. Validation is therefore
+driven by what was submitted rather than by a map that could be missing an
+entry. A violating lane is excluded from the aggregation and reported, so a
+malformed or over-reaching answer does not reach the parent session as advice.
 
 Extracted from ``mcp/tools/subagent.py`` (Q00/ouroboros#1754), which keeps
 re-exports for its existing importers.
@@ -103,11 +105,6 @@ class FanoutRecord:
     synthesizer_input: dict[str, Any]
     required_keys: tuple[str, ...] | None = None
     question_identity: str = ""
-    #: ``lane_id -> answer_contract`` exactly as issued to the children. A
-    #: record outlives the process that wrote it, so re-entry must judge an
-    #: answer against the contract its child was given rather than against
-    #: whatever the current build advertises. Server-authored: no child content.
-    answer_contracts: dict[str, Any] | None = None
 
     def gating_keys(self) -> tuple[str, ...]:
         """Return the keys whose absence blocks completion."""
@@ -135,8 +132,6 @@ class FanoutRecord:
             data["required_keys"] = list(self.required_keys)
         if self.question_identity:
             data["question_identity"] = self.question_identity
-        if self.answer_contracts:
-            data["answer_contracts"] = self.answer_contracts
         return data
 
     @classmethod
@@ -156,11 +151,6 @@ class FanoutRecord:
                 else None
             ),
             question_identity=str(data.get("question_identity") or ""),
-            answer_contracts=(
-                dict(raw_contracts)
-                if isinstance(raw_contracts := data.get("answer_contracts"), Mapping)
-                else None
-            ),
         )
 
 
@@ -239,7 +229,6 @@ class FanoutRegistry:
         fanout_id: str | None = None,
         required_keys: list[str] | None = None,
         question_identity: str = "",
-        answer_contracts: dict[str, Any] | None = None,
     ) -> str:
         """Persist a fan-out record and return its ``fanout_id``.
 
@@ -271,7 +260,6 @@ class FanoutRegistry:
             synthesizer_input=synthesizer_input,
             required_keys=None if required_keys is None else tuple(required_keys),
             question_identity=question_identity,
-            answer_contracts=answer_contracts,
         )
         try:
             # A fan-out record carries the producer's ``synthesizer_input``
@@ -442,10 +430,6 @@ def register_question_advisory_fanout(
     """
     from ouroboros.mcp.tools.subagent import _payload_lane_id
 
-    issued_contracts = {
-        lane_id: dict(contract) for lane_id, contract in _canonical_lane_contracts().items()
-    }
-
     expected_keys: list[str] = []
     required_keys: list[str] = []
     question_identity = ""
@@ -469,50 +453,46 @@ def register_question_advisory_fanout(
         synthesizer_input={"lane_ids": list(expected_keys)},
         fanout_id=fanout_id,
         required_keys=required_keys,
-        answer_contracts=issued_contracts or None,
     )
 
 
-def _enforceable_contracts(record: FanoutRecord) -> dict[str, Mapping[str, Any]]:
-    """Return the ``lane_id -> answer_contract`` map to judge this record by.
-
-    The contracts issued with the record win. Reading today's canonical
-    definitions instead would judge a child by a contract it was never given:
-    a record can be submitted after a restart or an upgrade, and the answer it
-    carries was written against whatever was advertised when its prompt was
-    built. That is the same advertised-iff-enforced rule the lane's
-    ``question_identity`` obeys, applied across time rather than across lanes.
-
-    Records written before contracts were persisted fall back to the canonical
-    map. They were issued by a build whose contracts are no longer recoverable,
-    so the current ones are the closest available approximation — and the
-    fallback is deliberately not silence: dropping enforcement entirely would
-    let an old record accept anything.
-    """
-    if record.answer_contracts is not None:
-        # A contract that is not even an object is kept rather than skipped, as
-        # an empty one that no output can satisfy. Dropping it would remove the
-        # lane from this map, and a lane absent from it is a lane nobody
-        # validates -- the same fail-open the validator below was just closed
-        # against, reached by a different route.
-        return {
-            lane_id: contract if isinstance(contract, Mapping) else {}
-            for lane_id, contract in record.answer_contracts.items()
-        }
-    return _canonical_lane_contracts()
-
-
 def _canonical_lane_contracts() -> dict[str, Mapping[str, Any]]:
-    """Return the ``lane_id -> answer_contract`` map this build advertises."""
+    """Return the ``lane_id -> answer_contract`` map this build advertises.
+
+    Which lanes are contracted is a property of the code, and it is read from
+    the code every time rather than from the record.
+
+    An earlier revision of this PR persisted a copy of each contract with the
+    record, so that a submission arriving after a restart or an upgrade would be
+    judged by the contract its child was actually given. Two rounds of findings
+    came out of that copy -- a corrupt schema, then a missing entry -- and both
+    had the same shape: something that must exist became something that could be
+    absent, and absence read as "nothing to check" rather than as an anomaly.
+
+    The copy is gone because what it bought does not survive being priced. A
+    fan-out lives from one interview turn to its submission, so version skew
+    needs an upgrade inside that window; and every skew outcome without the copy
+    is already safe -- a tightened contract rejects the old answer as a violation
+    (``partial``, the host retries or the turn proceeds without that lane), and a
+    loosened one accepts what this build considers acceptable, which is the
+    question being asked. So the copy prevented a rare, benign ``partial``, and
+    in exchange made the set of lanes that must be validated into mutable data.
+    """
     from ouroboros.orchestrator.capabilities.interview_schemas import (
         _interview_question_advisory_fanout_metadata,
     )
 
     contracts: dict[str, Mapping[str, Any]] = {}
     for lane in _interview_question_advisory_fanout_metadata()["lanes"]:
-        contract = lane.get("answer_contract")
-        if isinstance(contract, Mapping):
-            contracts[str(lane["lane_id"])] = contract
+        if "answer_contract" not in lane:
+            continue
+        contract = lane["answer_contract"]
+        # A lane that declares a contract stays in this map even if what it
+        # declared is unusable, as an empty contract no output can satisfy.
+        # Skipping it would drop the lane from the map, and a lane absent from
+        # the map is a lane nobody checks -- the declaration would then have
+        # disabled the very check it asked for.
+        contracts[str(lane["lane_id"])] = contract if isinstance(contract, Mapping) else {}
     return contracts
 
 
@@ -763,15 +743,27 @@ def _contract_violations(
     record: FanoutRecord,
     provided: Mapping[str, Any],
 ) -> dict[str, list[str]]:
-    """Return ``lane_id -> violations`` for contracted lanes that broke theirs."""
+    """Return ``lane_id -> violations`` for contracted lanes that broke theirs.
+
+    Driven by what was submitted, not by the contract map. Iterating the map
+    made a lane's absence from it into silence: the loop never visited that
+    lane, so "no contract" produced the same result as "checked and fine" --
+    and the provenance check below rides here too, so a lane skipped this way
+    lost its question binding as well as its schema.
+
+    Now every submitted lane is visited and asked whether it is contracted. A
+    lane the code declares uncontracted (``code_context``, ``web_context``)
+    passes through, which is what those lanes are; a lane the code declares
+    contracted is checked, and there is no third answer for it to fall into.
+    """
     if record.kind != FANOUT_KIND_QUESTION_ADVISORY:
         return {}
+    contracts = _canonical_lane_contracts()
     violations: dict[str, list[str]] = {}
-    for lane_id, contract in _enforceable_contracts(record).items():
-        if lane_id not in provided:
+    for lane_id, output in provided.items():
+        if lane_id not in contracts:
             continue
-        output = provided[lane_id]
-        errors = _validate_against_contract(output, contract)
+        errors = _validate_against_contract(output, contracts[lane_id])
         errors.extend(_provenance_violations(record, output))
         if errors:
             violations[lane_id] = errors

@@ -628,12 +628,68 @@ def test_the_confirmation_instruction_asks_for_the_whole_request() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def test_re_entry_judges_by_the_contract_that_was_issued(tmp_path: Any, monkeypatch: Any) -> None:
-    """A record outlives the process that wrote it.
+def test_the_record_carries_no_contract_to_lose(tmp_path: Any) -> None:
+    """Which lanes are contracted is code, so the record has no say in it.
 
-    A host can submit after a restart or an upgrade. Judging that answer against
-    whatever the current build advertises rejects work the child did exactly as
-    asked — advertised-iff-enforced, applied across time.
+    An earlier revision persisted the contracts with the record. That copy is
+    what two rounds of findings were about — first a corrupt schema, then a
+    missing entry — and both were the same shape: a fact the code guarantees had
+    become a value that could be absent, with absence reading as "nothing to
+    check". The field is gone rather than guarded (Q00/ouroboros#1754).
+    """
+    registry = FanoutRegistry(tmp_path)
+    fanout_id, _lane_ids, _identity = _registered_advisory(registry)
+
+    persisted = json.loads((tmp_path / f"{fanout_id}.json").read_text(encoding="utf-8"))
+
+    assert "answer_contracts" not in persisted
+    assert not hasattr(registry.load(fanout_id), "answer_contracts")
+
+
+def test_no_record_state_can_switch_a_lane_contract_off(tmp_path: Any) -> None:
+    """The probe that used to bypass validation now changes nothing.
+
+    Emptying `answer_contracts` on disk once made re-entry skip `data_context`
+    entirely — arbitrary fields accepted, `status="complete"`, and the question
+    binding lost with it, because that check rode in the same loop. The key is
+    read by nothing now, so the record can carry it, omit it, or lie about it.
+    """
+    registry = FanoutRegistry(tmp_path)
+    fanout_id, lane_ids, identity = _registered_advisory(registry)
+    path = tmp_path / f"{fanout_id}.json"
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+    persisted["answer_contracts"] = {}
+    path.write_text(json.dumps(persisted, ensure_ascii=False), encoding="utf-8")
+
+    results = [
+        entry for entry in _required_results(lane_ids, identity) if entry["key"] != "data_context"
+    ]
+    smuggled = _valid_no_op(identity)
+    smuggled["arbitrary_child_value"] = 42
+    smuggled["question_identity"] = "interview-question:ffffffffffffffff"
+    results.append({"key": "data_context", "content": smuggled})
+
+    outcome = _submit(registry, fanout_id, results)
+
+    assert outcome["status"] == "partial"
+    violations = outcome["contract_violations"]["data_context"]
+    assert any("additionalProperties" in violation for violation in violations)
+    # The question binding rides in the same loop, so it had to come back too.
+    assert "question_identity: does not belong to this fan-out" in violations
+
+
+def test_a_lane_is_judged_by_the_contract_this_build_declares(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """After an upgrade the current contract judges, and that is the safe half.
+
+    The reverse — replaying against a copy issued before the upgrade — is what
+    the removed field bought. Priced out, it was worth less than it cost: a
+    fan-out lives from one interview turn to its submission, so skew needs an
+    upgrade inside that window, and the outcome here is `partial`. The lane is
+    dropped for that turn; the question was shown to the user first and the
+    interview continues. Compare that with what the copy made possible when it
+    went missing, one test up.
     """
     from ouroboros.orchestrator.capabilities import interview_schemas as schemas
 
@@ -642,8 +698,10 @@ def test_re_entry_judges_by_the_contract_that_was_issued(tmp_path: Any, monkeypa
     results = _required_results(lane_ids, identity)
     assert _submit(registry, fanout_id, results)["status"] == "complete"
 
+    declared = schemas._interview_question_advisory_fanout_metadata
+
     def upgraded() -> dict[str, Any]:
-        metadata = schemas._interview_question_advisory_fanout_metadata()
+        metadata = declared()
         for lane in metadata["lanes"]:
             if lane["lane_id"] == "data_context":
                 lane["answer_contract"]["response_model_schema"]["required"].append("caveats")
@@ -651,41 +709,7 @@ def test_re_entry_judges_by_the_contract_that_was_issued(tmp_path: Any, monkeypa
 
     monkeypatch.setattr(schemas, "_interview_question_advisory_fanout_metadata", upgraded)
 
-    assert _submit(registry, fanout_id, results)["status"] == "complete"
-
-
-def test_the_record_pins_the_contract_it_issued(tmp_path: Any) -> None:
-    registry = FanoutRegistry(tmp_path)
-    fanout_id, _lane_ids, _identity = _registered_advisory(registry)
-
-    record = registry.load(fanout_id)
-
-    assert record is not None
-    assert record.answer_contracts is not None
-    assert record.answer_contracts["data_context"]["contract_id"] == "data_evidence_answer.v1"
-
-
-def test_a_record_issued_before_contracts_were_pinned_still_enforces(tmp_path: Any) -> None:
-    """The legacy fallback is the canonical contract, not silence.
-
-    Its issuing build's contracts are unrecoverable, so the current ones are the
-    closest available approximation. Dropping enforcement instead would let an
-    old record accept anything.
-    """
-    registry = FanoutRegistry(tmp_path)
-    fanout_id = registry.register(
-        kind=FANOUT_KIND_QUESTION_ADVISORY,
-        session_id="sess-data",
-        correlation_key="context.lane_id",
-        expected_keys=["data_context"],
-        required_keys=["data_context"],
-        synthesizer_input={"lane_ids": ["data_context"]},
-    )
-    record = registry.load(fanout_id)
-    assert record is not None
-    assert record.answer_contracts is None
-
-    outcome = _submit(registry, fanout_id, [{"key": "data_context", "content": {"shape": "wrong"}}])
+    outcome = _submit(registry, fanout_id, results)
 
     assert outcome["status"] == "partial"
     assert "data_context" in outcome["contract_violations"]
@@ -710,26 +734,33 @@ def test_a_record_issued_before_contracts_were_pinned_still_enforces(tmp_path: A
     ],
 )
 def test_a_contract_that_cannot_be_checked_is_not_a_contract_that_passed(
-    tmp_path: Any, corruption: Any, why: str
+    tmp_path: Any, monkeypatch: Any, corruption: Any, why: str
 ) -> None:
     """Being unable to check and having checked out must not share an answer.
 
-    An unenforceable persisted contract used to return no violations, and the
-    caller reads no violations as *validated* — so a lane whose contract had
-    rotted was accepted with whatever fields it carried, `status="complete"`.
-    A record can only reach this state by being corrupted underneath the
-    registry, but the response says the output was judged against its issued
-    contract, and that has to stay true or say nothing.
+    An unenforceable contract used to return no violations, and the caller reads
+    no violations as *validated* — so a lane whose contract had rotted was
+    accepted with whatever fields it carried, `status="complete"`.
+
+    The corruption is injected into the build's lane metadata rather than into a
+    record, because that is the only place it can come from now: a lane that
+    declares a contract this build cannot use is a defect in the build, and the
+    lane must fail closed rather than quietly become uncontracted.
     """
+    from ouroboros.orchestrator.capabilities import interview_schemas as schemas
+
+    declared = schemas._interview_question_advisory_fanout_metadata
+
+    def broken() -> dict[str, Any]:
+        metadata = declared()
+        for lane in metadata["lanes"]:
+            if lane["lane_id"] == "data_context":
+                lane["answer_contract"] = corruption
+        return metadata
+
     registry = FanoutRegistry(tmp_path)
     fanout_id, lane_ids, identity = _registered_advisory(registry)
-    record = registry.load(fanout_id)
-    assert record is not None
-    assert record.answer_contracts is not None
-    record.answer_contracts["data_context"] = corruption
-    (tmp_path / f"{fanout_id}.json").write_text(
-        json.dumps(record.to_dict(), ensure_ascii=False), encoding="utf-8"
-    )
+    monkeypatch.setattr(schemas, "_interview_question_advisory_fanout_metadata", broken)
 
     results = [
         entry for entry in _required_results(lane_ids, identity) if entry["key"] != "data_context"
@@ -748,22 +779,28 @@ def test_a_contract_that_cannot_be_checked_is_not_a_contract_that_passed(
 
 
 @pytest.mark.asyncio
-async def test_the_public_submit_tool_also_refuses_an_uncheckable_contract(tmp_path: Any) -> None:
+async def test_the_public_submit_tool_also_refuses_an_uncheckable_contract(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
     """Through the tool a host actually calls, not only the core function."""
     from ouroboros.mcp.tools.evaluation_handlers import SubmitFanoutResultsHandler
+    from ouroboros.orchestrator.capabilities import interview_schemas as schemas
+
+    declared = schemas._interview_question_advisory_fanout_metadata
+
+    def broken() -> dict[str, Any]:
+        metadata = declared()
+        for lane in metadata["lanes"]:
+            if lane["lane_id"] == "data_context":
+                lane["answer_contract"] = {
+                    "contract_id": "data_evidence_answer.v1",
+                    "response_model_schema": {"type": "not-a-type"},
+                }
+        return metadata
 
     registry = FanoutRegistry(tmp_path)
     fanout_id, lane_ids, identity = _registered_advisory(registry)
-    record = registry.load(fanout_id)
-    assert record is not None
-    assert record.answer_contracts is not None
-    record.answer_contracts["data_context"] = {
-        "contract_id": "data_evidence_answer.v1",
-        "response_model_schema": {"type": "not-a-type"},
-    }
-    (tmp_path / f"{fanout_id}.json").write_text(
-        json.dumps(record.to_dict(), ensure_ascii=False), encoding="utf-8"
-    )
+    monkeypatch.setattr(schemas, "_interview_question_advisory_fanout_metadata", broken)
 
     results = [
         entry for entry in _required_results(lane_ids, identity) if entry["key"] != "data_context"
