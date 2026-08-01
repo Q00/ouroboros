@@ -606,23 +606,23 @@ def _interview_data_evidence_answer_contract() -> dict[str, Any]:
     return {
         "contract_id": "data_evidence_answer.v1",
         "scope": "single_interview_question_data_evidence",
+        # Exactly two things, and deliberately no third. The schema is what the
+        # child must satisfy and what re-entry enforces; the instruction is what
+        # the child must do. A claim ABOUT the system -- an ``evidence_policy``
+        # or an ``execution_semantics`` block -- reads as authoritative as
+        # either, is enforced by nothing, and is addressed to a reader who
+        # cannot act on it. Three of this PR's findings were guarantees stated
+        # somewhere nothing made them true, so the field where a fourth would
+        # live is not kept (Q00/ouroboros#1825).
+        #
+        # Where the deleted claims went: ``aggregates_only`` was a restatement
+        # of the schema, which already admits only an aggregation and holds no
+        # field for a value. Categorical grouping and "a row list is not
+        # evidence" are undecidable over an open value space -- the class that
+        # cost #1703 ten rounds -- so they are instruction, and say so below.
+        # ``runs_after`` / ``run_by`` are host duties and live in
+        # skills/interview/SKILL.md, which is the document the host reads.
         "response_model_schema": answer_schema,
-        "execution_semantics": {
-            "child_executes": False,
-            "runs_after": "explicit_user_confirmation",
-            "run_by": "parent_session",
-            "answer_authority": "none",
-        },
-        "evidence_policy": {
-            "aggregates_only": True,
-            "grouping_keys": "categorical_only",
-            "not_expressible_is_no_evidence": [
-                "row list",
-                "name",
-                "identifier",
-                "error message",
-            ],
-        },
         "runtime_instruction": (
             "Decide from the question text alone whether its honest answer is a "
             "measurement. If it is not, return data_needed=false with a reason "
@@ -630,6 +630,10 @@ def _interview_data_evidence_answer_contract() -> dict[str, Any]:
             "would run and return them as read_requests. Do not run them: the "
             "parent session runs a read only after the user confirms it, and "
             "there is no field in this contract for a value you fetched. "
+            "Only aggregates can be carried: group by categories, never by an "
+            "identifier, and when the honest answer would be a row list, a name, "
+            "an identifier, or an error message, that is data_needed=false with "
+            "a reason rather than evidence. "
             "Whatever the numbers show, the interview answer is the user's own "
             "words, never yours."
         ),

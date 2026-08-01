@@ -804,13 +804,13 @@ def _attach_question_assist_requests(
         correlation_key="context.lane_id",
     )
     if fanout_registry is not None:
-        # Register with the SAME contract this response stamps: the record's
-        # correlation key is ``context.lane_id`` and its expected keys are the
-        # lane ids carried on the emitted advisory payloads, so a host that
-        # follows the stamped ``question_advisory_result_correlation_key``
-        # round-trips through ``ouroboros_submit_fanout_results`` successfully
-        # (#1578 registered a ``code_facts`` code-investigation record here,
-        # which rejected contract-following submissions as a mismatch).
+        # Register from the SAME request this response stamps: the correlation
+        # key is ``context.lane_id``, the expected keys are the lane ids on the
+        # emitted payloads, and the persisted answer contracts are the ones the
+        # children were handed — so a host following the stamped
+        # ``question_advisory_result_correlation_key`` round-trips through
+        # ``ouroboros_submit_fanout_results``, and a submission arriving after a
+        # restart is judged by the contract it was issued (#1578, #1825 R2).
         meta["question_advisory_fanout_id"] = register_question_advisory_fanout(
             fanout_registry,
             session_id=session_id,

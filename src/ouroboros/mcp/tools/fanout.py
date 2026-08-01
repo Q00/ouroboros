@@ -28,11 +28,13 @@ indefinite ``partial``. The host can declare the second case, which completes
 the fan-out with that lane marked undispatched. Without this, the cheapest way
 for a host to finish is to invent the missing output.
 
-**Contracted lanes are validated before their output is passed on.** A lane
-whose canonical definition carries an ``answer_contract`` has its submitted
-output checked against it; a violating lane is excluded from the aggregation and
-reported, so a malformed or over-reaching answer does not reach the parent
-session as if it were advice.
+**Contracted lanes are validated against the contract they were issued.** A
+lane that shipped an ``answer_contract`` has its submitted output checked
+against the copy persisted with the record, not against whatever the current
+build advertises — a record outlives the process that wrote it, and judging a
+child by a contract it was never given rejects work done exactly as asked. A
+violating lane is excluded from the aggregation and reported, so a malformed or
+over-reaching answer does not reach the parent session as if it were advice.
 
 Extracted from ``mcp/tools/subagent.py`` (Q00/ouroboros#1754), which keeps
 re-exports for its existing importers.
@@ -90,6 +92,11 @@ class FanoutRecord:
     synthesizer_input: dict[str, Any]
     required_keys: tuple[str, ...] | None = None
     question_identity: str = ""
+    #: ``lane_id -> answer_contract`` exactly as issued to the children. A
+    #: record outlives the process that wrote it, so re-entry must judge an
+    #: answer against the contract its child was given rather than against
+    #: whatever the current build advertises. Server-authored: no child content.
+    answer_contracts: dict[str, Any] | None = None
 
     def gating_keys(self) -> tuple[str, ...]:
         """Return the keys whose absence blocks completion."""
@@ -117,6 +124,8 @@ class FanoutRecord:
             data["required_keys"] = list(self.required_keys)
         if self.question_identity:
             data["question_identity"] = self.question_identity
+        if self.answer_contracts:
+            data["answer_contracts"] = self.answer_contracts
         return data
 
     @classmethod
@@ -136,6 +145,11 @@ class FanoutRecord:
                 else None
             ),
             question_identity=str(data.get("question_identity") or ""),
+            answer_contracts=(
+                dict(raw_contracts)
+                if isinstance(raw_contracts := data.get("answer_contracts"), Mapping)
+                else None
+            ),
         )
 
 
@@ -204,6 +218,7 @@ class FanoutRegistry:
         fanout_id: str | None = None,
         required_keys: list[str] | None = None,
         question_identity: str = "",
+        answer_contracts: dict[str, Any] | None = None,
     ) -> str:
         """Persist a fan-out record and return its ``fanout_id``.
 
@@ -224,6 +239,7 @@ class FanoutRegistry:
             synthesizer_input=synthesizer_input,
             required_keys=None if required_keys is None else tuple(required_keys),
             question_identity=question_identity,
+            answer_contracts=answer_contracts,
         )
         try:
             # A fan-out record carries the producer's ``synthesizer_input``
@@ -377,12 +393,23 @@ def register_question_advisory_fanout(
     may have several questions in flight, so an unbound answer is one whose
     evidence can land beside a different question than the one it measured.
 
+    So do the answer contracts, captured here at registration — the same moment
+    and the same lane definitions the payloads were built from. A record
+    outlives the process that wrote it: a host can submit after a restart or an
+    upgrade, and judging that answer against the contract the current build
+    advertises would reject work the child did exactly as asked. Enforcement
+    follows what was issued, not what is current.
+
     Advisory lanes have no gating synthesizer (each is independent advice to make
     the human's answer easier), so submission routes to a deterministic
     aggregation that returns the correlated lane outputs in dispatch order for
     the host to synthesize.
     """
     from ouroboros.mcp.tools.subagent import _payload_lane_id
+
+    issued_contracts = {
+        lane_id: dict(contract) for lane_id, contract in _canonical_lane_contracts().items()
+    }
 
     expected_keys: list[str] = []
     required_keys: list[str] = []
@@ -407,17 +434,37 @@ def register_question_advisory_fanout(
         synthesizer_input={"lane_ids": list(expected_keys)},
         fanout_id=fanout_id,
         required_keys=required_keys,
+        answer_contracts=issued_contracts or None,
     )
 
 
-def _advisory_lane_answer_contracts() -> dict[str, Mapping[str, Any]]:
-    """Return the canonical ``lane_id -> answer_contract`` map.
+def _enforceable_contracts(record: FanoutRecord) -> dict[str, Mapping[str, Any]]:
+    """Return the ``lane_id -> answer_contract`` map to judge this record by.
 
-    Looked up from the lane definitions at re-entry rather than persisted with
-    the record. The contract is server-authored and versioned, so reading the
-    current one keeps enforcement identical to what the server advertises today
-    and keeps one more field out of durable state.
+    The contracts issued with the record win. Reading today's canonical
+    definitions instead would judge a child by a contract it was never given:
+    a record can be submitted after a restart or an upgrade, and the answer it
+    carries was written against whatever was advertised when its prompt was
+    built. That is the same advertised-iff-enforced rule the lane's
+    ``question_identity`` obeys, applied across time rather than across lanes.
+
+    Records written before contracts were persisted fall back to the canonical
+    map. They were issued by a build whose contracts are no longer recoverable,
+    so the current ones are the closest available approximation — and the
+    fallback is deliberately not silence: dropping enforcement entirely would
+    let an old record accept anything.
     """
+    if record.answer_contracts is not None:
+        return {
+            lane_id: contract
+            for lane_id, contract in record.answer_contracts.items()
+            if isinstance(contract, Mapping)
+        }
+    return _canonical_lane_contracts()
+
+
+def _canonical_lane_contracts() -> dict[str, Mapping[str, Any]]:
+    """Return the ``lane_id -> answer_contract`` map this build advertises."""
     from ouroboros.orchestrator.capabilities.interview_schemas import (
         _interview_question_advisory_fanout_metadata,
     )
@@ -631,7 +678,7 @@ def _contract_violations(
     if record.kind != FANOUT_KIND_QUESTION_ADVISORY:
         return {}
     violations: dict[str, list[str]] = {}
-    for lane_id, contract in _advisory_lane_answer_contracts().items():
+    for lane_id, contract in _enforceable_contracts(record).items():
         if lane_id not in provided:
             continue
         output = provided[lane_id]

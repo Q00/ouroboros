@@ -148,6 +148,47 @@ def _default_code_investigation_confirmation_prompt(output: Mapping[str, Any]) -
     return f"Confirm before forwarding this code-derived answer: {answer_text}"
 
 
+_GENERIC_ADVISORY_OUTPUT_SECTION = """## Output
+Return a compact JSON object with:
+- lane_id
+- finding: the single most useful advisory finding
+- evidence: short list of file paths, source URLs, or reasoning anchors
+- suggested_options: up to 3 answer options or draft snippets
+- unresolved_ambiguities: short list of what the human still must decide
+
+Keep it brief. The parent session will synthesize multiple advisory lanes before
+forwarding anything back to ouroboros_interview."""
+
+
+def _advisory_output_section(answer_contract: Any) -> str:
+    """Return the Output section for one advisory lane.
+
+    A lane that ships an answer contract is validated against it at re-entry, so
+    its output section must ask for that contract and nothing else. The generic
+    shape below asks for ``finding`` / ``evidence`` / ``suggested_options`` —
+    fields a closed contract forbids — while omitting the ones it requires, so
+    emitting both told the child two incompatible things and let the last one
+    win. A required lane that obeys the wrong one is rejected at re-entry and
+    pins the fan-out at ``partial`` forever.
+
+    The branch is on the contract's presence rather than on the lane id so the
+    shape is written once. A second hand-authored block would agree with the
+    contract on the day it was written and drift the next time either moved.
+    """
+    if not isinstance(answer_contract, Mapping):
+        return _GENERIC_ADVISORY_OUTPUT_SECTION
+    contract_id = str(answer_contract.get("contract_id") or "the lane answer contract")
+    return f"""## Output
+Return one JSON object satisfying `{contract_id}`, rendered in full above. It is
+a closed schema: every field it requires must be present, and any field it does
+not name is rejected. Do not add the generic advisory fields — no `finding`, no
+`evidence`, no `suggested_options`.
+
+Your output is validated against that contract when the parent submits it. An
+answer in any other shape is discarded, and because this lane is required, the
+parent cannot complete the consultation without it."""
+
+
 def _data_context_lane_brief(answer_contract: Any) -> str:
     """Render the data lane's standing rules plus its answer contract.
 
@@ -1469,16 +1510,7 @@ answer is a descriptive fact with clear evidence.
 {synthesis_contract_json}
 ```
 
-## Output
-Return a compact JSON object with:
-- lane_id
-- finding: the single most useful advisory finding
-- evidence: short list of file paths, source URLs, or reasoning anchors
-- suggested_options: up to 3 answer options or draft snippets
-- unresolved_ambiguities: short list of what the human still must decide
-
-Keep it brief. The parent session will synthesize multiple advisory lanes before
-forwarding anything back to ouroboros_interview."""
+{_advisory_output_section(raw_lane.get("answer_contract"))}"""
 
         payloads.append(
             build_subagent_payload(

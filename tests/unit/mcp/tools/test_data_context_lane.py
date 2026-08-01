@@ -453,3 +453,138 @@ def test_the_record_binds_the_question_it_was_registered_for(tmp_path: Any) -> N
     assert record is not None
     assert record.question_identity == identity
     assert record.session_id == "sess-data"
+
+
+# --------------------------------------------------------------------------- #
+# The prompt asks for the contract it is judged by
+# --------------------------------------------------------------------------- #
+
+
+def _output_section(prompt: str) -> str:
+    return prompt.split("## Output")[-1]
+
+
+def test_the_prompt_asks_for_the_contract_it_will_be_judged_by() -> None:
+    """The last thing the child is told must not contradict its contract.
+
+    The generic advisory Output section asks for `finding` / `evidence` /
+    `suggested_options` — fields this closed contract forbids — and omits the
+    ones it requires. Emitted after the contract, it told the child two
+    incompatible things and let the wrong one win: a required lane obeying it is
+    rejected at re-entry and pins the fan-out at `partial` forever.
+    """
+    section = _output_section(_data_payload()["prompt"])
+
+    assert "data_evidence_answer.v1" in section
+    for generic_field in ("- finding:", "- evidence:", "- suggested_options:"):
+        assert generic_field not in section
+
+
+def test_a_lane_without_a_contract_keeps_the_generic_output_shape() -> None:
+    """The branch is on the contract's presence, not on a lane-id list."""
+    code_lane = next(p for p in _advisory_payloads() if p["context"]["lane_id"] == "code_context")
+    section = _output_section(code_lane["prompt"])
+
+    assert "- suggested_options:" in section
+    assert "data_evidence_answer.v1" not in section
+
+
+# --------------------------------------------------------------------------- #
+# Durable replay
+# --------------------------------------------------------------------------- #
+
+
+def test_re_entry_judges_by_the_contract_that_was_issued(tmp_path: Any, monkeypatch: Any) -> None:
+    """A record outlives the process that wrote it.
+
+    A host can submit after a restart or an upgrade. Judging that answer against
+    whatever the current build advertises rejects work the child did exactly as
+    asked — advertised-iff-enforced, applied across time.
+    """
+    from ouroboros.orchestrator.capabilities import interview_schemas as schemas
+
+    registry = FanoutRegistry(tmp_path)
+    fanout_id, lane_ids, identity = _registered_advisory(registry)
+    results = _required_results(lane_ids, identity)
+    assert _submit(registry, fanout_id, results)["status"] == "complete"
+
+    def upgraded() -> dict[str, Any]:
+        metadata = schemas._interview_question_advisory_fanout_metadata()
+        for lane in metadata["lanes"]:
+            if lane["lane_id"] == "data_context":
+                lane["answer_contract"]["response_model_schema"]["required"].append("caveats")
+        return metadata
+
+    monkeypatch.setattr(schemas, "_interview_question_advisory_fanout_metadata", upgraded)
+
+    assert _submit(registry, fanout_id, results)["status"] == "complete"
+
+
+def test_the_record_pins_the_contract_it_issued(tmp_path: Any) -> None:
+    registry = FanoutRegistry(tmp_path)
+    fanout_id, _lane_ids, _identity = _registered_advisory(registry)
+
+    record = registry.load(fanout_id)
+
+    assert record is not None
+    assert record.answer_contracts is not None
+    assert record.answer_contracts["data_context"]["contract_id"] == "data_evidence_answer.v1"
+
+
+def test_a_record_issued_before_contracts_were_pinned_still_enforces(tmp_path: Any) -> None:
+    """The legacy fallback is the canonical contract, not silence.
+
+    Its issuing build's contracts are unrecoverable, so the current ones are the
+    closest available approximation. Dropping enforcement instead would let an
+    old record accept anything.
+    """
+    registry = FanoutRegistry(tmp_path)
+    fanout_id = registry.register(
+        kind=FANOUT_KIND_QUESTION_ADVISORY,
+        session_id="sess-data",
+        correlation_key="context.lane_id",
+        expected_keys=["data_context"],
+        required_keys=["data_context"],
+        synthesizer_input={"lane_ids": ["data_context"]},
+    )
+    record = registry.load(fanout_id)
+    assert record is not None
+    assert record.answer_contracts is None
+
+    outcome = _submit(registry, fanout_id, [{"key": "data_context", "content": {"shape": "wrong"}}])
+
+    assert outcome["status"] == "partial"
+    assert "data_context" in outcome["contract_violations"]
+
+
+def test_the_contract_carries_only_what_is_enforced_or_instructed() -> None:
+    """No field for a guarantee nothing makes true.
+
+    Three findings on this PR were the same shape: a guarantee stated in a
+    description, a policy block, or a design document, with nothing on the code
+    path making it so. A contract addressed to the child holds what it must
+    satisfy and what it must do; a claim about the system reads as authoritative
+    as either, is enforced by nothing, and is addressed to a reader who cannot
+    act on it. Removing the field is what stops the fourth instance.
+    """
+    contract = interview_data_evidence_answer_contract()
+
+    assert set(contract) == {
+        "contract_id",
+        "scope",
+        "response_model_schema",
+        "runtime_instruction",
+    }
+
+
+def test_the_undecidable_rules_are_instruction_not_policy() -> None:
+    """Categorical grouping and "a row list is not evidence" cannot be checked.
+
+    Both quantify over an open value space, which is the class that cost #1703
+    ten rounds. Stated as policy they would be a guarantee; stated to the child
+    they are what they actually are.
+    """
+    instruction = interview_data_evidence_answer_contract()["runtime_instruction"]
+
+    assert "never by an identifier" in instruction
+    assert "row list" in instruction
