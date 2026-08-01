@@ -544,6 +544,7 @@ describe("child timeout helpers", () => {
       agent: "general",
       prompt: "p",
       truncated: false,
+      proposalOnly: false,
       hash: "h",
     })
     expect(timeout.timeoutMs).toBeGreaterThan(0)
@@ -606,7 +607,7 @@ describe("stamp", () => {
 
 describe("notify", () => {
   const sub = (title: string, truncated = false) => ({
-    tool: "t", title, agent: "general", prompt: "p", truncated, hash: "h",
+    tool: "t", title, agent: "general", prompt: "p", truncated, proposalOnly: false, hash: "h",
   })
   const okR = (title: string, childID = "ses_child", truncated = false) => ({
     sub: sub(title, truncated), childID,
@@ -704,6 +705,7 @@ describe("ralph recursion guard", () => {
     agent: "general",
     prompt: "p",
     truncated: false,
+    proposalOnly: false,
     hash: "h",
   })
 
@@ -778,7 +780,7 @@ describe("childOutput", () => {
 
 describe("buildEnvelope — dispatch schema", () => {
   const mkSub = (tool: string, title = tool) =>
-    ({ tool, title, agent: "general", prompt: "p", truncated: false, hash: "h" }) as unknown as Parameters<
+    ({ tool, title, agent: "general", prompt: "p", truncated: false, proposalOnly: false, hash: "h" }) as unknown as Parameters<
       typeof buildEnvelope
     >[0][0]["sub"]
   const okR = (tool: string, childID = "ses_" + tool) => ({ sub: mkSub(tool), childID })
@@ -1031,6 +1033,7 @@ describe("_dispatch — child session lifecycle", () => {
       prompt: "next",
       agent: "general",
       truncated: false,
+      proposalOnly: false,
       hash: "h",
     }
 
@@ -1066,6 +1069,7 @@ describe("_dispatch — child session lifecycle", () => {
       prompt: "run",
       agent: "general",
       truncated: false,
+      proposalOnly: false,
       hash: "h",
       timeout: {
         timeoutMs: 1,
