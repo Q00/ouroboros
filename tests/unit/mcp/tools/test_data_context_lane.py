@@ -370,6 +370,10 @@ def test_required_lane_that_never_ran_can_be_declared(tmp_path: Any) -> None:
         ({"undispatched": "false"}, "a non-empty string is truthy and says the opposite"),
         ({"undispatched": "true"}, "the string, not the literal"),
         ({"undispatched": 1}, "a number is not the documented boolean"),
+        ({"undispatched": {"value": False}}, "an object is truthy whatever it contains"),
+        ({"undispatched": None}, "null is not a declaration"),
+        ({"undispatched": False}, "the flag says it ran, so the entry owes an output"),
+        ({"undispatched": False, "content": "advice"}, "one of the two shapes, or neither"),
         ({"undispatched": True, "content": "advice"}, "never ran, and here is what it said"),
         ({}, "neither what the child said nor that there was nothing to say"),
     ],
@@ -423,7 +427,11 @@ async def test_the_public_submit_tool_also_refuses_a_malformed_declaration(tmp_p
     )
 
     assert malformed.is_ok, malformed
-    assert malformed.unwrap().meta["status"] == "invalid_result_entry"
+    meta = malformed.unwrap().meta
+    assert meta["status"] == "invalid_result_entry"
+    # Every offender at once: a host with three bad entries should not need
+    # three submissions to learn three facts.
+    assert sorted(meta["invalid_keys"]) == sorted(required)
 
     # The honest declaration still completes: refusing the malformed shape must
     # not cost the host the escape the shape exists to provide.
