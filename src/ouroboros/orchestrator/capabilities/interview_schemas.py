@@ -393,16 +393,6 @@ def interview_code_investigation_answer_contract() -> dict[str, Any]:
     return _interview_code_investigation_answer_contract()
 
 
-#: Where a proposed read would run, as the child understands it.  The class is
-#: what the confirmation surface needs in order to tell the user what approving
-#: costs; it confers no permission, because nothing in this contract executes.
-DATA_SOURCE_CLASSES: tuple[str, ...] = (
-    "local",
-    "metered",
-    "external",
-    "side_effect_ambiguous",
-)
-
 #: Aggregations a read request may ask for.  The list is closed on purpose: an
 #: aggregate is the only answer shape this lane can carry, so a lookup that
 #: cannot be phrased as one has no way to be requested and becomes a no-op
@@ -460,7 +450,6 @@ def _interview_data_read_request_schema() -> dict[str, Any]:
             "tool_name",
             "metric",
             "aggregation",
-            "source_class",
             "informs_decision",
         ],
         "properties": {
@@ -519,7 +508,6 @@ def _interview_data_read_request_schema() -> dict[str, Any]:
                 "maxLength": 80,
                 "description": "Period the measurement covers, e.g. 'last 90 days'.",
             },
-            "source_class": {"type": "string", "enum": list(DATA_SOURCE_CLASSES)},
             "informs_decision": {
                 "type": "string",
                 "minLength": 1,
@@ -536,7 +524,27 @@ def _interview_data_read_request_schema() -> dict[str, Any]:
 def _interview_data_evidence_answer_contract() -> dict[str, Any]:
     """Return the answer contract for the ``data_context`` advisory lane.
 
-    Three properties this schema holds by shape rather than by rule.
+    Four properties this schema holds by shape rather than by rule.
+
+    **The child does not classify the tool it names.** There is no
+    ``source_class`` here. Whoever knows a tool is who classifies it, and that
+    is the rule the sibling lanes already follow: ``code_context`` runs on
+    ``Read`` / ``Glob`` / ``Grep``, which the server hands the child *with*
+    their ``mutation_class`` read out of ``_BUILTIN_SEMANTICS``, so the child
+    picks from a list rather than rating anything; ``web_context`` names no tool
+    at all. Only ``data_context`` reaches tools the server has never seen --
+    a host's warehouse, its Metabase, its analytics MCP -- which is exactly why
+    this lane proposes and the host executes.
+
+    A child-asserted class had the untrusted party rating the risk of a tool it
+    knows only by name, and the host was told to warn about cost from that
+    rating. ``operation: "read"`` is a label on the request, not a constraint on
+    the tool, so a metered warehouse call could arrive labelled a free local
+    read and the warning would simply not be given. RFC #1754 already ruled on
+    this: "a tool's name cannot prove it is read-only [...] a child judging
+    'obviously local, free, read-only' from names and descriptions is not a
+    boundary." The host resolves the named tool in its own inventory and speaks
+    from what it finds; ``skills/interview/SKILL.md`` carries that duty.
 
     **A measurement cannot be reported as a measurement.** There is no field for
     an observed value, a row, or a timestamp of observation -- only proposals --
@@ -1064,7 +1072,6 @@ def _interview_question_advisory_fanout_metadata() -> dict[str, Any]:
 __all__ = [
     "DATA_AGGREGATIONS",
     "DATA_NO_EVIDENCE_REASONS",
-    "DATA_SOURCE_CLASSES",
     "_code_investigation_repo_inspection_tool_capabilities",
     "_interview_code_investigation_answer_contract",
     "_interview_code_investigation_request_schema",

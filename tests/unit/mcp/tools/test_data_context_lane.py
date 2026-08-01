@@ -159,7 +159,6 @@ def test_a_name_in_the_source_cannot_be_spelled_as_a_query(field: str) -> None:
         "tool_name": "warehouse_query",
         "metric": "enterprise accounts",
         "aggregation": "count",
-        "source_class": "local",
         "informs_decision": "whether SSO ships first",
     }
     if field == "tool_name":
@@ -175,6 +174,40 @@ def test_a_name_in_the_source_cannot_be_spelled_as_a_query(field: str) -> None:
     answer["read_requests"] = [request]
 
     assert list(Draft202012Validator(schema).iter_errors(answer)) != []
+
+
+def test_the_child_has_no_field_in_which_to_rate_a_tool() -> None:
+    """A classification that disagrees with the tool cannot be submitted at all.
+
+    The asked-for regression is "a child-declared classification that disagrees
+    with the registered tool". There is no such submission to test, because the
+    field it would travel in is gone: the child names a tool and the host, which
+    holds the tool, classifies it. `code_context` has always worked this way —
+    the server hands it `Read` / `Glob` / `Grep` with their `mutation_class`
+    already filled in — and `web_context` names no tool. This lane was the only
+    one asking the party that knows least to rate the risk (Q00/ouroboros#1754).
+    """
+    schema = interview_data_evidence_answer_contract()["response_model_schema"]
+    request_schema = schema["properties"]["read_requests"]["items"]
+    assert "source_class" not in request_schema["properties"]
+    assert "source_class" not in request_schema["required"]
+
+    answer = _valid_no_op("interview-question:0123456789abcdef")
+    answer["data_needed"] = True
+    answer.pop("no_evidence_reason")
+    answer["read_requests"] = [
+        {
+            "operation": "read",
+            "tool_name": "database.delete_all",
+            "metric": "accounts",
+            "aggregation": "count",
+            "informs_decision": "whether SSO ships first",
+            "source_class": "local",
+        }
+    ]
+
+    errors = [error.validator for error in Draft202012Validator(schema).iter_errors(answer)]
+    assert "additionalProperties" in errors
 
 
 def test_a_fetched_value_has_nowhere_to_go() -> None:
@@ -193,7 +226,6 @@ def test_a_fetched_value_has_nowhere_to_go() -> None:
             "tool_name": "warehouse_query",
             "metric": "accounts requesting SSO",
             "aggregation": "count",
-            "source_class": "metered",
             "informs_decision": "whether SSO belongs in the paid tier",
         }
     ]
@@ -216,7 +248,6 @@ def test_a_write_cannot_be_proposed() -> None:
             "tool_name": "warehouse_query",
             "metric": "accounts",
             "aggregation": "count",
-            "source_class": "local",
             "informs_decision": "n/a",
         }
     ]
@@ -233,7 +264,6 @@ def test_no_op_and_evidence_cannot_both_be_claimed() -> None:
             "tool_name": "warehouse_query",
             "metric": "accounts",
             "aggregation": "count",
-            "source_class": "local",
             "informs_decision": "pricing tier",
         }
     ]
@@ -635,7 +665,6 @@ def _fully_populated_proposal(identity: str) -> dict[str, Any]:
                 "group_by": ["plan_tier"],
                 "filters": [{"field": "region", "comparator": "eq", "value": "emea"}],
                 "time_window": "last 90 days",
-                "source_class": "metered",
                 "informs_decision": "whether SSO ships in the first milestone",
             }
         ],
