@@ -270,6 +270,77 @@ def test_submit_correlation_mismatch(tmp_path: Any) -> None:
     assert out["status"] == "correlation_mismatch"
 
 
+def test_an_omitted_envelope_field_does_not_redeem_a_bound_fanout(tmp_path: Any) -> None:
+    """An absent value is a mismatch, not a waiver.
+
+    The MCP handler turns a missing `session_id` / `correlation_key` argument
+    into `""`, so a caller that left it out used to skip these checks entirely
+    and redeem a fan-out registered under someone else's session. That matters
+    more than it reads: contracted lane answers carry no session of their own
+    *because* this envelope settles it, so the guarantee they lean on has to
+    hold for a caller who asserts nothing (Q00/ouroboros#1754).
+    """
+    registry = FanoutRegistry(tmp_path)
+    payloads = [
+        build_subagent_payload(
+            tool_name="ouroboros_lateral_think",
+            title="L (researcher)",
+            prompt="x",
+            agent="researcher",
+            context={"persona": "researcher"},
+        )
+    ]
+    fanout_id = register_lateral_persona_fanout(registry, session_id="s1", payloads=payloads)
+    results = [{"key": "researcher", "content": "x"}]
+
+    def submit(session_id: str, correlation_key: str) -> dict[str, Any]:
+        return submit_fanout_results(
+            registry,
+            session_id=session_id,
+            correlation_key=correlation_key,
+            results=results,
+            fanout_id=fanout_id,
+        )
+
+    # The same submission under its own envelope still completes: the checks bind
+    # the owner, they do not make the envelope harder to satisfy correctly.
+    assert submit("s1", "context.persona")["status"] == "complete"
+    assert submit("", "context.persona")["status"] == "correlation_mismatch"
+    assert submit("s2", "context.persona")["status"] == "correlation_mismatch"
+    assert submit("s1", "")["status"] == "correlation_mismatch"
+    assert submit("s1", "code_facts")["status"] == "correlation_mismatch"
+
+
+def test_a_record_that_bound_nothing_has_nothing_to_demand(tmp_path: Any) -> None:
+    """A producer that ran without a session keeps today's behavior.
+
+    The record decides what must be proven. Demanding a session the producer
+    never recorded would reject correct submissions to prove a binding that was
+    never made — over-blocking in the name of a guarantee.
+    """
+    registry = FanoutRegistry(tmp_path)
+    payloads = [
+        build_subagent_payload(
+            tool_name="ouroboros_lateral_think",
+            title="L (researcher)",
+            prompt="x",
+            agent="researcher",
+            context={"persona": "researcher"},
+        )
+    ]
+    fanout_id = register_lateral_persona_fanout(registry, session_id="", payloads=payloads)
+
+    out = submit_fanout_results(
+        registry,
+        session_id="",
+        correlation_key="context.persona",
+        results=[{"key": "researcher", "content": "x"}],
+        fanout_id=fanout_id,
+    )
+
+    assert out["status"] == "complete"
+
+
 def test_submit_complete_lateral_panel_routes_to_synthesizer(tmp_path: Any) -> None:
     registry = FanoutRegistry(tmp_path)
     personas = ("researcher", "contrarian", "simplifier")
@@ -619,6 +690,51 @@ async def test_lateral_handler_without_registry_stamps_no_fanout_id() -> None:
     )
     assert result.is_ok, result
     assert "fanout_id" not in result.unwrap().meta
+
+
+@pytest.mark.asyncio
+async def test_submit_tool_omitting_the_envelope_does_not_redeem_a_bound_fanout(
+    tmp_path: Any,
+) -> None:
+    """The public path is where omission is cheapest, so it is pinned there too.
+
+    `SubmitFanoutResultsHandler` declares both envelope arguments optional and
+    converts an omission to `""`. A host that sends only `fanout_id` and results
+    must not redeem a record that bound a session — the core check above is the
+    same one, but only this test covers the arguments a real host actually omits.
+    """
+    registry = FanoutRegistry(tmp_path)
+    handler = LateralThinkHandler(agent_runtime_backend="gemini", fanout_registry=registry)
+    personas = ["researcher", "contrarian"]
+    produced = await handler.handle(
+        {
+            "problem_context": "stuck on a milestone question",
+            "current_approach": "keep asking the same thing",
+            "personas": personas,
+            "session_id": "sess-envelope",
+        }
+    )
+    assert produced.is_ok, produced
+    fanout_id = produced.unwrap().meta["fanout_id"]
+    results = [{"key": persona, "content": f"{persona}-out"} for persona in personas]
+
+    submit = SubmitFanoutResultsHandler(fanout_registry=registry)
+    omitted = await submit.handle({"fanout_id": fanout_id, "results": results})
+
+    assert omitted.is_ok, omitted
+    assert omitted.unwrap().meta["status"] == "correlation_mismatch"
+
+    honored = await submit.handle(
+        {
+            "session_id": "sess-envelope",
+            "correlation_key": "context.persona",
+            "fanout_id": fanout_id,
+            "results": results,
+        }
+    )
+
+    assert honored.is_ok, honored
+    assert honored.unwrap().meta["status"] == "complete"
 
 
 @pytest.mark.asyncio

@@ -225,9 +225,15 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
    `meta.question_advisory_fanout_id`, or a `fanout_id` in a lateral persona
    panel dispatch), after all advisory/persona subagents return, call
    `ouroboros_submit_fanout_results` with:
+   - `session_id`: the session the fan-out was issued under. Required whenever
+     the producer ran with one — an omitted session is refused rather than
+     waived, because this is what binds a submission to its owner. Contracted
+     lanes assert no session of their own; this argument is the binding.
    - `fanout_id`: the stamped id from that meta,
    - `correlation_key`: the stamped `result_correlation_key`
-     (`context.lane_id`, `context.persona`, or `code_facts`),
+     (`context.lane_id`, `context.persona`, or `code_facts`). Omitting it is
+     refused the same way whenever the fan-out recorded one — send back what the
+     meta stamped rather than leaving it out,
    - `results`: one `{ "key": <correlation value>, "content": <child output> }`
      per subagent, where `key` is that child's correlation value (its lane id,
      persona, or `code_facts`).

@@ -539,14 +539,28 @@ def submit_fanout_results(
             "fanout_id": fanout_id,
             "error": f"No pending fan-out is registered for fanout_id={fanout_id!r}.",
         }
-    if record.session_id and session_id and record.session_id != session_id:
+    # The record decides what must be proven, and an omitted value is a mismatch
+    # rather than a waiver. Both checks used to require the *submitted* value to
+    # be truthy too, so a caller who simply left the argument out skipped them --
+    # and the public handler turns every omission into ``""``, which made "left
+    # it out" the cheapest way past the envelope rather than the hardest.
+    #
+    # This is the envelope contracted lanes lean on: their answers assert no
+    # session of their own precisely because it is settled here, so a binding
+    # that any caller can decline by silence is not a binding at all.
+    #
+    # A record holding neither value -- a producer that ran without a session,
+    # written before the field, or keyed nothing -- has nothing to bind against
+    # and keeps today's behavior. What the producer recorded is what is demanded,
+    # so tightening cannot reject a submission whose contract was never made.
+    if record.session_id and record.session_id != session_id:
         return {
             "status": "correlation_mismatch",
             "fanout_id": fanout_id,
             "error": "session_id does not match the registered fan-out.",
             "expected_session_id": record.session_id,
         }
-    if record.correlation_key and correlation_key and record.correlation_key != correlation_key:
+    if record.correlation_key and record.correlation_key != correlation_key:
         return {
             "status": "correlation_mismatch",
             "fanout_id": fanout_id,
