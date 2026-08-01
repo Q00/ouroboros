@@ -2,7 +2,9 @@
 
 import asyncio
 import json
+import os
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -452,6 +454,120 @@ class TestCheckpointStoreRollback:
         assert rollback2_path.exists()
         assert rollback3_path.exists()
         assert not rollback4_path.exists()  # Should be deleted
+
+
+class TestCheckpointStoreAtomicSave:
+    """#1830: a failed save must not disturb the committed checkpoint chain."""
+
+    def _files(self, store: CheckpointStore) -> list[str]:
+        return sorted(entry.name for entry in store._base_path.iterdir())
+
+    def test_failed_write_preserves_current_checkpoint_and_history(
+        self, checkpoint_store: CheckpointStore
+    ) -> None:
+        """A partial serialization failure leaves the previous save untouched.
+
+        save() used to rotate the committed checkpoint to level 1 and then
+        truncate the destination before serializing, so a mid-write failure
+        destroyed the current checkpoint and consumed rollback history.
+        """
+        first = CheckpointData.create("atomic-write", "execution", {"step": 1})
+        assert checkpoint_store.save(first).is_ok
+        current = checkpoint_store._get_checkpoint_path("atomic-write")
+        original = current.read_bytes()
+        files_before = self._files(checkpoint_store)
+
+        def partial_dump(obj, fp, *args, **kwargs):
+            fp.write('{"seed_id":"atomic-write","phase":')
+            fp.flush()
+            raise OSError("simulated disk write failure")
+
+        second = CheckpointData.create("atomic-write", "execution", {"step": 2})
+        with patch("ouroboros.persistence.checkpoint.json.dump", side_effect=partial_dump):
+            result = checkpoint_store.save(second)
+
+        assert result.is_err
+        assert current.read_bytes() == original, "failed save mutated the committed checkpoint"
+        assert self._files(checkpoint_store) == files_before, (
+            "failed save rotated history or left temporary files behind"
+        )
+        loaded = checkpoint_store.load("atomic-write")
+        assert loaded.is_ok
+        assert loaded.value.state == {"step": 1}
+
+    def test_failed_first_save_leaves_no_partial_checkpoint(
+        self, checkpoint_store: CheckpointStore
+    ) -> None:
+        """With no prior save, a failed write must leave the store empty."""
+
+        def failing_dump(obj, fp, *args, **kwargs):
+            fp.write("{")
+            raise OSError("simulated disk write failure")
+
+        checkpoint = CheckpointData.create("first-save", "execution", {"step": 1})
+        with patch("ouroboros.persistence.checkpoint.json.dump", side_effect=failing_dump):
+            result = checkpoint_store.save(checkpoint)
+
+        assert result.is_err
+        current = checkpoint_store._get_checkpoint_path("first-save")
+        assert not current.exists(), "failed first save left a partial level-0 checkpoint"
+        litter = [name for name in self._files(checkpoint_store) if not name.endswith(".lock")]
+        assert litter == [], f"failed first save left files behind: {litter}"
+        assert checkpoint_store.load("first-save").is_err
+
+    def test_failed_publish_restores_rotated_history(
+        self, checkpoint_store: CheckpointStore
+    ) -> None:
+        """If promoting the staged file fails, the rotation is rolled back.
+
+        The transaction is rotate-then-publish; a failure between the two
+        must not leave the chain shifted with no current checkpoint.
+        """
+        for step in range(1, 6):
+            saved = checkpoint_store.save(
+                CheckpointData.create("publish-fail", "execution", {"step": step})
+            )
+            assert saved.is_ok
+        current = checkpoint_store._get_checkpoint_path("publish-fail")
+        original = current.read_bytes()
+        files_before = self._files(checkpoint_store)
+        real_replace = os.replace
+
+        def failing_publish(src, dst):
+            if Path(dst) == current and ".tmp-" in Path(src).name:
+                raise OSError("simulated rename failure")
+            return real_replace(src, dst)
+
+        sixth = CheckpointData.create("publish-fail", "execution", {"step": 6})
+        with patch("ouroboros.persistence.checkpoint.os.replace", side_effect=failing_publish):
+            result = checkpoint_store.save(sixth)
+
+        assert result.is_err
+        assert current.read_bytes() == original, "publish failure lost the committed checkpoint"
+        assert self._files(checkpoint_store) == files_before, (
+            "publish failure left the rotation shifted or files behind"
+        )
+        loaded = checkpoint_store.load("publish-fail")
+        assert loaded.is_ok
+        assert loaded.value.state == {"step": 5}
+
+    def test_successful_save_rotates_and_leaves_no_temp_files(
+        self, checkpoint_store: CheckpointStore
+    ) -> None:
+        """The staged-write path keeps the existing rotation contract."""
+        for step in (1, 2):
+            saved = checkpoint_store.save(
+                CheckpointData.create("happy-save", "execution", {"step": step})
+            )
+            assert saved.is_ok
+
+        assert checkpoint_store.load("happy-save").value.state == {"step": 2}
+        rollback = checkpoint_store._get_checkpoint_path("happy-save", 1)
+        assert json.loads(rollback.read_text())["state"] == {"step": 1}
+        litter = [
+            name for name in self._files(checkpoint_store) if ".tmp-" in name or ".retire-" in name
+        ]
+        assert litter == [], f"save left temporary files behind: {litter}"
 
 
 class TestPeriodicCheckpointer:
