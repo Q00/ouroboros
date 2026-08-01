@@ -258,10 +258,12 @@ class CheckpointStore:
         for rollback support (max 3 levels per NFR11).
 
         Uses file locking to prevent race conditions during concurrent access.
-        The new checkpoint is serialized to a staged sibling file and made
-        durable before any committed file moves, and the rotate-and-publish
-        step is reversible — a failed save leaves the current checkpoint and
-        the rollback chain exactly as they were (#1830).
+        The new checkpoint is serialized to a staged sibling file, flushed,
+        and fsynced — so any process-visible write failure surfaces before a
+        committed file moves (directory entries are not fsynced; power-loss
+        ordering is out of scope) — and the rotate-and-publish step is
+        reversible: a failed save leaves the current checkpoint and the
+        rollback chain exactly as they were (#1830).
 
         Args:
             checkpoint: Checkpoint data to save.
@@ -311,6 +313,7 @@ class CheckpointStore:
         undoes the rotation and restores the exact pre-save chain. All moves
         are same-directory renames.
         """
+        self._compact_checkpoint_levels(seed_id)
         oldest = self._get_checkpoint_path(seed_id, self.MAX_ROLLBACK_DEPTH)
         retired: Path | None = None
         if oldest.exists():
@@ -356,6 +359,27 @@ class CheckpointStore:
                 # committed save is preferable to reporting failure and
                 # inviting a retry of a transaction that already happened.
                 pass
+
+    def _compact_checkpoint_levels(self, seed_id: str) -> None:
+        """Slide existing generations down to fill holes in the chain.
+
+        A partially undone save can leave the chain sparse. Rotating a
+        sparse chain would retire the oldest generation while an empty slot
+        remains below it — silently shrinking the rollback window — so every
+        save first compacts the chain. Moves only fill previously empty
+        slots, never overwrite, so a failure here cannot lose a generation.
+        """
+        occupied = [
+            level
+            for level in range(self.MAX_ROLLBACK_DEPTH + 1)
+            if self._get_checkpoint_path(seed_id, level).exists()
+        ]
+        for index, level in enumerate(occupied):
+            if index != level:
+                os.replace(
+                    self._get_checkpoint_path(seed_id, level),
+                    self._get_checkpoint_path(seed_id, index),
+                )
 
     def load(self, seed_id: str) -> Result[CheckpointData, PersistenceError]:
         """Load latest valid checkpoint with automatic rollback on corruption.

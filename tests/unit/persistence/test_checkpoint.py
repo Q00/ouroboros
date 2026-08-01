@@ -597,6 +597,54 @@ class TestCheckpointStoreAtomicSave:
             f"only {sorted(surviving_steps)} survive"
         )
 
+    @pytest.mark.parametrize("failing_undo_step", [1, 2, 3])
+    def test_retry_after_partial_undo_keeps_full_rollback_history(
+        self, checkpoint_store: CheckpointStore, failing_undo_step: int
+    ) -> None:
+        """A retried save must rebuild the full chain, not discard through holes.
+
+        A partial undo leaves the chain sparse; the next successful save has
+        to compact those holes before rotating so that a generation still
+        inside the three-level rollback window is never dropped while an
+        empty slot remains.
+        """
+        for step in range(1, 6):
+            assert checkpoint_store.save(
+                CheckpointData.create("retry-undo", "execution", {"step": step})
+            ).is_ok
+        real_replace = os.replace
+        state = {"publish_failed": False, "undo_calls": 0}
+
+        def faulty_replace(src, dst):
+            if ".tmp-" in Path(src).name:
+                state["publish_failed"] = True
+                raise OSError("simulated promotion failure")
+            if state["publish_failed"]:
+                state["undo_calls"] += 1
+                if state["undo_calls"] == failing_undo_step:
+                    raise OSError("simulated undo failure")
+            return real_replace(src, dst)
+
+        sixth = CheckpointData.create("retry-undo", "execution", {"step": 6})
+        with patch("ouroboros.persistence.checkpoint.os.replace", side_effect=faulty_replace):
+            assert checkpoint_store.save(sixth).is_err
+
+        retried = checkpoint_store.save(
+            CheckpointData.create("retry-undo", "execution", {"step": 6})
+        )
+        assert retried.is_ok
+
+        for level, expected_step in ((0, 6), (1, 5), (2, 4), (3, 3)):
+            level_path = checkpoint_store._get_checkpoint_path("retry-undo", level)
+            assert level_path.exists(), (
+                f"undo step {failing_undo_step}: level {level} is a hole after retry"
+            )
+            actual = json.loads(level_path.read_text())["state"]["step"]
+            assert actual == expected_step, (
+                f"undo step {failing_undo_step}: level {level} holds generation "
+                f"{actual}, expected {expected_step}"
+            )
+
     def test_post_commit_cleanup_failure_still_reports_success(
         self, checkpoint_store: CheckpointStore, monkeypatch: pytest.MonkeyPatch
     ) -> None:
