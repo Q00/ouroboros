@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -2419,6 +2420,148 @@ def test_add_routes_git_plus_ssh_url_through_clone(
     assert cloned_url == "ssh://git@github.com/Q00/ouroboros-plugins.git", cloned_url
     # And lockfile records source_kind="git".
     assert Lockfile(paths["lockfile"]).read()["github-pr-ops"].source_kind == "git"
+
+
+@pytest.mark.parametrize("mode", ["add", "install"])
+def test_failed_url_refresh_preserves_last_known_good_cache(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str
+) -> None:
+    """#1826: a failed clone must not destroy the previous cached repository.
+
+    Both URL entry points used to delete the live cache directory before
+    attempting the replacement clone, so a transient network failure turned
+    into irreversible loss of the last-known-good cache. The refresh must
+    stage the new clone beside the cache and leave the old bytes untouched
+    on any failure, without littering the cache root.
+    """
+    paths = _common_paths(tmp_path)
+    cache_root = tmp_path / "cache"
+    url = "https://github.com/Q00/ouroboros-plugins.git"
+    clone_dest = cache_root / "github.com_Q00_ouroboros-plugins.git"
+    clone_dest.mkdir(parents=True)
+    (clone_dest / "sentinel.txt").write_text("last known good")
+
+    def _network_down(repo_url: str, dest: Path) -> str:
+        raise subprocess.CalledProcessError(
+            128, ["git", "clone"], stderr="simulated network failure"
+        )
+
+    monkeypatch.setattr("ouroboros.cli.commands.plugin._shallow_clone", _network_down)
+
+    selector = (
+        ["add", url, "--plugin", "github-pr-ops"]
+        if mode == "add"
+        else ["install", "github-pr-ops", "--from", url]
+    )
+    result = runner.invoke(
+        plugin_app,
+        [
+            *selector,
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--plugin-home-root",
+            str(paths["plugin_home_root"]),
+            "--cache-root",
+            str(cache_root),
+        ],
+    )
+
+    assert result.exit_code == 1, result.output
+    assert "git clone failed" in result.output
+    assert (clone_dest / "sentinel.txt").read_text() == "last known good", (
+        "a failed refresh deleted the last-known-good cache"
+    )
+    assert sorted(entry.name for entry in cache_root.iterdir()) == [clone_dest.name], (
+        "a failed refresh left staging or backup litter in the cache root"
+    )
+
+
+@pytest.mark.parametrize("mode", ["add", "install"])
+def test_successful_url_refresh_replaces_stale_cache(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str
+) -> None:
+    """A successful refresh fully replaces the stale cache, with no litter."""
+    paths = _common_paths(tmp_path)
+    cache_root = tmp_path / "cache"
+    url = "https://github.com/Q00/ouroboros-plugins.git"
+    clone_dest = cache_root / "github.com_Q00_ouroboros-plugins.git"
+    clone_dest.mkdir(parents=True)
+    (clone_dest / "stale.txt").write_text("previous refresh")
+
+    def _fake_clone(repo_url: str, dest: Path) -> str:
+        plugin_dir = dest / "plugins" / "github-pr-ops"
+        plugin_dir.mkdir(parents=True)
+        (plugin_dir / "ouroboros.plugin.json").write_text(json.dumps(REFERENCE_MANIFEST))
+        return "cafef00d"
+
+    monkeypatch.setattr("ouroboros.cli.commands.plugin._shallow_clone", _fake_clone)
+
+    selector = (
+        ["add", url, "--plugin", "github-pr-ops"]
+        if mode == "add"
+        else ["install", "github-pr-ops", "--from", url]
+    )
+    result = runner.invoke(
+        plugin_app,
+        [
+            *selector,
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--plugin-home-root",
+            str(paths["plugin_home_root"]),
+            "--cache-root",
+            str(cache_root),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert not (clone_dest / "stale.txt").exists(), "stale cache content survived the refresh"
+    assert (clone_dest / "plugins" / "github-pr-ops" / "ouroboros.plugin.json").exists()
+    assert sorted(entry.name for entry in cache_root.iterdir()) == [clone_dest.name], (
+        "refresh left staging or backup litter in the cache root"
+    )
+    assert Lockfile(paths["lockfile"]).read()["github-pr-ops"].source_kind == "git"
+
+
+def test_stage_url_cache_refresh_restores_backup_when_promote_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If promoting the staged clone fails, the previous cache is restored.
+
+    The swap renames the live cache aside before promoting staging; a
+    failure between those two steps must put the old bytes back rather
+    than leaving the destination missing.
+    """
+    from ouroboros.cli.commands.plugin_cache import stage_url_cache_refresh
+
+    cache_root = tmp_path / "cache"
+    dest = cache_root / "repo"
+    dest.mkdir(parents=True)
+    (dest / "good.txt").write_text("keep me")
+
+    real_rename = os.rename
+    calls = {"n": 0}
+
+    def flaky_rename(src, dst):
+        calls["n"] += 1
+        if calls["n"] == 2:  # dest→backup succeeds, staging→dest fails
+            raise OSError(28, "No space left on device")
+        return real_rename(src, dst)
+
+    monkeypatch.setattr("ouroboros.cli.commands.plugin_cache.os.rename", flaky_rename)
+
+    def _clone(staging: Path) -> str:
+        staging.mkdir()
+        (staging / "new.txt").write_text("fresh clone")
+        return "cafef00d"
+
+    with pytest.raises(OSError):
+        stage_url_cache_refresh(_clone, dest)
+
+    assert (dest / "good.txt").read_text() == "keep me", "prior cache was not restored"
+    assert sorted(entry.name for entry in cache_root.iterdir()) == ["repo"], (
+        "promote failure left staging or backup litter"
+    )
 
 
 def test_trust_rejects_undeclared_scope(runner: CliRunner, tmp_path: Path) -> None:
