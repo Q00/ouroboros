@@ -416,12 +416,11 @@ def register_question_advisory_fanout(
     may have several questions in flight, so an unbound answer is one whose
     evidence can land beside a different question than the one it measured.
 
-    So do the answer contracts, captured here at registration — the same moment
-    and the same lane definitions the payloads were built from. A record
-    outlives the process that wrote it: a host can submit after a restart or an
-    upgrade, and judging that answer against the contract the current build
-    advertises would reject work the child did exactly as asked. Enforcement
-    follows what was issued, not what is current.
+    The answer contracts are not persisted with it. Which lanes are contracted
+    is a property of the code, read from the code at re-entry; a copy in the
+    record would be a fact the build guarantees turned into a value that could
+    go missing. See ``_canonical_lane_contracts`` for what that copy cost and
+    what removing it gives up.
 
     Advisory lanes have no gating synthesizer (each is independent advice to make
     the human's answer easier), so submission routes to a deterministic

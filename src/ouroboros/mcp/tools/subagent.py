@@ -55,6 +55,7 @@ from ouroboros.core.types import Result
 from ouroboros.mcp.tools.advisory_prompts import (  # noqa: F401
     _GENERIC_ADVISORY_OUTPUT_SECTION,
     _advisory_output_section,
+    _bounded_json,
     _data_context_lane_brief,
 )
 from ouroboros.mcp.tools.assignment import AssignmentMessage
@@ -93,7 +94,6 @@ _INTERVIEW_ADVISORY_MAX_JSON_CHARS = 2_400
 # advisory contract a child must satisfy field-for-field. Truncating it mid
 # schema would leave the child guessing the shape it is validated against at
 # re-entry — a contract cut in half is advertised but not deliverable.
-_INTERVIEW_DATA_CONTRACT_MAX_JSON_CHARS = 8_000
 _LATERAL_PANEL_FALLBACK_ID = "lateral_persona_panel.v1"
 _LATERAL_PANEL_FALLBACK_TOOL = "ouroboros_lateral_think"
 _LATERAL_PANEL_FALLBACK_SEQUENTIAL_MODE = "sequential_persona_payload_dispatch"
@@ -154,17 +154,6 @@ def _default_code_investigation_confirmation_prompt(output: Mapping[str, Any]) -
     if len(answer_text) > _INTERVIEW_SUBAGENT_MAX_ANSWER_CHARS:
         answer_text = answer_text[: _INTERVIEW_SUBAGENT_MAX_ANSWER_CHARS - 1].rstrip() + "…"
     return f"Confirm before forwarding this code-derived answer: {answer_text}"
-
-
-def _bounded_json(value: Any, max_chars: int) -> str:
-    """Render JSON for prompts without letting metadata dominate context."""
-    try:
-        rendered = json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2)
-    except (TypeError, ValueError):
-        rendered = json.dumps(str(value), ensure_ascii=False)
-    if len(rendered) <= max_chars:
-        return rendered
-    return rendered[:max_chars].rstrip() + "\n... [truncated]"
 
 
 def _payload_persona(payload: Mapping[str, Any]) -> str:

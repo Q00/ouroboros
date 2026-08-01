@@ -436,6 +436,11 @@ DATA_NO_EVIDENCE_REASONS: tuple[str, ...] = (
 #: are identifiers, so they are constrained like identifiers: no whitespace, no
 #: quotes, no parentheses.  A query cannot be spelled in a field shaped this way,
 #: which is cheaper than looking for one in a field that has no shape.
+#:
+#: What this costs, stated rather than discovered later: a source whose column
+#: names contain spaces has to be named by its physical identifier here.  That
+#: is a real restriction, and it is the one taken deliberately -- allowing
+#: whitespace back is what makes a sentence, and a query, spellable again.
 _DATA_IDENTIFIER_PATTERN = r"^[A-Za-z0-9_.:\-]{1,128}$"
 
 

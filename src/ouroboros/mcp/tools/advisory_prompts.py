@@ -13,6 +13,7 @@ re-exports for its existing importers.
 from __future__ import annotations
 
 from collections.abc import Mapping
+import json
 from typing import Any
 
 #: A rendered answer contract is the largest thing in an advisory prompt, so it
@@ -21,9 +22,11 @@ _INTERVIEW_DATA_CONTRACT_MAX_JSON_CHARS = 8_000
 
 
 def _bounded_json(value: Any, max_chars: int) -> str:
-    """Render JSON for prompts without letting metadata dominate context."""
-    import json
+    """Render JSON for prompts without letting metadata dominate context.
 
+    Shared with ``mcp/tools/subagent.py``, which imports it from here rather
+    than keeping the second copy the extraction briefly created.
+    """
     try:
         rendered = json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2)
     except (TypeError, ValueError):

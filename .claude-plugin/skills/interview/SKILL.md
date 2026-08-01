@@ -278,6 +278,15 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
      present the numbers as a reason to reconsider — evidence informs a
      decision, it does not revisit one.
 
+   When `data_needed` is false there is nothing to confirm: the lane is saying
+   this question's honest answer is not a measurement. `no_evidence_reason` is
+   one of a fixed set of constants — if you mention it, say it in your own
+   words rather than pasting the constant at the user.
+
+   Whenever you do show numbers, say when they were measured. A measurement is
+   point-in-time and a Seed is not, so a number shown without its moment
+   outlives the fact it described.
+
    **Milestone lateral-review dispatch**:
    If an MCP response includes `meta.lateral_review_recommended=true`, treat it
    as a required lightweight subagent review for that turn. The interview just
