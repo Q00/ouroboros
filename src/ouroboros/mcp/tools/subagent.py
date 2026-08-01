@@ -37,10 +37,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from functools import lru_cache
 import json
-from pathlib import Path
 import re
 from typing import Any
-from uuid import uuid4
 
 from jsonschema import Draft202012Validator
 import structlog
@@ -49,10 +47,23 @@ from ouroboros.backends.capabilities import (
     SubagentDispatchMode,
     resolve_subagent_dispatch,
 )
-from ouroboros.core.owner_only import secure_directory, write_owner_only
 from ouroboros.core.seed_contract_prompt import render_auto_recursion_guard
 from ouroboros.core.types import Result
 from ouroboros.mcp.tools.assignment import AssignmentMessage
+
+# Fan-out re-entry moved to ``mcp.tools.fanout`` in #1754; re-exported here so
+# the handlers that already import these names from this module keep working.
+from ouroboros.mcp.tools.fanout import (  # noqa: F401
+    FANOUT_KIND_CODE_INVESTIGATION,
+    FANOUT_KIND_LATERAL_PERSONA_PANEL,
+    FANOUT_KIND_QUESTION_ADVISORY,
+    FanoutRecord,
+    FanoutRegistry,
+    register_code_investigation_fanout,
+    register_lateral_persona_fanout,
+    register_question_advisory_fanout,
+    submit_fanout_results,
+)
 from ouroboros.mcp.types import (
     ContentType,
     MCPContentItem,
@@ -70,6 +81,11 @@ _INTERVIEW_SUBAGENT_MAX_TRANSCRIPT_ANSWER_CHARS = 220
 _INTERVIEW_SUBAGENT_MAX_ANSWER_CHARS = 300
 _INTERVIEW_ADVISORY_MAX_QUESTION_CHARS = 900
 _INTERVIEW_ADVISORY_MAX_JSON_CHARS = 2_400
+# The data lane's answer contract gets its own budget because it is the only
+# advisory contract a child must satisfy field-for-field. Truncating it mid
+# schema would leave the child guessing the shape it is validated against at
+# re-entry — a contract cut in half is advertised but not deliverable.
+_INTERVIEW_DATA_CONTRACT_MAX_JSON_CHARS = 8_000
 _LATERAL_PANEL_FALLBACK_ID = "lateral_persona_panel.v1"
 _LATERAL_PANEL_FALLBACK_TOOL = "ouroboros_lateral_think"
 _LATERAL_PANEL_FALLBACK_SEQUENTIAL_MODE = "sequential_persona_payload_dispatch"
@@ -130,6 +146,34 @@ def _default_code_investigation_confirmation_prompt(output: Mapping[str, Any]) -
     if len(answer_text) > _INTERVIEW_SUBAGENT_MAX_ANSWER_CHARS:
         answer_text = answer_text[: _INTERVIEW_SUBAGENT_MAX_ANSWER_CHARS - 1].rstrip() + "…"
     return f"Confirm before forwarding this code-derived answer: {answer_text}"
+
+
+def _data_context_lane_brief(answer_contract: Any) -> str:
+    """Render the data lane's standing rules plus its answer contract.
+
+    The rules are stated here rather than left to the child's judgment because
+    every one of them is a boundary the child cannot be trusted to rediscover:
+    what it may not do (execute), what it may not carry (a value it fetched, a
+    row, an identifier), and what its output is for (the user's judgment, never
+    the answer).
+    """
+    contract_json = _bounded_json(answer_contract, _INTERVIEW_DATA_CONTRACT_MAX_JSON_CHARS)
+    return f"""You may discover which data tools exist so you can name them. You may not
+call one. Every lookup you would run is returned as a read_request and the
+parent session runs it only after the user confirms it.
+
+Your output is material for the user's judgment, never the answer. Whatever a
+number would show, the interview answer is the user's own words.
+
+Only aggregates can be carried. If the honest answer is a row list, a name, an
+identifier, or an error message, that is data_needed=false with a reason — not
+evidence. Grouping keys must be categorical; grouping by an identifier is a row
+list wearing an aggregate's clothes.
+
+## Answer Contract (data_evidence_answer.v1)
+```json
+{contract_json}
+```"""
 
 
 def _bounded_json(value: Any, max_chars: int) -> str:
@@ -1337,7 +1381,9 @@ def build_interview_question_advisory_subagents(
 
         persona = str(raw_lane.get("persona") or "").strip()
         agent = persona or (
-            "researcher" if capability in {"inspect_code", "web_research"} else "general"
+            "researcher"
+            if capability in {"inspect_code", "web_research", "read_data"}
+            else "general"
         )
         purpose = str(raw_lane.get("purpose") or "Help answer the interview question.").strip()
         required = bool(raw_lane.get("required"))
@@ -1356,6 +1402,15 @@ def build_interview_question_advisory_subagents(
                 "If no current web facts are needed, return that no-op finding."
             )
             extra = "Use web research only when the answer depends on current external facts."
+        elif lane_id == "data_context":
+            lane_task = (
+                "Decide from the question text ALONE, before touching any tool, "
+                "whether its honest answer is a measurement. If it is not, return "
+                "data_needed=false with a reason — that is a complete answer. If "
+                "it is, name the reads that would inform it and return them as "
+                "read_requests. Do NOT run them."
+            )
+            extra = _data_context_lane_brief(raw_lane.get("answer_contract"))
         elif lane_id == "ambiguity_contrarian":
             lane_task = (
                 "Challenge the question and the likely answer. Identify hidden "
@@ -2500,13 +2555,6 @@ _FANOUT_HOST_ACTION_BY_MODE: dict[SubagentDispatchMode, str] = {
     SubagentDispatchMode.SEQUENTIAL: "process_payloads_sequentially",
 }
 
-_DEFAULT_FANOUT_DIR = Path.home() / ".ouroboros" / "data" / "fanout"
-
-# Fan-out re-entry kinds — each routes to one revived synthesizer.
-FANOUT_KIND_LATERAL_PERSONA_PANEL = "lateral_persona_panel"
-FANOUT_KIND_CODE_INVESTIGATION = "code_investigation"
-FANOUT_KIND_QUESTION_ADVISORY = "question_advisory"
-
 
 def _fanout_meta_key(prefix: str, key: str) -> str:
     """Prefix a fan-out meta key, or use it bare when no prefix is given."""
@@ -2607,391 +2655,6 @@ def stamp_fanout_meta(
     meta[_fanout_meta_key(prefix, "dispatch_mode")] = dispatch_mode.value
     meta[_fanout_meta_key(prefix, "host_action")] = host_action
     meta[_fanout_meta_key(prefix, "result_correlation_key")] = correlation_key
-
-
-# ---------------------------------------------------------------------------
-# Fan-out result re-entry: persisted expected-key state + synthesizer routing
-# ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True, slots=True)
-class FanoutRecord:
-    """Persisted fan-out request state, keyed by ``fanout_id``.
-
-    Survives across MCP calls so a later ``ouroboros_submit_fanout_results``
-    submission can validate its expected keys and route to the right revived
-    synthesizer. ``synthesizer_input`` carries exactly the non-output argument
-    each synthesizer needs: the orchestration ``entries`` list for a lateral
-    persona panel, or the ``request`` mapping for a code investigation.
-    """
-
-    fanout_id: str
-    kind: str
-    session_id: str
-    correlation_key: str
-    expected_keys: tuple[str, ...]
-    synthesizer_input: dict[str, Any]
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "fanout_id": self.fanout_id,
-            "kind": self.kind,
-            "session_id": self.session_id,
-            "correlation_key": self.correlation_key,
-            "expected_keys": list(self.expected_keys),
-            "synthesizer_input": self.synthesizer_input,
-        }
-
-    @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> FanoutRecord:
-        raw_input = data.get("synthesizer_input")
-        return cls(
-            fanout_id=str(data["fanout_id"]),
-            kind=str(data["kind"]),
-            session_id=str(data.get("session_id") or ""),
-            correlation_key=str(data.get("correlation_key") or ""),
-            expected_keys=tuple(str(key) for key in data.get("expected_keys") or ()),
-            synthesizer_input=dict(raw_input) if isinstance(raw_input, Mapping) else {},
-        )
-
-
-class FanoutRegistry:
-    """File-backed store for pending fan-out expected-key state.
-
-    Reuses the interview data directory as the persistence substrate (the same
-    place interview state JSON is written) rather than inventing a new layer:
-    handlers that know the resolved interview state dir thread it in via
-    :meth:`rebase_default`; until then the zero-arg default falls back to
-    ``~/.ouroboros/data/fanout``.
-    Each record is a single ``{fanout_id}.json`` file. Writes are best-effort:
-    a persistence failure degrades re-entry (submissions report the fan-out as
-    unknown) but never breaks the fan-out request path.
-    """
-
-    def __init__(self, directory: Path | None = None) -> None:
-        self._dir = directory or _DEFAULT_FANOUT_DIR
-
-    @property
-    def directory(self) -> Path:
-        return self._dir
-
-    def rebase_default(self, directory: Path) -> None:
-        """Re-root a default-located registry onto the server's real data dir.
-
-        The zero-arg constructor falls back to ``~/.ouroboros/data/fanout``
-        because the server factory does not know the resolved interview state
-        dir at construction time. Handlers that DO know it (via
-        ``resolved_state_dir()``) call this to thread the actual data dir in.
-        A registry constructed with an explicit directory (e.g. tests injecting
-        ``tmp_path``) is never re-rooted, and because producer + submit handlers
-        share one registry instance, both sides observe the same directory.
-        """
-        if self._dir == _DEFAULT_FANOUT_DIR:
-            self._dir = directory
-
-    def _path(self, fanout_id: str) -> Path:
-        return self._dir / f"{fanout_id}.json"
-
-    def register(
-        self,
-        *,
-        kind: str,
-        session_id: str,
-        correlation_key: str,
-        expected_keys: list[str],
-        synthesizer_input: dict[str, Any],
-        fanout_id: str | None = None,
-    ) -> str:
-        """Persist a fan-out record and return its ``fanout_id``.
-
-        A ``fanout_id`` is generated (uuid4-backed, deterministic-friendly when
-        supplied by the caller) and stamped into the returned value so the
-        producer can echo it into the emitted meta. Persistence is best-effort.
-        """
-        resolved_id = fanout_id or f"fanout_{uuid4().hex}"
-        record = FanoutRecord(
-            fanout_id=resolved_id,
-            kind=kind,
-            session_id=session_id,
-            correlation_key=correlation_key,
-            expected_keys=tuple(expected_keys),
-            synthesizer_input=synthesizer_input,
-        )
-        try:
-            # A fan-out record carries the producer's ``synthesizer_input``
-            # verbatim — the code-investigation request, the persona panel
-            # entries — so it is the same artifact class as the transcript it
-            # was derived from and takes the same writer. Registration stays
-            # best-effort: an unconfirmed durability flush is logged like every
-            # other migrated writer, and the caller still gets its id.
-            secure_directory(self._dir)
-            if not write_owner_only(
-                self._path(resolved_id),
-                json.dumps(record.to_dict(), ensure_ascii=False),
-            ):
-                log.warning(
-                    "fanout.registry.durability_unconfirmed",
-                    fanout_id=resolved_id,
-                    kind=kind,
-                )
-        except OSError as exc:
-            log.warning(
-                "fanout.registry.persist_failed",
-                fanout_id=resolved_id,
-                kind=kind,
-                error=str(exc),
-            )
-        return resolved_id
-
-    def load(self, fanout_id: str) -> FanoutRecord | None:
-        """Load a persisted fan-out record, or ``None`` if unknown/corrupt."""
-        try:
-            content = self._path(fanout_id).read_text(encoding="utf-8")
-        except OSError:
-            return None
-        try:
-            data = json.loads(content)
-        except json.JSONDecodeError:
-            return None
-        if not isinstance(data, Mapping):
-            return None
-        try:
-            return FanoutRecord.from_dict(data)
-        except (KeyError, TypeError, ValueError):
-            return None
-
-
-def _fanout_identity_synthesis(aggregated_outputs: list[Mapping[str, Any]]) -> dict[str, Any]:
-    """Server-side synthesizer: return the correlated outputs for the host.
-
-    The re-entry tool does not run an LLM. Its job is to give the host the
-    correlated child outputs back in dispatch order; the host performs the
-    actual synthesis. This identity synthesizer preserves that contract while
-    still exercising the revived synthesizer aggregation/ordering logic.
-    """
-    return {"aggregated_outputs": [dict(item) for item in aggregated_outputs]}
-
-
-def _fanout_identity_continuation(synthesis: Any) -> dict[str, Any]:
-    """Server-side interview continuation: signal readiness with the synthesis."""
-    return {"ready_to_continue": True, "synthesis": synthesis}
-
-
-def register_lateral_persona_fanout(
-    registry: FanoutRegistry,
-    *,
-    session_id: str,
-    payloads: list[SubagentPayload],
-    correlation_key: str = "context.persona",
-    fanout_id: str | None = None,
-) -> str:
-    """Register a lateral persona-panel fan-out for later result re-entry.
-
-    Expected keys are the payload personas (``context.persona``); the persisted
-    ``entries`` carry ``persona_id`` + ``execution_order`` so
-    :func:`synthesize_lateral_persona_panel_when_complete` can order and gate
-    the submitted outputs.
-    """
-    entries: list[dict[str, Any]] = []
-    expected_keys: list[str] = []
-    for index, payload in enumerate(payloads, start=1):
-        persona = _payload_persona(payload.to_dict())
-        expected_keys.append(persona)
-        entries.append({"persona_id": persona, "execution_order": index})
-    return registry.register(
-        kind=FANOUT_KIND_LATERAL_PERSONA_PANEL,
-        session_id=session_id,
-        correlation_key=correlation_key,
-        expected_keys=expected_keys,
-        synthesizer_input={"entries": entries},
-        fanout_id=fanout_id,
-    )
-
-
-def register_code_investigation_fanout(
-    registry: FanoutRegistry,
-    *,
-    session_id: str,
-    request: Mapping[str, Any],
-    correlation_key: str = "code_facts",
-    fanout_id: str | None = None,
-) -> str:
-    """Register a code-investigation fan-out for later result re-entry.
-
-    Expected keys default to the request's ``required_result_ids`` (or the
-    ``code_facts`` sentinel :func:`synthesize_code_investigation_when_complete`
-    assumes), and the full ``request`` is persisted so the synthesizer can
-    re-run its answer-contract validation on the submitted output.
-    """
-    required = request.get("required_result_ids")
-    if isinstance(required, (list, tuple)) and required:
-        expected_keys = [str(item) for item in required]
-    else:
-        expected_keys = ["code_facts"]
-    return registry.register(
-        kind=FANOUT_KIND_CODE_INVESTIGATION,
-        session_id=session_id,
-        correlation_key=correlation_key,
-        expected_keys=expected_keys,
-        synthesizer_input={"request": dict(request)},
-        fanout_id=fanout_id,
-    )
-
-
-def register_question_advisory_fanout(
-    registry: FanoutRegistry,
-    *,
-    session_id: str,
-    payloads: list[SubagentPayload],
-    correlation_key: str = "context.lane_id",
-    fanout_id: str | None = None,
-) -> str:
-    """Register an interview question-advisory fan-out for later result re-entry.
-
-    The advisory lanes are stamped to correlate by ``context.lane_id`` (a lane's
-    persona is absent on the ``code_context`` / ``web_context`` lanes), so the
-    expected keys are the lane ids carried on the emitted payloads — exactly the
-    keys the stamped ``question_advisory_result_correlation_key`` tells the host
-    to submit under. This is the invariant #1578 broke: the producer stamped
-    ``context.lane_id`` but registered a ``code_facts`` record, so a
-    contract-following host was rejected with ``correlation_mismatch``.
-
-    Advisory lanes have no gating synthesizer (each is independent advice to make
-    the human's answer easier), so submission routes to a deterministic
-    aggregation that returns the correlated lane outputs in dispatch order for
-    the host to synthesize.
-    """
-    expected_keys: list[str] = []
-    for payload in payloads:
-        lane_id = _payload_lane_id(payload.to_dict())
-        if lane_id and lane_id not in expected_keys:
-            expected_keys.append(lane_id)
-    return registry.register(
-        kind=FANOUT_KIND_QUESTION_ADVISORY,
-        session_id=session_id,
-        correlation_key=correlation_key,
-        expected_keys=expected_keys,
-        synthesizer_input={"lane_ids": list(expected_keys)},
-        fanout_id=fanout_id,
-    )
-
-
-def submit_fanout_results(
-    registry: FanoutRegistry,
-    *,
-    session_id: str,
-    correlation_key: str,
-    results: list[Mapping[str, Any]],
-    fanout_id: str,
-) -> dict[str, Any]:
-    """Validate + route a batch of correlated fan-out results back to synthesis.
-
-    Contract:
-
-    * Unknown ``fanout_id`` → ``status="unknown_fanout_id"`` (clean error).
-    * A ``session_id`` / ``correlation_key`` that disagrees with the persisted
-      record → ``status="correlation_mismatch"`` (clean error).
-    * Missing expected keys → ``status="partial"`` + ``missing_keys`` (the host
-      may resubmit with the remaining lanes).
-    * Complete set → route to the revived synthesizer for the record ``kind``
-      and return its structured outcome under ``status="complete"``.
-    """
-    record = registry.load(fanout_id)
-    if record is None:
-        return {
-            "status": "unknown_fanout_id",
-            "fanout_id": fanout_id,
-            "error": f"No pending fan-out is registered for fanout_id={fanout_id!r}.",
-        }
-    if record.session_id and session_id and record.session_id != session_id:
-        return {
-            "status": "correlation_mismatch",
-            "fanout_id": fanout_id,
-            "error": "session_id does not match the registered fan-out.",
-            "expected_session_id": record.session_id,
-        }
-    if record.correlation_key and correlation_key and record.correlation_key != correlation_key:
-        return {
-            "status": "correlation_mismatch",
-            "fanout_id": fanout_id,
-            "error": "correlation_key does not match the registered fan-out.",
-            "expected_correlation_key": record.correlation_key,
-        }
-
-    provided: dict[str, Any] = {}
-    for result in results:
-        key = result.get("key")
-        if key is None:
-            continue
-        provided[str(key)] = result.get("content")
-
-    missing_keys = [key for key in record.expected_keys if key not in provided]
-    if missing_keys:
-        return {
-            "status": "partial",
-            "fanout_id": fanout_id,
-            "kind": record.kind,
-            "missing_keys": missing_keys,
-            "received_keys": sorted(provided),
-            "expected_keys": list(record.expected_keys),
-        }
-
-    if record.kind == FANOUT_KIND_LATERAL_PERSONA_PANEL:
-        entries = record.synthesizer_input.get("entries") or []
-        outcome = continue_interview_after_lateral_persona_synthesis(
-            entries,
-            provided,
-            _fanout_identity_synthesis,
-            _fanout_identity_continuation,
-        )
-        return {
-            "status": "complete",
-            "fanout_id": fanout_id,
-            "kind": record.kind,
-            "correlation_key": record.correlation_key,
-            "result": outcome,
-        }
-
-    if record.kind == FANOUT_KIND_CODE_INVESTIGATION:
-        request = record.synthesizer_input.get("request") or {}
-        outcome = synthesize_code_investigation_when_complete(
-            request,
-            provided,
-            _fanout_identity_synthesis,
-        )
-        return {
-            "status": "complete",
-            "fanout_id": fanout_id,
-            "kind": record.kind,
-            "correlation_key": record.correlation_key,
-            "result": outcome,
-        }
-
-    if record.kind == FANOUT_KIND_QUESTION_ADVISORY:
-        # Advisory lanes are independent advice with no gating synthesizer, so
-        # aggregate the correlated outputs deterministically in dispatch (lane)
-        # order and hand them back for the host to synthesize.
-        lane_ids = record.synthesizer_input.get("lane_ids") or list(record.expected_keys)
-        aggregated = [
-            {"lane_id": lane_id, "output": provided[lane_id]}
-            for lane_id in lane_ids
-            if lane_id in provided
-        ]
-        outcome = _fanout_identity_synthesis(aggregated)
-        return {
-            "status": "complete",
-            "fanout_id": fanout_id,
-            "kind": record.kind,
-            "correlation_key": record.correlation_key,
-            "result": outcome,
-        }
-
-    return {
-        "status": "unknown_kind",
-        "fanout_id": fanout_id,
-        "kind": record.kind,
-        "error": f"No synthesizer is registered for fan-out kind={record.kind!r}.",
-    }
 
 
 # ---------------------------------------------------------------------------

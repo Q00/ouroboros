@@ -373,7 +373,7 @@ def _resolve_correlated_key(payload: Mapping[str, Any], dotted_key: str) -> str:
 
 def _emitted_advisory_contract(
     registry: FanoutRegistry, session_id: str
-) -> tuple[str, str, list[str]]:
+) -> tuple[str, str, list[str], dict[str, Any]]:
     """Emit an advisory response and read the re-entry contract FROM its meta.
 
     Returns ``(fanout_id, correlation_key, lane_keys)`` exactly as a
@@ -399,7 +399,46 @@ def _emitted_advisory_contract(
         for payload in meta["question_advisory_subagents"]
     ]
     assert lane_keys, "advisory fan-out emitted no lanes"
-    return fanout_id, correlation_key, lane_keys
+    return fanout_id, correlation_key, lane_keys, meta
+
+
+def _advisory_lane_outputs(meta: Mapping[str, Any], lane_keys: list[str]) -> dict[str, Any]:
+    """Return one contract-satisfying output per emitted lane.
+
+    Only ``data_context`` carries an answer contract, and it is satisfied here
+    with its no-op answer — the response a child gives when the question's
+    honest answer is not a measurement. Every other lane completes on the
+    generic advisory shape, so a plain string stands in for its advice.
+    """
+    identity = ""
+    for payload in meta["question_advisory_subagents"]:
+        context = payload.get("context") or {}
+        if context.get("lane_id") == "data_context":
+            identity = str(context.get("question_identity") or "")
+    outputs: dict[str, Any] = {key: f"{key}-advice" for key in lane_keys}
+    if "data_context" in outputs:
+        outputs["data_context"] = {
+            "session_id": str(meta["session_id"]) if "session_id" in meta else "",
+            "question_identity": identity,
+            "lane_id": "data_context",
+            "data_needed": False,
+            "read_requests": [],
+            "no_evidence_reason": "the question asks for a decision, not a measurement",
+        }
+    return outputs
+
+
+def _required_advisory_lanes() -> list[str]:
+    """Return the lane ids whose absence must block advisory completion."""
+    from ouroboros.orchestrator.capabilities.interview_schemas import (
+        _interview_question_advisory_fanout_metadata,
+    )
+
+    return [
+        str(lane["lane_id"])
+        for lane in _interview_question_advisory_fanout_metadata()["lanes"]
+        if lane.get("required")
+    ]
 
 
 @pytest.mark.asyncio
@@ -414,7 +453,8 @@ async def test_advisory_reentry_follows_stamped_meta_contract(tmp_path: Any) -> 
     """
     registry = FanoutRegistry(tmp_path)
     session_id = "sess-advisory-contract"
-    fanout_id, correlation_key, lane_keys = _emitted_advisory_contract(registry, session_id)
+    fanout_id, correlation_key, lane_keys, meta = _emitted_advisory_contract(registry, session_id)
+    outputs = _advisory_lane_outputs(meta, lane_keys)
 
     submit = SubmitFanoutResultsHandler(fanout_registry=registry)
     submit_result = await submit.handle(
@@ -422,7 +462,7 @@ async def test_advisory_reentry_follows_stamped_meta_contract(tmp_path: Any) -> 
             "session_id": session_id,
             "fanout_id": fanout_id,
             "correlation_key": correlation_key,
-            "results": [{"key": key, "content": f"{key}-advice"} for key in lane_keys],
+            "results": [{"key": key, "content": outputs[key]} for key in lane_keys],
         }
     )
     assert submit_result.is_ok, submit_result
@@ -430,18 +470,27 @@ async def test_advisory_reentry_follows_stamped_meta_contract(tmp_path: Any) -> 
     assert out["status"] == "complete"
     assert out["kind"] == FANOUT_KIND_QUESTION_ADVISORY
     assert out["correlation_key"] == correlation_key
+    assert out["contract_violations"] == {}
     aggregated = out["result"]["aggregated_outputs"]
     assert [item["lane_id"] for item in aggregated] == lane_keys
-    assert [item["output"] for item in aggregated] == [f"{key}-advice" for key in lane_keys]
+    assert [item["output"] for item in aggregated] == [outputs[key] for key in lane_keys]
 
 
 @pytest.mark.asyncio
-async def test_advisory_reentry_partial_set_lists_missing_lane_ids(tmp_path: Any) -> None:
-    """Submitting a subset of the emitted lanes reports the missing lane ids."""
+async def test_advisory_reentry_partial_set_lists_missing_required_lane_ids(
+    tmp_path: Any,
+) -> None:
+    """A subset submission reports the REQUIRED lanes still outstanding.
+
+    Optional lanes are not listed as missing here: their absence does not block
+    completion, so naming them would tell the host to chase output it was never
+    obliged to produce.
+    """
     registry = FanoutRegistry(tmp_path)
     session_id = "sess-advisory-partial"
-    fanout_id, correlation_key, lane_keys = _emitted_advisory_contract(registry, session_id)
+    fanout_id, correlation_key, lane_keys, _meta = _emitted_advisory_contract(registry, session_id)
     assert len(lane_keys) > 1, "partial-set case needs multiple advisory lanes"
+    optional_first = next(key for key in lane_keys if key not in _required_advisory_lanes())
 
     submit = SubmitFanoutResultsHandler(fanout_registry=registry)
     submit_result = await submit.handle(
@@ -449,14 +498,15 @@ async def test_advisory_reentry_partial_set_lists_missing_lane_ids(tmp_path: Any
             "session_id": session_id,
             "fanout_id": fanout_id,
             "correlation_key": correlation_key,
-            "results": [{"key": lane_keys[0], "content": f"{lane_keys[0]}-advice"}],
+            "results": [{"key": optional_first, "content": f"{optional_first}-advice"}],
         }
     )
     assert submit_result.is_ok, submit_result
     out = submit_result.unwrap().meta
     assert out["status"] == "partial"
-    assert out["missing_keys"] == lane_keys[1:]
-    assert out["received_keys"] == [lane_keys[0]]
+    assert out["missing_required_keys"] == _required_advisory_lanes()
+    assert out["missing_keys"] == out["missing_required_keys"]
+    assert out["received_keys"] == [optional_first]
 
 
 # --------------------------------------------------------------------------- #

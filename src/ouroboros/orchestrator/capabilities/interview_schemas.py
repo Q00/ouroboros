@@ -393,6 +393,254 @@ def interview_code_investigation_answer_contract() -> dict[str, Any]:
     return _interview_code_investigation_answer_contract()
 
 
+#: Where a proposed read would run, as the child understands it.  The class is
+#: what the confirmation surface needs in order to tell the user what approving
+#: costs; it confers no permission, because nothing in this contract executes.
+DATA_SOURCE_CLASSES: tuple[str, ...] = (
+    "local",
+    "metered",
+    "external",
+    "side_effect_ambiguous",
+)
+
+#: Aggregations a read request may ask for.  The list is closed on purpose: an
+#: aggregate is the only answer shape this lane can carry, so a lookup that
+#: cannot be phrased as one has no way to be requested and becomes a no-op
+#: finding instead.  See ``_interview_data_evidence_answer_contract``.
+DATA_AGGREGATIONS: tuple[str, ...] = (
+    "count",
+    "distinct_count",
+    "sum",
+    "average",
+    "median",
+    "percentile",
+    "min",
+    "max",
+    "rate",
+)
+
+
+def _interview_data_read_request_schema() -> dict[str, Any]:
+    """Return the schema for one proposed, unexecuted data read.
+
+    The request names *what to measure* rather than how to fetch it: there is no
+    query string here, and the confirmation surface renders these fields so the
+    user sees the measurement before approving it rather than a dialect they
+    would have to read.
+    """
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": [
+            "operation",
+            "tool_name",
+            "metric",
+            "aggregation",
+            "source_class",
+            "informs_decision",
+        ],
+        "properties": {
+            "operation": {
+                "const": "read",
+                "description": (
+                    "The only operation this lane can express. A write, a "
+                    "migration, or a schema change has no representation here."
+                ),
+            },
+            "tool_name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "description": "Host tool the parent session would run this read through.",
+            },
+            "metric": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200,
+                "description": "What is being measured, in the source's own vocabulary.",
+            },
+            "aggregation": {"type": "string", "enum": list(DATA_AGGREGATIONS)},
+            "group_by": {
+                "type": "array",
+                "maxItems": 4,
+                "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 80,
+                    "description": (
+                        "Categorical key only. Grouping by an identifier turns "
+                        "an aggregate back into a row list, which this lane "
+                        "cannot carry."
+                    ),
+                },
+            },
+            "filters": {
+                "type": "array",
+                "maxItems": 8,
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["field", "comparator", "value"],
+                    "properties": {
+                        "field": {"type": "string", "minLength": 1, "maxLength": 80},
+                        "comparator": {
+                            "type": "string",
+                            "enum": ["eq", "neq", "gt", "gte", "lt", "lte", "in", "between"],
+                        },
+                        "value": {"type": "string", "minLength": 1, "maxLength": 200},
+                    },
+                },
+            },
+            "time_window": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 80,
+                "description": "Period the measurement covers, e.g. 'last 90 days'.",
+            },
+            "source_class": {"type": "string", "enum": list(DATA_SOURCE_CLASSES)},
+            "informs_decision": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 400,
+                "description": (
+                    "The interview decision this number would inform. A read "
+                    "that cannot name one is not worth the user's confirmation."
+                ),
+            },
+        },
+    }
+
+
+def _interview_data_evidence_answer_contract() -> dict[str, Any]:
+    """Return the answer contract for the ``data_context`` advisory lane.
+
+    Two properties this schema holds by shape rather than by rule.
+
+    **The child cannot report a measurement.** There is no field for an observed
+    value, a row, or a timestamp of observation -- only proposals. A child that
+    ran a lookup anyway has nowhere to put the result, so "the child executes
+    nothing" is a property of what can be expressed rather than something a
+    later check has to detect (Q00/ouroboros#1754).
+
+    **A no-op is an answer, not an absence.** ``data_needed: false`` is a
+    complete, valid response and forces ``read_requests`` empty. The lane is
+    ``required: true`` precisely because this response always exists, so a
+    question that is not data-driven completes the fan-out rather than stalling
+    it.
+    """
+    answer_schema: dict[str, Any] = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": [
+            "session_id",
+            "question_identity",
+            "lane_id",
+            "data_needed",
+            "read_requests",
+        ],
+        "properties": {
+            "session_id": {
+                "type": "string",
+                "description": "Current Ouroboros interview session ID.",
+            },
+            "question_identity": {
+                "type": "string",
+                "pattern": r"^interview-question:[0-9a-f]{16}$",
+                "description": "Matches the originating advisory request.",
+            },
+            "lane_id": {"const": "data_context"},
+            "data_needed": {
+                "type": "boolean",
+                "description": (
+                    "False when the honest answer to this question is not a "
+                    "measurement. Decided from the question text before any "
+                    "tool call."
+                ),
+            },
+            "read_requests": {
+                "type": "array",
+                "maxItems": 5,
+                "items": _interview_data_read_request_schema(),
+            },
+            "no_evidence_reason": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 400,
+                "description": (
+                    "Why no read is proposed: the question is not data-driven, "
+                    "no data tool is reachable, or the answer would be a row "
+                    "list, a name, an identifier, or an error message rather "
+                    "than an aggregate."
+                ),
+            },
+            "caveats": {
+                "type": "array",
+                "maxItems": 5,
+                "items": {"type": "string", "minLength": 1, "maxLength": 300},
+                "description": (
+                    "What the user should hold in mind when reading these "
+                    "numbers. A measurement is point-in-time; a Seed is not."
+                ),
+            },
+        },
+        "allOf": [
+            {
+                "if": {
+                    "properties": {"data_needed": {"const": False}},
+                    "required": ["data_needed"],
+                },
+                "then": {
+                    "properties": {"read_requests": {"maxItems": 0}},
+                    "required": ["no_evidence_reason"],
+                },
+            },
+            {
+                "if": {
+                    "properties": {"data_needed": {"const": True}},
+                    "required": ["data_needed"],
+                },
+                "then": {"properties": {"read_requests": {"minItems": 1}}},
+            },
+        ],
+    }
+    return {
+        "contract_id": "data_evidence_answer.v1",
+        "scope": "single_interview_question_data_evidence",
+        "response_model_schema": answer_schema,
+        "execution_semantics": {
+            "child_executes": False,
+            "runs_after": "explicit_user_confirmation",
+            "run_by": "parent_session",
+            "answer_authority": "none",
+        },
+        "evidence_policy": {
+            "aggregates_only": True,
+            "grouping_keys": "categorical_only",
+            "not_expressible_is_no_evidence": [
+                "row list",
+                "name",
+                "identifier",
+                "error message",
+            ],
+        },
+        "runtime_instruction": (
+            "Decide from the question text alone whether its honest answer is a "
+            "measurement. If it is not, return data_needed=false with a reason "
+            "and stop -- that is a complete answer. If it is, name the reads you "
+            "would run and return them as read_requests. Do not run them: the "
+            "parent session runs a read only after the user confirms it, and "
+            "there is no field in this contract for a value you fetched. "
+            "Whatever the numbers show, the interview answer is the user's own "
+            "words, never yours."
+        ),
+    }
+
+
+def interview_data_evidence_answer_contract() -> dict[str, Any]:
+    """Return the public ``data_context`` answer contract."""
+    return _interview_data_evidence_answer_contract()
+
+
 def _code_investigation_repo_inspection_tool_capabilities() -> tuple[dict[str, Any], ...]:
     """Return concrete repo-inspection tool capabilities for code-fact subagents."""
     tool_schemas: Mapping[str, Mapping[str, Any]] = {
@@ -567,7 +815,7 @@ def _interview_question_advisory_request_schema() -> dict[str, Any]:
                 "minItems": 1,
                 "items": {
                     "type": "string",
-                    "enum": ["inspect_code", "web_research", "run_lateral_review"],
+                    "enum": ["inspect_code", "web_research", "run_lateral_review", "read_data"],
                 },
             },
             "lanes": {
@@ -583,6 +831,7 @@ def _interview_question_advisory_request_schema() -> dict[str, Any]:
                             "enum": [
                                 "code_context",
                                 "web_context",
+                                "data_context",
                                 "ambiguity_contrarian",
                                 "answer_simplifier",
                                 "architecture_implications",
@@ -591,13 +840,28 @@ def _interview_question_advisory_request_schema() -> dict[str, Any]:
                         "purpose": {"type": "string", "minLength": 1},
                         "capability": {
                             "type": "string",
-                            "enum": ["inspect_code", "web_research", "run_lateral_review"],
+                            "enum": [
+                                "inspect_code",
+                                "web_research",
+                                "run_lateral_review",
+                                "read_data",
+                            ],
                         },
                         "persona": {
                             "type": "string",
                             "enum": ["researcher", "contrarian", "simplifier", "architect"],
                         },
                         "required": {"type": "boolean"},
+                        "answer_contract": {
+                            "type": "object",
+                            "additionalProperties": True,
+                            "description": (
+                                "Versioned response contract this lane's output "
+                                "is validated against at re-entry. A lane "
+                                "without one completes on the generic advisory "
+                                "shape."
+                            ),
+                        },
                     },
                 },
             },
@@ -683,6 +947,20 @@ def _interview_question_advisory_fanout_metadata() -> dict[str, Any]:
             "required": False,
         },
         {
+            "lane_id": "data_context",
+            "purpose": (
+                "Propose the measurements that would inform this question, so "
+                "the user judges against numbers instead of memory."
+            ),
+            "capability": "read_data",
+            # Required because its no-op answer always exists: a question that is
+            # not data-driven still completes this lane. Optional would let a
+            # data-driven question lose its evidence silently, which is the
+            # defect the lane exists to remove (#1754).
+            "required": True,
+            "answer_contract": _interview_data_evidence_answer_contract(),
+        },
+        {
             "lane_id": "ambiguity_contrarian",
             "purpose": "Name hidden assumptions, missing decisions, and risky vague words.",
             "capability": "run_lateral_review",
@@ -746,10 +1024,15 @@ def _interview_question_advisory_fanout_metadata() -> dict[str, Any]:
 
 
 __all__ = [
+    "DATA_AGGREGATIONS",
+    "DATA_SOURCE_CLASSES",
     "_code_investigation_repo_inspection_tool_capabilities",
     "_interview_code_investigation_answer_contract",
     "_interview_code_investigation_request_schema",
+    "_interview_data_evidence_answer_contract",
+    "_interview_data_read_request_schema",
     "_interview_question_advisory_fanout_metadata",
     "_interview_question_advisory_request_schema",
     "interview_code_investigation_answer_contract",
+    "interview_data_evidence_answer_contract",
 ]

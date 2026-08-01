@@ -459,6 +459,24 @@ describe("parseMetadata", () => {
     })
   })
 
+  test("fan-out identity survives into the response shape", () => {
+    // Children run in the background here, so the parent redeems the fan-out
+    // itself once the Task widgets finish. It can only do that if the id and
+    // correlation key reach a response it can see — without them the data
+    // lane's proposal has no route back to a confirmation.
+    const out = parseMetadata({
+      session_id: "sess-2",
+      question_advisory_fanout_id: "fanout_abc123",
+      question_advisory_result_correlation_key: "context.lane_id",
+      question_advisory_subagents: [
+        { tool_name: "ouroboros_interview", title: "Data", agent: "researcher", prompt: "propose" },
+      ],
+    })
+
+    expect(out.responseShape.question_advisory_fanout_id).toBe("fanout_abc123")
+    expect(out.responseShape.question_advisory_result_correlation_key).toBe("context.lane_id")
+  })
+
   test("invalid advisory children are skipped", () => {
     const out = parseMetadata({
       question_advisory_subagents: [

@@ -244,6 +244,15 @@ export function parseMetadata(meta: unknown): { subs: Sub[]; responseShape: Reco
     "milestone",
     "seed_ready",
     "question_advisory_recommended",
+    // Dispatch here is fire-and-forget: children run in the background and no
+    // output exists when this hook returns, so this transport has no moment
+    // where the parent holds every lane at once. The parent redeems the
+    // fan-out itself once the Task widgets finish — which it can only do if
+    // the identity survives into the response it can see. Without these two
+    // keys the data lane's proposal has no route to a confirmation, because
+    // nothing downstream can name the fan-out the proposal belongs to (#1754).
+    "question_advisory_fanout_id",
+    "question_advisory_result_correlation_key",
   ]) {
     if (key in record) responseShape[key] = record[key]
   }

@@ -44,6 +44,13 @@ OBSERVATION_PREFIXES: tuple[str, ...] = (
     "[from-code]",
     "[from-repo]",
     "[from-research]",
+    # ``[from-data]`` has no forwarding path: the data lane returns proposals,
+    # the user reads the numbers, and the answer is the user's own words on the
+    # ordinary ``[from-user]`` path (#1754). It is listed anyway because a
+    # measurement is the least durable fact of the three -- if one ever arrives
+    # in an answer slot out of contract, it must be withheld like the rest
+    # rather than treated as a decision because no rule named it.
+    "[from-data]",
 )
 
 #: Rendered in place of a withheld answer.  It names why the content is gone and

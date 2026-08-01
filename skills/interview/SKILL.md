@@ -191,6 +191,8 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
      `meta.code_investigation_request` when present.
    - `web_context` — browse/search only when current external facts genuinely
      affect the answer.
+   - `data_context` — propose the measurements that would inform the question.
+     This lane runs nothing; see "Data proposals" below for your duties.
    - `ambiguity_contrarian` — find hidden assumptions, vague terms, missing
      decisions, and risky defaults.
    - `answer_simplifier` — turn the question into 2-3 easy choices or one
@@ -230,10 +232,36 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
      per subagent, where `key` is that child's correlation value (its lane id,
      persona, or `code_facts`).
    A complete set returns the correlated synthesis to continue with; a partial
-   set returns `status="partial"` with `missing_keys` so you can resubmit the
-   remaining lanes. Sequential hosts submit after processing payloads
-   one-by-one — same tool, same contract. Continue the interview from the
-   returned synthesis; keep the user-facing question visible throughout.
+   set returns `status="partial"` with `missing_required_keys` so you can
+   resubmit the remaining lanes. Sequential hosts submit after processing
+   payloads one-by-one — same tool, same contract. Continue the interview from
+   the returned synthesis; keep the user-facing question visible throughout.
+
+   Only lanes marked `required: true` in the request block completion. A lane
+   you ran that had nothing to say still submits its output — that is an answer.
+   A lane you could **not spawn at all** (no capability for it, the child died,
+   the user cancelled it) is submitted as
+   `{ "key": <lane id>, "undispatched": true }`. Never invent output for a lane
+   you did not run: a fabricated finding is worse than a missing one, and this
+   is exactly why the declaration exists.
+
+   **Data proposals**:
+   The `data_context` lane returns `read_request` objects — measurements it
+   would run, never results. When its output carries any:
+   - Show the user what would be measured, rendered from the structured fields
+     (metric, aggregation, grouping, time window, source class). Do not paste a
+     query string; there is none.
+   - Run a read only after the user confirms that specific request. `metered`,
+     `external`, or `side_effect_ambiguous` sources cost something to touch —
+     say so when you ask.
+   - Show the numbers **beside** the question as material for the user's
+     judgment. They are never the answer. The user answers in their own words
+     on the ordinary `[from-user]` path; there is no `[from-data]` answer to
+     forward.
+   - If the user has already answered the question by the time the proposal
+     arrives, drop it. Do not re-open a decision the user has made, and do not
+     present the numbers as a reason to reconsider — evidence informs a
+     decision, it does not revisit one.
 
    **Milestone lateral-review dispatch**:
    If an MCP response includes `meta.lateral_review_recommended=true`, treat it

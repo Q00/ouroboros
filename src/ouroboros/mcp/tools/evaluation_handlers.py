@@ -1939,9 +1939,9 @@ class SubmitFanoutResultsHandler:
                 "subagents declared by a prior tool's `meta` (which stamped a "
                 "`fanout_id` and a `result_correlation_key`), call this tool with "
                 "one {key, content} per child output — `key` is the value of the "
-                "correlation field for that child. A complete set returns the "
-                "synthesis to continue with; a partial set returns "
-                "`status=partial` with the missing keys so you can resubmit."
+                "correlation field for that child. A child you could not spawn "
+                "at all is {key, undispatched: true}; never invent its output. "
+                "Missing required keys return `status=partial` so you resubmit."
             ),
             parameters=(
                 MCPToolParameter(
@@ -1969,9 +1969,9 @@ class SubmitFanoutResultsHandler:
                     name="results",
                     type=ToolInputType.ARRAY,
                     description=(
-                        "Correlated child outputs: a list of objects each with a "
-                        "'key' (the correlation value) and a 'content' (the child "
-                        "result, object or text)."
+                        "Correlated child outputs: objects with a 'key' (the "
+                        "correlation value) and a 'content' (the child result), "
+                        "or 'undispatched': true when the child never ran."
                     ),
                     required=True,
                 ),

@@ -2469,3 +2469,52 @@ async def test_server_shutdown_stops_before_dependents_when_control_bus_refuses_
 
     release.set()
     await asyncio.wait_for(tasks[0], timeout=0.5)
+
+
+# --------------------------------------------------------------------------- #
+# Fan-out re-entry reachability on the shipped server (#1754)
+# --------------------------------------------------------------------------- #
+
+
+def test_composition_root_registers_fanout_reentry_tool() -> None:
+    """The re-entry tool must exist on the server the CLI actually builds.
+
+    This asserts against ``create_ouroboros_server`` rather than
+    ``get_ouroboros_tools`` deliberately. Both factories build tool sets, only
+    the first one ships, and for a long time only the second one wired the
+    fan-out — so a full unit suite passed while the primary MCP surface had no
+    ``ouroboros_submit_fanout_results`` at all and stamped no ``fanout_id``.
+    A test aimed at the correct factory could never have caught that.
+    """
+    from ouroboros.mcp.server.adapter import create_ouroboros_server
+
+    server = create_ouroboros_server(name="fanout-reentry-probe")
+
+    assert "ouroboros_submit_fanout_results" in {tool.name for tool in server.info.tools}
+
+
+def test_composition_root_shares_one_fanout_registry() -> None:
+    """Producers and the re-entry tool must observe the same registry.
+
+    A fan-out registered by the interview handler is redeemed through the
+    submit handler; separate registry instances would make every submission
+    report ``unknown_fanout_id`` while every individual handler looked fine in
+    isolation.
+    """
+    from ouroboros.mcp.server.adapter import create_ouroboros_server
+    from ouroboros.mcp.tools.authoring_handlers import InterviewHandler
+    from ouroboros.mcp.tools.evaluation_handlers import (
+        LateralThinkHandler,
+        SubmitFanoutResultsHandler,
+    )
+
+    server = create_ouroboros_server(name="fanout-registry-probe")
+    handlers = list(server._tool_handlers.values())
+
+    registries = {
+        id(handler.fanout_registry)
+        for handler in handlers
+        if isinstance(handler, (InterviewHandler, LateralThinkHandler, SubmitFanoutResultsHandler))
+        and handler.fanout_registry is not None
+    }
+    assert len(registries) == 1, "producers and the submit tool must share one registry"

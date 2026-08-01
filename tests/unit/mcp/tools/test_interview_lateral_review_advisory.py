@@ -13,6 +13,13 @@ from ouroboros.mcp.tools.authoring_handlers import (
     _maybe_record_lateral_review_advisory,
 )
 from ouroboros.mcp.tools.subagent import SubagentDispatchMode
+from ouroboros.orchestrator.capabilities.interview_schemas import (
+    _interview_question_advisory_fanout_metadata,
+)
+
+# Derived, not hardcoded: these tests care that every declared lane is
+# dispatched, not how many lanes there happen to be.
+_ADVISORY_LANE_COUNT = len(_interview_question_advisory_fanout_metadata()["lanes"])
 
 
 def _score(value: float) -> AmbiguityScore:
@@ -252,10 +259,12 @@ async def test_handler_surfaces_runnable_lateral_review_dispatch() -> None:
         "inspect_code",
         "web_research",
         "run_lateral_review",
+        "read_data",
     ]
     assert {lane["lane_id"] for lane in advisory["lanes"]} == {
         "code_context",
         "web_context",
+        "data_context",
         "ambiguity_contrarian",
         "answer_simplifier",
         "architecture_implications",
@@ -265,6 +274,7 @@ async def test_handler_surfaces_runnable_lateral_review_dispatch() -> None:
     assert [subagent["context"]["lane_id"] for subagent in advisory_subagents] == [
         "code_context",
         "web_context",
+        "data_context",
         "ambiguity_contrarian",
         "answer_simplifier",
         "architecture_implications",
@@ -326,7 +336,7 @@ async def test_advisory_fanout_is_host_driven_stamped_on_codex_runtime() -> None
     assert result.is_ok
     meta = result.value.meta
     # Advisory lanes are still attached...
-    assert len(meta["question_advisory_subagents"]) == 5
+    assert len(meta["question_advisory_subagents"]) == _ADVISORY_LANE_COUNT
     # ...but now stamped so the Codex host fans them out itself.
     assert meta["question_advisory_dispatch_mode"] == "host_driven"
     assert meta["question_advisory_contract_id"] == "interview_question_advisory_fanout.v1"
@@ -349,7 +359,7 @@ def test_question_advisory_sequential_runtime_emits_processing_contract() -> Non
         runtime_backend="gemini",
     )
 
-    assert len(meta["question_advisory_subagents"]) == 5
+    assert len(meta["question_advisory_subagents"]) == _ADVISORY_LANE_COUNT
     assert meta["question_advisory_dispatch_mode"] == "sequential"
     assert meta["question_advisory_contract_id"] == "interview_question_advisory_fanout.v1"
     assert meta["question_advisory_host_action"] == "process_payloads_sequentially"

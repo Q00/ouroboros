@@ -32,6 +32,14 @@ from ouroboros.mcp.errors import (
     MCPServerError,
     MCPToolError,
 )
+
+# Re-exported: split out in #1754, still imported from here by evaluation tests.
+from ouroboros.mcp.server.project_dir import (  # noqa: F401
+    _PROJECT_ROOT_MARKERS,
+    _looks_like_project_root,
+    _project_dir_from_artifact,
+    _project_dir_from_seed,
+)
 from ouroboros.mcp.server.protocol import PromptHandler, ResourceHandler, ToolHandler
 from ouroboros.mcp.server.security import AuthConfig, AuthMethod, RateLimitConfig, SecurityLayer
 from ouroboros.mcp.types import (
@@ -536,40 +544,6 @@ def _validate_parameter_constraints(
             raise ValueError(f"Invalid items for {parameter.name}: expected {item_type} values")
 
 
-_PROJECT_ROOT_MARKERS = (
-    # VCS (most universal — nearly every project has one)
-    ".git",
-    # Python
-    "pyproject.toml",
-    "setup.py",
-    "setup.cfg",
-    # Node.js
-    "package.json",
-    # Rust
-    "Cargo.toml",
-    # Go
-    "go.mod",
-    # Java / Kotlin
-    "pom.xml",
-    "build.gradle",
-    "build.gradle.kts",
-    # Ruby
-    "Gemfile",
-    # PHP
-    "composer.json",
-)
-
-
-def _looks_like_project_root(path: object) -> bool:
-    """Return True when the given path looks like a project root."""
-    from pathlib import Path
-
-    if not isinstance(path, Path):
-        return False
-
-    return any((path / marker).exists() for marker in _PROJECT_ROOT_MARKERS)
-
-
 def _parse_legacy_execution_task_summary(artifact: str, seed: Any) -> Any | None:
     """Parse legacy parallel execution output into task completion results.
 
@@ -799,62 +773,6 @@ def _evaluation_summary_from_spec_verification(
         execution_completion_status=mechanical.execution_completion_status,
         approval_status="approved" if approved else "rejected",
     )
-
-
-def _project_dir_from_seed(seed: Any) -> str | None:
-    """Extract a likely project directory from seed metadata or brownfield context."""
-    if seed is None:
-        return None
-
-    seed_meta = getattr(seed, "metadata", None)
-    if seed_meta:
-        project_dir = getattr(seed_meta, "project_dir", None) or getattr(
-            seed_meta,
-            "working_directory",
-            None,
-        )
-        if project_dir:
-            return str(project_dir)
-
-    brownfield_context = getattr(seed, "brownfield_context", None)
-    context_references = getattr(brownfield_context, "context_references", ()) or ()
-
-    for reference in context_references:
-        path = getattr(reference, "path", None)
-        role = getattr(reference, "role", None)
-        if isinstance(path, str) and path and role == "primary":
-            return path
-
-    for reference in context_references:
-        path = getattr(reference, "path", None)
-        if isinstance(path, str) and path:
-            return path
-
-    return None
-
-
-def _project_dir_from_artifact(artifact: str) -> str | None:
-    """Extract a likely project root from Write/Edit/File tool output."""
-    from pathlib import Path
-    import re
-
-    # Match quoted paths (spaces allowed) and unquoted paths.
-    # Examples:  Write: /foo/bar.py  |  File: "/path with spaces/bar.py"
-    write_matches: list[str] = []
-    for m in re.finditer(r'(?:Write|Edit|File): (?:"([^"]+)"|(.+))', artifact):
-        path_candidate = m.group(1) or m.group(2)
-        if path_candidate:
-            write_matches.append(path_candidate.strip())
-    for path_str in write_matches:
-        candidate = Path(path_str).parent
-        for _ in range(10):
-            if _looks_like_project_root(candidate):
-                return str(candidate)
-            if candidate == candidate.parent:
-                break
-            candidate = candidate.parent
-
-    return None
 
 
 class MCPServerAdapter:
@@ -1737,7 +1655,9 @@ def create_ouroboros_server(
         StartEvolveStepHandler,
         StartExecuteSeedHandler,
         StartRalphHandler,
+        SubmitFanoutResultsHandler,
     )
+    from ouroboros.mcp.tools.fanout import FanoutRegistry
     from ouroboros.mcp.tools.pm_handler import PMInterviewHandler
     from ouroboros.mcp.tools.qa import QAHandler
     from ouroboros.mcp.tools.registry import ToolRegistry
@@ -2368,6 +2288,15 @@ def create_ouroboros_server(
         agent_runtime_backend=execute_runtime_backend,
         opencode_mode=opencode_mode,
     )
+    # ONE registry, shared by every producer and by the re-entry tool. A fan-out
+    # registered by the interview handler is redeemed through
+    # ``ouroboros_submit_fanout_results``, so both sides must observe the same
+    # directory; the handlers re-root it onto the resolved state dir. Until
+    # #1754 this composition root injected no registry and registered no submit
+    # handler, so on the shipped stdio server no ``fanout_id`` was ever stamped
+    # and the re-entry contract in skills/interview/SKILL.md named a tool that
+    # was not there.
+    fanout_registry = FanoutRegistry()
     # No shared-adapter injection for interview handlers: the injected stage
     # adapter has no strict MCP isolation, and ``self.llm_adapter or ...``
     # would bypass the handler's own strict factory (#765, #1768). Injection
@@ -2377,6 +2306,7 @@ def create_ouroboros_server(
         llm_backend=interview_llm_backend,
         agent_runtime_backend=interview_runtime_backend,
         opencode_mode=opencode_mode,
+        fanout_registry=fanout_registry,
         suppress_tool_use_prompt_cues=interview_envelope_sealed,
     )
     generate_seed = GenerateSeedHandler(
@@ -2470,6 +2400,7 @@ def create_ouroboros_server(
             llm_backend=interview_llm_backend,
             agent_runtime_backend=interview_runtime_backend,
             opencode_mode=opencode_mode,
+            fanout_registry=fanout_registry,
             suppress_tool_use_prompt_cues=interview_envelope_sealed,
         ),
         PMInterviewHandler(
@@ -2496,7 +2427,9 @@ def create_ouroboros_server(
         LateralThinkHandler(
             agent_runtime_backend=reflect_runtime_backend,
             opencode_mode=opencode_mode,
+            fanout_registry=fanout_registry,
         ),
+        SubmitFanoutResultsHandler(fanout_registry=fanout_registry),
         evolve_step,
         StartEvolveStepHandler(
             evolve_handler=evolve_step,
