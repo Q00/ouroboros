@@ -46,6 +46,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 import json
 from pathlib import Path
+import re
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
@@ -59,6 +60,16 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 log = structlog.get_logger(__name__)
 
 _DEFAULT_FANOUT_DIR = Path.home() / ".ouroboros" / "data" / "fanout"
+
+#: A fan-out id is two things at once: a public redemption token a caller hands
+#: back through ``ouroboros_submit_fanout_results``, and the name of the file
+#: the record lives in. Constraining it to this alphabet is what keeps those two
+#: facts from meeting. A separator, a parent segment, a drive letter and an
+#: absolute form are all unspellable in it, so "the record I loaded came from
+#: outside the registry" is not a condition to be detected downstream — it has
+#: no way to be expressed upstream. ``Path(dir) / "/tmp/forged.json"`` is
+#: ``/tmp/forged.json``, and a check placed after that join is already too late.
+_FANOUT_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,128}")
 
 # Fan-out re-entry kinds — each routes to one revived synthesizer.
 FANOUT_KIND_LATERAL_PERSONA_PANEL = "lateral_persona_panel"
@@ -204,7 +215,17 @@ class FanoutRegistry:
             return
         self._dir = directory
 
-    def _path(self, fanout_id: str) -> Path:
+    def _path(self, fanout_id: str) -> Path | None:
+        """Return the record path for ``fanout_id``, or ``None`` if it is not one.
+
+        The registry directory is the whole of where a record may live, so an id
+        that cannot name a file inside it names nothing. Returning ``None``
+        rather than raising keeps the existing read contract: an unredeemable id
+        is reported as an unknown fan-out, which is what a caller holding a
+        forged one should learn.
+        """
+        if not _FANOUT_ID_RE.fullmatch(fanout_id):
+            return None
         return self._dir / f"{fanout_id}.json"
 
     def register(
@@ -227,6 +248,17 @@ class FanoutRegistry:
         producer can echo it into the emitted meta. Persistence is best-effort.
         """
         resolved_id = fanout_id or f"fanout_{uuid4().hex}"
+        # Generated ids always conform; a supplied one that does not is a
+        # producer bug, and issuing it would hand out a token that can never be
+        # redeemed. Refused here rather than at redemption so the defect surfaces
+        # where it was written. This is argument validity, not the best-effort
+        # persistence below: a full disk still returns an id.
+        record_path = self._path(resolved_id)
+        if record_path is None:
+            raise ValueError(
+                "fanout_id must be 1-128 characters of [A-Za-z0-9_-]; "
+                "it names a file inside the registry directory."
+            )
         # From here the id is public and redeemable, so the directory it was
         # written to is part of the promise. See ``rebase_default``.
         self._issued = True
@@ -250,7 +282,7 @@ class FanoutRegistry:
             # other migrated writer, and the caller still gets its id.
             secure_directory(self._dir)
             if not write_owner_only(
-                self._path(resolved_id),
+                record_path,
                 json.dumps(record.to_dict(), ensure_ascii=False),
             ):
                 log.warning(
@@ -269,8 +301,11 @@ class FanoutRegistry:
 
     def load(self, fanout_id: str) -> FanoutRecord | None:
         """Load a persisted fan-out record, or ``None`` if unknown/corrupt."""
+        path = self._path(fanout_id)
+        if path is None:
+            return None
         try:
-            content = self._path(fanout_id).read_text(encoding="utf-8")
+            content = path.read_text(encoding="utf-8")
         except OSError:
             return None
         try:

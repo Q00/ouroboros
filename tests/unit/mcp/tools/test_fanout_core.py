@@ -12,6 +12,7 @@ Covers PR-J:
 from __future__ import annotations
 
 from collections.abc import Mapping
+import json
 from typing import Any
 
 import pytest
@@ -729,6 +730,127 @@ async def test_submit_tool_omitting_the_envelope_does_not_redeem_a_bound_fanout(
             "session_id": "sess-envelope",
             "correlation_key": "context.persona",
             "fanout_id": fanout_id,
+            "results": results,
+        }
+    )
+
+    assert honored.is_ok, honored
+    assert honored.unwrap().meta["status"] == "complete"
+
+
+def test_an_id_that_is_not_a_registry_filename_redeems_nothing(tmp_path: Any) -> None:
+    """The id is a filename, so a path is what it must not be able to spell.
+
+    `Path(directory) / "/tmp/forged.json"` is `/tmp/forged.json` — the join
+    silently discards the directory — so an absolute id turned a caller-chosen
+    file into an authoritative persisted record. The alphabet is what closes it:
+    a separator, a parent segment and a drive letter are unspellable, so this is
+    not detection over an open space (Q00/ouroboros#1754).
+    """
+    outside = tmp_path / "forged.json"
+    outside.write_text(
+        json.dumps(
+            {
+                "fanout_id": "forged",
+                "kind": FANOUT_KIND_LATERAL_PERSONA_PANEL,
+                "session_id": "",
+                "correlation_key": "context.persona",
+                "expected_keys": ["researcher"],
+                "synthesizer_input": {"entries": []},
+            }
+        ),
+        encoding="utf-8",
+    )
+    registry = FanoutRegistry(tmp_path / "fanout")
+
+    forged_ids = [
+        str(tmp_path / "forged"),  # absolute
+        "../forged",  # traversal
+        "..",
+        "sub/forged",  # separator
+        "",
+    ]
+
+    for forged in forged_ids:
+        assert registry.load(forged) is None, forged
+        out = submit_fanout_results(
+            registry,
+            session_id="",
+            correlation_key="context.persona",
+            results=[{"key": "researcher", "content": "x"}],
+            fanout_id=forged,
+        )
+        assert out["status"] == "unknown_fanout_id", forged
+
+
+def test_a_producer_cannot_issue_an_id_it_could_never_redeem(tmp_path: Any) -> None:
+    """Refused where it was written, not where it fails to load."""
+    registry = FanoutRegistry(tmp_path)
+
+    with pytest.raises(ValueError, match="fanout_id"):
+        register_lateral_persona_fanout(
+            registry,
+            session_id="s1",
+            payloads=[
+                build_subagent_payload(
+                    tool_name="ouroboros_lateral_think",
+                    title="L (researcher)",
+                    prompt="x",
+                    agent="researcher",
+                    context={"persona": "researcher"},
+                )
+            ],
+            fanout_id="../escape",
+        )
+
+
+@pytest.mark.asyncio
+async def test_submit_tool_rejects_forged_ids_and_still_redeems_issued_ones(
+    tmp_path: Any,
+) -> None:
+    """Through the public tool, which is what made the id caller-controlled.
+
+    Registering the re-entry tool on the shipped server is what turned
+    `fanout_id` into hostile input; before that it never crossed a transport.
+    So the boundary is pinned where a real caller reaches it.
+    """
+    state_dir = tmp_path / "state"
+    registry = FanoutRegistry(state_dir / "fanout")
+    handler = LateralThinkHandler(agent_runtime_backend="gemini", fanout_registry=registry)
+    personas = ["researcher", "contrarian"]
+    produced = await handler.handle(
+        {
+            "problem_context": "stuck",
+            "current_approach": "same",
+            "personas": personas,
+            "session_id": "sess-forge",
+        }
+    )
+    assert produced.is_ok, produced
+    issued_id = produced.unwrap().meta["fanout_id"]
+
+    outside = tmp_path / "forged.json"
+    outside.write_text((state_dir / "fanout" / f"{issued_id}.json").read_text(), encoding="utf-8")
+
+    submit = SubmitFanoutResultsHandler(fanout_registry=registry)
+    results = [{"key": persona, "content": f"{persona}-out"} for persona in personas]
+
+    for forged in (str(tmp_path / "forged"), "../forged", "sub/forged"):
+        refused = await submit.handle(
+            {
+                "session_id": "sess-forge",
+                "correlation_key": "context.persona",
+                "fanout_id": forged,
+                "results": results,
+            }
+        )
+        assert refused.is_err, forged
+
+    honored = await submit.handle(
+        {
+            "session_id": "sess-forge",
+            "correlation_key": "context.persona",
+            "fanout_id": issued_id,
             "results": results,
         }
     )
