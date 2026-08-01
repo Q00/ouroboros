@@ -477,6 +477,29 @@ describe("parseMetadata", () => {
     expect(out.responseShape.question_advisory_result_correlation_key).toBe("context.lane_id")
   })
 
+  test("the read_data capability marks a child proposal-only", () => {
+    // Read from the same context field the child's prompt is built from, so
+    // what the child is told and what it is permitted cannot disagree.
+    const out = parseMetadata({
+      question_advisory_subagents: [
+        {
+          tool_name: "ouroboros_interview",
+          title: "Data",
+          prompt: "propose",
+          context: { lane_id: "data_context", capability: "read_data" },
+        },
+        {
+          tool_name: "ouroboros_interview",
+          title: "Code",
+          prompt: "inspect",
+          context: { lane_id: "code_context", capability: "inspect_code" },
+        },
+      ],
+    })
+
+    expect(out.subs.map((s) => s.proposalOnly)).toEqual([true, false])
+  })
+
   test("invalid advisory children are skipped", () => {
     const out = parseMetadata({
       question_advisory_subagents: [
@@ -942,6 +965,41 @@ describe("_dispatch — child session lifecycle", () => {
     ])
     // At least the PATCH-running call should have fired (awaited phase)
     expect(patchCalls.length).toBeGreaterThanOrEqual(1)
+  })
+
+  test("a proposal-only child is created with tools denied", async () => {
+    // On host-driven transports Ouroboros can only ask a child not to execute.
+    // Here it creates the session itself, so the lane whose contract forbids
+    // execution must not also be handed blanket permission — that would leave
+    // the barrier in prose on the one transport that can enforce it.
+    const createCalls: unknown[] = []
+    const cli = mockCli({
+      create: async (args: unknown) => {
+        createCalls.push(args)
+        return { data: { id: "child_data" } }
+      },
+      prompt: async () => ({ data: { parts: [{ type: "text", text: "proposal" }] } }),
+    })
+    const b = mockBase(async () => ({}))
+    const sub = {
+      tool: "ouroboros_interview",
+      title: "Interview advisory: data_context",
+      prompt: "propose the reads",
+      agent: "general",
+      proposalOnly: true,
+    }
+
+    await _dispatch(cli as never, b as never, "pid", "mid", sub as never)
+
+    expect(createCalls).toEqual([
+      {
+        body: {
+          parentID: "pid",
+          title: "Interview advisory: data_context",
+          permission: [{ permission: "*", pattern: "*", action: "deny" }],
+        },
+      },
+    ])
   })
 
   test("throws when child session create returns no id", async () => {

@@ -89,6 +89,7 @@ class FanoutRecord:
     expected_keys: tuple[str, ...]
     synthesizer_input: dict[str, Any]
     required_keys: tuple[str, ...] | None = None
+    question_identity: str = ""
 
     def gating_keys(self) -> tuple[str, ...]:
         """Return the keys whose absence blocks completion."""
@@ -114,6 +115,8 @@ class FanoutRecord:
         # to what earlier versions wrote, so a downgrade reads it unchanged.
         if self.required_keys is not None:
             data["required_keys"] = list(self.required_keys)
+        if self.question_identity:
+            data["question_identity"] = self.question_identity
         return data
 
     @classmethod
@@ -132,6 +135,7 @@ class FanoutRecord:
                 if isinstance(raw_required, (list, tuple))
                 else None
             ),
+            question_identity=str(data.get("question_identity") or ""),
         )
 
 
@@ -139,35 +143,52 @@ class FanoutRegistry:
     """File-backed store for pending fan-out expected-key state.
 
     Reuses the interview data directory as the persistence substrate (the same
-    place interview state JSON is written) rather than inventing a new layer:
-    handlers that know the resolved interview state dir thread it in via
-    :meth:`rebase_default`; until then the zero-arg default falls back to
-    ``~/.ouroboros/data/fanout``.
+    place interview state JSON is written) rather than inventing a new layer.
     Each record is a single ``{fanout_id}.json`` file. Writes are best-effort:
     a persistence failure degrades re-entry (submissions report the fan-out as
     unknown) but never breaks the fan-out request path.
+
+    Prefer constructing with the final directory. A caller that knows the
+    resolved state dir — the composition root does, long before it builds this
+    — passes it here, and :meth:`rebase_default` then has nothing to do.
     """
 
     def __init__(self, directory: Path | None = None) -> None:
         self._dir = directory or _DEFAULT_FANOUT_DIR
+        self._issued = False
 
     @property
     def directory(self) -> Path:
         return self._dir
 
     def rebase_default(self, directory: Path) -> None:
-        """Re-root a default-located registry onto the server's real data dir.
+        """Re-root a still-unused default-located registry onto the real data dir.
 
-        The zero-arg constructor falls back to ``~/.ouroboros/data/fanout``
-        because the server factory does not know the resolved interview state
-        dir at construction time. Handlers that DO know it (via
-        ``resolved_state_dir()``) call this to thread the actual data dir in.
-        A registry constructed with an explicit directory (e.g. tests injecting
-        ``tmp_path``) is never re-rooted, and because producer + submit handlers
-        share one registry instance, both sides observe the same directory.
+        Some wiring paths build the registry before anyone knows the resolved
+        interview state dir, so a handler that DOES know it (via
+        ``resolved_state_dir()``) can thread it in here. A registry constructed
+        with an explicit directory is never re-rooted.
+
+        **A registry that has already issued a record is never re-rooted
+        either.** A fan-out id is a promise that a later submission can redeem
+        it, and moving the directory out from under an issued id silently breaks
+        that promise: the record stays at the old path and its valid submission
+        comes back ``unknown_fanout_id``. That is reachable whenever a producer
+        registers before the first interview turn — a lateral panel, say — and
+        the interview then resolves a custom ``state_dir``. Refusing the move is
+        the conservative half; constructing at the final directory is the half
+        that makes the move unnecessary.
         """
-        if self._dir == _DEFAULT_FANOUT_DIR:
-            self._dir = directory
+        if self._dir != _DEFAULT_FANOUT_DIR:
+            return
+        if self._issued:
+            log.warning(
+                "fanout.registry.rebase_refused_after_issue",
+                current=str(self._dir),
+                requested=str(directory),
+            )
+            return
+        self._dir = directory
 
     def _path(self, fanout_id: str) -> Path:
         return self._dir / f"{fanout_id}.json"
@@ -182,6 +203,7 @@ class FanoutRegistry:
         synthesizer_input: dict[str, Any],
         fanout_id: str | None = None,
         required_keys: list[str] | None = None,
+        question_identity: str = "",
     ) -> str:
         """Persist a fan-out record and return its ``fanout_id``.
 
@@ -190,6 +212,9 @@ class FanoutRegistry:
         producer can echo it into the emitted meta. Persistence is best-effort.
         """
         resolved_id = fanout_id or f"fanout_{uuid4().hex}"
+        # From here the id is public and redeemable, so the directory it was
+        # written to is part of the promise. See ``rebase_default``.
+        self._issued = True
         record = FanoutRecord(
             fanout_id=resolved_id,
             kind=kind,
@@ -198,6 +223,7 @@ class FanoutRegistry:
             expected_keys=tuple(expected_keys),
             synthesizer_input=synthesizer_input,
             required_keys=None if required_keys is None else tuple(required_keys),
+            question_identity=question_identity,
         )
         try:
             # A fan-out record carries the producer's ``synthesizer_input``
@@ -344,6 +370,13 @@ def register_question_advisory_fanout(
     context the child's prompt prints it from, so the flag the child is shown
     and the flag completion enforces cannot disagree.
 
+    So does ``question_identity``. A contracted lane's answer carries the
+    session and question it claims to be about, and the contract says that field
+    "matches the originating advisory request" — a sentence nothing enforced
+    until this was persisted. Advisory children run asynchronously and a host
+    may have several questions in flight, so an unbound answer is one whose
+    evidence can land beside a different question than the one it measured.
+
     Advisory lanes have no gating synthesizer (each is independent advice to make
     the human's answer easier), so submission routes to a deterministic
     aggregation that returns the correlated lane outputs in dispatch order for
@@ -353,6 +386,7 @@ def register_question_advisory_fanout(
 
     expected_keys: list[str] = []
     required_keys: list[str] = []
+    question_identity = ""
     for payload in payloads:
         data = payload.to_dict()
         lane_id = _payload_lane_id(data)
@@ -360,13 +394,16 @@ def register_question_advisory_fanout(
             continue
         expected_keys.append(lane_id)
         context = data.get("context")
-        if isinstance(context, Mapping) and bool(context.get("required")):
-            required_keys.append(lane_id)
+        if isinstance(context, Mapping):
+            if bool(context.get("required")):
+                required_keys.append(lane_id)
+            question_identity = question_identity or str(context.get("question_identity") or "")
     return registry.register(
         kind=FANOUT_KIND_QUESTION_ADVISORY,
         session_id=session_id,
         correlation_key=correlation_key,
         expected_keys=expected_keys,
+        question_identity=question_identity,
         synthesizer_input={"lane_ids": list(expected_keys)},
         fanout_id=fanout_id,
         required_keys=required_keys,
@@ -597,10 +634,39 @@ def _contract_violations(
     for lane_id, contract in _advisory_lane_answer_contracts().items():
         if lane_id not in provided:
             continue
-        errors = _validate_against_contract(provided[lane_id], contract)
+        output = provided[lane_id]
+        errors = _validate_against_contract(output, contract)
+        errors.extend(_provenance_violations(record, output))
         if errors:
             violations[lane_id] = errors
     return violations
+
+
+def _provenance_violations(record: FanoutRecord, output: Any) -> list[str]:
+    """Return violations for an answer that claims a different question.
+
+    The schema can only check that ``question_identity`` is *shaped* like one.
+    Shape is not provenance: ``interview-question:ffffffffffffffff`` validates
+    perfectly and belongs to nothing. Advisory children run asynchronously and a
+    host may hold several questions open, so an answer that is never bound to
+    the request it came from is one whose numbers can be rendered beside a
+    question they did not measure — which is the single thing this lane exists
+    to prevent.
+
+    Compared against the record rather than against the submission's arguments,
+    because both are attacker-supplied in the same call; only the record was
+    written by the producer.
+    """
+    if not isinstance(output, Mapping):
+        return []
+    problems: list[str] = []
+    claimed_identity = str(output.get("question_identity") or "")
+    if record.question_identity and claimed_identity != record.question_identity:
+        problems.append("question_identity: does not belong to this fan-out")
+    claimed_session = str(output.get("session_id") or "")
+    if record.session_id and claimed_session and claimed_session != record.session_id:
+        problems.append("session_id: does not belong to this fan-out")
+    return problems
 
 
 __all__ = [

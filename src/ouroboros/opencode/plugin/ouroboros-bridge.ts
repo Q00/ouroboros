@@ -23,6 +23,22 @@ export const ID_LEN = 26
 export const BYPASS_PERMISSION_RULESET = [
   { permission: "*", pattern: "*", action: "allow" },
 ] as const
+// A proposal-only child names the lookups it would run and runs none of them.
+// Its answer contract has no field for a fetched value, so a call it makes
+// anyway is pure cost and pure risk — a metered query billed, an external
+// service touched, before the user has confirmed anything.
+//
+// On the transports where the HOST spawns the child (Claude Code, Codex),
+// Ouroboros supplies a prompt and nothing else; the contract is the only lever
+// it has. Here it is not: this plugin creates the child session itself and
+// hands it a permission ruleset. Handing that child `*:* allow` while telling
+// it not to execute would put the whole barrier in prose on the one transport
+// where it does not have to be.
+export const PROPOSAL_ONLY_PERMISSION_RULESET = [
+  { permission: "*", pattern: "*", action: "deny" },
+] as const
+// Capability of the lane whose contract forbids execution (Q00/ouroboros#1754).
+export const PROPOSAL_ONLY_CAPABILITY = "read_data"
 export function num(v: string | undefined, d: number): number {
   const n = !v ? d : Number(v)
   return Number.isFinite(n) && n >= 0 ? n : d
@@ -89,6 +105,7 @@ interface Sub {
   truncated: boolean
   hash: string
   timeout?: ChildTimeout
+  proposalOnly: boolean
 }
 
 interface Raw {
@@ -97,6 +114,7 @@ interface Raw {
   agent?: string
   prompt: string
   timeout?: unknown
+  context?: { capability?: unknown }
 }
 
 interface ChildTimeout {
@@ -144,6 +162,9 @@ export function build(p: unknown, idx: number): Sub | null {
     truncated,
     hash: fnv(prompt),
     timeout: parseChildTimeout(r.timeout),
+    // Read from the same context field the child's own prompt is built from,
+    // so what the child is told and what it is permitted cannot disagree.
+    proposalOnly: r.context?.capability === PROPOSAL_ONLY_CAPABILITY,
   }
 }
 
@@ -509,7 +530,7 @@ async function dispatch(cli: Cli, b: Base, pid: string, mid: string, s: Sub): Pr
     body: {
       parentID: pid,
       title: s.title,
-      permission: BYPASS_PERMISSION_RULESET,
+      permission: s.proposalOnly ? PROPOSAL_ONLY_PERMISSION_RULESET : BYPASS_PERMISSION_RULESET,
     },
   })
   const childID = created?.data?.id

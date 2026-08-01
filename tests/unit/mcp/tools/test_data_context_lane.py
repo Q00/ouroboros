@@ -69,6 +69,10 @@ def test_lane_is_dispatched_required_with_its_contract() -> None:
 
     assert payload["context"]["capability"] == "read_data"
     assert payload["context"]["required"] is True
+    # Not the investigating persona: the other research lanes exist to go and
+    # find things out, and this one exists to name what it would measure and
+    # then stop. Asking for `researcher` would ask for the opposite.
+    assert payload["agent"] != "researcher"
     # The contract must arrive whole: a child validated field-for-field at
     # re-entry cannot satisfy a schema it was shown half of.
     assert "data_evidence_answer.v1" in payload["prompt"]
@@ -395,3 +399,57 @@ def test_the_record_never_holds_what_a_child_said(tmp_path: Any) -> None:
     record = registry.load(fanout_id)
     assert record is not None
     assert set(record.synthesizer_input) == {"lane_ids"}
+
+
+# --------------------------------------------------------------------------- #
+# Provenance of a proposal
+# --------------------------------------------------------------------------- #
+
+
+def test_a_proposal_for_another_question_is_refused(tmp_path: Any) -> None:
+    """Shape is not provenance.
+
+    `interview-question:ffffffffffffffff` satisfies the schema pattern and
+    belongs to nothing. Advisory children run asynchronously and a host may hold
+    several questions open, so an unbound answer is one whose numbers can be
+    rendered beside a question they did not measure.
+    """
+    registry = FanoutRegistry(tmp_path)
+    fanout_id, lane_ids, identity = _registered_advisory(registry)
+    results = [
+        entry for entry in _required_results(lane_ids, identity) if entry["key"] != "data_context"
+    ]
+    foreign = _valid_no_op("interview-question:ffffffffffffffff")
+    foreign["session_id"] = "sess-someone-else"
+    results.append({"key": "data_context", "content": foreign})
+
+    outcome = _submit(registry, fanout_id, results)
+
+    assert outcome["status"] == "partial"
+    violations = outcome["contract_violations"]["data_context"]
+    assert "question_identity: does not belong to this fan-out" in violations
+    assert "session_id: does not belong to this fan-out" in violations
+    # Named, never quoted — the error channel must not become a second copy of
+    # the submission.
+    assert "ffffffffffffffff" not in repr(outcome)
+
+
+def test_a_proposal_for_this_question_is_accepted(tmp_path: Any) -> None:
+    registry = FanoutRegistry(tmp_path)
+    fanout_id, lane_ids, identity = _registered_advisory(registry)
+
+    outcome = _submit(registry, fanout_id, _required_results(lane_ids, identity))
+
+    assert outcome["status"] == "complete"
+    assert outcome["contract_violations"] == {}
+
+
+def test_the_record_binds_the_question_it_was_registered_for(tmp_path: Any) -> None:
+    registry = FanoutRegistry(tmp_path)
+    fanout_id, _lane_ids, identity = _registered_advisory(registry)
+
+    record = registry.load(fanout_id)
+
+    assert record is not None
+    assert record.question_identity == identity
+    assert record.session_id == "sess-data"

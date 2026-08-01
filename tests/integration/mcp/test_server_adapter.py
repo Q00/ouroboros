@@ -720,6 +720,11 @@ class TestCreateOuroborosServer:
         "ouroboros_start_evolve_step",
         "ouroboros_start_execute_seed",
         "ouroboros_start_ralph",
+        # Added in #1754. This set held the re-entry tool's ABSENCE in place:
+        # `skills/interview/SKILL.md` documented the tool while this pin
+        # asserted the shipped server did not have it, so the wiring gap had a
+        # guardian rather than merely lacking a test.
+        "ouroboros_submit_fanout_results",
     }
 
     def test_creates_server_with_defaults(self) -> None:

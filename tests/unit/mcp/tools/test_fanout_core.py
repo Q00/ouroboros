@@ -17,6 +17,7 @@ from typing import Any
 import pytest
 
 from ouroboros.backends.capabilities import SubagentDispatchMode
+from ouroboros.mcp.tools import fanout as fanout_module
 from ouroboros.mcp.tools.authoring_handlers import (
     InterviewHandler,
     _attach_question_assist_requests,
@@ -525,6 +526,38 @@ def test_registry_rebase_default_moves_default_location_only(tmp_path: Any) -> N
     explicit = FanoutRegistry(tmp_path / "explicit")
     explicit.rebase_default(tmp_path / "fanout")
     assert explicit.directory == tmp_path / "explicit"
+
+
+def test_registry_never_moves_out_from_under_an_issued_fanout_id(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """An issued fan-out id must stay redeemable.
+
+    Reachable ordering: a lateral panel registers before the first interview
+    turn, and the interview then resolves a custom ``state_dir`` and re-roots
+    the SHARED registry. The record stays at the old path while lookups move to
+    the new one, so a valid submission comes back ``unknown_fanout_id`` — the
+    id was a promise the move quietly broke.
+    """
+    # The default location is the whole subject here, so it is redirected
+    # rather than used: a test must never write into the developer's own
+    # ``~/.ouroboros``.
+    monkeypatch.setattr(fanout_module, "_DEFAULT_FANOUT_DIR", tmp_path / "home-default")
+    registry = FanoutRegistry()
+    fanout_id = registry.register(
+        kind=FANOUT_KIND_LATERAL_PERSONA_PANEL,
+        session_id="sess-lateral-first",
+        correlation_key="context.persona",
+        expected_keys=["researcher"],
+        synthesizer_input={"entries": []},
+    )
+    issued_dir = registry.directory
+    assert registry.load(fanout_id) is not None
+
+    registry.rebase_default(tmp_path / "fanout")
+
+    assert registry.directory == issued_dir
+    assert registry.load(fanout_id) is not None
 
 
 def test_interview_handler_threads_state_dir_into_registry(tmp_path: Any) -> None:

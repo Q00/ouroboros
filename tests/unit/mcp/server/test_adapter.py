@@ -2518,3 +2518,20 @@ def test_composition_root_shares_one_fanout_registry() -> None:
         and handler.fanout_registry is not None
     }
     assert len(registries) == 1, "producers and the submit tool must share one registry"
+
+
+def test_composition_root_builds_the_registry_at_its_final_directory(tmp_path) -> None:
+    """No mutable re-root on the path that ships.
+
+    This root resolves the state dir long before it builds the registry, so the
+    registry can be constructed where its records will live. Leaving it default
+    -located and re-rooting later is what let a producer register into one
+    directory and have lookups moved to another.
+    """
+    from ouroboros.mcp.server.adapter import create_ouroboros_server
+
+    server = create_ouroboros_server(name="fanout-dir-probe", state_dir=tmp_path)
+    handler = server._tool_handlers["ouroboros_submit_fanout_results"]
+
+    assert handler.fanout_registry is not None
+    assert handler.fanout_registry.directory == tmp_path / "fanout"

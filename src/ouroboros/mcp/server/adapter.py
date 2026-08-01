@@ -2291,12 +2291,19 @@ def create_ouroboros_server(
     # ONE registry, shared by every producer and by the re-entry tool. A fan-out
     # registered by the interview handler is redeemed through
     # ``ouroboros_submit_fanout_results``, so both sides must observe the same
-    # directory; the handlers re-root it onto the resolved state dir. Until
-    # #1754 this composition root injected no registry and registered no submit
-    # handler, so on the shipped stdio server no ``fanout_id`` was ever stamped
-    # and the re-entry contract in skills/interview/SKILL.md named a tool that
-    # was not there.
-    fanout_registry = FanoutRegistry()
+    # directory. Until #1754 this composition root injected no registry and
+    # registered no submit handler, so on the shipped stdio server no
+    # ``fanout_id`` was ever stamped and the re-entry contract in
+    # skills/interview/SKILL.md named a tool that was not there.
+    #
+    # Built at its FINAL directory rather than at the default plus a later
+    # re-root. This root resolved ``state_dir_path`` hundreds of lines above, so
+    # the mutable path never had a reason to exist here — and leaving it mutable
+    # is not free: a producer that registers before the first interview turn (a
+    # lateral panel) would have its record moved out from under an already
+    # issued fan-out id, whose valid submission then returns
+    # ``unknown_fanout_id``.
+    fanout_registry = FanoutRegistry(state_dir_path / "fanout")
     # No shared-adapter injection for interview handlers: the injected stage
     # adapter has no strict MCP isolation, and ``self.llm_adapter or ...``
     # would bypass the handler's own strict factory (#765, #1768). Injection
