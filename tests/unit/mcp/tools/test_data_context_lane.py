@@ -542,6 +542,87 @@ def test_a_lane_without_a_contract_keeps_the_generic_output_shape() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# What the user is asked to approve
+# --------------------------------------------------------------------------- #
+
+
+def _fully_populated_proposal(identity: str) -> dict[str, Any]:
+    """A read request carrying every field the schema allows."""
+    return {
+        "question_identity": identity,
+        "lane_id": "data_context",
+        "data_needed": True,
+        "read_requests": [
+            {
+                "operation": "read",
+                "tool_name": "warehouse_query",
+                "metric": "enterprise accounts",
+                "aggregation": "count",
+                "group_by": ["plan_tier"],
+                "filters": [{"field": "region", "comparator": "eq", "value": "emea"}],
+                "time_window": "last 90 days",
+                "source_class": "metered",
+                "informs_decision": "whether SSO ships in the first milestone",
+            }
+        ],
+    }
+
+
+def test_the_host_receives_every_read_request_field_verbatim(tmp_path: Any) -> None:
+    """ "Render the request whole" has to be satisfiable, not just instructed.
+
+    The host is told to show the user every field of the request it is asking
+    them to authorize. That duty is only keepable if the request reaches the
+    host as issued — a field dropped in aggregation is one the user can never be
+    shown, and two proposals differing only in a filter would then arrive
+    identical. So the passthrough is pinned here rather than the prose being
+    guarded: what makes an omission impossible is that there is no summarizing
+    step between the child and the confirmation surface (Q00/ouroboros#1754).
+    """
+    registry = FanoutRegistry(tmp_path)
+    fanout_id, lane_ids, identity = _registered_advisory(registry)
+    proposal = _fully_populated_proposal(identity)
+    schema = interview_data_evidence_answer_contract()["response_model_schema"]
+    request_schema = schema["properties"]["read_requests"]["items"]
+    # The fixture must exercise the whole schema, or the passthrough below is
+    # only proven for the fields someone remembered to put in it.
+    assert set(proposal["read_requests"][0]) == set(request_schema["properties"])
+    assert list(Draft202012Validator(schema).iter_errors(proposal)) == []
+
+    results = [
+        entry for entry in _required_results(lane_ids, identity) if entry["key"] != "data_context"
+    ]
+    results.append({"key": "data_context", "content": proposal})
+    outcome = _submit(registry, fanout_id, results)
+
+    assert outcome["status"] == "complete"
+    aggregated = outcome["result"]["aggregated_outputs"]
+    delivered = next(item for item in aggregated if item["lane_id"] == "data_context")
+    assert delivered["output"] == proposal
+
+
+def test_the_confirmation_instruction_asks_for_the_whole_request() -> None:
+    """Both copies of the host contract, because only one of them ships to each.
+
+    `skills/` is the canonical source and the wheel's payload;
+    `.claude-plugin/skills/` is what a marketplace install reads. An instruction
+    present in one and absent from the other is absent for half the hosts.
+    """
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[4]
+    for skill in (
+        root / "skills" / "interview" / "SKILL.md",
+        root / ".claude-plugin" / "skills" / "interview" / "SKILL.md",
+    ):
+        content = skill.read_text(encoding="utf-8")
+        assert "every field the object carries" in content, skill
+        # The partial list this replaced: naming a subset is what let two
+        # requests differing by a filter render identically.
+        assert "(metric, aggregation, grouping, time window, source class)" not in content, skill
+
+
+# --------------------------------------------------------------------------- #
 # Durable replay
 # --------------------------------------------------------------------------- #
 

@@ -259,9 +259,13 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
    **Data proposals**:
    The `data_context` lane returns `read_request` objects — measurements it
    would run, never results. When its output carries any:
-   - Show the user what would be measured, rendered from the structured fields
-     (metric, aggregation, grouping, time window, source class). Do not paste a
-     query string; there is none.
+   - Render the request **whole**: every field the object carries, exactly as
+     issued. Do not summarize it and do not choose which fields to show. Two
+     proposals that differ only in a filter, or in the tool they would run
+     against, are different operations — a rendering that drops a field makes
+     them look like the same one, and the user's approval then belongs to
+     something they were not shown. The object is small and closed, so showing
+     all of it is the cheap option. Do not paste a query string; there is none.
    - Run a read only after the user confirms that specific request. `metered`,
      `external`, or `side_effect_ambiguous` sources cost something to touch —
      say so when you ask.

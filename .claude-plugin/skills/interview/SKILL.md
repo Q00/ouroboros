@@ -191,6 +191,8 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
      `meta.code_investigation_request` when present.
    - `web_context` — browse/search only when current external facts genuinely
      affect the answer.
+   - `data_context` — propose the measurements that would inform the question.
+     This lane runs nothing; see "Data proposals" below for your duties.
    - `ambiguity_contrarian` — find hidden assumptions, vague terms, missing
      decisions, and risky defaults.
    - `answer_simplifier` — turn the question into 2-3 easy choices or one
@@ -217,6 +219,64 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
    as a prerequisite. The only time you skip spawning is when the host has no
    subagent primitive at all (then use `sequential_fallback`).
    Preserve the original question text while advisory children run.
+
+   **Submitting fan-out results back (re-entry)**:
+   When the originating `meta` carries a `fanout_id` (e.g.
+   `meta.question_advisory_fanout_id`, or a `fanout_id` in a lateral persona
+   panel dispatch), after all advisory/persona subagents return, call
+   `ouroboros_submit_fanout_results` with:
+   - `session_id`: the session the fan-out was issued under. Required whenever
+     the producer ran with one — an omitted session is refused rather than
+     waived, because this is what binds a submission to its owner. Contracted
+     lanes assert no session of their own; this argument is the binding.
+   - `fanout_id`: the stamped id from that meta,
+   - `correlation_key`: the stamped `result_correlation_key`
+     (`context.lane_id`, `context.persona`, or `code_facts`). Omitting it is
+     refused the same way whenever the fan-out recorded one — send back what the
+     meta stamped rather than leaving it out,
+   - `results`: one `{ "key": <correlation value>, "content": <child output> }`
+     per subagent, where `key` is that child's correlation value (its lane id,
+     persona, or `code_facts`).
+   A complete set returns the correlated synthesis to continue with; a partial
+   set returns `status="partial"` with `missing_required_keys`. **Retry with
+   every lane you hold, not only the missing ones** — no submitted output is
+   kept between calls, so each call is judged on what it carries. (The record
+   stores only what was *asked*; retaining what children *answered* is durable
+   result state, deferred with its sanitization duties to a later slice.)
+   Sequential hosts submit after processing payloads one-by-one — same tool,
+   same contract, so accumulate the outputs on your side and send the growing
+   set. Continue the interview from the returned synthesis; keep the
+   user-facing question visible throughout.
+
+   Only lanes marked `required: true` in the request block completion. A lane
+   you ran that had nothing to say still submits its output — that is an answer.
+   A lane you could **not spawn at all** (no capability for it, the child died,
+   the user cancelled it) is submitted as
+   `{ "key": <lane id>, "undispatched": true }`. Never invent output for a lane
+   you did not run: a fabricated finding is worse than a missing one, and this
+   is exactly why the declaration exists.
+
+   **Data proposals**:
+   The `data_context` lane returns `read_request` objects — measurements it
+   would run, never results. When its output carries any:
+   - Render the request **whole**: every field the object carries, exactly as
+     issued. Do not summarize it and do not choose which fields to show. Two
+     proposals that differ only in a filter, or in the tool they would run
+     against, are different operations — a rendering that drops a field makes
+     them look like the same one, and the user's approval then belongs to
+     something they were not shown. The object is small and closed, so showing
+     all of it is the cheap option. Do not paste a query string; there is none.
+   - Run a read only after the user confirms that specific request. `metered`,
+     `external`, or `side_effect_ambiguous` sources cost something to touch —
+     say so when you ask.
+   - Show the numbers **beside** the question as material for the user's
+     judgment. They are never the answer. The user answers in their own words
+     on the ordinary `[from-user]` path; there is no `[from-data]` answer to
+     forward.
+   - If the user has already answered the question by the time the proposal
+     arrives, drop it. Do not re-open a decision the user has made, and do not
+     present the numbers as a reason to reconsider — evidence informs a
+     decision, it does not revisit one.
 
    **Milestone lateral-review dispatch**:
    If an MCP response includes `meta.lateral_review_recommended=true`, treat it
