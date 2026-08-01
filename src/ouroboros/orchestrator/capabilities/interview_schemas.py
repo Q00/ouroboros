@@ -543,8 +543,15 @@ def _interview_data_evidence_answer_contract() -> dict[str, Any]:
     read and the warning would simply not be given. RFC #1754 already ruled on
     this: "a tool's name cannot prove it is read-only [...] a child judging
     'obviously local, free, read-only' from names and descriptions is not a
-    boundary." The host resolves the named tool in its own inventory and speaks
-    from what it finds; ``skills/interview/SKILL.md`` carries that duty.
+    boundary."
+
+    Removing the field does not move the rating to the host, because there is
+    nowhere to move it to: MCP carries no cost or mutation metadata, so a host
+    told to disclose one would be manufacturing it, and a disclaimer on every
+    read is a thing users learn to click through. What is left is what was
+    load-bearing all along -- the user installed these tools, the whole request
+    including the tool name is rendered, and nothing runs until they confirm
+    that specific request. ``skills/interview/SKILL.md`` carries that duty.
 
     **A measurement cannot be reported as a measurement.** There is no field for
     an observed value, a row, or a timestamp of observation -- only proposals --
