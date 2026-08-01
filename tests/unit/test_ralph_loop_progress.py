@@ -13,6 +13,7 @@ from typing import Any
 import pytest
 
 from ouroboros.core.types import Result
+from ouroboros.mcp.tools.qa import FAIL_THRESHOLD
 from ouroboros.mcp.tools.ralph_handlers import RalphHandler
 from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
 from ouroboros.ralph_loop import RalphLoopConfig, RalphLoopRunner
@@ -547,12 +548,18 @@ def _qa_meta(score: float, verdict: str, pass_threshold: float = 0.8) -> dict[st
     string (``src/ouroboros/mcp/tools/qa.py``), which is what makes the two
     fields capable of contradicting each other.
     """
+    if score >= pass_threshold:
+        loop_action = "done"
+    elif score >= FAIL_THRESHOLD:
+        loop_action = "continue"
+    else:
+        loop_action = "escalate"
     return {
         "score": score,
         "verdict": verdict,
         "pass_threshold": pass_threshold,
         "passed": score >= pass_threshold,
-        "loop_action": "escalate" if score < pass_threshold else "complete",
+        "loop_action": loop_action,
     }
 
 
@@ -581,6 +588,10 @@ async def test_sub_threshold_score_does_not_stop_the_loop_on_a_pass_verdict() ->
     assert result.stop_reason == "max_generations reached"
     assert result.iteration_count == 2
     assert evolve.calls == 2
+    # An authoritative QA failure must not serialize as a successful, non-error
+    # terminal result — `to_tool_result` is what the job/auto layer reads.
+    assert result.status == "failed"
+    assert result.to_tool_result().is_error is True
 
 
 @pytest.mark.asyncio
@@ -600,3 +611,49 @@ async def test_uncontradicted_pass_verdict_still_stops_the_loop() -> None:
     assert result.stop_reason == "qa passed"
     assert result.iteration_count == 1
     assert evolve.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_converged_action_does_not_complete_on_a_contradicted_qa_pass() -> None:
+    """``converged`` is the sibling success exit and must consult the same QA result.
+
+    ``evolution_handlers`` runs post-execution QA for both ``continue`` and
+    ``converged`` and publishes the pre-QA action unchanged, so a converged step
+    can arrive carrying an authoritative QA failure. Guarding only the ``qa
+    passed`` branch would leave this exit reporting terminal success.
+    """
+    evolve = _ScriptedEvolveHandler(metas=[{"action": "converged", "qa": _qa_meta(0.1, "pass")}])
+    runner = RalphLoopRunner(evolve)
+
+    result = await runner.run(RalphLoopConfig(lineage_id="lin_converged_bad_qa", max_generations=3))
+
+    assert result.status == "failed"
+    assert result.stop_reason == "qa_failed"
+    assert result.to_tool_result().is_error is True
+    assert result.iteration_count == 1
+
+
+@pytest.mark.asyncio
+async def test_converged_action_still_completes_on_an_uncontradicted_qa_pass() -> None:
+    """The converged guard must fire only on contradiction, not on every converge."""
+    evolve = _ScriptedEvolveHandler(metas=[{"action": "converged", "qa": _qa_meta(0.95, "pass")}])
+    runner = RalphLoopRunner(evolve)
+
+    result = await runner.run(RalphLoopConfig(lineage_id="lin_converged_ok", max_generations=3))
+
+    assert result.status == "completed"
+    assert result.to_tool_result().is_error is False
+    assert result.iteration_count == 1
+
+
+@pytest.mark.asyncio
+async def test_converged_without_qa_numbers_keeps_completing() -> None:
+    """A payload with no computed QA fields keeps its legacy terminal behaviour."""
+    evolve = _ScriptedEvolveHandler(metas=[{"action": "converged"}])
+    runner = RalphLoopRunner(evolve)
+
+    result = await runner.run(RalphLoopConfig(lineage_id="lin_converged_legacy", max_generations=3))
+
+    assert result.status == "completed"
+    assert result.stop_reason == "converged"
+    assert result.to_tool_result().is_error is False

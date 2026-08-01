@@ -298,8 +298,17 @@ class RalphLoopRunner:
                 stop_reason = "qa passed"
                 break
             if action in _TERMINAL_SUCCESS_ACTIONS:
-                status = "completed"
-                stop_reason = action
+                # evolve_step runs post-execution QA for `converged` too and
+                # publishes the pre-QA action unchanged, so a converged step can
+                # arrive carrying an authoritative QA failure. Guarding only the
+                # `qa passed` branch above would leave this exit reporting a
+                # terminal success for the very payload that branch rejected.
+                if _qa_authoritative_failure(final_result.meta):
+                    status = "failed"
+                    stop_reason = "qa_failed"
+                else:
+                    status = "completed"
+                    stop_reason = action
                 break
             if action in _TERMINAL_FAILURE_ACTIONS or final_result.is_error:
                 status = "failed"
@@ -319,7 +328,12 @@ class RalphLoopRunner:
             seed_content = None
         else:
             if final_result is not None:
-                status = "completed"
+                # Exhausting the budget without ever obtaining a QA pass is not a
+                # success. `max_generations reached` is already a recoverable
+                # BLOCKED stop_reason downstream (`auto/pipeline.py`), so only the
+                # status changes: the run stays retryable, it just stops claiming
+                # it succeeded.
+                status = "failed" if _qa_authoritative_failure(final_result.meta) else "completed"
                 stop_reason = "max_generations reached"
 
         if final_result is None:
@@ -372,6 +386,19 @@ def _qa_result_contradicts_pass(qa: dict[str, Any]) -> bool:
         return False
     # A NaN score compares False here, which lands on the fail-closed side.
     return not score >= threshold
+
+
+def _qa_authoritative_failure(meta: dict[str, Any]) -> bool:
+    """Return True when this generation's QA payload authoritatively failed it.
+
+    Distinct from ``not _qa_passed(...)``: a payload with no QA block, or one
+    carrying only a verdict string, is *not* an authoritative failure and keeps
+    its legacy terminal behaviour. Only the gate's own computed fields count.
+    """
+    qa = meta.get("qa")
+    if not isinstance(qa, dict):
+        return False
+    return _qa_result_contradicts_pass(qa)
 
 
 def _qa_passed(meta: dict[str, Any]) -> bool:
