@@ -397,13 +397,23 @@ def interview_code_investigation_answer_contract() -> dict[str, Any]:
 #: aggregate is the only answer shape this lane can carry, so a lookup that
 #: cannot be phrased as one has no way to be requested and becomes a no-op
 #: finding instead.  See ``_interview_data_evidence_answer_contract``.
+#:
+#: Every member here names a complete operation.  ``percentile`` did not -- it
+#: needed a rank the request had no field for, so ``percentile`` of latency was
+#: a request the user could approve and the parent still had to finish, picking
+#: between p50 and p99 after the approval that was supposed to cover it.  The
+#: ranks are members instead of a parameter, which keeps the ambiguity out
+#: without adding a conditional field that only some aggregations use
+#: (Q00/ouroboros#1754).
 DATA_AGGREGATIONS: tuple[str, ...] = (
     "count",
     "distinct_count",
     "sum",
     "average",
     "median",
-    "percentile",
+    "p90",
+    "p95",
+    "p99",
     "min",
     "max",
     "rate",
@@ -496,7 +506,17 @@ def _interview_data_read_request_schema() -> dict[str, Any]:
                         "field": {"type": "string", "pattern": _DATA_IDENTIFIER_PATTERN},
                         "comparator": {
                             "type": "string",
-                            "enum": ["eq", "neq", "gt", "gte", "lt", "lte", "in", "between"],
+                            # Scalar comparators only, because `value` is one
+                            # value. `between` and `in` each took two or more
+                            # operands and were handed a single string to pack
+                            # them into, so `"2026-01-01..2026-03-31"` was a
+                            # filter the user approved and the parent still had
+                            # to parse. A range is two filters here -- `gte`
+                            # and `lte` -- which says the same thing and leaves
+                            # nothing to interpret. A set has no unambiguous
+                            # form in this slice: group by the field instead
+                            # and let the user read the categories.
+                            "enum": ["eq", "neq", "gt", "gte", "lt", "lte"],
                         },
                         "value": {"type": "string", "minLength": 1, "maxLength": 200},
                     },

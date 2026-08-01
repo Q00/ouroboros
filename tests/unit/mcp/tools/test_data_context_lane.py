@@ -176,6 +176,72 @@ def test_a_name_in_the_source_cannot_be_spelled_as_a_query(field: str) -> None:
     assert list(Draft202012Validator(schema).iter_errors(answer)) != []
 
 
+@pytest.mark.parametrize(
+    ("request_patch", "unstated"),
+    [
+        ({"aggregation": "percentile"}, "which rank — p50 reads differently from p99"),
+        (
+            {"filters": [{"field": "day", "comparator": "between", "value": "2026-01..2026-03"}]},
+            "two operands packed into one string the parent would have to parse",
+        ),
+        (
+            {"filters": [{"field": "region", "comparator": "in", "value": "emea,apac"}]},
+            "a set packed into one string",
+        ),
+    ],
+)
+def test_a_request_the_parent_would_have_to_finish_cannot_be_proposed(
+    request_patch: dict[str, Any], unstated: str
+) -> None:
+    """What the user approves has to be the whole operation, not most of it.
+
+    The host renders every field and runs the read after confirmation, so a
+    request that still needs a decision afterwards moves that decision past the
+    approval meant to cover it. Closed by making the incomplete forms
+    unspellable rather than by adding a parameter only some aggregations use:
+    the ranks are their own members, and a range is two scalar filters.
+    """
+    schema = interview_data_evidence_answer_contract()["response_model_schema"]
+    answer = _valid_no_op("interview-question:0123456789abcdef")
+    answer["data_needed"] = True
+    answer.pop("no_evidence_reason")
+    answer["read_requests"] = [
+        {
+            "operation": "read",
+            "tool_name": "warehouse_query",
+            "metric": "request latency",
+            "aggregation": "average",
+            "informs_decision": "whether the p95 target is met",
+            **request_patch,
+        }
+    ]
+
+    assert list(Draft202012Validator(schema).iter_errors(answer)) != [], unstated
+
+
+def test_the_complete_forms_of_those_requests_are_accepted() -> None:
+    """The replacements must express what the rejected forms were reaching for."""
+    schema = interview_data_evidence_answer_contract()["response_model_schema"]
+    answer = _valid_no_op("interview-question:0123456789abcdef")
+    answer["data_needed"] = True
+    answer.pop("no_evidence_reason")
+    answer["read_requests"] = [
+        {
+            "operation": "read",
+            "tool_name": "warehouse_query",
+            "metric": "request latency",
+            "aggregation": "p95",
+            "informs_decision": "whether the p95 target is met",
+            "filters": [
+                {"field": "day", "comparator": "gte", "value": "2026-01-01"},
+                {"field": "day", "comparator": "lte", "value": "2026-03-31"},
+            ],
+        }
+    ]
+
+    assert list(Draft202012Validator(schema).iter_errors(answer)) == []
+
+
 def test_the_child_has_no_field_in_which_to_rate_a_tool() -> None:
     """A classification that disagrees with the tool cannot be submitted at all.
 
@@ -432,6 +498,23 @@ async def test_the_public_submit_tool_also_refuses_a_malformed_declaration(tmp_p
     # Every offender at once: a host with three bad entries should not need
     # three submissions to learn three facts.
     assert sorted(meta["invalid_keys"]) == sorted(required)
+
+    # An entry that is not an object, or that names no lane, has no key to be
+    # reported under — so it is reported by position rather than dropped. It
+    # used to be filtered out before reaching the core, which let a submission
+    # that mis-serialised one lane come back `complete`.
+    unserialisable = await submit.handle(
+        {
+            "session_id": "sess-data",
+            "correlation_key": "context.lane_id",
+            "fanout_id": fanout_id,
+            "results": [42, {}, *({"key": key, "content": "advice"} for key in required)],
+        }
+    )
+
+    assert unserialisable.is_ok, unserialisable
+    assert unserialisable.unwrap().meta["status"] == "invalid_result_entry"
+    assert unserialisable.unwrap().meta["invalid_keys"] == ["<results[0]>", "<results[1]>"]
 
     # The honest declaration still completes: refusing the malformed shape must
     # not cost the host the escape the shape exists to provide.

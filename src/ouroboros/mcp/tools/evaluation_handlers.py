@@ -2000,7 +2000,7 @@ class SubmitFanoutResultsHandler:
                     tool_name="ouroboros_submit_fanout_results",
                 )
             )
-        results = [item for item in raw_results if isinstance(item, dict)]
+        results = list(raw_results)  # not filtered; the core reports bad entries
 
         outcome = submit_fanout_results(
             self._registry,

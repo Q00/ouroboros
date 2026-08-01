@@ -619,9 +619,17 @@ def submit_fanout_results(
     provided: dict[str, Any] = {}
     declared: set[str] = set()
     invalid: list[str] = []
-    for result in results:
+    for index, result in enumerate(results):
+        # An entry that is not an object, or that names no lane, is reported by
+        # position rather than dropped: it has no key to be reported under, and
+        # silently discarding it let an otherwise complete submission come back
+        # `complete` while one lane had been mis-serialised into nothing.
+        if not isinstance(result, Mapping):
+            invalid.append(f"<results[{index}]>")
+            continue
         key = result.get("key")
         if key is None:
+            invalid.append(f"<results[{index}]>")
             continue
         # A child that never ran is declared in the same list its siblings
         # report through: one entry per lane the host was asked to spawn,
