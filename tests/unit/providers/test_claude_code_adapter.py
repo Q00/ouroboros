@@ -2389,3 +2389,156 @@ class TestProviderErrorFormatDetails:
         assert result.value.content == "recovered response"
         assert adapter._execute_single_request.await_count == 2
         mock_sleep.assert_awaited_once()
+
+
+class TestCLIFallbackWhenSDKAbsent:
+    """The `claude` backend must survive a process the SDK cannot enter.
+
+    `claude-agent-sdk` requires `mcp<2.0.0` and the MCP protocol server requires
+    `mcp==2.0.0`, so a server built from the `[mcp]` extra has no SDK to import.
+    Before this, `llm.backend: claude` in that process could generate nothing at
+    all and reported it as an interview-content failure (Q00/ouroboros#1839).
+    """
+
+    @staticmethod
+    def _adapter(**kwargs: object) -> ClaudeCodeAdapter:
+        with patch.object(ClaudeCodeAdapter, "_resolve_cli_path", return_value="/bin/claude"):
+            return ClaudeCodeAdapter(**kwargs)  # type: ignore[arg-type]
+
+    @staticmethod
+    def _proc(stdout: bytes, stderr: bytes = b"", returncode: int = 0) -> MagicMock:
+        proc = MagicMock()
+        proc.returncode = returncode
+        proc.communicate = AsyncMock(return_value=(stdout, stderr))
+        proc.kill = MagicMock()
+        return proc
+
+    def test_a_missing_sdk_falls_back_to_the_cli(self) -> None:
+        adapter = self._adapter()
+        payload = (
+            b'{"type":"result","subtype":"success","is_error":false,'
+            b'"result":"the answer","stop_reason":"end_turn",'
+            b'"usage":{"input_tokens":11,"output_tokens":7}}'
+        )
+        with (
+            patch.dict("sys.modules", {"claude_agent_sdk": None}),
+            patch(
+                "asyncio.create_subprocess_exec",
+                new=AsyncMock(return_value=self._proc(payload)),
+            ) as spawn,
+        ):
+            result = asyncio.run(
+                adapter.complete(
+                    [
+                        Message(role=MessageRole.SYSTEM, content="be terse"),
+                        Message(role=MessageRole.USER, content="ping"),
+                    ],
+                    CompletionConfig(model="claude-haiku-4-5"),
+                )
+            )
+
+        assert result.is_ok, result
+        assert result.value.content == "the answer"
+        assert result.value.finish_reason == "end_turn"
+        assert result.value.usage.total_tokens == 18
+
+        argv = list(spawn.await_args.args)
+        assert argv[0] == "/bin/claude"
+        assert "-p" in argv and "--output-format" in argv and "json" in argv
+        # The system message travels as a CLI flag rather than being folded into
+        # the prompt, matching what the SDK path does with it.
+        assert "--append-system-prompt" in argv
+        assert argv[argv.index("--append-system-prompt") + 1] == "be terse"
+
+    def test_the_adapters_own_permission_vocabulary_is_not_forwarded_blindly(self) -> None:
+        """`default` is a mode this adapter has and the CLI does not.
+
+        Forwarding it would make every fallback call fail on argument parsing,
+        which is a worse failure than the one being fixed: it would look like the
+        model refused rather than like a bad flag.
+        """
+        payload = b'{"is_error":false,"result":"ok","stop_reason":"end_turn"}'
+        for mode, forwarded in (("default", False), ("bypassPermissions", True)):
+            adapter = self._adapter(permission_mode=mode)
+            with (
+                patch.dict("sys.modules", {"claude_agent_sdk": None}),
+                patch(
+                    "asyncio.create_subprocess_exec",
+                    new=AsyncMock(return_value=self._proc(payload)),
+                ) as spawn,
+            ):
+                assert asyncio.run(
+                    adapter.complete(
+                        [Message(role=MessageRole.USER, content="ping")],
+                        CompletionConfig(model="claude-haiku-4-5"),
+                    )
+                ).is_ok
+            assert ("--permission-mode" in list(spawn.await_args.args)) is forwarded, mode
+
+    def test_a_cli_error_is_reported_as_one(self) -> None:
+        """The CLI's own failure text reaches the caller rather than a generic one."""
+        payload = (
+            b'{"is_error":true,"subtype":"error_max_turns",'
+            b'"result":"reached maximum number of turns","session_id":"abc"}'
+        )
+        adapter = self._adapter()
+        with (
+            patch.dict("sys.modules", {"claude_agent_sdk": None}),
+            patch(
+                "asyncio.create_subprocess_exec",
+                new=AsyncMock(return_value=self._proc(payload)),
+            ),
+        ):
+            result = asyncio.run(
+                adapter.complete(
+                    [Message(role=MessageRole.USER, content="ping")],
+                    CompletionConfig(model="claude-haiku-4-5"),
+                )
+            )
+
+        assert result.is_err
+        assert "maximum number of turns" in result.error.message
+        assert result.error.details["subtype"] == "error_max_turns"
+
+    def test_a_non_json_body_surfaces_stderr(self) -> None:
+        """An auth prompt or a bad flag never reaches the result envelope.
+
+        Whatever the CLI wrote to stderr is the only diagnosis there is, so it is
+        carried rather than replaced with a parse error the user cannot act on.
+        """
+        adapter = self._adapter()
+        with (
+            patch.dict("sys.modules", {"claude_agent_sdk": None}),
+            patch(
+                "asyncio.create_subprocess_exec",
+                new=AsyncMock(
+                    return_value=self._proc(b"not json", b"Invalid API key", returncode=1)
+                ),
+            ),
+        ):
+            result = asyncio.run(
+                adapter.complete(
+                    [Message(role=MessageRole.USER, content="ping")],
+                    CompletionConfig(model="claude-haiku-4-5"),
+                )
+            )
+
+        assert result.is_err
+        assert "Invalid API key" in result.error.details["stderr"]
+        assert result.error.details["returncode"] == 1
+
+    def test_neither_transport_is_named_as_neither(self) -> None:
+        """With no SDK and no CLI the message says so, instead of naming only pip."""
+        with patch.object(ClaudeCodeAdapter, "_resolve_cli_path", return_value=None):
+            adapter = ClaudeCodeAdapter()
+        with patch.dict("sys.modules", {"claude_agent_sdk": None}):
+            result = asyncio.run(
+                adapter.complete(
+                    [Message(role=MessageRole.USER, content="ping")],
+                    CompletionConfig(model="claude-haiku-4-5"),
+                )
+            )
+
+        assert result.is_err
+        assert "Neither" in result.error.message
+        assert "claude CLI" in result.error.message

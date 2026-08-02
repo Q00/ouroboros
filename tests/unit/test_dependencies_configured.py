@@ -324,3 +324,43 @@ def test_build_excludes_generated_artifacts():
 
     missing = required_excludes - excludes
     assert not missing, f"Missing hatch build excludes for generated artifacts: {missing}"
+
+
+def test_shipped_mcp_launcher_extras_can_co_resolve() -> None:
+    """Extras requested together must not pin one distribution two ways.
+
+    The launcher used to request ``[mcp,claude]``. Those two extras pin the same
+    distribution at incompatible majors — ``mcp==2.0.0`` against the SDK's
+    ``mcp<2.0.0`` — so asking for both produces an unsatisfiable install rather
+    than a degraded one, and the server never starts at all.
+
+    Checked statically against ``pyproject.toml`` rather than by resolving, so it
+    holds without a network and names the conflicting distribution when it fails
+    (Q00/ouroboros#1839).
+    """
+    import re
+    import tomllib
+
+    root = Path(__file__).parent.parent.parent
+    pyproject = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+    optional = pyproject["project"]["optional-dependencies"]
+
+    entry = json.loads((root / ".claude-plugin" / ".mcp.json").read_text(encoding="utf-8"))
+    args = entry["mcpServers"]["ouroboros"]["args"]
+    spec = args[args.index("--from") + 1]
+    requested = re.findall(r"\[([^\]]*)\]", spec)
+    extras = [e.strip() for e in (requested[0].split(",") if requested else [])]
+
+    seen: dict[str, tuple[str, str]] = {}
+    for extra in extras:
+        for requirement in optional.get(extra, []):
+            name = re.split(r"[\[\(<>=!;\s]", requirement, maxsplit=1)[0].strip()
+            constraint = requirement[len(name) :].strip()
+            if name in seen and seen[name][1] != constraint:
+                prior_extra, prior_constraint = seen[name]
+                msg = (
+                    f"extras {prior_extra!r} and {extra!r} both constrain {name!r}: "
+                    f"{prior_constraint!r} vs {constraint!r}"
+                )
+                raise AssertionError(msg)
+            seen[name] = (extra, constraint)

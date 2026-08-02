@@ -368,14 +368,25 @@ class ClaudeCodeAdapter:
         try:
             # Lazy import to avoid loading SDK at module import time
             from claude_agent_sdk import ClaudeAgentOptions, query  # noqa: F401
+
+            sdk_available = True
         except ImportError as e:
-            log.error("claude_code_adapter.sdk_not_installed", error=str(e))
-            return Result.err(
-                ProviderError(
-                    message="Claude Agent SDK is not installed. Run: pip install claude-agent-sdk",
-                    details={"import_error": str(e)},
+            # Not fatal on its own: the CLI carries the same subscription and
+            # runs out of process, which is the only transport that survives an
+            # environment the SDK cannot enter. See ``_complete_via_cli``.
+            sdk_available = False
+            if self._cli_path is None:
+                log.error("claude_code_adapter.sdk_and_cli_unavailable", error=str(e))
+                return Result.err(
+                    ProviderError(
+                        message=(
+                            "Neither the Claude Agent SDK nor the claude CLI is available. "
+                            "Install the CLI, or add the SDK with: pip install claude-agent-sdk"
+                        ),
+                        details={"import_error": str(e), "cli_path": None},
+                    )
                 )
-            )
+            log.info("claude_code_adapter.sdk_absent_using_cli", cli_path=str(self._cli_path))
 
         profile_result = resolve_completion_profile_result(config, backend="claude_code")
         if profile_result.is_err:
@@ -444,7 +455,10 @@ class ClaudeCodeAdapter:
             claude_code_entrypoint=os.environ.get("CLAUDE_CODE_ENTRYPOINT"),
         )
 
-        result = await self._complete_with_transient_retry(prompt, config, system_prompt)
+        if sdk_available:
+            result = await self._complete_with_transient_retry(prompt, config, system_prompt)
+        else:
+            result = await self._complete_via_cli(prompt, config, system_prompt)
 
         # JSON enforcement layer: if response_format requires JSON,
         # normalize or retry until we get valid JSON.
@@ -452,6 +466,131 @@ class ClaudeCodeAdapter:
             result = await self._enforce_json(result, prompt, config, system_prompt)
 
         return result
+
+    #: Values the `claude` CLI accepts for --permission-mode. The adapter's own
+    #: mode vocabulary is wider (it includes "default", which the CLI expresses
+    #: by omitting the flag), so a mode outside this set is dropped rather than
+    #: forwarded into an argument the CLI would reject.
+    _CLI_PERMISSION_MODES = frozenset(
+        {"acceptEdits", "auto", "bypassPermissions", "manual", "dontAsk", "plan"}
+    )
+
+    async def _complete_via_cli(
+        self,
+        prompt: str,
+        config: CompletionConfig,
+        system_prompt: str | None,
+    ) -> Result[CompletionResponse, ProviderError]:
+        """Run one completion through the ``claude`` CLI in print mode.
+
+        The Python SDK is not always installable beside the caller. It requires
+        ``mcp<2.0.0``, and the MCP protocol server requires ``mcp==2.0.0``, so a
+        server process built from the ``[mcp]`` extra has no SDK to import — and
+        a user whose backend is ``claude`` then cannot generate anything at all
+        (Q00/ouroboros#1839).
+
+        The CLI has no such conflict: it is a separate process carrying the same
+        subscription, so it is the transport that survives that boundary. This
+        path is entered only when the SDK is absent, so an environment that has
+        the SDK behaves exactly as before -- streaming, tool use and structured
+        turns are the SDK's, and nothing here changes them.
+
+        What it gives up is what one-shot print mode does not have: no
+        multi-turn tool use, and no per-turn events. Question generation and the
+        other single-response calls do not use those, which is why this is a
+        fallback rather than a replacement.
+        """
+        import asyncio
+        import json as _json
+
+        cli_path = self._cli_path
+        if cli_path is None:  # pragma: no cover - guarded by the caller
+            return Result.err(ProviderError(message="claude CLI path is unavailable"))
+
+        argv = [str(cli_path), "-p", "--output-format", "json"]
+        if config.model:
+            argv += ["--model", config.model]
+        if system_prompt:
+            argv += ["--append-system-prompt", system_prompt]
+        if self._permission_mode in self._CLI_PERMISSION_MODES:
+            argv += ["--permission-mode", self._permission_mode]
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *argv,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=self._cwd or None,
+            )
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(prompt.encode("utf-8")), timeout=self._timeout
+            )
+        except TimeoutError:
+            proc.kill()
+            return Result.err(
+                ProviderError(
+                    message=f"claude CLI timed out after {self._timeout}s",
+                    details={"timeout_seconds": self._timeout},
+                )
+            )
+        except OSError as exc:
+            return Result.err(
+                ProviderError(
+                    message=f"claude CLI could not be executed: {exc}",
+                    details={"cli_path": str(cli_path)},
+                )
+            )
+
+        stderr_text = stderr.decode("utf-8", "replace").strip()
+        try:
+            payload = _json.loads(stdout.decode("utf-8", "replace"))
+        except ValueError:
+            # A non-JSON body means the CLI failed before it produced a result
+            # envelope -- an auth prompt, a usage limit, a bad flag. The stderr
+            # text is the only diagnosis available, and it is what the user
+            # needs to see.
+            return Result.err(
+                ProviderError(
+                    message=f"claude CLI returned no JSON result (exit {proc.returncode})",
+                    details={"stderr": stderr_text[:2000], "returncode": proc.returncode},
+                )
+            )
+
+        if payload.get("is_error") or proc.returncode != 0:
+            return Result.err(
+                ProviderError(
+                    message=str(payload.get("result") or "claude CLI reported an error"),
+                    details={
+                        "subtype": payload.get("subtype"),
+                        "returncode": proc.returncode,
+                        "session_id": payload.get("session_id"),
+                        "stderr": stderr_text[:2000],
+                    },
+                )
+            )
+
+        usage = payload.get("usage") or {}
+        log.info(
+            "claude_code_adapter.cli_request_completed",
+            content_length=len(str(payload.get("result") or "")),
+            session_id=payload.get("session_id"),
+            stop_reason=payload.get("stop_reason"),
+        )
+        return Result.ok(
+            CompletionResponse(
+                content=str(payload.get("result") or ""),
+                model=config.model,
+                usage=UsageInfo(
+                    prompt_tokens=int(usage.get("input_tokens") or 0),
+                    completion_tokens=int(usage.get("output_tokens") or 0),
+                    total_tokens=int(usage.get("input_tokens") or 0)
+                    + int(usage.get("output_tokens") or 0),
+                ),
+                finish_reason=str(payload.get("stop_reason") or "stop"),
+                raw_response=payload,
+            )
+        )
 
     def _normalize_json_content(
         self, result: Result[CompletionResponse, ProviderError]
