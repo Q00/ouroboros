@@ -519,6 +519,54 @@ class ClaudeCodeAdapter:
         {"acceptEdits", "auto", "bypassPermissions", "manual", "dontAsk", "plan"}
     )
 
+    def _empty_content_error(
+        self,
+        content: str,
+        *,
+        session_id: str | None,
+        stderr_tail: str,
+    ) -> ProviderError | None:
+        """The adapter's contract for an empty body: infrastructure, not an answer.
+
+        A transport that returned ``content=""`` as a success would hand an
+        interview or QA caller a false answer, and would do it past the retry
+        loop -- the loop returns on the first `is_ok`, so nothing downstream gets
+        a second chance. Both transports read this one copy so a body that came
+        back empty means the same thing however it travelled.
+
+        Returns ``None`` when the content is fine, so the caller can treat it as
+        "no objection" rather than having to catch anything.
+        """
+        if content:
+            return None
+        log.warning(
+            "claude_code_adapter.empty_response",
+            content_length=0,
+            session_id=session_id,
+            hint=(
+                "CLI started but produced no content"
+                if session_id
+                else "CLI may still be starting (custom CLI sync, etc.)"
+            ),
+        )
+        message = (
+            "Empty response from CLI - session started but no content produced"
+            if session_id
+            # Phrased to match ``_CLAUDE_CLI_BOOTSTRAP_PATTERNS`` so the retry
+            # loop treats a bootstrap stumble as transient rather than final.
+            else "Empty response from CLI - may need retry (timeout/startup)"
+        )
+        return ProviderError(
+            message=message,
+            details={
+                "session_id": session_id,
+                "content_length": 0,
+                "stderr": stderr_tail,
+                "configured_cli_path": (str(self._cli_path) if self._cli_path else None),
+                "cwd": self._cwd,
+            },
+        )
+
     def _effective_max_turns(self, config: CompletionConfig) -> int:
         """The turn budget this request runs under, per-request override first.
 
@@ -574,10 +622,13 @@ class ClaudeCodeAdapter:
         the SDK behaves exactly as before -- streaming, tool use and structured
         turns are the SDK's, and nothing here changes them.
 
-        What it gives up is what one-shot print mode does not have: no
-        multi-turn tool use, and no per-turn events. Question generation and the
-        other single-response calls do not use those, which is why this is a
-        fallback rather than a replacement.
+        What it gives up is the streaming surface: no per-turn callbacks and no
+        incremental message events, because print mode reports once at the end.
+        Multi-turn tool execution itself still happens -- ``--allowedTools`` and
+        ``--max-turns`` are forwarded, which is what the 20-turn read-only
+        envelope in semantic evaluation needs. Single-response callers observe
+        only the final result, which is why this is a usable fallback rather
+        than a replacement for the SDK's event stream.
 
         The isolation the caller asked for is carried through natively. The
         interview/PM/QA callers build this adapter with ``allowed_tools=[]`` and
@@ -683,16 +734,24 @@ class ClaudeCodeAdapter:
                 )
             )
 
+        session_id = payload.get("session_id")
+        content = str(payload.get("result") or "")
+        empty = self._empty_content_error(
+            content, session_id=session_id, stderr_tail=stderr_text[:2000]
+        )
+        if empty is not None:
+            return Result.err(empty)
+
         usage = payload.get("usage") or {}
         log.info(
             "claude_code_adapter.cli_request_completed",
-            content_length=len(str(payload.get("result") or "")),
-            session_id=payload.get("session_id"),
+            content_length=len(content),
+            session_id=session_id,
             stop_reason=payload.get("stop_reason"),
         )
         return Result.ok(
             CompletionResponse(
-                content=str(payload.get("result") or ""),
+                content=content,
                 model=config.model,
                 usage=UsageInfo(
                     prompt_tokens=int(usage.get("input_tokens") or 0),
@@ -1512,54 +1571,15 @@ class ClaudeCodeAdapter:
             return Result.err(error_result)
 
         # Check for empty response — always an error regardless of session_id
-        if not content:
+        empty = self._empty_content_error(
+            content,
+            session_id=session_id,
             # Include captured stderr for diagnostics — helps identify
             # why the CLI produced no output (rate limits, auth, etc.)
-            stderr_tail = "\n".join(stderr_lines[-20:]) if stderr_lines else ""
-            if session_id:
-                log.warning(
-                    "claude_code_adapter.empty_response",
-                    content_length=0,
-                    session_id=session_id,
-                    stderr_lines=len(stderr_lines),
-                    hint="CLI started but produced no content",
-                )
-                return Result.err(
-                    ProviderError(
-                        message="Empty response from CLI - session started but no content produced",
-                        details={
-                            "session_id": session_id,
-                            "content_length": 0,
-                            "stderr": stderr_tail,
-                            "configured_cli_path": (
-                                str(self._cli_path) if self._cli_path else None
-                            ),
-                            "cwd": self._cwd,
-                        },
-                    )
-                )
-            else:
-                log.warning(
-                    "claude_code_adapter.empty_response",
-                    content_length=0,
-                    session_id=session_id,
-                    stderr_lines=len(stderr_lines),
-                    hint="CLI may still be starting (custom CLI sync, etc.)",
-                )
-                return Result.err(
-                    ProviderError(
-                        message="Empty response from CLI - may need retry (timeout/startup)",
-                        details={
-                            "session_id": session_id,
-                            "content_length": 0,
-                            "stderr": stderr_tail,
-                            "configured_cli_path": (
-                                str(self._cli_path) if self._cli_path else None
-                            ),
-                            "cwd": self._cwd,
-                        },
-                    )
-                )
+            stderr_tail="\n".join(stderr_lines[-20:]) if stderr_lines else "",
+        )
+        if empty is not None:
+            return Result.err(empty)
 
         log.info(
             "claude_code_adapter.request_completed",

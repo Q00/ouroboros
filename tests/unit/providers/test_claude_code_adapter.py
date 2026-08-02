@@ -2736,6 +2736,84 @@ class TestCLIFallbackWhenSDKAbsent:
         assert result.is_err
         assert spawn.await_count == 1
 
+    def test_an_empty_result_envelope_is_not_a_successful_answer(self) -> None:
+        """`is_error: false` with an empty body is infrastructure, not an answer.
+
+        The SDK path already classifies empty content as a retryable provider
+        error. Returning `content=""` as `is_ok` would hand an interview or QA
+        caller a false answer *past* the retry loop, since the loop returns on
+        the first success.
+        """
+        adapter = self._adapter()
+        empty = b'{"is_error":false,"result":"","stop_reason":"end_turn"}'
+        good = b'{"is_error":false,"result":"an actual answer","stop_reason":"end_turn"}'
+        with (
+            patch.dict("sys.modules", {"claude_agent_sdk": None}),
+            patch("asyncio.sleep", new=AsyncMock()),
+            patch(
+                "asyncio.create_subprocess_exec",
+                new=AsyncMock(side_effect=[self._proc(empty), self._proc(good)]),
+            ) as spawn,
+        ):
+            result = asyncio.run(
+                adapter.complete(
+                    [Message(role=MessageRole.USER, content="ping")],
+                    CompletionConfig(model="claude-haiku-4-5"),
+                )
+            )
+
+        assert result.is_ok, result
+        assert result.value.content == "an actual answer"
+        assert spawn.await_count == 2
+
+    def test_a_persistently_empty_cli_fails_explicitly(self) -> None:
+        """Exhausting the retries reports the emptiness rather than returning it."""
+        adapter = self._adapter()
+        empty = b'{"is_error":false,"result":"","stop_reason":"end_turn"}'
+        with (
+            patch.dict("sys.modules", {"claude_agent_sdk": None}),
+            patch("asyncio.sleep", new=AsyncMock()),
+            patch(
+                "asyncio.create_subprocess_exec",
+                new=AsyncMock(side_effect=lambda *_a, **_k: self._proc(empty)),
+            ),
+        ):
+            result = asyncio.run(
+                adapter.complete(
+                    [Message(role=MessageRole.USER, content="ping")],
+                    CompletionConfig(model="claude-haiku-4-5"),
+                )
+            )
+
+        assert result.is_err
+        assert "Empty response" in result.error.message
+        assert result.error.details["content_length"] == 0
+
+    def test_a_missing_result_key_is_treated_the_same_as_an_empty_one(self) -> None:
+        """No `result` key at all is the same absence, not a different one."""
+        adapter = self._adapter()
+        with (
+            patch.dict("sys.modules", {"claude_agent_sdk": None}),
+            patch("asyncio.sleep", new=AsyncMock()),
+            patch(
+                "asyncio.create_subprocess_exec",
+                new=AsyncMock(
+                    side_effect=lambda *_a, **_k: self._proc(
+                        b'{"is_error":false,"stop_reason":"end_turn"}'
+                    )
+                ),
+            ),
+        ):
+            result = asyncio.run(
+                adapter.complete(
+                    [Message(role=MessageRole.USER, content="ping")],
+                    CompletionConfig(model="claude-haiku-4-5"),
+                )
+            )
+
+        assert result.is_err
+        assert "Empty response" in result.error.message
+
     def test_a_model_id_is_normalized_the_same_way_on_both_transports(self) -> None:
         """`anthropic/...` is valid config the SDK strips; raw it fails the CLI."""
         payload = b'{"is_error":false,"result":"ok","stop_reason":"end_turn"}'
