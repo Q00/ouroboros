@@ -551,7 +551,10 @@ class OuroborosTUI(App[None]):
             # can clear a paused display. Scope is exactly that: it never sets
             # a status, only lifts `paused`. Progress is per-turn runtime
             # metadata and must not advertise global paused/terminal state.
-            if self._state.is_paused and _progress_acknowledges_running(data):
+            # Gate on the status, not just the flag: a terminal event clears
+            # `is_paused`, so keying off the status keeps late or out-of-order
+            # progress from resurrecting a run that already ended.
+            if self._state.status == "paused" and _progress_acknowledges_running(data):
                 self._state.status = "running"
                 self._state.is_paused = False
         elif event_type == "execution.phase.completed":

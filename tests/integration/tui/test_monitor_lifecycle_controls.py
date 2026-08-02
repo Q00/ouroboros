@@ -20,6 +20,7 @@ import pytest
 from typer.testing import CliRunner
 
 from ouroboros.cli.commands.tui import app as tui_app
+from ouroboros.events.base import BaseEvent
 from ouroboros.orchestrator.events import create_workflow_progress_event
 from ouroboros.orchestrator.session import SessionRepository
 from ouroboros.persistence.event_store import EventStore, sqlite_database_url
@@ -333,6 +334,61 @@ class TestAcknowledgedDurableControlPath:
 
         assert tui.state.status == "paused"
         assert tui.state.is_paused is True
+
+    @pytest.mark.parametrize(
+        "terminal_event",
+        [
+            "orchestrator.session.completed",
+            "orchestrator.session.failed",
+            "orchestrator.session.cancelled",
+        ],
+    )
+    async def test_late_running_progress_cannot_revive_a_terminal_run(
+        self, event_store: EventStore, terminal_event: str
+    ) -> None:
+        """paused -> terminal -> stale progress(running) must not walk it back."""
+        expected_status = terminal_event.rsplit(".", 1)[-1]
+
+        tui = OuroborosTUI()
+        tui.set_execution("exec_stale", "sess_stale")
+        tui.state.status = "paused"
+        tui.state.is_paused = True
+
+        tui._process_subscription_event(
+            BaseEvent(
+                type=terminal_event,
+                aggregate_type="session",
+                aggregate_id="sess_stale",
+                data={},
+            )
+        )
+        assert tui.state.status == expected_status
+        assert tui.state.is_paused is False
+
+        workflow_event = create_workflow_progress_event(
+            execution_id="exec_stale",
+            session_id="sess_stale",
+            acceptance_criteria=[],
+            completed_count=3,
+            total_count=3,
+            current_ac_index=3,
+            current_phase="Deliver",
+            activity="working",
+            activity_detail="",
+            elapsed_display="00:10",
+            estimated_remaining="00:00",
+            messages_count=4,
+            tool_calls_count=2,
+            estimated_tokens=100,
+            estimated_cost_usd=0.01,
+            last_update={"runtime_status": "running"},
+        )
+        await event_store.append(workflow_event)
+
+        tui._process_subscription_event(workflow_event)
+
+        assert tui.state.status == expected_status
+        assert tui.state.is_paused is False
 
     async def test_progress_does_not_override_a_running_display(
         self, event_store: EventStore

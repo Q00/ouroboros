@@ -335,11 +335,16 @@ pub fn populate_state_from_events(state: &mut AppState, events: &[EventRow]) {
                     state._start_ts = ts.to_string();
                 }
             }
+            // Terminal events clear `is_paused` as well as setting the status,
+            // matching the Python monitor. Leaving the flag set would let a
+            // late progress event lift a run that has already ended.
             "orchestrator.session.completed" => {
                 state.status = ExecutionStatus::Completed;
+                state.is_paused = false;
             }
             "orchestrator.session.failed" => {
                 state.status = ExecutionStatus::Failed;
+                state.is_paused = false;
             }
             "orchestrator.session.paused" => {
                 state.status = ExecutionStatus::Paused;
@@ -347,6 +352,7 @@ pub fn populate_state_from_events(state: &mut AppState, events: &[EventRow]) {
             }
             "orchestrator.session.cancelled" => {
                 state.status = ExecutionStatus::Cancelled;
+                state.is_paused = false;
             }
             "execution.phase.completed" => {
                 if let Some(phase_str) = ev.payload.get("phase").and_then(|v| v.as_str()) {
@@ -409,7 +415,9 @@ pub fn populate_state_from_events(state: &mut AppState, events: &[EventRow]) {
                 // reporting the runtime is executing again is the only signal
                 // that can lift a paused display. It never authors a status
                 // otherwise.
-                if state.is_paused && progress_acknowledges_running(&ev.payload) {
+                if state.status == ExecutionStatus::Paused
+                    && progress_acknowledges_running(&ev.payload)
+                {
                     state.is_paused = false;
                     state.status = ExecutionStatus::Running;
                 }
@@ -925,7 +933,9 @@ pub fn populate_state_from_events(state: &mut AppState, events: &[EventRow]) {
                     });
             }
             "orchestrator.progress.updated" => {
-                if state.is_paused && progress_acknowledges_running(&ev.payload) {
+                if state.status == ExecutionStatus::Paused
+                    && progress_acknowledges_running(&ev.payload)
+                {
                     state.is_paused = false;
                     state.status = ExecutionStatus::Running;
                 }
@@ -1182,6 +1192,33 @@ mod tests {
 
             assert!(state.is_paused, "{terminal} cleared the paused display");
             assert_eq!(state.status, ExecutionStatus::Paused, "{terminal}");
+        }
+    }
+
+    #[test]
+    fn late_running_progress_cannot_revive_a_terminal_run() {
+        // paused -> completed -> stale progress(running). The terminal event is
+        // authoritative; delayed progress must not walk it back.
+        for (terminal_event, expected) in [
+            ("orchestrator.session.completed", ExecutionStatus::Completed),
+            ("orchestrator.session.failed", ExecutionStatus::Failed),
+            ("orchestrator.session.cancelled", ExecutionStatus::Cancelled),
+        ] {
+            let mut state = paused_state();
+
+            populate_state_from_events(&mut state, &[event(terminal_event, json!({}))]);
+            assert!(!state.is_paused, "{terminal_event} left is_paused set");
+
+            populate_state_from_events(
+                &mut state,
+                &[event(
+                    "workflow.progress.updated",
+                    json!({"last_update": {"runtime_status": "running"}}),
+                )],
+            );
+
+            assert_eq!(state.status, expected, "{terminal_event} was walked back");
+            assert!(!state.is_paused);
         }
     }
 
