@@ -1322,3 +1322,86 @@ describe("bridge appends declare themselves", () => {
     expect(text).toContain("Dispatch failed")
   })
 })
+
+describe("a pre-dispatch failure still carries the fan-out identity", () => {
+  // The identity is what lets the parent declare the lanes `undispatched` when
+  // no child ever ran. It lives in `_meta`, which the host model does not read;
+  // the response shape is the channel it does. A failure that renders only the
+  // failure message therefore does not degrade re-entry, it removes it — and a
+  // required lane with no way to be declared pins the fan-out at `partial`.
+  function questionOutput() {
+    return {
+      content: [{ type: "text", text: "Session sess-1\n\nHow do you define completion?" }],
+      metadata: {
+        session_id: "sess-1",
+        question_advisory_preserve_content: true,
+        question_advisory_fanout_id: "fanout_probe",
+        question_advisory_result_correlation_key: "context.lane_id",
+        question_advisory_subagents: [
+          {
+            tool_name: "ouroboros_interview",
+            title: "Interview advisory: data_context",
+            agent: "general",
+            prompt: "Measure it.",
+          },
+        ],
+      },
+    }
+  }
+
+  async function hookWith(client: unknown) {
+    const plugin = await OuroborosBridge({ client, directory: "/tmp/ouroboros-test" } as never)
+    return (plugin as Record<string, (...args: unknown[]) => Promise<void>>)["tool.execute.after"]
+  }
+
+  const readyCli = {
+    session: {
+      _client: { patch: async () => ({}) },
+      create: async () => ({ data: { id: "child_1" } }),
+      prompt: async () => ({ data: { parts: [] } }),
+      abort: async () => ({}),
+      messages: async () => ({ data: [] }),
+    },
+  }
+
+  test("a rejection before dispatch keeps the id and correlation key visible", async () => {
+    _resetDedupe()
+    const hook = await hookWith(readyCli)
+    const output = questionOutput()
+
+    // No sessionID — rejected before any child is created.
+    await hook({ tool: "ouroboros_interview", callID: "call_fail" }, output)
+
+    const text = readText(output)
+    expect(text).toContain("Dispatch failed")
+    expect(text).toContain("fanout_probe")
+    expect(text).toContain("context.lane_id")
+  })
+
+  test("the same holds when the client is not ready", async () => {
+    _resetDedupe()
+    const hook = await hookWith({ session: {} })
+    const output = questionOutput()
+
+    await hook({ tool: "ouroboros_interview", sessionID: "parent_1", callID: "call_fail2" }, output)
+
+    const text = readText(output)
+    expect(text).toContain("client not ready")
+    expect(text).toContain("fanout_probe")
+    expect(text).toContain("context.lane_id")
+  })
+
+  test("and when the message id cannot be resolved", async () => {
+    _resetDedupe()
+    const hook = await hookWith(readyCli)
+    const output = questionOutput()
+
+    // messages() returns no matching callID, so resolveMid gives up.
+    await hook({ tool: "ouroboros_interview", sessionID: "parent_1", callID: "call_missing" }, output)
+
+    const text = readText(output)
+    expect(text).toContain("Dispatch failed")
+    expect(text).toContain("fanout_probe")
+    expect(text).toContain("context.lane_id")
+  })
+})

@@ -397,9 +397,14 @@ export function buildEnvelope(
   }
 }
 
-function fail(r: Output, label: string, err: unknown, preservePrefix?: string): void {
+// A failure that drops the fan-out identity is worse than a failure: the parent
+// cannot then declare the lanes `undispatched`, and a required lane pins the
+// fan-out at `partial` for good. The identity lives in `_meta`, which the host
+// model does not read — the response shape is the channel it does — so every
+// pre-dispatch rejection carries it too.
+function fail(r: Output, label: string, err: unknown, preservePrefix?: string, shape?: string): void {
   const msg = `[Ouroboros] Dispatch failed for '${label}': ${errMsg(err)}. See ${LOG}.`
-  stampBridge(r, preservePrefix, msg)
+  stampBridge(r, preservePrefix, msg + (shape ?? ""))
 }
 
 const seen = new Map<string, number>()
@@ -671,11 +676,18 @@ export const OuroborosBridge: Plugin = async (ctx) => {
         const pid = typeof input.sessionID === "string" ? input.sessionID : ""
         const callID = typeof input.callID === "string" ? input.callID : ""
         const failurePrefix = preserveContent ? originalText : undefined
-        if (!pid) { log(`REJECT reason=empty_sessionID tool=${subs[0].tool}`); fail(out, subs[0].tool, new Error("empty sessionID"), failurePrefix); return }
-        if (!callID) { log(`REJECT reason=empty_callID tool=${subs[0].tool}`); fail(out, subs[0].tool, new Error("empty callID"), failurePrefix); return }
+        // Preserve response_shape in text so the LLM can read the contract
+        // fields build_subagent_result() provides — session_id, status, and the
+        // fan-out identity. Computed before the rejections below so a failure
+        // carries it too, and shared by every path that stamps.
+        const shapeSuffix = Object.keys(responseShape).length > 0
+          ? "\n\n```json\n" + JSON.stringify(responseShape, null, 2) + "\n```"
+          : ""
+        if (!pid) { log(`REJECT reason=empty_sessionID tool=${subs[0].tool}`); fail(out, subs[0].tool, new Error("empty sessionID"), failurePrefix, shapeSuffix); return }
+        if (!callID) { log(`REJECT reason=empty_callID tool=${subs[0].tool}`); fail(out, subs[0].tool, new Error("empty callID"), failurePrefix, shapeSuffix); return }
         if (isNestedRalphDispatch(pid, subs)) {
           log(`REJECT reason=nested_ralph pid=${pid} tool=${subs[0].tool}`)
-          fail(out, "ouroboros_ralph", new Error("nested ouroboros_ralph delegation is not allowed"), failurePrefix)
+          fail(out, "ouroboros_ralph", new Error("nested ouroboros_ralph delegation is not allowed"), failurePrefix, shapeSuffix)
           return
         }
 
@@ -683,16 +695,13 @@ export const OuroborosBridge: Plugin = async (ctx) => {
         const b = base(ctx.client)
         if (!cli?.session?.create || !cli.session.prompt || !cli.session.abort || !cli.session.messages || !b) {
           log(`REJECT reason=client_not_ready tool=${subs[0].tool}`)
-          fail(out, subs[0].tool, new Error("client not ready"), failurePrefix)
+          fail(out, subs[0].tool, new Error("client not ready"), failurePrefix, shapeSuffix)
           return
         }
 
         if (dupe(pid, callID)) {
           log(`DEDUPE pid=${pid} callID=${callID} tool=${subs[0].tool} count=${subs.length}`)
-          const dedupeShapeSuffix = Object.keys(responseShape).length > 0
-            ? "\n\n```json\n" + JSON.stringify(responseShape, null, 2) + "\n```"
-            : ""
-          const dedupeBanner = notify([], [], subs) + dedupeShapeSuffix
+          const dedupeBanner = notify([], [], subs) + shapeSuffix
           stampBridge(out, preserveContent ? originalText : undefined, dedupeBanner)
           const meta = (out.metadata ?? {}) as Record<string, unknown>
           meta.ouroboros_dispatch = buildEnvelope([], [], subs)
@@ -704,7 +713,7 @@ export const OuroborosBridge: Plugin = async (ctx) => {
         const mid = await resolveMid(cli, pid, callID)
         if (!mid) {
           log(`REJECT reason=no_message_found pid=${pid} callID=${callID}`)
-          fail(out, subs[0].tool, new Error("could not resolve messageID"), failurePrefix)
+          fail(out, subs[0].tool, new Error("could not resolve messageID"), failurePrefix, shapeSuffix)
           return
         }
 
@@ -727,12 +736,6 @@ export const OuroborosBridge: Plugin = async (ctx) => {
 
         log(`DISPATCH_DONE pid=${pid} ok=${ok.length} failed=${failed.length}`)
         const banner = notify(ok, failed.map((f) => f.sub), [])
-        // Preserve response_shape in text so the LLM can read contract fields
-        // (session_id, job_id, status) that build_subagent_result() provides.
-        // Without this, stamp() replaces the JSON and the LLM loses these values.
-        const shapeSuffix = Object.keys(responseShape).length > 0
-          ? "\n\n```json\n" + JSON.stringify(responseShape, null, 2) + "\n```"
-          : ""
         stampBridge(out, preserveContent ? originalText : undefined, banner + shapeSuffix)
 
         const envelope = buildEnvelope(ok, failed, [])
