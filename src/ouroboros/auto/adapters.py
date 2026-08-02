@@ -21,7 +21,7 @@ from ouroboros.core.requirement_candidate import RequirementDistillation
 from ouroboros.core.seed import Seed, ac_texts
 from ouroboros.mcp.errors import MCPServerError
 from ouroboros.mcp.job_manager import JobManager, JobStatus
-from ouroboros.mcp.tools.advisory_dispatch import QUESTION_ADVISORY_DISPATCH_MARKER
+from ouroboros.mcp.tools.advisory_dispatch import strip_question_advisory_dispatch
 from ouroboros.mcp.tools.authoring_handlers import (
     REQUIRED_CLIENT_GATES,
     GenerateSeedHandler,
@@ -1235,7 +1235,7 @@ def _extract_interview_question(text: str, *, session_id: str) -> str:
     response, so the directive is cut at its marker rather than answered as
     part of the question.
     """
-    text = text.split(QUESTION_ADVISORY_DISPATCH_MARKER, 1)[0]
+    text = strip_question_advisory_dispatch(text)
     stripped = text.strip()
     if not stripped:
         return ""

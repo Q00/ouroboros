@@ -152,8 +152,30 @@ def append_lateral_review_notice(
     )
 
 
+def strip_question_advisory_dispatch(question: Any) -> Any:
+    """Return *question* with any appended host directive removed.
+
+    The inverse of :func:`append_question_advisory_dispatch`, for the round
+    trip. A host is asked to echo back the exact question it asked, and the
+    question it was shown carries the directive below the marker; a host that
+    copies the response text wholesale would put server-authored instructions
+    into the durable transcript, and from there into requirement extraction and
+    the Seed.
+
+    Nothing distinguishes a careless host from a careful one at the point of
+    receipt, so the cut is made unconditionally. It is safe to apply to text
+    that never carried a directive: the marker is a fixed server-authored
+    string, so its absence leaves the value untouched, and a non-string passes
+    through for the caller's own validation to reject.
+    """
+    if not isinstance(question, str) or QUESTION_ADVISORY_DISPATCH_MARKER not in question:
+        return question
+    return question.split(QUESTION_ADVISORY_DISPATCH_MARKER, 1)[0].strip()
+
+
 __all__ = [
     "QUESTION_ADVISORY_DISPATCH_MARKER",
     "append_lateral_review_notice",
     "append_question_advisory_dispatch",
+    "strip_question_advisory_dispatch",
 ]

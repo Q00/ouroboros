@@ -650,3 +650,43 @@ def test_dispatch_marker_separates_question_from_directive() -> None:
     before, _, after = text.partition(QUESTION_ADVISORY_DISPATCH_MARKER)
     assert before.strip() == "Session sess-render\n\nQ?"
     assert "Host action" in after
+
+
+def test_the_directive_cannot_ride_last_question_into_the_transcript() -> None:
+    """A host echoes the question back; the question it saw carries a directive.
+
+    `last_question` becomes the recorded round's question, which is read by
+    requirement extraction and reaches the Seed. A host that copies the response
+    text wholesale would write server-authored instructions into durable state.
+    The marker is server-authored and everything after it is addressed to the
+    host, so the cut is made on receipt rather than asked for in prose.
+    """
+    from ouroboros.mcp.tools.advisory_dispatch import strip_question_advisory_dispatch
+
+    meta = _advisory_meta(SubagentDispatchMode.HOST_DRIVEN, runtime_backend="claude")
+    question = "What are the acceptance criteria?"
+    echoed = append_question_advisory_dispatch(question, meta)
+
+    assert strip_question_advisory_dispatch(echoed) == question
+    # Idempotent on text that never carried one, and inert on a non-string so
+    # the caller's own validation still sees what it was given.
+    assert strip_question_advisory_dispatch(question) == question
+    assert strip_question_advisory_dispatch(None) is None
+
+
+def test_every_question_bearing_response_path_appends_the_directive() -> None:
+    """Three paths build a question response; a fourth would be a silent gap.
+
+    A path that skipped the append would look identical to a turn with no
+    advisory — the failure mode this whole fix exists to remove.
+    """
+    from pathlib import Path
+    import re
+
+    source = Path("src/ouroboros/mcp/tools/authoring_handlers.py").read_text(encoding="utf-8")
+
+    built = set(re.findall(r"(\w+_response_text) = f?\"(?:Session|Interview started)", source))
+    appended = set(re.findall(r"append_question_advisory_dispatch\(\s*(\w+_response_text)", source))
+
+    assert built, "no question-bearing response paths found — the pattern moved"
+    assert built <= appended, built - appended

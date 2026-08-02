@@ -61,6 +61,7 @@ from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.tools.advisory_dispatch import (
     append_lateral_review_notice,
     append_question_advisory_dispatch,
+    strip_question_advisory_dispatch,
 )
 from ouroboros.mcp.tools.subagent import (
     DELEGATED_TO_SUBAGENT,
@@ -2204,7 +2205,11 @@ class InterviewHandler:
             if isinstance(suggested_interview_id_arg, str) and suggested_interview_id_arg
             else None
         )
-        last_question = arguments.get("last_question")
+        # This becomes the recorded round's question, so a host that echoed the
+        # response text wholesale would write the fan-out directive into durable
+        # state and from there into the Seed. SKILL.md can state the duty; only
+        # this side can hold it.
+        last_question = strip_question_advisory_dispatch(arguments.get("last_question"))
 
         # --- Argument validation (before any dispatch) ---
         # Determine action from arguments
