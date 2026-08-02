@@ -528,7 +528,7 @@ def _interview_data_read_request_schema() -> dict[str, Any]:
             "tool_name": {
                 "type": "string",
                 "pattern": _DATA_IDENTIFIER_PATTERN,
-                "description": "Host tool the parent session would run this read through.",
+                "description": "Host tool you ran this read through.",
             },
             "metric": {
                 "type": "string",
@@ -726,7 +726,7 @@ def _interview_data_evidence_answer_contract() -> dict[str, Any]:
     it by name -- and an answer could say ``data_needed: true`` with a concrete
     read *and* ``no_evidence_reason``, which is "this question is measurable"
     and "this question is not a measurement" in one payload. Nothing downstream
-    resolves that; the host renders a proposal the same answer disowned. The
+    resolves that; the host renders a measurement the same answer disowned. The
     fix is not to forbid that pair but to stop having a place where a pair from
     two states can meet, so the next field added to one state cannot leak into
     the other by nobody remembering to exclude it.
@@ -744,7 +744,8 @@ def _interview_data_evidence_answer_contract() -> dict[str, Any]:
     envelope arrive in the same call and only one of them was written by the
     producer. The sibling ``code_investigation`` contract carries a session
     because its output becomes a ``[from-code]`` interview answer; this lane's
-    output is a proposal shown beside the question, so ``question_identity`` is
+    output is a measurement shown beside the question, so ``question_identity``
+    is
     the whole of what has to match (Q00/ouroboros#1754).
     """
     identity_property: dict[str, Any] = {
@@ -774,9 +775,10 @@ def _interview_data_evidence_answer_contract() -> dict[str, Any]:
                 "type": "string",
                 "enum": list(DATA_NO_EVIDENCE_REASONS),
                 "description": (
-                    "Why no read is proposed. Chosen from a closed set: the "
-                    "reasons this lane can have are known in advance, so this "
-                    "is a choice rather than a sentence."
+                    "Why no measurement is carried. Chosen from a closed set: "
+                    "the reasons this lane can have are known in advance, so "
+                    "this is a choice rather than a sentence. Each one is about "
+                    "you, never about the host."
                 ),
             },
         },
@@ -1165,8 +1167,8 @@ def _interview_question_advisory_fanout_metadata() -> dict[str, Any]:
         {
             "lane_id": "data_context",
             "purpose": (
-                "Propose the measurements that would inform this question, so "
-                "the user judges against numbers instead of memory."
+                "Take the measurements that inform this question, so the "
+                "user judges against numbers instead of memory."
             ),
             "capability": "read_data",
             # Required because its no-op answer always exists: a question that is
@@ -1230,7 +1232,7 @@ def _interview_question_advisory_fanout_metadata() -> dict[str, Any]:
         "runtime_instruction": (
             "Show the MCP interview question to the user first, then fan out "
             "advisory lanes for code context, current web facts when needed, "
-            "proposed measurements, ambiguity critique, simplification, and "
+            "measurements taken, ambiguity critique, simplification, and "
             "architecture implications. "
             "Read child task results as they complete and synthesize them into "
             "two or three answer options or one recommended draft. Do not forward advisory text to "
