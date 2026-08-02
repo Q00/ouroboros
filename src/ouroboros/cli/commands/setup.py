@@ -3975,12 +3975,12 @@ def _setup_claude(claude_path: str) -> None:
         yaml.dump(config_dict, f, default_flow_style=False, sort_keys=False)
 
     # Do not register the isolated MCP 2 server with this Claude SDK profile.
-    # The persisted runtime and LLM backend below both require
-    # ``claude-agent-sdk`` (and therefore MCP 1.x), while the protocol server
-    # runs in an environment that intentionally excludes that SDK. Registering
-    # it here would create a server that boots but fails lazily on authoring and
-    # execution tools. A future CLI-only Claude LLM adapter can make this path
-    # available without weakening the dependency boundary.
+    # The protocol server excludes ``claude-agent-sdk`` (it pins MCP 1.x), and
+    # the persisted *runtime* backend below still requires it — a registration
+    # here would boot and then fail lazily on execution tools. The *LLM* half of
+    # that dependency is gone as of Q00/ouroboros#1839 (``ClaudeCodeAdapter``
+    # falls back to the ``claude`` CLI), so lifting this skip now needs the same
+    # fallback on ``ClaudeAgentAdapter``, not a change here.
     print_warning(
         "Skipped Ouroboros MCP registration for the standalone Claude SDK profile: "
         "its MCP 1.x runtime cannot share the isolated MCP 2 server process. "

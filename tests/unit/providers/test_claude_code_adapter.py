@@ -2411,6 +2411,22 @@ class TestCLIFallbackWhenSDKAbsent:
         proc.returncode = returncode
         proc.communicate = AsyncMock(return_value=(stdout, stderr))
         proc.kill = MagicMock()
+        proc.wait = AsyncMock(return_value=returncode)
+        return proc
+
+    @staticmethod
+    def _hanging_proc() -> MagicMock:
+        """A child that never answers — the case a bare subprocess cannot escape."""
+
+        async def _never(*_a: object, **_k: object) -> tuple[bytes, bytes]:
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")  # pragma: no cover
+
+        proc = MagicMock()
+        proc.returncode = None
+        proc.communicate = _never
+        proc.kill = MagicMock()
+        proc.wait = AsyncMock(return_value=-9)
         return proc
 
     def test_a_missing_sdk_falls_back_to_the_cli(self) -> None:
@@ -2542,3 +2558,174 @@ class TestCLIFallbackWhenSDKAbsent:
         assert result.is_err
         assert "Neither" in result.error.message
         assert "claude CLI" in result.error.message
+
+    def test_a_json_retry_stays_on_the_transport_that_answered(self) -> None:
+        """Prose-then-JSON must not route the retry back into the absent SDK.
+
+        Question generation and scoring both request a schema, so this is on the
+        reported path rather than beside it: if the first body is prose, the
+        retry has to reach the CLI again. Reaching for the SDK here turns a
+        recoverable response into `ImportError` in the one process that has no
+        SDK to import.
+        """
+        adapter = self._adapter()
+        prose = b'{"is_error":false,"result":"Sure! Here you go:","stop_reason":"end_turn"}'
+        good = b'{"is_error":false,"result":"{\\"q\\": 1}","stop_reason":"end_turn"}'
+        with (
+            patch.dict("sys.modules", {"claude_agent_sdk": None}),
+            patch(
+                "asyncio.create_subprocess_exec",
+                new=AsyncMock(side_effect=[self._proc(prose), self._proc(good)]),
+            ) as spawn,
+        ):
+            result = asyncio.run(
+                adapter.complete(
+                    [Message(role=MessageRole.USER, content="ask something")],
+                    CompletionConfig(
+                        model="claude-haiku-4-5",
+                        response_format={"type": "json_object"},
+                    ),
+                )
+            )
+
+        assert result.is_ok, result
+        assert result.value.content == '{"q": 1}'
+        # Two CLI spawns: the prose answer and the retry. Had the retry gone to
+        # the SDK there would be one spawn and an import failure.
+        assert spawn.await_count == 2
+
+    def test_the_no_tools_envelope_reaches_the_cli(self) -> None:
+        """`allowed_tools=[]` and `strict_mcp_config` are carried, not dropped.
+
+        Interview/PM/QA construct this adapter that way precisely so the spawned
+        CLI cannot execute tools or rediscover ouroboros' own MCP server and
+        recurse. A fallback that ignored them would be more dangerous than the
+        failure it replaces.
+        """
+        adapter = self._adapter(allowed_tools=[], strict_mcp_config=True)
+        payload = b'{"is_error":false,"result":"ok","stop_reason":"end_turn"}'
+        with (
+            patch.dict("sys.modules", {"claude_agent_sdk": None}),
+            patch(
+                "asyncio.create_subprocess_exec",
+                new=AsyncMock(return_value=self._proc(payload)),
+            ) as spawn,
+        ):
+            assert asyncio.run(
+                adapter.complete(
+                    [Message(role=MessageRole.USER, content="ping")],
+                    CompletionConfig(model="claude-haiku-4-5"),
+                )
+            ).is_ok
+
+        argv = list(spawn.await_args.args)
+        assert "--allowedTools" in argv
+        # The CLI honors an empty allow-list literally, unlike the SDK.
+        assert argv[argv.index("--allowedTools") + 1] == ""
+        assert "--strict-mcp-config" in argv
+
+    def test_a_permissive_caller_is_not_sealed_by_the_fallback(self) -> None:
+        """The other half of the pin: no envelope means no envelope flags.
+
+        `allowed_tools=None` is the permissive default, and forcing an empty
+        allow-list onto it would silently disable tools for callers that never
+        asked for that.
+        """
+        adapter = self._adapter(allowed_tools=None, strict_mcp_config=False)
+        payload = b'{"is_error":false,"result":"ok","stop_reason":"end_turn"}'
+        with (
+            patch.dict("sys.modules", {"claude_agent_sdk": None}),
+            patch(
+                "asyncio.create_subprocess_exec",
+                new=AsyncMock(return_value=self._proc(payload)),
+            ) as spawn,
+        ):
+            assert asyncio.run(
+                adapter.complete(
+                    [Message(role=MessageRole.USER, content="ping")],
+                    CompletionConfig(model="claude-haiku-4-5"),
+                )
+            ).is_ok
+
+        argv = list(spawn.await_args.args)
+        assert "--allowedTools" not in argv
+        assert "--strict-mcp-config" not in argv
+
+    def test_a_model_id_is_normalized_the_same_way_on_both_transports(self) -> None:
+        """`anthropic/...` is valid config the SDK strips; raw it fails the CLI."""
+        payload = b'{"is_error":false,"result":"ok","stop_reason":"end_turn"}'
+        cases: list[tuple[str, str | None]] = [
+            ("anthropic/claude-sonnet-4-5", "claude-sonnet-4-5"),
+            ("openrouter/anthropic/claude-opus-4-1", "claude-opus-4-1"),
+            ("claude-haiku-4-5", "claude-haiku-4-5"),
+            # No usable preference — omit the flag and take the CLI default.
+            ("default", None),
+            ("openrouter/openai/gpt-4o", None),
+        ]
+        for configured, expected in cases:
+            adapter = self._adapter()
+            with (
+                patch.dict("sys.modules", {"claude_agent_sdk": None}),
+                patch(
+                    "asyncio.create_subprocess_exec",
+                    new=AsyncMock(return_value=self._proc(payload)),
+                ) as spawn,
+            ):
+                assert asyncio.run(
+                    adapter.complete(
+                        [Message(role=MessageRole.USER, content="ping")],
+                        CompletionConfig(model=configured),
+                    )
+                ).is_ok
+            argv = list(spawn.await_args.args)
+            if expected is None:
+                assert "--model" not in argv, configured
+            else:
+                assert argv[argv.index("--model") + 1] == expected, configured
+
+    def test_a_nonresponsive_cli_is_bounded_and_reaped(self) -> None:
+        """A child nothing else owns must not be able to hang the caller forever."""
+        adapter = self._adapter(timeout=0.05)
+        proc = self._hanging_proc()
+        with (
+            patch.dict("sys.modules", {"claude_agent_sdk": None}),
+            patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)),
+        ):
+            result = asyncio.run(
+                adapter.complete(
+                    [Message(role=MessageRole.USER, content="ping")],
+                    CompletionConfig(model="claude-haiku-4-5"),
+                )
+            )
+
+        assert result.is_err
+        assert "timed out" in result.error.message
+        proc.kill.assert_called_once()
+        proc.wait.assert_awaited()
+
+    def test_cancellation_does_not_leave_the_child_running(self) -> None:
+        """Cancelling the caller is the only chance to reap this subprocess."""
+        adapter = self._adapter()
+        proc = self._hanging_proc()
+
+        async def _run() -> None:
+            task = asyncio.create_task(
+                adapter.complete(
+                    [Message(role=MessageRole.USER, content="ping")],
+                    CompletionConfig(model="claude-haiku-4-5"),
+                )
+            )
+            # Let the task reach the await on the child before cancelling.
+            await asyncio.sleep(0.05)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        with (
+            patch.dict("sys.modules", {"claude_agent_sdk": None}),
+            patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)),
+        ):
+            asyncio.run(_run())
+
+        proc.kill.assert_called_once()
+        proc.wait.assert_awaited()

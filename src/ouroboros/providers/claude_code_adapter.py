@@ -27,7 +27,7 @@ Custom CLI Path:
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from copy import deepcopy
 from dataclasses import replace
 from functools import lru_cache
@@ -84,6 +84,39 @@ _RETRYABLE_ERROR_PATTERNS = (
     *BASE_TRANSIENT_PATTERNS,
     *_CLAUDE_CLI_BOOTSTRAP_PATTERNS,
 )
+# One completion attempt, as a callable. ``complete()`` binds this once so that
+# retries downstream reach the transport that is actually available.
+_Transport = Callable[
+    [str, CompletionConfig, "str | None"],
+    Awaitable["Result[CompletionResponse, ProviderError]"],
+]
+# ``timeout=None`` means "no adapter-level deadline" on the SDK path, where the
+# SDK still owns the child process and a cancelled task tears it down. A bare
+# subprocess has no such owner, so the CLI path substitutes a finite ceiling
+# rather than waiting forever on a process nothing will reap.
+_CLI_DEFAULT_TIMEOUT_SECONDS = 600.0
+# How long a killed child gets to actually die before we stop waiting on it.
+# Bounded so cleanup can never become the new hang.
+_CLI_REAP_TIMEOUT_SECONDS = 5.0
+
+
+async def _terminate_process(proc: asyncio.subprocess.Process | None) -> None:
+    """Kill a subprocess and wait for it, without ever raising.
+
+    ``Process.kill()`` only delivers the signal; without the ``wait()`` the child
+    stays a zombie and its pipes stay open. Called from timeout and cancellation
+    paths, so it must not raise a second error over the one being reported.
+    """
+    if proc is None or proc.returncode is not None:
+        return
+    try:
+        proc.kill()
+    except (ProcessLookupError, OSError):  # already gone
+        return
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=_CLI_REAP_TIMEOUT_SECONDS)
+    except (TimeoutError, asyncio.CancelledError, OSError):
+        log.warning("claude_code_adapter.cli_process_not_reaped", pid=proc.pid)
 
 
 @lru_cache(maxsize=1)
@@ -455,25 +488,54 @@ class ClaudeCodeAdapter:
             claude_code_entrypoint=os.environ.get("CLAUDE_CODE_ENTRYPOINT"),
         )
 
-        if sdk_available:
-            result = await self._complete_with_transient_retry(prompt, config, system_prompt)
-        else:
-            result = await self._complete_via_cli(prompt, config, system_prompt)
+        # Bind the transport once. Everything downstream that re-issues the
+        # request -- notably the JSON-enforcement retries -- has to reach the
+        # same one: routing a retry back through the SDK in a process that has
+        # no SDK turns a recoverable prose response into an ImportError.
+        transport = self._complete_with_transient_retry if sdk_available else self._complete_via_cli
+        result = await transport(prompt, config, system_prompt)
 
         # JSON enforcement layer: if response_format requires JSON,
         # normalize or retry until we get valid JSON.
         if requires_json and result.is_ok:
-            result = await self._enforce_json(result, prompt, config, system_prompt)
+            result = await self._enforce_json(result, prompt, config, system_prompt, transport)
 
         return result
 
-    #: Values the `claude` CLI accepts for --permission-mode. The adapter's own
-    #: mode vocabulary is wider (it includes "default", which the CLI expresses
-    #: by omitting the flag), so a mode outside this set is dropped rather than
-    #: forwarded into an argument the CLI would reject.
+    #: Values the `claude` CLI accepts for --permission-mode (its documented
+    #: choices list, verified on 2.1.220). The adapter's own mode vocabulary is
+    #: wider -- it includes "default", which the CLI expresses by omitting the
+    #: flag -- so a mode outside this set is dropped rather than forwarded into
+    #: an argument the CLI would reject.
     _CLI_PERMISSION_MODES = frozenset(
         {"acceptEdits", "auto", "bypassPermissions", "manual", "dontAsk", "plan"}
     )
+
+    @staticmethod
+    def _normalize_model(model: str | None) -> str | None:
+        """Map a configured model id onto one Claude accepts, or ``None``.
+
+        Both transports resolve the same Anthropic model, so they have to agree
+        on this: an operator override like ``anthropic/claude-sonnet-4-5`` is
+        valid config that the SDK strips to a bare id, and forwarding it raw to
+        ``claude --model`` fails the request outright.
+
+        Returns ``None`` when the caller expressed no usable preference, which
+        both transports render as "omit the model and take the default".
+        """
+        # "default" is not a valid model id — treat it as None
+        if not model or model == "default":
+            return None
+        # Strip provider prefixes — both transports reach Anthropic directly
+        if model.startswith("openrouter/anthropic/"):
+            return model[len("openrouter/anthropic/") :]
+        if model.startswith("anthropic/"):
+            return model[len("anthropic/") :]
+        if model.startswith("openrouter/"):
+            # Non-Anthropic model (e.g., openrouter/openai/gpt-4o) — Claude
+            # only supports Claude, so skip it and use the default
+            return None
+        return model
 
     async def _complete_via_cli(
         self,
@@ -499,6 +561,14 @@ class ClaudeCodeAdapter:
         multi-turn tool use, and no per-turn events. Question generation and the
         other single-response calls do not use those, which is why this is a
         fallback rather than a replacement.
+
+        The isolation the caller asked for is carried through natively. The
+        interview/PM/QA callers build this adapter with ``allowed_tools=[]`` and
+        ``strict_mcp_config=True`` specifically so the spawned CLI cannot run
+        tools or rediscover ouroboros' own MCP server and recurse; a transport
+        that dropped those would be more dangerous than the failure it replaces.
+        ``max_turns`` has no CLI flag, but it is moot under an empty tool
+        catalog -- with nothing to call, print mode returns on turn one.
         """
         import asyncio
         import json as _json
@@ -508,13 +578,24 @@ class ClaudeCodeAdapter:
             return Result.err(ProviderError(message="claude CLI path is unavailable"))
 
         argv = [str(cli_path), "-p", "--output-format", "json"]
-        if config.model:
-            argv += ["--model", config.model]
+        model = self._normalize_model(config.model)
+        if model:
+            argv += ["--model", model]
         if system_prompt:
             argv += ["--append-system-prompt", system_prompt]
         if self._permission_mode in self._CLI_PERMISSION_MODES:
             argv += ["--permission-mode", self._permission_mode]
+        if self._allowed_tools is not None:
+            # Unlike the SDK -- which drops an empty list before it reaches the
+            # CLI, hence the ``extra_args`` workaround in
+            # ``_execute_single_request`` -- the CLI honors ``--allowedTools ""``
+            # literally, so the empty envelope seals itself with no enumerate.
+            argv += ["--allowedTools", " ".join(self._allowed_tools)]
+        if self._strict_mcp_config:
+            argv.append("--strict-mcp-config")
 
+        timeout = self._timeout or _CLI_DEFAULT_TIMEOUT_SECONDS
+        proc: asyncio.subprocess.Process | None = None
         try:
             proc = await asyncio.create_subprocess_exec(
                 *argv,
@@ -524,16 +605,22 @@ class ClaudeCodeAdapter:
                 cwd=self._cwd or None,
             )
             stdout, stderr = await asyncio.wait_for(
-                proc.communicate(prompt.encode("utf-8")), timeout=self._timeout
+                proc.communicate(prompt.encode("utf-8")), timeout=timeout
             )
         except TimeoutError:
-            proc.kill()
+            await _terminate_process(proc)
             return Result.err(
                 ProviderError(
-                    message=f"claude CLI timed out after {self._timeout}s",
-                    details={"timeout_seconds": self._timeout},
+                    message=f"claude CLI timed out after {timeout}s",
+                    details={"timeout_seconds": timeout},
                 )
             )
+        except asyncio.CancelledError:
+            # The caller going away must not leave the child running: nothing
+            # else holds a handle to it, so this is the only place it can be
+            # reaped. Reap, then let the cancellation continue to propagate.
+            await _terminate_process(proc)
+            raise
         except OSError as exc:
             return Result.err(
                 ProviderError(
@@ -619,13 +706,19 @@ class ClaudeCodeAdapter:
         prompt: str,
         config: CompletionConfig,
         system_prompt: str | None,
+        transport: _Transport | None = None,
     ) -> Result[CompletionResponse, ProviderError]:
         """Normalize JSON content or retry until valid JSON is obtained.
 
         If the response contains valid JSON (even wrapped in prose/fences),
         extract and return just the JSON. If no valid JSON, retry up to
         _MAX_JSON_RETRIES times. If all retries fail, return an error.
+
+        ``transport`` is the callable that produced ``result``; retries must go
+        back through it rather than assuming the SDK, which may not be
+        importable in this process at all (Q00/ouroboros#1839).
         """
+        retry = transport or self._complete_with_transient_retry
         # Try to normalize the initial result
         normalized = self._normalize_json_content(result)
         if normalized is not None:
@@ -643,7 +736,7 @@ class ClaudeCodeAdapter:
                 attempt=json_attempt,
                 max_json_retries=_MAX_JSON_RETRIES,
             )
-            result = await self._complete_with_transient_retry(prompt, config, system_prompt)
+            result = await retry(prompt, config, system_prompt)
             if result.is_err:
                 return result
             normalized = self._normalize_json_content(result)
@@ -1066,20 +1159,9 @@ class ClaudeCodeAdapter:
             )
 
         # Pass model from CompletionConfig if specified
-        # "default" is not a valid SDK model — treat it as None (use SDK default)
-        if config.model and config.model != "default":
-            model = config.model
-            # Strip provider prefixes — the Agent SDK uses Anthropic's API directly
-            if model.startswith("openrouter/anthropic/"):
-                model = model[len("openrouter/anthropic/") :]
-            elif model.startswith("anthropic/"):
-                model = model[len("anthropic/") :]
-            elif model.startswith("openrouter/"):
-                # Non-Anthropic model (e.g., openrouter/openai/gpt-4o) —
-                # Agent SDK only supports Claude, so skip and use SDK default
-                model = None
-            if model:
-                options_kwargs["model"] = model
+        model = self._normalize_model(config.model)
+        if model:
+            options_kwargs["model"] = model
 
         # Pass system prompt as authoritative instruction (matches adapter.py:281-282 pattern)
         if system_prompt:
