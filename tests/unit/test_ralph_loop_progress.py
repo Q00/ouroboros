@@ -677,9 +677,9 @@ async def test_exhaustion_fails_when_qa_ran_but_returned_no_verdict() -> None:
     """
     evolve = _ScriptedEvolveHandler(
         metas=[
-            {"action": "continue", "executed": True, "qa": _qa_meta(0.1, "fail")},
+            {"action": "continue", "qa_attempted": True, "qa": _qa_meta(0.1, "fail")},
             # QA ran again but its completion could not be parsed → no `qa` key.
-            {"action": "continue", "executed": True},
+            {"action": "continue", "qa_attempted": True},
         ]
     )
     runner = RalphLoopRunner(evolve)
@@ -694,7 +694,7 @@ async def test_exhaustion_fails_when_qa_ran_but_returned_no_verdict() -> None:
 @pytest.mark.asyncio
 async def test_converged_fails_when_qa_ran_but_returned_no_verdict() -> None:
     """The converged exit must not mint a success out of a missing QA verdict."""
-    evolve = _ScriptedEvolveHandler(metas=[{"action": "converged", "executed": True}])
+    evolve = _ScriptedEvolveHandler(metas=[{"action": "converged", "qa_attempted": True}])
     runner = RalphLoopRunner(evolve)
 
     result = await runner.run(RalphLoopConfig(lineage_id="lin_converged_no_qa", max_generations=3))

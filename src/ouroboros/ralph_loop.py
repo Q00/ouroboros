@@ -395,15 +395,19 @@ def _qa_result_contradicts_pass(qa: dict[str, Any]) -> bool:
 def _qa_was_attempted(meta: dict[str, Any], skip_qa: bool) -> bool:
     """Return True when the producer ran post-execution QA for this generation.
 
-    Mirrors the condition in ``evolution_handlers`` that decides whether to run
-    QA at all, using the fields that same producer publishes. Payloads that
-    predate those fields answer False and keep their legacy terminal behaviour.
+    New producers publish the decision explicitly, keeping this consumer
+    independent of the producer's evolving action vocabulary. The derived
+    branch is compatibility-only for payloads written before ``qa_attempted``
+    existed.
     """
-    return (
-        not skip_qa
-        and meta.get("executed") is True
-        and meta.get("action") in _TERMINAL_SUCCESS_ACTIONS | {"continue"}
-    )
+    if skip_qa:
+        return False
+    attempted = meta.get("qa_attempted")
+    if isinstance(attempted, bool):
+        return attempted
+    return meta.get("executed") is True and meta.get("action") in _TERMINAL_SUCCESS_ACTIONS | {
+        "continue"
+    }
 
 
 def _qa_authoritative_failure(meta: dict[str, Any], skip_qa: bool = False) -> bool:

@@ -1396,6 +1396,52 @@ class TestEvolveStepHandler:
         assert result.is_ok
         assert "Generation 1" in result.value.text_content
         assert result.value.meta["action"] == "continue"
+        assert result.value.meta["qa_attempted"] is False
+
+    @pytest.mark.asyncio
+    async def test_handler_publishes_qa_attempt_when_qa_returns_no_result(self) -> None:
+        """Consumers can fail closed without reconstructing producer policy."""
+        from ouroboros.core.errors import ProviderError
+        from ouroboros.mcp.tools.definitions import EvolveStepHandler
+
+        store = await create_event_store()
+        seed = make_seed()
+        gen_result = GenerationResult(
+            generation_number=1,
+            seed=seed,
+            evaluation_summary=make_eval_summary(),
+            phase=GenerationPhase.COMPLETED,
+            success=True,
+        )
+        handler = EvolveStepHandler(evolutionary_loop=make_loop(store, gen_result=gen_result))
+
+        class _FailingQAHandler:
+            async def handle(self, _arguments):  # noqa: ANN001
+                return Result.err(ProviderError(message="unparseable QA response"))
+
+        import yaml
+
+        with (
+            patch(
+                "ouroboros.mcp.tools.evolution_handlers.maybe_restore_task_workspace",
+                return_value=None,
+            ),
+            patch("ouroboros.mcp.tools.qa.QAHandler", _FailingQAHandler),
+            patch(
+                "ouroboros.mcp.tools.evolution_handlers.build_verification_artifacts",
+                new=AsyncMock(side_effect=RuntimeError("no artifact")),
+            ),
+        ):
+            result = await handler.handle(
+                {
+                    "lineage_id": "lin_handler_qa_attempt",
+                    "seed_content": yaml.dump(seed.to_dict()),
+                }
+            )
+
+        assert result.is_ok
+        assert result.value.meta["qa_attempted"] is True
+        assert "qa" not in result.value.meta
 
     @pytest.mark.asyncio
     async def test_handler_resets_project_dir_after_call(self) -> None:
