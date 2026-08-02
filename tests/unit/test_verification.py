@@ -456,13 +456,16 @@ class TestSpecVerifier:
         summary = verifier.verify_all((assertion,))
         assert summary.verified_count == 1
 
-    # A pattern that matches the empty string can succeed without any
-    # criterion-specific content, so it verifies whatever it is pointed at. All of
-    # these compile, which is the only question the gate used to ask.
+    # A pattern that matches any input succeeds without any criterion-specific
+    # content, so it verifies whatever it is pointed at. All of these compile, which
+    # is the only question the gate used to ask.
     #
     # Split by which subject exposes each one: the patterns below also match ordinary
     # non-empty files, while `\A\Z` succeeds only against an empty one — so proving
-    # that case needs a project that has such a file.
+    # that case needs a project that has such a file. Matching the empty string is
+    # not itself the defect: `\A\Z` tells an empty file from every other file, which
+    # is exactly what an "MUST remain empty" criterion needs. What fabricates a pass
+    # is searching a *set* of candidates for any hit, so that pair is tested apart.
     @pytest.mark.parametrize("pattern", [".*", "x?", r"\s*", "(?:)", "|", "^"])
     def test_t2_pattern_matching_any_input_is_not_evidence(self, pattern: str) -> None:
         """Such a pattern must not verify an AC the project does not satisfy."""
@@ -502,13 +505,19 @@ class TestSpecVerifier:
         assert summary.reports[0].verified_pass is False
 
     @pytest.mark.parametrize("tier", [VerificationTier.T2_STRUCTURAL, VerificationTier.T1_CONSTANT])
-    def test_anchored_empty_pattern_is_not_evidence(self, tier: VerificationTier) -> None:
+    def test_anchored_empty_pattern_over_a_glob_is_not_evidence(
+        self, tier: VerificationTier
+    ) -> None:
         """`\\A\\Z` succeeds only on an empty file, so only an empty file exposes it.
 
         An empty ``__init__.py`` is ordinary in a Python package, and against it the
         old verifier reported `Pattern found in __init__.py` on both tiers. Against a
         non-empty fixture this pattern matches nothing either way, so a test without
         an empty candidate would pass with the guard removed and prove nothing.
+
+        The hint here sweeps two files and the search stops at the first hit, so a
+        pass names no particular file — the package marker satisfying it is not what
+        the criterion is about. Contrast the exact-hint case below, which is honest.
         """
         project = self._create_project({"pkg/__init__.py": "", "main.py": "print('hello')\n"})
         assertion = SpecAssertion(
@@ -525,6 +534,60 @@ class TestSpecVerifier:
 
         assert summary.verified_count == 0
         assert summary.reports[0].verified_pass is False
+
+    @pytest.mark.parametrize("tier", [VerificationTier.T2_STRUCTURAL, VerificationTier.T1_CONSTANT])
+    def test_anchored_empty_pattern_verifies_the_file_its_hint_names(
+        self, tier: VerificationTier
+    ) -> None:
+        """An "MUST remain empty" criterion is real, and `\\A\\Z` is its honest regex.
+
+        Refusing `\\A\\Z` outright reports a project that satisfies its AC as a formal
+        failure, and the adapter downstream reads that as a discrepancy — the guard
+        against fabricated passes manufacturing a fabricated fail instead.
+        """
+        project = self._create_project({"pkg/__init__.py": "", "main.py": "print('hello')\n"})
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="pkg/__init__.py MUST remain empty",
+            tier=tier,
+            pattern=r"\A\Z",
+            file_hint="pkg/__init__.py",
+        )
+
+        summary = SpecVerifier(project_dir=project).verify_all(
+            (assertion,), agent_results={0: True}
+        )
+
+        assert summary.verified_count == 1
+        assert summary.reports[0].verified_pass is True
+        assert summary.discrepancy_count == 0
+
+    @pytest.mark.parametrize("tier", [VerificationTier.T2_STRUCTURAL, VerificationTier.T1_CONSTANT])
+    def test_anchored_empty_pattern_still_fails_when_the_named_file_has_content(
+        self, tier: VerificationTier
+    ) -> None:
+        """The exact-hint allowance must not become a free pass.
+
+        Same criterion, same pattern, same single-file hint — but the file has content
+        now, and `\\A\\Z` has to report that. This is what makes the test above evidence
+        of discrimination rather than evidence that the guard stopped looking.
+        """
+        project = self._create_project({"pkg/__init__.py": "from .camera import x\n"})
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="pkg/__init__.py MUST remain empty",
+            tier=tier,
+            pattern=r"\A\Z",
+            file_hint="pkg/__init__.py",
+        )
+
+        summary = SpecVerifier(project_dir=project).verify_all(
+            (assertion,), agent_results={0: True}
+        )
+
+        assert summary.verified_count == 0
+        assert summary.reports[0].verified_pass is False
+        assert summary.discrepancy_count == 1
 
     def test_empty_matching_pattern_fails_closed_against_an_agent_pass_claim(self) -> None:
         """Refusing the pattern must raise a discrepancy, not silently skip the AC.
