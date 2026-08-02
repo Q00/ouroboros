@@ -88,15 +88,23 @@ _RUNTIME_LIFECYCLE_STATUSES = frozenset({"running", "paused", "completed", "fail
 def _runtime_status_from_progress(data: object) -> str | None:
     """Extract an authoritative runtime status from a progress event payload.
 
-    Mirrors ``SessionRepository._status_from_event``: the status may sit under
-    ``progress.runtime_status`` or at the payload root.
+    The two progress producers nest it differently:
+
+    - ``orchestrator.progress.updated`` (``SessionRepository.track_progress``)
+      wraps the payload in ``progress``, matching
+      ``SessionRepository._status_from_event`` and the
+      ``$.progress.runtime_status`` / ``$.runtime_status`` snapshot query.
+    - ``workflow.progress.updated`` (``create_workflow_progress_event``) carries
+      it in ``last_update``, where ``WorkflowState`` writes it
+      (``workflow_state.py`` ``last_update["runtime_status"]``).
     """
     if not isinstance(data, dict):
         return None
-    progress = data.get("progress")
     candidates = []
-    if isinstance(progress, dict):
-        candidates.append(progress.get("runtime_status"))
+    for container_key in ("progress", "last_update"):
+        container = data.get(container_key)
+        if isinstance(container, dict):
+            candidates.append(container.get("runtime_status"))
     candidates.append(data.get("runtime_status"))
     for candidate in candidates:
         status = _coerce_non_empty_string(candidate)
@@ -398,10 +406,15 @@ class OuroborosTUI(App[None]):
         except Exception:
             pass
 
+        # State projection must not depend on whether a Textual message exists
+        # for the event type. `orchestrator.progress.updated` has no message
+        # mapping, and it is the acknowledgement that clears a paused display —
+        # gating the projection on `message is not None` made it unreachable.
+        self._update_state_from_event(event)
+
         message = create_message_from_event(event)
         if message is not None:
             self.post_message(message)
-            self._update_state_from_event(event)
 
         # Fold provider identity through the SHARED board derivation (the exact
         # rules the web Kanban's reduce_board applies). Additive: it only annotates

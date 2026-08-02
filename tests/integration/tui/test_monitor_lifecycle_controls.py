@@ -20,6 +20,7 @@ import pytest
 from typer.testing import CliRunner
 
 from ouroboros.cli.commands.tui import app as tui_app
+from ouroboros.orchestrator.events import create_workflow_progress_event
 from ouroboros.orchestrator.session import SessionRepository
 from ouroboros.persistence.event_store import EventStore, sqlite_database_url
 from ouroboros.tui.app import OuroborosTUI
@@ -196,7 +197,7 @@ class TestAcknowledgedDurableControlPath:
         assert [event.type for event in events] == ["orchestrator.session.paused"]
 
         # Only the acknowledged lifecycle event flips the display.
-        tui._update_state_from_event(events[0])
+        tui._process_subscription_event(events[0])
         assert tui.state.status == "paused"
         assert tui.state.is_paused is True
 
@@ -229,7 +230,7 @@ class TestAcknowledgedDurableControlPath:
             "sess_resume",
             event_types={"orchestrator.session.paused"},
         )
-        tui._update_state_from_event(paused_events[0])
+        tui._process_subscription_event(paused_events[0])
         assert tui.state.is_paused is True
 
         # The execution really resumes and reports it through progress.
@@ -246,7 +247,46 @@ class TestAcknowledgedDurableControlPath:
         )
         assert progress_events, "no progress event was persisted"
         for event in progress_events:
-            tui._update_state_from_event(event)
+            tui._process_subscription_event(event)
+
+        assert tui.state.status == "running"
+        assert tui.state.is_paused is False
+
+    async def test_resume_is_acknowledged_by_workflow_progress_last_update(
+        self, event_store: EventStore
+    ) -> None:
+        """The other producer nests `runtime_status` under `last_update`.
+
+        `create_workflow_progress_event` carries the status where
+        `WorkflowState` writes it, not under `progress`. Built from the real
+        event factory so the payload shape cannot drift away from production.
+        """
+        tui = OuroborosTUI()
+        tui.set_execution("exec_wf", "sess_wf")
+        tui.state.status = "paused"
+        tui.state.is_paused = True
+
+        workflow_event = create_workflow_progress_event(
+            execution_id="exec_wf",
+            session_id="sess_wf",
+            acceptance_criteria=[],
+            completed_count=1,
+            total_count=3,
+            current_ac_index=1,
+            current_phase="Discover",
+            activity="working",
+            activity_detail="",
+            elapsed_display="00:10",
+            estimated_remaining="00:20",
+            messages_count=4,
+            tool_calls_count=2,
+            estimated_tokens=100,
+            estimated_cost_usd=0.01,
+            last_update={"runtime_status": "running"},
+        )
+        await event_store.append(workflow_event)
+
+        tui._process_subscription_event(workflow_event)
 
         assert tui.state.status == "running"
         assert tui.state.is_paused is False
@@ -279,7 +319,7 @@ class TestAcknowledgedDurableControlPath:
             event_types={"orchestrator.progress.updated"},
         )
         for event in progress_events:
-            tui._update_state_from_event(event)
+            tui._process_subscription_event(event)
 
         assert tui.state.status == "paused"
         assert tui.state.is_paused is True

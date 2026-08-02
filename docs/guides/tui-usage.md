@@ -135,7 +135,9 @@ View evolutionary lineage across generations when using evolutionary loops (`ooo
 
 > **Note**: `ouroboros tui monitor` attaches to the event store as an observer
 > and does not own the running execution, so `p` and `r` are hidden from the
-> footer and do nothing there. Use `ouroboros cancel execution` to stop a run.
+> footer and do nothing there. This applies to both backends — the `slt` backend
+> offers them only in `--mock` demo mode, where it owns the simulation it is
+> pausing. Use `ouroboros cancel execution` to stop a run.
 >
 > The bindings appear only when an embedding caller connects an execution owner
 > via `OuroborosTUI.set_pause_callback()` / `set_resume_callback()`. Even then,
