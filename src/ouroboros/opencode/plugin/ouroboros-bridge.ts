@@ -326,7 +326,9 @@ export function stamp(r: Output, msg: string): void {
 // call site. Passing `original` is what says "a question is in front of this".
 export function stampBridge(r: Output, original: string | undefined, body: string): void {
   const declared = `${OUROBOROS_DISPATCH_MARKER}\n\n${BRIDGE_NOTICE_OPENING}\n${body}`
-  stamp(r, original === undefined ? declared : `${original}\n\n${declared}`)
+  // Falsy, not `undefined`: readText() returns "" for a metadata-only response,
+  // and prefixing that would open the text with two blank lines.
+  stamp(r, original ? `${original}\n\n${declared}` : declared)
 }
 
 export interface OkResult {
@@ -729,7 +731,7 @@ export const OuroborosBridge: Plugin = async (ctx) => {
         const banner = notify(ok, failed.map((f) => f.sub), [])
         // Preserve response_shape in text so the LLM can read contract fields
         // (session_id, job_id, status) that build_subagent_result() provides.
-        // Without this, stamp() replaces the JSON and the LLM loses these values.
+        // Without this the stamp replaces the JSON and the LLM loses these values.
         const shapeSuffix = Object.keys(responseShape).length > 0
           ? "\n\n```json\n" + JSON.stringify(responseShape, null, 2) + "\n```"
           : ""

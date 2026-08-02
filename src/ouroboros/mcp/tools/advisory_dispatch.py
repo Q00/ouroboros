@@ -57,10 +57,11 @@ _SEQUENTIAL_HOST_ACTION = "process_payloads_sequentially"
 #: where it is parsed.
 QUESTION_ADVISORY_DISPATCH_MARKER = "<!-- ouroboros-question-advisory-dispatch-v1 -->"
 
-#: The first words of the directive that always follows the marker. Recognising
-#: the pair is what lets the strip tell its own output from a question that
-#: merely quotes the marker; written once here so the emitter and the stripper
-#: cannot drift into disagreeing about what a directive looks like.
+#: The first words of the directive this module appends after the marker.
+#: Recognising the pair is what lets a reader tell an append from a question
+#: that merely quotes the marker; written once here so the emitter and the
+#: readers cannot drift into disagreeing about what a directive looks like.
+#: One of two openings — see :data:`_DIRECTIVE_OPENINGS`.
 _HOST_DIRECTIVE_OPENING = "> **Host action — "
 
 #: The OpenCode bridge's opening. It is a *second* producer appending to the
@@ -115,9 +116,14 @@ def directive_was_appended(meta: dict[str, Any]) -> bool:
 
     The renderer's own condition, named once so a reader of the response cannot
     disagree with the writer of it about whether there is anything to strip.
-    ``PLUGIN_PASSIVE`` stamps no host action and leaves content unchanged, so
-    this is false there and `auto` cuts nothing — the same reason
-    ``_HOST_DIRECTIVE_OPENING`` is a shared constant rather than two copies.
+    ``PLUGIN_PASSIVE`` stamps no host action, so this is false there and `auto`
+    cuts nothing.
+
+    *This module* leaves the content unchanged there; the response a host sees
+    does not, because the bridge stamps its own notice onto it afterwards. The
+    distinction is the whole point of asking the producer instead of the text:
+    what this answers is whether **we** appended, which is the only thing our
+    gate is entitled to speak for.
     """
     payloads = meta.get(_PAYLOADS_KEY)
     return bool(meta.get(_HOST_ACTION_KEY)) and isinstance(payloads, list) and bool(payloads)
@@ -285,14 +291,17 @@ def split_appended_dispatch(text: str) -> str:
 
     **Only call this when the server appended a directive**, which
     :func:`directive_was_appended` answers from the same response. With none
-    present the last marker in the text belongs to the question, and cutting
-    there destroys it — on ``PLUGIN_PASSIVE``, where content is left unchanged
-    by design, that would be every turn.
+    present a marker in the text belongs to the question, and cutting there
+    destroys it — on ``PLUGIN_PASSIVE``, where this module appends nothing,
+    that would be every turn.
 
     The gate is also what retires the residual an earlier version of this
-    docstring accepted. A directive is always appended last, so once one exists
-    the last marker is ours and a question quoting the sentinel survives in
-    front of the cut.
+    docstring accepted: with a directive known to be present, a question merely
+    quoting the sentinel survives in front of the cut. That version went on to
+    say the *last* marker is therefore ours. It was ours while we were the only
+    producer. The bridge now declares with the same marker and appends after us,
+    so the search is for the last marker of the opening this function names —
+    which is what the ``openings`` argument to :func:`_directive_at` is for.
 
     The shape question itself is asked in one place, :func:`_directive_at`, and
     both readers of a response ask it. What differs is the warrant each side has
@@ -318,6 +327,32 @@ def split_appended_dispatch(text: str) -> str:
     return text if cut < 0 else text[:cut].strip()
 
 
+def strip_declared_append(text: Any) -> Any:
+    """Return *text* without a declared append, for a caller holding no record.
+
+    :func:`echo_carries_dispatch` answers a caller that has the issued question
+    and can simply prefer it. Two branches have no such record: the plugin path
+    persists no question-only round, so its answer branch is *always* the one
+    with nothing stored, and the reopen branch is answering a probe the server
+    never issued. There, refusing an echo does not keep the right question —
+    there is no right question to keep, and the round would record a placeholder
+    instead. Refusing would trade a leak for the damage ``last_question`` exists
+    to repair.
+
+    So this cuts rather than refuses, and cutting is warranted by the same thing
+    that makes the echo path work: the producer declared where its own text
+    begins. That is a statement, not an inference from prose — which is what
+    separates this from the shape-matching that kept truncating questions. What
+    remains is the residual the whole grammar carries: a question reproducing a
+    complete declared append, marker and opening together, is cut at it. That is
+    narrower than the text this otherwise writes into the transcript verbatim.
+    """
+    if not isinstance(text, str):
+        return text
+    cut = _directive_at(text)
+    return text if cut < 0 else text[:cut].strip()
+
+
 __all__ = [
     "QUESTION_ADVISORY_DISPATCH_MARKER",
     "append_lateral_review_notice",
@@ -325,4 +360,5 @@ __all__ = [
     "directive_was_appended",
     "echo_carries_dispatch",
     "split_appended_dispatch",
+    "strip_declared_append",
 ]

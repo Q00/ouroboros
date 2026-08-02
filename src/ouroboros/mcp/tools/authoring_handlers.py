@@ -62,6 +62,7 @@ from ouroboros.mcp.tools.advisory_dispatch import (
     append_lateral_review_notice,
     append_question_advisory_dispatch,
     echo_carries_dispatch,
+    strip_declared_append,
 )
 from ouroboros.mcp.tools.subagent import (
     DELEGATED_TO_SUBAGENT,
@@ -2382,20 +2383,20 @@ class InterviewHandler:
                 # provenance where the answer arrives either way.
                 has_pending = bool(state.rounds) and state.rounds[-1].user_response is None
                 if has_pending:
-                    # The subprocess path's gatekeeper, asked here too — and this
-                    # is the path the bridge's append actually reaches, since only
-                    # ``PLUGIN_PASSIVE`` lets a second producer stamp the visible
-                    # question. An echo carrying a directive is not a repair.
+                    # Only reachable from state a subprocess turn persisted; an
+                    # echo carrying a directive is not a repair, so prefer ours.
                     issued = state.rounds[-1].question
                     question_text = (
-                        issued
-                        if echo_carries_dispatch(last_question)
-                        else (last_question or issued)
+                        issued if echo_carries_dispatch(last_question) else (last_question or issued)
                     )
                 else:
-                    # Fall back to a descriptive placeholder for backward
-                    # compatibility (callers that don't supply last_question).
-                    question_text = last_question if last_question else "(continued from subagent)"
+                    # The branch plugin mode takes every turn: it persists no
+                    # question-only round, so there is never a record to prefer
+                    # and refusing the echo would store the placeholder instead
+                    # of the question. Cut the declared append, not the question.
+                    question_text = (
+                        strip_declared_append(last_question) or "(continued from subagent)"
+                    )
                 plugin_intent_guard_report = _guard_interview_answer(
                     state=state,
                     question=question_text,
@@ -3145,7 +3146,8 @@ class InterviewHandler:
                 )
 
             if not state.rounds and last_question:
-                pending_question = last_question
+                # No round to prefer: cut the append, refusing records nothing.
+                pending_question = strip_declared_append(last_question)
             elif not state.rounds:
                 return Result.err(
                     MCPToolError(
@@ -3204,7 +3206,8 @@ class InterviewHandler:
                             tool_name="ouroboros_interview",
                         )
                     )
-                pending_question = last_question
+                # The reopen probe is the caller's, never ours: same cut.
+                pending_question = strip_declared_append(last_question)
 
             intent_guard_report = _guard_interview_answer(
                 state=state,

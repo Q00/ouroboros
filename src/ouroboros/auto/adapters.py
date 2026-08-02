@@ -1247,10 +1247,13 @@ def _extract_interview_question(
     ``directive_was_appended`` so the gate and the renderer share one condition.
     Cutting on shape alone truncated
     a question that quoted the sentinel whenever no directive was there to
-    find — on ``PLUGIN_PASSIVE``, where the response is deliberately left
-    unchanged, that is every turn. Auto would then answer, and persist, a
-    question the server never asked. The producer knows whether it appended;
-    asking it is cheaper and surer than inferring from the text.
+    find — on ``PLUGIN_PASSIVE``, where the server appends none, that is every
+    turn. Auto would then answer, and persist, a question the server never
+    asked. The producer knows whether it appended; asking it is cheaper and
+    surer than inferring from the text. It is also the only honest question to
+    ask, since the server is no longer the only producer that writes into that
+    text: the OpenCode bridge appends to it too, and this gate speaks only for
+    ours.
     """
     if dispatch_appended:
         text = split_appended_dispatch(text)

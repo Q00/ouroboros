@@ -1219,8 +1219,10 @@ describe("bridge appends declare themselves", () => {
   //
   // Three paths append: dispatch, dedupe, and pre-dispatch failure. Only the
   // first was declared when this was found, which is why the declaration now
-  // lives in `stampBridge` rather than at each call site. These tests pin all
-  // three, so a fourth path that bypasses the helper is a failing test.
+  // lives in `stampBridge` rather than at each call site. The three behavioural
+  // tests below pin what each path emits; the source test pins that they are
+  // the only writers, since `stamp` stays exported and a fourth call site could
+  // otherwise bypass the helper and pass all three.
   const DECLARATION = `\n\n${OUROBOROS_DISPATCH_MARKER}\n\n${BRIDGE_NOTICE_OPENING}\n`
 
   function expectDeclaredAfter(text: string, question: string): void {
@@ -1267,6 +1269,17 @@ describe("bridge appends declare themselves", () => {
   }
 
   const QUESTION = "Session sess-1\n\nHow do you define completion?"
+
+  test("stampBridge is the only writer that appends to a response", async () => {
+    // The behavioural tests above cannot see a fourth call site; this can.
+    // `stamp` is the primitive and stays exported, so the invariant worth
+    // pinning is that nothing inside the hook reaches past `stampBridge`.
+    const source = await Bun.file(new URL("./ouroboros-bridge.ts", import.meta.url)).text()
+    const body = source.slice(source.indexOf("export function stampBridge"))
+    const direct = body.match(/(?<!stampB)\bstamp\(/g) ?? []
+    // The one inside stampBridge itself is the intended delegation.
+    expect(direct.length).toBe(1)
+  })
 
   test("stampBridge declares, with or without a question in front", () => {
     const withQuestion = { content: [{ type: "text", text: "x" }] }

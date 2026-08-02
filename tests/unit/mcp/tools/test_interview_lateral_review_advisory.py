@@ -1123,19 +1123,24 @@ def _bridge_echo(issued: str) -> str:
 
 
 async def test_a_bridge_mutated_echo_does_not_reach_the_plugin_transcript(tmp_path) -> None:
-    """The plugin path, with the exact shape the bridge produces.
+    """The plugin handler's pending branch, with the shape the bridge produces.
 
-    **This is the path the bridge's append actually reaches.** `handle()` returns
-    to `_handle_plugin_dispatch` before `_handle_answer` is entered, so the
-    gatekeeper the subprocess path asks was never on the plugin round-trip — and
-    plugin-passive is the only transport where the bridge stamps anything. A
-    gatekeeper that recognised the bridge's grammar while sitting on the other
-    branch would have read as a fix and persisted the banner anyway.
+    `handle()` returns into `_handle_plugin_dispatch` before `_handle_answer` is
+    entered, so the subprocess gatekeeper is not on the plugin round-trip at all
+    and this branch needs its own.
 
-    So this drives the real handler against a real state directory rather than a
-    mocked engine: the plugin path loads and saves state itself, and a mock of
-    `InterviewEngine` is simply not consulted here. What the round remembers
-    asking is read back off disk.
+    **The fixture is the caveat.** A question-only pending round is state plugin
+    mode does not produce on its own — it reaches this branch only from a
+    session a subprocess turn persisted. The branch plugin mode takes every turn
+    is the sibling below, covered by
+    ``test_the_plugin_branch_that_actually_runs_records_only_the_question``,
+    which builds no state by hand. This test was written believing it covered
+    that path, and passed while the live path leaked; the pair is split so the
+    fixture cannot stand in for the transport again.
+
+    It drives the real handler against a real state directory rather than a
+    mocked engine: the plugin path loads and saves state itself, so a mock of
+    `InterviewEngine` is never consulted here.
     """
     from ouroboros.mcp.tools.advisory_dispatch import (
         QUESTION_ADVISORY_DISPATCH_MARKER as marker,
@@ -1267,3 +1272,128 @@ def test_two_declared_appends_cut_at_the_server_s_own_directive() -> None:
     )
     # The echo path still recognises it — it accepts either producer.
     assert echo_carries_dispatch(both)
+
+
+async def test_the_plugin_branch_that_actually_runs_records_only_the_question(tmp_path) -> None:
+    """Driven start -> answer, never by hand-built state.
+
+    The earlier plugin regression seeded a question-only pending round, and that
+    is the one state shape plugin mode does not produce: the child asks the
+    questions and the server only ever records answers, so `record_answer`
+    appends a complete round and `has_pending` is false on every turn. The gate
+    written for the pending branch was therefore never reached here, and the
+    test that was supposed to prove otherwise passed because its fixture stood
+    in for a state the transport cannot reach.
+
+    So this one asks the handler for a session and answers it, three times,
+    reading each round back off disk.
+    """
+    from ouroboros.mcp.tools.advisory_dispatch import (
+        QUESTION_ADVISORY_DISPATCH_MARKER as marker,
+    )
+
+    issued = "How do you define completion?"
+    handler = InterviewHandler(
+        data_dir=tmp_path, agent_runtime_backend="opencode", opencode_mode="plugin"
+    )
+    started = await handler.handle(
+        {
+            "action": "start",
+            "initial_context": "Build a data-aware interview lane for Ouroboros.",
+            "cwd": str(tmp_path),
+        }
+    )
+    assert started.is_ok
+    session_id = started.value.meta["session_id"]
+    state_file = tmp_path / f"interview_{session_id}.json"
+
+    for turn in range(3):
+        before = json.loads(state_file.read_text(encoding="utf-8"))["rounds"]
+        assert not (before and before[-1]["user_response"] is None), (
+            "plugin mode is not expected to persist a question-only round"
+        )
+        result = await handler.handle(
+            {
+                "session_id": session_id,
+                "answer": f"A{turn}",
+                "last_question": _bridge_echo(issued),
+            }
+        )
+        assert result.is_ok
+
+    for round_data in json.loads(state_file.read_text(encoding="utf-8"))["rounds"]:
+        assert round_data["question"] == issued
+        assert marker not in round_data["question"]
+        assert "fanout_abc123" not in round_data["question"]
+
+
+async def test_a_new_session_and_a_reopen_record_only_the_question() -> None:
+    """The two subprocess branches with no round to prefer.
+
+    Neither has a stored question — one has no rounds at all, the other is a
+    Seed-ready-challenge reopen answering a probe the server never issued. So
+    neither can prefer the record, and refusing the echo would leave the round
+    with nothing. They cut the declared append instead, and the directive here
+    is the server's own, built by the renderer rather than written by hand.
+    """
+    from ouroboros.mcp.tools.advisory_dispatch import (
+        QUESTION_ADVISORY_DISPATCH_MARKER as marker,
+    )
+
+    question = "How do you define completion?"
+    meta = {
+        "question_advisory_host_action": "spawn_subagents",
+        "question_advisory_subagents": [
+            {
+                "tool_name": "ouroboros_interview",
+                "title": "Interview advisory: data_context",
+                "agent": "general",
+                "prompt": "Measure it.",
+                "context": {"lane_id": "data_context", "required": True},
+            }
+        ],
+        "question_advisory_fanout_id": "fanout_server_leak",
+    }
+    echoed = append_question_advisory_dispatch(question, meta)
+    assert directive_was_appended(meta)
+
+    for label, rounds in (
+        ("no rounds yet", []),
+        (
+            "reopen after an answered round",
+            [InterviewRound(round_number=1, question="Q1?", user_response="A1")],
+        ),
+    ):
+        state = InterviewState(interview_id="sess-nb", rounds=list(rounds))
+
+        async def record(
+            current: InterviewState, answer: str, question_text: str
+        ) -> Result[InterviewState, object]:
+            current.rounds.append(
+                InterviewRound(
+                    round_number=current.current_round_number,
+                    question=question_text,
+                    user_response=answer,
+                )
+            )
+            return Result.ok(current)
+
+        engine = MagicMock()
+        engine.load_state = AsyncMock(return_value=Result.ok(state))
+        engine.record_response = AsyncMock(side_effect=record)
+        engine.save_state = AsyncMock(return_value=MagicMock(is_err=False))
+        engine.ask_next_question = AsyncMock(return_value=Result.ok("Next?"))
+
+        handler = InterviewHandler(interview_engine=engine, agent_runtime_backend="claude")
+        handler.llm_adapter = MagicMock()
+        handler._emit_event_bg = MagicMock()  # type: ignore[method-assign]
+        handler._score_interview_state = AsyncMock(return_value=_score(0.35))  # type: ignore[method-assign]
+
+        result = await handler.handle(
+            {"session_id": "sess-nb", "answer": "A", "last_question": echoed}
+        )
+        assert result.is_ok, label
+        recorded = engine.record_response.await_args.args[2]
+        assert recorded == question, label
+        assert marker not in recorded, label
+        assert "fanout_server_leak" not in recorded, label
