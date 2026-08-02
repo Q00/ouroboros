@@ -350,6 +350,14 @@ pub struct AppState {
     // Mock simulation
     pub mock_tick: u64,
     pub auto_simulate: bool,
+
+    /// Whether `p`/`r` may change lifecycle state.
+    ///
+    /// Only the mock/demo simulation is owned by this process. When attached to
+    /// a real database the TUI is an observer with no execution owner, so
+    /// pausing locally would report a transition the run never made
+    /// (Q00/ouroboros#1833).
+    pub lifecycle_controls_enabled: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -450,6 +458,27 @@ impl AppState {
 
             mock_tick: 0,
             auto_simulate: true,
+            lifecycle_controls_enabled: true,
+        }
+    }
+
+    /// Drop to observer mode: no execution owner, so no lifecycle controls.
+    pub fn disable_lifecycle_controls(&mut self) {
+        self.lifecycle_controls_enabled = false;
+        self.command_palette
+            .commands
+            .retain(|command| !matches!(command.label.as_str(), "Pause" | "Resume"));
+    }
+
+    /// Carry execution-ownership capability across a state rebuild.
+    ///
+    /// Ownership is a property of how this process attached — mock simulation
+    /// versus an observed database — not of the session being viewed. Switching
+    /// sessions rebuilds `AppState` from `new()`, which would otherwise restore
+    /// owner-only controls to an observer (Q00/ouroboros#1833).
+    pub fn inherit_capabilities_from(&mut self, previous: &AppState) {
+        if !previous.lifecycle_controls_enabled {
+            self.disable_lifecycle_controls();
         }
     }
 
@@ -672,4 +701,85 @@ fn chrono_lite_now() -> String {
     let m = (secs / 60) % 60;
     let s = secs % 60;
     format!("{h:02}:{m:02}:{s:02}")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn palette_labels(state: &AppState) -> Vec<&str> {
+        state
+            .command_palette
+            .commands
+            .iter()
+            .map(|command| command.label.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn mock_mode_offers_lifecycle_controls() {
+        let state = AppState::new();
+
+        assert!(state.lifecycle_controls_enabled);
+        assert!(palette_labels(&state).contains(&"Pause"));
+        assert!(palette_labels(&state).contains(&"Resume"));
+    }
+
+    #[test]
+    fn observer_mode_withdraws_lifecycle_controls() {
+        // Q00/ouroboros#1833: attached to a real database the TUI owns no
+        // execution, so it must not advertise or perform pause/resume.
+        let mut state = AppState::new();
+
+        state.disable_lifecycle_controls();
+
+        assert!(!state.lifecycle_controls_enabled);
+        assert!(!palette_labels(&state).contains(&"Pause"));
+        assert!(!palette_labels(&state).contains(&"Resume"));
+    }
+
+    #[test]
+    fn observer_mode_survives_a_session_switch() {
+        // Switching sessions rebuilds AppState from new(); the observer
+        // capability must not come back with it.
+        let mut attached = AppState::new();
+        attached.disable_lifecycle_controls();
+
+        let mut after_switch = AppState::new();
+        after_switch.inherit_capabilities_from(&attached);
+
+        assert!(!after_switch.lifecycle_controls_enabled);
+        assert!(!palette_labels(&after_switch).contains(&"Pause"));
+        assert!(!palette_labels(&after_switch).contains(&"Resume"));
+    }
+
+    #[test]
+    fn mock_mode_keeps_its_controls_across_a_session_switch() {
+        // The inverse: a process that does own its simulation keeps the controls.
+        let owning = AppState::new();
+
+        let mut after_switch = AppState::new();
+        after_switch.inherit_capabilities_from(&owning);
+
+        assert!(after_switch.lifecycle_controls_enabled);
+        assert!(palette_labels(&after_switch).contains(&"Pause"));
+    }
+
+    #[test]
+    fn observer_mode_keeps_navigation_commands_dispatchable() {
+        // Dispatch is by label, so removing two entries must not strand the
+        // commands that used to sit after them.
+        let mut state = AppState::new();
+
+        state.disable_lifecycle_controls();
+
+        let labels = palette_labels(&state);
+        for expected in ["Dashboard", "Execution", "Lineage", "Sessions", "Quit"] {
+            assert!(labels.contains(&expected), "missing {expected}");
+        }
+    }
 }

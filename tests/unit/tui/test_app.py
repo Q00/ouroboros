@@ -664,8 +664,8 @@ class TestOuroborosTUIMessageHandlers:
         assert nodes["node_child"]["parent_id"] == "node_root"
         assert nodes["node_root"]["content"] == "Canonical root AC"
 
-    def test_on_pause_requested(self) -> None:
-        """Test handling PauseRequested message."""
+    def test_on_pause_requested_without_owner_keeps_status(self) -> None:
+        """A pause request with no execution owner must not claim 'paused'."""
         app = OuroborosTUI()
         app.set_execution("exec_123")
         initial_log_count = len(app.state.logs)
@@ -673,14 +673,14 @@ class TestOuroborosTUIMessageHandlers:
 
         app.on_pause_requested(msg)
 
-        assert app.state.is_paused is True
-        assert app.state.status == "paused"
-        # Check log was added (one more than before)
+        assert app.state.is_paused is False
+        assert app.state.status == "running"
         assert len(app.state.logs) == initial_log_count + 1
-        assert "Pause requested" in app.state.logs[-1]["message"]
+        assert app.state.logs[-1]["level"] == "warning"
+        assert "unavailable" in app.state.logs[-1]["message"]
 
-    def test_on_resume_requested(self) -> None:
-        """Test handling ResumeRequested message."""
+    def test_on_resume_requested_without_owner_keeps_status(self) -> None:
+        """A resume request with no execution owner must not claim 'running'."""
         app = OuroborosTUI()
         app.set_execution("exec_123")
         app._state.is_paused = True
@@ -690,11 +690,11 @@ class TestOuroborosTUIMessageHandlers:
 
         app.on_resume_requested(msg)
 
-        assert app.state.is_paused is False
-        assert app.state.status == "running"
-        # Check log was added (one more than before)
+        assert app.state.is_paused is True
+        assert app.state.status == "paused"
         assert len(app.state.logs) == initial_log_count + 1
-        assert "Resume requested" in app.state.logs[-1]["message"]
+        assert app.state.logs[-1]["level"] == "warning"
+        assert "unavailable" in app.state.logs[-1]["message"]
 
 
 class TestOuroborosTUIActions:
@@ -703,6 +703,7 @@ class TestOuroborosTUIActions:
     def test_action_pause_posts_message(self) -> None:
         """Test pause action posts message when execution active."""
         app = OuroborosTUI()
+        app.set_pause_callback(MagicMock())
         app.set_execution("exec_123")
         app.post_message = MagicMock()  # type: ignore
 
@@ -717,6 +718,7 @@ class TestOuroborosTUIActions:
     def test_action_pause_no_execution(self) -> None:
         """Test pause action does nothing without execution."""
         app = OuroborosTUI()
+        app.set_pause_callback(MagicMock())
         app.post_message = MagicMock()  # type: ignore
 
         app.action_pause()
@@ -726,6 +728,7 @@ class TestOuroborosTUIActions:
     def test_action_pause_already_paused(self) -> None:
         """Test pause action does nothing when already paused."""
         app = OuroborosTUI()
+        app.set_pause_callback(MagicMock())
         app.set_execution("exec_123")
         app._state.is_paused = True
         app.post_message = MagicMock()  # type: ignore
@@ -734,9 +737,16 @@ class TestOuroborosTUIActions:
 
         app.post_message.assert_not_called()
 
+    def test_pause_binding_is_hidden_without_owner(self) -> None:
+        """`False` (hidden), not `None` (greyed out but still advertised)."""
+        app = OuroborosTUI()
+
+        assert app.check_action("pause", ()) is False
+
     def test_action_resume_posts_message(self) -> None:
         """Test resume action posts message when paused."""
         app = OuroborosTUI()
+        app.set_resume_callback(MagicMock())
         app.set_execution("exec_123")
         app._state.is_paused = True
         app.post_message = MagicMock()  # type: ignore
@@ -750,6 +760,7 @@ class TestOuroborosTUIActions:
     def test_action_resume_not_paused(self) -> None:
         """Test resume action does nothing when not paused."""
         app = OuroborosTUI()
+        app.set_resume_callback(MagicMock())
         app.set_execution("exec_123")
         app._state.is_paused = False
         app.post_message = MagicMock()  # type: ignore
@@ -757,6 +768,100 @@ class TestOuroborosTUIActions:
         app.action_resume()
 
         app.post_message.assert_not_called()
+
+    def test_resume_binding_is_hidden_without_owner(self) -> None:
+        """`False` (hidden), not `None` (greyed out but still advertised)."""
+        app = OuroborosTUI()
+
+        assert app.check_action("resume", ()) is False
+
+    def test_check_action_shows_controls_when_owner_connected(self) -> None:
+        """Bindings are advertised once an execution owner is connected."""
+        app = OuroborosTUI()
+        app.set_pause_callback(MagicMock())
+        app.set_resume_callback(MagicMock())
+
+        assert app.check_action("pause", ()) is True
+        assert app.check_action("resume", ()) is True
+
+    def test_check_action_leaves_unrelated_actions_alone(self) -> None:
+        """Only the lifecycle bindings are gated."""
+        app = OuroborosTUI()
+
+        assert app.check_action("quit", ()) is True
+        assert app.check_action("show_logs", ()) is True
+
+    @pytest.mark.asyncio
+    async def test_pause_key_spam_starts_one_request_until_acknowledged(self) -> None:
+        app = OuroborosTUI()
+        release = asyncio.Event()
+
+        async def _blocked_pause(_execution_id: str) -> None:
+            await release.wait()
+
+        callback = AsyncMock(side_effect=_blocked_pause)
+        app.set_pause_callback(callback)
+        app.set_execution("exec_123")
+        message = PauseRequested("exec_123")
+
+        app.on_pause_requested(message)
+        app.on_pause_requested(message)
+        app.on_pause_requested(message)
+        await asyncio.sleep(0)
+
+        callback.assert_awaited_once_with("exec_123")
+        assert app.check_action("pause", ()) is False
+
+        release.set()
+        await asyncio.sleep(0)
+        app._update_state_from_event(
+            BaseEvent(
+                type="orchestrator.session.paused",
+                aggregate_type="session",
+                aggregate_id="sess_123",
+                data={"execution_id": "exec_123"},
+            )
+        )
+
+        assert ("pause", "exec_123") not in app._control_requests
+
+    @pytest.mark.asyncio
+    async def test_control_failure_releases_gate_for_retry(self) -> None:
+        app = OuroborosTUI()
+        callback = AsyncMock(side_effect=RuntimeError("owner unavailable"))
+        app.set_resume_callback(callback)
+        app.set_execution("exec_123")
+        app._state.status = "paused"
+        app._state.is_paused = True
+        message = ResumeRequested("exec_123")
+
+        app.on_resume_requested(message)
+        await asyncio.sleep(0)
+        app.on_resume_requested(message)
+        await asyncio.sleep(0)
+
+        assert callback.await_count == 2
+        assert ("resume", "exec_123") not in app._control_requests
+
+    @pytest.mark.asyncio
+    async def test_session_switch_cancels_pending_control(self) -> None:
+        app = OuroborosTUI()
+        release = asyncio.Event()
+
+        async def _blocked_pause(_execution_id: str) -> None:
+            await release.wait()
+
+        callback = AsyncMock(side_effect=_blocked_pause)
+        app.set_pause_callback(callback)
+        app.set_execution("exec_old")
+        app.on_pause_requested(PauseRequested("exec_old"))
+        await asyncio.sleep(0)
+
+        app.set_execution("exec_new")
+        await asyncio.sleep(0)
+
+        assert not app._control_requests
+        assert app.state.execution_id == "exec_new"
 
 
 class TestOuroborosTUIEventSubscription:

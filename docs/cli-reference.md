@@ -1006,9 +1006,14 @@ ouroboros tui monitor --backend slt
 | `s` | Session Selector |
 | `e` | Lineage view |
 | `q` | Quit |
-| `p` | Pause execution |
-| `r` | Resume execution |
+| `p` | Pause execution — hidden in `tui monitor` |
+| `r` | Resume execution — hidden in `tui monitor` |
 | Up/Down | Scroll |
+
+> **Note**: `ouroboros tui monitor` observes the event store and does not own
+> the running execution, so the pause/resume bindings are hidden there.
+> Use `ouroboros cancel execution` to stop a run. See
+> [TUI Usage](./guides/tui-usage.md#keyboard-shortcuts) for details.
 
 ---
 

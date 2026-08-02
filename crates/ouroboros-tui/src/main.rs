@@ -179,6 +179,14 @@ fn main() -> std::io::Result<()> {
                         );
                         db::populate_state_from_events(&mut state, &lineage_events);
                     }
+                    // Attached to a real execution: this process observes it but
+                    // does not own it, so lifecycle controls must not be offered.
+                    state.disable_lifecycle_controls();
+                    state.add_log(
+                        LogLevel::Info,
+                        "tui",
+                        "Observer mode — pause/resume unavailable; use 'ouroboros cancel execution'",
+                    );
                     ouro_db = Some(conn);
                 }
             }
@@ -199,20 +207,28 @@ fn main() -> std::io::Result<()> {
             handle_global_keys(ui, &mut state);
 
             if let Some(cmd_idx) = ui.command_palette(&mut state.command_palette) {
-                match cmd_idx {
-                    0 => state.tabs.selected = 0, // Dashboard
-                    1 => state.tabs.selected = 1, // Execution
-                    2 => state.tabs.selected = 2, // Lineage
-                    3 => state.tabs.selected = 3, // Sessions
-                    4 => {
+                // Dispatch by label: the Pause/Resume entries are removed in
+                // observer mode, so positional indices are not stable.
+                let label = state
+                    .command_palette
+                    .commands
+                    .get(cmd_idx)
+                    .map(|command| command.label.clone())
+                    .unwrap_or_default();
+                match label.as_str() {
+                    "Dashboard" => state.tabs.selected = 0,
+                    "Execution" => state.tabs.selected = 1,
+                    "Lineage" => state.tabs.selected = 2,
+                    "Sessions" => state.tabs.selected = 3,
+                    "Pause" if state.lifecycle_controls_enabled => {
                         state.is_paused = true;
                         state.status = ExecutionStatus::Paused;
                     }
-                    5 => {
+                    "Resume" if state.lifecycle_controls_enabled => {
                         state.is_paused = false;
                         state.status = ExecutionStatus::Running;
                     }
-                    6 => ui.quit(),
+                    "Quit" => ui.quit(),
                     _ => {}
                 }
             }
@@ -233,6 +249,10 @@ fn main() -> std::io::Result<()> {
                                 if let Some(ref mut conn) = ouro_db {
                                     // Reset state for new session
                                     let mut new_state = AppState::new();
+                                    // Execution ownership belongs to how this
+                                    // process attached, not to the session being
+                                    // viewed — it must survive the rebuild.
+                                    new_state.inherit_capabilities_from(&state);
                                     // Preserve sessions list and table
                                     new_state.sessions = state.sessions.clone();
                                     new_state.session_table = slt::TableState::new(
@@ -300,12 +320,17 @@ fn handle_global_keys(ui: &mut Context, state: &mut AppState) {
     if ui.key_mod('p', KeyModifiers::CONTROL) {
         state.command_palette.open = !state.command_palette.open;
     }
-    if ui.key('p') && !state.command_palette.open && !log_input_active {
+    // Only the mock simulation is owned by this process. Attached to a real
+    // database the TUI is an observer, and flipping local state would report a
+    // pause/resume the execution never made (Q00/ouroboros#1833).
+    let lifecycle_key_active =
+        state.lifecycle_controls_enabled && !state.command_palette.open && !log_input_active;
+    if ui.key('p') && lifecycle_key_active {
         state.is_paused = true;
         state.status = ExecutionStatus::Paused;
         state.add_log(LogLevel::Info, "tui", "Execution paused by user");
     }
-    if ui.key('r') && !state.command_palette.open && !log_input_active {
+    if ui.key('r') && lifecycle_key_active {
         state.is_paused = false;
         state.status = ExecutionStatus::Running;
         state.add_log(LogLevel::Info, "tui", "Execution resumed");
@@ -470,9 +495,17 @@ fn render_footer(ui: &mut Context, state: &AppState) {
         Screen::SessionSelector => &[("Enter", "Load session"), ("←→", "Page"), ("Esc", "Back")],
     };
 
+    // Pause/Resume is advertised only when this process owns the execution
+    // (mock/demo). An observer attached to a real database cannot control it.
+    let global_keys: &[(&str, &str)] = if state.lifecycle_controls_enabled {
+        &[("q", "Quit"), ("p/r", "Pause/Resume"), ("^P", "Palette")]
+    } else {
+        &[("q", "Quit"), ("^P", "Palette")]
+    };
+
     ui.container().bg(surface).px(3).py(0).row(|ui| {
         // Global keys
-        for (key, desc) in &[("q", "Quit"), ("p/r", "Pause/Resume"), ("^P", "Palette")] {
+        for (key, desc) in global_keys {
             ui.text(*key).fg(accent);
             ui.text(format!(" {}  ", desc)).fg(dim);
         }

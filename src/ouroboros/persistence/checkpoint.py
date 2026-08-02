@@ -18,6 +18,7 @@ import json
 import os
 from pathlib import Path
 import re
+import secrets
 from typing import Any
 
 from ouroboros.core.errors import PersistenceError
@@ -257,6 +258,12 @@ class CheckpointStore:
         for rollback support (max 3 levels per NFR11).
 
         Uses file locking to prevent race conditions during concurrent access.
+        The new checkpoint is serialized to a staged sibling file, flushed,
+        and fsynced — so any process-visible write failure surfaces before a
+        committed file moves (directory entries are not fsynced; power-loss
+        ordering is out of scope) — and the rotate-and-publish step is
+        reversible: a failed save leaves the current checkpoint and the
+        rollback chain exactly as they were (#1830).
 
         Args:
             checkpoint: Checkpoint data to save.
@@ -269,12 +276,24 @@ class CheckpointStore:
 
             # Use file locking to prevent race conditions
             with _file_lock(checkpoint_path, exclusive=True):
-                # Rotate existing checkpoints for rollback support
-                self._rotate_checkpoints(checkpoint.seed_id)
-
-                # Write new checkpoint
-                with checkpoint_path.open("w") as f:
-                    json.dump(checkpoint.to_dict(), f, indent=2)
+                # The staged name is constant-length and seed-free so it can
+                # never breach the 255-byte filename budget that the seed
+                # sanitizer enforces for the real checkpoint files.
+                staged = checkpoint_path.with_name(f".tmp-{secrets.token_hex(8)}.json")
+                try:
+                    with staged.open("w") as f:
+                        json.dump(checkpoint.to_dict(), f, indent=2)
+                        f.flush()
+                        os.fsync(f.fileno())
+                    self._publish_staged_checkpoint(checkpoint.seed_id, staged, checkpoint_path)
+                finally:
+                    # A successful publish consumed the staged file via
+                    # rename; anything still here is failure debris. The
+                    # cleanup itself must never fail a committed save.
+                    try:
+                        staged.unlink(missing_ok=True)
+                    except OSError:
+                        pass
 
             return Result.ok(None)
         except Exception as e:
@@ -285,6 +304,82 @@ class CheckpointStore:
                     details={"seed_id": checkpoint.seed_id, "phase": checkpoint.phase},
                 )
             )
+
+    def _publish_staged_checkpoint(self, seed_id: str, staged: Path, destination: Path) -> None:
+        """Rotate history and promote the staged file as one reversible step.
+
+        The oldest checkpoint is retired aside rather than deleted and every
+        shift is recorded, so a failure while promoting the staged file
+        undoes the rotation and restores the exact pre-save chain. All moves
+        are same-directory renames.
+        """
+        self._compact_checkpoint_levels(seed_id)
+        oldest = self._get_checkpoint_path(seed_id, self.MAX_ROLLBACK_DEPTH)
+        retired: Path | None = None
+        if oldest.exists():
+            retired = oldest.with_name(f".retire-{secrets.token_hex(8)}.json")
+            os.replace(oldest, retired)
+        shifted: list[tuple[Path, Path]] = []
+        try:
+            for level in range(self.MAX_ROLLBACK_DEPTH - 1, -1, -1):
+                source = self._get_checkpoint_path(seed_id, level)
+                if source.exists():
+                    target = self._get_checkpoint_path(seed_id, level + 1)
+                    os.replace(source, target)
+                    shifted.append((source, target))
+            os.replace(staged, destination)
+        except Exception:
+            # Undo in reverse order; a rename that fails mid-undo aborts the
+            # walk but destroys nothing — every checkpoint still exists at
+            # some level or in the retired file, and load()'s rollback walk
+            # finds the levels.
+            undo_complete = True
+            for source, target in reversed(shifted):
+                try:
+                    os.replace(target, source)
+                except OSError:
+                    undo_complete = False
+                    break
+            # The retired checkpoint may be restored only into a provably
+            # vacated oldest slot. After a partial undo that slot can still
+            # hold an unshifted generation, and restoring over it would
+            # destroy that generation — the retired file then stays on disk
+            # as recoverable debris instead.
+            if retired is not None and retired.exists() and undo_complete and not oldest.exists():
+                try:
+                    os.replace(retired, oldest)
+                except OSError:
+                    pass
+            raise
+        if retired is not None:
+            try:
+                retired.unlink(missing_ok=True)
+            except OSError:
+                # Promotion is the commit point; cleanup debris after a
+                # committed save is preferable to reporting failure and
+                # inviting a retry of a transaction that already happened.
+                pass
+
+    def _compact_checkpoint_levels(self, seed_id: str) -> None:
+        """Slide existing generations down to fill holes in the chain.
+
+        A partially undone save can leave the chain sparse. Rotating a
+        sparse chain would retire the oldest generation while an empty slot
+        remains below it — silently shrinking the rollback window — so every
+        save first compacts the chain. Moves only fill previously empty
+        slots, never overwrite, so a failure here cannot lose a generation.
+        """
+        occupied = [
+            level
+            for level in range(self.MAX_ROLLBACK_DEPTH + 1)
+            if self._get_checkpoint_path(seed_id, level).exists()
+        ]
+        for index, level in enumerate(occupied):
+            if index != level:
+                os.replace(
+                    self._get_checkpoint_path(seed_id, level),
+                    self._get_checkpoint_path(seed_id, index),
+                )
 
     def load(self, seed_id: str) -> Result[CheckpointData, PersistenceError]:
         """Load latest valid checkpoint with automatic rollback on corruption.

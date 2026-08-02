@@ -130,8 +130,23 @@ View evolutionary lineage across generations when using evolutionary loops (`ooo
 | `s` | Session Selector |
 | `e` | Lineage view |
 | `q` | Quit the TUI |
-| `r` | Resume execution |
-| `p` | Pause execution |
+| `p` | Pause execution — only when an execution owner is connected (see below) |
+| `r` | Resume execution — only when an execution owner is connected (see below) |
+
+> **Note**: `ouroboros tui monitor` attaches to the event store as an observer
+> and does not own the running execution, so `p` and `r` are hidden from the
+> footer and do nothing there. This applies to both backends — the `slt` backend
+> offers them only in `--mock` demo mode, where it owns the simulation it is
+> pausing. Use `ouroboros cancel execution` to stop a run.
+>
+> The bindings appear only when an embedding caller connects an execution owner
+> via `OuroborosTUI.set_pause_callback()` / `set_resume_callback()`. Even then,
+> the displayed lifecycle status changes only after the execution control path
+> persists an acknowledged lifecycle event — `orchestrator.session.paused` for a
+> pause, and progress carrying `runtime_status: running` for a resume. A request
+> that is unavailable or fails is reported as a warning/error and leaves the
+> status unchanged. Both backends project that same acknowledgement, so a paused
+> display recovers on its own once the execution really resumes.
 
 ### Navigation
 
@@ -180,7 +195,12 @@ Key message types:
 
 **AC tree doesn't update**
 - The TUI polls every 0.5s; brief delays are expected
-- Press `r` to resume execution if paused
+- If the run is paused, resume it from the process that owns the execution;
+  `ouroboros tui monitor` cannot resume a run
+
+**`p` / `r` do nothing**
+- Expected in `ouroboros tui monitor` — it does not own the execution, so the
+  bindings are hidden. Use `ouroboros cancel execution` to stop a run.
 
 **Display issues**
 - Ensure your terminal supports 256 colors and Unicode

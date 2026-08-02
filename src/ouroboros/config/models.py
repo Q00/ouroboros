@@ -887,8 +887,8 @@ def resolve_event_store_path(config_path: Path | None = None) -> Path:
         return config_path.parent / "ouroboros.db"
 
     try:
-        loaded = yaml.safe_load(config_path.read_text()) or {}
-    except (OSError, yaml.YAMLError):
+        loaded = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    except (OSError, UnicodeDecodeError, yaml.YAMLError):
         raise ValueError("invalid EventStore configuration") from None
     if not isinstance(loaded, Mapping):
         raise ValueError("invalid EventStore configuration")

@@ -500,7 +500,7 @@ def create_default_config(
     # Create config.yaml
     default_config = get_default_config()
     config_dict = _model_to_yaml_dict(default_config)
-    with config_path.open("w") as f:
+    with config_path.open("w", encoding="utf-8") as f:
         yaml.dump(
             config_dict,
             f,
@@ -512,7 +512,7 @@ def create_default_config(
     # Create credentials.yaml with secure permissions
     default_credentials = get_default_credentials()
     credentials_dict = _model_to_yaml_dict(default_credentials)
-    with credentials_path.open("w") as f:
+    with credentials_path.open("w", encoding="utf-8") as f:
         yaml.dump(
             credentials_dict,
             f,
@@ -553,9 +553,9 @@ def load_config(config_path: Path | None = None) -> OuroborosConfig:
         )
 
     try:
-        with config_path.open() as f:
+        with config_path.open(encoding="utf-8") as f:
             config_dict = yaml.safe_load(f)
-    except yaml.YAMLError as e:
+    except (UnicodeDecodeError, yaml.YAMLError) as e:
         raise ConfigError(
             f"Failed to parse configuration file: {e}",
             config_file=str(config_path),
@@ -626,9 +626,9 @@ def load_credentials(credentials_path: Path | None = None) -> CredentialsConfig:
         pass
 
     try:
-        with credentials_path.open() as f:
+        with credentials_path.open(encoding="utf-8") as f:
             credentials_dict = yaml.safe_load(f)
-    except yaml.YAMLError as e:
+    except (UnicodeDecodeError, yaml.YAMLError) as e:
         raise ConfigError(
             f"Failed to parse credentials file: {e}",
             config_file=str(credentials_path),
@@ -1126,9 +1126,9 @@ def get_usage_limit_pause_seconds() -> int:
         return int(_DEFAULT_USAGE_LIMIT_PAUSE_HOURS * _SECONDS_PER_HOUR)
 
     try:
-        with config_path.open() as f:
+        with config_path.open(encoding="utf-8") as f:
             config_dict = yaml.safe_load(f)
-    except yaml.YAMLError as e:
+    except (UnicodeDecodeError, yaml.YAMLError) as e:
         raise ConfigError(
             f"Failed to parse configuration file: {e}",
             config_file=str(config_path),
@@ -1197,9 +1197,9 @@ def get_max_parallel_workers() -> int:
         return _DEFAULT_MAX_PARALLEL_WORKERS
 
     try:
-        with config_path.open() as f:
+        with config_path.open(encoding="utf-8") as f:
             config_dict = yaml.safe_load(f)
-    except yaml.YAMLError as e:
+    except (UnicodeDecodeError, yaml.YAMLError) as e:
         raise ConfigError(
             f"Failed to parse configuration file: {e}",
             config_file=str(config_path),

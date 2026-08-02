@@ -298,8 +298,17 @@ class RalphLoopRunner:
                 stop_reason = "qa passed"
                 break
             if action in _TERMINAL_SUCCESS_ACTIONS:
-                status = "completed"
-                stop_reason = action
+                # evolve_step runs post-execution QA for `converged` too and
+                # publishes the pre-QA action unchanged, so a converged step can
+                # arrive carrying an authoritative QA failure. Guarding only the
+                # `qa passed` branch above would leave this exit reporting a
+                # terminal success for the very payload that branch rejected.
+                if _qa_authoritative_failure(final_result.meta, config.skip_qa):
+                    status = "failed"
+                    stop_reason = "qa_failed"
+                else:
+                    status = "completed"
+                    stop_reason = action
                 break
             if action in _TERMINAL_FAILURE_ACTIONS or final_result.is_error:
                 status = "failed"
@@ -319,7 +328,16 @@ class RalphLoopRunner:
             seed_content = None
         else:
             if final_result is not None:
-                status = "completed"
+                # Exhausting the budget without ever obtaining a QA pass is not a
+                # success. `max_generations reached` is already a recoverable
+                # BLOCKED stop_reason downstream (`auto/pipeline.py`), so only the
+                # status changes: the run stays retryable, it just stops claiming
+                # it succeeded.
+                status = (
+                    "failed"
+                    if _qa_authoritative_failure(final_result.meta, config.skip_qa)
+                    else "completed"
+                )
                 stop_reason = "max_generations reached"
 
         if final_result is None:
@@ -350,9 +368,79 @@ def _extract_qa_verdict(meta: dict[str, Any]) -> str | None:
     return str(verdict).lower() if verdict is not None else None
 
 
+def _numeric(value: Any) -> float | None:
+    """Return ``value`` as a float, rejecting bools (a subclass of int)."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
+
+
+def _qa_result_contradicts_pass(qa: dict[str, Any]) -> bool:
+    """Return True when the QA gate's own numbers refute a ``pass`` verdict.
+
+    ``verdict`` is kept verbatim from the model whenever it is one of the valid
+    tokens, while ``passed``/``score``/``pass_threshold`` are computed by the QA
+    gate itself. Only the computed fields are authoritative here.
+    """
+    if qa.get("passed") is False:
+        return True
+    score = _numeric(qa.get("score"))
+    threshold = _numeric(qa.get("pass_threshold"))
+    if score is None or threshold is None:
+        return False
+    # A NaN score compares False here, which lands on the fail-closed side.
+    return not score >= threshold
+
+
+def _qa_was_attempted(meta: dict[str, Any], skip_qa: bool) -> bool:
+    """Return True when the producer ran post-execution QA for this generation.
+
+    New producers publish the decision explicitly, keeping this consumer
+    independent of the producer's evolving action vocabulary. The derived
+    branch is compatibility-only for payloads written before ``qa_attempted``
+    existed.
+    """
+    if skip_qa:
+        return False
+    attempted = meta.get("qa_attempted")
+    if isinstance(attempted, bool):
+        return attempted
+    return meta.get("executed") is True and meta.get("action") in _TERMINAL_SUCCESS_ACTIONS | {
+        "continue"
+    }
+
+
+def _qa_authoritative_failure(meta: dict[str, Any], skip_qa: bool = False) -> bool:
+    """Return True when this generation carries no authoritative QA pass.
+
+    Deliberately not `not _qa_passed(...)`: a payload from a run where QA never
+    ran keeps its legacy terminal behaviour. But absence of the block is *not*
+    evidence of success when QA did run — ``evolution_handlers`` drops the whole
+    ``qa`` key whenever ``QAHandler`` errors, which is exactly what a truncated or
+    malformed QA completion produces. Keying only on a parsed failure would make a
+    garbled QA response safer for the run than an honest failing one.
+    """
+    qa = meta.get("qa")
+    if not isinstance(qa, dict):
+        return _qa_was_attempted(meta, skip_qa)
+    return _qa_result_contradicts_pass(qa)
+
+
 def _qa_passed(meta: dict[str, Any]) -> bool:
-    verdict = _extract_qa_verdict(meta)
-    return verdict in {"pass", "passed"}
+    """Return True only when the QA verdict *and* its own numbers agree on a pass.
+
+    Stopping the loop here reports the run as ``completed``, which downstream
+    (``auto/pipeline.py``) reads as a terminal success, so a model-authored
+    ``verdict`` string must never outrank the gate's computed result. Every
+    other reader of this payload already gates on ``passed`` (``auto/adapters.py``,
+    ``auto/pipeline.py``); this brings the loop's stop decision in line.
+    """
+    qa = meta.get("qa")
+    if not isinstance(qa, dict):
+        return False
+    if _extract_qa_verdict(meta) not in {"pass", "passed"}:
+        return False
+    return not _qa_result_contradicts_pass(qa)
 
 
 def _extract_findings_hash(meta: dict[str, Any]) -> str | None:

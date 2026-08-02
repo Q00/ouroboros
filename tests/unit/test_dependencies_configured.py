@@ -324,3 +324,40 @@ def test_build_excludes_generated_artifacts():
 
     missing = required_excludes - excludes
     assert not missing, f"Missing hatch build excludes for generated artifacts: {missing}"
+
+
+def test_shipped_mcp_launcher_requests_only_the_servers_own_extra() -> None:
+    """The launcher must request ``[mcp]`` and nothing else.
+
+    The launcher used to request ``[mcp,claude]``, which is an *unsatisfiable*
+    install rather than a degraded one — ``mcp==2.0.0`` against the SDK's
+    transitive ``mcp<2.0.0`` — so the server never starts at all
+    (Q00/ouroboros#1839).
+
+    This asserts the extras list rather than trying to prove the extras
+    co-resolve. That earlier phrasing could not decide the case it was written
+    for: the conflict is transitive (``claude`` lists ``claude-agent-sdk``, and
+    the ``mcp`` pin lives one level down), so comparing direct requirement names
+    finds ``mcp`` and ``claude-agent-sdk``, sees two different names, and passes
+    the exact combination it claims to reject. Proving co-resolution statically
+    needs the whole dependency graph; asserting the one-line literal that gates
+    whether the server boots needs nothing and cannot silently pass.
+
+    What this gives up: a genuinely new, compatible extra added to the launcher
+    fails here and has to be added deliberately. For the file that decides
+    whether the MCP server starts, that is the intended cost.
+    """
+    import re
+
+    root = Path(__file__).parent.parent.parent
+    entry = json.loads((root / ".claude-plugin" / ".mcp.json").read_text(encoding="utf-8"))
+    args = entry["mcpServers"]["ouroboros"]["args"]
+    spec = args[args.index("--from") + 1]
+    requested = re.findall(r"\[([^\]]*)\]", spec)
+    extras = [e.strip() for e in (requested[0].split(",") if requested else [])]
+
+    assert extras == ["mcp"], (
+        f"shipped MCP launcher requests extras {extras!r}; it must request only "
+        "['mcp']. Adding 'claude' here reintroduces the unsatisfiable "
+        "mcp==2.0.0 vs claude-agent-sdk(mcp<2.0.0) install from #1839."
+    )

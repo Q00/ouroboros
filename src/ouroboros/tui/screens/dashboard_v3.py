@@ -1096,6 +1096,16 @@ class DashboardScreenV3(Screen[None]):
     # Actions
     # ─────────────────────────────────────────────────────────────────────────
 
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        """Defer `p`/`r` availability to the app that owns the execution.
+
+        Screen bindings shadow app bindings, so the dashboard must apply the
+        same gate; otherwise `ouroboros tui monitor`, which owns no execution,
+        would keep advertising controls it cannot exercise. Delegating keeps one
+        source of truth instead of a second copy of the rule.
+        """
+        return self.app.check_action(action, parameters)
+
     def action_pause(self) -> None:
         if self._state and self._state.execution_id:
             self.post_message(PauseRequested(self._state.execution_id))

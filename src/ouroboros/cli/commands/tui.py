@@ -58,8 +58,16 @@ def monitor_command(
 
     Starts a terminal UI that shows a list of all sessions found in the
     database. You can then select a session to monitor in real-time.
+
+    The monitor attaches to the event store as an observer and does not own the
+    running execution, so pause/resume controls are not offered on either
+    backend. Use `ouroboros cancel execution` to stop a run.
     """
     resolved_db_path = db_path or _resolve_event_store_path_or_exit()
+    print_info(
+        "This monitor does not own the execution: pause/resume are not available here. "
+        "Use 'ouroboros cancel execution' to stop a run."
+    )
     if backend == "slt":
         _run_slt_backend(resolved_db_path)
         return
