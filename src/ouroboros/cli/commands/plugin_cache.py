@@ -62,7 +62,9 @@ def stage_url_cache_refresh(clone: Callable[[Path], str], clone_dest: Path) -> s
 
     try:
         git_sha = clone(staging)
-    except Exception:
+    except BaseException:
+        # BaseException so a user interrupt during the clone also drops the
+        # partial staging tree; the live cache is untouched either way.
         shutil.rmtree(staging, ignore_errors=True)
         raise
 

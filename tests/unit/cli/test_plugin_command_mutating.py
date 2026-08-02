@@ -2606,6 +2606,79 @@ def test_stage_url_cache_refresh_restores_backup_when_promote_fails(
     )
 
 
+def test_failed_restore_preserves_backup_for_manual_recovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Even when promotion AND restoration both fail, the old bytes survive.
+
+    The restore rename is the last automatic recovery step; when it also
+    fails, the renamed-aside backup directory is the sole remaining copy of
+    the last-known-good cache and must stay on disk for manual recovery.
+    """
+    from ouroboros.cli.commands.plugin_cache import stage_url_cache_refresh
+
+    cache_root = tmp_path / "cache"
+    dest = cache_root / "repo"
+    dest.mkdir(parents=True)
+    (dest / "good.txt").write_text("keep me")
+
+    real_rename = os.rename
+    calls = {"n": 0}
+
+    def double_fault(src, dst):
+        calls["n"] += 1
+        if calls["n"] == 2:  # staging → dest promotion
+            raise OSError(28, "No space left on device")
+        if calls["n"] == 3:  # backup → dest restoration
+            raise OSError(5, "Input/output error")
+        return real_rename(src, dst)
+
+    monkeypatch.setattr("ouroboros.cli.commands.plugin_cache.os.rename", double_fault)
+
+    def _clone(staging: Path) -> str:
+        staging.mkdir()
+        (staging / "new.txt").write_text("fresh clone")
+        return "cafef00d"
+
+    with pytest.raises(OSError):
+        stage_url_cache_refresh(_clone, dest)
+
+    assert calls["n"] == 3, "expected promotion and restoration to both be attempted"
+    backups = [entry for entry in cache_root.iterdir() if ".bak-" in entry.name]
+    assert len(backups) == 1, f"expected the backup to survive, found {backups}"
+    assert (backups[0] / "good.txt").read_text() == "keep me", (
+        "the last-known-good bytes were lost with no automatic copy remaining"
+    )
+    assert [entry for entry in cache_root.iterdir() if ".staging-" in entry.name] == [], (
+        "staging debris left behind"
+    )
+
+
+def test_interrupted_clone_drops_staging_and_keeps_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A user interrupt mid-clone cleans staging and leaves the cache alone."""
+    from ouroboros.cli.commands.plugin_cache import stage_url_cache_refresh
+
+    cache_root = tmp_path / "cache"
+    dest = cache_root / "repo"
+    dest.mkdir(parents=True)
+    (dest / "good.txt").write_text("keep me")
+
+    def _interrupted_clone(staging: Path) -> str:
+        staging.mkdir()
+        (staging / "partial.txt").write_text("half a clone")
+        raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        stage_url_cache_refresh(_interrupted_clone, dest)
+
+    assert (dest / "good.txt").read_text() == "keep me"
+    assert [entry for entry in cache_root.iterdir() if ".staging-" in entry.name] == [], (
+        "an interrupted clone left a partial staging tree"
+    )
+
+
 def test_trust_rejects_undeclared_scope(runner: CliRunner, tmp_path: Path) -> None:
     """`ooo plugin trust --scope <typo>` must refuse to persist a grant
     for a scope the manifest does not declare. Otherwise the command
