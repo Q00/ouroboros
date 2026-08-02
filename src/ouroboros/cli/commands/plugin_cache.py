@@ -71,8 +71,13 @@ def stage_url_cache_refresh(clone: Callable[[Path], str], clone_dest: Path) -> s
     backup_used = False
     try:
         if clone_dest.exists():
-            os.rename(clone_dest, backup)
+            # Ownership is recorded before the rename: an interrupt landing
+            # between the rename's side effect and this flag would otherwise
+            # skip restoration and strand the cache under the backup name.
+            # The handler's ``backup.exists()`` guard keeps the early flag
+            # harmless when the rename itself never happened.
             backup_used = True
+            os.rename(clone_dest, backup)
         os.rename(staging, clone_dest)
     except BaseException:
         # The live cache may already be parked at ``backup`` here. User

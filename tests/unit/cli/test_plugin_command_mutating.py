@@ -2713,6 +2713,49 @@ def test_interrupted_promotion_restores_cache_and_drops_staging(
     assert sorted(entry.name for entry in cache_root.iterdir()) == ["repo"]
 
 
+def test_interrupt_after_backup_rename_still_restores_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An interrupt landing right after the backup rename must not strand the cache.
+
+    Ownership of the parked backup has to be recorded before the rename's
+    side effect exists; otherwise an interrupt in that window skips the
+    restore branch and the public cache path is left absent.
+    """
+    from ouroboros.cli.commands.plugin_cache import stage_url_cache_refresh
+
+    cache_root = tmp_path / "cache"
+    dest = cache_root / "repo"
+    dest.mkdir(parents=True)
+    (dest / "good.txt").write_text("keep me")
+
+    real_rename = os.rename
+    calls = {"n": 0}
+
+    def rename_then_interrupt(src, dst):
+        calls["n"] += 1
+        if calls["n"] == 1:  # dest → backup: perform the side effect, then interrupt
+            real_rename(src, dst)
+            raise KeyboardInterrupt
+        return real_rename(src, dst)
+
+    monkeypatch.setattr("ouroboros.cli.commands.plugin_cache.os.rename", rename_then_interrupt)
+
+    def _clone(staging: Path) -> str:
+        staging.mkdir()
+        (staging / "new.txt").write_text("fresh clone")
+        return "cafef00d"
+
+    with pytest.raises(KeyboardInterrupt):
+        stage_url_cache_refresh(_clone, dest)
+
+    assert dest.exists() and (dest / "good.txt").read_text() == "keep me", (
+        "the cache was stranded under .bak-* instead of being restored"
+    )
+    litter = [entry.name for entry in cache_root.iterdir() if entry.name != "repo"]
+    assert litter == [], f"interrupt left litter behind: {litter}"
+
+
 def test_trust_rejects_undeclared_scope(runner: CliRunner, tmp_path: Path) -> None:
     """`ooo plugin trust --scope <typo>` must refuse to persist a grant
     for a scope the manifest does not declare. Otherwise the command
