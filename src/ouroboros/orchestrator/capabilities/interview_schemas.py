@@ -1285,7 +1285,12 @@ def _interview_question_advisory_fanout_metadata() -> dict[str, Any]:
         },
         "response_payload_refs": {
             "plugin": "parent_runtime.ouroboros_dispatch.children",
-            "result_correlation_key": "lane_id",
+            # The dotted path, because that is what re-entry compares against.
+            # This read ``lane_id`` while the producer stamped and the registry
+            # registered ``context.lane_id``, so a host following the advertised
+            # contract was refused with ``correlation_mismatch`` — the sibling
+            # panel advertises ``context.persona`` for the same reason.
+            "result_correlation_key": "context.lane_id",
             "requires_prose_parsing": False,
             "synthesis_owner": "parent_session",
         },

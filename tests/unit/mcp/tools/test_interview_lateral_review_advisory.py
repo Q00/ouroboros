@@ -1354,3 +1354,63 @@ def test_every_advisory_key_the_bridge_lifts_is_one_the_producer_stamps() -> Non
 
     missing = [key for key in advisory_lifted if key not in meta]
     assert not missing, f"bridge lifts keys the producer never stamps: {missing}"
+
+
+async def test_the_advertised_correlation_key_is_the_one_that_redeems(tmp_path) -> None:
+    """Three producers of one protocol, compared against each other.
+
+    The capability advertises a correlation key, the response meta stamps one,
+    and the registry registers one. They are written in three places and were
+    checked in three places, so the capability could say ``lane_id`` while the
+    other two said ``context.lane_id`` and every suite stayed green — a host
+    that followed the published contract was refused with
+    ``correlation_mismatch``.
+
+    So this compares them rather than pinning them: the value comes from the
+    real capability blob, the meta from the real producer, the record from the
+    real registry, and the submission is keyed with what the capability
+    advertises. Nothing here is written down, which is the point — a fourth
+    producer that disagrees fails here instead of at a host.
+    """
+    from ouroboros.mcp.tools.fanout import FanoutRegistry, submit_fanout_results
+    from ouroboros.orchestrator.capabilities import ouroboros_tool_capability_metadata
+
+    capability = ouroboros_tool_capability_metadata("ouroboros_interview")
+    advertised = capability["orchestration"]["question_advisory_fanout"]["response_payload_refs"][
+        "result_correlation_key"
+    ]
+
+    registry = FanoutRegistry(tmp_path)
+    meta: dict[str, object] = {}
+    _attach_question_assist_requests(
+        meta,
+        session_id="sess-agree",
+        question="What are the acceptance criteria?",
+        phase="answer",
+        score=_score(0.35),
+        dispatch_mode=SubagentDispatchMode.PLUGIN_PASSIVE,
+        runtime_backend="opencode",
+        opencode_mode="plugin",
+        fanout_registry=registry,
+    )
+
+    stamped = meta["question_advisory_result_correlation_key"]
+    fanout_id = str(meta["question_advisory_fanout_id"])
+    record = registry.load(fanout_id)
+    assert record is not None
+
+    assert advertised == stamped, "the capability advertises a key the response does not stamp"
+    assert advertised == record.correlation_key, (
+        "the capability advertises a key the registry did not register"
+    )
+
+    # And the whole point of agreeing: a host that follows the advertisement
+    # redeems. Keyed with `advertised`, never with a literal.
+    result = submit_fanout_results(
+        registry,
+        fanout_id=fanout_id,
+        session_id="sess-agree",
+        correlation_key=str(advertised),
+        results=[{"key": lane, "undispatched": True} for lane in record.expected_keys],
+    )
+    assert result["status"] == "complete", result
