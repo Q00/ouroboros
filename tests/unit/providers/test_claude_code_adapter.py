@@ -2623,6 +2623,11 @@ class TestCLIFallbackWhenSDKAbsent:
         # The CLI honors an empty allow-list literally, unlike the SDK.
         assert argv[argv.index("--allowedTools") + 1] == ""
         assert "--strict-mcp-config" in argv
+        # `--strict-mcp-config` closes MCP discovery only. The parent's project
+        # and user instructions, hooks, agents and plugins arrive through
+        # setting sources, which the SDK path empties too.
+        assert "--setting-sources" in argv
+        assert argv[argv.index("--setting-sources") + 1] == ""
 
     def test_a_permissive_caller_is_not_sealed_by_the_fallback(self) -> None:
         """The other half of the pin: no envelope means no envelope flags.
@@ -2650,6 +2655,86 @@ class TestCLIFallbackWhenSDKAbsent:
         argv = list(spawn.await_args.args)
         assert "--allowedTools" not in argv
         assert "--strict-mcp-config" not in argv
+        assert "--setting-sources" not in argv
+
+    def test_the_turn_budget_is_forwarded_to_the_cli(self) -> None:
+        """`--max-turns` is absent from `claude --help` but is a real flag.
+
+        The CLI rejects genuinely unknown options (`error: unknown option`),
+        and accepts this one — so an SDK-absent run that omitted it would run
+        past the configured turn and cost boundary. Semantic evaluation asks
+        for 20 turns with tools enabled, which is where that bites.
+        """
+        payload = b'{"is_error":false,"result":"ok","stop_reason":"end_turn"}'
+        # Constructor value, then a per-request override of the same adapter.
+        for ctor_turns, request_turns, expected in ((20, None, "20"), (20, 3, "3"), (1, None, "1")):
+            adapter = self._adapter(max_turns=ctor_turns)
+            with (
+                patch.dict("sys.modules", {"claude_agent_sdk": None}),
+                patch(
+                    "asyncio.create_subprocess_exec",
+                    new=AsyncMock(return_value=self._proc(payload)),
+                ) as spawn,
+            ):
+                assert asyncio.run(
+                    adapter.complete(
+                        [Message(role=MessageRole.USER, content="ping")],
+                        CompletionConfig(model="claude-haiku-4-5", max_turns=request_turns),
+                    )
+                ).is_ok
+            argv = list(spawn.await_args.args)
+            assert argv[argv.index("--max-turns") + 1] == expected, (ctor_turns, request_turns)
+
+    def test_a_transient_cli_failure_is_retried_like_a_transient_sdk_failure(self) -> None:
+        """Rate limits belong to the service, not to how we reached it.
+
+        The SDK transport gets `_MAX_RETRIES` for overload/rate-limit/bootstrap
+        errors. Selecting the fallback must not silently convert those same
+        errors into permanent failures.
+        """
+        adapter = self._adapter()
+        overloaded = b'{"is_error":true,"result":"API error: 529 overloaded_error"}'
+        good = b'{"is_error":false,"result":"recovered","stop_reason":"end_turn"}'
+        with (
+            patch.dict("sys.modules", {"claude_agent_sdk": None}),
+            patch("asyncio.sleep", new=AsyncMock()),
+            patch(
+                "asyncio.create_subprocess_exec",
+                new=AsyncMock(side_effect=[self._proc(overloaded, returncode=1), self._proc(good)]),
+            ) as spawn,
+        ):
+            result = asyncio.run(
+                adapter.complete(
+                    [Message(role=MessageRole.USER, content="ping")],
+                    CompletionConfig(model="claude-haiku-4-5"),
+                )
+            )
+
+        assert result.is_ok, result
+        assert result.value.content == "recovered"
+        assert spawn.await_count == 2
+
+    def test_a_permanent_cli_failure_is_not_retried(self) -> None:
+        """The other half: a non-transient error still fails on the first try."""
+        adapter = self._adapter()
+        bad_request = b'{"is_error":true,"result":"invalid model name"}'
+        with (
+            patch.dict("sys.modules", {"claude_agent_sdk": None}),
+            patch("asyncio.sleep", new=AsyncMock()),
+            patch(
+                "asyncio.create_subprocess_exec",
+                new=AsyncMock(return_value=self._proc(bad_request, returncode=1)),
+            ) as spawn,
+        ):
+            result = asyncio.run(
+                adapter.complete(
+                    [Message(role=MessageRole.USER, content="ping")],
+                    CompletionConfig(model="claude-haiku-4-5"),
+                )
+            )
+
+        assert result.is_err
+        assert spawn.await_count == 1
 
     def test_a_model_id_is_normalized_the_same_way_on_both_transports(self) -> None:
         """`anthropic/...` is valid config the SDK strips; raw it fails the CLI."""

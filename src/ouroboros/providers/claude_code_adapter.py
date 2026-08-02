@@ -30,7 +30,7 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from copy import deepcopy
 from dataclasses import replace
-from functools import lru_cache
+from functools import lru_cache, partial
 import inspect
 import json
 import os
@@ -480,7 +480,7 @@ class ClaudeCodeAdapter:
             prompt_preview=prompt[:100],
             message_count=len(messages),
             has_system_prompt=system_prompt is not None,
-            max_turns=config.max_turns if config.max_turns is not None else self._max_turns,
+            max_turns=self._effective_max_turns(config),
             model=config.model,
             cwd=str(self._cwd) if self._cwd else None,
             cli_path=str(self._cli_path) if self._cli_path else None,
@@ -492,7 +492,15 @@ class ClaudeCodeAdapter:
         # request -- notably the JSON-enforcement retries -- has to reach the
         # same one: routing a retry back through the SDK in a process that has
         # no SDK turns a recoverable prose response into an ImportError.
-        transport = self._complete_with_transient_retry if sdk_available else self._complete_via_cli
+        #
+        # Both transports sit under the same transient-retry loop, so which one
+        # is available decides how the request travels, never how many transient
+        # failures it survives.
+        transport: _Transport = (
+            self._complete_with_transient_retry
+            if sdk_available
+            else partial(self._complete_with_transient_retry, single_attempt=self._complete_via_cli)
+        )
         result = await transport(prompt, config, system_prompt)
 
         # JSON enforcement layer: if response_format requires JSON,
@@ -510,6 +518,15 @@ class ClaudeCodeAdapter:
     _CLI_PERMISSION_MODES = frozenset(
         {"acceptEdits", "auto", "bypassPermissions", "manual", "dontAsk", "plan"}
     )
+
+    def _effective_max_turns(self, config: CompletionConfig) -> int:
+        """The turn budget this request runs under, per-request override first.
+
+        Both transports have to read one copy: semantic evaluation asks for 20
+        turns with tools enabled, so a transport that silently dropped the limit
+        would let an SDK-absent run past the configured turn and cost boundary.
+        """
+        return config.max_turns if config.max_turns is not None else self._max_turns
 
     @staticmethod
     def _normalize_model(model: str | None) -> str | None:
@@ -567,8 +584,9 @@ class ClaudeCodeAdapter:
         ``strict_mcp_config=True`` specifically so the spawned CLI cannot run
         tools or rediscover ouroboros' own MCP server and recurse; a transport
         that dropped those would be more dangerous than the failure it replaces.
-        ``max_turns`` has no CLI flag, but it is moot under an empty tool
-        catalog -- with nothing to call, print mode returns on turn one.
+        ``--max-turns`` is absent from ``claude --help`` but is a real flag (the
+        CLI rejects genuinely unknown options), so the turn budget is forwarded
+        rather than assumed moot.
         """
         import asyncio
         import json as _json
@@ -591,8 +609,16 @@ class ClaudeCodeAdapter:
             # ``_execute_single_request`` -- the CLI honors ``--allowedTools ""``
             # literally, so the empty envelope seals itself with no enumerate.
             argv += ["--allowedTools", " ".join(self._allowed_tools)]
+        argv += ["--max-turns", str(self._effective_max_turns(config))]
         if self._strict_mcp_config:
-            argv.append("--strict-mcp-config")
+            # ``--strict-mcp-config`` blocks MCP discovery and nothing else, but
+            # the isolation this flag stands for is wider: the SDK path also
+            # empties setting_sources/skills/agents/plugins/hooks so a nested
+            # interview cannot inherit the parent's project instructions. On the
+            # CLI those all arrive through setting sources (``--agents`` and
+            # ``--plugin-dir`` are opt-in and never passed), so declining the
+            # sources closes them at the root rather than one flag at a time.
+            argv += ["--strict-mcp-config", "--setting-sources", ""]
 
         timeout = self._timeout or _CLI_DEFAULT_TIMEOUT_SECONDS
         proc: asyncio.subprocess.Process | None = None
@@ -767,12 +793,20 @@ class ClaudeCodeAdapter:
         prompt: str,
         config: CompletionConfig,
         system_prompt: str | None,
+        single_attempt: _Transport | None = None,
     ) -> Result[CompletionResponse, ProviderError]:
         """Inner retry loop for transient API errors (rate limits, timeouts, etc.).
 
         This handles infrastructure-level failures only. JSON format
         enforcement is handled by the caller.
+
+        ``single_attempt`` is the one-shot transport to retry around, defaulting
+        to the SDK request. Rate limits, overloads and CLI bootstrap stumbles are
+        properties of the service, not of how we reached it, so the fallback
+        transport is retried on the same terms rather than failing permanently
+        the first time one of them appears.
         """
+        run_once = single_attempt or self._execute_single_request_positional
         last_error: ProviderError | None = None
         effective_system_prompt = system_prompt
         phantom_recovery_used = False
@@ -780,14 +814,10 @@ class ClaudeCodeAdapter:
         for attempt in range(_MAX_RETRIES):
             try:
                 if self._timeout is None:
-                    result = await self._execute_single_request(
-                        prompt, config, system_prompt=effective_system_prompt
-                    )
+                    result = await run_once(prompt, config, effective_system_prompt)
                 else:
                     async with asyncio.timeout(self._timeout):
-                        result = await self._execute_single_request(
-                            prompt, config, system_prompt=effective_system_prompt
-                        )
+                        result = await run_once(prompt, config, effective_system_prompt)
 
                 if result.is_ok:
                     if attempt > 0:
@@ -904,6 +934,18 @@ class ClaudeCodeAdapter:
         )
         return Result.err(last_error or ProviderError(message="Max retries exceeded"))
 
+    async def _execute_single_request_positional(
+        self,
+        prompt: str,
+        config: CompletionConfig,
+        system_prompt: str | None,
+    ) -> Result[CompletionResponse, ProviderError]:
+        """``_execute_single_request`` shaped like every other one-shot transport.
+
+        Exists only so the retry loop can hold either transport in one variable.
+        """
+        return await self._execute_single_request(prompt, config, system_prompt=system_prompt)
+
     async def _execute_single_request(
         self,
         prompt: str,
@@ -1009,7 +1051,7 @@ class ClaudeCodeAdapter:
 
         options_kwargs: dict = {
             "disallowed_tools": disallowed,
-            "max_turns": config.max_turns if config.max_turns is not None else self._max_turns,
+            "max_turns": self._effective_max_turns(config),
             # Allow MCP and other ~/.claude/ settings to be inherited
             "permission_mode": self._permission_mode,
             "cwd": self._cwd,
