@@ -727,8 +727,8 @@ def _attach_question_assist_requests(
     lane ids as expected keys, matching the stamped
     ``question_advisory_result_correlation_key`` — and its ``fanout_id`` is
     stamped as ``question_advisory_fanout_id`` so a later
-    ``ouroboros_submit_fanout_results`` submission can be matched. With no
-    registry the emitted meta is byte-identical to the pre-registry contract.
+    ``ouroboros_submit_fanout_results`` submission can be matched. A registry
+    adds that id; the correlation key is stamped without one, on all three.
     """
     code_request = _build_code_investigation_request(
         session_id=session_id,

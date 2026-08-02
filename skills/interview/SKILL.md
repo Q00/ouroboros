@@ -239,7 +239,9 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
      persona, or `code_facts`).
    Every result must be either `{ "key": <lane>, "content": ... }` or exactly
    `{ "key": <lane>, "undispatched": true }` — the literal `true`, no `content`
-   beside it, and never an entry carrying neither. Anything else comes back as
+   beside it, and never an entry carrying neither. One entry per lane: a lane
+   reported twice is two statements about it, and nothing here picks between
+   them by list position. Anything else comes back as
    `status="invalid_result_entry"` with `invalid_keys`, listing every bad entry
    at once so one resubmission fixes them all.
 

@@ -687,7 +687,9 @@ def submit_fanout_results(
     spawn through one list, whatever became of it. Exactly that shape, though:
     an ``undispatched`` that is not the literal ``true``, or one arriving with
     ``content``, returns ``status="invalid_result_entry"`` rather than being
-    read for what it might have meant.
+    read for what it might have meant. So does a lane reported twice: two
+    entries for one lane are two statements about it, and choosing between
+    them by list position is not a reading this can defend.
     """
     record = registry.load(fanout_id)
     if record is None:
@@ -740,6 +742,20 @@ def submit_fanout_results(
         if key is None:
             invalid.append(f"<results[{index}]>")
             continue
+        # One lane, one entry. Two measurements for one lane used to be a plain
+        # dict assignment, so the later entry won and the earlier one vanished
+        # unreported — list order chose the number the interview saw. Answered
+        # *and* declared undispatched resolved in content's favour whichever
+        # order it arrived in, which was deterministic but undeclared: a
+        # precedence rule no contract states, applied to a host that has told
+        # us two opposite things about one lane.
+        #
+        # Neither is a report this can rank. Refused rather than ranked, with
+        # the malformed entries below, so the host is told which lane it
+        # double-reported instead of being given a number chosen for it.
+        if str(key) in declared or str(key) in provided:
+            invalid.append(str(key))
+            continue
         # A child that never ran is declared in the same list its siblings
         # report through: one entry per lane the host was asked to spawn,
         # carrying either what it said or the fact that it could not be asked.
@@ -777,13 +793,21 @@ def submit_fanout_results(
             "kind": record.kind,
             "error": (
                 'each result must be either {"key": <lane>, "content": ...} '
-                'or exactly {"key": <lane>, "undispatched": true}.'
+                'or exactly {"key": <lane>, "undispatched": true}, '
+                "and each lane may appear once."
             ),
             "invalid_keys": invalid,
         }
 
-    # A declaration only counts for a lane this fan-out actually asked for, and
-    # never for one whose output arrived anyway.
+    # A declaration only counts for a lane this fan-out actually asked for.
+    #
+    # ``not in provided`` is kept but no longer filters anything: refusing a
+    # repeated key above leaves these two sets disjoint, so a lane cannot be
+    # both declared and answered by the time this runs. It used to be the rule
+    # that settled that collision silently. Left in place as a guard rather
+    # than deleted on the strength of an argument made one screen away — but a
+    # guard, not a check: if the invariant broke, this would go back to
+    # dropping the lane quietly instead of saying so.
     undispatched = tuple(
         key for key in record.expected_keys if key in declared and key not in provided
     )

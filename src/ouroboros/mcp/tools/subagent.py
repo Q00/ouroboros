@@ -2595,10 +2595,9 @@ def stamp_fanout_meta(
     * ``PLUGIN_PASSIVE`` → no host-action cue (the bridge consumes the
       ``_subagents`` envelope from :func:`build_multi_subagent_result`).
 
-    Keys are written as ``{prefix}_dispatch_mode`` / ``{prefix}_host_action`` /
-    ``{prefix}_result_correlation_key`` when ``prefix`` is non-empty, or as the
-    bare key names when ``prefix`` is empty. The emitted keys/values are
-    byte-identical to what the legacy producers stamped inline.
+    ``{prefix}_result_correlation_key`` is written on all three: it names how a
+    submission is keyed, which the cue does not own. The other two keys are the
+    cue's, so ``PLUGIN_PASSIVE`` gets neither.
 
     Args:
         meta: Response meta dict, mutated in place.
@@ -2609,13 +2608,14 @@ def stamp_fanout_meta(
     """
     if not payloads:
         return
+    # The bridge lifts this by name with no fallback, so omitting it on
+    # ``PLUGIN_PASSIVE`` removed re-entry there: every submission mismatched.
+    meta[_fanout_meta_key(prefix, "result_correlation_key")] = correlation_key
     host_action = _FANOUT_HOST_ACTION_BY_MODE.get(dispatch_mode)
     if host_action is None:
-        # PLUGIN_PASSIVE: the envelope path stamps no host-action cue here.
-        return
+        return  # PLUGIN_PASSIVE: no cue, and no dispatch mode to announce with it.
     meta[_fanout_meta_key(prefix, "dispatch_mode")] = dispatch_mode.value
     meta[_fanout_meta_key(prefix, "host_action")] = host_action
-    meta[_fanout_meta_key(prefix, "result_correlation_key")] = correlation_key
 
 
 # ---------------------------------------------------------------------------

@@ -1267,3 +1267,84 @@ def test_two_declared_appends_cut_at_the_server_s_own_directive() -> None:
     )
     # The echo path still recognises it — it accepts either producer.
     assert echo_carries_dispatch(both)
+
+
+def test_the_correlation_key_is_stamped_on_every_transport() -> None:
+    """It names how a submission is keyed, which no transport is exempt from.
+
+    It used to be written only alongside the host-action cue, so
+    ``PLUGIN_PASSIVE`` — the one transport with no cue to write — got neither.
+    That did not degrade re-entry there, it removed it: the bridge lifts this
+    key by name with no fallback, so the parent redeemed with nothing to key by
+    and every submission came back ``correlation_mismatch``.
+    """
+    for mode in SubagentDispatchMode:
+        meta = _advisory_meta(
+            mode,
+            runtime_backend="opencode" if mode is SubagentDispatchMode.PLUGIN_PASSIVE else "claude",
+            opencode_mode="plugin" if mode is SubagentDispatchMode.PLUGIN_PASSIVE else None,
+        )
+        assert meta["question_advisory_result_correlation_key"] == "context.lane_id", mode
+    # The cue itself stays host-only: it tells a host model to fan out, and on
+    # the bridge transport nothing reads it.
+    plugin_meta = _advisory_meta(
+        SubagentDispatchMode.PLUGIN_PASSIVE, runtime_backend="opencode", opencode_mode="plugin"
+    )
+    assert "question_advisory_host_action" not in plugin_meta
+
+
+def test_every_advisory_key_the_bridge_lifts_is_one_the_producer_stamps() -> None:
+    """The producer's real output against the bridge's real lift list.
+
+    This is the seam the last defect lived in, and the reason it survived a
+    green suite: the bridge test builds its metadata by hand, so it proved the
+    bridge lifts a key it was handed, never that anything hands it one. The
+    producer stamped no correlation key on ``PLUGIN_PASSIVE`` and both sides
+    passed.
+
+    That is the third time a fixture stood in for the code it was meant to
+    check — after the plugin regression that seeded a round shape plugin mode
+    cannot produce, and the module-size gate that does not check its own table
+    without ``--baseline-ref``. So neither side of this is written down here:
+    the keys come from the bridge source as it stands, and the meta from the
+    producer as it runs.
+
+    Scoped to the ``question_advisory_`` keys because the rest of the lift list
+    (``session_id``, ``ambiguity_score``, ``milestone``, ``seed_ready``) is
+    stamped by the handler around this producer, not by it. It pins names
+    rather than a byte-level round trip; the bridge's own suite covers the lift
+    itself.
+    """
+    from pathlib import Path
+    import re
+    import tempfile
+
+    from ouroboros.mcp.tools.fanout import FanoutRegistry
+
+    # Resolved from this file, not the cwd: a test that reads the repo must not
+    # depend on where pytest was invoked from.
+    repo_root = Path(__file__).resolve().parents[4]
+    source = (repo_root / "src/ouroboros/opencode/plugin/ouroboros-bridge.ts").read_text(
+        encoding="utf-8"
+    )
+    block = source.split("const responseShape: Record<string, unknown> = {}", 1)[1]
+    block = block.split("]) {", 1)[0]
+    lifted = re.findall(r'"([a-z_]+)"', block)
+    advisory_lifted = [key for key in lifted if key.startswith("question_advisory_")]
+    assert advisory_lifted, "bridge lift list not found — parser is stale, not the code"
+
+    meta: dict[str, object] = {}
+    _attach_question_assist_requests(
+        meta,
+        session_id="sess-render",
+        question="What are the acceptance criteria?",
+        phase="answer",
+        score=_score(0.35),
+        dispatch_mode=SubagentDispatchMode.PLUGIN_PASSIVE,
+        runtime_backend="opencode",
+        opencode_mode="plugin",
+        fanout_registry=FanoutRegistry(Path(tempfile.mkdtemp())),
+    )
+
+    missing = [key for key in advisory_lifted if key not in meta]
+    assert not missing, f"bridge lifts keys the producer never stamps: {missing}"

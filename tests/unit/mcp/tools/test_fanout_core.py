@@ -2,8 +2,8 @@
 
 Covers PR-J:
 - ``build_fanout_subagents`` generic builder,
-- ``stamp_fanout_meta`` 3-mode stamping (byte-identical to the legacy inline
-  producers),
+- ``stamp_fanout_meta`` 3-mode stamping (the cue is host-only; the
+  correlation key is written on all three),
 - ``FanoutRegistry`` persist/load,
 - ``submit_fanout_results`` routing (complete / partial / unknown / mismatch),
 - end-to-end producer -> registry -> submit for both revived synthesizer kinds.
@@ -69,7 +69,7 @@ def test_build_fanout_subagents_rejects_empty_inputs() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# stamp_fanout_meta (byte-identical 3-mode contract)
+# stamp_fanout_meta (3-mode contract)
 # --------------------------------------------------------------------------- #
 
 
@@ -109,7 +109,15 @@ def test_stamp_fanout_meta_sequential_bare() -> None:
     }
 
 
-def test_stamp_fanout_meta_plugin_passive_stamps_nothing() -> None:
+def test_stamp_fanout_meta_plugin_passive_stamps_only_the_correlation_key() -> None:
+    """No host-action cue there, but the submission still has to be keyed.
+
+    This asserted an empty dict, which read as "the bridge transport needs
+    nothing from this stamp". It needed one thing: the bridge lifts
+    ``result_correlation_key`` by name with no fallback, so omitting it did not
+    leave re-entry undegraded — it left every submission answering
+    ``correlation_mismatch``. The cue is what is host-only, not the key.
+    """
     meta: dict[str, Any] = {}
     stamp_fanout_meta(
         meta,
@@ -118,7 +126,7 @@ def test_stamp_fanout_meta_plugin_passive_stamps_nothing() -> None:
         payloads=_payloads(),
         correlation_key="context.lane_id",
     )
-    assert meta == {}
+    assert meta == {"question_advisory_result_correlation_key": "context.lane_id"}
 
 
 def test_stamp_fanout_meta_empty_payloads_is_noop() -> None:
@@ -154,7 +162,13 @@ def _advisory_meta(dispatch_mode: SubagentDispatchMode, **kwargs: Any) -> dict[s
 
 
 def test_advisory_producer_byte_identical_without_registry() -> None:
-    """No registry -> emitted fan-out meta is the exact pre-registry contract."""
+    """No registry -> the pre-registry contract, on the two modes built here.
+
+    Scoped deliberately. ``PLUGIN_PASSIVE`` is the mode that stopped being
+    byte-identical — it gained the correlation key it had always needed — and
+    it is the one this test does not construct, which is why an unqualified
+    claim here would have outlived its own coverage.
+    """
     host = _advisory_meta(SubagentDispatchMode.HOST_DRIVEN)
     assert host["question_advisory_contract_id"] == "interview_question_advisory_fanout.v1"
     assert host["question_advisory_dispatch_mode"] == "host_driven"
@@ -925,3 +939,87 @@ async def test_submit_tool_requires_fanout_id() -> None:
     submit = SubmitFanoutResultsHandler()
     result = await submit.handle({"results": []})
     assert result.is_err
+
+
+def _advisory_fanout(registry: FanoutRegistry) -> str:
+    fanout_id = registry.register(
+        kind=FANOUT_KIND_QUESTION_ADVISORY,
+        session_id="s1",
+        correlation_key="context.lane_id",
+        expected_keys=["data_context", "code_context"],
+        question_identity="",
+        synthesizer_input={"lane_ids": ["data_context", "code_context"]},
+        required_keys=[],
+    )
+    assert fanout_id is not None
+    return fanout_id
+
+
+@pytest.mark.parametrize(
+    ("label", "repeated"),
+    [
+        (
+            "two measurements for one lane",
+            [
+                {"key": "data_context", "content": {"value": 41}},
+                {"key": "data_context", "content": {"value": 999}},
+            ],
+        ),
+        (
+            "answered, then declared undispatched",
+            [
+                {"key": "data_context", "content": {"value": 41}},
+                {"key": "data_context", "undispatched": True},
+            ],
+        ),
+        (
+            "declared undispatched, then answered",
+            [
+                {"key": "data_context", "undispatched": True},
+                {"key": "data_context", "content": {"value": 41}},
+            ],
+        ),
+    ],
+)
+def test_a_repeated_correlation_key_is_refused_rather_than_ordered(
+    tmp_path: Any, label: str, repeated: list[Any]
+) -> None:
+    """One lane, one entry — nothing here may pick between two reports.
+
+    Two measurements for one lane went into a plain dict, so the later entry
+    won and the earlier vanished unreported: list position chose the number.
+    Answered *and* declared undispatched behaved differently — content won
+    whichever order it arrived in — which was deterministic but undeclared, a
+    precedence rule no contract states applied to a host that has said two
+    opposite things about one lane.
+
+    Both are refused now, because neither is a report this can rank.
+    """
+    registry = FanoutRegistry(tmp_path)
+    out = submit_fanout_results(
+        registry,
+        fanout_id=_advisory_fanout(registry),
+        session_id="s1",
+        correlation_key="context.lane_id",
+        results=[*repeated, {"key": "code_context", "content": {"value": 7}}],
+    )
+
+    assert out["status"] == "invalid_result_entry", label
+    assert out["invalid_keys"] == ["data_context"], label
+
+
+def test_distinct_correlation_keys_still_complete(tmp_path: Any) -> None:
+    """The control: refusing repeats must not refuse an ordinary submission."""
+    registry = FanoutRegistry(tmp_path)
+    out = submit_fanout_results(
+        registry,
+        fanout_id=_advisory_fanout(registry),
+        session_id="s1",
+        correlation_key="context.lane_id",
+        results=[
+            {"key": "data_context", "content": {"value": 41}},
+            {"key": "code_context", "content": {"value": 7}},
+        ],
+    )
+
+    assert out["status"] == "complete"
