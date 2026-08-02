@@ -21,6 +21,7 @@ import typer
 
 from ouroboros import __version__
 from ouroboros.cli.commands import (
+    artifacts,
     auto,
     cancel,
     cleanup,
@@ -103,6 +104,7 @@ app.command(name="seed", help="Generate a Seed YAML specification from an interv
 )
 app.add_typer(run.app, name="run")
 app.add_typer(job.app, name="job")
+app.add_typer(artifacts.app, name="artifacts")
 app.add_typer(harness.app, name="harness")
 app.add_typer(config.app, name="config")
 app.add_typer(status.app, name="status")

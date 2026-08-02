@@ -12,6 +12,31 @@ The RFC narrows itself deliberately. *Lifecycle verbs* (spawn / pause / resume /
 
 Disposable Memory is, in one sentence, the discipline that makes the slide promise *"main ledger holds only `contract_id + artifact_ref`"* survive in code.
 
+## Runtime implementation
+
+The accepted C2-C5 contract is implemented by these production surfaces:
+
+- `core/disposable_memory.py` defines the frozen, extra-forbidden result
+  envelope. It has no body or transcript field and is capped by regression
+  tests at less than 4 KiB.
+- `persistence/artifact_store.py` stores canonical JSON bodies under
+  `.ouroboros/artifacts/<sha256-prefix>/<sha256>.json`, binds them to durable
+  per-contract manifests, verifies hashes on every fetch, and refuses contract
+  reuse for different content.
+- `orchestrator/disposable_memory.py` runs child work through `AgentProcess`,
+  persists the body before completion, and returns only the bounded envelope.
+  Default replay reads the artifact; explicit force-rerun requires a new
+  contract id.
+- `ouroboros artifacts fetch|replay|prune` exposes explicit inspection and
+  dry-run-first GC. `prune --apply` writes a tombstone for every referencing
+  contract before deleting a shared blob.
+
+The encoded JSON artifact limit is exactly 1 MiB: 1,048,576 bytes is accepted
+and the next byte is rejected. The 1 MiB regression fixture also proves that
+the EventStore row and caller envelope remain below 4 KiB and contain no body
+substring. A global cross-process file lock serializes reference publication
+with pruning; malformed manifests abort GC fail-closed.
+
 ## Scope
 
 This document **does** decide:
@@ -83,6 +108,8 @@ This RFC does **not** add a Python `multiprocessing` or `os.fork` layer.
 ouroboros artifacts prune              # dry-run; prints what would be deleted
 ouroboros artifacts prune --apply      # actually delete
 ouroboros artifacts prune --ttl 30d    # override default TTL of 90 days
+ouroboros artifacts fetch CONTRACT_ID  # explicit body fetch + hash verification
+ouroboros artifacts replay CONTRACT_ID # deterministic read; never re-executes
 ```
 
 **Algorithm.**
