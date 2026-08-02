@@ -158,7 +158,12 @@ def append_lateral_review_notice(
     )
 
 
-def resolve_echoed_question(echoed: Any, *, issued_question: str | None) -> Any:
+def resolve_echoed_question(
+    echoed: Any,
+    *,
+    issued_question: str | None,
+    shown_question: str | None = None,
+) -> Any:
     """Return the question a host echoed back, without the directive below it.
 
     A host is asked to echo "the exact question you asked", and the question it
@@ -189,6 +194,23 @@ def resolve_echoed_question(echoed: Any, *, issued_question: str | None) -> Any:
     those unequal would let the directive ride through on a host that did
     exactly what was asked, which is the leak this function exists to close.
 
+    **Compare against what the host saw; return what the server stores.** Those
+    are two strings, and conflating them reopened the leak once already: a
+    question-bearing response renders ``(ambiguity: 0.35) `` in front of the
+    question before the directive is appended, so a host echoing the visible
+    text submits a prefix the stored question never had. Comparing that against
+    the stored form read a perfectly faithful echo as a rewrite and passed the
+    whole thing through, directive and payload JSON included — on the ordinary
+    path, since a live interview scores almost every question. ``shown_question``
+    is that rendered form; a match on either it or the stored form resolves to
+    the stored one, so the transcript keeps the question's identity form and
+    never the presentation.
+
+    Both forms are reconstructed from what the server knows, which is what keeps
+    this a proof. Recognising the prefix in the echo instead would be shape
+    matching again, and the same collision would return in miniature for a
+    question that opens with one.
+
     With no issued question to compare against — a reopen, where the probe is
     the host's and the server generated nothing — there is nothing to prove and
     the echo is returned as given.
@@ -213,7 +235,11 @@ def resolve_echoed_question(echoed: Any, *, issued_question: str | None) -> Any:
         return echoed
     from ouroboros.orchestrator.capabilities import normalize_question_text
 
-    if normalize_question_text(echoed[:cut]) != normalize_question_text(issued_question):
+    prefix = normalize_question_text(echoed[:cut])
+    accepted = {normalize_question_text(issued_question)}
+    if shown_question:
+        accepted.add(normalize_question_text(shown_question))
+    if prefix not in accepted:
         return echoed
     return issued_question
 

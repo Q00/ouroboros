@@ -264,7 +264,7 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
 
    **Data measurements**:
    The `data_context` lane discovers what data tools this host exposes, takes
-   the measurement itself, and returns the aggregate with the moment it ran.
+   the measurement itself, and returns the aggregate it read.
    You do not confirm anything before it runs and you do not run anything after
    — it has already happened by the time you read the result. There is nothing
    to approve because the approval already exists: the user registered these

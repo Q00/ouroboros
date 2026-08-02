@@ -90,6 +90,9 @@ from ouroboros.orchestrator.capabilities import (
     ouroboros_tool_capability_metadata,
     stable_code_investigation_question_identity,
 )
+from ouroboros.orchestrator.capabilities.question_text import (
+    format_question_with_ambiguity as _format_question_with_ambiguity,
+)
 from ouroboros.orchestrator.policy import (
     PolicyContext,
     PolicyExecutionPhase,
@@ -606,19 +609,6 @@ def _compute_transcript_chars(state: InterviewState) -> int:
         total += len(round_data.question or "")
         total += len(round_data.user_response or "")
     return total
-
-
-def _format_question_with_ambiguity(question: str, score: AmbiguityScore | None) -> str:
-    """Attach the current ambiguity score to a question for display.
-
-    The text format uses ``(ambiguity: <score>)`` without the milestone
-    label to preserve backward compatibility with downstream consumers
-    that parse the score via regex.  Milestone data is available in the
-    structured ``meta.milestone`` field of the MCP response.
-    """
-    if score is None:
-        return question
-    return f"(ambiguity: {score.overall_score:.2f}) {question}"
 
 
 def _build_code_investigation_request(
@@ -3187,10 +3177,15 @@ class InterviewHandler:
                 pass
             elif state.rounds[-1].user_response is None:
                 issued = state.rounds[-1].question
-                # The issued question is what tells an echo of it apart from a
-                # question quoting the directive.
+                # Compare against the rendered form the host was shown -- the
+                # stored question never carried the ambiguity prefix -- and
+                # record the stored one.
+                shown = _format_question_with_ambiguity(issued, _load_state_ambiguity_score(state))
                 pending_question = (
-                    resolve_echoed_question(last_question, issued_question=issued) or issued
+                    resolve_echoed_question(
+                        last_question, issued_question=issued, shown_question=shown
+                    )
+                    or issued
                 )
             else:
                 if not last_question:

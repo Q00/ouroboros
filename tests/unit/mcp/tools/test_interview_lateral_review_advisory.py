@@ -791,3 +791,88 @@ def test_question_identity_and_the_echo_check_share_one_definition() -> None:
     assert stable_code_investigation_question_identity(
         reflowed
     ) == stable_code_investigation_question_identity(canonical)
+
+
+async def test_the_visible_echo_persists_only_the_question_when_a_score_is_shown() -> None:
+    """A live interview scores nearly every question, so this is the normal path.
+
+    A question-bearing response renders `(ambiguity: 0.35) ` in front of the
+    question before the directive is appended, so the text a host is shown — and
+    faithfully echoes back — carries a prefix the stored question never had.
+    Comparing that against the stored form read a perfectly compliant echo as a
+    rewrite and passed the whole thing through, marker, directive and payload
+    JSON, into `record_response` and from there the Seed. The guarantee the
+    previous round stated, that a faithful echo cannot reach durable state, was
+    false as shipped for every scored round.
+
+    So the comparison is against the *rendered* form, reconstructed from the
+    score stored when the question was issued, and what is recorded is the
+    stored form: the transcript keeps the question's identity, never its
+    presentation. Recognising the prefix inside the echo instead would be shape
+    matching again, and the collision would return for a question that opens
+    with one.
+
+    The unscored round runs beside it because it is the case every earlier
+    sentinel regression covered, and covering only that is how this was missed.
+    """
+    from ouroboros.mcp.tools.advisory_dispatch import (
+        QUESTION_ADVISORY_DISPATCH_MARKER as marker,
+    )
+    from ouroboros.orchestrator.capabilities.question_text import (
+        format_question_with_ambiguity,
+    )
+
+    issued = "How do you define completion?"
+    directive = f"\n\n{marker}\n\n> **Host action — spawn_subagents:** keep the question"
+    scored = _score(0.35)
+
+    for stored_score, shown in (
+        (scored, format_question_with_ambiguity(issued, scored)),
+        (None, issued),
+    ):
+        state = InterviewState(
+            interview_id="sess-shown",
+            rounds=[
+                InterviewRound(round_number=1, question="Q1?", user_response="A1"),
+                InterviewRound(round_number=2, question=issued, user_response=None),
+            ],
+        )
+        if stored_score is not None:
+            state.store_ambiguity(
+                score=stored_score.overall_score,
+                breakdown=stored_score.breakdown.model_dump(mode="json"),
+            )
+
+        async def record(
+            current: InterviewState, answer: str, question: str
+        ) -> Result[InterviewState, object]:
+            current.rounds.append(
+                InterviewRound(
+                    round_number=current.current_round_number,
+                    question=question,
+                    user_response=answer,
+                )
+            )
+            return Result.ok(current)
+
+        engine = MagicMock()
+        engine.load_state = AsyncMock(return_value=Result.ok(state))
+        engine.record_response = AsyncMock(side_effect=record)
+        engine.save_state = AsyncMock(return_value=MagicMock(is_err=False))
+        engine.ask_next_question = AsyncMock(return_value=Result.ok("Next?"))
+
+        handler = InterviewHandler(interview_engine=engine, agent_runtime_backend="claude")
+        handler.llm_adapter = MagicMock()
+        handler._emit_event_bg = MagicMock()  # type: ignore[method-assign]
+        handler._score_interview_state = AsyncMock(return_value=_score(0.30))  # type: ignore[method-assign]
+
+        result = await handler.handle(
+            {"session_id": "sess-shown", "answer": "A", "last_question": shown + directive}
+        )
+
+        assert result.is_ok
+        recorded = engine.record_response.await_args.args[2]
+        # The stored form, not the presentation and not the directive.
+        assert recorded == issued, (stored_score, recorded)
+        assert marker not in recorded
+        assert "ambiguity:" not in recorded
