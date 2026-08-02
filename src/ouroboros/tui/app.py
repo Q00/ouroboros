@@ -82,24 +82,30 @@ def _coerce_non_empty_string(value: object) -> str | None:
     return None
 
 
-_RUNTIME_LIFECYCLE_STATUSES = frozenset({"running", "paused", "completed", "failed", "cancelled"})
+def _progress_acknowledges_running(data: object) -> bool:
+    """Whether a progress payload acknowledges the run is executing again.
 
+    Deliberately narrow: only ``running`` is honoured, because that is the one
+    transition no other event can supply — there is no
+    ``orchestrator.session.resumed``. ``runtime_status`` is per-runtime-turn
+    metadata, and ``derive_runtime_signal`` maps messages such as
+    ``result.completed`` / ``turn.completed`` to ``"completed"``. Those describe
+    the latest agent turn, not the orchestration, so treating them as global
+    lifecycle would let an unfinished run advertise a terminal state. Global
+    paused/terminal status stays with ``orchestrator.session.*`` and
+    ``execution.terminal``.
 
-def _runtime_status_from_progress(data: object) -> str | None:
-    """Extract an authoritative runtime status from a progress event payload.
-
-    The two progress producers nest it differently:
+    The two producers nest the value differently:
 
     - ``orchestrator.progress.updated`` (``SessionRepository.track_progress``)
       wraps the payload in ``progress``, matching
       ``SessionRepository._status_from_event`` and the
       ``$.progress.runtime_status`` / ``$.runtime_status`` snapshot query.
     - ``workflow.progress.updated`` (``create_workflow_progress_event``) carries
-      it in ``last_update``, where ``WorkflowState`` writes it
-      (``workflow_state.py`` ``last_update["runtime_status"]``).
+      it in ``last_update``, where ``WorkflowState`` writes it.
     """
     if not isinstance(data, dict):
-        return None
+        return False
     candidates = []
     for container_key in ("progress", "last_update"):
         container = data.get(container_key)
@@ -108,9 +114,9 @@ def _runtime_status_from_progress(data: object) -> str | None:
     candidates.append(data.get("runtime_status"))
     for candidate in candidates:
         status = _coerce_non_empty_string(candidate)
-        if status is not None and status.lower() in _RUNTIME_LIFECYCLE_STATUSES:
-            return status.lower()
-    return None
+        if status is not None:
+            return status.lower() == "running"
+    return False
 
 
 def _coerce_int(value: object, default: int) -> int:
@@ -540,16 +546,14 @@ class OuroborosTUI(App[None]):
             self._state.status = "paused"
             self._state.is_paused = True
         elif event_type in {"orchestrator.progress.updated", "workflow.progress.updated"}:
-            # There is no `orchestrator.session.resumed` event; a resumed run is
-            # acknowledged by progress carrying a runtime status. This reads the
-            # same two payload locations as the durable projections
-            # (`SessionRepository._status_from_event` and the
-            # `$.progress.runtime_status` / `$.runtime_status` snapshot query),
-            # so a paused display recovers only on an authoritative signal.
-            runtime_status = _runtime_status_from_progress(data)
-            if runtime_status is not None:
-                self._state.status = runtime_status
-                self._state.is_paused = runtime_status == "paused"
+            # There is no `orchestrator.session.resumed` event, so progress
+            # reporting the runtime is executing again is the only signal that
+            # can clear a paused display. Scope is exactly that: it never sets
+            # a status, only lifts `paused`. Progress is per-turn runtime
+            # metadata and must not advertise global paused/terminal state.
+            if self._state.is_paused and _progress_acknowledges_running(data):
+                self._state.status = "running"
+                self._state.is_paused = False
         elif event_type == "execution.phase.completed":
             self._state.current_phase = data.get("phase", "")
             self._state.iteration = data.get("iteration", 0)

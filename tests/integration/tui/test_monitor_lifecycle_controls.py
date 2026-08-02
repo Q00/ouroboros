@@ -291,6 +291,82 @@ class TestAcknowledgedDurableControlPath:
         assert tui.state.status == "running"
         assert tui.state.is_paused is False
 
+    @pytest.mark.parametrize("terminal_runtime_status", ["completed", "failed", "cancelled"])
+    async def test_per_turn_terminal_runtime_status_is_not_global_lifecycle(
+        self, event_store: EventStore, terminal_runtime_status: str
+    ) -> None:
+        """Progress metadata must not advertise a terminal run.
+
+        `runtime_status` describes the latest agent turn: `derive_runtime_signal`
+        maps runtime messages such as `result.completed` / `turn.completed` to
+        `"completed"`, and the runner persists that workflow-progress event
+        immediately. With 0 of 3 ACs done the orchestration is plainly not
+        finished, so honouring it would recreate the reporting problem this PR
+        exists to fix, only with terminal states.
+        """
+        tui = OuroborosTUI()
+        tui.set_execution("exec_turn", "sess_turn")
+        tui.state.status = "paused"
+        tui.state.is_paused = True
+
+        workflow_event = create_workflow_progress_event(
+            execution_id="exec_turn",
+            session_id="sess_turn",
+            acceptance_criteria=[],
+            completed_count=0,
+            total_count=3,
+            current_ac_index=1,
+            current_phase="Discover",
+            activity="working",
+            activity_detail="",
+            elapsed_display="00:10",
+            estimated_remaining="00:20",
+            messages_count=4,
+            tool_calls_count=2,
+            estimated_tokens=100,
+            estimated_cost_usd=0.01,
+            last_update={"runtime_status": terminal_runtime_status},
+        )
+        await event_store.append(workflow_event)
+
+        tui._process_subscription_event(workflow_event)
+
+        assert tui.state.status == "paused"
+        assert tui.state.is_paused is True
+
+    async def test_progress_does_not_override_a_running_display(
+        self, event_store: EventStore
+    ) -> None:
+        """Progress only lifts `paused`; it never authors a status otherwise."""
+        tui = OuroborosTUI()
+        tui.set_execution("exec_live", "sess_live")
+        assert tui.state.status == "running"
+
+        workflow_event = create_workflow_progress_event(
+            execution_id="exec_live",
+            session_id="sess_live",
+            acceptance_criteria=[],
+            completed_count=0,
+            total_count=3,
+            current_ac_index=1,
+            current_phase="Discover",
+            activity="working",
+            activity_detail="",
+            elapsed_display="00:10",
+            estimated_remaining="00:20",
+            messages_count=4,
+            tool_calls_count=2,
+            estimated_tokens=100,
+            estimated_cost_usd=0.01,
+            last_update={"runtime_status": "completed"},
+        )
+        await event_store.append(workflow_event)
+
+        tui._process_subscription_event(workflow_event)
+
+        assert tui.state.status == "running"
+        assert tui.state.is_paused is False
+
     async def test_progress_without_runtime_status_does_not_clear_paused(
         self, event_store: EventStore
     ) -> None:
