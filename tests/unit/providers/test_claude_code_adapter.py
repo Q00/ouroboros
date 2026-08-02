@@ -2814,6 +2814,81 @@ class TestCLIFallbackWhenSDKAbsent:
         assert result.is_err
         assert "Empty response" in result.error.message
 
+    def test_unencodable_caller_text_never_reaches_a_spawn(self) -> None:
+        """A lone surrogate must fail before there is a child to orphan.
+
+        MCP payloads are caller-controlled, so this text is reachable. Encoding
+        it after the spawn left a process waiting on a stdin that would never
+        be written, and repeated bad inputs accumulated them. The pin is that no
+        subprocess is created at all, not that a created one gets cleaned up.
+        """
+        adapter = self._adapter()
+        with (
+            patch.dict("sys.modules", {"claude_agent_sdk": None}),
+            patch("asyncio.sleep", new=AsyncMock()),
+            patch("asyncio.create_subprocess_exec", new=AsyncMock()) as spawn,
+        ):
+            result = asyncio.run(
+                adapter.complete(
+                    [Message(role=MessageRole.USER, content="lone surrogate: \ud800")],
+                    CompletionConfig(model="claude-haiku-4-5"),
+                )
+            )
+
+        assert result.is_err
+        assert "cannot be encoded" in result.error.message
+        spawn.assert_not_awaited()
+
+    def test_unencodable_system_text_never_reaches_a_spawn(self) -> None:
+        """The same for text that travels as an argv flag rather than on stdin."""
+        adapter = self._adapter()
+        with (
+            patch.dict("sys.modules", {"claude_agent_sdk": None}),
+            patch("asyncio.sleep", new=AsyncMock()),
+            patch("asyncio.create_subprocess_exec", new=AsyncMock()) as spawn,
+        ):
+            result = asyncio.run(
+                adapter.complete(
+                    [
+                        Message(role=MessageRole.SYSTEM, content="be terse \udfff"),
+                        Message(role=MessageRole.USER, content="ping"),
+                    ],
+                    CompletionConfig(model="claude-haiku-4-5"),
+                )
+            )
+
+        assert result.is_err
+        assert "cannot be encoded" in result.error.message
+        spawn.assert_not_awaited()
+
+    def test_any_post_spawn_failure_reaps_the_child(self) -> None:
+        """Ownership, not a catalogue of exception types.
+
+        Once the child exists every exit path has to reap it, including error
+        classes nobody enumerated. `communicate` raising an arbitrary error
+        stands in for that.
+        """
+        adapter = self._adapter()
+        # returncode stays None: a child that is still alive, which is the only
+        # state in which reaping is observable at all.
+        proc = self._hanging_proc()
+        proc.communicate = AsyncMock(side_effect=RuntimeError("pipe exploded"))
+        with (
+            patch.dict("sys.modules", {"claude_agent_sdk": None}),
+            patch("asyncio.sleep", new=AsyncMock()),
+            patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)),
+        ):
+            result = asyncio.run(
+                adapter.complete(
+                    [Message(role=MessageRole.USER, content="ping")],
+                    CompletionConfig(model="claude-haiku-4-5"),
+                )
+            )
+
+        assert result.is_err
+        proc.kill.assert_called()
+        proc.wait.assert_awaited()
+
     def test_a_failure_names_the_transport_that_actually_failed(self) -> None:
         """Blaming the SDK from a process without one is the original bug's shape.
 

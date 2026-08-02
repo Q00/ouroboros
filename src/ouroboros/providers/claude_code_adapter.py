@@ -684,8 +684,24 @@ class ClaudeCodeAdapter:
             # sources closes them at the root rather than one flag at a time.
             argv += ["--strict-mcp-config", "--setting-sources", ""]
 
+        # Everything caller-controlled is encoded before a child exists. A lone
+        # surrogate arriving through an MCP payload is unencodable, and doing
+        # this after the spawn meant the failure landed on a process already
+        # waiting on a stdin that would never be written. Done here it fails
+        # with nothing to leak.
+        try:
+            stdin_bytes = prompt.encode("utf-8")
+            for arg in argv:
+                arg.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            return Result.err(
+                ProviderError(
+                    message=f"claude CLI request contains text that cannot be encoded: {exc}",
+                    details={"cli_path": str(cli_path), "reason": exc.reason},
+                )
+            )
+
         timeout = self._timeout or _CLI_DEFAULT_TIMEOUT_SECONDS
-        proc: asyncio.subprocess.Process | None = None
         try:
             proc = await asyncio.create_subprocess_exec(
                 *argv,
@@ -694,9 +710,21 @@ class ClaudeCodeAdapter:
                 stderr=asyncio.subprocess.PIPE,
                 cwd=self._cwd or None,
             )
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(prompt.encode("utf-8")), timeout=timeout
+        except OSError as exc:
+            return Result.err(
+                ProviderError(
+                    message=f"claude CLI could not be executed: {exc}",
+                    details={"cli_path": str(cli_path)},
+                )
             )
+
+        # From here the child exists and nothing else holds a handle to it, so
+        # this scope owns it. Reaping is unconditional rather than a list of
+        # exception types to remember: `_terminate_process` no-ops once the
+        # process has exited, so covering every path costs nothing and leaves
+        # no path to forget.
+        try:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(stdin_bytes), timeout=timeout)
         except TimeoutError:
             await _terminate_process(proc)
             return Result.err(
@@ -705,19 +733,9 @@ class ClaudeCodeAdapter:
                     details={"timeout_seconds": timeout},
                 )
             )
-        except asyncio.CancelledError:
-            # The caller going away must not leave the child running: nothing
-            # else holds a handle to it, so this is the only place it can be
-            # reaped. Reap, then let the cancellation continue to propagate.
+        except BaseException:  # noqa: BLE001 - ownership, re-raised immediately
             await _terminate_process(proc)
             raise
-        except OSError as exc:
-            return Result.err(
-                ProviderError(
-                    message=f"claude CLI could not be executed: {exc}",
-                    details={"cli_path": str(cli_path)},
-                )
-            )
 
         stderr_text = stderr.decode("utf-8", "replace").strip()
         try:
