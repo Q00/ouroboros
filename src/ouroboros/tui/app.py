@@ -4,7 +4,14 @@ OuroborosTUI is the main application class that:
 - Manages screens (session selector, dashboard, execution, logs, debug)
 - Handles global keybindings
 - Subscribes to EventStore for live updates
-- Provides pause/resume execution control
+- Optionally forwards pause/resume requests to an execution owner
+
+Pause/resume are only offered when an embedding caller connects an execution
+owner via :meth:`OuroborosTUI.set_pause_callback` /
+:meth:`OuroborosTUI.set_resume_callback`. Without one the bindings are hidden.
+Even with an owner connected, the displayed lifecycle status changes only when
+an acknowledged lifecycle event arrives — the TUI never optimistically reports
+a transition the execution never made.
 """
 
 from __future__ import annotations
@@ -16,6 +23,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 from textual.app import App
 from textual.binding import Binding
+from textual.notifications import SeverityLevel
 
 from ouroboros.dashboard.board import ProviderLedger, fold_provider_event
 from ouroboros.tui.events import (
@@ -71,6 +79,29 @@ def _coerce_non_empty_string(value: object) -> str | None:
         stripped = value.strip()
         if stripped:
             return stripped
+    return None
+
+
+_RUNTIME_LIFECYCLE_STATUSES = frozenset({"running", "paused", "completed", "failed", "cancelled"})
+
+
+def _runtime_status_from_progress(data: object) -> str | None:
+    """Extract an authoritative runtime status from a progress event payload.
+
+    Mirrors ``SessionRepository._status_from_event``: the status may sit under
+    ``progress.runtime_status`` or at the payload root.
+    """
+    if not isinstance(data, dict):
+        return None
+    progress = data.get("progress")
+    candidates = []
+    if isinstance(progress, dict):
+        candidates.append(progress.get("runtime_status"))
+    candidates.append(data.get("runtime_status"))
+    for candidate in candidates:
+        status = _coerce_non_empty_string(candidate)
+        if status is not None and status.lower() in _RUNTIME_LIFECYCLE_STATUSES:
+            return status.lower()
     return None
 
 
@@ -495,6 +526,17 @@ class OuroborosTUI(App[None]):
         elif event_type == "orchestrator.session.paused":
             self._state.status = "paused"
             self._state.is_paused = True
+        elif event_type in {"orchestrator.progress.updated", "workflow.progress.updated"}:
+            # There is no `orchestrator.session.resumed` event; a resumed run is
+            # acknowledged by progress carrying a runtime status. This reads the
+            # same two payload locations as the durable projections
+            # (`SessionRepository._status_from_event` and the
+            # `$.progress.runtime_status` / `$.runtime_status` snapshot query),
+            # so a paused display recovers only on an authoritative signal.
+            runtime_status = _runtime_status_from_progress(data)
+            if runtime_status is not None:
+                self._state.status = runtime_status
+                self._state.is_paused = runtime_status == "paused"
         elif event_type == "execution.phase.completed":
             self._state.current_phase = data.get("phase", "")
             self._state.iteration = data.get("iteration", 0)
@@ -1001,22 +1043,57 @@ class OuroborosTUI(App[None]):
             pass  # Screen might not be ready
 
     def on_pause_requested(self, message: PauseRequested) -> None:
-        self._state.is_paused = True
-        self._state.status = "paused"
-        if self._pause_callback is not None:
-            asyncio.create_task(self._call_pause_callback(message.execution_id))
+        """Forward a pause request to the execution owner.
+
+        Lifecycle display state is never changed here. ``paused`` is only
+        rendered once the authoritative execution control path acknowledges
+        the transition via ``orchestrator.session.paused`` (or a terminal
+        ``execution.terminal`` mirror), so the monitor cannot claim a
+        transition the execution never reached.
+        """
+        if self._pause_callback is None:
+            self._report_control_unavailable("Pause", message.execution_id)
+            return
+        asyncio.create_task(self._call_pause_callback(message.execution_id))
         self._state.add_log(
             "info", "tui.control", f"Pause requested for execution {message.execution_id}"
         )
 
     def on_resume_requested(self, message: ResumeRequested) -> None:
-        self._state.is_paused = False
-        self._state.status = "running"
-        if self._resume_callback is not None:
-            asyncio.create_task(self._call_resume_callback(message.execution_id))
+        """Forward a resume request to the execution owner.
+
+        As with :meth:`on_pause_requested`, the displayed lifecycle status is
+        left untouched until an acknowledged lifecycle event arrives.
+        """
+        if self._resume_callback is None:
+            self._report_control_unavailable("Resume", message.execution_id)
+            return
+        asyncio.create_task(self._call_resume_callback(message.execution_id))
         self._state.add_log(
             "info", "tui.control", f"Resume requested for execution {message.execution_id}"
         )
+
+    def _report_control_unavailable(self, action: str, execution_id: str) -> None:
+        """Log and surface that a lifecycle control is not wired up."""
+        detail = (
+            f"{action} is unavailable in this monitor: no execution control is "
+            f"connected for execution {execution_id}."
+        )
+        self._state.add_log("warning", "tui.control", detail)
+        self._notify(detail, severity="warning")
+
+    def _report_control_failure(self, action: str, error: Exception) -> None:
+        """Log and surface that a lifecycle control request failed."""
+        detail = f"{action} callback failed: {error}"
+        self._state.add_log("error", "tui.control", detail)
+        self._notify(detail, severity="error")
+
+    def _notify(self, message: str, *, severity: SeverityLevel) -> None:
+        """Best-effort user notification that tolerates a not-yet-running app."""
+        try:
+            self.notify(message, severity=severity, markup=False)
+        except Exception:
+            pass  # App may not be running (offline/embedded construction)
 
     async def _call_pause_callback(self, execution_id: str) -> None:
         if self._pause_callback is not None:
@@ -1025,7 +1102,7 @@ class OuroborosTUI(App[None]):
                 if asyncio.iscoroutine(result):
                     await result
             except Exception as e:
-                self._state.add_log("error", "tui.control", f"Pause callback failed: {e}")
+                self._report_control_failure("Pause", e)
 
     async def _call_resume_callback(self, execution_id: str) -> None:
         if self._resume_callback is not None:
@@ -1034,9 +1111,36 @@ class OuroborosTUI(App[None]):
                 if asyncio.iscoroutine(result):
                     await result
             except Exception as e:
-                self._state.add_log("error", "tui.control", f"Resume callback failed: {e}")
+                self._report_control_failure("Resume", e)
+
+    @property
+    def pause_control_available(self) -> bool:
+        """Whether a pause owner is connected to this monitor."""
+        return self._pause_callback is not None
+
+    @property
+    def resume_control_available(self) -> bool:
+        """Whether a resume owner is connected to this monitor."""
+        return self._resume_callback is not None
+
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        """Hide the pause/resume bindings when no execution owner is connected.
+
+        ``ouroboros tui monitor`` attaches to the event store as an observer and
+        owns no execution, so advertising `p`/`r` there would promise control it
+        cannot exercise. ``False`` is deliberate: Textual treats ``False`` as
+        disabled *and* hidden, while ``None`` would leave the key greyed out in
+        the footer — still advertised.
+        """
+        if action == "pause" and not self.pause_control_available:
+            return False
+        if action == "resume" and not self.resume_control_available:
+            return False
+        return super().check_action(action, parameters)
 
     def action_pause(self) -> None:
+        # `check_action` already makes the key inert without a connected owner;
+        # a request that still gets here is refused by `on_pause_requested`.
         if self._state.execution_id and not self._state.is_paused:
             self.post_message(PauseRequested(self._state.execution_id))
 
@@ -1085,9 +1189,18 @@ class OuroborosTUI(App[None]):
 
     def set_pause_callback(self, callback: Any) -> None:
         self._pause_callback = callback
+        self._refresh_control_bindings()
 
     def set_resume_callback(self, callback: Any) -> None:
         self._resume_callback = callback
+        self._refresh_control_bindings()
+
+    def _refresh_control_bindings(self) -> None:
+        """Re-evaluate `check_action` so the footer reflects a late-connected owner."""
+        try:
+            self.refresh_bindings()
+        except Exception:
+            pass  # App may not be mounted yet; check_action runs fresh on mount
 
     def update_ac_tree(self, tree_data: dict[str, Any]) -> None:
         self._state.ac_tree = tree_data

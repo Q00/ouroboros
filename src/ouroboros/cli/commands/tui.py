@@ -58,6 +58,10 @@ def monitor_command(
 
     Starts a terminal UI that shows a list of all sessions found in the
     database. You can then select a session to monitor in real-time.
+
+    The monitor attaches to the event store as an observer and does not own the
+    running execution, so pause/resume controls are not offered. Use
+    `ouroboros cancel execution` to stop a run.
     """
     resolved_db_path = db_path or _resolve_event_store_path_or_exit()
     if backend == "slt":
@@ -65,6 +69,10 @@ def monitor_command(
         return
 
     print_info(f"Connecting to database: {resolved_db_path}")
+    print_info(
+        "This monitor does not own the execution: pause/resume are not available here. "
+        "Use 'ouroboros cancel execution' to stop a run."
+    )
 
     try:
         from ouroboros.tui import OuroborosTUI
