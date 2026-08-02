@@ -28,10 +28,7 @@ from typing import Annotated
 
 import typer
 
-from ouroboros.cli.commands.plugin_cache import (
-    stage_url_cache_refresh,
-    url_cache_destination,
-)
+from ouroboros.cli.commands import plugin_cache
 from ouroboros.cli.formatters import console
 from ouroboros.cli.formatters.panels import (
     print_error,
@@ -1870,20 +1867,13 @@ def add_command(
     if _looks_like_url(target):
         # Staged shallow clone into cache_root/<sanitized-host-path>; a
         # failed refresh preserves the last-known-good cache (#1826).
-        clone_dest = url_cache_destination(cache_root, target)
+        clone_dest = plugin_cache.url_cache_destination(cache_root, target)
         try:
-            git_sha = stage_url_cache_refresh(
+            git_sha = plugin_cache.stage_url_cache_refresh(
                 lambda staging: _shallow_clone(target, staging), clone_dest
             )
-        except subprocess.CalledProcessError as exc:
-            print_error(f"git clone failed: {exc.stderr.strip() if exc.stderr else exc}")
-            raise typer.Exit(code=1) from exc
-        except OSError as exc:
-            print_error(
-                f"plugin cache refresh failed at {clone_dest}: {exc}. "
-                "The previous cache was preserved when recovery was possible; "
-                "check sibling .bak-* directories before retrying."
-            )
+        except (subprocess.CalledProcessError, OSError) as exc:
+            print_error(plugin_cache.url_cache_refresh_error(exc, clone_dest))
             raise typer.Exit(code=1) from exc
         repo_root = clone_dest
         source_kind = "git"
@@ -2468,20 +2458,13 @@ def _install_named_from_url(
 ) -> None:
     """`install <name> --from <repo-url>` qualified form for plugin_home sources."""
     _reject_subdirectory_form(repo_url)
-    clone_dest = url_cache_destination(cache_root, repo_url)
+    clone_dest = plugin_cache.url_cache_destination(cache_root, repo_url)
     try:
-        git_sha = stage_url_cache_refresh(
+        git_sha = plugin_cache.stage_url_cache_refresh(
             lambda staging: _shallow_clone(repo_url, staging), clone_dest
         )
-    except subprocess.CalledProcessError as exc:
-        print_error(f"git clone failed: {exc.stderr.strip() if exc.stderr else exc}")
-        raise typer.Exit(code=1) from exc
-    except OSError as exc:
-        print_error(
-            f"plugin cache refresh failed at {clone_dest}: {exc}. "
-            "The previous cache was preserved when recovery was possible; "
-            "check sibling .bak-* directories before retrying."
-        )
+    except (subprocess.CalledProcessError, OSError) as exc:
+        print_error(plugin_cache.url_cache_refresh_error(exc, clone_dest))
         raise typer.Exit(code=1) from exc
 
     catalog = _enumerate_catalog(clone_dest)

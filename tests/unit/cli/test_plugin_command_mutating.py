@@ -2489,7 +2489,7 @@ def test_url_refresh_filesystem_failure_is_reported_without_traceback(
         raise OSError(28, "No space left on device")
 
     monkeypatch.setattr(
-        "ouroboros.cli.commands.plugin.stage_url_cache_refresh", _disk_failure
+        "ouroboros.cli.commands.plugin_cache.stage_url_cache_refresh", _disk_failure
     )
     selector = (
         ["add", url, "--plugin", "github-pr-ops"]

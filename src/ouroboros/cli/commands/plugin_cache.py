@@ -17,6 +17,19 @@ import os
 from pathlib import Path
 import secrets
 import shutil
+import subprocess
+
+
+def url_cache_refresh_error(exc: subprocess.CalledProcessError | OSError, dest: Path) -> str:
+    """Render clone and filesystem failures through one public CLI contract."""
+    if isinstance(exc, subprocess.CalledProcessError):
+        detail = exc.stderr.strip() if exc.stderr else exc
+        return f"git clone failed: {detail}"
+    return (
+        f"plugin cache refresh failed at {dest}: {exc}. "
+        "The previous cache was preserved when recovery was possible; "
+        "check sibling .bak-* directories before retrying."
+    )
 
 
 def url_cache_destination(cache_root: Path, repo_url: str) -> Path:
