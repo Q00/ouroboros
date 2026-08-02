@@ -785,10 +785,15 @@ def test_no_echo_of_any_shape_carries_a_directive_into_the_transcript() -> None:
     ):
         assert echo_carries_dispatch(shape), shape[:60]
 
-    # A repair is a question, and a question does not carry our marker. This is
-    # the case the predicate must not swallow: `last_question` exists to fix a
-    # round whose stored question was damaged by partial persistence.
+    # A repair must get through, and the marker alone does not make an echo.
+    # This is the case the predicate must not swallow: `last_question` exists to
+    # fix a round whose stored question was damaged by partial persistence, and
+    # for one round the bare-marker test swallowed it — so a question that
+    # merely quoted the sentinel could not repair anything, and where the stored
+    # question was the damaged one, the damage is what reached the transcript.
     assert not echo_carries_dispatch("The real repaired question?")
+    assert not echo_carries_dispatch(f"How should Ouroboros preserve {marker} here?")
+    assert not echo_carries_dispatch(f"{marker}")
     assert not echo_carries_dispatch(None)
 
 
@@ -996,3 +1001,61 @@ def test_the_gate_and_the_renderer_share_one_condition() -> None:
 
     # A turn that attached no advisory at all — the length-guard path.
     assert not directive_was_appended({})
+
+
+async def test_a_repair_quoting_the_marker_replaces_a_damaged_question() -> None:
+    """The harm the bare-marker test caused, at the handler.
+
+    `last_question` exists to repair a pending round whose stored question was
+    damaged by partial persistence. While the predicate tested for the marker
+    alone, a repair that quoted the sentinel was read as an echo and dropped —
+    and the damaged text it was sent to replace is what reached
+    `record_response`, requirement extraction, and the Seed.
+
+    The stored question below is that damage. If the repair cannot get through,
+    the placeholder is what the interview remembers asking.
+    """
+    from ouroboros.mcp.tools.advisory_dispatch import (
+        QUESTION_ADVISORY_DISPATCH_MARKER as marker,
+    )
+
+    repair = f"How should Ouroboros preserve {marker} in a question?"
+    state = InterviewState(
+        interview_id="sess-repair",
+        rounds=[
+            InterviewRound(round_number=1, question="Q1?", user_response="A1"),
+            InterviewRound(
+                round_number=2, question="[question text unavailable]", user_response=None
+            ),
+        ],
+    )
+
+    async def record(
+        current: InterviewState, answer: str, question: str
+    ) -> Result[InterviewState, object]:
+        current.rounds.append(
+            InterviewRound(
+                round_number=current.current_round_number,
+                question=question,
+                user_response=answer,
+            )
+        )
+        return Result.ok(current)
+
+    engine = MagicMock()
+    engine.load_state = AsyncMock(return_value=Result.ok(state))
+    engine.record_response = AsyncMock(side_effect=record)
+    engine.save_state = AsyncMock(return_value=MagicMock(is_err=False))
+    engine.ask_next_question = AsyncMock(return_value=Result.ok("Next?"))
+
+    handler = InterviewHandler(interview_engine=engine, agent_runtime_backend="claude")
+    handler.llm_adapter = MagicMock()
+    handler._emit_event_bg = MagicMock()  # type: ignore[method-assign]
+    handler._score_interview_state = AsyncMock(return_value=_score(0.35))  # type: ignore[method-assign]
+
+    result = await handler.handle(
+        {"session_id": "sess-repair", "answer": "A", "last_question": repair}
+    )
+
+    assert result.is_ok
+    assert engine.record_response.await_args.args[2] == repair

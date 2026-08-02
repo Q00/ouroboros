@@ -171,6 +171,25 @@ def append_lateral_review_notice(
     )
 
 
+def _directive_at(text: str) -> int:
+    """Return the offset of a directive this module wrote, or -1.
+
+    A directive is the marker *and* the opening that always follows it, never
+    the marker alone. Both readers of a response ask this same question — the
+    echo path to decide whether an echo is a repair, the parser to decide where
+    a response body ends — so they ask it in one place and cannot answer it
+    differently.
+
+    The last one, because a directive is always appended: any earlier marker is
+    text the question carried.
+    """
+    cut = text.rfind(QUESTION_ADVISORY_DISPATCH_MARKER)
+    if cut < 0:
+        return -1
+    suffix = text[cut + len(QUESTION_ADVISORY_DISPATCH_MARKER) :]
+    return cut if suffix.lstrip("\n").startswith(_HOST_DIRECTIVE_OPENING) else -1
+
+
 def echo_carries_dispatch(echoed: Any) -> bool:
     """Return whether an echoed question carries a directive this module wrote.
 
@@ -196,9 +215,22 @@ def echo_carries_dispatch(echoed: Any) -> bool:
     past it. Enumerating those forms is what the previous approach had to do, and
     the list only grows.
 
+    **The marker alone is not the test.** It was, for one round, and that broke
+    the repair this exists to allow: a question quoting the marker without any
+    directive under it was read as an echo, so the stored question won — and
+    where the stored question is the damaged one ``last_question`` exists to
+    replace, the damage is what reached the transcript. The docstring above
+    claimed the worst case was keeping the right question, which is true only
+    when the stored question is right, and that is precisely the case this
+    parameter is not for.
+
+    So it asks for a directive, not a mention. What remains is narrower and
+    stated: a repair that reproduces a whole directive is not distinguishable
+    from an echo, and preferring the record there is the safe reading.
+
     A non-string is not an echo; the caller's own validation rejects it.
     """
-    return isinstance(echoed, str) and QUESTION_ADVISORY_DISPATCH_MARKER in echoed
+    return isinstance(echoed, str) and _directive_at(echoed) >= 0
 
 
 def split_appended_dispatch(text: str) -> str:
@@ -231,13 +263,8 @@ def split_appended_dispatch(text: str) -> str:
     question and is recorded as one — a guarantee stated where nothing made it
     true, which is the shape this branch keeps finding in its own comments.
     """
-    cut = text.rfind(QUESTION_ADVISORY_DISPATCH_MARKER)
-    if cut < 0:
-        return text
-    suffix = text[cut + len(QUESTION_ADVISORY_DISPATCH_MARKER) :]
-    if not suffix.lstrip("\n").startswith(_HOST_DIRECTIVE_OPENING):
-        return text
-    return text[:cut].strip()
+    cut = _directive_at(text)
+    return text if cut < 0 else text[:cut].strip()
 
 
 __all__ = [
