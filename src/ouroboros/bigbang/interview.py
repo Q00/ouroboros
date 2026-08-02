@@ -36,6 +36,7 @@ from ouroboros.interview_adapters import (
     next_unresolved_reference,
     select_glossary_injection,
 )
+from ouroboros.interview_calibration import InterviewCalibration
 from ouroboros.providers.base import (
     CompletionConfig,
     LLMAdapter,
@@ -842,7 +843,10 @@ class InterviewEngine:
         return Result.ok(state)
 
     async def ask_next_question(
-        self, state: InterviewState
+        self,
+        state: InterviewState,
+        *,
+        language_calibration: InterviewCalibration | None = None,
     ) -> Result[str, ProviderError | ValidationError]:
         """Generate the next question based on current state.
 
@@ -906,6 +910,7 @@ class InterviewEngine:
             state,
             initial_context=effective_initial_context,
             max_chars=system_prompt_budget,
+            language_calibration=language_calibration,
         )
         messages = [
             Message(role=MessageRole.SYSTEM, content=system_prompt),
@@ -963,6 +968,47 @@ class InterviewEngine:
         )
 
         return Result.ok(question)
+
+    async def rephrase_pending_question(
+        self,
+        question: str,
+        calibration: InterviewCalibration,
+    ) -> Result[str, ProviderError]:
+        """Reword one pending question while preserving its decision semantics."""
+        messages = [
+            Message(
+                role=MessageRole.SYSTEM,
+                content=(
+                    "Rephrase exactly one requirements-interview question at the requested "
+                    "language level. Preserve every decision, constraint, and acceptance "
+                    "meaning. Define unfamiliar jargon inline, do not answer the question, "
+                    "do not add architecture recommendations, and return only the rephrased "
+                    "question in the user's language.\n\n"
+                    f"{calibration.prompt_guidance()}"
+                ),
+            ),
+            Message(
+                role=MessageRole.USER,
+                content=(
+                    f"User-stated evidence:\n{calibration.evidence}\n\n"
+                    f"Pending question:\n{question[:4000]}"
+                ),
+            ),
+        ]
+        assert self.model is not None
+        result = await self._require_llm_adapter().complete(
+            messages,
+            CompletionConfig(
+                model=self.model,
+                role="clarification",
+                model_is_explicit=self.model_is_explicit,
+                temperature=0.1,
+                max_tokens=min(self.max_tokens, 600),
+            ),
+        )
+        if result.is_err:
+            return Result.err(result.error)
+        return Result.ok(result.value.content.strip())
 
     async def _select_question_from_candidates(
         self,
@@ -1217,6 +1263,7 @@ class InterviewEngine:
         state: InterviewState,
         initial_context: str | None = None,
         max_chars: int | None = None,
+        language_calibration: InterviewCalibration | None = None,
     ) -> str:
         """Build the system prompt for question generation.
 
@@ -1263,6 +1310,9 @@ class InterviewEngine:
                 f"This is {round_info}. Your ONLY job is to ask questions that reduce ambiguity.\n\n"
                 f"Initial context: {prompt_initial_context}\n"
             )
+
+        if language_calibration is not None:
+            dynamic_header += f"\n\n{language_calibration.prompt_guidance()}"
 
         # Answer prefix hints — always present so the question generator
         # can interpret enriched answers regardless of brownfield status.

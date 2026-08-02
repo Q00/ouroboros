@@ -60,7 +60,7 @@ for the canonical meanings of `AgentRuntimeContext`, `ControlPlane`,
 
 ### 1. Skills & Agents Registry
 **Auto-discovery of bundled skills and agents that ship with Ouroboros core**
-- Skills: 14 core workflow skills (interview, seed, run, evaluate, evolve, cancel, unstuck, update, help, setup, ralph, tutorial, welcome, status)
+- Skills: bundled workflow skills, including interview, idk calibration, seed, run, evaluate, evolve, cancel, unstuck, update, help, setup, ralph, tutorial, welcome, and status
 - Agents: 9 specialized agents for different thinking modes
 - Hot-reload capabilities without restart
 - Magic prefix detection (`/ouroboros:`)
