@@ -394,6 +394,17 @@ def interview_code_investigation_answer_contract() -> dict[str, Any]:
     return _interview_code_investigation_answer_contract()
 
 
+#: Aggregations whose result is a tally.  A count of things cannot be negative
+#: and cannot be fractional, so a schema that admits ``-1`` or ``1.5`` under one
+#: of these is admitting a number no read produced -- and this lane's whole
+#: output is numbers shown to a user as measured fact.
+#:
+#: Kept as a set rather than folded into a per-aggregation value schema: the
+#: distinction is between "counts things" and "computes over them", and only the
+#: first constrains the result's shape.  ``sum`` is deliberately absent -- a sum
+#: over signed quantities is signed, and a sum over fractions is fractional.
+DATA_COUNTING_AGGREGATIONS: frozenset[str] = frozenset({"count", "distinct_count"})
+
 #: Aggregations a read request may ask for.  The list is closed on purpose: an
 #: aggregate is the only answer shape this lane can carry, so a lookup that
 #: cannot be phrased as one has no way to be requested and becomes a no-op
@@ -406,17 +417,6 @@ def interview_code_investigation_answer_contract() -> dict[str, Any]:
 #: ranks are members instead of a parameter, which keeps the ambiguity out
 #: without adding a conditional field that only some aggregations use
 #: (Q00/ouroboros#1754).
-#: Aggregations whose result is a tally.  A count of things cannot be negative
-#: and cannot be fractional, so a schema that admits ``-1`` or ``1.5`` under one
-#: of these is admitting a number no read produced -- and this lane's whole
-#: output is numbers shown to a user as measured fact.
-#:
-#: Kept as a set rather than folded into a per-aggregation value schema: the
-#: distinction is between "counts things" and "computes over them", and only the
-#: first constrains the result's shape.  ``sum`` is deliberately absent -- a sum
-#: over signed quantities is signed, and a sum over fractions is fractional.
-DATA_COUNTING_AGGREGATIONS: frozenset[str] = frozenset({"count", "distinct_count"})
-
 DATA_AGGREGATIONS: tuple[str, ...] = (
     "count",
     "distinct_count",
@@ -473,18 +473,6 @@ DATA_NO_EVIDENCE_REASONS: tuple[str, ...] = (
 #: whitespace back is what makes a sentence, and a query, spellable again.
 _DATA_IDENTIFIER_PATTERN = r"^[A-Za-z0-9_.:\-]{1,128}$"
 
-#: An ISO-8601 timestamp, constrained by pattern rather than by ``format``.
-#: ``format`` is annotation-only under Draft 2020-12 unless a validator opts in,
-#: so a contract that relied on it would be stating a rule nothing enforced --
-#: the failure mode this file has hit twice already.
-#:
-#: The zone is optional, which is a concession made deliberately. A naive
-#: timestamp is ambiguous by up to a day, and asking for one is the right ask --
-#: the description does. But this lane is ``required: true`` and a rejected
-#: answer is popped from the aggregation, so rejecting a naive timestamp does
-#: not buy a better one: it stalls the fan-out and the user sees no measurement
-#: at all. An ambiguous moment beats a withheld one, and children emit naive
-#: timestamps often enough that the strict form would be a routine stall.
 #: How many grouped numbers one measurement may carry. Even one grouping key can
 #: produce arbitrarily many groups, and "an aggregate" stops being one somewhere
 #: before the row count. The bound is where that line is drawn -- and it is

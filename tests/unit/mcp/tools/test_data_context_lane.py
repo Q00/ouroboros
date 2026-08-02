@@ -168,8 +168,8 @@ def test_data_lane_is_the_only_required_optional_split_completion_reads() -> Non
 def test_a_field_that_could_be_closed_was_closed(field: str, smuggled: Any, closed_by: str) -> None:
     """Every field that could stop being free text has stopped being one.
 
-    A child that ran a lookup has no field designated for the result, but prose
-    fields were still sentence-shaped and a result fits in a sentence. Rather
+    The result has its own field now (`values`); what is closed here is the
+    prose, which was still sentence-shaped and a result fits in a sentence. Rather
     than look for results in them — the search #1754 records as not converging
     over ten rounds — the fields that did not need to be prose were closed.
     """
@@ -236,9 +236,9 @@ def test_a_request_the_parent_would_have_to_finish_cannot_be_proposed(
 ) -> None:
     """What the user approves has to be the whole operation, not most of it.
 
-    The host renders every field and runs the read after confirmation, so a
-    request that still needs a decision afterwards moves that decision past the
-    approval meant to cover it. Closed by making the incomplete forms
+    The user reads every field beside a measurement the lane has already taken,
+    so a request that still needs a decision is one the lane finished by
+    guessing. Closed by making the incomplete forms
     unspellable rather than by adding a parameter only some aggregations use:
     the ranks are their own members, and a range is two scalar filters.
     """
@@ -286,12 +286,12 @@ def test_the_complete_forms_of_those_requests_are_accepted() -> None:
 
 
 def test_the_two_answer_states_are_exclusive() -> None:
-    """An answer is a proposal or a no-op, and cannot be both.
+    """An answer is a measurement or a no-op, and cannot be both.
 
     `data_needed: true` with a concrete read *and* `no_evidence_reason` says the
     question is measurable and is not a measurement. Nothing downstream can
-    resolve that — the host renders a proposal it was simultaneously told not to
-    make (Q00/ouroboros#1754).
+    resolve that — the host renders a measurement the same answer disowned
+    (Q00/ouroboros#1754).
     """
     schema = interview_data_evidence_answer_contract()["response_model_schema"]
     validator = Draft202012Validator(schema)
@@ -325,7 +325,7 @@ def test_neither_state_can_borrow_the_other_state_s_fields() -> None:
     two complete states, so a field belonging to one state stays spellable in
     the other until someone forbids it by name. Rather than wait for the next
     field to be added and the forbidding to be forgotten, every property is
-    checked here: each must be legal in the no-op state, in the proposal state,
+    checked here: each must be legal in the no-op state, in the measured state,
     or in both deliberately — never legal in one only by omission.
     """
     schema = interview_data_evidence_answer_contract()["response_model_schema"]
@@ -623,8 +623,8 @@ async def test_the_public_submit_tool_refuses_a_self_contradicting_answer(tmp_pa
     """Through re-entry, because that is where the contradiction would land.
 
     Schema validation alone would prove the shape is rejected; this proves the
-    lane is excluded from the aggregation rather than reaching the confirmation
-    surface as a proposal the same answer disowned.
+    lane is excluded from the aggregation rather than reaching the host's
+    rendering as a measurement the same answer disowned.
     """
     from ouroboros.mcp.tools.evaluation_handlers import SubmitFanoutResultsHandler
 
@@ -829,9 +829,9 @@ def test_the_record_never_holds_what_a_child_said(tmp_path: Any) -> None:
     registry = FanoutRegistry(tmp_path)
     fanout_id, lane_ids, identity = _registered_advisory(registry)
     # Placed in `metric`, which is one of the three fields still free: they
-    # exist to be read by the user before approving a read, so they cannot be
-    # closed without removing the confirmation surface. What protects the user
-    # is where this can travel, and the assertions below are that boundary.
+    # exist to be read by the user beside the measurement that already ran, so
+    # they cannot be closed without taking that reading away. What protects the
+    # user is where this can travel, and the assertions below are that boundary.
     secret = "accounts, observed 41, contact bob@example.com"
     proposal = _fully_populated_proposal(identity)
     proposal["read_requests"][0]["metric"] = secret
@@ -1009,7 +1009,7 @@ def test_a_lane_without_a_contract_keeps_the_generic_output_shape() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# What the user is asked to approve
+# What the user is shown
 # --------------------------------------------------------------------------- #
 
 
@@ -1042,13 +1042,13 @@ def _fully_populated_proposal(identity: str) -> dict[str, Any]:
 def test_the_host_receives_every_read_request_field_verbatim(tmp_path: Any) -> None:
     """ "Render the request whole" has to be satisfiable, not just instructed.
 
-    The host is told to show the user every field of the request it is asking
-    them to authorize. That duty is only keepable if the request reaches the
-    host as issued — a field dropped in aggregation is one the user can never be
-    shown, and two proposals differing only in a filter would then arrive
-    identical. So the passthrough is pinned here rather than the prose being
-    guarded: what makes an omission impossible is that there is no summarizing
-    step between the child and the confirmation surface (Q00/ouroboros#1754).
+    The host is told to show the user every field of the measurement it renders
+    beside the question. That duty is only keepable if the measurement reaches
+    the host as the child returned it — a field dropped in aggregation is one
+    the user can never be shown, and two measurements differing only in a filter
+    would then arrive identical. So the passthrough is pinned here rather than
+    the prose being guarded: what makes an omission impossible is that there is
+    no summarizing step between the child and the host's rendering.
     """
     registry = FanoutRegistry(tmp_path)
     fanout_id, lane_ids, identity = _registered_advisory(registry)
@@ -1422,8 +1422,9 @@ def test_the_prompt_does_not_forbid_the_discovery_it_permits() -> None:
     instruction, so the self-selection the lane is built around never ran --
     observed as a `data_needed=false` verdict reached with zero tool uses.
 
-    The prohibition that belongs here is on *calling* a data tool, which is the
-    parent's to do after the user confirms. Discovery is not execution.
+    The calling prohibition is gone too (#1825): the lane runs the read. What
+    this still pins is the ordering the conflict destroyed — the lane looks at
+    what is described before it decides whether the answer is a measurement.
     """
     prompt = _data_payload()["prompt"]
 
