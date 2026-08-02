@@ -71,6 +71,8 @@ from ouroboros.mcp.tools.fanout import (  # noqa: F401
     register_code_investigation_fanout,
     register_lateral_persona_fanout,
     register_question_advisory_fanout,
+    stamp_lateral_persona_fanout,
+    stamp_question_advisory_fanout,
     submit_fanout_results,
 )
 from ouroboros.mcp.types import (

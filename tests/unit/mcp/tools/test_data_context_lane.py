@@ -1043,6 +1043,49 @@ def test_the_confirmation_instruction_asks_for_the_whole_request() -> None:
 # --------------------------------------------------------------------------- #
 
 
+@pytest.mark.parametrize("failure", ["directory", "write"])
+def test_no_id_is_stamped_when_the_record_could_not_be_written(
+    tmp_path: Any, monkeypatch: Any, failure: str
+) -> None:
+    """An id is a promise that a later submission can redeem it.
+
+    Registration used to swallow a persistence failure and return the id
+    anyway, so a full disk produced a fan-out id over no record — and the host
+    found out at submission, after every child had run, when re-entry answered
+    `unknown_fanout_id`. Failing to register costs the turn its re-entry;
+    issuing an unredeemable id costs the turn its results (Q00/ouroboros#1754,
+    which lists "no stamped id when registration failed to persist").
+    """
+    from ouroboros.mcp.tools import fanout as fanout_module
+
+    if failure == "directory":
+        monkeypatch.setattr(
+            fanout_module,
+            "secure_directory",
+            lambda _directory: (_ for _ in ()).throw(OSError("disk full")),
+        )
+    else:
+        monkeypatch.setattr(fanout_module, "write_owner_only", lambda *_args, **_kwargs: False)
+
+    registry = FanoutRegistry(tmp_path)
+    meta: dict[str, Any] = {}
+    _attach_question_assist_requests(
+        meta,
+        session_id="sess-data",
+        question=QUESTION,
+        phase="answer",
+        score=None,
+        dispatch_mode=SubagentDispatchMode.HOST_DRIVEN,
+        runtime_backend="codex",
+        fanout_registry=registry,
+    )
+
+    # The turn still happens — the lanes are dispatched and the question is
+    # still answered. What it loses is re-entry, and it loses it visibly.
+    assert meta["question_advisory_subagents"]
+    assert "question_advisory_fanout_id" not in meta
+
+
 def test_the_record_carries_no_contract_to_lose(tmp_path: Any) -> None:
     """Which lanes are contracted is code, so the record has no say in it.
 

@@ -159,9 +159,10 @@ class FanoutRegistry:
 
     Reuses the interview data directory as the persistence substrate (the same
     place interview state JSON is written) rather than inventing a new layer.
-    Each record is a single ``{fanout_id}.json`` file. Writes are best-effort:
-    a persistence failure degrades re-entry (submissions report the fan-out as
-    unknown) but never breaks the fan-out request path.
+    Each record is a single ``{fanout_id}.json`` file. A write that fails
+    issues no id: the request path still proceeds, but without re-entry, which
+    is the honest degradation. Handing back an id whose record is missing looks
+    like success and fails at redemption instead.
 
     Prefer constructing with the final directory. A caller that knows the
     resolved state dir — the composition root does, long before it builds this
@@ -229,28 +230,33 @@ class FanoutRegistry:
         fanout_id: str | None = None,
         required_keys: list[str] | None = None,
         question_identity: str = "",
-    ) -> str:
-        """Persist a fan-out record and return its ``fanout_id``.
+    ) -> str | None:
+        """Persist a fan-out record and return its ``fanout_id``, or ``None``.
+
+        ``None`` means the record was not written, so no id is issued. An id is
+        a promise that a later submission can redeem it, and returning one over
+        a record that does not exist breaks that promise at the worst moment --
+        after the children have run, when the host submits and is told the
+        fan-out is unknown. Failing to register costs the turn its re-entry;
+        issuing an unredeemable id costs the turn its results.
 
         A ``fanout_id`` is generated (uuid4-backed, deterministic-friendly when
-        supplied by the caller) and stamped into the returned value so the
-        producer can echo it into the emitted meta. Persistence is best-effort.
+        supplied by the caller) and returned once its record is on disk, so the
+        producer can echo into the emitted meta only what a host can redeem.
         """
         resolved_id = fanout_id or f"fanout_{uuid4().hex}"
         # Generated ids always conform; a supplied one that does not is a
         # producer bug, and issuing it would hand out a token that can never be
         # redeemed. Refused here rather than at redemption so the defect surfaces
-        # where it was written. This is argument validity, not the best-effort
-        # persistence below: a full disk still returns an id.
+        # where it was written -- raised rather than returned as ``None``, which
+        # says "this write did not happen" about a caller that asked for the
+        # impossible.
         record_path = self._path(resolved_id)
         if record_path is None:
             raise ValueError(
                 "fanout_id must be 1-128 characters of [A-Za-z0-9_-]; "
                 "it names a file inside the registry directory."
             )
-        # From here the id is public and redeemable, so the directory it was
-        # written to is part of the promise. See ``rebase_default``.
-        self._issued = True
         record = FanoutRecord(
             fanout_id=resolved_id,
             kind=kind,
@@ -265,19 +271,12 @@ class FanoutRegistry:
             # A fan-out record carries the producer's ``synthesizer_input``
             # verbatim — the code-investigation request, the persona panel
             # entries — so it is the same artifact class as the transcript it
-            # was derived from and takes the same writer. Registration stays
-            # best-effort: an unconfirmed durability flush is logged like every
-            # other migrated writer, and the caller still gets its id.
+            # was derived from and takes the same writer.
             secure_directory(self._dir)
-            if not write_owner_only(
+            persisted = write_owner_only(
                 record_path,
                 json.dumps(record.to_dict(), ensure_ascii=False),
-            ):
-                log.warning(
-                    "fanout.registry.durability_unconfirmed",
-                    fanout_id=resolved_id,
-                    kind=kind,
-                )
+            )
         except OSError as exc:
             log.warning(
                 "fanout.registry.persist_failed",
@@ -285,6 +284,17 @@ class FanoutRegistry:
                 kind=kind,
                 error=str(exc),
             )
+            return None
+        if not persisted:
+            log.warning(
+                "fanout.registry.durability_unconfirmed",
+                fanout_id=resolved_id,
+                kind=kind,
+            )
+            return None
+        # Only now is the id public and redeemable, so only now is the directory
+        # it was written to part of a promise. See ``rebase_default``.
+        self._issued = True
         return resolved_id
 
     def load(self, fanout_id: str) -> FanoutRecord | None:
@@ -331,7 +341,7 @@ def register_lateral_persona_fanout(
     payloads: list[SubagentPayload],
     correlation_key: str = "context.persona",
     fanout_id: str | None = None,
-) -> str:
+) -> str | None:
     """Register a lateral persona-panel fan-out for later result re-entry.
 
     Expected keys are the payload personas (``context.persona``); the persisted
@@ -364,7 +374,7 @@ def register_code_investigation_fanout(
     request: Mapping[str, Any],
     correlation_key: str = "code_facts",
     fanout_id: str | None = None,
-) -> str:
+) -> str | None:
     """Register a code-investigation fan-out for later result re-entry.
 
     Expected keys default to the request's ``required_result_ids`` (or the
@@ -394,7 +404,7 @@ def register_question_advisory_fanout(
     payloads: list[SubagentPayload],
     correlation_key: str = "context.lane_id",
     fanout_id: str | None = None,
-) -> str:
+) -> str | None:
     """Register an interview question-advisory fan-out for later result re-entry.
 
     The advisory lanes are stamped to correlate by ``context.lane_id`` (a lane's
@@ -456,6 +466,45 @@ def register_question_advisory_fanout(
         fanout_id=fanout_id,
         required_keys=required_keys,
     )
+
+
+def stamp_question_advisory_fanout(
+    meta: dict[str, Any],
+    registry: FanoutRegistry | None,
+    *,
+    session_id: str,
+    payloads: list[SubagentPayload],
+) -> None:
+    """Register the advisory fan-out and stamp its id, if there is one to stamp.
+
+    Registration and stamping are one decision, so they live in one place: an id
+    reaches the host only when its record exists. With no registry there is no
+    re-entry to offer; with a failed write there is an id that would answer
+    ``unknown_fanout_id`` after every child had run. Both are the same absence
+    from the host's side, and both leave the turn otherwise intact.
+    """
+    if registry is None:
+        return
+    fanout_id = register_question_advisory_fanout(
+        registry, session_id=session_id, payloads=payloads
+    )
+    if fanout_id is not None:
+        meta["question_advisory_fanout_id"] = fanout_id
+
+
+def stamp_lateral_persona_fanout(
+    dispatch_record: dict[str, Any],
+    registry: FanoutRegistry | None,
+    *,
+    session_id: str,
+    payloads: list[SubagentPayload],
+) -> None:
+    """Register the persona panel and stamp its id, on the same terms."""
+    if registry is None:
+        return
+    fanout_id = register_lateral_persona_fanout(registry, session_id=session_id, payloads=payloads)
+    if fanout_id is not None:
+        dispatch_record["fanout_id"] = fanout_id
 
 
 def _canonical_lane_contracts() -> dict[str, Mapping[str, Any]]:
@@ -887,5 +936,7 @@ __all__ = [
     "register_code_investigation_fanout",
     "register_lateral_persona_fanout",
     "register_question_advisory_fanout",
+    "stamp_lateral_persona_fanout",
+    "stamp_question_advisory_fanout",
     "submit_fanout_results",
 ]

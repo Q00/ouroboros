@@ -1571,9 +1571,9 @@ class LateralThinkHandler(BridgeAwareMixin):
                 build_lateral_multi_subagent,
                 build_multi_subagent_result,
                 lateral_persona_panel_metadata_from_capability_definitions,
-                register_lateral_persona_fanout,
                 resolve_subagent_dispatch,
                 stamp_fanout_meta,
+                stamp_lateral_persona_fanout,
             )
 
             if explicit_list:
@@ -1727,12 +1727,12 @@ class LateralThinkHandler(BridgeAwareMixin):
             )
             if not host_driven:
                 dispatch_record["legacy_dispatch_mode"] = "inline_fallback"
-            if self.fanout_registry is not None:
-                dispatch_record["fanout_id"] = register_lateral_persona_fanout(
-                    self.fanout_registry,
-                    session_id=str(arguments.get("session_id") or ""),
-                    payloads=payloads,
-                )
+            stamp_lateral_persona_fanout(
+                dispatch_record,
+                self.fanout_registry,
+                session_id=str(arguments.get("session_id") or ""),
+                payloads=payloads,
+            )
             dispatch_blob = json.dumps(dispatch_record)
             dispatch_b64 = base64.b64encode(dispatch_blob.encode("utf-8")).decode("ascii")
             host_banner = (

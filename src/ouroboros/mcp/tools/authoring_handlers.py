@@ -67,10 +67,10 @@ from ouroboros.mcp.tools.subagent import (
     build_interview_subagent,
     dispatch_plugin_terminal,
     lateral_persona_panel_metadata_from_capability_definitions,
-    register_question_advisory_fanout,
     resolve_subagent_dispatch,
     should_dispatch_via_plugin,
     stamp_fanout_meta,
+    stamp_question_advisory_fanout,
 )
 from ouroboros.mcp.types import (
     ContentType,
@@ -803,19 +803,16 @@ def _attach_question_assist_requests(
         payloads=advisory_payloads,
         correlation_key="context.lane_id",
     )
-    if fanout_registry is not None:
-        # Register from the SAME request this response stamps: the correlation
-        # key is ``context.lane_id``, the expected keys are the lane ids on the
-        # emitted payloads, and the persisted answer contracts are the ones the
-        # children were handed — so a host following the stamped
-        # ``question_advisory_result_correlation_key`` round-trips through
-        # ``ouroboros_submit_fanout_results``, and a submission arriving after a
-        # restart is judged by the contract it was issued (#1578, #1825 R2).
-        meta["question_advisory_fanout_id"] = register_question_advisory_fanout(
-            fanout_registry,
-            session_id=session_id,
-            payloads=advisory_payloads,
-        )
+    # Register from the SAME request this response stamps: correlation key
+    # ``context.lane_id``, expected keys the payload lane ids, so a host
+    # following the stamped key round-trips (#1578). Contracts are not
+    # persisted -- re-entry judges by this build (#1825).
+    stamp_question_advisory_fanout(
+        meta,
+        fanout_registry,
+        session_id=session_id,
+        payloads=advisory_payloads,
+    )
 
 
 def _is_initial_context_length_guard_question(question: str) -> bool:
