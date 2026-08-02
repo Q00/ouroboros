@@ -23,6 +23,7 @@ from ouroboros.mcp.tools.authoring_handlers import (
 from ouroboros.mcp.tools.fanout import (
     FANOUT_KIND_QUESTION_ADVISORY,
     FanoutRegistry,
+    _validate_against_contract,
     submit_fanout_results,
 )
 from ouroboros.mcp.tools.subagent import build_interview_question_advisory_subagents
@@ -57,6 +58,24 @@ def _valid_no_op(identity: str) -> dict[str, Any]:
         "read_requests": [],
         "no_evidence_reason": "not_a_measurement",
     }
+
+
+def _answer_states() -> dict[str, dict[str, Any]]:
+    """Return the contract's two answer shapes, keyed by title.
+
+    The schema is a `oneOf` over two closed objects, so there is no top-level
+    `properties` to index: a field belongs to a state, which is the point.
+    """
+    schema = interview_data_evidence_answer_contract()["response_model_schema"]
+    return {branch["title"]: branch for branch in schema["oneOf"]}
+
+
+def _proposal_state() -> dict[str, Any]:
+    return _answer_states()["MeasurementProposed"]
+
+
+def _read_request_schema() -> dict[str, Any]:
+    return _proposal_state()["properties"]["read_requests"]["items"]
 
 
 # --------------------------------------------------------------------------- #
@@ -242,6 +261,98 @@ def test_the_complete_forms_of_those_requests_are_accepted() -> None:
     assert list(Draft202012Validator(schema).iter_errors(answer)) == []
 
 
+def test_the_two_answer_states_are_exclusive() -> None:
+    """An answer is a proposal or a no-op, and cannot be both.
+
+    `data_needed: true` with a concrete read *and* `no_evidence_reason` says the
+    question is measurable and is not a measurement. Nothing downstream can
+    resolve that — the host renders a proposal it was simultaneously told not to
+    make (Q00/ouroboros#1754).
+    """
+    schema = interview_data_evidence_answer_contract()["response_model_schema"]
+    validator = Draft202012Validator(schema)
+    proposal = {
+        "question_identity": "interview-question:0123456789abcdef",
+        "lane_id": "data_context",
+        "data_needed": True,
+        "read_requests": [
+            {
+                "operation": "read",
+                "tool_name": "warehouse_query",
+                "metric": "enterprise accounts",
+                "aggregation": "count",
+                "informs_decision": "whether SSO ships first",
+            }
+        ],
+    }
+
+    assert list(validator.iter_errors(proposal)) == []
+    assert (
+        list(validator.iter_errors({**proposal, "no_evidence_reason": "not_a_measurement"})) != []
+    )
+
+
+def test_neither_state_can_borrow_the_other_state_s_fields() -> None:
+    """The class, not the instance: four rounds found this schema admitting a
+    shape that is not a coherent answer, each time through a different field.
+
+    The root is that it is written as one object with conditions rather than as
+    two complete states, so a field belonging to one state stays spellable in
+    the other until someone forbids it by name. Rather than wait for the next
+    field to be added and the forbidding to be forgotten, every property is
+    checked here: each must be legal in the no-op state, in the proposal state,
+    or in both deliberately — never legal in one only by omission.
+    """
+    schema = interview_data_evidence_answer_contract()["response_model_schema"]
+    validator = Draft202012Validator(schema)
+    identity = "interview-question:0123456789abcdef"
+    read = {
+        "operation": "read",
+        "tool_name": "warehouse_query",
+        "metric": "enterprise accounts",
+        "aggregation": "count",
+        "informs_decision": "whether SSO ships first",
+    }
+    states = {
+        "no_op": {
+            "question_identity": identity,
+            "lane_id": "data_context",
+            "data_needed": False,
+            "read_requests": [],
+            "no_evidence_reason": "not_a_measurement",
+        },
+        "proposal": {
+            "question_identity": identity,
+            "lane_id": "data_context",
+            "data_needed": True,
+            "read_requests": [read],
+        },
+    }
+    for name, answer in states.items():
+        assert list(validator.iter_errors(answer)) == [], name
+
+    # Structure does the forbidding now: each state is a closed object, so a
+    # field it does not name is rejected without anyone having named it as
+    # forbidden. This walks the states rather than a hand-written list, so a
+    # field added to one of them is covered the day it is added.
+    branches = _answer_states()
+    owned = {
+        title: set(state["properties"]) - set(branches["NoMeasurementNeeded"]["properties"])
+        | set(state["properties"]) - set(branches["MeasurementProposed"]["properties"])
+        for title, state in branches.items()
+    }
+    assert owned["NoMeasurementNeeded"], "the states must differ, or oneOf decides nothing"
+
+    for title, fields in owned.items():
+        borrower = "proposal" if title == "NoMeasurementNeeded" else "no_op"
+        owner = "no_op" if title == "NoMeasurementNeeded" else "proposal"
+        for field in fields:
+            if field not in states[owner]:
+                continue
+            answer = {**states[borrower], field: states[owner][field]}
+            assert list(validator.iter_errors(answer)) != [], f"{borrower} borrowed {field}"
+
+
 def test_the_child_has_no_field_in_which_to_rate_a_tool() -> None:
     """A classification that disagrees with the tool cannot be submitted at all.
 
@@ -253,8 +364,7 @@ def test_the_child_has_no_field_in_which_to_rate_a_tool() -> None:
     already filled in — and `web_context` names no tool. This lane was the only
     one asking the party that knows least to rate the risk (Q00/ouroboros#1754).
     """
-    schema = interview_data_evidence_answer_contract()["response_model_schema"]
-    request_schema = schema["properties"]["read_requests"]["items"]
+    request_schema = _read_request_schema()
     assert "source_class" not in request_schema["properties"]
     assert "source_class" not in request_schema["required"]
 
@@ -272,8 +382,8 @@ def test_the_child_has_no_field_in_which_to_rate_a_tool() -> None:
         }
     ]
 
-    errors = [error.validator for error in Draft202012Validator(schema).iter_errors(answer)]
-    assert "additionalProperties" in errors
+    reported = _validate_against_contract(answer, interview_data_evidence_answer_contract())
+    assert any(violation.endswith(": additionalProperties") for violation in reported), reported
 
 
 def test_a_fetched_value_has_nowhere_to_go() -> None:
@@ -299,8 +409,8 @@ def test_a_fetched_value_has_nowhere_to_go() -> None:
     assert list(Draft202012Validator(schema).iter_errors(answer)) == []
 
     answer["observed_value"] = 42
-    errors = [error.validator for error in Draft202012Validator(schema).iter_errors(answer)]
-    assert "additionalProperties" in errors
+    reported = _validate_against_contract(answer, interview_data_evidence_answer_contract())
+    assert any(violation.endswith(": additionalProperties") for violation in reported), reported
 
 
 def test_a_write_cannot_be_proposed() -> None:
@@ -471,6 +581,41 @@ def test_a_lane_is_not_excused_by_a_value_that_only_looks_true(
 
     assert outcome["status"] == "invalid_result_entry", why
     assert outcome["invalid_keys"] == ["data_context"], why
+
+
+@pytest.mark.asyncio
+@pytest.mark.asyncio
+async def test_the_public_submit_tool_refuses_a_self_contradicting_answer(tmp_path: Any) -> None:
+    """Through re-entry, because that is where the contradiction would land.
+
+    Schema validation alone would prove the shape is rejected; this proves the
+    lane is excluded from the aggregation rather than reaching the confirmation
+    surface as a proposal the same answer disowned.
+    """
+    from ouroboros.mcp.tools.evaluation_handlers import SubmitFanoutResultsHandler
+
+    registry = FanoutRegistry(tmp_path)
+    fanout_id, lane_ids, identity = _registered_advisory(registry)
+    contradictory = _fully_populated_proposal(identity)
+    contradictory["no_evidence_reason"] = "not_a_measurement"
+    results = [
+        entry for entry in _required_results(lane_ids, identity) if entry["key"] != "data_context"
+    ]
+    results.append({"key": "data_context", "content": contradictory})
+
+    submitted = await SubmitFanoutResultsHandler(fanout_registry=registry).handle(
+        {
+            "session_id": "sess-data",
+            "correlation_key": "context.lane_id",
+            "fanout_id": fanout_id,
+            "results": results,
+        }
+    )
+
+    assert submitted.is_ok, submitted
+    meta = submitted.unwrap().meta
+    assert meta["status"] == "partial"
+    assert "data_context" in meta["contract_violations"]
 
 
 @pytest.mark.asyncio
@@ -713,10 +858,9 @@ def test_a_session_the_child_asserts_is_not_a_field_at_all(tmp_path: Any) -> Non
     the field is absent rather than lenient, and the closed schema is what makes
     absent enforceable (Q00/ouroboros#1754).
     """
-    contract = interview_data_evidence_answer_contract()
-    schema = contract["response_model_schema"]
-    assert "session_id" not in schema["properties"]
-    assert "session_id" not in schema["required"]
+    for state in _answer_states().values():
+        assert "session_id" not in state["properties"], state["title"]
+        assert "session_id" not in state["required"], state["title"]
 
     registry = FanoutRegistry(tmp_path)
     fanout_id, lane_ids, identity = _registered_advisory(registry)
@@ -855,7 +999,7 @@ def test_the_host_receives_every_read_request_field_verbatim(tmp_path: Any) -> N
     fanout_id, lane_ids, identity = _registered_advisory(registry)
     proposal = _fully_populated_proposal(identity)
     schema = interview_data_evidence_answer_contract()["response_model_schema"]
-    request_schema = schema["properties"]["read_requests"]["items"]
+    request_schema = _read_request_schema()
     # The fixture must exercise the whole schema, or the passthrough below is
     # only proven for the fields someone remembered to put in it.
     assert set(proposal["read_requests"][0]) == set(request_schema["properties"])
@@ -975,7 +1119,8 @@ def test_a_lane_is_judged_by_the_contract_this_build_declares(
         metadata = declared()
         for lane in metadata["lanes"]:
             if lane["lane_id"] == "data_context":
-                lane["answer_contract"]["response_model_schema"]["required"].append("caveats")
+                for branch in lane["answer_contract"]["response_model_schema"]["oneOf"]:
+                    branch["required"].append("caveats")
         return metadata
 
     monkeypatch.setattr(schemas, "_interview_question_advisory_fanout_metadata", upgraded)

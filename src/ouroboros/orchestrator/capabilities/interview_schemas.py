@@ -595,11 +595,26 @@ def _interview_data_evidence_answer_contract() -> dict[str, Any]:
     extraction, and the record keeps no child-authored content
     (Q00/ouroboros#1754).
 
-    **A no-op is an answer, not an absence.** ``data_needed: false`` is a
-    complete, valid response and forces ``read_requests`` empty. The lane is
-    ``required: true`` precisely because this response always exists, so a
-    question that is not data-driven completes the fan-out rather than stalling
-    it.
+    **An answer is one of two states, and cannot be between them.** The schema
+    is a ``oneOf`` over two closed objects rather than one object with
+    conditions: ``NoMeasurementNeeded`` carries a reason and no reads,
+    ``MeasurementProposed`` carries reads and has no field for a reason.
+
+    It was the other shape first, and that shape leaked. One object with
+    ``if``/``then`` pairs constrains only the fields each pair names, so a field
+    belonging to one state stayed spellable in the other until someone forbade
+    it by name -- and an answer could say ``data_needed: true`` with a concrete
+    read *and* ``no_evidence_reason``, which is "this question is measurable"
+    and "this question is not a measurement" in one payload. Nothing downstream
+    resolves that; the host renders a proposal the same answer disowned. The
+    fix is not to forbid that pair but to stop having a place where a pair from
+    two states can meet, so the next field added to one state cannot leak into
+    the other by nobody remembering to exclude it.
+
+    **A no-op is an answer, not an absence.** ``NoMeasurementNeeded`` is a
+    complete, valid response. The lane is ``required: true`` precisely because
+    this response always exists, so a question that is not data-driven
+    completes the fan-out rather than stalling it.
 
     **The answer names the question it was drafted for, and nothing else.**
     There is no ``session_id`` here. The session is settled by the submission
@@ -612,35 +627,27 @@ def _interview_data_evidence_answer_contract() -> dict[str, Any]:
     output is a proposal shown beside the question, so ``question_identity`` is
     the whole of what has to match (Q00/ouroboros#1754).
     """
-    answer_schema: dict[str, Any] = {
+    identity_property: dict[str, Any] = {
+        "type": "string",
+        "pattern": r"^interview-question:[0-9a-f]{16}$",
+        "description": "Matches the originating advisory request.",
+    }
+    no_op_state: dict[str, Any] = {
+        "title": "NoMeasurementNeeded",
         "type": "object",
         "additionalProperties": False,
-        "required": [
-            "question_identity",
-            "lane_id",
-            "data_needed",
-            "read_requests",
-        ],
+        "required": ["question_identity", "lane_id", "data_needed", "no_evidence_reason"],
         "properties": {
-            "question_identity": {
-                "type": "string",
-                "pattern": r"^interview-question:[0-9a-f]{16}$",
-                "description": "Matches the originating advisory request.",
-            },
+            "question_identity": identity_property,
             "lane_id": {"const": "data_context"},
             "data_needed": {
-                "type": "boolean",
+                "const": False,
                 "description": (
-                    "False when the honest answer to this question is not a "
-                    "measurement. Decided from the question text before any "
-                    "tool call."
+                    "The honest answer to this question is not a measurement. "
+                    "Decided from the question text before any tool call."
                 ),
             },
-            "read_requests": {
-                "type": "array",
-                "maxItems": 5,
-                "items": _interview_data_read_request_schema(),
-            },
+            "read_requests": {"type": "array", "maxItems": 0},
             "no_evidence_reason": {
                 "type": "string",
                 "enum": list(DATA_NO_EVIDENCE_REASONS),
@@ -651,26 +658,28 @@ def _interview_data_evidence_answer_contract() -> dict[str, Any]:
                 ),
             },
         },
-        "allOf": [
-            {
-                "if": {
-                    "properties": {"data_needed": {"const": False}},
-                    "required": ["data_needed"],
-                },
-                "then": {
-                    "properties": {"read_requests": {"maxItems": 0}},
-                    "required": ["no_evidence_reason"],
-                },
-            },
-            {
-                "if": {
-                    "properties": {"data_needed": {"const": True}},
-                    "required": ["data_needed"],
-                },
-                "then": {"properties": {"read_requests": {"minItems": 1}}},
-            },
-        ],
     }
+    proposal_state: dict[str, Any] = {
+        "title": "MeasurementProposed",
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["question_identity", "lane_id", "data_needed", "read_requests"],
+        "properties": {
+            "question_identity": identity_property,
+            "lane_id": {"const": "data_context"},
+            "data_needed": {
+                "const": True,
+                "description": "The honest answer to this question is a measurement.",
+            },
+            "read_requests": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 5,
+                "items": _interview_data_read_request_schema(),
+            },
+        },
+    }
+    answer_schema: dict[str, Any] = {"oneOf": [no_op_state, proposal_state]}
     return {
         "contract_id": "data_evidence_answer.v1",
         "scope": "single_interview_question_data_evidence",

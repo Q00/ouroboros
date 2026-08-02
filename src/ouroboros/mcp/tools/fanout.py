@@ -410,11 +410,14 @@ def register_question_advisory_fanout(
     and the flag completion enforces cannot disagree.
 
     So does ``question_identity``. A contracted lane's answer carries the
-    session and question it claims to be about, and the contract says that field
-    "matches the originating advisory request" — a sentence nothing enforced
-    until this was persisted. Advisory children run asynchronously and a host
-    may have several questions in flight, so an unbound answer is one whose
-    evidence can land beside a different question than the one it measured.
+    question it claims to be about — and only the question: it asserts no
+    session, because the submission envelope already binds that and a copy the
+    child asserts about itself is the weaker of the two. The contract says the
+    identity field "matches the originating advisory request", a sentence
+    nothing enforced until this was persisted. Advisory children run
+    asynchronously and a host may have several questions in flight, so an
+    unbound answer is one whose evidence can land beside a different question
+    than the one it measured.
 
     The answer contracts are not persisted with it. Which lanes are contracted
     is a property of the code, read from the code at re-entry; a copy in the
@@ -528,8 +531,36 @@ def _validate_against_contract(
     # second copy of whatever the child produced.
     return sorted(
         f"{'/'.join(str(part) for part in error.absolute_path) or '<root>'}: {error.validator}"
-        for error in validator.iter_errors(dict(output))
+        for error in _reportable_errors(validator.iter_errors(dict(output)))
     )
+
+
+def _reportable_errors(errors: Any) -> list[Any]:
+    """Flatten a ``oneOf`` failure to the branch the answer was trying to be.
+
+    A contract written as alternative states reports one error at the root --
+    ``oneOf`` -- with each branch's reasons underneath in ``error.context``.
+    Reporting the root alone says only "wrong shape"; reporting every branch's
+    reasons says contradictory things, because the branch the answer was *not*
+    trying to satisfy fails for reasons that would be wrong advice ("this
+    should have been a no-op" to a proposal that merely carried a stray field).
+
+    So the branch with the fewest complaints wins: the one the answer came
+    closest to being is the one it meant, and its complaints are the ones worth
+    reporting. This keeps the report as specific as it was when the contract
+    was a single object -- a path and a failed rule, never a value.
+    """
+    flattened: list[Any] = []
+    for error in errors:
+        context = list(getattr(error, "context", None) or ())
+        if error.validator != "oneOf" or not context:
+            flattened.append(error)
+            continue
+        by_branch: dict[int, list[Any]] = {}
+        for sub in context:
+            by_branch.setdefault(sub.schema_path[0] if sub.schema_path else 0, []).append(sub)
+        flattened.extend(min(by_branch.values(), key=len))
+    return flattened
 
 
 def submit_fanout_results(
