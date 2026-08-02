@@ -1,10 +1,17 @@
 """Prompt text for interview advisory lanes.
 
-The Output section a lane is given and the standing brief the ``data_context``
-lane carries. They live here rather than beside the payload builder because they
-are the words a child is judged by: the Output section must ask for exactly the
-contract re-entry enforces, and the data brief states the boundaries the child
-cannot be trusted to rediscover.
+The Output section a lane is given, and the task line and standing brief the
+``data_context`` lane carries. They live here rather than beside the payload
+builder because they are the words a child is judged by: the Output section must
+ask for exactly the contract re-entry enforces, and the data brief states the
+boundaries the child cannot be trusted to rediscover.
+
+Both defects this module has held were one prompt saying two things. The Output
+section asked for fields the closed contract forbids; the task line banned
+touching any tool while the brief permitted discovery. In each case the child
+obeyed one half and was rejected — or, worse, quietly declined — for obeying it.
+So the halves are kept together: co-location is not agreement, but it puts the
+disagreement in front of whoever edits either one.
 
 Extracted from ``mcp/tools/subagent.py`` (Q00/ouroboros#1754), which keeps
 re-exports for its existing importers.
@@ -79,6 +86,28 @@ answer in any other shape is discarded, and because this lane is required, the
 parent cannot complete the consultation without it."""
 
 
+def _data_context_lane_task() -> str:
+    """Render the data lane's task line, beside the brief it must agree with.
+
+    These two strings are rendered into one prompt, minutes apart in the child's
+    reading and previously modules apart in ours. That distance is how they came
+    to disagree: the brief separated discovering a tool from calling one, the
+    task banned "touching any tool" outright, and the child obeyed the earlier
+    absolute. Keeping them in one file does not make agreement automatic, but it
+    makes the disagreement visible to whoever edits either half.
+    """
+    return (
+        "First find out which data tools this host exposes — a read-only "
+        "capability check, not a call. THEN decide whether the question's "
+        "honest answer is a measurement you could actually reach. A question "
+        "nothing available can measure is data_needed=false with "
+        "no_data_tool_available; a question that is not asking for a number is "
+        "not_a_measurement. Either is a complete answer, and they are not "
+        "interchangeable. If it is reachable, name the reads that would inform "
+        "it and return them as read_requests. Do NOT call a data tool."
+    )
+
+
 def _data_context_lane_brief(answer_contract: Any) -> str:
     """Render the data lane's standing rules plus its answer contract.
 
@@ -89,9 +118,20 @@ def _data_context_lane_brief(answer_contract: Any) -> str:
     the answer).
     """
     contract_json = _bounded_json(answer_contract, _INTERVIEW_DATA_CONTRACT_MAX_JSON_CHARS)
-    return f"""You may discover which data tools exist so you can name them. You may not
-call one. Every lookup you would run is returned as a read_request and the
-parent session runs it only after the user confirms it.
+    return f"""Find out which data tools this host exposes before you judge anything else.
+Discovery is a capability check; calling one is not yours to do. Every lookup
+you would run is returned as a read_request and the parent session runs it only
+after the user confirms it.
+
+That order is the point, not a formality. Whether a question's honest answer is
+a measurement depends on what is reachable here, not on the question's grammar:
+"what counts as completion, and at what point is it measured" reads as a request
+for a definition where nothing is connected, and as "count which completion
+events actually fire" where an event stream is. Judge it against the environment
+you found, not against the sentence alone. And no_data_tool_available is a fact
+about this host that you cannot establish without looking — reporting
+not_a_measurement in its place tells the user their question was the wrong
+shape, when what they needed to hear was that no data path is connected.
 
 Your output is material for the user's judgment, never the answer. Whatever a
 number would show, the interview answer is the user's own words.
@@ -117,4 +157,5 @@ __all__ = [
     "_GENERIC_ADVISORY_OUTPUT_SECTION",
     "_advisory_output_section",
     "_data_context_lane_brief",
+    "_data_context_lane_task",
 ]

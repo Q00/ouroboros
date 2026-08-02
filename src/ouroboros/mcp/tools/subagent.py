@@ -57,6 +57,7 @@ from ouroboros.mcp.tools.advisory_prompts import (  # noqa: F401
     _advisory_output_section,
     _bounded_json,
     _data_context_lane_brief,
+    _data_context_lane_task,
 )
 from ouroboros.mcp.tools.assignment import AssignmentMessage
 
@@ -1377,13 +1378,7 @@ def build_interview_question_advisory_subagents(
             )
             extra = "Use web research only when the answer depends on current external facts."
         elif lane_id == "data_context":
-            lane_task = (
-                "Decide from the question text ALONE, before touching any tool, "
-                "whether its honest answer is a measurement. If it is not, return "
-                "data_needed=false with a reason — that is a complete answer. If "
-                "it is, name the reads that would inform it and return them as "
-                "read_requests. Do NOT run them."
-            )
+            lane_task = _data_context_lane_task()
             extra = _data_context_lane_brief(raw_lane.get("answer_contract"))
         elif lane_id == "ambiguity_contrarian":
             lane_task = (

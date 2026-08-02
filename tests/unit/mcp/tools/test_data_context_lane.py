@@ -1334,3 +1334,67 @@ def test_the_undecidable_rules_are_instruction_not_policy() -> None:
 
     assert "never by an identifier" in instruction
     assert "row list" in instruction
+
+
+# --------------------------------------------------------------------------- #
+# Measurability is judged against the environment, not against the sentence
+# --------------------------------------------------------------------------- #
+
+
+def test_the_prompt_does_not_forbid_the_discovery_it_permits() -> None:
+    """One prompt must not both allow discovery and ban touching any tool.
+
+    The lane brief said "you may discover which data tools exist"; the Lane Task
+    rendered above it said "decide from the question text ALONE, before touching
+    any tool". Facing the conflict a child obeys the earlier, more absolute
+    instruction, so the self-selection the lane is built around never ran --
+    observed as a `data_needed=false` verdict reached with zero tool uses.
+
+    The prohibition that belongs here is on *calling* a data tool, which is the
+    parent's to do after the user confirms. Discovery is not execution.
+    """
+    prompt = _data_payload()["prompt"]
+
+    for absolute_ban in (
+        "before touching any tool",
+        "from the question text ALONE",
+        "from the question text alone",
+    ):
+        assert absolute_ban not in prompt
+
+
+def test_discovery_is_instructed_before_the_verdict() -> None:
+    """Order is load-bearing: the verdict depends on what discovery finds."""
+    prompt = _data_payload()["prompt"]
+
+    discovery_at = prompt.index("find out which data tools this host exposes")
+    verdict_at = prompt.index("is a measurement")
+
+    assert discovery_at < verdict_at
+
+
+def test_both_no_evidence_reasons_are_given_distinct_triggers() -> None:
+    """`no_data_tool_available` is a fact about the host, not about the question.
+
+    It was unreachable by construction while the verdict preceded any tool
+    contact: a child with nothing connected reported `not_a_measurement`, which
+    tells the user their question was the wrong shape when what they needed to
+    hear was that no data path exists. Both are `data_needed=false`; only one is
+    actionable.
+    """
+    prompt = _data_payload()["prompt"]
+
+    assert "no_data_tool_available" in prompt
+    assert "not_a_measurement" in prompt
+    # The distinction is stated, not left for the child to infer from the enum.
+    assert "no data path is connected" in prompt
+
+
+def test_the_contract_instruction_agrees_with_the_lane_task() -> None:
+    """The contract is rendered inside the same prompt; it cannot disagree."""
+    contract = interview_data_evidence_answer_contract()
+    instruction = contract["runtime_instruction"]
+
+    assert "before you judge" in instruction
+    assert "no_data_tool_available" in instruction
+    assert "from the question text alone" not in instruction

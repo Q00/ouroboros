@@ -701,9 +701,15 @@ def _interview_data_evidence_answer_contract() -> dict[str, Any]:
         # skills/interview/SKILL.md, which is the document the host reads.
         "response_model_schema": answer_schema,
         "runtime_instruction": (
-            "Decide from the question text alone whether its honest answer is a "
-            "measurement. If it is not, return data_needed=false with a reason "
-            "and stop -- that is a complete answer. If it is, name the reads you "
+            "Find out which data tools this host exposes before you judge, then "
+            "decide whether the question's honest answer is a measurement you "
+            "could reach through them. The order is load-bearing: measurability "
+            "is a property of the question and the environment together, and "
+            "no_data_tool_available is a fact about the host that the question's "
+            "wording cannot establish. If the answer is not a measurement, or "
+            "nothing available can measure it, return data_needed=false with "
+            "whichever reason is true and stop -- that is a complete answer. If "
+            "it is reachable, name the reads you "
             "would run and return them as read_requests. Do not run them: the "
             "parent session runs a read only after the user confirms it, and "
             "there is no field in this contract for a value you fetched. "
