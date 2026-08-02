@@ -27,6 +27,39 @@ MAX_FILES_PER_HINT = 100
 MAX_PATTERN_LENGTH = 200  # Limit LLM-generated regex length to reduce ReDoS risk
 MAX_SCALAR_LENGTH = 4096
 
+# Inputs a pattern is tried against to decide whether it discriminates at all. A
+# pattern that matches *every* one of these matches any file it is pointed at.
+#
+# Empty is one probe among several, not the test on its own: `\A\Z` matches the
+# empty string and nothing else, which is exactly how "this file MUST remain empty"
+# is expressed, and rejecting it turns an honest criterion into a formal failure.
+# The distinction that matters is not "can match nothing" but "cannot tell two
+# files apart". Deliberately short and few — these run on every model-supplied
+# pattern, and a long probe is how a screen against ReDoS becomes its own ReDoS.
+_INDISCRIMINATE_PROBES = ("", "a", "0\n", " ")
+
+# Inputs carrying no content of their own. A pattern one of these satisfies is
+# saying "this file is empty" — a claim about one named file, not about a set.
+_CONTENTLESS_PROBES = ("", " ", "\n")
+
+
+def _satisfied_by_an_empty_file(compiled: re.Pattern) -> bool:
+    """True when an empty or blank file alone is enough to make this pattern hit."""
+    return any(compiled.search(probe) is not None for probe in _CONTENTLESS_PROBES)
+
+
+def _unnamed_empty_file(compiled: re.Pattern, files: list[str]) -> bool:
+    """True when a hit would only say "one of these candidates happens to be empty".
+
+    `\\A\\Z` is honest evidence for "`pkg/__init__.py` MUST remain empty" — but only
+    because that hint names the file the criterion is about. Point the same pattern
+    at `**/*.py` and the search stops at whichever candidate is empty first, which
+    in a Python project is some package marker that no criterion ever mentioned.
+    The pattern discriminates between files; searching a set for *any* hit is what
+    throws that away, so this is a property of the pair, not of the regex.
+    """
+    return len(files) > 1 and _satisfied_by_an_empty_file(compiled)
+
 
 def _skip_inline_space(text: str, index: int) -> int:
     while index < len(text) and text[index] in " \t\f\v":
@@ -195,13 +228,11 @@ class SpecVerifier:
         except (re.error, OverflowError) as e:
             logger.warning("Invalid regex pattern: %s", e)
             return None
-        if compiled.search("") is not None:
-            # A pattern that can match the empty string can succeed without any
-            # criterion-specific content, so a hit is evidence that a file was read,
-            # not evidence about the criterion. `.*`, `x?`, `\s*`, `(?:)`, `|` and `^`
-            # succeed against any file; `\A\Z` succeeds against an empty one, which an
-            # ordinary `__init__.py` supplies. All compile, and all verified whatever
-            # criterion they were pointed at.
+        if all(compiled.search(probe) is not None for probe in _INDISCRIMINATE_PROBES):
+            # A pattern that matches every one of these matches whatever file it is
+            # pointed at, so a hit is evidence that a file was read, not evidence
+            # about the criterion. `.*`, `x?`, `\s*`, `(?:)`, `|` and `^` all compile,
+            # and all verified whatever criterion they were given.
             logger.warning(
                 "Regex pattern can match without criterion content, skipping: %r", pattern
             )
@@ -244,6 +275,18 @@ class SpecVerifier:
                 verified=False,
                 discrepancy=True,
                 detail="Unusable regex pattern: invalid, too long, or matches any input",
+            )
+
+        if _unnamed_empty_file(pattern, files):
+            return SpecVerificationResult(
+                assertion=assertion,
+                verified=False,
+                discrepancy=True,
+                detail=(
+                    f"Pattern '{assertion.pattern}' is satisfied by an empty file, and hint "
+                    f"'{assertion.file_hint}' matched {len(files)} files: a hit would name "
+                    f"no particular one. Point the hint at the file the criterion is about."
+                ),
             )
 
         for file_path in files:
@@ -320,6 +363,18 @@ class SpecVerifier:
                 verified=False,
                 discrepancy=True,
                 detail="Unusable regex pattern: invalid, too long, or matches any input",
+            )
+
+        if _unnamed_empty_file(content_pattern, files):
+            return SpecVerificationResult(
+                assertion=assertion,
+                verified=False,
+                discrepancy=True,
+                detail=(
+                    f"Pattern '{assertion.pattern}' is satisfied by an empty file, and hint "
+                    f"'{assertion.file_hint}' matched {len(files)} files: a hit would name "
+                    f"no particular one. Point the hint at the file the criterion is about."
+                ),
             )
 
         for file_path in files:
