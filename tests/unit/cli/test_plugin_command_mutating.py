@@ -2756,6 +2756,32 @@ def test_interrupt_after_backup_rename_still_restores_cache(
     assert litter == [], f"interrupt left litter behind: {litter}"
 
 
+def test_refresh_uses_bounded_sibling_names_near_name_max(tmp_path: Path) -> None:
+    """Temporary artifacts stay valid when the destination is already long."""
+    from ouroboros.cli.commands.plugin_cache import stage_url_cache_refresh
+
+    cache_root = tmp_path / "cache"
+    cache_root.mkdir()
+    dest = cache_root / ("r" * 235)
+    dest.mkdir()
+    (dest / "old.txt").write_text("old")
+    seen_staging_name = ""
+
+    def _clone(staging: Path) -> str:
+        nonlocal seen_staging_name
+        seen_staging_name = staging.name
+        staging.mkdir()
+        (staging / "new.txt").write_text("new")
+        return "cafef00d"
+
+    assert stage_url_cache_refresh(_clone, dest) == "cafef00d"
+
+    name_max = os.pathconf(cache_root, "PC_NAME_MAX")
+    assert len(os.fsencode(seen_staging_name)) <= name_max
+    assert (dest / "new.txt").read_text() == "new"
+    assert sorted(entry.name for entry in cache_root.iterdir()) == [dest.name]
+
+
 def test_trust_rejects_undeclared_scope(runner: CliRunner, tmp_path: Path) -> None:
     """`ooo plugin trust --scope <typo>` must refuse to persist a grant
     for a scope the manifest does not declare. Otherwise the command

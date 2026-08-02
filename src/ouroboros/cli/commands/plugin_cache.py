@@ -13,6 +13,7 @@ installs already follow.
 from __future__ import annotations
 
 from collections.abc import Callable
+import hashlib
 import os
 from pathlib import Path
 import secrets
@@ -57,8 +58,13 @@ def stage_url_cache_refresh(clone: Callable[[Path], str], clone_dest: Path) -> s
     """
     clone_dest.parent.mkdir(parents=True, exist_ok=True)
     suffix = secrets.token_hex(6)
-    staging = clone_dest.with_name(f"{clone_dest.name}.staging-{suffix}")
-    backup = clone_dest.with_name(f"{clone_dest.name}.bak-{suffix}")
+    # Do not extend the destination basename: a valid cache component may
+    # already be near NAME_MAX. A bounded digest keeps temporary siblings
+    # attributable to the destination without inheriting its length.
+    identity = hashlib.sha256(os.fsencode(clone_dest.name)).hexdigest()[:12]
+    sibling_prefix = f".ouroboros-cache-{identity}"
+    staging = clone_dest.with_name(f"{sibling_prefix}.staging-{suffix}")
+    backup = clone_dest.with_name(f"{sibling_prefix}.bak-{suffix}")
 
     try:
         git_sha = clone(staging)
