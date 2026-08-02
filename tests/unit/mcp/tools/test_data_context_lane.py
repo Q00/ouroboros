@@ -1777,31 +1777,33 @@ def test_what_computes_over_things_keeps_the_whole_number_line() -> None:
         assert _accepts(_measured(aggregation=aggregation, values=[{"value": value}])), aggregation
 
 
-def test_a_question_that_merely_mentions_the_marker_survives() -> None:
-    """The marker's presence is not the test; this side must know its own output.
+def test_parsing_our_own_response_keeps_a_question_that_mentions_the_marker() -> None:
+    """Shape is all this side has when it reads a response it just produced.
 
-    Splitting on the marker truncated any question quoting it — before intent
-    checking and before persistence, so the transcript and the Seed took the
-    corruption silently.
+    `auto` extracts the question it must answer from the response body, so there
+    is no second copy to compare against and the directive can only be
+    recognised by its form. That is enough here and not enough everywhere: a
+    question quoting the marker *and* the directive's opening is cut short by
+    this function too. It reaches durable state only through the echoed
+    `last_question`, where `resolve_echoed_question` compares against the
+    question the server issued and refuses the cut — which is the case pinned at
+    the handler in `test_interview_lateral_review_advisory.py`.
     """
     from ouroboros.mcp.tools.advisory_dispatch import (
         QUESTION_ADVISORY_DISPATCH_MARKER as marker,
     )
     from ouroboros.mcp.tools.advisory_dispatch import (
-        strip_question_advisory_dispatch as strip,
+        split_appended_dispatch as split,
     )
 
     quoted = f"What does this token mean: {marker} and should it be preserved?"
-    assert strip(quoted) == quoted
-    assert strip(f"Explain {marker}") == f"Explain {marker}"
+    assert split(quoted) == quoted
+    assert split(f"Explain {marker}") == f"Explain {marker}"
 
     meta = _advisory_meta_for_strip()
-    real = append_question_advisory_dispatch("Real question?", meta)
-    assert strip(real) == "Real question?"
-    # A question that quotes the marker AND carries a real directive keeps the
-    # quote and loses only the directive.
+    assert split(append_question_advisory_dispatch("Real question?", meta)) == "Real question?"
     both = append_question_advisory_dispatch(f"What is {marker} for?", meta)
-    assert strip(both) == f"What is {marker} for?"
+    assert split(both) == f"What is {marker} for?"
 
 
 def test_a_tied_branch_reports_the_shape_the_answer_was_trying_to_be() -> None:

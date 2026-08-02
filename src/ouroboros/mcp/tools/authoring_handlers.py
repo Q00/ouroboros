@@ -61,7 +61,7 @@ from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.tools.advisory_dispatch import (
     append_lateral_review_notice,
     append_question_advisory_dispatch,
-    strip_question_advisory_dispatch,
+    resolve_echoed_question,
 )
 from ouroboros.mcp.tools.subagent import (
     DELEGATED_TO_SUBAGENT,
@@ -2205,11 +2205,9 @@ class InterviewHandler:
             if isinstance(suggested_interview_id_arg, str) and suggested_interview_id_arg
             else None
         )
-        # This becomes the recorded round's question, so a host that echoed the
-        # response text wholesale would write the fan-out directive into durable
-        # state and from there into the Seed. SKILL.md can state the duty; only
-        # this side can hold it.
-        last_question = strip_question_advisory_dispatch(arguments.get("last_question"))
+        # Taken as given; the echo is resolved against the issued question
+        # where the round is identified, the only place the two can be compared.
+        last_question = arguments.get("last_question")
 
         # --- Argument validation (before any dispatch) ---
         # Determine action from arguments
@@ -3188,7 +3186,12 @@ class InterviewHandler:
             if not state.rounds:
                 pass
             elif state.rounds[-1].user_response is None:
-                pending_question = last_question or state.rounds[-1].question
+                issued = state.rounds[-1].question
+                # The issued question is what tells an echo of it apart from a
+                # question quoting the directive.
+                pending_question = (
+                    resolve_echoed_question(last_question, issued_question=issued) or issued
+                )
             else:
                 if not last_question:
                     return Result.err(

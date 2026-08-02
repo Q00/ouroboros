@@ -652,26 +652,70 @@ def test_dispatch_marker_separates_question_from_directive() -> None:
     assert "Host action" in after
 
 
-def test_the_directive_cannot_ride_last_question_into_the_transcript() -> None:
-    """A host echoes the question back; the question it saw carries a directive.
+async def test_a_question_quoting_the_whole_sentinel_reaches_the_transcript_intact() -> None:
+    """At the handler, because that is where the truncation reached the Seed.
 
-    `last_question` becomes the recorded round's question, which is read by
-    requirement extraction and reaches the Seed. A host that copies the response
-    text wholesale would write server-authored instructions into durable state.
-    The marker is server-authored and everything after it is addressed to the
-    host, so the cut is made on receipt rather than asked for in prose.
+    Two rounds were spent recognising the directive by its shape: splitting at
+    the marker truncated a question that mentioned it, and requiring the marker
+    plus the directive's opening truncated a question that quoted both — which
+    is what an interview *about this feature* contains. An in-band sentinel
+    cannot tell output from quoted output, so the server compares against the
+    question it issued instead.
+
+    The two inputs below differ only in that: one is the issued question with
+    our directive under it, the other is a different question that quotes the
+    full sentinel. The first is recorded without the directive; the second is
+    recorded whole.
     """
-    from ouroboros.mcp.tools.advisory_dispatch import strip_question_advisory_dispatch
+    from ouroboros.mcp.tools.advisory_dispatch import (
+        QUESTION_ADVISORY_DISPATCH_MARKER as marker,
+    )
 
-    meta = _advisory_meta(SubagentDispatchMode.HOST_DRIVEN, runtime_backend="claude")
-    question = "What are the acceptance criteria?"
-    echoed = append_question_advisory_dispatch(question, meta)
+    quoted = (
+        "How should Ouroboros preserve this literal example?\n\n"
+        f"{marker}\n\n> **Host action — quoted-example:** keep it"
+    )
+    echoed = f"Q2?\n\n{marker}\n\n> **Host action — spawn_subagents:** keep the question"
 
-    assert strip_question_advisory_dispatch(echoed) == question
-    # Idempotent on text that never carried one, and inert on a non-string so
-    # the caller's own validation still sees what it was given.
-    assert strip_question_advisory_dispatch(question) == question
-    assert strip_question_advisory_dispatch(None) is None
+    for supplied, expected in ((echoed, "Q2?"), (quoted, quoted)):
+        state = InterviewState(
+            interview_id="sess-echo",
+            rounds=[
+                InterviewRound(round_number=1, question="Q1?", user_response="A1"),
+                InterviewRound(round_number=2, question="Q2?", user_response=None),
+            ],
+        )
+
+        async def record(
+            current: InterviewState, answer: str, question: str
+        ) -> Result[InterviewState, object]:
+            current.rounds.append(
+                InterviewRound(
+                    round_number=current.current_round_number,
+                    question=question,
+                    user_response=answer,
+                )
+            )
+            return Result.ok(current)
+
+        engine = MagicMock()
+        engine.load_state = AsyncMock(return_value=Result.ok(state))
+        engine.record_response = AsyncMock(side_effect=record)
+        engine.save_state = AsyncMock(return_value=MagicMock(is_err=False))
+        engine.ask_next_question = AsyncMock(return_value=Result.ok("Next?"))
+
+        handler = InterviewHandler(interview_engine=engine, agent_runtime_backend="claude")
+        handler.llm_adapter = MagicMock()
+        handler._emit_event_bg = MagicMock()  # type: ignore[method-assign]
+        handler._score_interview_state = AsyncMock(return_value=_score(0.35))  # type: ignore[method-assign]
+
+        result = await handler.handle(
+            {"session_id": "sess-echo", "answer": "A", "last_question": supplied}
+        )
+
+        assert result.is_ok
+        recorded = engine.record_response.await_args.args[2]
+        assert recorded == expected, recorded
 
 
 def test_every_question_bearing_response_path_appends_the_directive() -> None:
@@ -690,3 +734,60 @@ def test_every_question_bearing_response_path_appends_the_directive() -> None:
 
     assert built, "no question-bearing response paths found — the pattern moved"
     assert built <= appended, built - appended
+
+
+def test_the_echo_comparison_states_what_it_does_not_cover() -> None:
+    """The guarantee is about faithful echoes, and only those.
+
+    A host that rewrites the question while keeping our directive attached
+    matches nothing we issued, so the directive rides along. Pinned so the limit
+    is a known shape rather than a surprise: closing it needs either shape
+    recognition, which does not converge, or refusing the echo whenever a record
+    exists, which strands plugin-mode transcripts on the placeholder
+    `last_question` exists to repair.
+    """
+    from ouroboros.mcp.tools.advisory_dispatch import (
+        QUESTION_ADVISORY_DISPATCH_MARKER as marker,
+    )
+    from ouroboros.mcp.tools.advisory_dispatch import resolve_echoed_question
+
+    issued = "What are the acceptance\ncriteria for this feature?"
+    directive = f"\n\n{marker}\n\n> **Host action — spawn_subagents:** keep it"
+
+    # Faithful echo: the directive cannot reach the transcript.
+    assert resolve_echoed_question(issued + directive, issued_question=issued) == issued
+    # Nor when the echo arrived reflowed. Text picks that up crossing a host,
+    # and judging it unequal would leak the directive through a host that did
+    # exactly what was asked. Equality is `normalize_question_text` — the same
+    # normalisation the fan-out digests to bind an answer to its question.
+    for faithful in (
+        issued + " " + directive,
+        issued.replace("\n", " ") + directive,
+        issued.replace("\n", "   ") + directive,
+        issued.replace("?", "？") + directive,
+    ):
+        assert resolve_echoed_question(faithful, issued_question=issued) == issued, faithful
+    # Rewritten echo: passes through as the host's own text, directive included.
+    rewritten = "What acceptance criteria do you want?" + directive
+    assert resolve_echoed_question(rewritten, issued_question=issued) == rewritten
+
+
+def test_question_identity_and_the_echo_check_share_one_definition() -> None:
+    """Two definitions of "same question" would drift, and drift invisibly.
+
+    The fan-out digests this normalisation to bind an answer to its question;
+    the echo check compares against it to tell a faithful echo from a rewritten
+    one. If they disagreed, one side would bind what the other had let through.
+    """
+    from ouroboros.orchestrator.capabilities import (
+        normalize_question_text,
+        stable_code_investigation_question_identity,
+    )
+
+    reflowed = "What are the acceptance\n\ncriteria   for this feature?"
+    canonical = "What are the acceptance criteria for this feature?"
+
+    assert normalize_question_text(reflowed) == normalize_question_text(canonical)
+    assert stable_code_investigation_question_identity(
+        reflowed
+    ) == stable_code_investigation_question_identity(canonical)
