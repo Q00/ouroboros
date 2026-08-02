@@ -1882,6 +1882,7 @@ class TestOuroborosTools:
         "ouroboros_lineage_status",
         "ouroboros_measure_drift",
         "ouroboros_pm_interview",
+        "ouroboros_project_status",
         "ouroboros_qa",
         "ouroboros_query_projection",
         "ouroboros_query_events",

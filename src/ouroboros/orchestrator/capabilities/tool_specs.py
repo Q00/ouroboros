@@ -55,6 +55,7 @@ _OUROBOROS_COMPANION_FAMILIES: tuple[tuple[str, tuple[str, ...]], ...] = (
         "session",
         (
             "ouroboros_session_status",
+            "ouroboros_project_status",
             "ouroboros_query_events",
             "ouroboros_query_projection",
             "ouroboros_ac_tree_hud",
@@ -112,6 +113,7 @@ _OUROBOROS_BACKGROUND_TOOLS = frozenset(
 _OUROBOROS_STATUS_TOOLS = frozenset(
     {
         "ouroboros_session_status",
+        "ouroboros_project_status",
         "ouroboros_job_status",
         "ouroboros_job_wait",
         "ouroboros_job_result",
@@ -579,6 +581,20 @@ _OUROBOROS_TOOL_CAPABILITY_SPECS: Mapping[str, _OuroborosToolCapabilitySpec] = {
     "ouroboros_session_status": _OuroborosToolCapabilitySpec(
         execution_mode="status",
         companions=(
+            "ouroboros_project_status",
+            "ouroboros_query_events",
+            "ouroboros_query_projection",
+            "ouroboros_ac_tree_hud",
+        ),
+        side_effects=_OUROBOROS_SIDE_EFFECT_FREE_METADATA,
+        retry=_OUROBOROS_DEFAULT_RETRY_METADATA,
+        interrupt=_OUROBOROS_READ_ONLY_INTERRUPT_METADATA,
+        mutation_class=CapabilityMutationClass.READ_ONLY,
+    ),
+    "ouroboros_project_status": _OuroborosToolCapabilitySpec(
+        execution_mode="status",
+        companions=(
+            "ouroboros_session_status",
             "ouroboros_query_events",
             "ouroboros_query_projection",
             "ouroboros_ac_tree_hud",
@@ -643,6 +659,7 @@ _OUROBOROS_TOOL_CAPABILITY_SPECS: Mapping[str, _OuroborosToolCapabilitySpec] = {
         execution_mode="status",
         companions=(
             "ouroboros_session_status",
+            "ouroboros_project_status",
             "ouroboros_query_events",
             "ouroboros_query_projection",
         ),
@@ -676,6 +693,7 @@ _OUROBOROS_TOOL_CAPABILITY_SPECS: Mapping[str, _OuroborosToolCapabilitySpec] = {
         execution_mode="status",
         companions=(
             "ouroboros_session_status",
+            "ouroboros_project_status",
             "ouroboros_query_projection",
             "ouroboros_ac_tree_hud",
         ),
@@ -688,6 +706,7 @@ _OUROBOROS_TOOL_CAPABILITY_SPECS: Mapping[str, _OuroborosToolCapabilitySpec] = {
         execution_mode="status",
         companions=(
             "ouroboros_session_status",
+            "ouroboros_project_status",
             "ouroboros_query_events",
             "ouroboros_ac_tree_hud",
         ),
@@ -964,6 +983,7 @@ _OUROBOROS_CANCEL_METADATA: Mapping[str, Mapping[str, Any]] = {
     "ouroboros_lineage_status": _OUROBOROS_UNSUPPORTED_CANCEL_METADATA,
     "ouroboros_measure_drift": _OUROBOROS_UNSUPPORTED_CANCEL_METADATA,
     "ouroboros_pm_interview": _OUROBOROS_UNSUPPORTED_CANCEL_METADATA,
+    "ouroboros_project_status": _OUROBOROS_UNSUPPORTED_CANCEL_METADATA,
     "ouroboros_qa": _OUROBOROS_UNSUPPORTED_CANCEL_METADATA,
     "ouroboros_query_events": _OUROBOROS_UNSUPPORTED_CANCEL_METADATA,
     "ouroboros_query_projection": _OUROBOROS_UNSUPPORTED_CANCEL_METADATA,
