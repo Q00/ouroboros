@@ -87,3 +87,23 @@ jobs:
       - name: Run tests
         run: bun test
         working-directory: src/ouroboros/opencode/plugin
+
+  native-tui:
+    name: Native TUI (Rust)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7.0.1
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/ouroboros-tui
+
+      - name: Run tests
+        run: cargo test
+        working-directory: crates/ouroboros-tui

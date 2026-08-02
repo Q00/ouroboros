@@ -249,6 +249,10 @@ fn main() -> std::io::Result<()> {
                                 if let Some(ref mut conn) = ouro_db {
                                     // Reset state for new session
                                     let mut new_state = AppState::new();
+                                    // Execution ownership belongs to how this
+                                    // process attached, not to the session being
+                                    // viewed — it must survive the rebuild.
+                                    new_state.inherit_capabilities_from(&state);
                                     // Preserve sessions list and table
                                     new_state.sessions = state.sessions.clone();
                                     new_state.session_table = slt::TableState::new(

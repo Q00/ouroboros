@@ -37,4 +37,9 @@ ouroboros-tui --help                    # show all options
 
 ## Keys
 
-`q` quit · `p`/`r` pause/resume · `1-5` screens · `Ctrl+P` command palette · `↑↓` navigate · `Enter` select · mouse click
+`q` quit · `1-5` screens · `Ctrl+P` command palette · `↑↓` navigate · `Enter` select · mouse click
+
+`p`/`r` pause/resume are available in `--mock` demo mode only, where this process owns the
+simulation it is pausing. When monitoring a real database the TUI is an observer with no
+execution owner, so the keys are absent from the footer and the command palette. Use
+`ouroboros cancel execution` to stop a run.
