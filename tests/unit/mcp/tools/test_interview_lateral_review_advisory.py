@@ -1089,9 +1089,9 @@ def test_the_bridge_declares_itself_with_the_grammar_the_gatekeeper_knows() -> N
         QUESTION_ADVISORY_DISPATCH_MARKER as marker,
     )
 
-    bridge_source = Path("src/ouroboros/opencode/plugin/ouroboros-bridge.ts").read_text(
-        encoding="utf-8"
-    )
+    bridge_source = (
+        Path(__file__).resolve().parents[4] / "src/ouroboros/opencode/plugin/ouroboros-bridge.ts"
+    ).read_text(encoding="utf-8")
     assert f'export const OUROBOROS_DISPATCH_MARKER = "{marker}"' in bridge_source
     assert f'export const BRIDGE_NOTICE_OPENING = "{_BRIDGE_NOTICE_OPENING}"' in bridge_source
 
@@ -1327,8 +1327,14 @@ def test_every_advisory_key_the_bridge_lifts_is_one_the_producer_stamps() -> Non
     source = (repo_root / "src/ouroboros/opencode/plugin/ouroboros-bridge.ts").read_text(
         encoding="utf-8"
     )
-    block = source.split("const responseShape: Record<string, unknown> = {}", 1)[1]
-    block = block.split("]) {", 1)[0]
+    # Anchored on the function, not on the `responseShape` declaration: that
+    # line appears in `parse()` too, and splitting on it swallowed the whole of
+    # `parse` and only landed right because of the prefix filter below. A
+    # parser that reads more than it claims is the thing this test exists to
+    # object to.
+    body = source.split("export function parseMetadata", 1)
+    assert len(body) == 2, "parseMetadata not found — parser is stale, not the code"
+    block = body[1].split("]) {", 1)[0]
     lifted = re.findall(r'"([a-z_]+)"', block)
     advisory_lifted = [key for key in lifted if key.startswith("question_advisory_")]
     assert advisory_lifted, "bridge lift list not found — parser is stale, not the code"
