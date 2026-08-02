@@ -30,6 +30,7 @@ from ouroboros.bigbang.interview import (
 from ouroboros.core.types import Result
 from ouroboros.events.base import BaseEvent
 from ouroboros.mcp.errors import MCPServerError
+from ouroboros.mcp.tools.advisory_dispatch import QUESTION_ADVISORY_DISPATCH_MARKER
 from ouroboros.mcp.tools.authoring_handlers import InterviewHandler
 from ouroboros.mcp.tools.subagent import synthesize_code_investigation_when_complete
 from ouroboros.orchestrator.capabilities import (
@@ -857,7 +858,9 @@ async def test_answer_emits_response_diagnostic_event(tmp_path: Path) -> None:
         question="Who uses it first?",
     )
     assert outcome.value.meta["interview_reasoning"]["answered_rounds"] == 1
-    assert outcome.value.content[0].text == (
+    # Everything before the advisory marker is the question envelope; the
+    # directive after it is addressed to the host, not to the interviewee.
+    assert outcome.value.content[0].text.split(QUESTION_ADVISORY_DISPATCH_MARKER, 1)[0].strip() == (
         f"Session {pending_state.interview_id}\n\nWho uses it first?"
     )
     await _drain_bg_tasks(handler)

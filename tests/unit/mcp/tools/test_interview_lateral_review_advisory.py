@@ -1,11 +1,13 @@
 """Milestone-transition lateral review advisory tests for #817."""
 
+import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from ouroboros.bigbang.ambiguity import AmbiguityScore, ComponentScore, ScoreBreakdown
 from ouroboros.bigbang.interview import InterviewRound, InterviewState
 from ouroboros.core.types import Result
 from ouroboros.events.interview import interview_lateral_review_recommended
+from ouroboros.mcp.tools.advisory_dispatch import append_question_advisory_dispatch
 from ouroboros.mcp.tools.authoring_handlers import (
     InterviewHandler,
     _attach_question_assist_requests,
@@ -511,3 +513,140 @@ async def test_handler_does_not_record_advisory_when_question_generation_fails()
         call.args[0].type == "interview.lateral_review.recommended"
         for call in handler._emit_event_bg.call_args_list
     )
+
+
+# ---------------------------------------------------------------------------
+# Host-visible delivery of the advisory fan-out.
+#
+# The tests above assert the fan-out contract on ``result.value.meta``. That is
+# where the contract is *built*, not where a host-driven runtime *reads* it:
+# MCP ``_meta`` reaches a bridge process, and HOST_DRIVEN / SEQUENTIAL runtimes
+# have none — the host model's only channel is response content. So these pin
+# the rendered surface instead. A regression that put the payloads back into
+# meta alone would keep every assertion above green.
+# ---------------------------------------------------------------------------
+
+
+def _advisory_meta(
+    dispatch_mode: SubagentDispatchMode,
+    *,
+    runtime_backend: str,
+    opencode_mode: str | None = None,
+) -> dict[str, object]:
+    meta: dict[str, object] = {}
+    _attach_question_assist_requests(
+        meta,
+        session_id="sess-render",
+        question="What are the acceptance criteria?",
+        phase="answer",
+        score=_score(0.35),
+        dispatch_mode=dispatch_mode,
+        runtime_backend=runtime_backend,
+        opencode_mode=opencode_mode,
+    )
+    return meta
+
+
+def test_host_driven_advisory_payloads_reach_the_response_text() -> None:
+    """A HOST_DRIVEN host must be able to fan out from content alone."""
+    meta = _advisory_meta(SubagentDispatchMode.HOST_DRIVEN, runtime_backend="claude")
+
+    text = append_question_advisory_dispatch("Session sess-render\n\nQ?", meta)
+
+    # The spawn directive is stated, not merely stamped.
+    assert "spawn_subagents" in text
+    assert "context.lane_id" in text
+    # Every declared lane is named, and the payloads are recoverable from the
+    # content verbatim -- the host is told not to rewrite prompts from prose,
+    # which only holds if it can read the prompts back out.
+    payloads = meta["question_advisory_subagents"]
+    assert isinstance(payloads, list)
+    assert len(payloads) == _ADVISORY_LANE_COUNT
+    for payload in payloads:
+        assert payload["context"]["lane_id"] in text
+
+    block = text.partition("```json\n")[2].partition("\n```")[0]
+    assert json.loads(block) == payloads
+    # Requiredness is visible, so a host knows which absences block completion.
+    assert "data_context" in text
+    assert "undispatched" in text
+
+
+def test_advisory_dispatch_keeps_the_question_first() -> None:
+    """The question must precede the directive, per preserve_content."""
+    meta = _advisory_meta(SubagentDispatchMode.HOST_DRIVEN, runtime_backend="claude")
+
+    text = append_question_advisory_dispatch(
+        "Session sess-render\n\nWhat are the acceptance criteria?", meta
+    )
+
+    assert text.startswith("Session sess-render\n\nWhat are the acceptance criteria?")
+    assert text.index("What are the acceptance criteria?") < text.index("Host action")
+
+
+def test_sequential_runtime_gets_its_own_directive() -> None:
+    """SEQUENTIAL hosts read content too, and are told to process in order."""
+    meta = _advisory_meta(SubagentDispatchMode.SEQUENTIAL, runtime_backend="gemini")
+
+    text = append_question_advisory_dispatch("Session sess-render\n\nQ?", meta)
+
+    assert "process_payloads_sequentially" in text
+    assert "spawn one subagent per payload" not in text
+
+
+def test_plugin_passive_response_text_is_unchanged() -> None:
+    """A bridge reads metadata out of band; duplicating it into content is noise."""
+    meta = _advisory_meta(
+        SubagentDispatchMode.PLUGIN_PASSIVE,
+        runtime_backend="opencode",
+        opencode_mode="plugin",
+    )
+    base = "Session sess-render\n\nQ?"
+
+    # The lanes are still built and registered for the bridge...
+    assert len(meta["question_advisory_subagents"]) == _ADVISORY_LANE_COUNT
+    # ...and PLUGIN_PASSIVE stamps no host action, so content stays byte-identical.
+    assert "question_advisory_host_action" not in meta
+    assert append_question_advisory_dispatch(base, meta) == base
+
+
+def test_advisory_dispatch_noop_without_payloads() -> None:
+    """The length-guard turn attaches no advisory; content must not grow."""
+    base = "Session sess-render\n\nQ?"
+
+    assert append_question_advisory_dispatch(base, {}) == base
+    assert (
+        append_question_advisory_dispatch(
+            base, {"question_advisory_host_action": "spawn_subagents"}
+        )
+        == base
+    )
+
+
+def test_auto_driver_reads_the_question_without_the_directive() -> None:
+    """Two consumers read one response; only the host model wants the directive.
+
+    ``auto`` is a programmatic driver, not a host model -- it spawns nothing and
+    would otherwise answer a question with the fan-out directive appended to it.
+    """
+    from ouroboros.auto.adapters import _extract_interview_question
+
+    meta = _advisory_meta(SubagentDispatchMode.HOST_DRIVEN, runtime_backend="claude")
+    question = "What are the acceptance criteria?"
+    text = append_question_advisory_dispatch(f"Session sess-render\n\n{question}", meta)
+
+    assert _extract_interview_question(text, session_id="sess-render") == question
+
+
+def test_dispatch_marker_separates_question_from_directive() -> None:
+    """The boundary is explicit, so a parser never has to guess where to cut."""
+    from ouroboros.mcp.tools.advisory_dispatch import QUESTION_ADVISORY_DISPATCH_MARKER
+
+    meta = _advisory_meta(SubagentDispatchMode.HOST_DRIVEN, runtime_backend="claude")
+
+    text = append_question_advisory_dispatch("Session sess-render\n\nQ?", meta)
+
+    assert QUESTION_ADVISORY_DISPATCH_MARKER in text
+    before, _, after = text.partition(QUESTION_ADVISORY_DISPATCH_MARKER)
+    assert before.strip() == "Session sess-render\n\nQ?"
+    assert "Host action" in after

@@ -58,6 +58,10 @@ from ouroboros.interview_adapters import (
     InterviewTurnContext,
 )
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
+from ouroboros.mcp.tools.advisory_dispatch import (
+    append_lateral_review_notice,
+    append_question_advisory_dispatch,
+)
 from ouroboros.mcp.tools.subagent import (
     DELEGATED_TO_SUBAGENT,
     FanoutRegistry,
@@ -588,22 +592,6 @@ def _with_lateral_review_dispatch(
         }
     )
     return enriched
-
-
-def _append_lateral_review_notice(
-    response_text: str,
-    lateral_review_meta: dict[str, Any] | None,
-) -> str:
-    """Surface a short user-visible cue without hiding the question first."""
-    if lateral_review_meta is None:
-        return response_text
-    personas = ", ".join(str(p) for p in lateral_review_meta["lateral_review_personas"])
-    milestone = lateral_review_meta["lateral_review_milestone"]
-    return (
-        f"{response_text}\n\nLateral review queued: running "
-        f"{personas} before this interview turn "
-        f"(milestone: {milestone})."
-    )
 
 
 def _compute_transcript_chars(state: InterviewState) -> int:
@@ -2843,6 +2831,9 @@ class InterviewHandler:
                 start_response_text = (
                     f"Interview started. Session ID: {state.interview_id}\n\n{display_question}"
                 )
+                start_response_text = append_question_advisory_dispatch(
+                    start_response_text, start_meta
+                )
                 # Q00/ouroboros#831 (diagnostics): capture the shape of every
                 # MCP question-bearing response so future hang reports can be
                 # correlated with response size / transcript pressure.
@@ -3439,6 +3430,9 @@ class InterviewHandler:
                     advisory_build_duration_ms = None
 
                 resume_response_text = f"Session {session_id}\n\n{display_question}"
+                resume_response_text = append_question_advisory_dispatch(
+                    resume_response_text, resume_meta
+                )
                 # Q00/ouroboros#831 (diagnostics): response-shape event for
                 # the resume-pending branch.  Pure observability.
                 from ouroboros.events.interview import interview_response_emitted
@@ -3740,10 +3734,11 @@ class InterviewHandler:
             answer_meta.update(lateral_review_dispatch_meta)
 
         answer_response_text = f"Session {session_id}\n\n{display_question}"
-        answer_response_text = _append_lateral_review_notice(
+        answer_response_text = append_lateral_review_notice(
             answer_response_text,
             lateral_review_dispatch_meta,
         )
+        answer_response_text = append_question_advisory_dispatch(answer_response_text, answer_meta)
         # Q00/ouroboros#831 (diagnostics): response-shape event for
         # the answer branch.  Pure observability.
         from ouroboros.events.interview import interview_response_emitted
