@@ -191,7 +191,7 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
      `meta.code_investigation_request` when present.
    - `web_context` — browse/search only when current external facts genuinely
      affect the answer.
-   - `data_context` — propose the measurements that would inform the question.
+   - `data_context` — take the measurements that inform the question.
      This lane takes the measurement; see "Data measurements" below.
    - `ambiguity_contrarian` — find hidden assumptions, vague terms, missing
      decisions, and risky defaults.

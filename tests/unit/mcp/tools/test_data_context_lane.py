@@ -80,8 +80,20 @@ def _measured_state() -> dict[str, Any]:
     return _answer_states()["MeasurementTaken"]
 
 
+def _read_request_shapes() -> dict[str, dict[str, Any]]:
+    """Return the two closed measurement shapes by title.
+
+    The read is a `oneOf` since #1825's grouping fix: a grouped value carries its
+    label or the read is not grouped, which one object with an optional `group`
+    could not say.
+    """
+    items = _measured_state()["properties"]["read_requests"]["items"]
+    return {shape["title"]: shape for shape in items["oneOf"]}
+
+
 def _read_request_schema() -> dict[str, Any]:
-    return _measured_state()["properties"]["read_requests"]["items"]
+    """Return the grouped shape — it carries every field both shapes share."""
+    return _read_request_shapes()["GroupedMeasurement"]
 
 
 # --------------------------------------------------------------------------- #
@@ -907,17 +919,31 @@ def test_a_session_the_child_asserts_is_not_a_field_at_all(tmp_path: Any) -> Non
     assert "data_context" in outcome["contract_violations"]
 
 
-def test_a_second_issuance_of_the_same_question_is_not_a_mismatch(tmp_path: Any) -> None:
+def test_a_measurement_may_cross_issuances_of_the_same_question(tmp_path: Any) -> None:
     """Two fan-outs for the same question text share one identity, by design.
 
     A question re-emitted on resume, or asked twice in one session, produces the
     same `question_identity` because that identity is a digest of the question
-    text — and a proposal drafted for the first issuance names the same
-    measurement as one drafted for the second, because it was drafted from the
-    same question. Nothing false can be rendered: the child returns a proposal
-    and never a measurement, and the read runs after confirmation, at the time
-    it is confirmed. Binding per issuance would demand a token echoed by the
-    child, buying detection of a case that carries no harm (Q00/ouroboros#1754).
+    text, so a measurement taken for one issuance satisfies the other.
+
+    The original reason for allowing this was that the child returned a proposal
+    and never a measurement, so nothing time-sensitive could cross. That stopped
+    being true in #1825, and the behaviour is kept anyway on a different
+    reasoning, recorded here so the next reader is not working from the retired
+    one.
+
+    A measurement that crosses issuances measured *the same question*. Its age
+    travels with it — `observed_at` is required and the host is told to say when
+    — and the decision it could corrupt is already guarded: a measurement
+    arriving after the user has answered is dropped rather than shown. What is
+    genuinely lost is the record that this round's lane did not run.
+
+    Closing that needs a token the child echoes back, because the server cannot
+    otherwise tell when a payload was produced. A required field is a new way
+    for a required lane to stall on every turn — the defect class this contract
+    spent eight fixes closing — bought against a narrow and already-disclosed
+    harm. The trade is negative, so it is an accepted risk rather than a gap
+    (Q00/ouroboros#1825).
     """
     registry = FanoutRegistry(tmp_path)
     first_id, lane_ids, identity = _registered_advisory(registry)
@@ -994,7 +1020,11 @@ def test_a_lane_without_a_contract_keeps_the_generic_output_shape() -> None:
 
 
 def _fully_populated_proposal(identity: str) -> dict[str, Any]:
-    """A read request carrying every field the schema allows."""
+    """A measurement carrying every field the grouped shape allows.
+
+    Grouped, because that shape is the superset: it is the only one with
+    `group_by`, and its values carry the label the ungrouped shape forbids.
+    """
     return {
         "question_identity": identity,
         "lane_id": "data_context",
@@ -1010,7 +1040,7 @@ def _fully_populated_proposal(identity: str) -> dict[str, Any]:
                 "time_window": "last 90 days",
                 "informs_decision": "whether SSO ships in the first milestone",
                 "observed_at": "2026-08-02T06:00:00Z",
-                "values": [{"value": 41}],
+                "values": [{"group": "enterprise", "value": 41}],
             }
         ],
     }
@@ -1074,6 +1104,16 @@ def test_the_surviving_boundary_is_stated_in_both_host_contracts() -> None:
         assert "material for the user's" in content, skill
         # A measurement without its moment is read later as a standing fact.
         assert "observed_at" in content, skill
+        # The drop-after-answer duty is what a measurement crossing issuances is
+        # weighed against (see the cross-issuance test above): the server cannot
+        # tell when a payload was produced, so this rule — not a token the child
+        # echoes — is what keeps a late number from re-opening a settled
+        # decision. It is a host duty, so the duty being *stated* is the whole of
+        # what this side can pin, and losing the sentence would silently retire
+        # the guard the accepted risk rests on.
+        assert "already answered the question by the time the measurement" in content, skill
+        assert "drop it" in content, skill
+        assert "evidence informs a\n     decision, it does not revisit one" in content, skill
         # The retired gate: leaving it would have hosts waiting to confirm a
         # read that already ran.
         assert "Run a read only after the user confirms" not in content, skill
@@ -1572,3 +1612,150 @@ def test_every_bound_the_child_can_hit_is_stated_in_its_description() -> None:
     assert "Empty means" in values_schema["description"]
     # And the cap is real, so the description is not decorative.
     assert not _accepts(_measured(values=[{"group": str(i), "value": i} for i in range(cap + 1)]))
+
+
+def test_a_grouped_value_carries_its_label_or_the_read_is_not_grouped() -> None:
+    """The schema could not say which category a number belonged to.
+
+    One object with an optional `group` accepted `group_by=["region","plan"]`
+    beside `values=[{"value": 41}]` — every category lost, two different
+    aggregates rendered identically — and equally accepted a label on a read
+    that declared no grouping. A field optional where it is required is a field
+    that is not required, so the read is two closed shapes, like the answer.
+    """
+    assert _accepts(_measured(values=[{"value": 41}]))
+    assert not _accepts(_measured(values=[{"group": "seoul", "value": 41}]))
+    assert _accepts(_measured(group_by=["region"], values=[{"group": "seoul", "value": 41}]))
+    assert not _accepts(_measured(group_by=["region"], values=[{"value": 41}]))
+    # An empty result stays spellable in either shape.
+    assert _accepts(_measured(group_by=["region"], values=[]))
+
+
+def test_grouping_takes_one_key_because_one_label_can_only_name_one() -> None:
+    """Four keys were never representable; the capacity only bought ambiguity."""
+    assert not _accepts(
+        _measured(group_by=["region", "plan"], values=[{"group": "seoul", "value": 1}])
+    )
+    shapes = _read_request_shapes()
+    assert shapes["GroupedMeasurement"]["properties"]["group_by"]["maxItems"] == 1
+    assert "group_by" not in shapes["UngroupedMeasurement"]["properties"]
+
+
+def test_observed_at_must_name_a_moment_that_could_exist() -> None:
+    """A pattern that counts digits does not check a time.
+
+    `observed_at` is the whole of what keeps a point-in-time measurement from
+    being read later as a standing fact, so a value that cannot name a moment
+    defeats it silently.
+    """
+    for impossible in (
+        "2026-13-40T29:99:99Z",
+        "2026-00-02T06:00:00Z",
+        "2026-08-32T06:00:00Z",
+        "2026-08-02T24:00:00Z",
+        "2026-08-02T06:60:00Z",
+        "2026-08-02T06:00:00+25:00",
+    ):
+        assert not _accepts(_measured(observed_at=impossible)), impossible
+    for real in ("2026-08-02T06:00:00Z", "2026-08-02T06:00:00", "2026-08-02T15:00:00+09:00"):
+        assert _accepts(_measured(observed_at=real)), real
+
+
+def test_a_nested_alternative_still_reports_the_rule_that_failed() -> None:
+    """`oneOf` must not be the report; it is what the host already knows.
+
+    The answer is one of two states and a measured read is in turn one of two
+    shapes, so flattening one level turned the outer `oneOf` into an inner one.
+    A violation names the path and the rule so the host can fix it.
+    """
+    answer = _measured(group_by=["region"], values=[{"value": 41}])
+    answer["read_requests"][0]["source_class"] = "warehouse"
+
+    reported = _validate_against_contract(answer, interview_data_evidence_answer_contract())
+
+    assert reported
+    assert not any(v.endswith(": oneOf") for v in reported), reported
+
+
+# --------------------------------------------------------------------------- #
+# The class, not the last instance
+# --------------------------------------------------------------------------- #
+#
+# Eight defects were found in this contract across one PR, and every one was the
+# same mismatch: a field constraint chosen from what the author meant rather than
+# from what a producer can emit. They split two ways and only two — the contract
+# refuses something honest (which stalls a `required: true` lane), or it admits
+# something that is not a measurement (which puts non-evidence beside a
+# question). Fixing them one at a time is how a ninth arrives, so both questions
+# are asked of every field here instead.
+
+
+_HONEST = {
+    "a fractional aggregate": {"aggregation": "average", "values": [{"value": 41.7}]},
+    "a negative value": {"values": [{"value": -3}]},
+    "zero — often the informative result": {"values": [{"value": 0}]},
+    "a large count": {"values": [{"value": 1_500_000_000}]},
+    "a non-ASCII metric": {"metric": "완료 레슨 수"},
+    "an MCP tool name": {"tool_name": "mcp__lemonboard-mimir__query"},
+    "a non-ASCII group label": {
+        "group_by": ["region"],
+        "values": [{"group": "서울 강남", "value": 1}],
+    },
+    "a time window written for a human": {"time_window": "2026-05-01 ~ 2026-08-01"},
+    "a range as two scalar filters": {
+        "filters": [
+            {"field": "d", "comparator": "gte", "value": "2026-05-01"},
+            {"field": "d", "comparator": "lte", "value": "2026-08-01"},
+        ]
+    },
+}
+
+_NOT_A_MEASUREMENT = {
+    "a value that is a string": {"values": [{"value": "41"}]},
+    "a value that is null": {"values": [{"value": None}]},
+    "an empty metric": {"metric": ""},
+    "an aggregation nobody defined": {"aggregation": "top_n"},
+    "a write wearing a read's label": {"operation": "write"},
+    "a query spelled in the tool name": {"tool_name": "SELECT count(*) FROM t"},
+    "a query spelled in a grouping key": {
+        "group_by": ["SELECT 1"],
+        "values": [{"group": "x", "value": 1}],
+    },
+    "a row list wearing an aggregate's name": {
+        "group_by": ["r"],
+        "values": [{"group": str(i), "value": i} for i in range(21)],
+    },
+    "a field the child invented": {"source_class": "warehouse"},
+}
+
+
+@pytest.mark.parametrize("case", sorted(_HONEST))
+def test_the_contract_admits_every_honest_measurement(case: str) -> None:
+    """A shape a producer can honestly emit and the contract refuses is a stall."""
+    assert _accepts(_measured(**_HONEST[case]))
+
+
+@pytest.mark.parametrize("case", sorted(_NOT_A_MEASUREMENT))
+def test_the_contract_admits_nothing_that_is_not_a_measurement(case: str) -> None:
+    """Anything this accepts is rendered to a user as evidence."""
+    assert not _accepts(_measured(**_NOT_A_MEASUREMENT[case]))
+
+
+def test_every_declared_constant_is_usable_by_the_child() -> None:
+    """A constant the schema names and the schema rejects is a trap."""
+    from ouroboros.orchestrator.capabilities.interview_schemas import (
+        DATA_AGGREGATIONS,
+        DATA_NO_EVIDENCE_REASONS,
+    )
+
+    for aggregation in DATA_AGGREGATIONS:
+        assert _accepts(_measured(aggregation=aggregation)), aggregation
+    for reason in DATA_NO_EVIDENCE_REASONS:
+        assert _accepts(
+            {
+                "question_identity": "interview-question:0123456789abcdef",
+                "lane_id": "data_context",
+                "data_needed": False,
+                "no_evidence_reason": reason,
+            }
+        ), reason

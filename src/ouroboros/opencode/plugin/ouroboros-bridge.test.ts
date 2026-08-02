@@ -463,7 +463,7 @@ describe("parseMetadata", () => {
     // Children run in the background here, so the parent redeems the fan-out
     // itself once the Task widgets finish. It can only do that if the id and
     // correlation key reach a response it can see — without them the data
-    // lane's proposal has no route back to a confirmation.
+    // lane's measurement never reaches re-entry.
     const out = parseMetadata({
       session_id: "sess-2",
       question_advisory_fanout_id: "fanout_abc123",

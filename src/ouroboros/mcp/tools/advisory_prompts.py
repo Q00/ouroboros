@@ -42,7 +42,7 @@ from typing import Any
 #: so the fan-out then cannot complete at all. Truncation still exists for a
 #: contract that runs away entirely; it is a backstop, not a budget, and a
 #: legitimate contract must never reach it.
-_INTERVIEW_DATA_CONTRACT_MAX_JSON_CHARS = 16_000
+_INTERVIEW_DATA_CONTRACT_MAX_JSON_CHARS = 24_000
 
 
 def _bounded_json(value: Any, max_chars: int) -> str:
@@ -132,9 +132,10 @@ def _data_context_lane_brief(answer_contract: Any) -> str:
 
     The rules are stated here rather than left to the child's judgment because
     every one of them is a boundary the child cannot be trusted to rediscover:
-    what it may not do (execute), what it may not carry (a value it fetched, a
-    row, an identifier), and what its output is for (the user's judgment, never
-    the answer).
+    what it must do before judging (look at what is described), what it may not
+    carry (a row, a name, an identifier), what it may not claim (anything about
+    the host), and what its output is for (the user's judgment, never the
+    answer).
     """
     contract_json = _bounded_json(answer_contract, _INTERVIEW_DATA_CONTRACT_MAX_JSON_CHARS)
     return f"""Find out which data tools this host exposes before you judge anything else,

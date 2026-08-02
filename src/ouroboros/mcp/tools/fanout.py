@@ -592,12 +592,20 @@ def _reportable_errors(errors: Any) -> list[Any]:
     Reporting the root alone says only "wrong shape"; reporting every branch's
     reasons says contradictory things, because the branch the answer was *not*
     trying to satisfy fails for reasons that would be wrong advice ("this
-    should have been a no-op" to a proposal that merely carried a stray field).
+    should have been a no-op" to a measurement that merely carried a stray
+    field).
 
     So the branch with the fewest complaints wins: the one the answer came
     closest to being is the one it meant, and its complaints are the ones worth
     reporting. This keeps the report as specific as it was when the contract
     was a single object -- a path and a failed rule, never a value.
+
+    Applied recursively, because alternatives nest: the answer is one of two
+    states, and a measured state's read is in turn one of two shapes (grouped or
+    not, Q00/ouroboros#1825). Flattening one level turned the outer ``oneOf``
+    into an inner ``oneOf`` and reported *that*, which tells the host "wrong
+    shape" about a value it already knew was the wrong shape. Depth is a
+    property of the contract, not of this function, so it is not counted.
     """
     flattened: list[Any] = []
     for error in errors:
@@ -608,7 +616,7 @@ def _reportable_errors(errors: Any) -> list[Any]:
         by_branch: dict[int, list[Any]] = {}
         for sub in context:
             by_branch.setdefault(sub.schema_path[0] if sub.schema_path else 0, []).append(sub)
-        flattened.extend(min(by_branch.values(), key=len))
+        flattened.extend(_reportable_errors(min(by_branch.values(), key=len)))
     return flattened
 
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from copy import deepcopy
 from typing import Any
 
 
@@ -473,9 +474,23 @@ _DATA_IDENTIFIER_PATTERN = r"^[A-Za-z0-9_.:\-]{1,128}$"
 #: not buy a better one: it stalls the fan-out and the user sees no measurement
 #: at all. An ambiguous moment beats a withheld one, and children emit naive
 #: timestamps often enough that the strict form would be a routine stall.
-_ISO_8601_TIMESTAMP_PATTERN = r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})?$"
+#: Each component is range-checked rather than merely counted. Counting digits
+#: admitted ``2026-13-40T29:99:99Z``, and this field is the whole of what keeps a
+#: point-in-time measurement from being read later as a standing fact, so a value
+#: that cannot name a moment defeats it silently.
+#:
+#: What this still does not catch, said rather than left to be discovered: a day
+#: that does not exist in its month, ``2026-02-30``. Ruling that out needs a
+#: calendar and JSON Schema has none -- ``format`` is annotation-only under Draft
+#: 2020-12 unless a validator opts in, which is the same trap as counting digits:
+#: a rule that reads as enforced and is not.
+_ISO_8601_TIMESTAMP_PATTERN = (
+    r"^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])"
+    r"T([01]\d|2[0-3]):[0-5]\d:[0-5]\d(\.\d+)?"
+    r"(Z|[+-]([01]\d|2[0-3]):[0-5]\d)?$"
+)
 
-#: How many grouped numbers one measurement may carry. Four group_by keys can
+#: How many grouped numbers one measurement may carry. Even one grouping key can
 #: produce arbitrarily many groups, and "an aggregate" stops being one somewhere
 #: before the row count. The bound is where that line is drawn -- and it is
 #: named in the field's description, because a limit the child cannot see is one
@@ -504,8 +519,22 @@ def _interview_data_read_request_schema() -> dict[str, Any]:
     point-in-time and a Seed is not. A number shown without its moment outlives
     the fact it described, and the child is the only party that knows when it
     ran.
+
+    **A grouped value carries its label, or the read is not grouped.** This is a
+    ``oneOf`` over two closed shapes for the same reason the answer itself is:
+    one object with an optional ``group`` accepted ``group_by=["region","plan"]``
+    beside ``values=[{"value": 41}]`` -- every category lost, and two different
+    aggregates rendered identically -- and equally accepted a label on a read
+    that declared no grouping at all. A field that is optional where it is
+    required is a field that is not required.
+
+    ``group_by`` takes one key rather than four. Four keys were never
+    representable: a single ``group`` string cannot say which key it labels, so
+    the extra capacity only bought ways to be ambiguous. One key with a required
+    label is what this shape can carry honestly, and a question needing two is a
+    second read.
     """
-    return {
+    common: dict[str, Any] = {
         "type": "object",
         "additionalProperties": False,
         "required": [
@@ -539,7 +568,8 @@ def _interview_data_read_request_schema() -> dict[str, Any]:
             "aggregation": {"type": "string", "enum": list(DATA_AGGREGATIONS)},
             "group_by": {
                 "type": "array",
-                "maxItems": 4,
+                "minItems": 1,
+                "maxItems": 1,
                 "items": {
                     "type": "string",
                     "pattern": _DATA_IDENTIFIER_PATTERN,
@@ -637,6 +667,18 @@ def _interview_data_read_request_schema() -> dict[str, Any]:
             },
         },
     }
+
+    ungrouped = deepcopy(common)
+    ungrouped["title"] = "UngroupedMeasurement"
+    ungrouped["properties"].pop("group_by")
+    ungrouped["properties"]["values"]["items"]["properties"].pop("group")
+
+    grouped = deepcopy(common)
+    grouped["title"] = "GroupedMeasurement"
+    grouped["required"] = [*common["required"], "group_by"]
+    grouped["properties"]["values"]["items"]["required"] = ["group", "value"]
+
+    return {"oneOf": [ungrouped, grouped]}
 
 
 def _interview_data_evidence_answer_contract() -> dict[str, Any]:
