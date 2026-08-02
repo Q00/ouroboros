@@ -523,15 +523,15 @@ class TestSpecVerifier:
         non-empty fixture this pattern matches nothing either way, so a test without
         an empty candidate would pass with the guard removed and prove nothing.
 
-        The hint sweeps rather than names, so the search stops at whichever candidate
-        is empty and a pass names no particular file — the package marker satisfying
-        it is not what the criterion is about. Contrast the exact hint below.
+        The criterion here is about a `CameraProvider` and the hint sweeps, so the
+        emptiness answer below is not on offer: the search stops at whichever
+        candidate is empty and a pass names no particular file. Contrast the exact
+        hint and matching criterion in the tests that follow.
 
         Both fixtures use the same wildcard hint and differ only in how many
         candidates survive ``_find_files``: the second's other `.py` sits under
-        `.venv` and is dropped, leaving one. A guard keyed on the candidate *count*
-        passes the first case and fails the second, which is why the count is not
-        the question — the hint still named nothing either time.
+        `.venv` and is dropped, leaving one. Neither the count nor the hint alone
+        may open the allowance, so both must refuse.
         """
         project = self._create_project(files)
         assertion = SpecAssertion(
@@ -558,6 +558,9 @@ class TestSpecVerifier:
         Refusing `\\A\\Z` outright reports a project that satisfies its AC as a formal
         failure, and the adapter downstream reads that as a discrepancy — the guard
         against fabricated passes manufacturing a fabricated fail instead.
+
+        What is verified here is the file, not the pattern: the criterion asks whether
+        `pkg/__init__.py` holds anything, and reading it answers that outright.
         """
         project = self._create_project({"pkg/__init__.py": "", "main.py": "print('hello')\n"})
         assertion = SpecAssertion(
@@ -604,7 +607,7 @@ class TestSpecVerifier:
         assert summary.discrepancy_count == 1
 
     @pytest.mark.parametrize("tier", [VerificationTier.T2_STRUCTURAL, VerificationTier.T1_CONSTANT])
-    def test_unnamed_empty_file_refusal_fails_closed_against_an_agent_pass_claim(
+    def test_anchored_empty_refusal_fails_closed_against_an_agent_pass_claim(
         self, tier: VerificationTier
     ) -> None:
         """The refusal has to raise a discrepancy, not merely decline to verify.
@@ -630,74 +633,27 @@ class TestSpecVerifier:
         assert summary.reports[0].verified_pass is False
         assert summary.discrepancy_count == 1
         assert summary.override_approval is False
-        assert "names no file" in summary.reports[0].results[0].detail
+        assert "Unusable regex pattern" in summary.reports[0].results[0].detail
 
     @pytest.mark.parametrize("tier", [VerificationTier.T2_STRUCTURAL, VerificationTier.T1_CONSTANT])
-    def test_filename_exit_obeys_the_empty_file_guard(self, tier: VerificationTier) -> None:
-        """T2 matches basenames before contents, and that exit needs the same guard.
-
-        `.` is satisfied by a blank file, so the guard refuses it under a sweeping
-        hint. Reached through the filename check it used to return `Found file:
-        main.py` instead — the same assertion approved on T2 and refused on T1.
-        """
-        project = self._create_project({"main.py": "print('hello')\n", "pkg/util.py": "x = 1\n"})
-        assertion = SpecAssertion(
-            ac_index=0,
-            ac_text="MUST define a CameraProvider interface",
-            tier=tier,
-            pattern=".",
-            file_hint="**/*.py",
-        )
-
-        summary = SpecVerifier(project_dir=project).verify_all(
-            (assertion,), agent_results={0: True}
-        )
-
-        assert summary.verified_count == 0
-        assert summary.reports[0].verified_pass is False
-        assert summary.override_approval is False
-
-    @pytest.mark.parametrize("tier", [VerificationTier.T2_STRUCTURAL, VerificationTier.T1_CONSTANT])
-    def test_blank_file_pattern_over_a_glob_is_not_evidence(self, tier: VerificationTier) -> None:
-        """A file of whitespace carries no more content than an empty one.
-
-        `\\A[ ]\\Z` never matches the empty string, so a guard that probes only with
-        `""` misses it while a blank `__init__.py` still mints the pass.
-        """
-        project = self._create_project({"pkg/__init__.py": " ", "main.py": "print('hello')\n"})
-        assertion = SpecAssertion(
-            ac_index=0,
-            ac_text="MUST define a CameraProvider interface",
-            tier=tier,
-            pattern=r"\A[ ]\Z",
-            file_hint="**/*.py",
-        )
-
-        summary = SpecVerifier(project_dir=project).verify_all(
-            (assertion,), agent_results={0: True}
-        )
-
-        assert summary.verified_count == 0
-        assert summary.reports[0].verified_pass is False
-        assert summary.override_approval is False
-
-    @pytest.mark.parametrize("tier", [VerificationTier.T2_STRUCTURAL, VerificationTier.T1_CONSTANT])
-    def test_exact_hint_does_not_admit_a_pattern_that_also_matches_content(
+    def test_empty_file_answer_needs_the_criterion_to_name_the_file(
         self, tier: VerificationTier
     ) -> None:
-        """The exact-hint allowance is for patterns whose only hit means "no content".
+        """An exact hint is not consent: `ac_text` has to be about the file too.
 
-        `\\A[0-9\\n]*\\Z` matches the empty string *and* a file of digits, so a hit says
-        nothing about which of the two it found — and the hint being exact does not
-        recover that. Only a pattern content cannot satisfy earns the allowance.
+        `pkg/__init__.py` is empty in most repositories, and both the hint and the
+        pattern come out of the same model completion. Keyed on the hint alone, the
+        allowance lets `\\A\\Z` pointed at any ordinary package marker "verify" a
+        criterion about a camera interface — verbatim the fabrication this change
+        exists to close, re-entered through the door opened for the honest case.
         """
-        project = self._create_project({"pkg/version.py": "123\n"})
+        project = self._create_project({"pkg/__init__.py": "", "main.py": "print('hello')\n"})
         assertion = SpecAssertion(
             ac_index=0,
-            ac_text="pkg/version.py MUST remain empty",
+            ac_text="MUST define a CameraProvider interface",
             tier=tier,
-            pattern=r"\A[0-9\n]*\Z",
-            file_hint="pkg/version.py",
+            pattern=r"\A\Z",
+            file_hint="pkg/__init__.py",
         )
 
         summary = SpecVerifier(project_dir=project).verify_all(
@@ -706,7 +662,128 @@ class TestSpecVerifier:
 
         assert summary.verified_count == 0
         assert summary.reports[0].verified_pass is False
+        assert summary.discrepancy_count == 1
+        assert summary.override_approval is False
         assert "Unusable regex pattern" in summary.reports[0].results[0].detail
+
+    @pytest.mark.parametrize("tier", [VerificationTier.T2_STRUCTURAL, VerificationTier.T1_CONSTANT])
+    def test_criterion_must_name_the_hinted_file_as_a_whole_token(
+        self, tier: VerificationTier
+    ) -> None:
+        """`a.py` sits inside `data.py`, and a substring test cannot tell them apart.
+
+        The criterion is about `data.py`; the hint points at a different, empty file
+        whose name happens to be a tail of it. Read as a substring, the criterion
+        appears to corroborate a hint it never mentioned.
+        """
+        project = self._create_project({"a.py": "", "data.py": "rows = []\n"})
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="data.py MUST remain empty",
+            tier=tier,
+            pattern=r"\A\Z",
+            file_hint="a.py",
+        )
+
+        summary = SpecVerifier(project_dir=project).verify_all(
+            (assertion,), agent_results={0: True}
+        )
+
+        assert summary.verified_count == 0
+        assert summary.reports[0].verified_pass is False
+        assert summary.override_approval is False
+
+    @pytest.mark.parametrize("tier", [VerificationTier.T2_STRUCTURAL, VerificationTier.T1_CONSTANT])
+    @pytest.mark.parametrize("blank", ["\t", "  ", "\n\n"], ids=["tab", "spaces", "newlines"])
+    def test_a_file_of_whitespace_satisfies_an_emptiness_criterion(
+        self, tier: VerificationTier, blank: str
+    ) -> None:
+        """The answer comes from the file, so `\\A\\Z` not matching a tab is irrelevant.
+
+        A guard that decided emptiness by trying the pattern against a fixed list of
+        blank strings would have to grow that list once per whitespace character
+        anyone writes. Reading the file has no list to keep up to date.
+        """
+        project = self._create_project({"pkg/__init__.py": blank})
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="pkg/__init__.py MUST remain empty",
+            tier=tier,
+            pattern=r"\A\Z",
+            file_hint="pkg/__init__.py",
+        )
+
+        summary = SpecVerifier(project_dir=project).verify_all(
+            (assertion,), agent_results={0: True}
+        )
+
+        assert summary.verified_count == 1
+        assert summary.reports[0].verified_pass is True
+        assert summary.discrepancy_count == 0
+
+    @pytest.mark.parametrize("tier", [VerificationTier.T2_STRUCTURAL, VerificationTier.T1_CONSTANT])
+    @pytest.mark.parametrize(
+        "pattern",
+        [r"\A\Z", r"\A[0-9\n]*\Z", r"\A(?![a0])", r"\A\Z|[\s\S]{3,}", r"\A[A-Z\n]*\Z"],
+        ids=["honest", "digits", "negative-lookahead", "alternation", "upper"],
+    )
+    def test_a_degenerate_pattern_earns_nothing_from_an_emptiness_criterion(
+        self, tier: VerificationTier, pattern: str
+    ) -> None:
+        """Every pattern here matches the file; the file is not empty; all must fail.
+
+        `\\A(?![a0])`, `\\A\\Z|[\\s\\S]{3,}` and `\\A[A-Z\\n]*\\Z` are each built to slip past
+        a screen that decides "matches empty and nothing else" by trying a fixed pair
+        of sample strings — they dodge the samples and match every real file. None of
+        that reaches the verdict, because the verdict is `content.strip()`. A screen
+        made of examples only rejects the examples it contains; this one holds
+        whatever the pattern turns out to be.
+        """
+        project = self._create_project({"pkg/__init__.py": "from .camera import x\n"})
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="pkg/__init__.py MUST remain empty",
+            tier=tier,
+            pattern=pattern,
+            file_hint="pkg/__init__.py",
+        )
+
+        summary = SpecVerifier(project_dir=project).verify_all(
+            (assertion,), agent_results={0: True}
+        )
+
+        assert summary.verified_count == 0
+        assert summary.reports[0].verified_pass is False
+        assert summary.discrepancy_count == 1
+        assert summary.override_approval is False
+
+    @pytest.mark.parametrize("tier", [VerificationTier.T2_STRUCTURAL, VerificationTier.T1_CONSTANT])
+    def test_a_must_not_be_empty_criterion_is_left_to_the_ordinary_path(
+        self, tier: VerificationTier
+    ) -> None:
+        """The criterion says "empty", but `\\S` needs content and answers for itself.
+
+        Routing on the word alone would invert this one: the emptiness answer would
+        read a file that is correctly non-empty and report a discrepancy against an AC
+        the project satisfies. The pattern carries the polarity — only one that
+        survives on a file with nothing in it needs rescuing.
+        """
+        project = self._create_project({"pkg/config.py": "FPS = 60\n"})
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="pkg/config.py MUST NOT be empty",
+            tier=tier,
+            pattern=r"\S",
+            file_hint="pkg/config.py",
+        )
+
+        summary = SpecVerifier(project_dir=project).verify_all(
+            (assertion,), agent_results={0: True}
+        )
+
+        assert summary.verified_count == 1
+        assert summary.reports[0].verified_pass is True
+        assert summary.discrepancy_count == 0
 
     def test_empty_matching_pattern_fails_closed_against_an_agent_pass_claim(self) -> None:
         """Refusing the pattern must raise a discrepancy, not silently skip the AC.

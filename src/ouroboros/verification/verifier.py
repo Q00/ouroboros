@@ -27,76 +27,44 @@ MAX_FILES_PER_HINT = 100
 MAX_PATTERN_LENGTH = 200  # Limit LLM-generated regex length to reduce ReDoS risk
 MAX_SCALAR_LENGTH = 4096
 
-# Content a pattern is tried against to decide whether matching the empty string
-# is all it can do. Most patterns that match the empty string also match every
-# other file — `.*`, `x?`, `\s*`, `(?:)`, `|`, `^` — so a hit is evidence a file
-# was read, not evidence about the criterion. `\A\Z` is the one that matters on
-# the other side: it matches the empty string and nothing else, which is how
-# "this file MUST remain empty" is written, and refusing it turns an honest
-# criterion into a formal failure.
+# Words that make an acceptance criterion a claim about a file holding nothing.
+# Such a criterion has no content for a regex to find, so every honest way to
+# write it — `\A\Z` and its blank-file variants — is refused by the empty-string
+# rule in `_safe_compile`, and an honest criterion fails formally.
 #
-# A probe added here can only move a pattern out of that exception and into the
-# refusal, never the reverse — the screen must not get weaker as it learns.
-# Deliberately short: these run on every model-supplied pattern, and a long probe
-# is how a guard against ReDoS becomes its own ReDoS.
-_CONTENT_PROBES = ("a", "0\n")
-
-# Inputs carrying no content of their own. A pattern one of these satisfies is
-# saying "this file is empty" — a claim about one named file, not about a set.
-_CONTENTLESS_PROBES = ("", " ", "\n")
+# `_empty_file_criterion_result` answers that one criterion from the file itself.
+# Emptiness is a property of the file, and reading it is ground truth; asking a
+# regex what it *could* match is inference, and inference run against a fixed
+# list of sample strings only ever rejects what the list literally contains.
+_EMPTINESS_WORDS = ("empty", "blank")
 
 
-def _matches_only_empty(compiled: re.Pattern) -> bool:
-    """True for a pattern like `\\A\\Z`, whose only hit means "this file has no content"."""
-    return compiled.search("") is not None and not any(
-        compiled.search(probe) is not None for probe in _CONTENT_PROBES
-    )
+def _asks_whether_a_named_file_is_empty(assertion: SpecAssertion) -> bool:
+    """True when the criterion itself asks whether the file its hint names is empty.
 
-
-def _satisfied_by_an_empty_file(compiled: re.Pattern) -> bool:
-    """True when an empty or blank file alone is enough to make this pattern hit."""
-    return any(compiled.search(probe) is not None for probe in _CONTENTLESS_PROBES)
-
-
-def _hint_names_one_file(file_hint: str, files: list[str]) -> bool:
-    """True when the hint picked out a specific file rather than swept for one.
-
-    A candidate count of one is not the same thing: `**/*.py` returns a single
-    candidate in any package whose only other `.py` files sit under `.venv` or
-    `node_modules`, because `_find_files` drops those. The count is then a
-    property of the project's tree, and a hit still names no file the criterion
-    chose. Only a hint carrying no wildcard names one.
+    Both halves are load-bearing. The hint must name one file, because `\\A\\Z`
+    over `**/*.py` stops at whichever candidate is empty first — in a Python
+    project some package marker no criterion ever mentioned. And the criterion
+    must name that same file, because `pkg/__init__.py` is empty in most
+    repositories, so an exact hint pointed at it would otherwise "verify" a
+    criterion about something else entirely. The hint comes from the same model
+    completion as the pattern and licenses nothing on its own; `ac_text` is the
+    spec's own wording, which the model selects by index but does not write.
     """
-    return bool(file_hint) and not any(c in file_hint for c in "*?[") and len(files) == 1
-
-
-def _unnamed_empty_file(compiled: re.Pattern, file_hint: str, files: list[str]) -> bool:
-    """True when a hit would only say "one of these candidates happens to be empty".
-
-    `\\A\\Z` is honest evidence for "`pkg/__init__.py` MUST remain empty" — but only
-    because that hint names the file the criterion is about. Point the same pattern
-    at `**/*.py` and the search stops at whichever candidate is empty first, which
-    in a Python project is some package marker that no criterion ever mentioned.
-    The pattern discriminates between files; searching a set for *any* hit is what
-    throws that away, so this is a property of the pair, not of the regex.
-    """
-    return _satisfied_by_an_empty_file(compiled) and not _hint_names_one_file(file_hint, files)
-
-
-def _unnamed_empty_file_result(
-    assertion: SpecAssertion, files: list[str]
-) -> SpecVerificationResult:
-    """One refusal for both tiers — a verdict that differs by tier is a hole."""
-    return SpecVerificationResult(
-        assertion=assertion,
-        verified=False,
-        discrepancy=True,
-        detail=(
-            f"Pattern '{assertion.pattern}' is satisfied by an empty file, and hint "
-            f"'{assertion.file_hint}' names no file ({len(files)} candidates): a hit "
-            f"would name no particular one. Point the hint at the file the criterion "
-            f"is about."
-        ),
+    hint = assertion.file_hint
+    if not hint or any(c in hint for c in "*?["):
+        return False
+    ac_text = assertion.ac_text.lower()
+    if not any(word in ac_text for word in _EMPTINESS_WORDS):
+        return False
+    # As a whole token, not a substring: `a.py` sits inside `data.py`, and a
+    # criterion about the latter must not license a hint pointed at the former.
+    return (
+        re.search(
+            rf"(?:\A|[\s'\"`(\[]){re.escape(hint.lower())}(?=\Z|[\s'\"`)\],.;:])",
+            ac_text,
+        )
+        is not None
     )
 
 
@@ -257,30 +225,86 @@ class SpecVerifier:
             project_dir=self.project_dir,
         )
 
-    def _safe_compile(self, pattern: str, flags: int = 0) -> re.Pattern | None:
-        """Compile a model-supplied regex, refusing one that cannot be evidence."""
+    def _compile_or_none(self, pattern: str, flags: int = 0) -> re.Pattern | None:
+        """Compile a model-supplied regex, refusing one that is unusable as a regex."""
         if len(pattern) > MAX_PATTERN_LENGTH:
             logger.warning("Regex pattern too long (%d chars), skipping", len(pattern))
             return None
         try:
-            compiled = re.compile(pattern, flags)
+            return re.compile(pattern, flags)
         except (re.error, OverflowError) as e:
             logger.warning("Invalid regex pattern: %s", e)
             return None
-        if compiled.search("") is not None and not _matches_only_empty(compiled):
-            # A pattern that matches the empty string *and* matches content succeeds
-            # against whatever file it is pointed at. `.*`, `x?`, `\s*`, `(?:)`, `|`
-            # and `^` all compile, and all verified whatever criterion they were
-            # given. `\A\Z` is the carve-out: it matches the empty string and no
-            # content, so it still tells one file from another.
+
+    def _safe_compile(self, pattern: str, flags: int = 0) -> re.Pattern | None:
+        """Compile a model-supplied regex, refusing one that cannot be evidence."""
+        compiled = self._compile_or_none(pattern, flags)
+        if compiled is None:
+            return None
+        if compiled.search("") is not None:
+            # A pattern that hits a file with no content in it hits every file:
+            # `.*`, `x?`, `\s*`, `(?:)`, `|` and `^` all compile, and all verified
+            # whatever criterion they were handed. A criterion that is genuinely
+            # about a file being empty is answered by `_empty_file_criterion_result`
+            # from the file, so nothing honest depends on admitting these here.
             logger.warning(
                 "Regex pattern can match without criterion content, skipping: %r", pattern
             )
             return None
         return compiled
 
+    def _empty_file_criterion_result(
+        self, assertion: SpecAssertion
+    ) -> SpecVerificationResult | None:
+        """Answer an "X MUST remain empty" criterion from the file, not from the pattern.
+
+        Returns None whenever this is not that criterion, leaving the assertion to
+        the ordinary path. Deliberately one gate ahead of the tier split: a verdict
+        that differs between T1 and T2 is a hole, and here that cannot be written.
+        """
+        if assertion.tier not in (VerificationTier.T1_CONSTANT, VerificationTier.T2_STRUCTURAL):
+            return None
+        if not _asks_whether_a_named_file_is_empty(assertion):
+            return None
+
+        # The pattern still decides which way the criterion is being asked. One that
+        # needs content — `\S` for "MUST NOT be empty" — is answered by the ordinary
+        # path, which can see the content it needs; only one that survives on a file
+        # with nothing in it lands here, and that is the pattern this rescue is for.
+        compiled = self._compile_or_none(assertion.pattern)
+        if compiled is None or compiled.search("") is None:
+            return None
+
+        files = self._find_files(assertion.file_hint)
+        if len(files) != 1:
+            return None
+        content = self._read_file(files[0])
+        if content is None:
+            return None
+
+        # `content.strip()` and not the pattern: a file of one tab is as empty as a
+        # file of zero bytes, and no pattern has to be trusted to agree.
+        empty = not content.strip()
+        basename = os.path.basename(files[0])
+        return SpecVerificationResult(
+            assertion=assertion,
+            verified=empty,
+            file_path=files[0],
+            discrepancy=not empty,
+            detail=(
+                f"Criterion asks whether {basename} is empty; it is empty"
+                if empty
+                else f"Criterion asks whether {basename} is empty; it holds "
+                f"{len(content.strip())} characters of content"
+            ),
+        )
+
     def _verify_one(self, assertion: SpecAssertion) -> SpecVerificationResult | None:
         """Verify a single assertion. Returns None for skipped tiers."""
+        empty_file = self._empty_file_criterion_result(assertion)
+        if empty_file is not None:
+            return empty_file
+
         if assertion.tier == VerificationTier.T1_CONSTANT:
             return self._verify_constant(assertion)
         elif assertion.tier == VerificationTier.T2_STRUCTURAL:
@@ -316,9 +340,6 @@ class SpecVerifier:
                 discrepancy=True,
                 detail="Unusable regex pattern: invalid, too long, or matches any input",
             )
-
-        if _unnamed_empty_file(pattern, assertion.file_hint, files):
-            return _unnamed_empty_file_result(assertion, files)
 
         for file_path in files:
             content = self._read_file(file_path)
@@ -372,21 +393,6 @@ class SpecVerifier:
 
         files = self._find_files(assertion.file_hint)
 
-        # Both checks below end in a success return, so the screens run ahead of the
-        # first of them. Placed between the two, the empty-file guard would refuse a
-        # pattern on the content path that the filename path had already accepted.
-        content_pattern = self._safe_compile(assertion.pattern)
-        if content_pattern is None:
-            return SpecVerificationResult(
-                assertion=assertion,
-                verified=False,
-                discrepancy=True,
-                detail="Unusable regex pattern: invalid, too long, or matches any input",
-            )
-
-        if _unnamed_empty_file(content_pattern, assertion.file_hint, files):
-            return _unnamed_empty_file_result(assertion, files)
-
         # First check: does the pattern match any filename?
         name_pattern = self._safe_compile(assertion.pattern, re.IGNORECASE)
 
@@ -402,6 +408,14 @@ class SpecVerifier:
                     )
 
         # Second check: search file contents for class/function/interface
+        content_pattern = self._safe_compile(assertion.pattern)
+        if content_pattern is None:
+            return SpecVerificationResult(
+                assertion=assertion,
+                verified=False,
+                discrepancy=True,
+                detail="Unusable regex pattern: invalid, too long, or matches any input",
+            )
 
         for file_path in files:
             content = self._read_file(file_path)
