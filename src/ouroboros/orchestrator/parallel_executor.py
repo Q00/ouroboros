@@ -83,6 +83,7 @@ from ouroboros.harness.deliver_gate import (
 from ouroboros.harness.journal import EvidenceEntry, EvidenceManifest
 from ouroboros.harness.traceguard_validator import validate_evidence_claims
 from ouroboros.observability.logging import get_logger
+from ouroboros.orchestrator import adaptive_concurrency
 from ouroboros.orchestrator.ac_execution_capsule import (
     UnmaterializableSuccessContractError,
     bind_capsule_to_runtime_handle,
@@ -390,6 +391,7 @@ from ouroboros.orchestrator.verifier import (
 )
 
 _PARALLEL_PAUSE_REPLAY_PAGE_SIZE = 64
+_has_usage_limit_pause = adaptive_concurrency.has_usage_limit_pause
 _PARALLEL_ROUTE_OBSERVATION_KEYS = frozenset(
     {
         "schema_version",
@@ -2010,18 +2012,6 @@ def _checkpoint_verify_gate_outcomes(
     return serialized
 
 
-def _has_usage_limit_pause(result: ACExecutionResult) -> bool:
-    """Return whether any leaf in an AC result tree carries a quota pause.
-
-    Decomposed aggregate results intentionally keep their own ``messages``
-    empty.  Pause ownership therefore has to follow the result tree down to
-    the atomic leaf instead of treating the aggregate envelope as the effect.
-    """
-    if any(is_usage_limit_pause_message(message) for message in reversed(result.messages)):
-        return True
-    return any(_has_usage_limit_pause(child) for child in result.sub_results)
-
-
 class _BatchInterruptedForRecoverablePause(RuntimeError):
     """Internal marker for an AC stopped before a shared-quota provider effect."""
 
@@ -2900,6 +2890,7 @@ class ParallelACExecutor:
         enable_decomposition: bool = True,
         decomposition_mode: Literal["bounce_only", "off"] = "bounce_only",
         max_concurrent: int = 3,
+        adaptive_max_concurrent: int | None = None,
         max_decomposition_depth: int = DEFAULT_MAX_DECOMPOSITION_DEPTH,
         checkpoint_store: Any | None = None,
         inherited_runtime_handle: RuntimeHandle | None = None,
@@ -2935,7 +2926,7 @@ class ParallelACExecutor:
                 classified bounce or not at all. Historical ``preflight``
                 records remain readable, but no live constructor can authorize
                 a new pre-execution decomposition effect.
-            max_concurrent: Maximum number of concurrent AC executions.
+            max_concurrent: Initial number of concurrent AC executions.
             max_decomposition_depth: Maximum recursive decomposition depth.
             checkpoint_store: Optional CheckpointStore for state recovery (RC3).
             inherited_runtime_handle: Optional parent Claude runtime handle for
@@ -3069,7 +3060,10 @@ class ParallelACExecutor:
         )
         self._authority_coordinator = self._coordinator
         self._authority_coordinator_review = self._coordinator.run_review
-        self._semaphore = anyio.Semaphore(max_concurrent)
+        self._adaptive_concurrency = adaptive_concurrency.AdaptiveConcurrencyController(
+            initial_limit=max_concurrent,
+            max_limit=adaptive_max_concurrent,
+        )
         if process_local_resume_nonce is not None and (
             len(process_local_resume_nonce) != 32
             or any(char not in "0123456789abcdef" for char in process_local_resume_nonce)
@@ -3268,10 +3262,11 @@ class ParallelACExecutor:
         limits = get_attribute(self, "_resolved_backend_limits")
         coordinator_effort = getattr(coordinator, "_reasoning_effort", None)
         return {
-            "version": 1,
+            "version": 2,
             "decomposition_mode": get_attribute(self, "_decomposition_mode"),
             "max_decomposition_depth": get_attribute(self, "_max_decomposition_depth"),
             "max_concurrent": get_attribute(self, "_max_concurrent"),
+            "adaptive_concurrency": get_attribute(self, "_adaptive_concurrency").policy,
             "execution_profile": (
                 get_attribute(self, "_execution_profile").model_dump(mode="json")
                 if get_attribute(self, "_execution_profile") is not None
@@ -3896,9 +3891,9 @@ class ParallelACExecutor:
                             "batch stopped at a recoverable provider quota boundary"
                         )
                         return
-                    async with self._semaphore:
+                    async with self._adaptive_concurrency.slot() as permit_epoch:
                         # Tasks are created together but may wait behind the
-                        # provider semaphore. Re-check under the permit so a
+                        # adaptive provider window. Re-check under the permit so a
                         # sibling that already found a shared quota window can
                         # close this provider entrance before its first effect.
                         if cancel_on_recoverable_pause and recoverable_pause_detected.is_set():
@@ -3973,11 +3968,15 @@ class ParallelACExecutor:
                                 else None
                             ),
                         )
+                        await adaptive_concurrency.observe_ac_result(
+                            self._adaptive_concurrency,
+                            result,
+                            permit_epoch,
+                            (session_id, execution_id, ac_idx),
+                        )
                         batch_results[idx] = result
                         if cancel_on_recoverable_pause and _has_usage_limit_pause(result):
-                            # A provider quota belongs to the batch, not merely
-                            # the AC that observed it. Signal first, then cancel
-                            # every already-running or semaphore-waiting sibling.
+                            # Quota belongs to the batch; cancel running/waiting siblings.
                             recoverable_pause_detected.set()
                             for sibling_idx, scope in tuple(sibling_cancel_scopes.items()):
                                 if sibling_idx != idx:

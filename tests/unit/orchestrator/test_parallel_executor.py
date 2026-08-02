@@ -6799,6 +6799,61 @@ class TestParallelACExecutor:
         assert max_active_count == 2
 
     @pytest.mark.asyncio
+    async def test_batch_adaptive_window_grows_after_sustained_provider_success(self) -> None:
+        """The pre-flight value is an initial estimate, not a permanent cap."""
+
+        seed = _make_seed(*(f"AC {index}" for index in range(6)))
+        executor = ProcessLocalTestExecutor(
+            adapter=MagicMock(),
+            event_store=AsyncMock(),
+            console=MagicMock(),
+            enable_decomposition=False,
+            max_concurrent=1,
+            adaptive_max_concurrent=2,
+        )
+        active_count = 0
+        max_active_count = 0
+
+        async def fake_execute_single_ac(**kwargs: Any) -> ACExecutionResult:
+            nonlocal active_count, max_active_count
+            ac_index = int(kwargs["ac_index"])
+            active_count += 1
+            max_active_count = max(max_active_count, active_count)
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            active_count -= 1
+            return ACExecutionResult(
+                ac_index=ac_index,
+                ac_content=str(kwargs["ac_content"]),
+                success=True,
+                messages=(
+                    AgentMessage(
+                        type="result",
+                        content="done",
+                        data={"subtype": "success"},
+                    ),
+                ),
+                final_message="done",
+            )
+
+        with patch.object(executor, "_execute_single_ac", side_effect=fake_execute_single_ac):
+            results = await executor._execute_ac_batch(
+                seed=seed,
+                batch_indices=list(range(6)),
+                session_id="sess_adaptive_growth",
+                execution_id="exec_adaptive_growth",
+                tools=["Read"],
+                tool_catalog=None,
+                system_prompt="test",
+                level_contexts=[],
+                ac_retry_attempts=dict.fromkeys(range(6), 0),
+            )
+
+        assert all(isinstance(result, ACExecutionResult) for result in results)
+        assert executor._adaptive_concurrency.snapshot().current_limit == 2
+        assert max_active_count == 2
+
+    @pytest.mark.asyncio
     async def test_atomic_ac_uses_ac_scoped_runtime_handle(self) -> None:
         """Atomic AC execution should seed a fresh AC-scoped runtime handle."""
 

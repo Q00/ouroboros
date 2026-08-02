@@ -6100,6 +6100,7 @@ class TestOrchestratorRunner:
         assert result is cancellation_result
         kwargs = executor_cls.call_args.kwargs
         assert kwargs["max_concurrent"] == semantics["effective_parallel_workers"]
+        assert kwargs["adaptive_max_concurrent"] == semantics["max_parallel_workers"]
         assert (
             kwargs["resolved_self_governs_rate_limit"]
             is semantics["backend_self_governs_rate_limit"]

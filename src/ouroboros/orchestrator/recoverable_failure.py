@@ -22,6 +22,7 @@ _METADATA_CHILD_FIELDS = (
     "meta",
     "mcp_meta",
     "metadata",
+    "headers",
     "error",
     "details",
     "response",
@@ -68,6 +69,8 @@ _METADATA_FIELDS = tuple(
             "resetAfterMs",
             "retry_after",
             "retryAfter",
+            "retry-after",
+            "Retry-After",
             "reset_after",
             "resetAfter",
             "resume_after",
@@ -103,6 +106,13 @@ _LIMIT_PATTERN = re.compile(
     r"|\b(?:quota|allowance)\s+(?:exceeded|exhausted|depleted)\b"
     r"|\brate\s+limit\s+window\b.{0,80}"
     r"\b(?:hit|reached|exceeded|exhausted|depleted|reset|resets)\b",
+    re.IGNORECASE,
+)
+_CONCURRENCY_LIMIT_PATTERN = re.compile(
+    r"\b(?:too\s+many\s+concurrent\s+requests"
+    r"|(?:request\s+)?concurrenc(?:y|ies)\s+(?:limit|cap|maximum|exceeded|reached)"
+    r"|(?:limit|cap|maximum)\s+(?:for\s+)?concurrent\s+requests?"
+    r"|concurrent\s+requests?\s+(?:exceeded|rejected))\b",
     re.IGNORECASE,
 )
 
@@ -226,7 +236,14 @@ def retry_duration_seconds_from_metadata(
         if parsed is not None:
             return max(1, (parsed + 999) // 1000)
 
-    for key in ("retry_after", "retryAfter", "reset_after", "resetAfter"):
+    for key in (
+        "retry_after",
+        "retryAfter",
+        "retry-after",
+        "Retry-After",
+        "reset_after",
+        "resetAfter",
+    ):
         value = _metadata_value(metadata, key)
         parsed_datetime = _parse_datetime(value)
         if parsed_datetime is not None:
@@ -327,6 +344,20 @@ def _metadata_has_http_429(metadata: Mapping[str, object]) -> bool:
     return False
 
 
+def _metadata_has_concurrency_limit_signal(metadata: Mapping[str, object]) -> bool:
+    """Return whether bounded provider metadata names a concurrency cap."""
+
+    kind = _metadata_value(metadata, "kind")
+    if isinstance(kind, str) and kind.strip().lower() in {
+        "concurrency_limit",
+        "concurrency_exceeded",
+        "concurrency_rejection",
+        "too_many_concurrent_requests",
+    }:
+        return True
+    return _CONCURRENCY_LIMIT_PATTERN.search(_metadata_text(metadata)) is not None
+
+
 def is_usage_limit_pause_message(
     message: AgentMessage,
     *,
@@ -344,12 +375,16 @@ def is_usage_limit_pause_message(
         return True
     runtime_shaped = any(_has_runtime_shape(metadata) for metadata in metadata_rows)
     has_http_429 = any(_metadata_has_http_429(metadata) for metadata in metadata_rows)
+    has_concurrency_limit_signal = (
+        any(_metadata_has_concurrency_limit_signal(metadata) for metadata in metadata_rows)
+        or _CONCURRENCY_LIMIT_PATTERN.search(message.content) is not None
+    )
     has_long_retry_window = any(
         (duration := _duration_from_metadata(metadata, now=resolved_now)) is not None
         and duration >= _LONG_RETRY_AFTER_SECONDS
         for metadata in metadata_rows
     )
-    if has_http_429 and has_long_retry_window:
+    if has_http_429 and has_long_retry_window and not has_concurrency_limit_signal:
         # Provider bridges may place the HTTP envelope and retry headers at
         # adjacent bounded metadata layers. They still describe one final
         # failure and must not authorize a costlier route merely because a

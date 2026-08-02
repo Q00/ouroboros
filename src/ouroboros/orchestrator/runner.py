@@ -2375,13 +2375,13 @@ class OrchestratorRunner:
         return current_seed_id, tuple(cohort)
 
     def _plan_parallel_workers(self, requested_workers: int | None = None) -> int:
-        """Return the effective fan-out worker count for the connected backend.
+        """Return the initial fan-out estimate for the connected backend.
 
-        Ouroboros caps delivery fan-out to the connected backend's known
-        concurrency limit so it does not stampede the LLM's rate/quota window
-        (R3). Backends whose underlying LLM limits are unknown — the CLI
-        runtimes — serialize by default and are raised only via
-        ``OUROBOROS_MAX_CONCURRENCY``.
+        Backends whose underlying LLM limits are unknown — the CLI runtimes —
+        start serialized. ParallelACExecutor treats this immutable pre-flight
+        value as an AIMD initial window, shrinking on provider pressure and
+        cautiously probing toward ``max_parallel_workers`` after sustained
+        success.
         """
         limits = resolve_backend_limits(self._adapter.runtime_backend)
         requested = self._max_parallel_workers if requested_workers is None else requested_workers
@@ -10400,16 +10400,15 @@ class OrchestratorRunner:
                 require_bound=True,
             )
 
-        # Cap fan-out to the connected backend's concurrency constraints so a
-        # parallel dispatch never stampedes the LLM's rate/quota window (R3).
+        # Start from pre-flight, then probe toward the worker budget after sustained success.
         if effective_workers < max_parallel_workers:
             self._console.print(
-                f"[yellow]Fan-out capped to {effective_workers} worker(s) for backend "
-                f"'{self._adapter.runtime_backend}' (requested {max_parallel_workers}). "
-                f"Override with OUROBOROS_MAX_CONCURRENCY.[/yellow]"
+                f"[yellow]Initial fan-out set to {effective_workers} worker(s) for backend "
+                f"'{self._adapter.runtime_backend}' (adaptive ceiling "
+                f"{max_parallel_workers}).[/yellow]"
             )
             log.info(
-                "orchestrator.runner.fan_out_capped",
+                "orchestrator.runner.fan_out_initialized",
                 runtime_backend=self._adapter.runtime_backend,
                 requested_workers=max_parallel_workers,
                 effective_workers=effective_workers,
@@ -10427,6 +10426,7 @@ class OrchestratorRunner:
             enable_decomposition=execution_semantics["enable_decomposition"],
             decomposition_mode=execution_semantics["decomposition_mode"],
             max_concurrent=effective_workers,
+            adaptive_max_concurrent=max_parallel_workers,
             max_decomposition_depth=max_decomposition_depth,
             inherited_runtime_handle=inherited_runtime_handle,
             task_cwd=self._effective_cwd(),

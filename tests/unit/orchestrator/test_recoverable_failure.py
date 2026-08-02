@@ -85,6 +85,35 @@ def test_short_window_429_population_remains_an_ordinary_retryable_failure(
     assert is_usage_limit_pause_message(message) is False
 
 
+def test_explicit_concurrency_cap_is_not_misclassified_as_quota() -> None:
+    message = AgentMessage(
+        type="result",
+        content="Interface request concurrency exceeded",
+        data={
+            "subtype": "error",
+            "http_status": 429,
+            "kind": "concurrency_limit",
+            "retry_after_seconds": 7_200,
+        },
+    )
+
+    assert is_usage_limit_pause_message(message) is False
+
+
+def test_retry_after_header_is_projected_from_nested_headers() -> None:
+    message = AgentMessage(
+        type="result",
+        content="Provider request failed.",
+        data={
+            "subtype": "error",
+            "http_status": 429,
+            "headers": {"Retry-After": "7200"},
+        },
+    )
+
+    assert is_usage_limit_pause_message(message) is True
+
+
 @pytest.mark.parametrize(
     "container_field",
     ("meta", "mcp_meta", "metadata", "error", "details", "response"),
