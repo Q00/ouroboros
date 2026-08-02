@@ -405,6 +405,14 @@ pub fn populate_state_from_events(state: &mut AppState, events: &[EventRow]) {
                 }
             }
             "workflow.progress.updated" => {
+                // There is no `orchestrator.session.resumed` event; progress
+                // reporting the runtime is executing again is the only signal
+                // that can lift a paused display. It never authors a status
+                // otherwise.
+                if state.is_paused && progress_acknowledges_running(&ev.payload) {
+                    state.is_paused = false;
+                    state.status = ExecutionStatus::Running;
+                }
                 if let Some(phase_str) = ev.payload.get("current_phase").and_then(|v| v.as_str()) {
                     state.current_phase = match phase_str.to_lowercase().as_str() {
                         "discover" => Phase::Discover,
@@ -917,6 +925,10 @@ pub fn populate_state_from_events(state: &mut AppState, events: &[EventRow]) {
                     });
             }
             "orchestrator.progress.updated" => {
+                if state.is_paused && progress_acknowledges_running(&ev.payload) {
+                    state.is_paused = false;
+                    state.status = ExecutionStatus::Running;
+                }
                 state._msg_count += 1;
                 if let Some(preview) = ev.payload.get("content_preview").and_then(|v| v.as_str()) {
                     state.add_log(
@@ -1006,6 +1018,34 @@ pub fn populate_state_from_events(state: &mut AppState, events: &[EventRow]) {
     state.rebuild_tree_state();
 }
 
+/// Whether a progress payload acknowledges the run is executing again.
+///
+/// Mirrors the Python monitor's `_progress_acknowledges_running`. Deliberately
+/// narrow: only `running` counts. `runtime_status` is per-runtime-turn
+/// metadata — messages such as `result.completed` project to `"completed"` —
+/// so honouring terminal values here would let an unfinished run advertise a
+/// terminal state. Global paused/terminal status stays with
+/// `orchestrator.session.*`.
+///
+/// The two producers nest the value differently: `orchestrator.progress.updated`
+/// wraps it in `progress`, `workflow.progress.updated` carries it in
+/// `last_update`.
+fn progress_acknowledges_running(payload: &Value) -> bool {
+    for container in ["progress", "last_update"] {
+        if let Some(status) = payload
+            .get(container)
+            .and_then(|v| v.get("runtime_status"))
+            .and_then(|v| v.as_str())
+        {
+            return status.trim().eq_ignore_ascii_case("running");
+        }
+    }
+    payload
+        .get("runtime_status")
+        .and_then(|v| v.as_str())
+        .is_some_and(|status| status.trim().eq_ignore_ascii_case("running"))
+}
+
 fn short_payload(payload: &Value) -> String {
     let s = payload.to_string();
     if s.chars().count() > 500 {
@@ -1055,5 +1095,109 @@ fn compute_elapsed(start: &str, end: &str) -> Option<String> {
         Some(format!("{hours:02}:{mins:02}:{secs:02}"))
     } else {
         Some(format!("{mins:02}:{secs:02}"))
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn event(event_type: &str, payload: Value) -> EventRow {
+        EventRow {
+            id: "1".into(),
+            aggregate_type: "session".into(),
+            aggregate_id: "sess_1833".into(),
+            event_type: event_type.into(),
+            payload,
+            timestamp: "2026-01-01T00:00:00Z".into(),
+        }
+    }
+
+    fn paused_state() -> AppState {
+        let mut state = AppState::new();
+        populate_state_from_events(
+            &mut state,
+            &[event(
+                "orchestrator.session.paused",
+                json!({"reason": "usage limit"}),
+            )],
+        );
+        assert!(state.is_paused, "fixture did not reach the paused state");
+        state
+    }
+
+    #[test]
+    fn workflow_progress_running_lifts_a_paused_display() {
+        // Q00/ouroboros#1833: with `r` inert in observer mode, a durable resume
+        // signal is the only way back out of `paused`.
+        let mut state = paused_state();
+
+        populate_state_from_events(
+            &mut state,
+            &[event(
+                "workflow.progress.updated",
+                json!({"last_update": {"runtime_status": "running"}}),
+            )],
+        );
+
+        assert!(!state.is_paused);
+        assert_eq!(state.status, ExecutionStatus::Running);
+    }
+
+    #[test]
+    fn orchestrator_progress_running_lifts_a_paused_display() {
+        let mut state = paused_state();
+
+        populate_state_from_events(
+            &mut state,
+            &[event(
+                "orchestrator.progress.updated",
+                json!({"progress": {"runtime_status": "running"}}),
+            )],
+        );
+
+        assert!(!state.is_paused);
+        assert_eq!(state.status, ExecutionStatus::Running);
+    }
+
+    #[test]
+    fn per_turn_terminal_runtime_status_is_not_global_lifecycle() {
+        // `runtime_status` describes the latest agent turn — `result.completed`
+        // projects to "completed" — so it must not end the run.
+        for terminal in ["completed", "failed", "cancelled"] {
+            let mut state = paused_state();
+
+            populate_state_from_events(
+                &mut state,
+                &[event(
+                    "workflow.progress.updated",
+                    json!({"last_update": {"runtime_status": terminal}}),
+                )],
+            );
+
+            assert!(state.is_paused, "{terminal} cleared the paused display");
+            assert_eq!(state.status, ExecutionStatus::Paused, "{terminal}");
+        }
+    }
+
+    #[test]
+    fn progress_without_runtime_status_does_not_lift_paused() {
+        let mut state = paused_state();
+
+        populate_state_from_events(
+            &mut state,
+            &[event(
+                "workflow.progress.updated",
+                json!({"completed_count": 1, "total_count": 3}),
+            )],
+        );
+
+        assert!(state.is_paused);
+        assert_eq!(state.status, ExecutionStatus::Paused);
     }
 }

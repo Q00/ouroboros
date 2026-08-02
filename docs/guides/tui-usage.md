@@ -145,7 +145,8 @@ View evolutionary lineage across generations when using evolutionary loops (`ooo
 > persists an acknowledged lifecycle event — `orchestrator.session.paused` for a
 > pause, and progress carrying `runtime_status: running` for a resume. A request
 > that is unavailable or fails is reported as a warning/error and leaves the
-> status unchanged.
+> status unchanged. Both backends project that same acknowledgement, so a paused
+> display recovers on its own once the execution really resumes.
 
 ### Navigation
 
