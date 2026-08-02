@@ -88,10 +88,12 @@ def test_lane_is_dispatched_required_with_its_contract() -> None:
 
     assert payload["context"]["capability"] == "read_data"
     assert payload["context"]["required"] is True
-    # The investigating persona, like its research siblings. It was held out of
-    # that set while the lane named reads and stopped; the lane executes now
-    # (#1825), so asking for `researcher` asks for what it actually does.
-    assert payload["agent"] == "researcher"
+    # Not the `researcher` persona, though the lane investigates now (#1825).
+    # `agents/researcher.md` prescribes its own free-form OUTPUT section, which
+    # this lane's closed contract rejects -- handing it that persona would
+    # reintroduce, from the persona side, the contradiction
+    # `_advisory_output_section` exists to prevent.
+    assert payload["agent"] != "researcher"
     # The contract must arrive whole: a child validated field-for-field at
     # re-entry cannot satisfy a schema it was shown half of.
     assert "data_evidence_answer.v1" in payload["prompt"]
@@ -1455,3 +1457,85 @@ def test_the_rendered_contract_fits_inside_its_own_bound() -> None:
     assert len(rendered) < _INTERVIEW_DATA_CONTRACT_MAX_JSON_CHARS
     # And the prompt the child actually receives shows it whole.
     assert "[truncated]" not in _data_payload()["prompt"]
+
+
+# --------------------------------------------------------------------------- #
+# A required lane must always be able to answer
+# --------------------------------------------------------------------------- #
+#
+# This lane is `required: true` and a contract violation is popped from the
+# aggregation, so every shape a well-behaved child can honestly produce must
+# validate. A rejection here is not strictness — it is the fan-out stalling and
+# the user seeing no measurement at all.
+
+
+def _measured(**patch: Any) -> dict[str, Any]:
+    request: dict[str, Any] = {
+        "operation": "read",
+        "tool_name": "clickhouse",
+        "metric": "completed trial lessons",
+        "aggregation": "count",
+        "informs_decision": "which completion definition to use",
+        "observed_at": "2026-08-02T06:00:00Z",
+        "values": [{"value": 41}],
+    }
+    request.update(patch)
+    return {
+        "question_identity": "interview-question:0123456789abcdef",
+        "lane_id": "data_context",
+        "data_needed": True,
+        "read_requests": [request],
+    }
+
+
+def _accepts(answer: dict[str, Any]) -> bool:
+    schema = interview_data_evidence_answer_contract()["response_model_schema"]
+    return list(Draft202012Validator(schema).iter_errors(answer)) == []
+
+
+def test_a_read_that_came_back_empty_is_still_a_measurement() -> None:
+    """Zero rows is a result, and often the informative one.
+
+    The observation that moved this lane to executing was "zero cost-series
+    metrics exist". A `minItems: 1` on `values` would make that finding
+    unspellable — and leave the child nowhere to go, because no
+    `no_evidence_reason` means "I measured and it was empty", so it would have
+    to pick one that is false.
+    """
+    assert _accepts(_measured(values=[]))
+    # `observed_at` is what separates an empty result from an absent one.
+    assert "observed_at" in _measured(values=[])["read_requests"][0]
+
+
+def test_a_naive_timestamp_is_accepted_though_the_zone_is_asked_for() -> None:
+    """An ambiguous moment beats a withheld one.
+
+    Rejecting a zone-less timestamp does not produce a better one; it pops the
+    lane and the user gets nothing. The description asks for the zone, which is
+    where the ask belongs.
+    """
+    assert _accepts(_measured(observed_at="2026-08-02T06:00:00"))
+    assert _accepts(_measured(observed_at="2026-08-02T06:00:00Z"))
+    assert _accepts(_measured(observed_at="2026-08-02T15:00:00+09:00"))
+    assert _accepts(_measured(observed_at="2026-08-02T06:00:00.123456Z"))
+    # Still not a date, and still not prose: the field names a moment.
+    assert not _accepts(_measured(observed_at="2026-08-02"))
+    assert not _accepts(_measured(observed_at="around noon"))
+
+    schema = _read_request_schema()
+    assert "zone" in schema["properties"]["observed_at"]["description"]
+
+
+def test_every_bound_the_child_can_hit_is_stated_in_its_description() -> None:
+    """A limit the child cannot see is a stall, not a limit.
+
+    `values` is capped, and a child that exceeds the cap is rejected and popped.
+    It can only avoid that if the cap is written where it reads.
+    """
+    values_schema = _read_request_schema()["properties"]["values"]
+    cap = values_schema["maxItems"]
+
+    assert str(cap) in values_schema["description"]
+    assert "Empty means" in values_schema["description"]
+    # And the cap is real, so the description is not decorative.
+    assert not _accepts(_measured(values=[{"group": str(i), "value": i} for i in range(cap + 1)]))

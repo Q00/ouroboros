@@ -443,15 +443,25 @@ DATA_NO_EVIDENCE_REASONS: tuple[str, ...] = (
 #: whitespace back is what makes a sentence, and a query, spellable again.
 _DATA_IDENTIFIER_PATTERN = r"^[A-Za-z0-9_.:\-]{1,128}$"
 
-#: An ISO-8601 instant, constrained by pattern rather than by ``format``.
+#: An ISO-8601 timestamp, constrained by pattern rather than by ``format``.
 #: ``format`` is annotation-only under Draft 2020-12 unless a validator opts in,
 #: so a contract that relied on it would be stating a rule nothing enforced --
 #: the failure mode this file has hit twice already.
-_ISO_8601_INSTANT_PATTERN = r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$"
+#:
+#: The zone is optional, which is a concession made deliberately. A naive
+#: timestamp is ambiguous by up to a day, and asking for one is the right ask --
+#: the description does. But this lane is ``required: true`` and a rejected
+#: answer is popped from the aggregation, so rejecting a naive timestamp does
+#: not buy a better one: it stalls the fan-out and the user sees no measurement
+#: at all. An ambiguous moment beats a withheld one, and children emit naive
+#: timestamps often enough that the strict form would be a routine stall.
+_ISO_8601_TIMESTAMP_PATTERN = r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})?$"
 
 #: How many grouped numbers one measurement may carry. Four group_by keys can
 #: produce arbitrarily many groups, and "an aggregate" stops being one somewhere
-#: before the row count. The bound is where that line is drawn.
+#: before the row count. The bound is where that line is drawn -- and it is
+#: named in the field's description, because a limit the child cannot see is one
+#: it discovers by being rejected for it.
 _DATA_VALUES_MAX_ITEMS = 20
 
 
@@ -566,12 +576,14 @@ def _interview_data_read_request_schema() -> dict[str, Any]:
             },
             "observed_at": {
                 "type": "string",
-                "pattern": _ISO_8601_INSTANT_PATTERN,
-                "description": "ISO-8601 instant at which you ran this read.",
+                "pattern": _ISO_8601_TIMESTAMP_PATTERN,
+                "description": (
+                    "ISO-8601 timestamp at which you ran this read. Give the "
+                    "zone (Z or +HH:MM); without one the moment is ambiguous."
+                ),
             },
             "values": {
                 "type": "array",
-                "minItems": 1,
                 "maxItems": _DATA_VALUES_MAX_ITEMS,
                 "items": {
                     "type": "object",
@@ -597,7 +609,13 @@ def _interview_data_read_request_schema() -> dict[str, Any]:
                         },
                     },
                 },
-                "description": "What the aggregation returned.",
+                "description": (
+                    f"What the aggregation returned, at most "
+                    f"{_DATA_VALUES_MAX_ITEMS} entries. Empty means the read "
+                    "ran and came back with nothing — that is a measurement, "
+                    "and often the informative one. If more groups than that "
+                    "came back, narrow the read rather than truncating it."
+                ),
             },
         },
     }
@@ -646,6 +664,20 @@ def _interview_data_evidence_answer_contract() -> dict[str, Any]:
     ``NoMeasurementNeeded`` answer instead. ``group_by`` keys are identifiers
     and ``values`` is bounded, because grouped numbers without a bound are a row
     list wearing an aggregate's name.
+
+    ``values`` may be empty, and that is not a missing answer. A read that ran
+    and came back with nothing is a measurement, frequently the informative one
+    -- the observation that moved this decision was "zero cost-series metrics
+    exist", which is exactly this shape. A minimum of one would have made the
+    finding unspellable, and left the child nowhere to go: no
+    ``no_evidence_reason`` means "I measured and it was empty", so it would have
+    had to pick a reason that was false. ``observed_at`` is what separates an
+    empty result from an absent one; the read is attested either way.
+
+    Every bound here is named in the field's own description for the same
+    reason. This lane is ``required: true`` and a contract violation is popped
+    from the aggregation, so a limit the child cannot see is not a limit -- it
+    is a stall the user experiences as the lane having nothing to say.
 
     What the missing value field was protecting is not the schema, and never
     was. RFC #1754 opens on it: "an interview question whose honest answer is a

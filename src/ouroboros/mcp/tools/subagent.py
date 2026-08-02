@@ -1352,15 +1352,18 @@ def build_interview_question_advisory_subagents(
         seen.add(lane_id)
 
         persona = str(raw_lane.get("persona") or "").strip()
-        # ``read_data`` joins the researcher set (#1825). It was held out of it
-        # while the lane named what it would measure and then stopped -- asking
-        # for an investigating persona would have asked for the opposite of its
-        # contract. The lane executes now, so it goes and finds things out like
-        # the other two, and the persona that matches is the one they get.
+        # ``read_data`` stays out of the researcher set even though the lane
+        # investigates now (#1825). The reason changed: it is no longer that
+        # the lane only names reads, it is that ``agents/researcher.md`` carries
+        # its own ``## OUTPUT`` section -- "states what was unknown, shows what
+        # evidence was gathered, presents a hypothesis" -- which is the
+        # free-form shape this lane's closed contract rejects. Handing it a
+        # persona that prescribes a different output is the defect
+        # ``_advisory_output_section`` exists to prevent, reintroduced from the
+        # persona side. This lane's own prompt already tells it to go and
+        # measure, so the persona buys nothing and costs a contradiction.
         agent = persona or (
-            "researcher"
-            if capability in {"inspect_code", "web_research", "read_data"}
-            else "general"
+            "researcher" if capability in {"inspect_code", "web_research"} else "general"
         )
         purpose = str(raw_lane.get("purpose") or "Help answer the interview question.").strip()
         required = bool(raw_lane.get("required"))
