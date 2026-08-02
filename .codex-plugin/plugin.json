@@ -1,6 +1,6 @@
 {
   "name": "ouroboros",
-  "version": "0.50.5",
+  "version": "0.50.7",
   "description": "Turn vague ideas into validated specifications and verified software.",
   "author": {
     "name": "Q00",
@@ -25,7 +25,10 @@
     "longDescription": "Clarify requirements, create a validated specification, execute it, and verify the result.",
     "developerName": "Q00",
     "category": "Development",
-    "capabilities": ["Interactive", "Write"],
+    "capabilities": [
+      "Interactive",
+      "Write"
+    ],
     "websiteURL": "https://github.com/Q00/ouroboros",
     "defaultPrompt": [
       "Help me turn this product idea into a clear build plan.",
