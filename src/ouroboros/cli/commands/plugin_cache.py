@@ -74,7 +74,10 @@ def stage_url_cache_refresh(clone: Callable[[Path], str], clone_dest: Path) -> s
             os.rename(clone_dest, backup)
             backup_used = True
         os.rename(staging, clone_dest)
-    except Exception:
+    except BaseException:
+        # The live cache may already be parked at ``backup`` here. User
+        # interruption must take the same rollback path as an OSError rather
+        # than strand the public destination and staging directory.
         if backup_used and not clone_dest.exists() and backup.exists():
             try:
                 os.rename(backup, clone_dest)

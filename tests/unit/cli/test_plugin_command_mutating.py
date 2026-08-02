@@ -2679,6 +2679,40 @@ def test_interrupted_clone_drops_staging_and_keeps_cache(
     )
 
 
+def test_interrupted_promotion_restores_cache_and_drops_staging(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An interrupt after parking the live cache still rolls the swap back."""
+    from ouroboros.cli.commands.plugin_cache import stage_url_cache_refresh
+
+    cache_root = tmp_path / "cache"
+    dest = cache_root / "repo"
+    dest.mkdir(parents=True)
+    (dest / "good.txt").write_text("keep me")
+    real_rename = os.rename
+    calls = {"n": 0}
+
+    def interrupted_promote(src, dst):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise KeyboardInterrupt
+        return real_rename(src, dst)
+
+    monkeypatch.setattr("ouroboros.cli.commands.plugin_cache.os.rename", interrupted_promote)
+
+    def _clone(staging: Path) -> str:
+        staging.mkdir()
+        (staging / "new.txt").write_text("fresh clone")
+        return "cafef00d"
+
+    with pytest.raises(KeyboardInterrupt):
+        stage_url_cache_refresh(_clone, dest)
+
+    assert calls["n"] == 3, "the parked backup was not restored after interruption"
+    assert (dest / "good.txt").read_text() == "keep me"
+    assert sorted(entry.name for entry in cache_root.iterdir()) == ["repo"]
+
+
 def test_trust_rejects_undeclared_scope(runner: CliRunner, tmp_path: Path) -> None:
     """`ooo plugin trust --scope <typo>` must refuse to persist a grant
     for a scope the manifest does not declare. Otherwise the command
