@@ -151,6 +151,7 @@ def make_loop(
     event_store: EventStore,
     gen_result: GenerationResult | None = None,
     gen_error: OuroborosError | None = None,
+    config: EvolutionaryLoopConfig | None = None,
 ) -> EvolutionaryLoop:
     """Create an EvolutionaryLoop with mocked engines.
 
@@ -161,7 +162,8 @@ def make_loop(
     """
     loop = EvolutionaryLoop(
         event_store=event_store,
-        config=EvolutionaryLoopConfig(
+        config=config
+        or EvolutionaryLoopConfig(
             max_generations=30,
             convergence_threshold=0.95,
             stagnation_window=3,
@@ -338,7 +340,7 @@ class TestEvolveStepGen1:
 
         assert result.is_ok
         step = result.value
-        assert step.action == StepAction.CONTINUE
+        assert step.action == StepAction.CONVERGED
         assert step.generation_result.generation_number == 1
         assert step.lineage.lineage_id == "lin_test_001"
         assert step.lineage.current_generation == 1
@@ -736,7 +738,17 @@ class TestEvolveStepConvergence:
             phase=GenerationPhase.COMPLETED,
             success=True,
         )
-        loop = make_loop(store, gen_result=gen_result)
+        loop = make_loop(
+            store,
+            gen_result=gen_result,
+            config=EvolutionaryLoopConfig(
+                max_generations=30,
+                convergence_threshold=0.95,
+                stagnation_window=3,
+                min_generations=2,
+                outcome_gate_enabled=False,
+            ),
+        )
 
         result = await loop.evolve_step("lin_stag")
 
@@ -1395,7 +1407,7 @@ class TestEvolveStepHandler:
 
         assert result.is_ok
         assert "Generation 1" in result.value.text_content
-        assert result.value.meta["action"] == "continue"
+        assert result.value.meta["action"] == "converged"
         assert result.value.meta["qa_attempted"] is False
 
     @pytest.mark.asyncio

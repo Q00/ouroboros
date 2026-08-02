@@ -1,6 +1,6 @@
 """Tests for Wonder scope guard and degraded-mode convergence."""
 
-from ouroboros.core.lineage import EvaluationSummary, FeedbackMetadata, OntologyLineage
+from ouroboros.core.lineage import ACResult, EvaluationSummary, FeedbackMetadata, OntologyLineage
 from ouroboros.core.seed import (
     EvaluationPrinciple,
     ExitCondition,
@@ -137,6 +137,80 @@ class TestWonderDegradedModeConvergence:
         assert "Feedback Signals" in prompt
         assert "decomposition_depth_warning" in prompt
         assert "max_depth=3" in prompt
+
+
+class TestWonderEvolutionFocus:
+    """Wonder receives only the verifier-selected open node set."""
+
+    def test_prompt_omits_frozen_acceptance_nodes(self) -> None:
+        from unittest.mock import AsyncMock
+
+        engine = WonderEngine(llm_adapter=AsyncMock(), model="test")
+        seed = _make_seed().model_copy(
+            update={
+                "acceptance_criteria": (
+                    "FROZEN user profile remains unchanged",
+                    "ACTIVE token refresh works",
+                )
+            }
+        )
+        summary = EvaluationSummary(
+            final_approved=False,
+            highest_stage_passed=2,
+            score=0.5,
+            ac_results=(
+                ACResult(
+                    ac_index=0,
+                    ac_content="FROZEN user profile remains unchanged",
+                    passed=True,
+                ),
+                ACResult(
+                    ac_index=1,
+                    ac_content="ACTIVE token refresh works",
+                    passed=False,
+                    evidence="refresh test failed",
+                ),
+            ),
+        )
+
+        prompt = engine._build_prompt(
+            seed.ontology_schema,
+            summary,
+            execution_output="very large full execution output",
+            lineage=OntologyLineage(lineage_id="lineage-focus", goal=seed.goal),
+            seed=seed,
+            active_ac_indices=(1,),
+        )
+
+        assert "ACTIVE AC 2: ACTIVE token refresh works" in prompt
+        assert "FROZEN user profile remains unchanged" not in prompt
+        assert "AC 2: refresh test failed" in prompt
+        assert "very large full execution output" not in prompt
+
+    def test_response_drops_gaps_and_frozen_challenges(self) -> None:
+        import json
+        from unittest.mock import AsyncMock
+
+        engine = WonderEngine(llm_adapter=AsyncMock(), model="test")
+        seed = _make_seed().model_copy(update={"acceptance_criteria": ("frozen", "active")})
+        content = json.dumps(
+            {
+                "questions": [
+                    {"question": "reopen frozen", "ac_refs": [1]},
+                    {"question": "fix active", "ac_refs": [2]},
+                    {"question": "add more scope", "kind": "gap"},
+                ],
+                "ontology_tensions": ["global tension"],
+                "should_continue": True,
+                "reasoning": "focus",
+            }
+        )
+
+        output = engine._parse_response(content, seed, active_ac_indices=(1,))
+
+        assert output.questions == ("fix active",)
+        assert output.grounded_questions[0].ac_indices == (1,)
+        assert output.ontology_tensions == ()
 
 
 class TestWonderParseResponseFallback:

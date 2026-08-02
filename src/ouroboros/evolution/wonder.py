@@ -237,6 +237,7 @@ class WonderEngine:
         execution_output: str | None,
         lineage: OntologyLineage,
         seed: Seed | None = None,
+        active_ac_indices: tuple[int, ...] | None = None,
     ) -> Result[WonderOutput, ProviderError]:
         """Generate wonder output for the next generation.
 
@@ -251,7 +252,12 @@ class WonderEngine:
             Result containing WonderOutput or ProviderError.
         """
         prompt = self._build_prompt(
-            current_ontology, evaluation_summary, execution_output, lineage, seed
+            current_ontology,
+            evaluation_summary,
+            execution_output,
+            lineage,
+            seed,
+            active_ac_indices,
         )
 
         messages = [
@@ -275,9 +281,16 @@ class WonderEngine:
                 "WonderEngine LLM call failed, using degraded mode: %s",
                 result.error,
             )
-            return Result.ok(self._degraded_output(evaluation_summary, current_ontology, seed))
+            return Result.ok(
+                self._degraded_output(
+                    evaluation_summary,
+                    current_ontology,
+                    seed,
+                    active_ac_indices,
+                )
+            )
 
-        return Result.ok(self._parse_response(result.value.content, seed))
+        return Result.ok(self._parse_response(result.value.content, seed, active_ac_indices))
 
     def _system_prompt(self) -> str:
         return """You are the Wonder Engine of Ouroboros, an evolutionary development system.
@@ -320,6 +333,9 @@ SCOPE GUARD — this is critical:
 - An ontology is ALWAYS incomplete — that is normal, not a gap to fill.
 - "This concept is not modeled" is NOT a valid tension unless the seed requires it (explicitly or implicitly).
 - Prefer deepening existing fields over adding new ones.
+- When an "Evolution Focus" is present, ONLY its active AC nodes may be
+  questioned or changed. Do not reopen frozen ACs, emit unscoped gap questions,
+  or add a new AC. The working set must shrink toward zero.
 - If the current ontology covers the seed's acceptance criteria AND evaluation shows no regressions or failures, set should_continue to false.
 
 Focus on ONTOLOGICAL questions (what IS the thing?) not implementation questions (how to code it)."""
@@ -331,8 +347,11 @@ Focus on ONTOLOGICAL questions (what IS the thing?) not implementation questions
         execution_output: str | None,
         lineage: OntologyLineage,
         seed: Seed | None = None,
+        active_ac_indices: tuple[int, ...] | None = None,
     ) -> str:
         parts: list[str] = []
+        focused = active_ac_indices is not None
+        active = set(active_ac_indices or ())
 
         # Seed scope comes first — this is the boundary for all questions
         if seed:
@@ -343,9 +362,22 @@ Focus on ONTOLOGICAL questions (what IS the thing?) not implementation questions
                 for c in seed.constraints:
                     parts.append(f"  - {c}")
             if seed.acceptance_criteria:
-                parts.append(f"Acceptance Criteria: {len(seed.acceptance_criteria)}")
-                for i, ac in enumerate(ac_texts(seed.acceptance_criteria), 1):
-                    parts.append(f"  AC {i}: {ac}")
+                seed_acs = ac_texts(seed.acceptance_criteria)
+                if focused:
+                    parts.append(
+                        f"Evolution Focus: {len(active)} active / "
+                        f"{len(seed_acs) - len(active)} frozen AC nodes"
+                    )
+                    parts.append(
+                        "Frozen nodes are immutable in this generation and are omitted below."
+                    )
+                    for index in sorted(active):
+                        if 0 <= index < len(seed_acs):
+                            parts.append(f"  ACTIVE AC {index + 1}: {seed_acs[index]}")
+                else:
+                    parts.append(f"Acceptance Criteria: {len(seed_acs)}")
+                    for i, ac in enumerate(seed_acs, 1):
+                        parts.append(f"  AC {i}: {ac}")
             parts.append("")
 
         parts.append(f"## Current Ontology: {ontology.name}")
@@ -377,13 +409,16 @@ Focus on ONTOLOGICAL questions (what IS the thing?) not implementation questions
                         f"{feedback.message}{detail_suffix}"
                     )
             if eval_summary.ac_results:
-                failed_acs = [ac for ac in eval_summary.ac_results if not ac.passed]
+                visible_results = [
+                    ac for ac in eval_summary.ac_results if not focused or ac.ac_index in active
+                ]
+                failed_acs = [ac for ac in visible_results if not ac.passed]
                 if failed_acs:
-                    parts.append(f"\n  Failed ACs ({len(failed_acs)}):")
+                    parts.append(f"\n  Active failed ACs ({len(failed_acs)}):")
                     for ac in failed_acs:
                         parts.append(f"    - AC {ac.ac_index + 1}: {ac.ac_content}")
-                passed_count = sum(1 for ac in eval_summary.ac_results if ac.passed)
-                parts.append(f"  AC pass rate: {passed_count}/{len(eval_summary.ac_results)}")
+                passed_count = sum(1 for ac in visible_results if ac.passed)
+                parts.append(f"  Visible AC pass rate: {passed_count}/{len(visible_results)}")
 
         # Regression context
         if lineage and len(lineage.generations) >= 2:
@@ -399,7 +434,25 @@ Focus on ONTOLOGICAL questions (what IS the thing?) not implementation questions
                 parts.append("  WHY did these previously-passing ACs start failing?")
 
         if execution_output:
-            truncated = truncate_head_tail(execution_output)
+            # Focused generations prefer verifier evidence attached to the open
+            # nodes.  The full prior transcript would re-expand context with
+            # already-settled work and defeat working-set convergence.
+            evidence = []
+            if focused and eval_summary is not None:
+                evidence = [
+                    f"AC {result.ac_index + 1}: {result.evidence}"
+                    for result in eval_summary.ac_results
+                    if result.ac_index in active and result.evidence
+                ]
+            truncated = (
+                "\n".join(evidence)
+                if evidence
+                else truncate_head_tail(
+                    execution_output,
+                    head=200 if focused else 500,
+                    tail=800 if focused else 2000,
+                )
+            )
             parts.append(f"\n## Execution Output (truncated)\n{truncated}")
 
         if lineage.generations:
@@ -421,7 +474,12 @@ Focus on ONTOLOGICAL questions (what IS the thing?) not implementation questions
 
         return "\n".join(parts)
 
-    def _parse_response(self, content: str, seed: Seed | None = None) -> WonderOutput:
+    def _parse_response(
+        self,
+        content: str,
+        seed: Seed | None = None,
+        active_ac_indices: tuple[int, ...] | None = None,
+    ) -> WonderOutput:
         """Parse LLM response into WonderOutput."""
         total_acs = len(seed.acceptance_criteria) if seed else None
         try:
@@ -452,6 +510,33 @@ Focus on ONTOLOGICAL questions (what IS the thing?) not implementation questions
             reasoning = data.get("reasoning", "")
             if not isinstance(reasoning, str):
                 raise TypeError("Expected reasoning to be a string")
+            if active_ac_indices is not None:
+                active = set(active_ac_indices)
+                grounded = tuple(
+                    GroundedQuestion(
+                        question=question.question,
+                        kind="challenge",
+                        ac_indices=tuple(i for i in question.ac_indices if i in active),
+                    )
+                    for question in grounded
+                    if question.kind == "challenge"
+                    and any(i in active for i in question.ac_indices)
+                )
+                # An empty focused response cannot justify a full-graph retry.
+                # Keep one concrete open-node question so Reflect receives a
+                # bounded target rather than inventing a new gap.
+                if not grounded and active:
+                    target = min(active)
+                    text = f"What blocks ACTIVE AC {target + 1} from passing its verifier?"
+                    grounded = (
+                        GroundedQuestion(
+                            question=text,
+                            kind="challenge",
+                            ac_indices=(target,),
+                        ),
+                    )
+                ontology_tensions = []
+                should_continue = bool(grounded)
             return WonderOutput(
                 # ``questions`` stays a flat string tuple for events, lineage, and
                 # the repetitive-feedback convergence check (unchanged contract).
@@ -463,6 +548,22 @@ Focus on ONTOLOGICAL questions (what IS the thing?) not implementation questions
             )
         except (ValueError, KeyError, TypeError, ValidationError) as e:
             logger.warning("Failed to parse WonderEngine response: %s", e)
+            if active_ac_indices:
+                target = min(active_ac_indices)
+                fallback = f"What blocks ACTIVE AC {target + 1} from passing its verifier?"
+                return WonderOutput(
+                    questions=(fallback,),
+                    grounded_questions=(
+                        GroundedQuestion(
+                            question=fallback,
+                            kind="challenge",
+                            ac_indices=(target,),
+                        ),
+                    ),
+                    ontology_tensions=(),
+                    should_continue=True,
+                    reasoning=f"Parse error, using focused fallback: {e}",
+                )
             scope_hint = f" for goal: {seed.goal}" if seed else ""
             fallback = f"What assumptions remain untested{scope_hint}?"
             return WonderOutput(
@@ -511,8 +612,25 @@ Focus on ONTOLOGICAL questions (what IS the thing?) not implementation questions
         eval_summary: EvaluationSummary | None,
         ontology: OntologySchema,
         seed: Seed | None = None,
+        active_ac_indices: tuple[int, ...] | None = None,
     ) -> WonderOutput:
         """Generate fallback output when LLM fails (degraded mode)."""
+        if active_ac_indices:
+            target = min(active_ac_indices)
+            question = f"What blocks ACTIVE AC {target + 1} from passing its verifier?"
+            return WonderOutput(
+                questions=(question,),
+                grounded_questions=(
+                    GroundedQuestion(
+                        question=question,
+                        kind="challenge",
+                        ac_indices=(target,),
+                    ),
+                ),
+                ontology_tensions=(),
+                should_continue=True,
+                reasoning="Degraded mode: using the verifier-selected active node",
+            )
         questions: list[str] = []
         tensions: list[str] = []
         scope_hint = f" (within scope: {seed.goal})" if seed else ""

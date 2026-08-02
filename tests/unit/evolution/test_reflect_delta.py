@@ -97,11 +97,17 @@ def _compose(
     passed: dict[int, bool] | None = None,
     challenge: tuple[int, ...] = (),
     regressed: tuple[int, ...] = (),
+    active: tuple[int, ...] | None = None,
 ) -> tuple[tuple[str, ...], tuple[ACPatch, ...], tuple[int, ...]]:
     if passed is None:
         passed = {0: True, 1: True, 2: True}
     return ReflectEngine._compose_acs(
-        data, parent, _summary(passed), _wonder(challenge), _regression(regressed)
+        data,
+        parent,
+        _summary(passed),
+        _wonder(challenge),
+        _regression(regressed),
+        active,
     )
 
 
@@ -172,6 +178,35 @@ class TestComposition:
         # only the 3 implicit keeps remain
         assert len(refined) == 3
         assert all(p.op == "keep" for p in patches)
+
+    def test_focused_evolution_drops_new_nodes(self) -> None:
+        refined, patches, _ = _compose(
+            {
+                "ac_patches": [
+                    {"op": "revise", "index": 1, "content": "target fixed"},
+                    {"op": "add", "content": "scope expansion"},
+                ]
+            },
+            passed={0: True, 1: False, 2: False},
+            active=(1,),
+        )
+
+        assert refined == ("AC zero", "target fixed", "AC two")
+        assert all(patch.op != "add" for patch in patches)
+
+    def test_focused_evolution_forces_non_target_failed_node_to_keep(self) -> None:
+        refined, _, _ = _compose(
+            {
+                "ac_patches": [
+                    {"op": "revise", "index": 1, "content": "target fixed"},
+                    {"op": "revise", "index": 2, "content": "not targeted"},
+                ]
+            },
+            passed={0: True, 1: False, 2: False},
+            active=(1,),
+        )
+
+        assert refined == ("AC zero", "target fixed", "AC two")
 
 
 class TestSatisficingBackstop:

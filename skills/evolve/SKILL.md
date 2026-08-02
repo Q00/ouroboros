@@ -11,10 +11,11 @@ refines the ontology and acceptance criteria across generations until convergenc
 
 ## Flow
 ```
-Gen 1: Interview → Seed(O₁) → Execute → Evaluate
-Gen 2: Wonder → Reflect → Seed(O₂) → Execute → Evaluate
-Gen 3: Wonder → Reflect → Seed(O₃) → Execute → Evaluate
-...until ontology converges (similarity ≥ 0.95) or max 30 generations
+Gen 1: Seed(O₁) → Execute(all nodes) → Judge → Gate
+Gen 2: Wonder(failed nodes) → Reflect(active nodes only) → Execute(active) → Gate(all)
+Gen 3: Repeat with a smaller active set; frozen PASS nodes are reverified, not regenerated
+...until the outcome gate passes, the working set stagnates, ontology converges,
+or max 30 generations is reached
 ```
 
 ## Usage
@@ -82,7 +83,9 @@ documented fallback / Path B instead of retrying the failing call.
    - `execute`: `true` (default) for full Execute→Evaluate pipeline,
      `false` for fast ontology-only evolution (no seed execution)
 6. Check the `action` in the response:
-   - `continue` → Call `ouroboros_evolve_step` again with just `lineage_id`
+   - `continue` → Inspect `active_ac_indices`, then call `ouroboros_evolve_step`
+     again with just `lineage_id`. Only active failed/reopened nodes evolve;
+     frozen PASS nodes stay immutable and are boundary-reverified.
    - `converged` → Evolution complete! Display final ontology
    - `stagnated` → Ontology unchanged for 3+ gens. Consider `ouroboros_lateral_think`
    - `exhausted` → Max 30 generations reached. Display best result
@@ -122,7 +125,18 @@ Then add to your runtime's MCP configuration (e.g., `~/.claude/mcp.json` for Cla
 - **Reflect**: "How should the ontology evolve?" - proposes specific
   mutations to fields, acceptance criteria, and constraints
 - **Convergence**: Loop stops when ontology similarity ≥ 0.95 between
-  consecutive generations, or after 30 generations max
+  consecutive generations, when the independently verified outcome passes,
+  when judge scores plateau for 3 generations, or after 30 generations max
+- **Focused evolution**: Gen 1 establishes the baseline. Gen 2+ derives an
+  active node set from failed/regressed verifier results. Only those nodes are
+  open to Wonder, Reflect, and execution; PASS nodes are frozen. The active
+  output should shrink toward zero rather than feeding the full graph back.
+- **Judge/Gate split**: Evaluation records score and evidence; deterministic
+  convergence logic decides accept/continue/stagnate. A passing Gen 1 may end
+  immediately—minimum-generation churn is not required after the gate passes.
+- **No-drift stop**: If rejected evaluation scores move by less than 0.01 for
+  the 3-generation window, stop as `stagnated` and hand off to `ooo unstuck`
+  instead of spending the 30-generation cap.
 - **Rewind**: Each generation is a snapshot. You can rewind to any
   generation and branch evolution from there
 - **evolve_step**: Runs exactly ONE generation per call. Designed for

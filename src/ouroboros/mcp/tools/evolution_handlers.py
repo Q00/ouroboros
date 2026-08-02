@@ -536,6 +536,20 @@ class EvolveStepHandler(BridgeAwareMixin):
             f"**Lineage**: {step.lineage.lineage_id} ({step.lineage.current_generation} generations)",
             f"**Next generation**: {step.next_generation}",
         ]
+        if gen.frozen_ac_indices:
+            active_labels = ", ".join(str(index + 1) for index in gen.active_ac_indices) or "none"
+            frozen_labels = ", ".join(str(index + 1) for index in gen.frozen_ac_indices)
+            text_lines.extend(
+                [
+                    f"**Active evolve nodes**: {active_labels}",
+                    f"**Frozen nodes**: {frozen_labels}",
+                    (
+                        "**Working set**: "
+                        f"{len(gen.active_ac_indices)} active / "
+                        f"{len(gen.frozen_ac_indices)} frozen"
+                    ),
+                ]
+            )
         if workspace is not None:
             text_lines.extend(
                 [
@@ -547,7 +561,11 @@ class EvolveStepHandler(BridgeAwareMixin):
         if gen.execution_output:
             text_lines.append("")
             text_lines.append("### Execution output")
-            output_preview = truncate_head_tail(gen.execution_output)
+            output_preview = truncate_head_tail(
+                gen.execution_output,
+                head=150 if gen.frozen_ac_indices else 500,
+                tail=650 if gen.frozen_ac_indices else 2000,
+            )
             text_lines.append(output_preview)
 
         if gen.evaluation_summary:
@@ -562,9 +580,22 @@ class EvolveStepHandler(BridgeAwareMixin):
             if es.ac_results:
                 text_lines.append("")
                 text_lines.append("#### Per-AC Results")
-                for ac in es.ac_results:
+                active = set(gen.active_ac_indices)
+                visible_results = [
+                    ac
+                    for ac in es.ac_results
+                    if not gen.frozen_ac_indices or ac.ac_index in active or not ac.passed
+                ]
+                for ac in visible_results:
                     status = "PASS" if ac.passed else "FAIL"
                     text_lines.append(f"- AC {ac.ac_index + 1}: [{status}] {ac.ac_content[:80]}")
+                frozen_passes = sum(
+                    1 for ac in es.ac_results if ac.ac_index in gen.frozen_ac_indices and ac.passed
+                )
+                if frozen_passes:
+                    text_lines.append(
+                        f"- {frozen_passes} frozen node(s): [PASS] boundary reverified"
+                    )
 
         checkpoint_commits, checkpoint_attempted_ac_ids = _checkpoint_passed_generation_acs(
             arguments,
@@ -653,6 +684,10 @@ class EvolveStepHandler(BridgeAwareMixin):
             "executed": execute,
             "qa_attempted": qa_attempted,
             "has_execution_output": gen.execution_output is not None,
+            "active_ac_indices": list(gen.active_ac_indices),
+            "frozen_ac_indices": list(gen.frozen_ac_indices),
+            "active_node_count": len(gen.active_ac_indices),
+            "frozen_node_count": len(gen.frozen_ac_indices),
             "checkpoint_commits": checkpoint_commits,
             "checkpoint_attempted_ac_ids": checkpoint_attempted_ac_ids,
         }

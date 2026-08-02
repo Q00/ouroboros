@@ -102,6 +102,8 @@ class LineageProjector:
                     created_at=event.timestamp,
                     seed_json=data.get("seed_json"),
                     execution_output=data.get("execution_output"),
+                    active_ac_indices=tuple(data.get("active_ac_indices", [])),
+                    frozen_ac_indices=tuple(data.get("frozen_ac_indices", [])),
                 )
                 generations[gen_num] = record
 

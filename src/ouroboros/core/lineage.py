@@ -355,6 +355,8 @@ class GenerationRecord(BaseModel, frozen=True):
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     seed_json: str | None = None
     execution_output: str | None = None
+    active_ac_indices: tuple[int, ...] = Field(default_factory=tuple)
+    frozen_ac_indices: tuple[int, ...] = Field(default_factory=tuple)
     seed_quality_canary_feedback: tuple[FeedbackMetadata, ...] = Field(
         default_factory=tuple,
         description=(

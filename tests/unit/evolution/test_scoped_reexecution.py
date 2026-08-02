@@ -162,6 +162,9 @@ class TestConfig:
     def test_scoped_reexecution_can_disable(self) -> None:
         assert EvolutionaryLoopConfig(scoped_reexecution=False).scoped_reexecution is False
 
+    def test_focused_evolution_defaults_true(self) -> None:
+        assert EvolutionaryLoopConfig().focused_evolution is True
+
 
 def _make_loop_for_gen2(
     store, executor: _CaptureExecutor, config: EvolutionaryLoopConfig, settled: tuple[int, ...]
@@ -247,7 +250,12 @@ class TestScopedForwardingIntegration:
             generations=(_gen(1, seed_v1, _eval({0: True, 1: True})),),
         )
         executor = _CaptureExecutor()
-        loop = _make_loop_for_gen2(store, executor, EvolutionaryLoopConfig(), settled=(0, 1))
+        loop = _make_loop_for_gen2(
+            store,
+            executor,
+            EvolutionaryLoopConfig(focused_evolution=False),
+            settled=(0, 1),
+        )
 
         result = await loop._run_generation(
             lineage=lineage, generation_number=2, current_seed=seed_v1
@@ -276,6 +284,30 @@ class TestScopedForwardingIntegration:
         assert result.is_ok
         assert executor.called is True
         assert executor.captured is None
+
+    async def test_focus_is_derived_from_gate_not_reflect_claim(self) -> None:
+        """Prior PASS nodes freeze even when Reflect reports no settled indices."""
+        store = await _store()
+        seed_v1 = _seed()
+        lineage = OntologyLineage(
+            lineage_id="lin_focus",
+            goal=seed_v1.goal,
+            generations=(_gen(1, seed_v1, _eval({0: True, 1: False})),),
+        )
+        executor = _CaptureExecutor()
+        loop = _make_loop_for_gen2(store, executor, EvolutionaryLoopConfig(), settled=())
+
+        result = await loop._run_generation(
+            lineage=lineage,
+            generation_number=2,
+            current_seed=seed_v1,
+        )
+
+        assert result.is_ok
+        assert result.value.active_ac_indices == (1,)
+        assert result.value.frozen_ac_indices == (0,)
+        assert executor.captured is not None
+        assert set(executor.captured) == {0}
 
     async def test_empty_settled_not_forwarded_integration(self) -> None:
         store = await _store()

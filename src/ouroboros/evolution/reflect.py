@@ -213,6 +213,8 @@ def _apply_satisficing_backstop(
     patches: list[ACPatch],
     protected: set[int],
     passed_indices: set[int],
+    *,
+    allow_additions: bool = True,
 ) -> tuple[tuple[str, ...], tuple[ACPatch, ...], tuple[int, ...]]:
     """Deterministically enforce the satisficing invariant.
 
@@ -230,6 +232,12 @@ def _apply_satisficing_backstop(
 
     for patch in patches:
         if patch.op == "add":
+            if not allow_additions:
+                logger.info(
+                    "reflect.patch.dropped",
+                    extra={"reason": "focused_evolution_disallows_new_node"},
+                )
+                continue
             if not patch.content:
                 logger.warning("reflect.patch.dropped", extra={"reason": "add_without_content"})
                 continue
@@ -414,6 +422,7 @@ class ReflectEngine:
         lineage: OntologyLineage,
         regression_report: RegressionReport | None = None,
         conductor_directive: ConductorDirective | None = None,
+        active_ac_indices: tuple[int, ...] | None = None,
     ) -> Result[ReflectOutput, ProviderError]:
         """Reflect on execution results and propose evolution.
 
@@ -441,6 +450,7 @@ class ReflectEngine:
             lineage,
             regression_report,
             conductor_directive,
+            active_ac_indices,
         )
 
         messages = [
@@ -478,6 +488,7 @@ class ReflectEngine:
             evaluation_summary,
             wonder_output,
             regression_report,
+            active_ac_indices,
         )
         if parsed is None:
             return Result.err(
@@ -534,6 +545,9 @@ Guidelines:
 - If evaluation score < 0.8 or not approved, propose more aggressive mutations to address failures
 - Each mutation must have a clear reason tied to evaluation findings or wonder questions
 - Patches should address the wonder questions and ontology tensions
+- When an "Evolution Focus" is present, only ACTIVE AC indices may be revised.
+  Keep every frozen node verbatim, do not add ACs, and do not rewrite the goal
+  or constraints. The next generation's working set must not expand.
 - Do NOT change things that are working well -- only evolve what needs evolution
 - action must be exactly one of: "add", "modify", "remove"
 - An empty ontology_mutations list is ONLY acceptable when there are no Wonder questions
@@ -548,11 +562,24 @@ Guidelines:
         lineage: OntologyLineage,
         regression_report: RegressionReport,
         conductor_directive: ConductorDirective | None = None,
+        active_ac_indices: tuple[int, ...] | None = None,
     ) -> str:
         parts = ["## Current Seed"]
         parts.append(f"Goal: {seed.goal}")
         parts.append(f"Constraints: {list(seed.constraints)}")
-        parts.append(f"Acceptance Criteria: {list(ac_texts(seed.acceptance_criteria))}")
+        seed_acs = ac_texts(seed.acceptance_criteria)
+        focused = active_ac_indices is not None
+        active = set(active_ac_indices or ())
+        if focused:
+            parts.append(
+                f"Evolution Focus: {len(active)} active / {len(seed_acs) - len(active)} frozen"
+            )
+            parts.append("Only these nodes may change; all omitted nodes are immutable:")
+            for index in sorted(active):
+                if 0 <= index < len(seed_acs):
+                    parts.append(f"  ACTIVE AC {index + 1}: {seed_acs[index]}")
+        else:
+            parts.append(f"Acceptance Criteria: {list(seed_acs)}")
 
         if conductor_directive is not None:
             parts.append("\n## Active Conductor Successor Directive")
@@ -601,10 +628,13 @@ Guidelines:
                 )
         if eval_summary.ac_results:
             parts.append("\n  Per-AC Breakdown:")
-            for ac in eval_summary.ac_results:
+            visible_results = [
+                ac for ac in eval_summary.ac_results if not focused or ac.ac_index in active
+            ]
+            for ac in visible_results:
                 status = "PASS" if ac.passed else "FAIL"
                 parts.append(f"    AC {ac.ac_index + 1} [{status}]: {ac.ac_content}")
-            failed_acs = [ac for ac in eval_summary.ac_results if not ac.passed]
+            failed_acs = [ac for ac in visible_results if not ac.passed]
             if failed_acs:
                 parts.append(
                     f"\n  PRIORITY: Fix {len(failed_acs)} failing AC(s) while preserving passing ones."
@@ -641,7 +671,22 @@ Guidelines:
             for t in wonder.ontology_tensions:
                 parts.append(f"  - {t}")
 
-        truncated = truncate_head_tail(execution_output)
+        evidence = []
+        if focused:
+            evidence = [
+                f"AC {result.ac_index + 1}: {result.evidence}"
+                for result in eval_summary.ac_results
+                if result.ac_index in active and result.evidence
+            ]
+        truncated = (
+            "\n".join(evidence)
+            if evidence
+            else truncate_head_tail(
+                execution_output,
+                head=200 if focused else 500,
+                tail=800 if focused else 2000,
+            )
+        )
         parts.append(f"\n## Execution Output (truncated)\n{truncated}")
 
         if len(lineage.generations) > 1:
@@ -691,6 +736,7 @@ Guidelines:
         evaluation_summary: EvaluationSummary,
         wonder_output: WonderOutput,
         regression_report: RegressionReport,
+        active_ac_indices: tuple[int, ...] | None = None,
     ) -> ReflectOutput | None:
         """Parse LLM response into ReflectOutput.
 
@@ -718,6 +764,7 @@ Guidelines:
                 evaluation_summary,
                 wonder_output,
                 regression_report,
+                active_ac_indices,
             )
             refined_goal = data.get("refined_goal", current_seed.goal)
             if not isinstance(refined_goal, str):
@@ -735,6 +782,11 @@ Guidelines:
                 _clean_required_text(constraint, "refined constraint")
                 for constraint in raw_refined_constraints
             )
+            if active_ac_indices is not None:
+                # Node-focused evolution cannot drift global direction while
+                # repairing a bounded AC working set.
+                refined_goal = current_seed.goal
+                refined_constraints = current_seed.constraints
             reasoning = data.get("reasoning", "")
             if not isinstance(reasoning, str):
                 raise TypeError("Expected reasoning to be a string")
@@ -765,6 +817,7 @@ Guidelines:
         evaluation_summary: EvaluationSummary,
         wonder_output: WonderOutput,
         regression_report: RegressionReport,
+        active_ac_indices: tuple[int, ...] | None = None,
     ) -> tuple[tuple[str, ...], tuple[ACPatch, ...], tuple[int, ...]]:
         """Compose the next AC list from LLM patches under the satisficing backstop."""
         passed_indices = {ac.ac_index for ac in evaluation_summary.ac_results if ac.passed}
@@ -781,11 +834,21 @@ Guidelines:
         # Invariant: a regressed AC is never settled, even if kept — subtract it
         # from the settleable set before the backstop decides settling.
         settleable = passed_indices - regressed
+        if active_ac_indices is not None:
+            active = {index for index in active_ac_indices if 0 <= index < len(parent_acs)}
+            protected.update(set(range(len(parent_acs))) - active)
+            settleable -= challenged
 
         if "ac_patches" in data:
             raw_patches = data["ac_patches"]
             patches = _parse_ac_patches(raw_patches)
-            return _apply_satisficing_backstop(parent_acs, patches, protected, settleable)
+            return _apply_satisficing_backstop(
+                parent_acs,
+                patches,
+                protected,
+                settleable,
+                allow_additions=active_ac_indices is None,
+            )
 
         # Legacy full-list shape: derive patches by positional diff.
         raw_refined_acs = data.get("refined_acs", list(parent_acs))
@@ -800,8 +863,16 @@ Guidelines:
         if legacy_patches is None:
             # Shorter list → full-rewrite semantics: use the LLM list as-is with
             # no settled indices and no patches (do not guess at deletions).
-            return llm_refined_acs, (), ()
-        return _apply_satisficing_backstop(parent_acs, legacy_patches, protected, settleable)
+            if active_ac_indices is None:
+                return llm_refined_acs, (), ()
+            legacy_patches = [ACPatch(op="keep", index=index) for index in range(len(parent_acs))]
+        return _apply_satisficing_backstop(
+            parent_acs,
+            legacy_patches,
+            protected,
+            settleable,
+            allow_additions=active_ac_indices is None,
+        )
 
 
 def _adapter_rebuild_kwargs(adapter: LLMAdapter) -> dict[str, object]:

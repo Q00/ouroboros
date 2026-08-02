@@ -51,6 +51,7 @@ from ouroboros.events.lineage import (
     lineage_stagnated,
     lineage_wonder_degraded,
 )
+from ouroboros.evolution import focus, loop_support
 from ouroboros.evolution.convergence import ConvergenceCriteria, ConvergenceSignal
 from ouroboros.evolution.directive_mapping import (
     is_terminal_directive,
@@ -75,40 +76,8 @@ from ouroboros.orchestrator.agent_process import AgentProcess, AgentProcessHandl
 from ouroboros.persistence.event_store import EventStore
 
 logger = logging.getLogger(__name__)
-
-
-def _default_runtime_controls() -> RuntimeControlsConfig:
-    """Load runtime controls through the config/env compatibility layer."""
-    from ouroboros.config.loader import get_runtime_controls_config
-
-    return get_runtime_controls_config()
-
-
-def _conductor_preservation_error(
-    approved: Seed,
-    successor: Seed,
-    directive: ConductorDirective | None,
-) -> str | None:
-    """Return a fail-closed invariant error for an unauthorized direction change."""
-    if directive is None:
-        return None
-    changed: list[str] = []
-    if directive.preserve_goal and approved.goal != successor.goal:
-        changed.append("goal")
-    if (
-        directive.preserve_acceptance_criteria
-        and approved.acceptance_criteria != successor.acceptance_criteria
-    ):
-        changed.append("acceptance_criteria")
-    if directive.preserve_constraints and approved.constraints != successor.constraints:
-        changed.append("constraints")
-    if directive.preserve_non_goals and approved.to_dict().get(
-        "non_goals"
-    ) != successor.to_dict().get("non_goals"):
-        changed.append("non_goals")
-    if not changed:
-        return None
-    return "Conductor successor changed preserved direction fields: " + ", ".join(changed)
+_default_runtime_controls = loop_support.default_runtime_controls
+_conductor_preservation_error = loop_support.conductor_preservation_error
 
 
 @dataclass
@@ -124,7 +93,10 @@ class EvolutionaryLoopConfig:
     enable_oscillation_detection: bool = True
     eval_gate_enabled: bool = True
     eval_min_score: float = 0.7
+    outcome_gate_enabled: bool = True
+    evaluation_plateau_epsilon: float = 0.01
     scoped_reexecution: bool = True
+    focused_evolution: bool = True
 
     def __post_init__(self) -> None:
         """Map legacy generation_timeout_seconds onto no-progress detection."""
@@ -149,6 +121,8 @@ class GenerationResult:
     reflect_output: ReflectOutput | None = None
     ontology_delta: OntologyDelta | None = None
     validation_output: str | None = None
+    active_ac_indices: tuple[int, ...] = ()
+    frozen_ac_indices: tuple[int, ...] = ()
     phase: GenerationPhase = GenerationPhase.COMPLETED
     success: bool = True
 
@@ -272,6 +246,8 @@ class EvolutionaryLoop:
             enable_oscillation_detection=self.config.enable_oscillation_detection,
             eval_gate_enabled=self.config.eval_gate_enabled,
             eval_min_score=self.config.eval_min_score,
+            outcome_gate_enabled=self.config.outcome_gate_enabled,
+            evaluation_plateau_epsilon=self.config.evaluation_plateau_epsilon,
         )
 
     def _install_sigint_handler(self) -> None:
@@ -574,6 +550,8 @@ class EvolutionaryLoop:
                 wonder_questions=result.wonder_output.questions if result.wonder_output else (),
                 phase=result.phase,
                 execution_output=result.execution_output,
+                active_ac_indices=result.active_ac_indices,
+                frozen_ac_indices=result.frozen_ac_indices,
             )
             lineage = lineage.with_generation(record)
 
@@ -596,6 +574,8 @@ class EvolutionaryLoop:
                         for feedback in record.seed_quality_canary_feedback
                     ]
                     or None,
+                    active_ac_indices=list(result.active_ac_indices),
+                    frozen_ac_indices=list(result.frozen_ac_indices),
                 )
             )
 
@@ -1072,6 +1052,8 @@ class EvolutionaryLoop:
                 phase=result.phase,
                 seed_json=json.dumps(result.seed.to_dict()),
                 execution_output=result.execution_output,
+                active_ac_indices=result.active_ac_indices,
+                frozen_ac_indices=result.frozen_ac_indices,
             )
             nonlocal_lineage = nonlocal_lineage.with_generation(record)
 
@@ -1093,6 +1075,8 @@ class EvolutionaryLoop:
                         for feedback in record.seed_quality_canary_feedback
                     ]
                     or None,
+                    active_ac_indices=list(result.active_ac_indices),
+                    frozen_ac_indices=list(result.frozen_ac_indices),
                 )
             )
 
@@ -1266,7 +1250,7 @@ class EvolutionaryLoop:
         conductor_directive: ConductorDirective | None = None,
     ) -> Result[GenerationResult, OuroborosError]:
         """Run one generation under progress-aware liveness controls."""
-        execution_id = self._generation_execution_id(lineage.lineage_id, generation_number)
+        execution_id = loop_support.generation_execution_id(lineage.lineage_id, generation_number)
         watchdog = GenerationProgressWatchdog(
             event_store=self.event_store,
             lineage_id=lineage.lineage_id,
@@ -1291,11 +1275,6 @@ class EvolutionaryLoop:
         except GenerationWatchdogTimeout as exc:
             return Result.err(exc)
 
-    @staticmethod
-    def _generation_execution_id(lineage_id: str, generation_number: int) -> str:
-        """Build the deterministic execution ID for an evolve generation."""
-        return f"evolve:{lineage_id}:generation:{generation_number}"
-
     async def _call_executor(
         self,
         seed: Seed,
@@ -1305,31 +1284,18 @@ class EvolutionaryLoop:
         externally_satisfied_acs: dict[int, dict[str, Any]] | None = None,
     ) -> Any:
         """Call the configured executor with optional execution_id support."""
-        kwargs: dict[str, Any] = {"parallel": parallel}
-        if execution_id is not None and self._callable_accepts_keyword(
+        return await focus.call_executor(
             self.executor,
-            "execution_id",
-        ):
-            kwargs["execution_id"] = execution_id
-        if externally_satisfied_acs and self._callable_accepts_keyword(
-            self.executor,
-            "externally_satisfied_acs",
-        ):
-            kwargs["externally_satisfied_acs"] = externally_satisfied_acs
-        return await self.executor(seed, **kwargs)
+            seed,
+            parallel=parallel,
+            execution_id=execution_id,
+            externally_satisfied_acs=externally_satisfied_acs,
+        )
 
     @staticmethod
     def _callable_accepts_keyword(callable_obj: Any, keyword: str) -> bool:
         """Return True when *callable_obj* accepts *keyword*."""
-        try:
-            signature = inspect.signature(callable_obj)
-        except (TypeError, ValueError):
-            return False
-
-        for parameter in signature.parameters.values():
-            if parameter.kind == inspect.Parameter.VAR_KEYWORD:
-                return True
-        return keyword in signature.parameters
+        return focus.callable_accepts_keyword(callable_obj, keyword, inspect.signature)
 
     async def _check_shutdown(
         self,
@@ -1476,6 +1442,8 @@ class EvolutionaryLoop:
         restored_execution_output: str | None = None
         restored_evaluation_summary: EvaluationSummary | None = None
         restored_validation_output: str | None = None
+        generation_parent_seed = current_seed
+        generation_focus = focus.initial_evolution_focus(current_seed)
 
         # Restore partial state from interrupted generation if resuming
         if resume_after_phase and lineage.generations:
@@ -1526,16 +1494,19 @@ class EvolutionaryLoop:
 
         # Gen 2+: Wonder and Reflect phases
         if generation_number > 1 and lineage.generations:
-            # Use last COMPLETED generation for context (evaluation, execution output).
-            # The tail may be an interrupted/failed record which lacks these fields.
             prev_gen = next(
                 (g for g in reversed(lineage.generations) if g.phase == GenerationPhase.COMPLETED),
                 lineage.generations[-1],  # fallback if no completed gen exists
             )
 
-            # Compute regressions once and reuse for both Reflect's prompt and its
-            # deterministic satisficing backstop (a regressed AC is never settled).
             regression_report: RegressionReport = RegressionDetector().detect(lineage)
+            generation_focus = focus.select_evolution_focus(
+                generation_parent_seed,
+                current_seed,
+                prev_gen.evaluation_summary,
+                regression_report=regression_report,
+                enabled=self.config.focused_evolution,
+            )
 
             # Emit generation started
             await self.event_store.append(
@@ -1548,13 +1519,19 @@ class EvolutionaryLoop:
 
             # Wonder phase (skip if already completed before interruption)
             if self.wonder_engine and not _should_skip("wondering"):
-                wonder_result = await self.wonder_engine.wonder(
-                    current_ontology=current_seed.ontology_schema,
-                    evaluation_summary=prev_gen.evaluation_summary,
-                    execution_output=prev_gen.execution_output,
-                    lineage=lineage,
-                    seed=current_seed,
+                wonder_kwargs: dict[str, Any] = {
+                    "current_ontology": current_seed.ontology_schema,
+                    "evaluation_summary": prev_gen.evaluation_summary,
+                    "execution_output": prev_gen.execution_output,
+                    "lineage": lineage,
+                    "seed": current_seed,
+                }
+                focus.add_active_focus(
+                    wonder_kwargs,
+                    self.wonder_engine.wonder,
+                    generation_focus,
                 )
+                wonder_result = await self.wonder_engine.wonder(**wonder_kwargs)
                 if wonder_result.is_ok:
                     wonder_output = wonder_result.value
                     if not wonder_output.should_continue and not wonder_output.questions:
@@ -1568,6 +1545,8 @@ class EvolutionaryLoop:
                                 generation_number=generation_number,
                                 seed=current_seed,
                                 wonder_output=wonder_output,
+                                active_ac_indices=generation_focus.active_ac_indices,
+                                frozen_ac_indices=generation_focus.frozen_ac_indices,
                                 phase=GenerationPhase.COMPLETED,
                                 success=True,
                             )
@@ -1625,15 +1604,21 @@ class EvolutionaryLoop:
             ):
                 max_reflect_attempts = 2
                 for attempt in range(max_reflect_attempts):
-                    reflect_result = await self.reflect_engine.reflect(
-                        current_seed=current_seed,
-                        execution_output=prev_gen.execution_output or "",
-                        evaluation_summary=prev_gen.evaluation_summary,
-                        wonder_output=wonder_output,
-                        lineage=lineage,
-                        regression_report=regression_report,
-                        conductor_directive=conductor_directive,
+                    reflect_kwargs: dict[str, Any] = {
+                        "current_seed": current_seed,
+                        "execution_output": prev_gen.execution_output or "",
+                        "evaluation_summary": prev_gen.evaluation_summary,
+                        "wonder_output": wonder_output,
+                        "lineage": lineage,
+                        "regression_report": regression_report,
+                        "conductor_directive": conductor_directive,
+                    }
+                    focus.add_active_focus(
+                        reflect_kwargs,
+                        self.reflect_engine.reflect,
+                        generation_focus,
                     )
+                    reflect_result = await self.reflect_engine.reflect(**reflect_kwargs)
 
                     if reflect_result.is_ok:
                         break
@@ -1779,6 +1764,17 @@ class EvolutionaryLoop:
                 )
             )
 
+        if generation_number > 1 and lineage.generations:
+            generation_focus = focus.select_evolution_focus(
+                generation_parent_seed,
+                current_seed,
+                prev_gen.evaluation_summary,
+                wonder=wonder_output,
+                regression_report=regression_report,
+                enabled=self.config.focused_evolution,
+            )
+            generation_focus.log_selection(generation_number)
+
         # Check for graceful shutdown before executing.
         # Derive the actual last completed phase from what ran:
         # - reflect_output set → seeding completed
@@ -1820,25 +1816,15 @@ class EvolutionaryLoop:
                 extra={"generation": generation_number},
             )
         elif execute and self.executor:
-            # AC-scoped re-execution: skip ACs that satisficed last generation
-            # (passed AND not challenged AND not regressed). Only when Reflect ran
-            # fresh this invocation — resume paths pass nothing (conservative full
-            # run). Verification still runs over ALL ACs downstream.
-            externally_satisfied_acs: dict[int, dict[str, Any]] | None = None
-            if (
-                self.config.scoped_reexecution
-                and reflect_output is not None
-                and reflect_output.settled_ac_indices
-                and not _should_skip("reflecting")
-            ):
-                externally_satisfied_acs = {
-                    i: {
-                        "reason": (
-                            "satisficed: passed in previous generation; not challenged or regressed"
-                        )
-                    }
-                    for i in reflect_output.settled_ac_indices
-                }
+            externally_satisfied_acs = focus.select_externally_satisfied_acs(
+                scoped_reexecution=self.config.scoped_reexecution,
+                focused_evolution=self.config.focused_evolution,
+                focus=generation_focus,
+                settled_ac_indices=(
+                    reflect_output.settled_ac_indices if reflect_output is not None else ()
+                ),
+                reflect_ran_fresh=not _should_skip("reflecting"),
+            )
             try:
                 exec_result = await self._call_executor(
                     current_seed,
@@ -2020,6 +2006,8 @@ class EvolutionaryLoop:
                 reflect_output=reflect_output,
                 ontology_delta=ontology_delta,
                 validation_output=validation_output,
+                active_ac_indices=generation_focus.active_ac_indices,
+                frozen_ac_indices=generation_focus.frozen_ac_indices,
                 phase=GenerationPhase.COMPLETED,
                 success=True,
             )

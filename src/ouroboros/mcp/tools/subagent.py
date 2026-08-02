@@ -2180,21 +2180,20 @@ Gen 1 lifecycle (seed provided):
 3. Record generation, report convergence signal.
 
 Gen 2+ lifecycle (no seed — reconstruct from prior generation):
-1. Wonder(ontology, evaluation) → open questions
-2. Reflect(seed, output, evaluation, wonder) → ontology mutations
-3. Generate next Seed from reflect output
-4. Execute(Seed) → execution_output
-5. Evaluate(execution_output) → evaluation summary
-6. Record generation, report convergence signal.
+1. Derive active nodes from failed/regressed AC verdicts; freeze prior PASS nodes
+2. Wonder(active nodes, focused evidence) → grounded open questions
+3. Reflect(active nodes only) → bounded ontology/AC mutations; do not add scope
+4. Generate next Seed while keeping frozen nodes verbatim
+5. Execute active nodes only; boundary-reverify every frozen node
+6. Evaluate the shrinking active output and record active/frozen indices
+7. Report the convergence signal.
 
 ## Lineage ID
 {lineage_id}
 {seed_note}{mode_note}{parallel_note}{project_dir_note}{qa_note}{conductor_note}
-Return a generation report containing: generation number, phase, action
-(continue / converged / stagnated / exhausted / failed), ontology similarity,
-evaluation verdict, and any ontology delta (added / removed / modified
-fields). Stop after one generation — the orchestrator decides whether to
-call you again."""
+Return a generation report: generation, phase, action, ontology similarity,
+evaluation verdict, active/frozen AC indices, and ontology delta. Report
+converged immediately on verified PASS; stop after one generation."""
 
     context: dict[str, Any] = {
         "lineage_id": lineage_id,
