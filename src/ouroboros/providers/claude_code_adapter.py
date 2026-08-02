@@ -399,7 +399,12 @@ class ClaudeCodeAdapter:
         messages: list[Message],
         config: CompletionConfig,
     ) -> Result[CompletionResponse, ProviderError]:
-        """Make a completion request via Claude Agent SDK with retry logic.
+        """Make a completion request over whichever transport is available.
+
+        Prefers the Claude Agent SDK and falls back to the ``claude`` CLI when
+        it cannot be imported. The choice is made once, here, and everything
+        below it -- profile resolution, system-message extraction, JSON
+        enforcement and its retries -- is the same either way.
 
         Implements exponential backoff for transient errors like API concurrency
         conflicts that can occur when running inside an active Claude Code session.
