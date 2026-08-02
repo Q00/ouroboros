@@ -215,14 +215,14 @@ def echo_carries_dispatch(echoed: Any) -> bool:
     past it. Enumerating those forms is what the previous approach had to do, and
     the list only grows.
 
-    **The marker alone is not the test.** It was, for one round, and that broke
-    the repair this exists to allow: a question quoting the marker without any
-    directive under it was read as an echo, so the stored question won — and
-    where the stored question is the damaged one ``last_question`` exists to
-    replace, the damage is what reached the transcript. The docstring above
-    claimed the worst case was keeping the right question, which is true only
-    when the stored question is right, and that is precisely the case this
-    parameter is not for.
+    **The marker alone is not the test, and the false positive is not free.**
+    For one round it was the test, and that broke the repair this exists to
+    allow: a question quoting the marker with no directive under it was read as
+    an echo, so the stored question won — and where the stored question is the
+    damaged one ``last_question`` exists to replace, the damage is what reached
+    the transcript. The argument for the bare marker was that the worst case is
+    keeping the right question. That holds only while the stored question is
+    right, which is precisely the case this parameter is not for.
 
     So it asks for a directive, not a mention. What remains is narrower and
     stated: a repair that reproduces a whole directive is not distinguishable
@@ -239,10 +239,7 @@ def split_appended_dispatch(text: str) -> str:
     Parsing, not provenance. The caller is reading a response the server
     produced in the same call (``auto/adapters.py`` extracting the question it
     must answer), so there is no second copy to compare against and the shape is
-    the only evidence there is. Kept apart from :func:`echo_carries_dispatch`
-    for that reason: this one removes text on the strength of a shape, and that
-    one only prefers a record we already hold. A single function doing both
-    would let the weaker warrant license the destructive act.
+    the only evidence there is.
 
     **Only call this when the server appended a directive**, which
     :func:`directive_was_appended` answers from the same response. With none
@@ -253,9 +250,15 @@ def split_appended_dispatch(text: str) -> str:
     The gate is also what retires the residual an earlier version of this
     docstring accepted. A directive is always appended last, so once one exists
     the last marker is ours and a question quoting the sentinel survives in
-    front of the cut. There is no shape judgement left on either side of the
-    round trip: this end asks whether one was written, and the echo end asks
-    whether one came back.
+    front of the cut.
+
+    The shape question itself is asked in one place, :func:`_directive_at`, and
+    both readers of a response ask it. What differs is the warrant each side has
+    for the answer: this one removes text, and does so only after
+    ``directive_was_appended`` has said the server wrote some; the echo side
+    removes nothing and only prefers a record it already holds. Sharing the
+    question keeps them from disagreeing about where a response ends; keeping
+    the warrants apart is what stops the weaker one licensing a cut.
 
     That earlier version also claimed the residual reached durable state only
     through the echo path, where it would be refused. It was wrong. A truncation

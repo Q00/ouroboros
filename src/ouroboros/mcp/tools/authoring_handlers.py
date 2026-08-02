@@ -2195,8 +2195,8 @@ class InterviewHandler:
             if isinstance(suggested_interview_id_arg, str) and suggested_interview_id_arg
             else None
         )
-        # Taken as given; the echo is resolved against the issued question
-        # where the round is identified, the only place the two can be compared.
+        # Taken as given; whether it is a repair or an echo of our own output is
+        # settled where the round is identified.
         last_question = arguments.get("last_question")
 
         # --- Argument validation (before any dispatch) ---

@@ -1244,7 +1244,8 @@ def _extract_interview_question(
     cut rather than answered as part of the question.
 
     ``dispatch_appended`` says whether the server appended one, read through
-    ``directive_was_appended`` so the gate and the renderer share one condition. Cutting on shape alone truncated
+    ``directive_was_appended`` so the gate and the renderer share one condition.
+    Cutting on shape alone truncated
     a question that quoted the sentinel whenever no directive was there to
     find — on ``PLUGIN_PASSIVE``, where the response is deliberately left
     unchanged, that is every turn. Auto would then answer, and persist, a

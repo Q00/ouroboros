@@ -1,10 +1,14 @@
 """How two interview questions are decided to be the same question.
 
-One definition, in one place, because two would drift and the drift would be
-invisible: the fan-out digests this to bind an answer to the question it was
-asked for, and the echo check compares against it to tell a faithful echo from
-a rewritten one. If they disagreed, one side would bind what the other had
-already let through.
+Two renderings of one question: the form its identity is digested from, and the
+form a host is shown. They sit together because a change to either is a change
+to what "the same question" means, and the two were far enough apart once that a
+comparison against the stored form did not know the shown form existed.
+
+`normalize_question_text` has one consumer today, the fan-out identity digest.
+It is here rather than beside that digest because this is where the question's
+forms live, and because `capabilities/__init__.py` is where it would otherwise
+grow.
 """
 
 from __future__ import annotations
@@ -30,10 +34,11 @@ def normalize_question_text(question: str) -> str:
 def format_question_with_ambiguity(question: str, score: AmbiguityScore | None) -> str:
     """Attach the current ambiguity score to a question for display.
 
-    The display form, beside the identity form above, because they are two
-    renderings of one question and the difference between them is load-bearing:
-    a host echoes back what it saw, and comparing that against what was stored
-    read a faithful echo as a rewrite (Q00/ouroboros#1825).
+    The display form. It lives here rather than in the handler that renders it
+    because `authoring_handlers.py` is at its module-size budget, and because
+    the difference between this form and the stored one is what an echo of a
+    question actually carries — which cost a round to learn
+    (Q00/ouroboros#1825).
 
     The text format uses ``(ambiguity: <score>)`` without the milestone
     label to preserve backward compatibility with downstream consumers

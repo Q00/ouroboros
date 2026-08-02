@@ -809,12 +809,11 @@ async def test_the_visible_echo_persists_only_the_question_when_a_score_is_shown
     previous round stated, that a faithful echo cannot reach durable state, was
     false as shipped for every scored round.
 
-    So the comparison is against the *rendered* form, reconstructed from the
-    score stored when the question was issued, and what is recorded is the
-    stored form: the transcript keeps the question's identity, never its
-    presentation. Recognising the prefix inside the echo instead would be shape
-    matching again, and the collision would return for a question that opens
-    with one.
+    That was first answered by comparing against the rendered form. The
+    comparison is gone (#1484cd03) and the case it was built for is covered by a
+    cheaper rule: an echo carrying our directive is not a repair, whatever
+    prefix it wears, so the round keeps the question the server issued and the
+    transcript keeps identity rather than presentation.
 
     The unscored round runs beside it because it is the case every earlier
     sentinel regression covered, and covering only that is how this was missed.

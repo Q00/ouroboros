@@ -234,7 +234,7 @@ def test_a_name_in_the_source_cannot_be_spelled_as_a_query(field: str) -> None:
 def test_a_request_the_parent_would_have_to_finish_cannot_be_proposed(
     request_patch: dict[str, Any], unstated: str
 ) -> None:
-    """What the user approves has to be the whole operation, not most of it.
+    """What the user is shown has to be the whole operation, not most of it.
 
     The user reads every field beside a measurement the lane has already taken,
     so a request that still needs a decision is one the lane finished by
@@ -1042,9 +1042,9 @@ def _fully_populated_proposal(identity: str) -> dict[str, Any]:
 def test_the_host_receives_every_read_request_field_verbatim(tmp_path: Any) -> None:
     """ "Render the request whole" has to be satisfiable, not just instructed.
 
-    The host is told to show the user every field of the measurement it renders
-    beside the question. That duty is only keepable if the measurement reaches
-    the host as the child returned it — a field dropped in aggregation is one
+    The host renders the measurement beside the question, so what the user can
+    be shown is bounded by what reaches the host. That is only worth pinning if
+    the measurement arrives as the child returned it — a field dropped in aggregation is one
     the user can never be shown, and two measurements differing only in a filter
     would then arrive identical. So the passthrough is pinned here rather than
     the prose being guarded: what makes an omission impossible is that there is
@@ -1785,10 +1785,9 @@ def test_parsing_our_own_response_keeps_a_question_that_mentions_the_marker() ->
     is no second copy to compare against and the directive can only be
     recognised by its form. That is enough here and not enough everywhere: a
     question quoting the marker *and* the directive's opening is cut short by
-    this function too. It reaches durable state only through the echoed
-    `last_question`, and there nothing is cut at all: an echo carrying our
-    directive is not treated as a repair, so the round keeps the question the
-    server issued — pinned at the handler in
+    this function too when it is called — and it is called only when
+    `directive_was_appended` says the server wrote one, which is what keeps the
+    quote in front of the cut. Pinned at the handler in
     `test_interview_lateral_review_advisory.py`.
     """
     from ouroboros.mcp.tools.advisory_dispatch import (
