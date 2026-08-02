@@ -1,9 +1,15 @@
 """The ``data_context`` advisory lane and the completion rules it needs (#1754).
 
-The lane proposes measurements and runs nothing. These tests pin the properties
-that make that true by construction rather than by good behaviour: what the
-child can express, what completion does when a lane is absent, and what happens
-to an output that breaks its contract.
+The lane takes the measurements it names (#1825). These tests pin what remains
+true by construction rather than by good behaviour: what the child can express,
+what it cannot claim, what completion does when a lane is absent, and what
+happens to an output that breaks its contract.
+
+The barrier moved when the lane was allowed to execute. It was "no field holds a
+value"; it is now "no value here becomes an answer" -- so the tests that used to
+prove a measurement unspellable now prove that everything *around* the
+measurement still holds: aggregates only, no claim about the host, and a
+required lane that can always answer.
 """
 
 from __future__ import annotations
@@ -400,12 +406,16 @@ def test_the_child_has_no_field_in_which_to_rate_a_tool() -> None:
     assert any(violation.endswith(": additionalProperties") for violation in reported), reported
 
 
-def test_a_fetched_value_has_nowhere_to_go() -> None:
-    """The child cannot report a measurement it ran, because no field holds one.
+def test_the_shape_admits_the_measurement_and_nothing_beside_it() -> None:
+    """A value fits where the contract put one, and nowhere else.
 
-    This is the structural half of "the child executes nothing": a child that
-    ignored the instruction and called a tool still has no way to hand the
-    result back, so the property does not depend on detecting misbehaviour.
+    This test used to prove the opposite -- that a child which ran a lookup had
+    nowhere to hand the result back. That was the barrier until #1825, and it
+    was aimed at the wrong thing: what #1754 set out to stop was a guess
+    becoming the Seed's evidence, and withholding the number made the guess
+    likelier. What survives is the closure. `values` and `observed_at` are the
+    only places a result may land; a field the child invents for one is refused,
+    so there is still exactly one shape a consumer has to read.
     """
     schema = interview_data_evidence_answer_contract()["response_model_schema"]
     answer = _valid_no_op("interview-question:0123456789abcdef")
@@ -1337,9 +1347,9 @@ def test_every_contract_this_build_advertises_is_enforceable() -> None:
 def test_the_contract_carries_only_what_is_enforced_or_instructed() -> None:
     """No field for a guarantee nothing makes true.
 
-    Three findings on this PR were the same shape: a guarantee stated in a
-    description, a policy block, or a design document, with nothing on the code
-    path making it so. A contract addressed to the child holds what it must
+    Four findings on this PR were the same shape: a guarantee stated in a
+    description, a policy block, a design document, or a reason constant, with
+    nothing on the code path making it so. A contract addressed to the child holds what it must
     satisfy and what it must do; a claim about the system reads as authoritative
     as either, is enforced by nothing, and is addressed to a reader who cannot
     act on it. Removing the field is what stops the fourth instance.
