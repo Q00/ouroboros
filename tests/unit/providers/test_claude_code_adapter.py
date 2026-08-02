@@ -278,6 +278,31 @@ class TestResolveCliPathPreservesPublicContract:
 
         assert adapter._cli_path == binary.resolve()
 
+    def test_missing_sdk_discovers_claude_on_path(self, tmp_path) -> None:
+        binary = tmp_path / "claude"
+        binary.write_text("#!/bin/sh\n")
+        binary.chmod(0o755)
+        adapter = ClaudeCodeAdapter()
+        payload = b'{"is_error":false,"result":"ok","stop_reason":"end_turn"}'
+        proc = MagicMock(returncode=0)
+        proc.communicate = AsyncMock(return_value=(payload, b""))
+
+        with (
+            patch.dict("sys.modules", {"claude_agent_sdk": None}),
+            patch("shutil.which", return_value=str(binary)) as which,
+            patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)) as spawn,
+        ):
+            result = asyncio.run(
+                adapter.complete(
+                    [Message(role=MessageRole.USER, content="ping")],
+                    CompletionConfig(model="claude-haiku-4-5"),
+                )
+            )
+
+        assert result.is_ok
+        which.assert_called_once_with("claude")
+        assert spawn.await_args.args[0] == str(binary.resolve())
+
 
 class TestAdapterOverheadReductions:
     """Test per-call overhead optimizations in ClaudeCodeAdapter."""
@@ -2547,7 +2572,10 @@ class TestCLIFallbackWhenSDKAbsent:
         """With no SDK and no CLI the message says so, instead of naming only pip."""
         with patch.object(ClaudeCodeAdapter, "_resolve_cli_path", return_value=None):
             adapter = ClaudeCodeAdapter()
-        with patch.dict("sys.modules", {"claude_agent_sdk": None}):
+        with (
+            patch.dict("sys.modules", {"claude_agent_sdk": None}),
+            patch("shutil.which", return_value=None),
+        ):
             result = asyncio.run(
                 adapter.complete(
                     [Message(role=MessageRole.USER, content="ping")],
@@ -2619,6 +2647,8 @@ class TestCLIFallbackWhenSDKAbsent:
             ).is_ok
 
         argv = list(spawn.await_args.args)
+        assert "--tools" in argv
+        assert argv[argv.index("--tools") + 1] == ""
         assert "--allowedTools" in argv
         # The CLI honors an empty allow-list literally, unlike the SDK.
         assert argv[argv.index("--allowedTools") + 1] == ""
@@ -2628,6 +2658,59 @@ class TestCLIFallbackWhenSDKAbsent:
         # setting sources, which the SDK path empties too.
         assert "--setting-sources" in argv
         assert argv[argv.index("--setting-sources") + 1] == ""
+
+    def test_the_cli_child_environment_is_isolated(self) -> None:
+        adapter = self._adapter()
+        payload = b'{"is_error":false,"result":"ok","stop_reason":"end_turn"}'
+        inherited = {
+            "CLAUDECODE": "1",
+            "OUROBOROS_AGENT_RUNTIME": "claude",
+            "OUROBOROS_LLM_BACKEND": "claude",
+            "_OUROBOROS_DEPTH": "2",
+        }
+        with (
+            patch.dict("sys.modules", {"claude_agent_sdk": None}),
+            patch.dict(os.environ, inherited, clear=False),
+            patch(
+                "asyncio.create_subprocess_exec",
+                new=AsyncMock(return_value=self._proc(payload)),
+            ) as spawn,
+        ):
+            result = asyncio.run(
+                adapter.complete(
+                    [Message(role=MessageRole.USER, content="ping")],
+                    CompletionConfig(model="claude-haiku-4-5"),
+                )
+            )
+
+        assert result.is_ok
+        child_env = spawn.await_args.kwargs["env"]
+        assert "CLAUDECODE" not in child_env
+        assert "OUROBOROS_AGENT_RUNTIME" not in child_env
+        assert "OUROBOROS_LLM_BACKEND" not in child_env
+        assert child_env["_OUROBOROS_DEPTH"] == "3"
+
+    def test_a_nonempty_tool_envelope_controls_catalog_and_permissions(self) -> None:
+        adapter = self._adapter(allowed_tools=["Read", "Grep"])
+        payload = b'{"is_error":false,"result":"ok","stop_reason":"end_turn"}'
+        with (
+            patch.dict("sys.modules", {"claude_agent_sdk": None}),
+            patch(
+                "asyncio.create_subprocess_exec",
+                new=AsyncMock(return_value=self._proc(payload)),
+            ) as spawn,
+        ):
+            result = asyncio.run(
+                adapter.complete(
+                    [Message(role=MessageRole.USER, content="ping")],
+                    CompletionConfig(model="claude-haiku-4-5"),
+                )
+            )
+
+        assert result.is_ok
+        argv = list(spawn.await_args.args)
+        assert argv[argv.index("--tools") + 1] == "Read Grep"
+        assert argv[argv.index("--allowedTools") + 1] == "Read Grep"
 
     def test_a_permissive_caller_is_not_sealed_by_the_fallback(self) -> None:
         """The other half of the pin: no envelope means no envelope flags.
@@ -2653,6 +2736,7 @@ class TestCLIFallbackWhenSDKAbsent:
             ).is_ok
 
         argv = list(spawn.await_args.args)
+        assert "--tools" not in argv
         assert "--allowedTools" not in argv
         assert "--strict-mcp-config" not in argv
         assert "--setting-sources" not in argv

@@ -44,6 +44,7 @@ import inspect
 import json
 import os
 from pathlib import Path
+import shutil
 import traceback
 
 import structlog
@@ -61,6 +62,7 @@ from ouroboros.providers.base import (
 )
 from ouroboros.providers.profiles import resolve_completion_profile_result
 from ouroboros.providers.tool_use_diagnostics import diagnose_tool_use_turn
+from ouroboros.runtime.child_env import DEFAULT_OUROBOROS_STRIP_KEYS, build_child_env
 
 log = structlog.get_logger(__name__)
 
@@ -427,6 +429,10 @@ class ClaudeCodeAdapter:
             # environment the SDK cannot enter. See ``_complete_via_cli``.
             sdk_available = False
             if self._cli_path is None:
+                discovered = shutil.which("claude")
+                if discovered:
+                    self._cli_path = Path(discovered).expanduser().resolve()
+            if self._cli_path is None:
                 log.error("claude_code_adapter.sdk_and_cli_unavailable", error=str(e))
                 return Result.err(
                     ProviderError(
@@ -536,6 +542,20 @@ class ClaudeCodeAdapter:
     _CLI_PERMISSION_MODES = frozenset(
         {"acceptEdits", "auto", "bypassPermissions", "manual", "dontAsk", "plan"}
     )
+
+    @staticmethod
+    def _build_cli_child_env() -> dict[str, str]:
+        """Isolate the direct CLI child and enforce the shared recursion limit."""
+        return build_child_env(
+            strip_keys=(*DEFAULT_OUROBOROS_STRIP_KEYS, "CLAUDECODE"),
+            depth_error_factory=lambda depth, max_depth: ProviderError(
+                message=(
+                    f"Maximum ouroboros nesting depth ({max_depth}) exceeded "
+                    f"while starting claude CLI (depth={depth})"
+                ),
+                details={"depth": depth, "max_depth": max_depth},
+            ),
+        )
 
     def _empty_content_error(
         self,
@@ -673,11 +693,12 @@ class ClaudeCodeAdapter:
         if self._permission_mode in self._CLI_PERMISSION_MODES:
             argv += ["--permission-mode", self._permission_mode]
         if self._allowed_tools is not None:
-            # Unlike the SDK -- which drops an empty list before it reaches the
-            # CLI, hence the ``extra_args`` workaround in
-            # ``_execute_single_request`` -- the CLI honors ``--allowedTools ""``
-            # literally, so the empty envelope seals itself with no enumerate.
-            argv += ["--allowedTools", " ".join(self._allowed_tools)]
+            # ``--tools`` defines the available catalog; ``--allowedTools`` only
+            # suppresses permission prompts for names that are already available.
+            # Both are required for SDK parity, especially ``--tools ""`` for the
+            # no-tools interview/PM/QA envelope.
+            tool_names = " ".join(self._allowed_tools)
+            argv += ["--tools", tool_names, "--allowedTools", tool_names]
         argv += ["--max-turns", str(self._effective_max_turns(config))]
         if self._strict_mcp_config:
             # ``--strict-mcp-config`` blocks MCP discovery and nothing else, but
@@ -708,13 +729,17 @@ class ClaudeCodeAdapter:
 
         timeout = self._timeout or _CLI_DEFAULT_TIMEOUT_SECONDS
         try:
+            child_env = self._build_cli_child_env()
             proc = await asyncio.create_subprocess_exec(
                 *argv,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=self._cwd or None,
+                env=child_env,
             )
+        except ProviderError as exc:
+            return Result.err(exc)
         except OSError as exc:
             return Result.err(
                 ProviderError(
