@@ -62,6 +62,7 @@ from ouroboros.mcp.tools.advisory_dispatch import (
     append_lateral_review_notice,
     append_question_advisory_dispatch,
     echo_carries_dispatch,
+    strip_bridge_notice,
 )
 from ouroboros.mcp.tools.subagent import (
     DELEGATED_TO_SUBAGENT,
@@ -2381,11 +2382,9 @@ class InterviewHandler:
                 # round persisted question-only, or appending — and settles
                 # provenance where the answer arrives either way.
                 has_pending = bool(state.rounds) and state.rounds[-1].user_response is None
+                # Plugin persists no question-only round, so the second branch
+                # is the live one; the first needs state a subprocess turn left.
                 if has_pending:
-                    # The subprocess path's gatekeeper, asked here too — and this
-                    # is the path the bridge's append actually reaches, since only
-                    # ``PLUGIN_PASSIVE`` lets a second producer stamp the visible
-                    # question. An echo carrying a directive is not a repair.
                     issued = state.rounds[-1].question
                     question_text = (
                         issued
@@ -2393,9 +2392,10 @@ class InterviewHandler:
                         else (last_question or issued)
                     )
                 else:
-                    # Fall back to a descriptive placeholder for backward
-                    # compatibility (callers that don't supply last_question).
-                    question_text = last_question if last_question else "(continued from subagent)"
+                    # No record to prefer — cut the bridge's own append instead.
+                    question_text = (
+                        strip_bridge_notice(last_question) or "(continued from subagent)"
+                    )
                 plugin_intent_guard_report = _guard_interview_answer(
                     state=state,
                     question=question_text,

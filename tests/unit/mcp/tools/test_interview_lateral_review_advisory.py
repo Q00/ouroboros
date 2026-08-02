@@ -1414,3 +1414,88 @@ async def test_the_advertised_correlation_key_is_the_one_that_redeems(tmp_path) 
         results=[{"key": lane, "undispatched": True} for lane in record.expected_keys],
     )
     assert result["status"] == "complete", result
+
+
+async def test_a_driven_plugin_interview_records_only_the_question(tmp_path) -> None:
+    """Driven ``start → answer``, never by hand-built state.
+
+    The sibling regression above seeds a question-only pending round, and that
+    is the one shape plugin mode does not produce: the child asks the questions
+    and the server only records answers, so ``record_answer`` appends a whole
+    round and ``has_pending`` is false on every turn. The gate written for the
+    pending branch was therefore never reached here, and the test meant to
+    prove otherwise passed because its fixture stood in for a state the
+    transport cannot reach.
+
+    So this one asks the handler for a session and answers it three times,
+    reading each round back off disk.
+    """
+    from ouroboros.mcp.tools.advisory_dispatch import (
+        QUESTION_ADVISORY_DISPATCH_MARKER as marker,
+    )
+
+    issued = "How do you define completion?"
+    handler = InterviewHandler(
+        data_dir=tmp_path, agent_runtime_backend="opencode", opencode_mode="plugin"
+    )
+    started = await handler.handle(
+        {
+            "action": "start",
+            "initial_context": "Build a data-aware interview lane for Ouroboros.",
+            "cwd": str(tmp_path),
+        }
+    )
+    assert started.is_ok
+    session_id = started.value.meta["session_id"]
+    state_file = tmp_path / f"interview_{session_id}.json"
+
+    for turn in range(3):
+        before = json.loads(state_file.read_text(encoding="utf-8"))["rounds"]
+        assert not (before and before[-1]["user_response"] is None), (
+            "plugin mode is not expected to persist a question-only round"
+        )
+        result = await handler.handle(
+            {
+                "session_id": session_id,
+                "answer": f"A{turn}",
+                "last_question": _bridge_echo(issued),
+            }
+        )
+        assert result.is_ok
+
+    for round_data in json.loads(state_file.read_text(encoding="utf-8"))["rounds"]:
+        assert round_data["question"] == issued
+        assert marker not in round_data["question"]
+        assert "fanout_abc123" not in round_data["question"]
+
+
+def test_a_question_quoting_a_host_directive_survives_the_plugin_strip() -> None:
+    """The cut is scoped to the producer that actually appends here.
+
+    Asking for both openings would cut at a quoted host directive — and an
+    interview about this feature quotes one. This module appends nothing on
+    ``PLUGIN_PASSIVE``, so the bridge is the only producer that can have
+    written there, and a question carrying someone else's grammar is left
+    whole.
+    """
+    from ouroboros.mcp.tools.advisory_dispatch import (
+        _BRIDGE_NOTICE_OPENING,
+        _HOST_DIRECTIVE_OPENING,
+        strip_bridge_notice,
+    )
+    from ouroboros.mcp.tools.advisory_dispatch import (
+        QUESTION_ADVISORY_DISPATCH_MARKER as marker,
+    )
+
+    quoting = (
+        "Two things. First, is this directive too verbose?\n\n"
+        f"{marker}\n\n{_HOST_DIRECTIVE_OPENING}spawn 6 subagents:**\nkeep it visible.\n\n"
+        "Second, should the bare sentinel appear in user-visible text?"
+    )
+    bridge = (
+        f"{marker}\n\n{_BRIDGE_NOTICE_OPENING}\n[Ouroboros] Dispatched 6 subagents.\n\n"
+        '```json\n{"question_advisory_fanout_id": "fanout_quoted"}\n```'
+    )
+
+    assert strip_bridge_notice(f"{quoting}\n\n{bridge}") == quoting
+    assert strip_bridge_notice(quoting) == quoting

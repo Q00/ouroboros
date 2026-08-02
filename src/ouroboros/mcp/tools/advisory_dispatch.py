@@ -318,6 +318,28 @@ def split_appended_dispatch(text: str) -> str:
     return text if cut < 0 else text[:cut].strip()
 
 
+def strip_bridge_notice(text: Any) -> Any:
+    """Return *text* without the bridge's declared append.
+
+    For the one branch that holds no issued question. Plugin mode persists no
+    question-only round — the child asks and the server only records answers —
+    so its answer branch has nothing to prefer, and refusing the echo would
+    store a placeholder instead of what the user was asked.
+
+    Scoped to the bridge's opening on purpose. This module appends nothing on
+    ``PLUGIN_PASSIVE``, so the bridge is the only producer that can have
+    written there; asking for the host opening as well would cut a question
+    that merely quotes a directive, which is the damage the echo path exists to
+    avoid. What remains is a question reproducing a whole *bridge* notice,
+    which is narrower than the banner and fan-out id this otherwise records
+    verbatim.
+    """
+    if not isinstance(text, str):
+        return text
+    cut = _directive_at(text, (_BRIDGE_NOTICE_OPENING,))
+    return text if cut < 0 else text[:cut].strip()
+
+
 __all__ = [
     "QUESTION_ADVISORY_DISPATCH_MARKER",
     "append_lateral_review_notice",
@@ -325,4 +347,5 @@ __all__ = [
     "directive_was_appended",
     "echo_carries_dispatch",
     "split_appended_dispatch",
+    "strip_bridge_notice",
 ]
