@@ -21,11 +21,25 @@ import shutil
 import subprocess
 
 
+class CacheRefreshRecoveryError(OSError):
+    """Promotion failed and the previous cache remains at ``backup_path``."""
+
+    def __init__(self, message: str, *, backup_path: Path) -> None:
+        super().__init__(message)
+        self.backup_path = backup_path
+
+
 def url_cache_refresh_error(exc: subprocess.CalledProcessError | OSError, dest: Path) -> str:
     """Render clone and filesystem failures through one public CLI contract."""
     if isinstance(exc, subprocess.CalledProcessError):
         detail = exc.stderr.strip() if exc.stderr else exc
         return f"git clone failed: {detail}"
+    if isinstance(exc, CacheRefreshRecoveryError):
+        return (
+            f"plugin cache refresh failed at {dest}: {exc}. "
+            f"The previous cache is retained at {exc.backup_path}; "
+            f"restore it to {dest} before retrying."
+        )
     return (
         f"plugin cache refresh failed at {dest}: {exc}. "
         "The previous cache was preserved when recovery was possible; "
@@ -85,18 +99,25 @@ def stage_url_cache_refresh(clone: Callable[[Path], str], clone_dest: Path) -> s
             backup_used = True
             os.rename(clone_dest, backup)
         os.rename(staging, clone_dest)
-    except BaseException:
+    except BaseException as exc:
         # The live cache may already be parked at ``backup`` here. User
         # interruption must take the same rollback path as an OSError rather
         # than strand the public destination and staging directory.
+        recovery_error: CacheRefreshRecoveryError | None = None
         if backup_used and not clone_dest.exists() and backup.exists():
             try:
                 os.rename(backup, clone_dest)
-            except OSError:
+            except OSError as restore_error:
                 # Restore failed; the backup stays on disk for manual
                 # recovery rather than being deleted with the staging tree.
-                pass
+                if isinstance(exc, Exception):
+                    recovery_error = CacheRefreshRecoveryError(
+                        f"promotion failed ({exc}); automatic restoration failed ({restore_error})",
+                        backup_path=backup,
+                    )
         shutil.rmtree(staging, ignore_errors=True)
+        if recovery_error is not None:
+            raise recovery_error from exc
         raise
 
     # The old cache is gone from its live path; dropping the backup is

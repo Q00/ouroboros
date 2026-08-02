@@ -2519,6 +2519,56 @@ def test_url_refresh_filesystem_failure_is_reported_without_traceback(
 
 
 @pytest.mark.parametrize("mode", ["add", "install"])
+def test_url_refresh_reports_exact_retained_backup_path(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str
+) -> None:
+    """Both public commands identify the sole surviving recovery copy."""
+    from ouroboros.cli.commands.plugin_cache import CacheRefreshRecoveryError
+
+    paths = _common_paths(tmp_path)
+    cache_root = tmp_path / "cache"
+    backup = cache_root / ".ouroboros-cache-deadbeefcafe.bak-123456789abc"
+    url = "https://github.com/Q00/ouroboros-plugins.git"
+
+    def _double_failure(*_args: object, **_kwargs: object) -> str:
+        raise CacheRefreshRecoveryError(
+            "promotion and automatic restoration failed", backup_path=backup
+        )
+
+    monkeypatch.setattr(
+        "ouroboros.cli.commands.plugin_cache.stage_url_cache_refresh", _double_failure
+    )
+    selector = (
+        ["add", url, "--plugin", "github-pr-ops"]
+        if mode == "add"
+        else ["install", "github-pr-ops", "--from", url]
+    )
+
+    result = runner.invoke(
+        plugin_app,
+        [
+            *selector,
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--plugin-home-root",
+            str(paths["plugin_home_root"]),
+            "--cache-root",
+            str(cache_root),
+        ],
+    )
+
+    assert result.exit_code == 1
+    # Rich wraps long paths inside a bordered panel. Remove only rendering
+    # characters so the exact path can be asserted independent of width.
+    import re
+
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", result.output)
+    squashed = re.sub(r"[│╭╮╰╯─\s]+", "", plain)
+    assert str(backup) in squashed
+    assert "restoreitto" in squashed
+
+
+@pytest.mark.parametrize("mode", ["add", "install"])
 def test_successful_url_refresh_replaces_stale_cache(
     runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str
 ) -> None:
@@ -2615,7 +2665,10 @@ def test_failed_restore_preserves_backup_for_manual_recovery(
     fails, the renamed-aside backup directory is the sole remaining copy of
     the last-known-good cache and must stay on disk for manual recovery.
     """
-    from ouroboros.cli.commands.plugin_cache import stage_url_cache_refresh
+    from ouroboros.cli.commands.plugin_cache import (
+        CacheRefreshRecoveryError,
+        stage_url_cache_refresh,
+    )
 
     cache_root = tmp_path / "cache"
     dest = cache_root / "repo"
@@ -2640,7 +2693,7 @@ def test_failed_restore_preserves_backup_for_manual_recovery(
         (staging / "new.txt").write_text("fresh clone")
         return "cafef00d"
 
-    with pytest.raises(OSError):
+    with pytest.raises(CacheRefreshRecoveryError) as exc_info:
         stage_url_cache_refresh(_clone, dest)
 
     assert calls["n"] == 3, "expected promotion and restoration to both be attempted"
@@ -2649,6 +2702,7 @@ def test_failed_restore_preserves_backup_for_manual_recovery(
     assert (backups[0] / "good.txt").read_text() == "keep me", (
         "the last-known-good bytes were lost with no automatic copy remaining"
     )
+    assert exc_info.value.backup_path == backups[0]
     assert [entry for entry in cache_root.iterdir() if ".staging-" in entry.name] == [], (
         "staging debris left behind"
     )
