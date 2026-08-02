@@ -63,6 +63,35 @@ QUESTION_ADVISORY_DISPATCH_MARKER = "<!-- ouroboros-question-advisory-dispatch-v
 #: cannot drift into disagreeing about what a directive looks like.
 _HOST_DIRECTIVE_OPENING = "> **Host action — "
 
+#: The OpenCode bridge's opening. It is a *second* producer appending to the
+#: visible question: on ``PLUGIN_PASSIVE`` the server renders nothing, and the
+#: bridge then stamps its dispatch banner and response-shape JSON — including
+#: ``question_advisory_fanout_id`` — onto the text a host sees and may echo back.
+#:
+#: The bridge declares itself with our marker and this opening rather than being
+#: recognised by its prose, because its prose is not stable: ``[Ouroboros] ``
+#: leads only the dispatched banner, while failed-only and skipped-only banners
+#: begin with their own words. A gatekeeper reverse-engineering that would have
+#: been wrong on arrival and wrong again on the next wording change.
+#:
+#: Duplicated in ``opencode/plugin/ouroboros-bridge.ts`` because the two cannot
+#: import each other; a test pins them equal, which is the language-boundary
+#: form of writing a shared constant once.
+_BRIDGE_NOTICE_OPENING = "> **Bridge dispatch — plugin_subagent:** "
+
+#: **A producer that appends dispatch state to the visible question declares it
+#: with this grammar**, so the gatekeeper never has to reverse-engineer prose.
+#: Two do: the host directive above and the bridge. The bridge went five rounds
+#: undeclared, which is why the rule is written where the next one will read it.
+#:
+#: It is a rule about dispatch state, not about every append.
+#: :func:`append_lateral_review_notice` also adds to the visible question and
+#: does not declare, so an echo carrying only that notice is recorded verbatim.
+#: That is a real residue and it is deliberately not fixed here: it predates this
+#: lane, carries no identifiers, and belongs to whichever change needs it rather
+#: than to the one that happened to notice it.
+_DIRECTIVE_OPENINGS = (_HOST_DIRECTIVE_OPENING, _BRIDGE_NOTICE_OPENING)
+
 
 def _lane_ids(payloads: list[Any], *, required_only: bool = False) -> list[str]:
     """Return lane ids in payload order, skipping anything malformed."""
@@ -171,23 +200,36 @@ def append_lateral_review_notice(
     )
 
 
-def _directive_at(text: str) -> int:
-    """Return the offset of a directive this module wrote, or -1.
+def _directive_at(text: str, openings: tuple[str, ...] = _DIRECTIVE_OPENINGS) -> int:
+    """Return the offset of a declared append by one of *openings*, or -1.
 
-    A directive is the marker *and* the opening that always follows it, never
-    the marker alone. Both readers of a response ask this same question — the
-    echo path to decide whether an echo is a repair, the parser to decide where
-    a response body ends — so they ask it in one place and cannot answer it
-    differently.
+    A directive is the marker *and* an opening that follows it, never the marker
+    alone. Both readers of a response ask this same question — the echo path to
+    decide whether an echo is a repair, the parser to decide where a response
+    body ends — so they ask it in one place and cannot answer it differently.
 
-    The last one, because a directive is always appended: any earlier marker is
-    text the question carried.
+    They do not ask about the same producers, though, and *openings* is where
+    they differ. Two producers now declare, and when both append the server's
+    directive comes first and the bridge's notice after it. A reader that simply
+    took the last marker would answer for whichever producer wrote last: the
+    parser, gated on the server having appended, would cut at the bridge's
+    marker and leave the server's own directive inside the question — the exact
+    failure that gate exists to prevent. So the scan walks markers from the end
+    and returns the last one belonging to a producer the caller asked about.
+
+    From the end, because a declared append always follows the question: an
+    earlier marker matching the same grammar is text the question carried, and
+    the caller's own gate is what makes preferring the later one safe.
     """
-    cut = text.rfind(QUESTION_ADVISORY_DISPATCH_MARKER)
-    if cut < 0:
-        return -1
-    suffix = text[cut + len(QUESTION_ADVISORY_DISPATCH_MARKER) :]
-    return cut if suffix.lstrip("\n").startswith(_HOST_DIRECTIVE_OPENING) else -1
+    end = len(text)
+    while True:
+        cut = text.rfind(QUESTION_ADVISORY_DISPATCH_MARKER, 0, end)
+        if cut < 0:
+            return -1
+        suffix = text[cut + len(QUESTION_ADVISORY_DISPATCH_MARKER) :].lstrip("\n")
+        if suffix.startswith(openings):
+            return cut
+        end = cut
 
 
 def echo_carries_dispatch(echoed: Any) -> bool:
@@ -260,13 +302,19 @@ def split_appended_dispatch(text: str) -> str:
     question keeps them from disagreeing about where a response ends; keeping
     the warrants apart is what stops the weaker one licensing a cut.
 
+    It also asks only about ``_HOST_DIRECTIVE_OPENING``, because the gate it
+    obeys is a statement about the server's own directive. The bridge declares
+    with the same marker and appends *after* the server, so accepting its
+    opening here would cut at the bridge's notice and leave the server's
+    directive standing in the question.
+
     That earlier version also claimed the residual reached durable state only
     through the echo path, where it would be refused. It was wrong. A truncation
     here removes the marker, so the echo arrives looking like an ordinary
     question and is recorded as one — a guarantee stated where nothing made it
     true, which is the shape this branch keeps finding in its own comments.
     """
-    cut = _directive_at(text)
+    cut = _directive_at(text, (_HOST_DIRECTIVE_OPENING,))
     return text if cut < 0 else text[:cut].strip()
 
 

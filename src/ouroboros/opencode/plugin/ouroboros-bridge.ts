@@ -20,6 +20,18 @@ export const DEDUPE_MS = 5_000
 export const MAX_FANOUT = 10
 export const MAX_SEEN = 256
 export const ID_LEN = 26
+// A producer that appends to the visible question announces itself, so the
+// server-side gatekeeper needs one grammar rather than a reverse-engineered
+// catalogue of everyone's prose. These two literals are the Python constants in
+// mcp/tools/advisory_dispatch.py; they cannot be imported across the language
+// boundary, so a test pins them equal instead.
+//
+// Detecting notify()'s own text was the alternative and it does not hold:
+// "[Ouroboros] " leads only the dispatched branch, while the failed- and
+// skipped-only banners start with their own words.
+export const OUROBOROS_DISPATCH_MARKER = "<!-- ouroboros-question-advisory-dispatch-v1 -->"
+export const BRIDGE_NOTICE_OPENING = "> **Bridge dispatch — plugin_subagent:** "
+
 export const BYPASS_PERMISSION_RULESET = [
   { permission: "*", pattern: "*", action: "allow" },
 ] as const
@@ -300,6 +312,23 @@ export function stamp(r: Output, msg: string): void {
   try { r.output = msg } catch {}
 }
 
+// Write bridge-authored text into a tool response, declaring it as the bridge's.
+//
+// The bridge is a second producer appending to a question the server rendered:
+// on PLUGIN_PASSIVE the server stamps no directive of its own, and whatever we
+// add here is text a host sees and may echo back as `last_question`. Undeclared,
+// that echo is indistinguishable from the question and the server records the
+// banner — fan-out id and all — as what it asked.
+//
+// The declaration is attached HERE rather than at each call site because there
+// are three appends (dispatch, dedupe, pre-dispatch failure) and only the first
+// had it. A rule that every call site must remember is a rule that gets a fourth
+// call site. Passing `original` is what says "a question is in front of this".
+export function stampBridge(r: Output, original: string | undefined, body: string): void {
+  const declared = `${OUROBOROS_DISPATCH_MARKER}\n\n${BRIDGE_NOTICE_OPENING}\n${body}`
+  stamp(r, original === undefined ? declared : `${original}\n\n${declared}`)
+}
+
 export interface OkResult {
   sub: Sub
   childID: string
@@ -370,7 +399,7 @@ export function buildEnvelope(
 
 function fail(r: Output, label: string, err: unknown, preservePrefix?: string): void {
   const msg = `[Ouroboros] Dispatch failed for '${label}': ${errMsg(err)}. See ${LOG}.`
-  stamp(r, preservePrefix ? `${preservePrefix}\n\n${msg}` : msg)
+  stampBridge(r, preservePrefix, msg)
 }
 
 const seen = new Map<string, number>()
@@ -664,7 +693,7 @@ export const OuroborosBridge: Plugin = async (ctx) => {
             ? "\n\n```json\n" + JSON.stringify(responseShape, null, 2) + "\n```"
             : ""
           const dedupeBanner = notify([], [], subs) + dedupeShapeSuffix
-          stamp(out, preserveContent ? `${originalText}\n\n${dedupeBanner}` : dedupeBanner)
+          stampBridge(out, preserveContent ? originalText : undefined, dedupeBanner)
           const meta = (out.metadata ?? {}) as Record<string, unknown>
           meta.ouroboros_dispatch = buildEnvelope([], [], subs)
           if (Object.keys(responseShape).length > 0) meta.ouroboros_response_shape = responseShape
@@ -704,7 +733,7 @@ export const OuroborosBridge: Plugin = async (ctx) => {
         const shapeSuffix = Object.keys(responseShape).length > 0
           ? "\n\n```json\n" + JSON.stringify(responseShape, null, 2) + "\n```"
           : ""
-        stamp(out, preserveContent ? `${originalText}\n\n${banner}${shapeSuffix}` : banner + shapeSuffix)
+        stampBridge(out, preserveContent ? originalText : undefined, banner + shapeSuffix)
 
         const envelope = buildEnvelope(ok, failed, [])
         const meta = (out.metadata ?? {}) as Record<string, unknown>

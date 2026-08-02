@@ -1058,3 +1058,212 @@ async def test_a_repair_quoting_the_marker_replaces_a_damaged_question() -> None
 
     assert result.is_ok
     assert engine.record_response.await_args.args[2] == repair
+
+
+def test_the_bridge_declares_itself_with_the_grammar_the_gatekeeper_knows() -> None:
+    """Two producers append to the visible question; both must be recognisable.
+
+    On `PLUGIN_PASSIVE` the server renders nothing — that is the transport's
+    contract — and the OpenCode bridge then stamps its dispatch banner and
+    response-shape JSON, `question_advisory_fanout_id` included, onto the text a
+    host sees. A faithful echo of that carried the whole thing into
+    `record_response` and the Seed, because the gatekeeper knew only the
+    server's own grammar.
+
+    The bridge declares itself rather than being detected: its prose is not
+    stable — `[Ouroboros] ` leads only the dispatched banner, while failed-only
+    and skipped-only banners start with their own words — so a gatekeeper
+    matching on that would have been wrong on arrival.
+
+    The constants live in two languages and cannot import each other, so this
+    pins them equal. That is what "written once so emitter and stripper cannot
+    drift" has to mean across a language boundary.
+    """
+    from pathlib import Path
+
+    from ouroboros.mcp.tools.advisory_dispatch import (
+        _BRIDGE_NOTICE_OPENING,
+        echo_carries_dispatch,
+    )
+    from ouroboros.mcp.tools.advisory_dispatch import (
+        QUESTION_ADVISORY_DISPATCH_MARKER as marker,
+    )
+
+    bridge_source = Path("src/ouroboros/opencode/plugin/ouroboros-bridge.ts").read_text(
+        encoding="utf-8"
+    )
+    assert f'export const OUROBOROS_DISPATCH_MARKER = "{marker}"' in bridge_source
+    assert f'export const BRIDGE_NOTICE_OPENING = "{_BRIDGE_NOTICE_OPENING}"' in bridge_source
+
+    # The shape the bridge actually stamps, banner and identifiers and all.
+    bridge_echo = (
+        "How do you define completion?\n\n"
+        f"{marker}\n\n{_BRIDGE_NOTICE_OPENING}\n"
+        "[Ouroboros] Dispatched 6 subagents. Task widgets will update as they complete.\n"
+        "  • Interview advisory: data_context → agent='general' [child=ses_abc]\n\n"
+        '```json\n{\n  "question_advisory_fanout_id": "fanout_abc123"\n}\n```'
+    )
+    assert echo_carries_dispatch(bridge_echo)
+
+
+def _bridge_echo(issued: str) -> str:
+    """The visible text the bridge actually stamps, banner and identifiers and all."""
+    from ouroboros.mcp.tools.advisory_dispatch import _BRIDGE_NOTICE_OPENING
+    from ouroboros.mcp.tools.advisory_dispatch import (
+        QUESTION_ADVISORY_DISPATCH_MARKER as marker,
+    )
+
+    return (
+        f"{issued}\n\n{marker}\n\n{_BRIDGE_NOTICE_OPENING}\n"
+        "[Ouroboros] Dispatched 6 subagents. Task widgets will update as they complete.\n"
+        "  • Interview advisory: data_context → agent='general' [child=ses_abc]\n\n"
+        '```json\n{\n  "question_advisory_fanout_id": "fanout_abc123",\n'
+        '  "session_id": "sess-bridge"\n}\n```'
+    )
+
+
+async def test_a_bridge_mutated_echo_does_not_reach_the_plugin_transcript(tmp_path) -> None:
+    """The plugin path, with the exact shape the bridge produces.
+
+    **This is the path the bridge's append actually reaches.** `handle()` returns
+    to `_handle_plugin_dispatch` before `_handle_answer` is entered, so the
+    gatekeeper the subprocess path asks was never on the plugin round-trip — and
+    plugin-passive is the only transport where the bridge stamps anything. A
+    gatekeeper that recognised the bridge's grammar while sitting on the other
+    branch would have read as a fix and persisted the banner anyway.
+
+    So this drives the real handler against a real state directory rather than a
+    mocked engine: the plugin path loads and saves state itself, and a mock of
+    `InterviewEngine` is simply not consulted here. What the round remembers
+    asking is read back off disk.
+    """
+    from ouroboros.mcp.tools.advisory_dispatch import (
+        QUESTION_ADVISORY_DISPATCH_MARKER as marker,
+    )
+
+    issued = "How do you define completion?"
+    state = InterviewState(
+        interview_id="sess-bridge",
+        rounds=[
+            InterviewRound(round_number=1, question="Q1?", user_response="A1"),
+            InterviewRound(round_number=2, question=issued, user_response=None),
+        ],
+    )
+    (tmp_path / "interview_sess-bridge.json").write_text(state.model_dump_json(), encoding="utf-8")
+
+    handler = InterviewHandler(
+        data_dir=tmp_path, agent_runtime_backend="opencode", opencode_mode="plugin"
+    )
+    result = await handler.handle(
+        {"session_id": "sess-bridge", "answer": "A", "last_question": _bridge_echo(issued)}
+    )
+    assert result.is_ok
+
+    persisted = json.loads((tmp_path / "interview_sess-bridge.json").read_text(encoding="utf-8"))
+    recorded = persisted["rounds"][-1]["question"]
+    assert recorded == issued
+    assert "fanout_abc123" not in recorded
+    assert marker not in recorded
+
+
+async def test_a_bridge_mutated_echo_does_not_reach_the_subprocess_transcript() -> None:
+    """The same shape at the other consumer of the same gatekeeper.
+
+    A bridge-shaped echo is not expected here — the bridge runs on plugin-passive
+    and this branch serves the subprocess transports. It is pinned anyway because
+    the two branches share one predicate, and the value of sharing it is that
+    neither can come to answer differently about what a directive looks like.
+    """
+    from ouroboros.mcp.tools.advisory_dispatch import (
+        QUESTION_ADVISORY_DISPATCH_MARKER as marker,
+    )
+
+    issued = "How do you define completion?"
+    state = InterviewState(
+        interview_id="sess-bridge",
+        rounds=[
+            InterviewRound(round_number=1, question="Q1?", user_response="A1"),
+            InterviewRound(round_number=2, question=issued, user_response=None),
+        ],
+    )
+
+    async def record(
+        current: InterviewState, answer: str, question: str
+    ) -> Result[InterviewState, object]:
+        current.rounds.append(
+            InterviewRound(
+                round_number=current.current_round_number,
+                question=question,
+                user_response=answer,
+            )
+        )
+        return Result.ok(current)
+
+    engine = MagicMock()
+    engine.load_state = AsyncMock(return_value=Result.ok(state))
+    engine.record_response = AsyncMock(side_effect=record)
+    engine.save_state = AsyncMock(return_value=MagicMock(is_err=False))
+    engine.ask_next_question = AsyncMock(return_value=Result.ok("Next?"))
+
+    handler = InterviewHandler(interview_engine=engine, agent_runtime_backend="claude")
+    handler.llm_adapter = MagicMock()
+    handler._emit_event_bg = MagicMock()  # type: ignore[method-assign]
+    handler._score_interview_state = AsyncMock(return_value=_score(0.35))  # type: ignore[method-assign]
+
+    result = await handler.handle(
+        {"session_id": "sess-bridge", "answer": "A", "last_question": _bridge_echo(issued)}
+    )
+
+    assert result.is_ok
+    recorded = engine.record_response.await_args.args[2]
+    assert recorded == issued
+    assert "fanout_abc123" not in recorded
+    assert marker not in recorded
+
+
+def test_two_declared_appends_cut_at_the_server_s_own_directive() -> None:
+    """When both producers append, the parser must still cut at the server's.
+
+    Declaring the bridge with the shared marker gave the response two markers.
+    The parser takes the last one, which used to be the server's because the
+    bridge wrote none — so with the bridge declared, a naive last-marker read
+    cuts at the *bridge's* notice and leaves the server's own host directive
+    standing inside the text the auto driver answers as the question. That is
+    the failure `_extract_interview_question` exists to prevent, reintroduced
+    by the fix for a different one.
+
+    So each reader names the producers it is asking about: the parser obeys a
+    gate that speaks only for the server's directive, and asks only for that
+    opening; the echo path accepts either, because it removes nothing.
+    """
+    from ouroboros.auto.adapters import _extract_interview_question
+    from ouroboros.mcp.tools.advisory_dispatch import (
+        _BRIDGE_NOTICE_OPENING,
+        _HOST_DIRECTIVE_OPENING,
+        echo_carries_dispatch,
+        split_appended_dispatch,
+    )
+    from ouroboros.mcp.tools.advisory_dispatch import (
+        QUESTION_ADVISORY_DISPATCH_MARKER as marker,
+    )
+
+    question = "How do you define completion?"
+    # On the wire the server renders first and the bridge stamps after it.
+    both = (
+        f"{question}\n\n"
+        f"{marker}\n\n{_HOST_DIRECTIVE_OPENING}spawn 6 subagents:**\n"
+        '```json\n{"lanes": ["data_context"]}\n```\n\n'
+        f"{marker}\n\n{_BRIDGE_NOTICE_OPENING}\n"
+        "[Ouroboros] Dispatched 6 subagents.\n\n"
+        '```json\n{"question_advisory_fanout_id": "fanout_abc123"}\n```'
+    )
+
+    assert split_appended_dispatch(both) == question
+    assert (
+        _extract_interview_question(
+            f"Session sess-1\n\n{both}", session_id="sess-1", dispatch_appended=True
+        )
+        == question
+    )
+    # The echo path still recognises it — it accepts either producer.
+    assert echo_carries_dispatch(both)

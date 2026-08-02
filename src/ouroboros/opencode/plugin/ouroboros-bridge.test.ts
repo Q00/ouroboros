@@ -1,8 +1,8 @@
 // Bun tests for pure helpers in ouroboros-bridge.ts.
 // Run: bun test  (from this directory)
 //
-// Covers: cfg, rand62, id, fnv, build, parse, readText, stamp, notify, dupe,
-//         base, childOutput.
+// Covers: cfg, rand62, id, fnv, build, parse, readText, stamp, stampBridge,
+//         notify, dupe, base, childOutput.
 // I/O + runtime-orchestration (patch/resolveMid/attempt/run/bridge) are
 // covered by Python installer tests and live integration; untested here
 // because they require a live client.
@@ -29,6 +29,8 @@ import {
   markRalphChild,
   notify,
   num,
+  BRIDGE_NOTICE_OPENING,
+  OUROBOROS_DISPATCH_MARKER,
   OuroborosBridge,
   parse,
   parseMetadata,
@@ -36,6 +38,7 @@ import {
   rand62,
   readText,
   stamp,
+  stampBridge,
   timeoutMessage,
 } from "./ouroboros-bridge.ts"
 import {
@@ -1204,5 +1207,118 @@ describe("OuroborosBridge hook — metadata advisory fanout", () => {
     expect(text.startsWith(originalQuestion)).toBe(true)
     expect(text).toContain("Dispatch failed")
     expect(text).toContain("empty sessionID")
+  })
+})
+
+describe("bridge appends declare themselves", () => {
+  // The bridge is a second producer writing into a question the server
+  // rendered. On PLUGIN_PASSIVE the server appends no directive of its own, so
+  // an undeclared bridge append is text a host cannot tell from the question —
+  // it echoes the whole thing back as `last_question` and the server records
+  // the banner, fan-out id included, as what it asked.
+  //
+  // Three paths append: dispatch, dedupe, and pre-dispatch failure. Only the
+  // first was declared when this was found, which is why the declaration now
+  // lives in `stampBridge` rather than at each call site. These tests pin all
+  // three, so a fourth path that bypasses the helper is a failing test.
+  const DECLARATION = `\n\n${OUROBOROS_DISPATCH_MARKER}\n\n${BRIDGE_NOTICE_OPENING}\n`
+
+  function expectDeclaredAfter(text: string, question: string): void {
+    expect(text.startsWith(question)).toBe(true)
+    expect(text.slice(question.length).startsWith(DECLARATION)).toBe(true)
+  }
+
+  function liveCli() {
+    let created = 0
+    return {
+      session: {
+        _client: { patch: async () => ({}) },
+        create: async () => ({ data: { id: `child_${++created}` } }),
+        prompt: async () => ({ data: { parts: [{ type: "text", text: "done" }] } }),
+        abort: async () => ({}),
+        messages: async () => ({
+          data: [
+            {
+              info: { id: "msg_1", role: "assistant" },
+              parts: [{ type: "tool", callID: "call_declared" }],
+            },
+          ],
+        }),
+      },
+    }
+  }
+
+  function questionOutput(question: string) {
+    return {
+      content: [{ type: "text", text: question }],
+      metadata: {
+        session_id: "sess-1",
+        question_advisory_preserve_content: true,
+        question_advisory_subagents: [
+          {
+            tool_name: "ouroboros_interview",
+            title: "Interview advisory: data_context",
+            agent: "general",
+            prompt: "Measure it.",
+          },
+        ],
+      },
+    }
+  }
+
+  const QUESTION = "Session sess-1\n\nHow do you define completion?"
+
+  test("stampBridge declares, with or without a question in front", () => {
+    const withQuestion = { content: [{ type: "text", text: "x" }] }
+    stampBridge(withQuestion, QUESTION, "banner")
+    expectDeclaredAfter(readText(withQuestion), QUESTION)
+
+    // Content replaced outright is entirely ours; it is declared too, so a host
+    // echoing it back is still recognisable rather than recorded as a question.
+    const replaced = { content: [{ type: "text", text: "x" }] }
+    stampBridge(replaced, undefined, "banner")
+    expect(readText(replaced).startsWith(`${OUROBOROS_DISPATCH_MARKER}\n\n`)).toBe(true)
+  })
+
+  test("the dispatch path declares", async () => {
+    _resetDedupe()
+    const plugin = await OuroborosBridge({ client: liveCli(), directory: "/tmp/ouroboros-test" } as never)
+    const hook = (plugin as Record<string, (...args: unknown[]) => Promise<void>>)["tool.execute.after"]
+    const output = questionOutput(QUESTION)
+
+    await hook({ tool: "ouroboros_interview", sessionID: "parent_1", callID: "call_declared" }, output)
+
+    const text = readText(output)
+    expectDeclaredAfter(text, QUESTION)
+    expect(text).toContain("[Ouroboros] Dispatched 1 subagent.")
+  })
+
+  test("the dedupe path declares", async () => {
+    _resetDedupe()
+    const plugin = await OuroborosBridge({ client: liveCli(), directory: "/tmp/ouroboros-test" } as never)
+    const hook = (plugin as Record<string, (...args: unknown[]) => Promise<void>>)["tool.execute.after"]
+    const args = { tool: "ouroboros_interview", sessionID: "parent_1", callID: "call_declared" }
+
+    await hook(args, questionOutput(QUESTION))
+    const second = questionOutput(QUESTION)
+    await hook(args, second)
+
+    const text = readText(second)
+    expectDeclaredAfter(text, QUESTION)
+    expect(text).toContain("Skipped 1 duplicate")
+  })
+
+  test("the pre-dispatch failure path declares", async () => {
+    _resetDedupe()
+    const plugin = await OuroborosBridge({ client: liveCli(), directory: "/tmp/ouroboros-test" } as never)
+    const hook = (plugin as Record<string, (...args: unknown[]) => Promise<void>>)["tool.execute.after"]
+    const output = questionOutput(QUESTION)
+
+    // No sessionID — rejected before any child is created.
+    await hook({ tool: "ouroboros_interview", callID: "call_declared" }, output)
+
+    const text = readText(output)
+    expectDeclaredAfter(text, QUESTION)
+    expect(text).toContain("Dispatch failed")
   })
 })

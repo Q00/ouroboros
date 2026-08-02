@@ -2382,7 +2382,16 @@ class InterviewHandler:
                 # provenance where the answer arrives either way.
                 has_pending = bool(state.rounds) and state.rounds[-1].user_response is None
                 if has_pending:
-                    question_text = last_question or state.rounds[-1].question
+                    # The subprocess path's gatekeeper, asked here too — and this
+                    # is the path the bridge's append actually reaches, since only
+                    # ``PLUGIN_PASSIVE`` lets a second producer stamp the visible
+                    # question. An echo carrying a directive is not a repair.
+                    issued = state.rounds[-1].question
+                    question_text = (
+                        issued
+                        if echo_carries_dispatch(last_question)
+                        else (last_question or issued)
+                    )
                 else:
                     # Fall back to a descriptive placeholder for backward
                     # compatibility (callers that don't supply last_question).
