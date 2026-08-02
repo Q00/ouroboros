@@ -791,6 +791,78 @@ class TestOuroborosTUIActions:
         assert app.check_action("quit", ()) is True
         assert app.check_action("show_logs", ()) is True
 
+    @pytest.mark.asyncio
+    async def test_pause_key_spam_starts_one_request_until_acknowledged(self) -> None:
+        app = OuroborosTUI()
+        release = asyncio.Event()
+
+        async def _blocked_pause(_execution_id: str) -> None:
+            await release.wait()
+
+        callback = AsyncMock(side_effect=_blocked_pause)
+        app.set_pause_callback(callback)
+        app.set_execution("exec_123")
+        message = PauseRequested("exec_123")
+
+        app.on_pause_requested(message)
+        app.on_pause_requested(message)
+        app.on_pause_requested(message)
+        await asyncio.sleep(0)
+
+        callback.assert_awaited_once_with("exec_123")
+        assert app.check_action("pause", ()) is False
+
+        release.set()
+        await asyncio.sleep(0)
+        app._update_state_from_event(
+            BaseEvent(
+                type="orchestrator.session.paused",
+                aggregate_type="session",
+                aggregate_id="sess_123",
+                data={"execution_id": "exec_123"},
+            )
+        )
+
+        assert ("pause", "exec_123") not in app._control_requests
+
+    @pytest.mark.asyncio
+    async def test_control_failure_releases_gate_for_retry(self) -> None:
+        app = OuroborosTUI()
+        callback = AsyncMock(side_effect=RuntimeError("owner unavailable"))
+        app.set_resume_callback(callback)
+        app.set_execution("exec_123")
+        app._state.status = "paused"
+        app._state.is_paused = True
+        message = ResumeRequested("exec_123")
+
+        app.on_resume_requested(message)
+        await asyncio.sleep(0)
+        app.on_resume_requested(message)
+        await asyncio.sleep(0)
+
+        assert callback.await_count == 2
+        assert ("resume", "exec_123") not in app._control_requests
+
+    @pytest.mark.asyncio
+    async def test_session_switch_cancels_pending_control(self) -> None:
+        app = OuroborosTUI()
+        release = asyncio.Event()
+
+        async def _blocked_pause(_execution_id: str) -> None:
+            await release.wait()
+
+        callback = AsyncMock(side_effect=_blocked_pause)
+        app.set_pause_callback(callback)
+        app.set_execution("exec_old")
+        app.on_pause_requested(PauseRequested("exec_old"))
+        await asyncio.sleep(0)
+
+        app.set_execution("exec_new")
+        await asyncio.sleep(0)
+
+        assert not app._control_requests
+        assert app.state.execution_id == "exec_new"
+
 
 class TestOuroborosTUIEventSubscription:
     """Tests for event store subscription."""

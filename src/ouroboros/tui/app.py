@@ -334,6 +334,7 @@ class OuroborosTUI(App[None]):
         self._is_paused = False
         self._pause_callback: Any | None = None
         self._resume_callback: Any | None = None
+        self._control_requests: dict[tuple[str, str], asyncio.Task[None]] = {}
 
     @property
     def state(self) -> TUIState:
@@ -529,12 +530,15 @@ class OuroborosTUI(App[None]):
         elif event_type == "orchestrator.session.completed":
             self._state.status = "completed"
             self._state.is_paused = False
+            self._acknowledge_all_controls(self._state.execution_id)
         elif event_type == "orchestrator.session.failed":
             self._state.status = "failed"
             self._state.is_paused = False
+            self._acknowledge_all_controls(self._state.execution_id)
         elif event_type == "orchestrator.session.cancelled":
             self._state.status = "cancelled"
             self._state.is_paused = False
+            self._acknowledge_all_controls(self._state.execution_id)
         elif event_type == "execution.terminal":
             # Mirror event from the execution stream — ensures TUI sees
             # terminal transitions even when only polling "execution".
@@ -542,9 +546,11 @@ class OuroborosTUI(App[None]):
             if terminal_status in {"completed", "failed", "cancelled", "paused"}:
                 self._state.status = terminal_status
                 self._state.is_paused = terminal_status == "paused"
+                self._acknowledge_all_controls(self._state.execution_id)
         elif event_type == "orchestrator.session.paused":
             self._state.status = "paused"
             self._state.is_paused = True
+            self._acknowledge_control("pause", self._state.execution_id)
         elif event_type in {"orchestrator.progress.updated", "workflow.progress.updated"}:
             # There is no `orchestrator.session.resumed` event, so progress
             # reporting the runtime is executing again is the only signal that
@@ -557,6 +563,7 @@ class OuroborosTUI(App[None]):
             if self._state.status == "paused" and _progress_acknowledges_running(data):
                 self._state.status = "running"
                 self._state.is_paused = False
+                self._acknowledge_control("resume", self._state.execution_id)
         elif event_type == "execution.phase.completed":
             self._state.current_phase = data.get("phase", "")
             self._state.iteration = data.get("iteration", 0)
@@ -612,6 +619,7 @@ class OuroborosTUI(App[None]):
 
     def set_execution(self, execution_id: str, session_id: str = "") -> None:
         """Set the execution to monitor."""
+        self._cancel_control_requests()
         self._execution_id = execution_id
         self._state.execution_id = execution_id
         self._state.session_id = session_id
@@ -662,6 +670,12 @@ class OuroborosTUI(App[None]):
         self._state.session_id = message.session_id
         self._state.status = message.status
         self._state.is_paused = message.status == "paused"
+        if message.status == "paused":
+            self._acknowledge_control("pause", message.execution_id)
+        elif message.status == "running":
+            self._acknowledge_control("resume", message.execution_id)
+        elif message.status in {"completed", "failed", "cancelled"}:
+            self._acknowledge_all_controls(message.execution_id)
         self._forward_to_dashboard("on_execution_updated", message)
 
     def on_phase_changed(self, message: PhaseChanged) -> None:
@@ -1074,7 +1088,10 @@ class OuroborosTUI(App[None]):
         if self._pause_callback is None:
             self._report_control_unavailable("Pause", message.execution_id)
             return
-        asyncio.create_task(self._call_pause_callback(message.execution_id))
+        if not self._begin_control_request(
+            "pause", message.execution_id, self._call_pause_callback(message.execution_id)
+        ):
+            return
         self._state.add_log(
             "info", "tui.control", f"Pause requested for execution {message.execution_id}"
         )
@@ -1088,7 +1105,10 @@ class OuroborosTUI(App[None]):
         if self._resume_callback is None:
             self._report_control_unavailable("Resume", message.execution_id)
             return
-        asyncio.create_task(self._call_resume_callback(message.execution_id))
+        if not self._begin_control_request(
+            "resume", message.execution_id, self._call_resume_callback(message.execution_id)
+        ):
+            return
         self._state.add_log(
             "info", "tui.control", f"Resume requested for execution {message.execution_id}"
         )
@@ -1122,6 +1142,7 @@ class OuroborosTUI(App[None]):
                 if asyncio.iscoroutine(result):
                     await result
             except Exception as e:
+                self._acknowledge_control("pause", execution_id)
                 self._report_control_failure("Pause", e)
 
     async def _call_resume_callback(self, execution_id: str) -> None:
@@ -1131,7 +1152,33 @@ class OuroborosTUI(App[None]):
                 if asyncio.iscoroutine(result):
                     await result
             except Exception as e:
+                self._acknowledge_control("resume", execution_id)
                 self._report_control_failure("Resume", e)
+
+    def _begin_control_request(self, action: str, execution_id: str, request: Any) -> bool:
+        """Start one lifecycle request per action/execution until acknowledged."""
+        key = (action, execution_id)
+        if execution_id != self._state.execution_id or key in self._control_requests:
+            request.close()
+            return False
+        self._control_requests[key] = asyncio.create_task(request)
+        return True
+
+    def _acknowledge_control(self, action: str, execution_id: str) -> None:
+        """Release an in-flight gate after failure or authoritative state."""
+        self._control_requests.pop((action, execution_id), None)
+
+    def _acknowledge_all_controls(self, execution_id: str) -> None:
+        for action in ("pause", "resume"):
+            self._acknowledge_control(action, execution_id)
+
+    def _cancel_control_requests(self) -> None:
+        """Cancel callbacks owned by the previous monitored execution."""
+        requests = tuple(self._control_requests.values())
+        self._control_requests.clear()
+        for request in requests:
+            if not request.done():
+                request.cancel()
 
     @property
     def pause_control_available(self) -> bool:
@@ -1152,20 +1199,41 @@ class OuroborosTUI(App[None]):
         disabled *and* hidden, while ``None`` would leave the key greyed out in
         the footer — still advertised.
         """
-        if action == "pause" and not self.pause_control_available:
-            return False
-        if action == "resume" and not self.resume_control_available:
-            return False
+        execution_id = self._state.execution_id
+        if action == "pause":
+            if (
+                not self.pause_control_available
+                or ("pause", execution_id) in self._control_requests
+            ):
+                return False
+        if action == "resume":
+            if (
+                not self.resume_control_available
+                or (
+                    "resume",
+                    execution_id,
+                )
+                in self._control_requests
+            ):
+                return False
         return super().check_action(action, parameters)
 
     def action_pause(self) -> None:
         # `check_action` already makes the key inert without a connected owner;
         # a request that still gets here is refused by `on_pause_requested`.
-        if self._state.execution_id and not self._state.is_paused:
+        if (
+            self._state.execution_id
+            and not self._state.is_paused
+            and ("pause", self._state.execution_id) not in self._control_requests
+        ):
             self.post_message(PauseRequested(self._state.execution_id))
 
     def action_resume(self) -> None:
-        if self._state.execution_id and self._state.is_paused:
+        if (
+            self._state.execution_id
+            and self._state.is_paused
+            and ("resume", self._state.execution_id) not in self._control_requests
+        ):
             self.post_message(ResumeRequested(self._state.execution_id))
 
     def action_show_dashboard(self) -> None:
