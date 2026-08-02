@@ -1,8 +1,17 @@
-"""Claude Code adapter for LLM completion using Claude Agent SDK.
+"""Claude Code adapter for LLM completion, over the SDK or the CLI.
 
-This adapter uses the Claude Agent SDK to make completion requests,
-leveraging the user's Claude Code Max Plan authentication instead of
-requiring separate API keys.
+This adapter makes completion requests against the user's Claude Code Max Plan
+authentication instead of requiring separate API keys.
+
+It has two transports and prefers the Claude Agent SDK. When the SDK cannot be
+imported it falls back to the ``claude`` CLI in print mode, because the SDK
+requires ``mcp<2.0.0`` while the MCP protocol server requires ``mcp==2.0.0`` --
+so in a server process built from the ``[mcp]`` extra there is no SDK to import
+and the backend could previously generate nothing at all (Q00/ouroboros#1839).
+Policy is shared rather than duplicated: model normalization, turn budget,
+permission vocabulary, retry behavior and empty-response validation are decided
+once and read by both. What differs is the streaming surface -- print mode
+reports once at the end, with no per-turn callbacks or incremental events.
 
 Usage:
     adapter = ClaudeCodeAdapter()
@@ -140,15 +149,19 @@ def _claude_options_field_names() -> frozenset[str]:
 
 
 class ClaudeCodeAdapter:
-    """LLM adapter using Claude Agent SDK (Claude Code Max Plan).
+    """LLM adapter for Claude Code Max Plan, over the SDK or the CLI.
 
-    This adapter provides the same interface as LiteLLMAdapter but uses
-    the Claude Agent SDK under the hood. This allows users to leverage
-    their Claude Code Max Plan subscription without needing separate API keys.
+    This adapter provides the same interface as LiteLLMAdapter but uses the
+    user's Claude Code subscription under the hood, so no separate API key is
+    needed. It prefers the Claude Agent SDK and falls back to the ``claude`` CLI
+    when the SDK is not importable -- see the module docstring for why that
+    happens and what the fallback does and does not carry.
 
     Attributes:
         cli_path: Path to the Claude CLI binary. If not set, the SDK will
             use its bundled CLI. Set this to use a custom/instrumented CLI.
+            Also the binary the fallback transport runs; with no SDK and no
+            configured path, completion fails naming both.
 
     Example:
         adapter = ClaudeCodeAdapter()
@@ -866,6 +879,10 @@ class ClaudeCodeAdapter:
         the first time one of them appears.
         """
         run_once = single_attempt or self._execute_single_request_positional
+        # Name the transport that actually failed. Reporting an SDK failure from
+        # a process that has no SDK sends the reader to the wrong diagnosis --
+        # and that misdirection is the exact shape of the bug this PR fixes.
+        transport_name = "Claude Agent SDK" if single_attempt is None else "claude CLI"
         last_error: ProviderError | None = None
         effective_system_prompt = system_prompt
         phantom_recovery_used = False
@@ -968,7 +985,7 @@ class ClaudeCodeAdapter:
                         backoff_seconds=backoff,
                     )
                     last_error = ProviderError(
-                        message=f"Claude Agent SDK request failed: {e}",
+                        message=f"{transport_name} request failed: {e}",
                         details={"error_type": error_type, "attempt": attempt + 1},
                     )
                     await asyncio.sleep(backoff)
@@ -981,7 +998,7 @@ class ClaudeCodeAdapter:
                 )
                 return Result.err(
                     ProviderError(
-                        message=f"Claude Agent SDK request failed: {e}",
+                        message=f"{transport_name} request failed: {e}",
                         details={"error_type": error_type},
                     )
                 )

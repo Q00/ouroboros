@@ -2814,6 +2814,35 @@ class TestCLIFallbackWhenSDKAbsent:
         assert result.is_err
         assert "Empty response" in result.error.message
 
+    def test_a_failure_names_the_transport_that_actually_failed(self) -> None:
+        """Blaming the SDK from a process without one is the original bug's shape.
+
+        A malformed-but-parseable envelope raises inside the CLI path and lands
+        in the shared exception handler. Naming the SDK there would send the
+        reader to `pip install claude-agent-sdk` — advice that cannot help in
+        the process where this transport is the one being used.
+        """
+        adapter = self._adapter()
+        malformed = b'{"is_error":false,"result":"ok","usage":{"input_tokens":"not-a-number"}}'
+        with (
+            patch.dict("sys.modules", {"claude_agent_sdk": None}),
+            patch("asyncio.sleep", new=AsyncMock()),
+            patch(
+                "asyncio.create_subprocess_exec",
+                new=AsyncMock(side_effect=lambda *_a, **_k: self._proc(malformed)),
+            ),
+        ):
+            result = asyncio.run(
+                adapter.complete(
+                    [Message(role=MessageRole.USER, content="ping")],
+                    CompletionConfig(model="claude-haiku-4-5"),
+                )
+            )
+
+        assert result.is_err
+        assert "claude CLI request failed" in result.error.message
+        assert "Claude Agent SDK" not in result.error.message
+
     def test_a_model_id_is_normalized_the_same_way_on_both_transports(self) -> None:
         """`anthropic/...` is valid config the SDK strips; raw it fails the CLI."""
         payload = b'{"is_error":false,"result":"ok","stop_reason":"end_turn"}'
