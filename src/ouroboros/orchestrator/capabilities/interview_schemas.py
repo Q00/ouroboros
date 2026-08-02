@@ -443,14 +443,39 @@ DATA_NO_EVIDENCE_REASONS: tuple[str, ...] = (
 #: whitespace back is what makes a sentence, and a query, spellable again.
 _DATA_IDENTIFIER_PATTERN = r"^[A-Za-z0-9_.:\-]{1,128}$"
 
+#: An ISO-8601 instant, constrained by pattern rather than by ``format``.
+#: ``format`` is annotation-only under Draft 2020-12 unless a validator opts in,
+#: so a contract that relied on it would be stating a rule nothing enforced --
+#: the failure mode this file has hit twice already.
+_ISO_8601_INSTANT_PATTERN = r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$"
+
+#: How many grouped numbers one measurement may carry. Four group_by keys can
+#: produce arbitrarily many groups, and "an aggregate" stops being one somewhere
+#: before the row count. The bound is where that line is drawn.
+_DATA_VALUES_MAX_ITEMS = 20
+
 
 def _interview_data_read_request_schema() -> dict[str, Any]:
-    """Return the schema for one proposed, unexecuted data read.
+    """Return the schema for one measurement this lane took.
 
-    The request names *what to measure* rather than how to fetch it: there is no
-    query string here, and the confirmation surface renders these fields so the
-    user sees the measurement before approving it rather than a dialect they
-    would have to read.
+    The read still names *what was measured* rather than how it was fetched:
+    there is no query string here, and the surface that shows the number beside
+    the question renders these fields, so the user reads the measurement rather
+    than a dialect they would have to interpret.
+
+    ``values`` and ``observed_at`` are what changed when the lane was allowed to
+    execute (Q00/ouroboros#1825). Before, the absence of a value field was the
+    barrier: a child that ran a lookup had nowhere to put the result. That
+    barrier is retired because it was aimed at the wrong thing -- what #1754 set
+    out to stop was a guess becoming the Seed's evidence, and execution was the
+    heavy instrument reached for to get it. The guard that actually holds is
+    downstream and unchanged: nothing here becomes an interview answer, a
+    requirement, or durable state.
+
+    ``observed_at`` is required rather than optional because a measurement is
+    point-in-time and a Seed is not. A number shown without its moment outlives
+    the fact it described, and the child is the only party that knows when it
+    ran.
     """
     return {
         "type": "object",
@@ -461,6 +486,8 @@ def _interview_data_read_request_schema() -> dict[str, Any]:
             "metric",
             "aggregation",
             "informs_decision",
+            "observed_at",
+            "values",
         ],
         "properties": {
             "operation": {
@@ -533,9 +560,44 @@ def _interview_data_read_request_schema() -> dict[str, Any]:
                 "minLength": 1,
                 "maxLength": 400,
                 "description": (
-                    "The interview decision this number would inform. A read "
-                    "that cannot name one is not worth the user's confirmation."
+                    "The interview decision this number informs. A read that "
+                    "cannot name one is not worth the user's attention."
                 ),
+            },
+            "observed_at": {
+                "type": "string",
+                "pattern": _ISO_8601_INSTANT_PATTERN,
+                "description": "ISO-8601 instant at which you ran this read.",
+            },
+            "values": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": _DATA_VALUES_MAX_ITEMS,
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["value"],
+                    "properties": {
+                        "group": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 120,
+                            "description": (
+                                "Category this number belongs to, one per "
+                                "group_by key. Omit when the read is ungrouped."
+                            ),
+                        },
+                        "value": {
+                            "type": "number",
+                            "description": (
+                                "The aggregate. Only a number fits: a row, a "
+                                "name, or an error is a NoMeasurementNeeded "
+                                "answer instead."
+                            ),
+                        },
+                    },
+                },
+                "description": "What the aggregation returned.",
             },
         },
     }
@@ -546,59 +608,67 @@ def _interview_data_evidence_answer_contract() -> dict[str, Any]:
 
     Four properties this schema holds by shape rather than by rule.
 
-    **The child does not classify the tool it names.** There is no
-    ``source_class`` here. Whoever knows a tool is who classifies it, and that
-    is the rule the sibling lanes already follow: ``code_context`` runs on
-    ``Read`` / ``Glob`` / ``Grep``, which the server hands the child *with*
-    their ``mutation_class`` read out of ``_BUILTIN_SEMANTICS``, so the child
-    picks from a list rather than rating anything; ``web_context`` names no tool
-    at all. Only ``data_context`` reaches tools the server has never seen --
-    a host's warehouse, its Metabase, its analytics MCP -- which is exactly why
-    this lane proposes and the host executes.
+    **The child does not classify the tool it names, and now runs it anyway.**
+    There is no ``source_class`` here, and the reason is unchanged: whoever
+    knows a tool is who classifies it. That is the rule the sibling lanes
+    follow -- ``code_context`` runs on ``Read`` / ``Glob`` / ``Grep``, handed to
+    the child *with* their ``mutation_class`` read out of ``_BUILTIN_SEMANTICS``
+    so it picks from a list rather than rating anything, and ``web_context``
+    names no tool at all. Only ``data_context`` reaches tools the server has
+    never seen: a host's warehouse, its Metabase, its analytics MCP.
 
-    A child-asserted class had the untrusted party rating the risk of a tool it
-    knows only by name, and the host was told to warn about cost from that
-    rating. ``operation: "read"`` is a label on the request, not a constraint on
-    the tool, so a metered warehouse call could arrive labelled a free local
-    read and the warning would simply not be given. RFC #1754 already ruled on
-    this: "a tool's name cannot prove it is read-only [...] a child judging
-    'obviously local, free, read-only' from names and descriptions is not a
-    boundary."
+    That asymmetry used to be the argument for this lane proposing while the
+    host executed. It no longer is (Q00/ouroboros#1825). ``operation: "read"``
+    is still a label on the request rather than a constraint on the tool, and
+    RFC #1754's finding still holds -- "a tool's name cannot prove it is
+    read-only [...] a child judging 'obviously local, free, read-only' from
+    names and descriptions is not a boundary." What changed is what follows
+    from it. The confirmation gate it justified could not price what it was
+    gating: MCP carries no cost or mutation metadata, so the host had nothing
+    true to disclose, and a disclaimer attached to every read is a thing users
+    learn to click through. It bought a round trip and a worse answer.
 
-    Removing the field does not move the rating to the host, because there is
-    nowhere to move it to: MCP carries no cost or mutation metadata, so a host
-    told to disclose one would be manufacturing it, and a disclaimer on every
-    read is a thing users learn to click through. What is left is what was
-    load-bearing all along -- the user installed these tools, the whole request
-    including the tool name is rendered, and nothing runs until they confirm
-    that specific request. ``skills/interview/SKILL.md`` carries that duty.
+    So the risk is accepted rather than mitigated by ceremony, and stated here
+    so it is accepted knowingly: a metered warehouse call or a write can arrive
+    named like a free local read, and this lane will make it. The standing
+    consent is the same one every other advisory lane already runs on -- the
+    user registered the MCP server, and registering it is the willingness to
+    have it called. What made this lane different was never the tools; it was
+    that this lane alone was asked to hold the line in prose.
 
-    **A measurement cannot be reported as a measurement.** There is no field for
-    an observed value, a row, or a timestamp of observation -- only proposals --
-    so a child that ran a lookup has no way to hand the result back *as a
-    result*, and no consumer can read one out of this shape.
+    **A measurement can be reported, and still cannot become the answer.**
+    ``values`` and ``observed_at`` exist now. A child that ran a lookup hands
+    the aggregate back, stamped with when it ran.
 
-    Say that precisely, because the stronger sentence is not true. Every field
-    that had a shape now has one: ``no_evidence_reason`` is a choice from
-    ``DATA_NO_EVIDENCE_REASONS`` rather than a sentence, and ``tool_name``,
-    ``group_by`` and a filter's ``field`` are identifiers, so a query cannot be
-    spelled in them. What is left free is ``metric``, ``informs_decision`` and a
-    filter's ``value`` -- the fields whose entire purpose is to be read by the
-    user before they approve the read. Any string a human must read can contain
-    a number, and looking for one is the search that ten rounds of #1703 showed
-    does not converge; a ``caveats`` array was removed rather than watched for
-    exactly this reason.
+    The shape still refuses everything that is not an aggregate. ``value`` is a
+    number, so a row, a name, an identifier, or an error message has no
+    representation and a result that is one of those is a
+    ``NoMeasurementNeeded`` answer instead. ``group_by`` keys are identifiers
+    and ``values`` is bounded, because grouped numbers without a bound are a row
+    list wearing an aggregate's name.
 
-    So the boundary is not that prose cannot mention a number. It is that
-    nothing here becomes an interview answer, a requirement, or durable state:
-    the user answers in their own words, ``[from-data]`` is withheld from
-    extraction, and the record keeps no child-authored content
-    (Q00/ouroboros#1754).
+    What the missing value field was protecting is not the schema, and never
+    was. RFC #1754 opens on it: "an interview question whose honest answer is a
+    number got a guess, and the guess became the Seed's evidence." The guard
+    against that is downstream and untouched -- the user answers in their own
+    words, there is no ``[from-data]`` answer path, ``[from-data]`` is withheld
+    from requirement extraction on every generation path, and the record keeps
+    no child-authored content. A number reaches the user's judgment and stops
+    there. Withholding the number too was the heavier instrument, and it made
+    the guess more likely rather than less.
+
+    The free-text fields keep the property they had: ``metric``,
+    ``informs_decision`` and a filter's ``value`` are read by a human, so they
+    can contain a number, and looking for one is the search ten rounds of #1703
+    showed does not converge -- a ``caveats`` array was removed rather than
+    watched for exactly this reason. That was never the boundary. The boundary
+    is that nothing here becomes an interview answer, a requirement, or durable
+    state.
 
     **An answer is one of two states, and cannot be between them.** The schema
     is a ``oneOf`` over two closed objects rather than one object with
-    conditions: ``NoMeasurementNeeded`` carries a reason and no reads,
-    ``MeasurementProposed`` carries reads and has no field for a reason.
+    conditions: ``NoMeasurementNeeded`` carries a reason and no measurements,
+    ``MeasurementTaken`` carries measurements and has no field for a reason.
 
     It was the other shape first, and that shape leaked. One object with
     ``if``/``then`` pairs constrains only the fields each pair names, so a field
@@ -643,8 +713,10 @@ def _interview_data_evidence_answer_contract() -> dict[str, Any]:
             "data_needed": {
                 "const": False,
                 "description": (
-                    "The honest answer to this question is not a measurement. "
-                    "Decided from the question text before any tool call."
+                    "No measurement is carried. Either the question's honest "
+                    "answer is not one, or nothing reachable here can take it "
+                    "-- which is why the reason is a separate field, and why "
+                    "the lane looks at what this host exposes before deciding."
                 ),
             },
             "read_requests": {"type": "array", "maxItems": 0},
@@ -659,8 +731,8 @@ def _interview_data_evidence_answer_contract() -> dict[str, Any]:
             },
         },
     }
-    proposal_state: dict[str, Any] = {
-        "title": "MeasurementProposed",
+    measured_state: dict[str, Any] = {
+        "title": "MeasurementTaken",
         "type": "object",
         "additionalProperties": False,
         "required": ["question_identity", "lane_id", "data_needed", "read_requests"],
@@ -669,7 +741,9 @@ def _interview_data_evidence_answer_contract() -> dict[str, Any]:
             "lane_id": {"const": "data_context"},
             "data_needed": {
                 "const": True,
-                "description": "The honest answer to this question is a measurement.",
+                "description": (
+                    "The honest answer to this question is a measurement, and it was taken."
+                ),
             },
             "read_requests": {
                 "type": "array",
@@ -679,7 +753,7 @@ def _interview_data_evidence_answer_contract() -> dict[str, Any]:
             },
         },
     }
-    answer_schema: dict[str, Any] = {"oneOf": [no_op_state, proposal_state]}
+    answer_schema: dict[str, Any] = {"oneOf": [no_op_state, measured_state]}
     return {
         "contract_id": "data_evidence_answer.v1",
         "scope": "single_interview_question_data_evidence",
@@ -703,22 +777,23 @@ def _interview_data_evidence_answer_contract() -> dict[str, Any]:
         "runtime_instruction": (
             "Find out which data tools this host exposes before you judge, then "
             "decide whether the question's honest answer is a measurement you "
-            "could reach through them. The order is load-bearing: measurability "
+            "can reach through them. The order is load-bearing: measurability "
             "is a property of the question and the environment together, and "
             "no_data_tool_available is a fact about the host that the question's "
             "wording cannot establish. If the answer is not a measurement, or "
-            "nothing available can measure it, return data_needed=false with "
-            "whichever reason is true and stop -- that is a complete answer. If "
-            "it is reachable, name the reads you "
-            "would run and return them as read_requests. Do not run them: the "
-            "parent session runs a read only after the user confirms it, and "
-            "there is no field in this contract for a value you fetched. "
+            "nothing available can take it, return data_needed=false with "
+            "whichever reason is true and stop -- that is a complete answer. "
+            "If it is reachable, take the measurement and return it: describe "
+            "what you measured, carry the aggregate in values, and stamp "
+            "observed_at with when you ran it. "
             "Only aggregates can be carried: group by categories, never by an "
             "identifier, and when the honest answer would be a row list, a name, "
             "an identifier, or an error message, that is data_needed=false with "
             "a reason rather than evidence. "
             "Whatever the numbers show, the interview answer is the user's own "
-            "words, never yours."
+            "words, never yours. Your numbers are material for their judgment "
+            "and stop there -- that is the whole of the boundary now, so do not "
+            "phrase a finding as the answer."
         ),
     }
 

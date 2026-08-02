@@ -1352,13 +1352,15 @@ def build_interview_question_advisory_subagents(
         seen.add(lane_id)
 
         persona = str(raw_lane.get("persona") or "").strip()
-        # ``read_data`` is deliberately absent from the researcher set. The
-        # other two capabilities exist to go and find things out; this one
-        # exists to name what it would measure and then stop, so asking the host
-        # for its investigating persona would ask for the opposite of the lane's
-        # contract (#1754).
+        # ``read_data`` joins the researcher set (#1825). It was held out of it
+        # while the lane named what it would measure and then stopped -- asking
+        # for an investigating persona would have asked for the opposite of its
+        # contract. The lane executes now, so it goes and finds things out like
+        # the other two, and the persona that matches is the one they get.
         agent = persona or (
-            "researcher" if capability in {"inspect_code", "web_research"} else "general"
+            "researcher"
+            if capability in {"inspect_code", "web_research", "read_data"}
+            else "general"
         )
         purpose = str(raw_lane.get("purpose") or "Help answer the interview question.").strip()
         required = bool(raw_lane.get("required"))

@@ -23,22 +23,24 @@ export const ID_LEN = 26
 export const BYPASS_PERMISSION_RULESET = [
   { permission: "*", pattern: "*", action: "allow" },
 ] as const
-// A proposal-only child names the lookups it would run and runs none of them.
-// Its answer contract has no field for a fetched value, so a call it makes
-// anyway is pure cost and pure risk — a metered query billed, an external
-// service touched, before the user has confirmed anything.
+// The `read_data` child used to be created with `*:* deny`, because its answer
+// contract had no field for a fetched value and a call it made anyway was pure
+// cost before the user had confirmed anything. That reasoning was sound for the
+// contract it defended and the contract changed: the lane executes and carries
+// aggregates now (Q00/ouroboros#1825).
 //
-// On the transports where the HOST spawns the child (Claude Code, Codex),
-// Ouroboros supplies a prompt and nothing else; the contract is the only lever
-// it has. Here it is not: this plugin creates the child session itself and
-// hands it a permission ruleset. Handing that child `*:* allow` while telling
-// it not to execute would put the whole barrier in prose on the one transport
-// where it does not have to be.
-export const PROPOSAL_ONLY_PERMISSION_RULESET = [
-  { permission: "*", pattern: "*", action: "deny" },
-] as const
-// Capability of the lane whose contract forbids execution (Q00/ouroboros#1754).
-export const PROPOSAL_ONLY_CAPABILITY = "read_data"
+// So the denial is removed rather than narrowed. Leaving it would recreate the
+// defect it was part of, mirrored — a child told to take the measurement on a
+// transport where every call is refused, which cannot report "I was blocked"
+// because no `no_evidence_reason` means that, and would report
+// `no_data_tool_available` instead. That is a confident falsehood about the
+// user's environment, which is worse than the mistaken verdict this all began
+// with.
+//
+// What replaces it is what the sibling lanes already run on: the user
+// registered these tools, and registering one is the willingness to have it
+// called. The boundary that survives is downstream of every transport — a
+// number is material for the user's judgment and never the interview answer.
 export function num(v: string | undefined, d: number): number {
   const n = !v ? d : Number(v)
   return Number.isFinite(n) && n >= 0 ? n : d
@@ -105,7 +107,6 @@ interface Sub {
   truncated: boolean
   hash: string
   timeout?: ChildTimeout
-  proposalOnly: boolean
 }
 
 interface Raw {
@@ -114,7 +115,6 @@ interface Raw {
   agent?: string
   prompt: string
   timeout?: unknown
-  context?: { capability?: unknown }
 }
 
 interface ChildTimeout {
@@ -162,9 +162,6 @@ export function build(p: unknown, idx: number): Sub | null {
     truncated,
     hash: fnv(prompt),
     timeout: parseChildTimeout(r.timeout),
-    // Read from the same context field the child's own prompt is built from,
-    // so what the child is told and what it is permitted cannot disagree.
-    proposalOnly: r.context?.capability === PROPOSAL_ONLY_CAPABILITY,
   }
 }
 
@@ -530,7 +527,7 @@ async function dispatch(cli: Cli, b: Base, pid: string, mid: string, s: Sub): Pr
     body: {
       parentID: pid,
       title: s.title,
-      permission: s.proposalOnly ? PROPOSAL_ONLY_PERMISSION_RULESET : BYPASS_PERMISSION_RULESET,
+      permission: BYPASS_PERMISSION_RULESET,
     },
   })
   const childID = created?.data?.id

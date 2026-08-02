@@ -70,12 +70,12 @@ def _answer_states() -> dict[str, dict[str, Any]]:
     return {branch["title"]: branch for branch in schema["oneOf"]}
 
 
-def _proposal_state() -> dict[str, Any]:
-    return _answer_states()["MeasurementProposed"]
+def _measured_state() -> dict[str, Any]:
+    return _answer_states()["MeasurementTaken"]
 
 
 def _read_request_schema() -> dict[str, Any]:
-    return _proposal_state()["properties"]["read_requests"]["items"]
+    return _measured_state()["properties"]["read_requests"]["items"]
 
 
 # --------------------------------------------------------------------------- #
@@ -88,10 +88,10 @@ def test_lane_is_dispatched_required_with_its_contract() -> None:
 
     assert payload["context"]["capability"] == "read_data"
     assert payload["context"]["required"] is True
-    # Not the investigating persona: the other research lanes exist to go and
-    # find things out, and this one exists to name what it would measure and
-    # then stop. Asking for `researcher` would ask for the opposite.
-    assert payload["agent"] != "researcher"
+    # The investigating persona, like its research siblings. It was held out of
+    # that set while the lane named reads and stopped; the lane executes now
+    # (#1825), so asking for `researcher` asks for what it actually does.
+    assert payload["agent"] == "researcher"
     # The contract must arrive whole: a child validated field-for-field at
     # re-entry cannot satisfy a schema it was shown half of.
     assert "data_evidence_answer.v1" in payload["prompt"]
@@ -179,6 +179,8 @@ def test_a_name_in_the_source_cannot_be_spelled_as_a_query(field: str) -> None:
         "metric": "enterprise accounts",
         "aggregation": "count",
         "informs_decision": "whether SSO ships first",
+        "observed_at": "2026-08-02T06:00:00Z",
+        "values": [{"value": 41}],
     }
     if field == "tool_name":
         request["tool_name"] = injected
@@ -231,6 +233,8 @@ def test_a_request_the_parent_would_have_to_finish_cannot_be_proposed(
             "metric": "request latency",
             "aggregation": "average",
             "informs_decision": "whether the p95 target is met",
+            "observed_at": "2026-08-02T06:00:00Z",
+            "values": [{"value": 41}],
             **request_patch,
         }
     ]
@@ -251,6 +255,8 @@ def test_the_complete_forms_of_those_requests_are_accepted() -> None:
             "metric": "request latency",
             "aggregation": "p95",
             "informs_decision": "whether the p95 target is met",
+            "observed_at": "2026-08-02T06:00:00Z",
+            "values": [{"value": 41}],
             "filters": [
                 {"field": "day", "comparator": "gte", "value": "2026-01-01"},
                 {"field": "day", "comparator": "lte", "value": "2026-03-31"},
@@ -282,6 +288,8 @@ def test_the_two_answer_states_are_exclusive() -> None:
                 "metric": "enterprise accounts",
                 "aggregation": "count",
                 "informs_decision": "whether SSO ships first",
+                "observed_at": "2026-08-02T06:00:00Z",
+                "values": [{"value": 41}],
             }
         ],
     }
@@ -312,6 +320,8 @@ def test_neither_state_can_borrow_the_other_state_s_fields() -> None:
         "metric": "enterprise accounts",
         "aggregation": "count",
         "informs_decision": "whether SSO ships first",
+        "observed_at": "2026-08-02T06:00:00Z",
+        "values": [{"value": 41}],
     }
     states = {
         "no_op": {
@@ -338,7 +348,7 @@ def test_neither_state_can_borrow_the_other_state_s_fields() -> None:
     branches = _answer_states()
     owned = {
         title: set(state["properties"]) - set(branches["NoMeasurementNeeded"]["properties"])
-        | set(state["properties"]) - set(branches["MeasurementProposed"]["properties"])
+        | set(state["properties"]) - set(branches["MeasurementTaken"]["properties"])
         for title, state in branches.items()
     }
     assert owned["NoMeasurementNeeded"], "the states must differ, or oneOf decides nothing"
@@ -378,6 +388,8 @@ def test_the_child_has_no_field_in_which_to_rate_a_tool() -> None:
             "metric": "accounts",
             "aggregation": "count",
             "informs_decision": "whether SSO ships first",
+            "observed_at": "2026-08-02T06:00:00Z",
+            "values": [{"value": 41}],
             "source_class": "local",
         }
     ]
@@ -403,6 +415,8 @@ def test_a_fetched_value_has_nowhere_to_go() -> None:
             "metric": "accounts requesting SSO",
             "aggregation": "count",
             "informs_decision": "whether SSO belongs in the paid tier",
+            "observed_at": "2026-08-02T06:00:00Z",
+            "values": [{"value": 41}],
         }
     ]
     answer.pop("no_evidence_reason")
@@ -425,6 +439,8 @@ def test_a_write_cannot_be_proposed() -> None:
             "metric": "accounts",
             "aggregation": "count",
             "informs_decision": "n/a",
+            "observed_at": "2026-08-02T06:00:00Z",
+            "values": [{"value": 41}],
         }
     ]
 
@@ -441,6 +457,8 @@ def test_no_op_and_evidence_cannot_both_be_claimed() -> None:
             "metric": "accounts",
             "aggregation": "count",
             "informs_decision": "pricing tier",
+            "observed_at": "2026-08-02T06:00:00Z",
+            "values": [{"value": 41}],
         }
     ]
 
@@ -979,6 +997,8 @@ def _fully_populated_proposal(identity: str) -> dict[str, Any]:
                 "filters": [{"field": "region", "comparator": "eq", "value": "emea"}],
                 "time_window": "last 90 days",
                 "informs_decision": "whether SSO ships in the first milestone",
+                "observed_at": "2026-08-02T06:00:00Z",
+                "values": [{"value": 41}],
             }
         ],
     }
@@ -1017,12 +1037,18 @@ def test_the_host_receives_every_read_request_field_verbatim(tmp_path: Any) -> N
     assert delivered["output"] == proposal
 
 
-def test_the_confirmation_instruction_asks_for_the_whole_request() -> None:
-    """Both copies of the host contract, because only one of them ships to each.
+def test_the_surviving_boundary_is_stated_in_both_host_contracts() -> None:
+    """Both copies, because only one of them ships to each host.
 
     `skills/` is the canonical source and the wheel's payload;
     `.claude-plugin/skills/` is what a marketplace install reads. An instruction
     present in one and absent from the other is absent for half the hosts.
+
+    What each must carry changed with the lane. There is no confirmation
+    surface to describe any more, and correspondingly less standing between a
+    measurement and the Seed: the host putting the number beside the question
+    rather than into the answer is now the whole of it, so that is the sentence
+    that has to be in both.
     """
     from pathlib import Path
 
@@ -1032,10 +1058,13 @@ def test_the_confirmation_instruction_asks_for_the_whole_request() -> None:
         root / ".claude-plugin" / "skills" / "interview" / "SKILL.md",
     ):
         content = skill.read_text(encoding="utf-8")
-        assert "every field the object carries" in content, skill
-        # The partial list this replaced: naming a subset is what let two
-        # requests differing by a filter render identically.
-        assert "(metric, aggregation, grouping, time window, source class)" not in content, skill
+        assert "there is no `[from-data]` answer to" in content, skill
+        assert "material for the user's" in content, skill
+        # A measurement without its moment is read later as a standing fact.
+        assert "observed_at" in content, skill
+        # The retired gate: leaving it would have hosts waiting to confirm a
+        # read that already ran.
+        assert "Run a read only after the user confirms" not in content, skill
 
 
 # --------------------------------------------------------------------------- #
@@ -1398,3 +1427,31 @@ def test_the_contract_instruction_agrees_with_the_lane_task() -> None:
     assert "before you judge" in instruction
     assert "no_data_tool_available" in instruction
     assert "from the question text alone" not in instruction
+
+
+def test_the_rendered_contract_fits_inside_its_own_bound() -> None:
+    """A truncated contract is not a smaller contract — it is an unsatisfiable one.
+
+    The child is validated field-for-field at re-entry, and this lane is
+    `required: true`, so a contract cut mid-render cannot be answered and the
+    fan-out cannot complete at all. The bound exists to stop a runaway contract
+    from crowding out the question; it is a backstop, and a legitimate contract
+    must never reach it.
+
+    Pinned with headroom rather than at the exact size, because a bound met
+    exactly is one the next field breaks.
+    """
+    import json
+
+    from ouroboros.mcp.tools.advisory_prompts import _INTERVIEW_DATA_CONTRACT_MAX_JSON_CHARS
+
+    rendered = json.dumps(
+        interview_data_evidence_answer_contract(),
+        ensure_ascii=False,
+        sort_keys=True,
+        indent=2,
+    )
+
+    assert len(rendered) < _INTERVIEW_DATA_CONTRACT_MAX_JSON_CHARS
+    # And the prompt the child actually receives shows it whole.
+    assert "[truncated]" not in _data_payload()["prompt"]

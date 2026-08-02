@@ -13,6 +13,15 @@ obeyed one half and was rejected — or, worse, quietly declined — for obeying
 So the halves are kept together: co-location is not agreement, but it puts the
 disagreement in front of whoever edits either one.
 
+The second of those was repaired twice. Letting the lane discover made the two
+halves agree, and the agreed position was still wrong: a lane that may look but
+not call buys a user round trip and returns less than the sibling lanes that
+simply ran. What #1754 set out to stop was a guess becoming the Seed's evidence,
+and a ban on execution was the heavy instrument reached for to get it — it made
+the guess likelier, not rarer. The lane executes now (Q00/ouroboros#1825), and
+the boundary that survives is the one that was doing the work all along: a
+number is material for the user's judgment and never the interview answer.
+
 Extracted from ``mcp/tools/subagent.py`` (Q00/ouroboros#1754), which keeps
 re-exports for its existing importers.
 """
@@ -25,7 +34,15 @@ from typing import Any
 
 #: A rendered answer contract is the largest thing in an advisory prompt, so it
 #: is bounded rather than allowed to crowd out the question it is about.
-_INTERVIEW_DATA_CONTRACT_MAX_JSON_CHARS = 8_000
+#:
+#: The bound must stay above the contract it renders, which is why it moved when
+#: the contract grew a place for measured values (Q00/ouroboros#1825). A child
+#: is validated field-for-field at re-entry, so a truncated contract is not a
+#: smaller contract — it is one nothing can satisfy, and the lane is required,
+#: so the fan-out then cannot complete at all. Truncation still exists for a
+#: contract that runs away entirely; it is a backstop, not a budget, and a
+#: legitimate contract must never reach it.
+_INTERVIEW_DATA_CONTRACT_MAX_JSON_CHARS = 16_000
 
 
 def _bounded_json(value: Any, max_chars: int) -> str:
@@ -97,14 +114,14 @@ def _data_context_lane_task() -> str:
     makes the disagreement visible to whoever edits either half.
     """
     return (
-        "First find out which data tools this host exposes — a read-only "
-        "capability check, not a call. THEN decide whether the question's "
-        "honest answer is a measurement you could actually reach. A question "
-        "nothing available can measure is data_needed=false with "
-        "no_data_tool_available; a question that is not asking for a number is "
-        "not_a_measurement. Either is a complete answer, and they are not "
-        "interchangeable. If it is reachable, name the reads that would inform "
-        "it and return them as read_requests. Do NOT call a data tool."
+        "First find out which data tools this host exposes. THEN decide whether "
+        "the question's honest answer is a measurement you can reach through "
+        "them. A question nothing available can measure is data_needed=false "
+        "with no_data_tool_available; a question that is not asking for a "
+        "number is not_a_measurement. Either is a complete answer, and they are "
+        "not interchangeable. If it IS reachable, take the measurement: run the "
+        "read, carry the aggregate back in values, and stamp observed_at with "
+        "when you ran it."
     )
 
 
@@ -118,10 +135,9 @@ def _data_context_lane_brief(answer_contract: Any) -> str:
     the answer).
     """
     contract_json = _bounded_json(answer_contract, _INTERVIEW_DATA_CONTRACT_MAX_JSON_CHARS)
-    return f"""Find out which data tools this host exposes before you judge anything else.
-Discovery is a capability check; calling one is not yours to do. Every lookup
-you would run is returned as a read_request and the parent session runs it only
-after the user confirms it.
+    return f"""Find out which data tools this host exposes before you judge anything else,
+then use them. You may call them: the user registered these tools, and
+registering one is the willingness to have it called.
 
 That order is the point, not a formality. Whether a question's honest answer is
 a measurement depends on what is reachable here, not on the question's grammar:
@@ -133,19 +149,25 @@ about this host that you cannot establish without looking — reporting
 not_a_measurement in its place tells the user their question was the wrong
 shape, when what they needed to hear was that no data path is connected.
 
-Your output is material for the user's judgment, never the answer. Whatever a
-number would show, the interview answer is the user's own words.
+Your output is material for the user's judgment, never the answer. This is the
+whole of the boundary now that you carry real numbers, so it is the one line to
+hold: the interview answer is the user's own words, whatever your numbers show.
+Put the measurement beside the question, not in place of it, and never write a
+finding in the shape of a decision the user has not made.
 
-Only aggregates can be carried. If the honest answer is a row list, a name, an
-identifier, or an error message, that is data_needed=false with one of the
-listed reasons — not evidence. Grouping keys must be categorical; grouping by an
+Only aggregates can be carried. If what you measured is a row list, a name, an
+identifier, or an error message, that is data_needed=false with one of the listed
+reasons — not evidence. Grouping keys must be categorical; grouping by an
 identifier is a row list wearing an aggregate's clothes.
 
-metric and informs_decision are read by the user before they approve the read,
-so write what you would say to them: name the thing measured and the decision it
-serves. They are not a place to report a number, a row, an address, or a query —
-nothing you write there is an answer, and a value put there is one the user was
-never offered the chance to confirm.
+Stamp observed_at with when you actually ran the read. A measurement is
+point-in-time and a Seed is not, and you are the only party that knows the
+moment; a number that outlives its moment is read later as a standing fact.
+
+metric and informs_decision are read by the user beside your numbers, so write
+what you would say to them: name the thing measured and the decision it serves.
+Put the number in values, where it belongs — a figure narrated in prose is one
+no consumer can find, bound, or date.
 
 ## Answer Contract (data_evidence_answer.v1)
 ```json

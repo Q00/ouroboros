@@ -192,7 +192,7 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
    - `web_context` — browse/search only when current external facts genuinely
      affect the answer.
    - `data_context` — propose the measurements that would inform the question.
-     This lane runs nothing; see "Data proposals" below for your duties.
+     This lane takes the measurement; see "Data measurements" below.
    - `ambiguity_contrarian` — find hidden assumptions, vague terms, missing
      decisions, and risky defaults.
    - `answer_simplifier` — turn the question into 2-3 easy choices or one
@@ -262,46 +262,49 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
    you did not run: a fabricated finding is worse than a missing one, and this
    is exactly why the declaration exists.
 
-   **Data proposals**:
-   The `data_context` lane returns `read_request` objects — measurements it
-   would run, never results. When its output carries any:
-   - Render the request **whole**: every field the object carries, exactly as
-     issued. Do not summarize it and do not choose which fields to show. Two
-     proposals that differ only in a filter, or in the tool they would run
-     against, are different operations — a rendering that drops a field makes
-     them look like the same one, and the user's approval then belongs to
-     something they were not shown. The object is small and closed, so showing
-     all of it is the cheap option. Do not paste a query string; there is none.
-   - **Resolve `tool_name` in your own tool inventory before you ask.** The
-     child names a tool; it does not classify one, and it cannot — it knows the
-     tool by name only. If the name resolves to nothing you have, do not offer
-     it: there is nothing to run. This lane only ever runs a read, so if what
-     you resolve is not one, do not run it however the request is labelled —
-     `operation: "read"` is a label on the request, not a promise about the
-     tool.
-   - Run a read only after the user confirms that specific request. Do not
-     repeat a cost or safety claim the child made; it had no standing to make
-     one. Do not manufacture one either: most tools carry no cost metadata, and
-     a disclaimer attached to every read teaches the user to click through it.
-     The user installed these tools and is being shown which one would run —
-     that is the disclosure, and their confirmation is the gate.
+   **Data measurements**:
+   The `data_context` lane discovers what data tools this host exposes, takes
+   the measurement itself, and returns the aggregate with the moment it ran.
+   You do not confirm anything before it runs and you do not run anything after
+   — it has already happened by the time you read the result. There is nothing
+   to approve because the approval already exists: the user registered these
+   tools, and registering one is the willingness to have it called. That is the
+   standing every other advisory lane runs on, and this lane was the only one
+   asked to hold a line in prose that its siblings did not.
+
+   When its output carries measurements:
    - Show the numbers **beside** the question as material for the user's
      judgment. They are never the answer. The user answers in their own words
      on the ordinary `[from-user]` path; there is no `[from-data]` answer to
-     forward.
-   - If the user has already answered the question by the time the proposal
+     forward. This is now the whole of the boundary: the lane carries real
+     values, so the only thing standing between a measurement and the Seed is
+     that you put it next to the question instead of into the answer.
+   - Say when each was measured. `observed_at` is on every measurement for this
+     reason — a measurement is point-in-time and a Seed is not, so a number
+     shown without its moment is read later as a standing fact.
+   - Carry the aggregate as the lane reported it, with its `metric` and the
+     decision it informs. Do not re-derive, re-scale, or combine numbers across
+     measurements; you did not run the read and cannot know what would survive
+     the arithmetic.
+   - If the user has already answered the question by the time the measurement
      arrives, drop it. Do not re-open a decision the user has made, and do not
      present the numbers as a reason to reconsider — evidence informs a
      decision, it does not revisit one.
 
-   When `data_needed` is false there is nothing to confirm: the lane is saying
-   this question's honest answer is not a measurement. `no_evidence_reason` is
-   one of a fixed set of constants — if you mention it, say it in your own
-   words rather than pasting the constant at the user.
+   When `data_needed` is false the lane looked and found nothing to measure.
+   The two reasons that matter say different things: `not_a_measurement` is
+   about the question, `no_data_tool_available` is about this host. The second
+   is worth telling the user plainly, because it is actionable — a data path is
+   missing, not a question. `no_evidence_reason` is one of a fixed set of
+   constants, so say it in your own words rather than pasting the constant.
 
-   Whenever you do show numbers, say when they were measured. A measurement is
-   point-in-time and a Seed is not, so a number shown without its moment
-   outlives the fact it described.
+   What this lane can reach is not classified by anyone. The child names the
+   tool it used; it cannot prove that tool was read-only, and MCP carries no
+   cost or mutation metadata for you to check against. That risk is accepted
+   knowingly and is the same one the sibling advisory lanes already run under.
+   Do not manufacture a disclaimer about it: a warning attached to every
+   measurement is one users learn to click through, and it would be
+   describing a check nothing performed.
 
    **Milestone lateral-review dispatch**:
    If an MCP response includes `meta.lateral_review_recommended=true`, treat it

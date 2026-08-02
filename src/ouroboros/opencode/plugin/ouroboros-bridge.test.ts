@@ -477,15 +477,18 @@ describe("parseMetadata", () => {
     expect(out.responseShape.question_advisory_result_correlation_key).toBe("context.lane_id")
   })
 
-  test("the read_data capability marks a child proposal-only", () => {
-    // Read from the same context field the child's prompt is built from, so
-    // what the child is told and what it is permitted cannot disagree.
+  test("no lane is singled out by its capability any more", () => {
+    // `read_data` used to mark a child proposal-only and strip its permissions.
+    // The lane executes now (#1825), so capability carries no permission
+    // meaning here and the field it was read from is gone. Pinned because a
+    // reintroduced special case would be invisible: the child would simply
+    // return less, and return it in a valid shape.
     const out = parseMetadata({
       question_advisory_subagents: [
         {
           tool_name: "ouroboros_interview",
           title: "Data",
-          prompt: "propose",
+          prompt: "measure",
           context: { lane_id: "data_context", capability: "read_data" },
         },
         {
@@ -497,7 +500,7 @@ describe("parseMetadata", () => {
       ],
     })
 
-    expect(out.subs.map((s) => s.proposalOnly)).toEqual([true, false])
+    expect(out.subs.map((s) => "proposalOnly" in s)).toEqual([false, false])
   })
 
   test("invalid advisory children are skipped", () => {
@@ -969,26 +972,27 @@ describe("_dispatch — child session lifecycle", () => {
     expect(patchCalls.length).toBeGreaterThanOrEqual(1)
   })
 
-  test("a proposal-only child is created with tools denied", async () => {
-    // On host-driven transports Ouroboros can only ask a child not to execute.
-    // Here it creates the session itself, so the lane whose contract forbids
-    // execution must not also be handed blanket permission — that would leave
-    // the barrier in prose on the one transport that can enforce it.
+  test("the data lane is created with the same permission as its siblings", async () => {
+    // It used to be created with `*:* deny`, matching a contract that had no
+    // field for a fetched value. The contract changed (#1825): the lane takes
+    // the measurement. A denial left behind would tell the child to measure on
+    // the one transport where every call is refused — and no `no_evidence_reason`
+    // means "I was blocked", so it would report `no_data_tool_available`: a
+    // confident falsehood about the user's environment.
     const createCalls: unknown[] = []
     const cli = mockCli({
       create: async (args: unknown) => {
         createCalls.push(args)
         return { data: { id: "child_data" } }
       },
-      prompt: async () => ({ data: { parts: [{ type: "text", text: "proposal" }] } }),
+      prompt: async () => ({ data: { parts: [{ type: "text", text: "measured" }] } }),
     })
     const b = mockBase(async () => ({}))
     const sub = {
       tool: "ouroboros_interview",
       title: "Interview advisory: data_context",
-      prompt: "propose the reads",
+      prompt: "take the measurement",
       agent: "general",
-      proposalOnly: true,
     }
 
     await _dispatch(cli as never, b as never, "pid", "mid", sub as never)
@@ -998,7 +1002,7 @@ describe("_dispatch — child session lifecycle", () => {
         body: {
           parentID: "pid",
           title: "Interview advisory: data_context",
-          permission: [{ permission: "*", pattern: "*", action: "deny" }],
+          permission: [{ permission: "*", pattern: "*", action: "allow" }],
         },
       },
     ])
