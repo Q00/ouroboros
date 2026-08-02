@@ -2477,6 +2477,48 @@ def test_failed_url_refresh_preserves_last_known_good_cache(
 
 
 @pytest.mark.parametrize("mode", ["add", "install"])
+def test_url_refresh_filesystem_failure_is_reported_without_traceback(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str
+) -> None:
+    """Promotion errors follow the CLI error contract and name recovery artifacts."""
+    paths = _common_paths(tmp_path)
+    cache_root = tmp_path / "cache"
+    url = "https://github.com/Q00/ouroboros-plugins.git"
+
+    def _disk_failure(*_args: object, **_kwargs: object) -> str:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(
+        "ouroboros.cli.commands.plugin.stage_url_cache_refresh", _disk_failure
+    )
+    selector = (
+        ["add", url, "--plugin", "github-pr-ops"]
+        if mode == "add"
+        else ["install", "github-pr-ops", "--from", url]
+    )
+
+    result = runner.invoke(
+        plugin_app,
+        [
+            *selector,
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--plugin-home-root",
+            str(paths["plugin_home_root"]),
+            "--cache-root",
+            str(cache_root),
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "plugin cache refresh failed" in result.output
+    assert "No space left on device" in result.output
+    assert ".bak-*" in result.output
+    assert result.exception is not None
+    assert not isinstance(result.exception, OSError)
+
+
+@pytest.mark.parametrize("mode", ["add", "install"])
 def test_successful_url_refresh_replaces_stale_cache(
     runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str
 ) -> None:

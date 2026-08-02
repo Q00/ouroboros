@@ -1878,6 +1878,13 @@ def add_command(
         except subprocess.CalledProcessError as exc:
             print_error(f"git clone failed: {exc.stderr.strip() if exc.stderr else exc}")
             raise typer.Exit(code=1) from exc
+        except OSError as exc:
+            print_error(
+                f"plugin cache refresh failed at {clone_dest}: {exc}. "
+                "The previous cache was preserved when recovery was possible; "
+                "check sibling .bak-* directories before retrying."
+            )
+            raise typer.Exit(code=1) from exc
         repo_root = clone_dest
         source_kind = "git"
         repository = target
@@ -2468,6 +2475,13 @@ def _install_named_from_url(
         )
     except subprocess.CalledProcessError as exc:
         print_error(f"git clone failed: {exc.stderr.strip() if exc.stderr else exc}")
+        raise typer.Exit(code=1) from exc
+    except OSError as exc:
+        print_error(
+            f"plugin cache refresh failed at {clone_dest}: {exc}. "
+            "The previous cache was preserved when recovery was possible; "
+            "check sibling .bak-* directories before retrying."
+        )
         raise typer.Exit(code=1) from exc
 
     catalog = _enumerate_catalog(clone_dest)
