@@ -2389,8 +2389,13 @@ class TestConfigEncodingLocaleIndependence:
             if not key.startswith(("PYTHON", "OUROBOROS", "LC_", "LANG"))
         }
         env.update({"PYTHONUTF8": "0", "LC_ALL": "C", "LANG": "C"})
+        # The program goes through a UTF-8 script file, not -c: under the C
+        # locale the child cannot even decode a non-ASCII command line, while
+        # Python source files are UTF-8 by default regardless of locale.
+        script_path = tmp_path / "locale_repro.py"
+        script_path.write_text(script, encoding="utf-8")
         result = subprocess.run(
-            [sys.executable, "-c", script, str(tmp_path / "config")],
+            [sys.executable, str(script_path), str(tmp_path / "config")],
             capture_output=True,
             text=True,
             env=env,
