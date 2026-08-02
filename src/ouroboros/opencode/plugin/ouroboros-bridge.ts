@@ -32,10 +32,9 @@ export const BYPASS_PERMISSION_RULESET = [
 // So the denial is removed rather than narrowed. Leaving it would recreate the
 // defect it was part of, mirrored — a child told to take the measurement on a
 // transport where every call is refused, which cannot report "I was blocked"
-// because no `no_evidence_reason` means that, and would report
-// `no_data_tool_available` instead. That is a confident falsehood about the
-// user's environment, which is worse than the mistaken verdict this all began
-// with.
+// because no `no_evidence_reason` means that, so it would have to pick one
+// that is false. Every reason the lane can give is a statement about itself,
+// which is exactly why none of them can carry "this transport refused me".
 //
 // What replaces it is what the sibling lanes already run on: the user
 // registered these tools, and registering one is the willingness to have it

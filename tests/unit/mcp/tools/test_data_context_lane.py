@@ -1398,27 +1398,48 @@ def test_discovery_is_instructed_before_the_verdict() -> None:
     """Order is load-bearing: the verdict depends on what discovery finds."""
     prompt = _data_payload()["prompt"]
 
-    discovery_at = prompt.index("find out which data tools this host exposes")
+    discovery_at = prompt.lower().index("read what data stores are described")
     verdict_at = prompt.index("is a measurement")
 
     assert discovery_at < verdict_at
 
 
-def test_both_no_evidence_reasons_are_given_distinct_triggers() -> None:
-    """`no_data_tool_available` is a fact about the host, not about the question.
+def test_no_reason_lets_the_lane_speak_about_the_host() -> None:
+    """A subagent sees what reached it, not what is connected.
 
-    It was unreachable by construction while the verdict preceded any tool
-    contact: a child with nothing connected reported `not_a_measurement`, which
-    tells the user their question was the wrong shape when what they needed to
-    hear was that no data path exists. Both are `data_needed=false`; only one is
-    actionable.
+    `no_data_tool_available` was removed for this. It was reported for a
+    question about EKS cost while a Mimir store holding exactly the container
+    CPU/memory series sat described in the lane's own prompt — the lane had no
+    loadable tool schemas and read that as "no data path exists". The parent
+    relayed it to the user as a fact about their infrastructure. It was false,
+    and it suppressed the only evidence that could bound the answer.
+    """
+    from ouroboros.orchestrator.capabilities.interview_schemas import (
+        DATA_NO_EVIDENCE_REASONS,
+    )
+
+    assert "no_data_tool_available" not in DATA_NO_EVIDENCE_REASONS
+    # The two claims it collapsed, split by what the lane can decide alone.
+    assert "no_data_store_described" in DATA_NO_EVIDENCE_REASONS
+    assert "store_described_but_not_callable" in DATA_NO_EVIDENCE_REASONS
+
+    prompt = _data_payload()["prompt"]
+    for reason in DATA_NO_EVIDENCE_REASONS:
+        assert reason in prompt, reason
+
+
+def test_unreachability_requires_an_attempted_call() -> None:
+    """A search result is not evidence of absence.
+
+    Descriptions say what stores exist; tool schemas say what is invocable. A
+    store can be described and its tools unloadable at the instant the lane
+    looks — which is what happened, because the subagent's tool snapshot froze
+    before those servers finished connecting.
     """
     prompt = _data_payload()["prompt"]
 
-    assert "no_data_tool_available" in prompt
-    assert "not_a_measurement" in prompt
-    # The distinction is stated, not left for the child to infer from the enum.
-    assert "no data path is connected" in prompt
+    assert "attempted the call" in prompt
+    assert "not evidence of absence" in prompt
 
 
 def test_the_contract_instruction_agrees_with_the_lane_task() -> None:
@@ -1427,7 +1448,9 @@ def test_the_contract_instruction_agrees_with_the_lane_task() -> None:
     instruction = contract["runtime_instruction"]
 
     assert "before you judge" in instruction
-    assert "no_data_tool_available" in instruction
+    assert "no_data_store_described" in instruction
+    assert "store_described_but_not_callable" in instruction
+    assert "not evidence of absence" in instruction
     assert "from the question text alone" not in instruction
 
 

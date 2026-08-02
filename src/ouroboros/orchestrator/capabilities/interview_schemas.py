@@ -420,16 +420,34 @@ DATA_AGGREGATIONS: tuple[str, ...] = (
 )
 
 
-#: Why a data-driven read is not being proposed.  A closed set, because the
-#: reasons are known in advance -- and because a free-text reason is a channel
-#: for the observation this lane must not carry.  A child that ran a lookup and
-#: wanted to report "observed 41 accounts" had a sentence-shaped field to put it
-#: in; now it has a choice of four constants (Q00/ouroboros#1754).
+#: Why no measurement is carried.  A closed set, because the reasons are known
+#: in advance -- and because a free-text reason is a channel for the observation
+#: this lane must not carry.  A child that ran a lookup and wanted to report
+#: "observed 41 accounts" had a sentence-shaped field to put it in; now it has a
+#: choice of constants (Q00/ouroboros#1754).
+#:
+#: **Every reason is about the lane, never about the host.**  ``no_data_tool_``
+#: ``available`` used to be here and was removed (Q00/ouroboros#1825): it is a
+#: claim about the user's infrastructure, and a subagent is not positioned to
+#: establish one.  It was reported for a question about EKS cost while five
+#: observability MCP servers were connected and a Mimir store holding exactly
+#: the container CPU/memory series sat described in the lane's own context --
+#: the lane had no loadable tool schemas, read that as "no data path exists",
+#: and the parent relayed it to the user as an actionable fact about their
+#: infrastructure.  It was false, and it suppressed the only evidence that could
+#: have bounded the answer.
+#:
+#: The two replacements split the claim by what the lane can decide for itself.
+#: ``no_data_store_described`` says nothing in the descriptions it was given
+#: holds this answer.  ``store_described_but_not_callable`` says one does and the
+#: lane could not reach it -- which reaches the parent as "handle this", not as
+#: "nothing exists", because the parent is the party that sees the environment.
 DATA_NO_EVIDENCE_REASONS: tuple[str, ...] = (
     "not_a_measurement",
-    "no_data_tool_available",
     "answer_would_not_be_an_aggregate",
     "question_too_ambiguous_to_measure",
+    "no_data_store_described",
+    "store_described_but_not_callable",
 )
 
 #: Names of things in the data source -- a tool, a column, a grouping key.  They
@@ -807,14 +825,18 @@ def _interview_data_evidence_answer_contract() -> dict[str, Any]:
         # skills/interview/SKILL.md, which is the document the host reads.
         "response_model_schema": answer_schema,
         "runtime_instruction": (
-            "Find out which data tools this host exposes before you judge, then "
-            "decide whether the question's honest answer is a measurement you "
-            "can reach through them. The order is load-bearing: measurability "
-            "is a property of the question and the environment together, and "
-            "no_data_tool_available is a fact about the host that the question's "
-            "wording cannot establish. If the answer is not a measurement, or "
-            "nothing available can take it, return data_needed=false with "
-            "whichever reason is true and stop -- that is a complete answer. "
+            "Read what data stores are described to you before you judge, then "
+            "decide whether the question's honest answer is a measurement one "
+            "of them holds. The order is load-bearing: measurability is a "
+            "property of the question and the environment together. "
+            "Every reason here is about you, not about this host -- you see "
+            "what reached you, not what is connected. If a store is described "
+            "and you could not reach it, that is "
+            "store_described_but_not_callable and only after an attempted call: "
+            "an empty tool search is not evidence of absence. If nothing "
+            "described holds the answer, that is no_data_store_described. "
+            "Return data_needed=false with whichever reason is true and stop -- "
+            "that is a complete answer. "
             "If it is reachable, take the measurement and return it: describe "
             "what you measured, carry the aggregate in values, and stamp "
             "observed_at with when you ran it. "

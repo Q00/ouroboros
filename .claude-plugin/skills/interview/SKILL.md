@@ -292,11 +292,26 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
      decision, it does not revisit one.
 
    When `data_needed` is false the lane looked and found nothing to measure.
-   The two reasons that matter say different things: `not_a_measurement` is
-   about the question, `no_data_tool_available` is about this host. The second
-   is worth telling the user plainly, because it is actionable — a data path is
-   missing, not a question. `no_evidence_reason` is one of a fixed set of
-   constants, so say it in your own words rather than pasting the constant.
+   Every reason it can give is a statement about the lane, never about the
+   user's infrastructure — a subagent sees what reached it, not what is
+   connected, so it is not positioned to tell anyone a data path is missing.
+   Read them accordingly:
+   - `not_a_measurement` / `question_too_ambiguous_to_measure` — about the
+     question. Nothing to relay beyond moving on.
+   - `answer_would_not_be_an_aggregate` — about the shape of the answer.
+   - `no_data_store_described` — nothing the lane was shown holds this answer.
+     Worth mentioning only if you know the store exists and the lane was not
+     told about it; otherwise it is ordinary.
+   - `store_described_but_not_callable` — **this one is yours to handle, not
+     the user's to hear.** A store exists and the child could not reach it. You
+     see the environment and it does not: check whether the tool is available to
+     you, take the read yourself, or re-dispatch the lane. Do not surface it as
+     a missing data path. This constant exists because its predecessor was
+     relayed to a user as a fact about their own infrastructure while the store
+     in question sat described in the child's prompt.
+
+   `no_evidence_reason` is one of a fixed set of constants, so say it in your
+   own words rather than pasting the constant.
 
    What this lane can reach is not classified by anyone. The child names the
    tool it used; it cannot prove that tool was read-only, and MCP carries no

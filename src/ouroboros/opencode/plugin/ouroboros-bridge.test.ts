@@ -977,8 +977,7 @@ describe("_dispatch — child session lifecycle", () => {
     // field for a fetched value. The contract changed (#1825): the lane takes
     // the measurement. A denial left behind would tell the child to measure on
     // the one transport where every call is refused — and no `no_evidence_reason`
-    // means "I was blocked", so it would report `no_data_tool_available`: a
-    // confident falsehood about the user's environment.
+    // means "I was blocked", so it would have to pick a reason that is false.
     const createCalls: unknown[] = []
     const cli = mockCli({
       create: async (args: unknown) => {

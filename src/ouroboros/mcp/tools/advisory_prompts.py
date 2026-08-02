@@ -114,14 +114,16 @@ def _data_context_lane_task() -> str:
     makes the disagreement visible to whoever edits either half.
     """
     return (
-        "First find out which data tools this host exposes. THEN decide whether "
-        "the question's honest answer is a measurement you can reach through "
-        "them. A question nothing available can measure is data_needed=false "
-        "with no_data_tool_available; a question that is not asking for a "
-        "number is not_a_measurement. Either is a complete answer, and they are "
-        "not interchangeable. If it IS reachable, take the measurement: run the "
-        "read, carry the aggregate back in values, and stamp observed_at with "
-        "when you ran it."
+        "First read what data stores are described to you — server "
+        "instructions, connected sources, anything naming what is held where. "
+        "THEN decide whether the question's honest answer is a measurement one "
+        "of them holds. If it is, take it: run the read, carry the aggregate "
+        "back in values, and stamp observed_at with when you ran it. If nothing "
+        "described holds the answer, that is no_data_store_described. If "
+        "something does and you could not reach it, that is "
+        "store_described_but_not_callable — and only after you tried the call. "
+        "A question that is not asking for a number is not_a_measurement. Each "
+        "is a complete answer and none is interchangeable with another."
     )
 
 
@@ -140,14 +142,30 @@ then use them. You may call them: the user registered these tools, and
 registering one is the willingness to have it called.
 
 That order is the point, not a formality. Whether a question's honest answer is
-a measurement depends on what is reachable here, not on the question's grammar:
+a measurement depends on what is held here, not on the question's grammar:
 "what counts as completion, and at what point is it measured" reads as a request
 for a definition where nothing is connected, and as "count which completion
-events actually fire" where an event stream is. Judge it against the environment
-you found, not against the sentence alone. And no_data_tool_available is a fact
-about this host that you cannot establish without looking — reporting
-not_a_measurement in its place tells the user their question was the wrong
-shape, when what they needed to hear was that no data path is connected.
+events actually fire" where an event stream is. Judge it against what you found
+described, not against the sentence alone.
+
+Two rules govern how you say you found nothing, and they exist because this lane
+got both of them wrong.
+
+**A search result is not evidence of absence.** Descriptions and callable tools
+answer different questions — descriptions say what stores exist and what they
+hold, tool schemas say what you can invoke. A store can be described and its
+tools unloadable at the instant you looked. So if a store is described, you may
+only report it unreachable after you *attempted the call* and it failed. An
+empty tool search is where you start looking, never where you stop.
+
+**Every reason you give is about you, not about this host.** You are one
+subagent inside someone's machine; you cannot see what is connected, only what
+reached you. `no_data_store_described` says nothing you were shown holds this
+answer. `store_described_but_not_callable` says something does and you could not
+get to it — the parent sees the environment and will decide what that means.
+Neither is "there is no data here", and you must not write a reason that says so:
+that sentence has already been relayed to a user as a fact about their own
+infrastructure while the store in question sat described in this very prompt.
 
 Your output is material for the user's judgment, never the answer. This is the
 whole of the boundary now that you carry real numbers, so it is the one line to
