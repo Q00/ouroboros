@@ -81,6 +81,19 @@ def _lane_ids(payloads: list[Any], *, required_only: bool = False) -> list[str]:
     return lanes
 
 
+def directive_was_appended(meta: dict[str, Any]) -> bool:
+    """Return whether :func:`append_question_advisory_dispatch` added a directive.
+
+    The renderer's own condition, named once so a reader of the response cannot
+    disagree with the writer of it about whether there is anything to strip.
+    ``PLUGIN_PASSIVE`` stamps no host action and leaves content unchanged, so
+    this is false there and `auto` cuts nothing — the same reason
+    ``_HOST_DIRECTIVE_OPENING`` is a shared constant rather than two copies.
+    """
+    payloads = meta.get(_PAYLOADS_KEY)
+    return bool(meta.get(_HOST_ACTION_KEY)) and isinstance(payloads, list) and bool(payloads)
+
+
 def append_question_advisory_dispatch(response_text: str, meta: dict[str, Any]) -> str:
     """Append the fan-out directive and its payloads to a question response.
 
@@ -100,10 +113,10 @@ def append_question_advisory_dispatch(response_text: str, meta: dict[str, Any]) 
     a ``PLUGIN_PASSIVE`` runtime (no host action stamped), or a turn that
     attached no advisory at all (the length-guard path).
     """
-    host_action = meta.get(_HOST_ACTION_KEY)
-    payloads = meta.get(_PAYLOADS_KEY)
-    if not host_action or not isinstance(payloads, list) or not payloads:
+    if not directive_was_appended(meta):
         return response_text
+    host_action = meta[_HOST_ACTION_KEY]
+    payloads = meta[_PAYLOADS_KEY]
 
     correlation_key = str(meta.get(_CORRELATION_KEY) or _DEFAULT_CORRELATION_KEY)
     lanes = _lane_ids(payloads)
@@ -199,9 +212,24 @@ def split_appended_dispatch(text: str) -> str:
     one only prefers a record we already hold. A single function doing both
     would let the weaker warrant license the destructive act.
 
-    The residual risk is bounded and stated: a question quoting the marker and
-    the directive's opening is cut short here too. It reaches durable state only
-    through the echo path, where the comparison above refuses it.
+    **Only call this when the server appended a directive**, which
+    :func:`directive_was_appended` answers from the same response. With none
+    present the last marker in the text belongs to the question, and cutting
+    there destroys it — on ``PLUGIN_PASSIVE``, where content is left unchanged
+    by design, that would be every turn.
+
+    The gate is also what retires the residual an earlier version of this
+    docstring accepted. A directive is always appended last, so once one exists
+    the last marker is ours and a question quoting the sentinel survives in
+    front of the cut. There is no shape judgement left on either side of the
+    round trip: this end asks whether one was written, and the echo end asks
+    whether one came back.
+
+    That earlier version also claimed the residual reached durable state only
+    through the echo path, where it would be refused. It was wrong. A truncation
+    here removes the marker, so the echo arrives looking like an ordinary
+    question and is recorded as one — a guarantee stated where nothing made it
+    true, which is the shape this branch keeps finding in its own comments.
     """
     cut = text.rfind(QUESTION_ADVISORY_DISPATCH_MARKER)
     if cut < 0:
@@ -216,6 +244,7 @@ __all__ = [
     "QUESTION_ADVISORY_DISPATCH_MARKER",
     "append_lateral_review_notice",
     "append_question_advisory_dispatch",
+    "directive_was_appended",
     "echo_carries_dispatch",
     "split_appended_dispatch",
 ]

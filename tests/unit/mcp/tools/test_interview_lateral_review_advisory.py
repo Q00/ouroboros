@@ -7,7 +7,10 @@ from ouroboros.bigbang.ambiguity import AmbiguityScore, ComponentScore, ScoreBre
 from ouroboros.bigbang.interview import InterviewRound, InterviewState
 from ouroboros.core.types import Result
 from ouroboros.events.interview import interview_lateral_review_recommended
-from ouroboros.mcp.tools.advisory_dispatch import append_question_advisory_dispatch
+from ouroboros.mcp.tools.advisory_dispatch import (
+    append_question_advisory_dispatch,
+    directive_was_appended,
+)
 from ouroboros.mcp.tools.authoring_handlers import (
     InterviewHandler,
     _attach_question_assist_requests,
@@ -635,7 +638,12 @@ def test_auto_driver_reads_the_question_without_the_directive() -> None:
     question = "What are the acceptance criteria?"
     text = append_question_advisory_dispatch(f"Session sess-render\n\n{question}", meta)
 
-    assert _extract_interview_question(text, session_id="sess-render") == question
+    assert (
+        _extract_interview_question(
+            text, session_id="sess-render", dispatch_appended=directive_was_appended(meta)
+        )
+        == question
+    )
 
 
 def test_dispatch_marker_separates_question_from_directive() -> None:
@@ -916,3 +924,75 @@ async def test_a_reopen_probe_quoting_the_sentinel_is_recorded_as_asked() -> Non
 
     assert result.is_ok
     assert engine.record_response.await_args.args[2] == probe
+
+
+def test_auto_cuts_a_directive_only_when_one_was_appended() -> None:
+    """Shape is safe to match on only after the producer says there is one.
+
+    `auto` parses the question out of the response body, and it used to cut at
+    the last marker unconditionally. With no directive present that marker
+    belongs to the question, so a question quoting the sentinel was truncated —
+    and on `PLUGIN_PASSIVE`, where content is left unchanged by design, no
+    directive is ever appended, so that was every turn. Auto would then answer,
+    and persist through `last_question`, a question the server never asked.
+
+    The predicate that guards the echo path does not catch it either: the
+    truncation removes the marker, so what arrives looks like an ordinary
+    question. The gate is what closes it — and once a directive *is* appended it
+    is the last thing in the text, so the last marker is always ours.
+    """
+    from ouroboros.auto.adapters import _extract_interview_question
+    from ouroboros.mcp.tools.advisory_dispatch import (
+        QUESTION_ADVISORY_DISPATCH_MARKER as marker,
+    )
+
+    quoting = f"How should auto preserve this literal? {marker}\n\n> **Host action — quoted:** x"
+    directive = f"\n\n{marker}\n\n> **Host action — spawn_subagents:** keep it"
+
+    # No directive appended (the plugin-passive shape): nothing is cut.
+    assert (
+        _extract_interview_question(
+            f"Session s\n\n{quoting}", session_id="s", dispatch_appended=False
+        )
+        == quoting
+    )
+    # A directive was appended: it is cut, and only it.
+    assert (
+        _extract_interview_question(
+            f"Session s\n\nReal question?{directive}", session_id="s", dispatch_appended=True
+        )
+        == "Real question?"
+    )
+    # Both: the quote survives because our directive is the last thing there.
+    assert (
+        _extract_interview_question(
+            f"Session s\n\n{quoting}{directive}", session_id="s", dispatch_appended=True
+        )
+        == quoting
+    )
+    # The default is not to cut, so a caller that forgets cannot destroy text.
+    assert _extract_interview_question(f"Session s\n\n{quoting}", session_id="s") == quoting
+
+
+def test_the_gate_and_the_renderer_share_one_condition() -> None:
+    """A reader of the response must not disagree with its writer.
+
+    `directive_was_appended` is the renderer's own condition, named once. Two
+    copies would drift, and the drift would be silent in the worst direction:
+    a gate that said yes where the renderer said no would cut text nobody added.
+    """
+    from ouroboros.mcp.tools.advisory_dispatch import (
+        QUESTION_ADVISORY_DISPATCH_MARKER as marker,
+    )
+
+    for mode, backend, opencode_mode in (
+        (SubagentDispatchMode.HOST_DRIVEN, "claude", None),
+        (SubagentDispatchMode.SEQUENTIAL, "gemini", None),
+        (SubagentDispatchMode.PLUGIN_PASSIVE, "opencode", "plugin"),
+    ):
+        meta = _advisory_meta(mode, runtime_backend=backend, opencode_mode=opencode_mode)
+        rendered = append_question_advisory_dispatch("Q?", meta)
+        assert directive_was_appended(meta) == (marker in rendered), mode
+
+    # A turn that attached no advisory at all — the length-guard path.
+    assert not directive_was_appended({})
