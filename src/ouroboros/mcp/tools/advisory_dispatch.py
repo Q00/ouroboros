@@ -57,6 +57,12 @@ _SEQUENTIAL_HOST_ACTION = "process_payloads_sequentially"
 #: where it is parsed.
 QUESTION_ADVISORY_DISPATCH_MARKER = "<!-- ouroboros-question-advisory-dispatch-v1 -->"
 
+#: The first words of the directive that always follows the marker. Recognising
+#: the pair is what lets the strip tell its own output from a question that
+#: merely quotes the marker; written once here so the emitter and the stripper
+#: cannot drift into disagreeing about what a directive looks like.
+_HOST_DIRECTIVE_OPENING = "> **Host action — "
+
 
 def _lane_ids(payloads: list[Any], *, required_only: bool = False) -> list[str]:
     """Return lane ids in payload order, skipping anything malformed."""
@@ -113,7 +119,7 @@ def append_question_advisory_dispatch(response_text: str, meta: dict[str, Any]) 
         "",
         QUESTION_ADVISORY_DISPATCH_MARKER,
         "",
-        f"> **Host action — {host_action}:** keep the question above visible, then "
+        f"{_HOST_DIRECTIVE_OPENING}{host_action}:** keep the question above visible, then "
         f"{directive}. Dispatch the payloads as issued rather than rewriting them "
         f"from this prose. Correlate results by `{correlation_key}`.",
         "",
@@ -153,7 +159,7 @@ def append_lateral_review_notice(
 
 
 def strip_question_advisory_dispatch(question: Any) -> Any:
-    """Return *question* with any appended host directive removed.
+    """Return *question* with an appended host directive removed.
 
     The inverse of :func:`append_question_advisory_dispatch`, for the round
     trip. A host is asked to echo back the exact question it asked, and the
@@ -162,15 +168,30 @@ def strip_question_advisory_dispatch(question: Any) -> Any:
     into the durable transcript, and from there into requirement extraction and
     the Seed.
 
-    Nothing distinguishes a careless host from a careful one at the point of
-    receipt, so the cut is made unconditionally. It is safe to apply to text
-    that never carried a directive: the marker is a fixed server-authored
-    string, so its absence leaves the value untouched, and a non-string passes
-    through for the caller's own validation to reject.
+    **What is cut is a directive, not a marker.** Splitting on the marker alone
+    truncated any question that merely mentioned it: ``What does this token
+    mean: <marker> and should it be preserved?`` became ``What does this token
+    mean:``, silently, before intent checking and persistence. A question is
+    user text and may contain anything, so the marker's presence cannot be the
+    test — this side has to recognise its own output.
+
+    So the cut requires the whole shape this module emits: the *last* marker in
+    the text, and immediately after it the directive that always follows one.
+    The last, because the directive is always appended, so a marker inside the
+    question precedes it; the shape, because a question ending in a bare marker
+    is still a question. Nothing else is removed, and text that never carried a
+    directive comes back unchanged — as does a non-string, which passes through
+    for the caller's own validation to reject.
     """
-    if not isinstance(question, str) or QUESTION_ADVISORY_DISPATCH_MARKER not in question:
+    if not isinstance(question, str):
         return question
-    return question.split(QUESTION_ADVISORY_DISPATCH_MARKER, 1)[0].strip()
+    cut = question.rfind(QUESTION_ADVISORY_DISPATCH_MARKER)
+    if cut < 0:
+        return question
+    suffix = question[cut + len(QUESTION_ADVISORY_DISPATCH_MARKER) :]
+    if not suffix.lstrip("\n").startswith(_HOST_DIRECTIVE_OPENING):
+        return question
+    return question[:cut].strip()
 
 
 __all__ = [

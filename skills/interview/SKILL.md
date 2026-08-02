@@ -279,9 +279,6 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
      forward. This is now the whole of the boundary: the lane carries real
      values, so the only thing standing between a measurement and the Seed is
      that you put it next to the question instead of into the answer.
-   - Say when each was measured. `observed_at` is on every measurement for this
-     reason — a measurement is point-in-time and a Seed is not, so a number
-     shown without its moment is read later as a standing fact.
    - Carry the aggregate as the lane reported it, with its `metric` and the
      decision it informs. Do not re-derive, re-scale, or combine numbers across
      measurements; you did not run the read and cannot know what would survive

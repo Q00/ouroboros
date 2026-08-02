@@ -616,8 +616,29 @@ def _reportable_errors(errors: Any) -> list[Any]:
         by_branch: dict[int, list[Any]] = {}
         for sub in context:
             by_branch.setdefault(sub.schema_path[0] if sub.schema_path else 0, []).append(sub)
-        flattened.extend(_reportable_errors(min(by_branch.values(), key=len)))
+        flattened.extend(_reportable_errors(min(by_branch.values(), key=_branch_distance)))
     return flattened
+
+
+def _branch_distance(branch_errors: list[Any]) -> tuple[int, int]:
+    """Rank a branch by how far the answer was from being it.
+
+    Complaint count alone ties whenever both branches object once, and the tie
+    was broken by declaration order -- which picked wrong. An answer that
+    declared ``group_by`` and omitted a label got "group_by is not an allowed
+    field" from the ungrouped branch, when the advice it needed was "label your
+    values". That is exactly the wrong-branch advice this flattening exists to
+    avoid, arriving through the tie instead of through the count.
+
+    So a complaint about a field the answer *wrote* breaks the tie against its
+    branch. Refusing what the author put there is a branch saying "you did not
+    mean me"; asking for something they left out is a branch saying "you meant
+    me and are not finished". The second is the advice worth giving, and the
+    ordering generalises: it reads only which kind of rule failed, not which
+    contract this happens to be.
+    """
+    refusals = sum(1 for error in branch_errors if error.validator == "additionalProperties")
+    return len(branch_errors), refusals
 
 
 def submit_fanout_results(
@@ -898,9 +919,49 @@ def _contract_violations(
             continue
         errors = _validate_against_contract(output, contracts[lane_id])
         errors.extend(_provenance_violations(record, output))
+        errors.extend(_aggregate_violations(output))
         if errors:
             violations[lane_id] = errors
     return violations
+
+
+def _aggregate_violations(output: Any) -> list[str]:
+    """Return violations for grouped values that are not one number per category.
+
+    Two numbers under the same label is a row list wearing an aggregate's name --
+    the shape ``group_by`` being categorical exists to prevent, reached by
+    repeating a category instead of grouping by an identifier. The schema cannot
+    say it: Draft 2020-12 has ``uniqueItems`` for whole items and nothing for
+    uniqueness by property, so a check that claimed it there would be a rule
+    that reads as enforced and is not.
+
+    Only duplication is judged. Which categories appear, and how many, is the
+    read's business.
+    """
+    if not isinstance(output, Mapping):
+        return []
+    reads = output.get("read_requests")
+    if not isinstance(reads, list):
+        return []
+    problems: list[str] = []
+    for index, read in enumerate(reads):
+        if not isinstance(read, Mapping):
+            continue
+        values = read.get("values")
+        if not isinstance(values, list):
+            continue
+        seen: set[str] = set()
+        for value in values:
+            if not isinstance(value, Mapping):
+                continue
+            group = value.get("group")
+            if not isinstance(group, str):
+                continue
+            if group in seen:
+                problems.append(f"read_requests/{index}/values: repeats a group")
+                break
+            seen.add(group)
+    return problems
 
 
 def _provenance_violations(record: FanoutRecord, output: Any) -> list[str]:

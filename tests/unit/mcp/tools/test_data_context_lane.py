@@ -22,6 +22,7 @@ import pytest
 
 from ouroboros.backends.capabilities import SubagentDispatchMode
 from ouroboros.bigbang.answer_provenance import classify_answer_provenance
+from ouroboros.mcp.tools.advisory_dispatch import append_question_advisory_dispatch
 from ouroboros.mcp.tools.authoring_handlers import (
     _attach_question_assist_requests,
     _build_question_advisory_request,
@@ -199,7 +200,6 @@ def test_a_name_in_the_source_cannot_be_spelled_as_a_query(field: str) -> None:
         "metric": "enterprise accounts",
         "aggregation": "count",
         "informs_decision": "whether SSO ships first",
-        "observed_at": "2026-08-02T06:00:00Z",
         "values": [{"value": 41}],
     }
     if field == "tool_name":
@@ -253,7 +253,6 @@ def test_a_request_the_parent_would_have_to_finish_cannot_be_proposed(
             "metric": "request latency",
             "aggregation": "average",
             "informs_decision": "whether the p95 target is met",
-            "observed_at": "2026-08-02T06:00:00Z",
             "values": [{"value": 41}],
             **request_patch,
         }
@@ -275,7 +274,6 @@ def test_the_complete_forms_of_those_requests_are_accepted() -> None:
             "metric": "request latency",
             "aggregation": "p95",
             "informs_decision": "whether the p95 target is met",
-            "observed_at": "2026-08-02T06:00:00Z",
             "values": [{"value": 41}],
             "filters": [
                 {"field": "day", "comparator": "gte", "value": "2026-01-01"},
@@ -308,7 +306,6 @@ def test_the_two_answer_states_are_exclusive() -> None:
                 "metric": "enterprise accounts",
                 "aggregation": "count",
                 "informs_decision": "whether SSO ships first",
-                "observed_at": "2026-08-02T06:00:00Z",
                 "values": [{"value": 41}],
             }
         ],
@@ -340,7 +337,6 @@ def test_neither_state_can_borrow_the_other_state_s_fields() -> None:
         "metric": "enterprise accounts",
         "aggregation": "count",
         "informs_decision": "whether SSO ships first",
-        "observed_at": "2026-08-02T06:00:00Z",
         "values": [{"value": 41}],
     }
     states = {
@@ -408,7 +404,6 @@ def test_the_child_has_no_field_in_which_to_rate_a_tool() -> None:
             "metric": "accounts",
             "aggregation": "count",
             "informs_decision": "whether SSO ships first",
-            "observed_at": "2026-08-02T06:00:00Z",
             "values": [{"value": 41}],
             "source_class": "local",
         }
@@ -425,9 +420,9 @@ def test_the_shape_admits_the_measurement_and_nothing_beside_it() -> None:
     nowhere to hand the result back. That was the barrier until #1825, and it
     was aimed at the wrong thing: what #1754 set out to stop was a guess
     becoming the Seed's evidence, and withholding the number made the guess
-    likelier. What survives is the closure. `values` and `observed_at` are the
-    only places a result may land; a field the child invents for one is refused,
-    so there is still exactly one shape a consumer has to read.
+    likelier. What survives is the closure. `values` is the only place a result
+    may land; a field the child invents for one is refused, so there is still
+    exactly one shape a consumer has to read.
     """
     schema = interview_data_evidence_answer_contract()["response_model_schema"]
     answer = _valid_no_op("interview-question:0123456789abcdef")
@@ -439,7 +434,6 @@ def test_the_shape_admits_the_measurement_and_nothing_beside_it() -> None:
             "metric": "accounts requesting SSO",
             "aggregation": "count",
             "informs_decision": "whether SSO belongs in the paid tier",
-            "observed_at": "2026-08-02T06:00:00Z",
             "values": [{"value": 41}],
         }
     ]
@@ -463,7 +457,6 @@ def test_a_write_cannot_be_proposed() -> None:
             "metric": "accounts",
             "aggregation": "count",
             "informs_decision": "n/a",
-            "observed_at": "2026-08-02T06:00:00Z",
             "values": [{"value": 41}],
         }
     ]
@@ -481,7 +474,6 @@ def test_no_op_and_evidence_cannot_both_be_claimed() -> None:
             "metric": "accounts",
             "aggregation": "count",
             "informs_decision": "pricing tier",
-            "observed_at": "2026-08-02T06:00:00Z",
             "values": [{"value": 41}],
         }
     ]
@@ -932,9 +924,11 @@ def test_a_measurement_may_cross_issuances_of_the_same_question(tmp_path: Any) -
     reasoning, recorded here so the next reader is not working from the retired
     one.
 
-    A measurement that crosses issuances measured *the same question*. Its age
-    travels with it — `observed_at` is required and the host is told to say when
-    — and the decision it could corrupt is already guarded: a measurement
+    A measurement that crosses issuances measured *the same question*, and a
+    measurement of the same question is that measurement whenever it was taken —
+    ageing is accepted unconditionally by RFC #1754's second revision, which is
+    also why `observed_at` no longer exists to caption it. The decision it could
+    corrupt is guarded by the one rule that does the work: a measurement
     arriving after the user has answered is dropped rather than shown. What is
     genuinely lost is the record that this round's lane did not run.
 
@@ -1039,7 +1033,6 @@ def _fully_populated_proposal(identity: str) -> dict[str, Any]:
                 "filters": [{"field": "region", "comparator": "eq", "value": "emea"}],
                 "time_window": "last 90 days",
                 "informs_decision": "whether SSO ships in the first milestone",
-                "observed_at": "2026-08-02T06:00:00Z",
                 "values": [{"group": "enterprise", "value": 41}],
             }
         ],
@@ -1102,8 +1095,6 @@ def test_the_surviving_boundary_is_stated_in_both_host_contracts() -> None:
         content = skill.read_text(encoding="utf-8")
         assert "there is no `[from-data]` answer to" in content, skill
         assert "material for the user's" in content, skill
-        # A measurement without its moment is read later as a standing fact.
-        assert "observed_at" in content, skill
         # The drop-after-answer duty is what a measurement crossing issuances is
         # weighed against (see the cross-issuance test above): the server cannot
         # tell when a payload was produced, so this rule — not a token the child
@@ -1549,7 +1540,6 @@ def _measured(**patch: Any) -> dict[str, Any]:
         "metric": "completed trial lessons",
         "aggregation": "count",
         "informs_decision": "which completion definition to use",
-        "observed_at": "2026-08-02T06:00:00Z",
         "values": [{"value": 41}],
     }
     request.update(patch)
@@ -1576,27 +1566,9 @@ def test_a_read_that_came_back_empty_is_still_a_measurement() -> None:
     to pick one that is false.
     """
     assert _accepts(_measured(values=[]))
-    # `observed_at` is what separates an empty result from an absent one.
-    assert "observed_at" in _measured(values=[])["read_requests"][0]
-
-
-def test_a_naive_timestamp_is_accepted_though_the_zone_is_asked_for() -> None:
-    """An ambiguous moment beats a withheld one.
-
-    Rejecting a zone-less timestamp does not produce a better one; it pops the
-    lane and the user gets nothing. The description asks for the zone, which is
-    where the ask belongs.
-    """
-    assert _accepts(_measured(observed_at="2026-08-02T06:00:00"))
-    assert _accepts(_measured(observed_at="2026-08-02T06:00:00Z"))
-    assert _accepts(_measured(observed_at="2026-08-02T15:00:00+09:00"))
-    assert _accepts(_measured(observed_at="2026-08-02T06:00:00.123456Z"))
-    # Still not a date, and still not prose: the field names a moment.
-    assert not _accepts(_measured(observed_at="2026-08-02"))
-    assert not _accepts(_measured(observed_at="around noon"))
-
-    schema = _read_request_schema()
-    assert "zone" in schema["properties"]["observed_at"]["description"]
+    # An empty `values` is the read attesting it ran and found nothing, which
+    # an absent answer cannot say.
+    assert _measured(values=[])["read_requests"][0]["values"] == []
 
 
 def test_every_bound_the_child_can_hit_is_stated_in_its_description() -> None:
@@ -1641,26 +1613,6 @@ def test_grouping_takes_one_key_because_one_label_can_only_name_one() -> None:
     assert "group_by" not in shapes["UngroupedMeasurement"]["properties"]
 
 
-def test_observed_at_must_name_a_moment_that_could_exist() -> None:
-    """A pattern that counts digits does not check a time.
-
-    `observed_at` is the whole of what keeps a point-in-time measurement from
-    being read later as a standing fact, so a value that cannot name a moment
-    defeats it silently.
-    """
-    for impossible in (
-        "2026-13-40T29:99:99Z",
-        "2026-00-02T06:00:00Z",
-        "2026-08-32T06:00:00Z",
-        "2026-08-02T24:00:00Z",
-        "2026-08-02T06:60:00Z",
-        "2026-08-02T06:00:00+25:00",
-    ):
-        assert not _accepts(_measured(observed_at=impossible)), impossible
-    for real in ("2026-08-02T06:00:00Z", "2026-08-02T06:00:00", "2026-08-02T15:00:00+09:00"):
-        assert _accepts(_measured(observed_at=real)), real
-
-
 def test_a_nested_alternative_still_reports_the_rule_that_failed() -> None:
     """`oneOf` must not be the report; it is what the host already knows.
 
@@ -1692,7 +1644,14 @@ def test_a_nested_alternative_still_reports_the_rule_that_failed() -> None:
 
 _HONEST = {
     "a fractional aggregate": {"aggregation": "average", "values": [{"value": 41.7}]},
-    "a negative value": {"values": [{"value": -3}]},
+    "a signed sum": {"aggregation": "sum", "values": [{"value": -1200}]},
+    # Negative and fractional are honest for what computes over things, and are
+    # refused for what tallies them — the matrix asked only about the value and
+    # missed that the constraint lives between two fields (review round 21).
+    "a negative value under a computing aggregation": {
+        "aggregation": "min",
+        "values": [{"value": -3}],
+    },
     "zero — often the informative result": {"values": [{"value": 0}]},
     "a large count": {"values": [{"value": 1_500_000_000}]},
     "a non-ASCII metric": {"metric": "완료 레슨 수"},
@@ -1726,6 +1685,9 @@ _NOT_A_MEASUREMENT = {
         "values": [{"group": str(i), "value": i} for i in range(21)],
     },
     "a field the child invented": {"source_class": "warehouse"},
+    "a negative tally": {"aggregation": "count", "values": [{"value": -1}]},
+    "a fractional tally": {"aggregation": "count", "values": [{"value": 1.5}]},
+    "a fractional distinct tally": {"aggregation": "distinct_count", "values": [{"value": 2.5}]},
 }
 
 
@@ -1759,3 +1721,204 @@ def test_every_declared_constant_is_usable_by_the_child() -> None:
                 "no_evidence_reason": reason,
             }
         ), reason
+
+
+# --------------------------------------------------------------------------- #
+# Constraints that live between two fields
+# --------------------------------------------------------------------------- #
+#
+# The completeness matrix above asked two questions of every field and missed
+# these, because each is a relation: a value is honest or not depending on the
+# aggregation beside it, a timestamp depending on the clock, a marker depending
+# on what follows it. The class was "a constraint chosen from what the author
+# meant"; the part left open was that a constraint can span fields.
+
+
+def _advisory_meta_for_strip() -> dict[str, Any]:
+    """Meta carrying a real host directive, so the strip sees its own output."""
+    from ouroboros.backends.capabilities import SubagentDispatchMode
+    from ouroboros.mcp.tools.authoring_handlers import _attach_question_assist_requests
+
+    meta: dict[str, Any] = {}
+    _attach_question_assist_requests(
+        meta,
+        session_id="sess-strip",
+        question="Real question?",
+        phase="answer",
+        score=None,
+        dispatch_mode=SubagentDispatchMode.HOST_DRIVEN,
+        runtime_backend="claude",
+    )
+    return meta
+
+
+def test_a_tally_cannot_be_negative_or_fractional() -> None:
+    """`count` and `distinct_count` count things; nothing else is their result."""
+    for aggregation in ("count", "distinct_count"):
+        assert not _accepts(_measured(aggregation=aggregation, values=[{"value": -1}]))
+        assert not _accepts(_measured(aggregation=aggregation, values=[{"value": 1.5}]))
+        assert _accepts(_measured(aggregation=aggregation, values=[{"value": 0}]))
+        assert _accepts(_measured(aggregation=aggregation, values=[{"value": 41}]))
+
+
+def test_what_computes_over_things_keeps_the_whole_number_line() -> None:
+    """The tally rule must not spread to aggregations it is false for.
+
+    A sum over signed quantities is signed; an average over anything is
+    fractional. `sum` is deliberately outside the counting set.
+    """
+    for aggregation, value in (
+        ("sum", -1200),
+        ("average", 41.7),
+        ("min", -40),
+        ("rate", -0.2),
+        ("p95", 12.5),
+    ):
+        assert _accepts(_measured(aggregation=aggregation, values=[{"value": value}])), aggregation
+
+
+def test_a_question_that_merely_mentions_the_marker_survives() -> None:
+    """The marker's presence is not the test; this side must know its own output.
+
+    Splitting on the marker truncated any question quoting it — before intent
+    checking and before persistence, so the transcript and the Seed took the
+    corruption silently.
+    """
+    from ouroboros.mcp.tools.advisory_dispatch import (
+        QUESTION_ADVISORY_DISPATCH_MARKER as marker,
+    )
+    from ouroboros.mcp.tools.advisory_dispatch import (
+        strip_question_advisory_dispatch as strip,
+    )
+
+    quoted = f"What does this token mean: {marker} and should it be preserved?"
+    assert strip(quoted) == quoted
+    assert strip(f"Explain {marker}") == f"Explain {marker}"
+
+    meta = _advisory_meta_for_strip()
+    real = append_question_advisory_dispatch("Real question?", meta)
+    assert strip(real) == "Real question?"
+    # A question that quotes the marker AND carries a real directive keeps the
+    # quote and loses only the directive.
+    both = append_question_advisory_dispatch(f"What is {marker} for?", meta)
+    assert strip(both) == f"What is {marker} for?"
+
+
+def test_a_tied_branch_reports_the_shape_the_answer_was_trying_to_be() -> None:
+    """Wrong-branch advice is what flattening exists to avoid.
+
+    An answer declaring `group_by` and omitting a label was told "group_by is
+    not an allowed field" — the ungrouped branch's reason, reached because both
+    branches objected once and the tie fell to declaration order.
+    """
+    answer = _measured(group_by=["region"], values=[{"value": 41}])
+
+    reported = _validate_against_contract(answer, interview_data_evidence_answer_contract())
+
+    assert reported == ["read_requests/0/values/0: required"], reported
+
+
+def test_an_ungrouped_read_returns_one_aggregate() -> None:
+    """Several unlabelled numbers are a row list with nothing to tell them apart.
+
+    Found by enumerating the contract's cross-field relations rather than by a
+    review round: categorical grouping exists to stop a row list, and this is
+    the same shape arriving where there is no grouping at all.
+    """
+    assert _accepts(_measured(values=[{"value": 41}]))
+    assert _accepts(_measured(values=[]))
+    assert not _accepts(_measured(values=[{"value": 1}, {"value": 2}]))
+
+
+def test_a_group_appears_once_or_it_is_not_an_aggregate() -> None:
+    """Two numbers under one label is a row list wearing an aggregate's name.
+
+    Checked at re-entry rather than in the schema: Draft 2020-12 has
+    `uniqueItems` for whole items and nothing for uniqueness by property, so
+    claiming it in the contract would be a rule that reads as enforced and is
+    not.
+    """
+    from ouroboros.mcp.tools.fanout import _aggregate_violations
+
+    repeated = _measured(
+        group_by=["region"],
+        values=[{"group": "seoul", "value": 1}, {"group": "seoul", "value": 2}],
+    )
+    distinct = _measured(
+        group_by=["region"],
+        values=[{"group": "seoul", "value": 1}, {"group": "busan", "value": 2}],
+    )
+
+    assert _aggregate_violations(repeated)
+    assert not _aggregate_violations(distinct)
+
+
+# --------------------------------------------------------------------------- #
+# An impossible time is unspellable, because there is no field to spell it in
+# --------------------------------------------------------------------------- #
+#
+# Review round 21 asked re-entry to reject clearly-future `observed_at` values,
+# after round 20 asked for component ranges and round 19 for anything at all.
+# Three rounds of validators on one field is the signal the field is wrong, not
+# the validator: an LLM child has no clock, so requiring it to testify about
+# time was asking for a fact it could only guess.
+#
+# RFC #1754's second revision removes the field instead. Ageing is accepted
+# unconditionally — a measurement of the same question is that measurement
+# whenever it was taken — and the interview session is the time envelope, so a
+# field restating it carried nothing any consumer read. These tests pin the
+# closure as structural, which is the difference between "we check for it" and
+# "it cannot be said".
+
+
+def test_a_measurement_has_nowhere_to_put_a_time() -> None:
+    """No validator can be wrong about a field that does not exist.
+
+    The three rejected timestamps below are the exact values earlier rounds
+    added validators for. Each is now refused by the same rule that refuses any
+    invented field, so there is no clock, no skew allowance, and no zone policy
+    left to get wrong.
+    """
+    for impossible in ("9999-12-31T23:59:59Z", "2026-13-40T29:99:99Z", "not a time"):
+        assert not _accepts(_measured(observed_at=impossible)), impossible
+    # ...and a well-formed one is refused too, which is the point: the field is
+    # gone, not merely validated.
+    assert not _accepts(_measured(observed_at="2026-08-02T06:00:00Z"))
+
+    for shape in _read_request_shapes().values():
+        assert "observed_at" not in shape["properties"], shape["title"]
+        assert "observed_at" not in shape["required"], shape["title"]
+
+
+def test_no_surface_still_asks_the_child_for_a_time() -> None:
+    """A prompt outliving its contract is this module's recurring defect.
+
+    The lane task, the brief, and the contract's own instruction are rendered
+    into one prompt; an instruction to stamp a field the schema no longer has
+    would be a required lane told to produce a rejected answer.
+    """
+    prompt = _data_payload()["prompt"]
+    instruction = interview_data_evidence_answer_contract()["runtime_instruction"]
+
+    assert "observed_at" not in prompt
+    assert "observed_at" not in instruction
+
+
+def test_the_host_is_no_longer_told_to_caption_a_measurement_with_its_time() -> None:
+    """Both copies, because only one of them ships to each host.
+
+    The say-when duty was the field's only consumer — a caption the user read
+    once. It goes with the field, while the drop-after-answer duty stays: with
+    ageing accepted unconditionally, that rule is the whole of what keeps a late
+    measurement from re-opening a settled decision.
+    """
+    from pathlib import Path
+
+    for skill in (
+        Path("skills/interview/SKILL.md"),
+        Path(".claude-plugin/skills/interview/SKILL.md"),
+    ):
+        content = skill.read_text(encoding="utf-8")
+        assert "observed_at" not in content, skill
+        assert "Say when each was measured" not in content, skill
+        assert "already answered the question by the time the measurement" in content, skill

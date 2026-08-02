@@ -406,6 +406,17 @@ def interview_code_investigation_answer_contract() -> dict[str, Any]:
 #: ranks are members instead of a parameter, which keeps the ambiguity out
 #: without adding a conditional field that only some aggregations use
 #: (Q00/ouroboros#1754).
+#: Aggregations whose result is a tally.  A count of things cannot be negative
+#: and cannot be fractional, so a schema that admits ``-1`` or ``1.5`` under one
+#: of these is admitting a number no read produced -- and this lane's whole
+#: output is numbers shown to a user as measured fact.
+#:
+#: Kept as a set rather than folded into a per-aggregation value schema: the
+#: distinction is between "counts things" and "computes over them", and only the
+#: first constrains the result's shape.  ``sum`` is deliberately absent -- a sum
+#: over signed quantities is signed, and a sum over fractions is fractional.
+DATA_COUNTING_AGGREGATIONS: frozenset[str] = frozenset({"count", "distinct_count"})
+
 DATA_AGGREGATIONS: tuple[str, ...] = (
     "count",
     "distinct_count",
@@ -474,22 +485,6 @@ _DATA_IDENTIFIER_PATTERN = r"^[A-Za-z0-9_.:\-]{1,128}$"
 #: not buy a better one: it stalls the fan-out and the user sees no measurement
 #: at all. An ambiguous moment beats a withheld one, and children emit naive
 #: timestamps often enough that the strict form would be a routine stall.
-#: Each component is range-checked rather than merely counted. Counting digits
-#: admitted ``2026-13-40T29:99:99Z``, and this field is the whole of what keeps a
-#: point-in-time measurement from being read later as a standing fact, so a value
-#: that cannot name a moment defeats it silently.
-#:
-#: What this still does not catch, said rather than left to be discovered: a day
-#: that does not exist in its month, ``2026-02-30``. Ruling that out needs a
-#: calendar and JSON Schema has none -- ``format`` is annotation-only under Draft
-#: 2020-12 unless a validator opts in, which is the same trap as counting digits:
-#: a rule that reads as enforced and is not.
-_ISO_8601_TIMESTAMP_PATTERN = (
-    r"^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])"
-    r"T([01]\d|2[0-3]):[0-5]\d:[0-5]\d(\.\d+)?"
-    r"(Z|[+-]([01]\d|2[0-3]):[0-5]\d)?$"
-)
-
 #: How many grouped numbers one measurement may carry. Even one grouping key can
 #: produce arbitrarily many groups, and "an aggregate" stops being one somewhere
 #: before the row count. The bound is where that line is drawn -- and it is
@@ -506,8 +501,8 @@ def _interview_data_read_request_schema() -> dict[str, Any]:
     the question renders these fields, so the user reads the measurement rather
     than a dialect they would have to interpret.
 
-    ``values`` and ``observed_at`` are what changed when the lane was allowed to
-    execute (Q00/ouroboros#1825). Before, the absence of a value field was the
+    ``values`` is what changed when the lane was allowed to execute
+    (Q00/ouroboros#1825). Before, the absence of a value field was the
     barrier: a child that ran a lookup had nowhere to put the result. That
     barrier is retired because it was aimed at the wrong thing -- what #1754 set
     out to stop was a guess becoming the Seed's evidence, and execution was the
@@ -515,10 +510,14 @@ def _interview_data_read_request_schema() -> dict[str, Any]:
     downstream and unchanged: nothing here becomes an interview answer, a
     requirement, or durable state.
 
-    ``observed_at`` is required rather than optional because a measurement is
-    point-in-time and a Seed is not. A number shown without its moment outlives
-    the fact it described, and the child is the only party that knows when it
-    ran.
+    There is no ``observed_at``. It was required here for two rounds and is
+    removed by RFC #1754's second revision: ageing is accepted unconditionally,
+    and the interview session is the measurement's time envelope, so a field
+    restating it bought nothing a consumer read. It also asked an LLM child with
+    no clock to testify about time, which cost three rounds of validators —
+    digits, then component ranges, then a wall clock with a skew allowance. The
+    close is structural rather than another validator: a field that does not
+    exist cannot carry an impossible time.
 
     **A grouped value carries its label, or the read is not grouped.** This is a
     ``oneOf`` over two closed shapes for the same reason the answer itself is:
@@ -543,7 +542,6 @@ def _interview_data_read_request_schema() -> dict[str, Any]:
             "metric",
             "aggregation",
             "informs_decision",
-            "observed_at",
             "values",
         ],
         "properties": {
@@ -622,14 +620,6 @@ def _interview_data_read_request_schema() -> dict[str, Any]:
                     "cannot name one is not worth the user's attention."
                 ),
             },
-            "observed_at": {
-                "type": "string",
-                "pattern": _ISO_8601_TIMESTAMP_PATTERN,
-                "description": (
-                    "ISO-8601 timestamp at which you ran this read. Give the "
-                    "zone (Z or +HH:MM); without one the moment is ambiguous."
-                ),
-            },
             "values": {
                 "type": "array",
                 "maxItems": _DATA_VALUES_MAX_ITEMS,
@@ -668,10 +658,51 @@ def _interview_data_read_request_schema() -> dict[str, Any]:
         },
     }
 
+    # A tally cannot be negative or fractional, and `value` alone cannot say so
+    # because the constraint lives between two fields. Expressed as if/then
+    # rather than as more `oneOf` branches: the criterion that made the answer
+    # two closed states was about a *field of one state staying spellable in the
+    # other*, and there is no field here to leak -- only a numeric range on a
+    # field both branches already require. Four branches would also double a
+    # contract the child must read whole.
+    common["allOf"] = [
+        {
+            "if": {
+                "properties": {"aggregation": {"enum": sorted(DATA_COUNTING_AGGREGATIONS)}},
+                "required": ["aggregation"],
+            },
+            "then": {
+                "properties": {
+                    "values": {
+                        "items": {
+                            "properties": {
+                                "value": {
+                                    "type": "integer",
+                                    "minimum": 0,
+                                    "description": (
+                                        "A tally: whole and not negative. "
+                                        "count and distinct_count cannot "
+                                        "produce anything else."
+                                    ),
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+        }
+    ]
+
     ungrouped = deepcopy(common)
     ungrouped["title"] = "UngroupedMeasurement"
     ungrouped["properties"].pop("group_by")
     ungrouped["properties"]["values"]["items"]["properties"].pop("group")
+    # One aggregate, because that is what an ungrouped read returns. Several
+    # unlabelled numbers are a row list with no way to tell them apart -- the
+    # thing categorical grouping exists to prevent, arriving through the door
+    # where there is no grouping at all. Zero stays legal: a read that came back
+    # empty is still a measurement.
+    ungrouped["properties"]["values"]["maxItems"] = 1
 
     grouped = deepcopy(common)
     grouped["title"] = "GroupedMeasurement"
@@ -715,8 +746,7 @@ def _interview_data_evidence_answer_contract() -> dict[str, Any]:
     that this lane alone was asked to hold the line in prose.
 
     **A measurement can be reported, and still cannot become the answer.**
-    ``values`` and ``observed_at`` exist now. A child that ran a lookup hands
-    the aggregate back, stamped with when it ran.
+    ``values`` exists now. A child that ran a lookup hands the aggregate back.
 
     The shape still refuses everything that is not an aggregate. ``value`` is a
     number, so a row, a name, an identifier, or an error message has no
@@ -731,8 +761,9 @@ def _interview_data_evidence_answer_contract() -> dict[str, Any]:
     exist", which is exactly this shape. A minimum of one would have made the
     finding unspellable, and left the child nowhere to go: no
     ``no_evidence_reason`` means "I measured and it was empty", so it would have
-    had to pick a reason that was false. ``observed_at`` is what separates an
-    empty result from an absent one; the read is attested either way.
+    had to pick a reason that was false. An empty ``values`` is the read
+    attesting that it ran and came back with nothing, which an absent answer
+    cannot say.
 
     Every bound here is named in the field's own description for the same
     reason. This lane is ``required: true`` and a contract violation is popped
@@ -882,8 +913,7 @@ def _interview_data_evidence_answer_contract() -> dict[str, Any]:
             "Return data_needed=false with whichever reason is true and stop -- "
             "that is a complete answer. "
             "If it is reachable, take the measurement and return it: describe "
-            "what you measured, carry the aggregate in values, and stamp "
-            "observed_at with when you ran it. "
+            "what you measured and carry the aggregate in values. "
             "Only aggregates can be carried: group by categories, never by an "
             "identifier, and when the honest answer would be a row list, a name, "
             "an identifier, or an error message, that is data_needed=false with "

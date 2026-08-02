@@ -117,8 +117,8 @@ def _data_context_lane_task() -> str:
         "First read what data stores are described to you — server "
         "instructions, connected sources, anything naming what is held where. "
         "THEN decide whether the question's honest answer is a measurement one "
-        "of them holds. If it is, take it: run the read, carry the aggregate "
-        "back in values, and stamp observed_at with when you ran it. If nothing "
+        "of them holds. If it is, take it: run the read and carry the "
+        "aggregate back in values. If nothing "
         "described holds the answer, that is no_data_store_described. If "
         "something does and you could not reach it, that is "
         "store_described_but_not_callable — and only after you tried the call. "
@@ -178,10 +178,6 @@ Only aggregates can be carried. If what you measured is a row list, a name, an
 identifier, or an error message, that is data_needed=false with one of the listed
 reasons — not evidence. Grouping keys must be categorical; grouping by an
 identifier is a row list wearing an aggregate's clothes.
-
-Stamp observed_at with when you actually ran the read. A measurement is
-point-in-time and a Seed is not, and you are the only party that knows the
-moment; a number that outlives its moment is read later as a standing fact.
 
 metric and informs_decision are read by the user beside your numbers, so write
 what you would say to them: name the thing measured and the decision it serves.
