@@ -1405,3 +1405,72 @@ describe("a pre-dispatch failure still carries the fan-out identity", () => {
     expect(text).toContain("context.lane_id")
   })
 })
+
+describe("malformed message data does not strand the fan-out", () => {
+  // `resolveMid` walks the session's messages. A stale or malformed entry used
+  // to throw out of the hook, whose only handler logs — so the response was
+  // left exactly as it arrived: no failure notice, no fan-out id, no
+  // correlation key. The server has already registered the required lane by
+  // then, so the host cannot declare it undispatched and re-entry is stranded.
+  function questionOutput() {
+    return {
+      content: [{ type: "text", text: "Session sess-1\n\nHow do you define completion?" }],
+      metadata: {
+        session_id: "sess-1",
+        question_advisory_preserve_content: true,
+        question_advisory_fanout_id: "fanout_probe",
+        question_advisory_result_correlation_key: "context.lane_id",
+        question_advisory_subagents: [
+          {
+            tool_name: "ouroboros_interview",
+            title: "Interview advisory: data_context",
+            agent: "general",
+            prompt: "Measure it.",
+          },
+        ],
+      },
+    }
+  }
+
+  async function runWith(messages: () => Promise<unknown>) {
+    _resetDedupe()
+    const cli = {
+      session: {
+        _client: { patch: async () => ({}) },
+        create: async () => ({ data: { id: "child_1" } }),
+        prompt: async () => ({ data: { parts: [] } }),
+        abort: async () => ({}),
+        messages,
+      },
+    }
+    const plugin = await OuroborosBridge({ client: cli, directory: "/tmp/ouroboros-test" } as never)
+    const hook = (plugin as Record<string, (...args: unknown[]) => Promise<void>>)["tool.execute.after"]
+    const output = questionOutput()
+    await hook({ tool: "ouroboros_interview", sessionID: "parent_1", callID: "call_x" }, output)
+    return readText(output)
+  }
+
+  test("an entry with no info or parts is skipped, not thrown on", async () => {
+    const text = await runWith(async () => ({ data: [{}] }))
+    expect(text).toContain("Dispatch failed")
+    expect(text).toContain("fanout_probe")
+    expect(text).toContain("context.lane_id")
+  })
+
+  test("null entries and non-array parts are skipped too", async () => {
+    const text = await runWith(async () => ({
+      data: [null, { info: { role: "assistant" } }, { info: { role: "assistant", id: 7 }, parts: "x" }],
+    }))
+    expect(text).toContain("Dispatch failed")
+    expect(text).toContain("fanout_probe")
+  })
+
+  test("an unexpected throw still renders the identity", async () => {
+    const text = await runWith(async () => {
+      throw new Error("transport exploded")
+    })
+    expect(text).toContain("Dispatch failed")
+    expect(text).toContain("fanout_probe")
+    expect(text).toContain("context.lane_id")
+  })
+})

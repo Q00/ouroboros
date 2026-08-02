@@ -521,9 +521,21 @@ async function resolveMid(cli: Cli, pid: string, callID: string): Promise<string
     const msgs = res?.data
     if (Array.isArray(msgs)) {
       for (let j = msgs.length - 1; j >= 0; j--) {
-        const m = msgs[j]
-        if (m.info.role !== "assistant") continue
-        if (m.parts.some((p) => p.type === "tool" && p.callID === callID)) return m.info.id
+        // Shape-checked rather than trusted: a stale or malformed entry used to
+        // throw out of the hook entirely, and the hook's only handler logs. The
+        // response was then left untouched — no failure notice and no fan-out
+        // identity — which strands a registered required lane with no way to be
+        // declared undispatched.
+        const m = msgs[j] as { info?: { role?: unknown; id?: unknown }; parts?: unknown }
+        if (!m || typeof m !== "object") continue
+        if (m.info?.role !== "assistant" || typeof m.info?.id !== "string") continue
+        if (!Array.isArray(m.parts)) continue
+        const hit = m.parts.some(
+          (p) => p && typeof p === "object"
+            && (p as { type?: unknown }).type === "tool"
+            && (p as { callID?: unknown }).callID === callID,
+        )
+        if (hit) return m.info.id
       }
     }
     if (i < RESOLVE_RETRIES - 1) await sleep(BACKOFF_MS)
@@ -659,6 +671,10 @@ export const OuroborosBridge: Plugin = async (ctx) => {
   log(`INIT dir=${ctx.directory ?? "?"} timeout=${CHILD_TIMEOUT_MS}ms`)
   return {
     "tool.execute.after": async (input, output) => {
+      // Enough to render a failure from the catch below. An exception after the
+      // fan-out was registered is the same harm as an explicit rejection, so it
+      // must reach the host as one rather than as silence.
+      let rescue: { out: Output; prefix?: string; shape: string; label: string } | null = null
       try {
         if (!input || typeof input !== "object") return
         if (typeof input.tool !== "string" || !input.tool.startsWith("ouroboros_")) return
@@ -683,6 +699,7 @@ export const OuroborosBridge: Plugin = async (ctx) => {
         const shapeSuffix = Object.keys(responseShape).length > 0
           ? "\n\n```json\n" + JSON.stringify(responseShape, null, 2) + "\n```"
           : ""
+        rescue = { out, prefix: failurePrefix, shape: shapeSuffix, label: subs[0].tool }
         if (!pid) { log(`REJECT reason=empty_sessionID tool=${subs[0].tool}`); fail(out, subs[0].tool, new Error("empty sessionID"), failurePrefix, shapeSuffix); return }
         if (!callID) { log(`REJECT reason=empty_callID tool=${subs[0].tool}`); fail(out, subs[0].tool, new Error("empty callID"), failurePrefix, shapeSuffix); return }
         if (isNestedRalphDispatch(pid, subs)) {
@@ -748,6 +765,9 @@ export const OuroborosBridge: Plugin = async (ctx) => {
         out.metadata = meta
       } catch (e) {
         log(`HOOK_CRASH err=${e instanceof Error ? e.stack ?? e.message : errMsg(e)}`)
+        if (rescue) {
+          try { fail(rescue.out, rescue.label, e, rescue.prefix, rescue.shape) } catch {}
+        }
       }
     },
   }
