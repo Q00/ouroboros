@@ -61,7 +61,7 @@ from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.tools.advisory_dispatch import (
     append_lateral_review_notice,
     append_question_advisory_dispatch,
-    resolve_echoed_question,
+    echo_carries_dispatch,
 )
 from ouroboros.mcp.tools.subagent import (
     DELEGATED_TO_SUBAGENT,
@@ -3176,16 +3176,12 @@ class InterviewHandler:
             if not state.rounds:
                 pass
             elif state.rounds[-1].user_response is None:
+                # An echo repairs a question damaged by partial persistence
+                # (79ef2cf5); one carrying our directive is not a repair, and
+                # the stored question of an unanswered round is what we asked.
                 issued = state.rounds[-1].question
-                # Compare against the rendered form the host was shown -- the
-                # stored question never carried the ambiguity prefix -- and
-                # record the stored one.
-                shown = _format_question_with_ambiguity(issued, _load_state_ambiguity_score(state))
                 pending_question = (
-                    resolve_echoed_question(
-                        last_question, issued_question=issued, shown_question=shown
-                    )
-                    or issued
+                    issued if echo_carries_dispatch(last_question) else (last_question or issued)
                 )
             else:
                 if not last_question:

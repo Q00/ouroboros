@@ -1786,9 +1786,10 @@ def test_parsing_our_own_response_keeps_a_question_that_mentions_the_marker() ->
     recognised by its form. That is enough here and not enough everywhere: a
     question quoting the marker *and* the directive's opening is cut short by
     this function too. It reaches durable state only through the echoed
-    `last_question`, where `resolve_echoed_question` compares against the
-    question the server issued and refuses the cut — which is the case pinned at
-    the handler in `test_interview_lateral_review_advisory.py`.
+    `last_question`, and there nothing is cut at all: an echo carrying our
+    directive is not treated as a repair, so the round keeps the question the
+    server issued — pinned at the handler in
+    `test_interview_lateral_review_advisory.py`.
     """
     from ouroboros.mcp.tools.advisory_dispatch import (
         QUESTION_ADVISORY_DISPATCH_MARKER as marker,

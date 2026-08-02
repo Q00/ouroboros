@@ -158,90 +158,34 @@ def append_lateral_review_notice(
     )
 
 
-def resolve_echoed_question(
-    echoed: Any,
-    *,
-    issued_question: str | None,
-    shown_question: str | None = None,
-) -> Any:
-    """Return the question a host echoed back, without the directive below it.
+def echo_carries_dispatch(echoed: Any) -> bool:
+    """Return whether an echoed question carries a directive this module wrote.
 
-    A host is asked to echo "the exact question you asked", and the question it
-    was shown carries the fan-out directive under the marker. That value becomes
-    the recorded round's question, which requirement extraction reads and the
-    Seed inherits, so a host copying the response text wholesale would write
-    server-authored instructions into durable state.
+    A host is asked to echo back "the exact question you asked", and the text it
+    was shown ends with the fan-out directive. That value becomes the recorded
+    round's question, which requirement extraction reads and the Seed inherits,
+    so an echo copied wholesale would write server-authored instructions into
+    durable state.
 
-    **Recognising the directive by its own shape does not work, and cannot.**
-    Two rounds were spent trying: splitting at the marker truncated any question
-    that mentioned it, and requiring the marker *plus* the directive's opening
-    truncated any question that quoted both — which is precisely what an
-    interview *about this feature* contains. An in-band sentinel cannot separate
-    output from quoted output, however long the sentinel grows; each longer
-    prefix is just a longer thing to quote.
+    **The marker is recognised here, and that is safe in this direction only.**
+    Three rounds were spent learning that an in-band sentinel cannot separate our
+    output from a question quoting our output: each longer prefix was a longer
+    thing to quote, and each round truncated a question someone could legitimately
+    ask. What made that unsafe was not the recognition — it was that recognition
+    licensed *cutting*, so a false positive destroyed the user's text.
 
-    So nothing is recognised and nothing is cut. This compares against what the
-    server knows it asked: if the echo is the issued question followed by our
-    marker, the issued question is returned — the one we already hold,
-    not a substring carved out of the echo. Anything else is the host's own
-    text and comes back untouched, including a question that quotes the whole
-    sentinel, because it will not equal what we issued.
+    Here it licenses nothing but a preference for the record we already hold. A
+    false positive costs a repair we did not need to make, because the stored
+    question of an unanswered round is the question the server issued and asked
+    about. So the worst case is keeping the right question, and no echo of any
+    shape — the question alone, the ambiguity-prefixed form, the whole response
+    body, a paraphrase with the directive still attached — can carry a directive
+    past it. Enumerating those forms is what the previous approach had to do, and
+    the list only grows.
 
-    Equality is ``normalize_question_text`` -- the same normalisation the
-    fan-out digests to bind an answer to its question. A faithful echo can still
-    arrive reflowed, with newlines folded to spaces or a character in a
-    different Unicode width, because text picks that up crossing a host. Judging
-    those unequal would let the directive ride through on a host that did
-    exactly what was asked, which is the leak this function exists to close.
-
-    **Compare against what the host saw; return what the server stores.** Those
-    are two strings, and conflating them reopened the leak once already: a
-    question-bearing response renders ``(ambiguity: 0.35) `` in front of the
-    question before the directive is appended, so a host echoing the visible
-    text submits a prefix the stored question never had. Comparing that against
-    the stored form read a perfectly faithful echo as a rewrite and passed the
-    whole thing through, directive and payload JSON included — on the ordinary
-    path, since a live interview scores almost every question. ``shown_question``
-    is that rendered form; a match on either it or the stored form resolves to
-    the stored one, so the transcript keeps the question's identity form and
-    never the presentation.
-
-    Both forms are reconstructed from what the server knows, which is what keeps
-    this a proof. Recognising the prefix in the echo instead would be shape
-    matching again, and the same collision would return in miniature for a
-    question that opens with one.
-
-    With no issued question to compare against — a reopen, where the probe is
-    the host's and the server generated nothing — there is nothing to prove and
-    the echo is returned as given.
-
-    **The residual, stated rather than left to be found.** A host that rewrites
-    the question *and* keeps our directive attached echoes something that
-    matches nothing we issued, so it passes through with the directive still on
-    it. Closing that means recognising the directive by shape again, which is
-    the thing that does not converge, or refusing the echo whenever the record
-    exists, which would strand plugin-mode transcripts on the
-    ``(continued from subagent)`` placeholder that ``last_question`` was added
-    to repair. Both cost more than they buy against a host that paraphrases and
-    preserves verbatim in the same breath. What the comparison guarantees is
-    narrower and worth having on its own: a host that echoes faithfully — the
-    behaviour the skill actually asks for — cannot put a directive in the
-    transcript, and no question is ever truncated.
+    A non-string is not an echo; the caller's own validation rejects it.
     """
-    if not isinstance(echoed, str) or not issued_question:
-        return echoed
-    cut = echoed.rfind(QUESTION_ADVISORY_DISPATCH_MARKER)
-    if cut < 0:
-        return echoed
-    from ouroboros.orchestrator.capabilities import normalize_question_text
-
-    prefix = normalize_question_text(echoed[:cut])
-    accepted = {normalize_question_text(issued_question)}
-    if shown_question:
-        accepted.add(normalize_question_text(shown_question))
-    if prefix not in accepted:
-        return echoed
-    return issued_question
+    return isinstance(echoed, str) and QUESTION_ADVISORY_DISPATCH_MARKER in echoed
 
 
 def split_appended_dispatch(text: str) -> str:
@@ -250,10 +194,10 @@ def split_appended_dispatch(text: str) -> str:
     Parsing, not provenance. The caller is reading a response the server
     produced in the same call (``auto/adapters.py`` extracting the question it
     must answer), so there is no second copy to compare against and the shape is
-    the only evidence there is. Kept apart from :func:`resolve_echoed_question`
-    for that reason: one operation can prove what it removes and the other
-    cannot, and a single function doing both would let the weaker evidence pass
-    for the stronger.
+    the only evidence there is. Kept apart from :func:`echo_carries_dispatch`
+    for that reason: this one removes text on the strength of a shape, and that
+    one only prefers a record we already hold. A single function doing both
+    would let the weaker warrant license the destructive act.
 
     The residual risk is bounded and stated: a question quoting the marker and
     the directive's opening is cut short here too. It reaches durable state only
@@ -272,6 +216,6 @@ __all__ = [
     "QUESTION_ADVISORY_DISPATCH_MARKER",
     "append_lateral_review_notice",
     "append_question_advisory_dispatch",
-    "resolve_echoed_question",
+    "echo_carries_dispatch",
     "split_appended_dispatch",
 ]

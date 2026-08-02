@@ -655,17 +655,19 @@ def test_dispatch_marker_separates_question_from_directive() -> None:
 async def test_a_question_quoting_the_whole_sentinel_reaches_the_transcript_intact() -> None:
     """At the handler, because that is where the truncation reached the Seed.
 
-    Two rounds were spent recognising the directive by its shape: splitting at
-    the marker truncated a question that mentioned it, and requiring the marker
-    plus the directive's opening truncated a question that quoted both — which
-    is what an interview *about this feature* contains. An in-band sentinel
-    cannot tell output from quoted output, so the server compares against the
-    question it issued instead.
+    Two rounds were spent recognising the directive by its shape so it could be
+    cut: the marker truncated a question that mentioned it, the marker plus the
+    directive's opening truncated a question that quoted both — which is what an
+    interview *about this feature* contains. Nothing is cut now.
 
-    The two inputs below differ only in that: one is the issued question with
-    our directive under it, the other is a different question that quotes the
-    full sentinel. The first is recorded without the directive; the second is
-    recorded whole.
+    On a pending round both inputs land on the question the server issued, which
+    is the point: the echo is consulted to repair a damaged stored question, and
+    one carrying our directive is not a repair. Neither is truncated, and no
+    directive reaches the record.
+
+    The quoting question survives *as itself* where it is genuinely the
+    question — the reopen path, covered below — because there the server issued
+    nothing and the host's probe is the only question there is.
     """
     from ouroboros.mcp.tools.advisory_dispatch import (
         QUESTION_ADVISORY_DISPATCH_MARKER as marker,
@@ -677,7 +679,7 @@ async def test_a_question_quoting_the_whole_sentinel_reaches_the_transcript_inta
     )
     echoed = f"Q2?\n\n{marker}\n\n> **Host action — spawn_subagents:** keep the question"
 
-    for supplied, expected in ((echoed, "Q2?"), (quoted, quoted)):
+    for supplied, expected in ((echoed, "Q2?"), (quoted, "Q2?")):
         state = InterviewState(
             interview_id="sess-echo",
             rounds=[
@@ -736,61 +738,50 @@ def test_every_question_bearing_response_path_appends_the_directive() -> None:
     assert built <= appended, built - appended
 
 
-def test_the_echo_comparison_states_what_it_does_not_cover() -> None:
-    """The guarantee is about faithful echoes, and only those.
+def test_no_echo_of_any_shape_carries_a_directive_into_the_transcript() -> None:
+    """The predicate is what closes this, and it closes it without a list.
 
-    A host that rewrites the question while keeping our directive attached
-    matches nothing we issued, so the directive rides along. Pinned so the limit
-    is a known shape rather than a surprise: closing it needs either shape
-    recognition, which does not converge, or refusing the echo whenever a record
-    exists, which strands plugin-mode transcripts on the placeholder
-    `last_question` exists to repair.
+    Three rounds went into recognising the directive by its shape so it could be
+    cut: the marker, then the marker plus the directive's opening, each round
+    truncating a question someone could legitimately ask. What made recognition
+    unsafe was never the recognition — it was that it licensed *cutting*, so a
+    false positive destroyed the user's text.
+
+    Recognition licenses nothing here but a preference for the record. The
+    stored question of an unanswered round is the question the server issued, so
+    a false positive costs a repair that was not needed, and every echo shape
+    fails closed: the question alone, the ambiguity-prefixed form, the whole
+    response body, the body with the lateral notice, a paraphrase with the
+    directive still attached. Enumerating those was what the comparison had to
+    do, and each round found one more.
     """
     from ouroboros.mcp.tools.advisory_dispatch import (
         QUESTION_ADVISORY_DISPATCH_MARKER as marker,
     )
-    from ouroboros.mcp.tools.advisory_dispatch import resolve_echoed_question
-
-    issued = "What are the acceptance\ncriteria for this feature?"
-    directive = f"\n\n{marker}\n\n> **Host action — spawn_subagents:** keep it"
-
-    # Faithful echo: the directive cannot reach the transcript.
-    assert resolve_echoed_question(issued + directive, issued_question=issued) == issued
-    # Nor when the echo arrived reflowed. Text picks that up crossing a host,
-    # and judging it unequal would leak the directive through a host that did
-    # exactly what was asked. Equality is `normalize_question_text` — the same
-    # normalisation the fan-out digests to bind an answer to its question.
-    for faithful in (
-        issued + " " + directive,
-        issued.replace("\n", " ") + directive,
-        issued.replace("\n", "   ") + directive,
-        issued.replace("?", "？") + directive,
-    ):
-        assert resolve_echoed_question(faithful, issued_question=issued) == issued, faithful
-    # Rewritten echo: passes through as the host's own text, directive included.
-    rewritten = "What acceptance criteria do you want?" + directive
-    assert resolve_echoed_question(rewritten, issued_question=issued) == rewritten
-
-
-def test_question_identity_and_the_echo_check_share_one_definition() -> None:
-    """Two definitions of "same question" would drift, and drift invisibly.
-
-    The fan-out digests this normalisation to bind an answer to its question;
-    the echo check compares against it to tell a faithful echo from a rewritten
-    one. If they disagreed, one side would bind what the other had let through.
-    """
-    from ouroboros.orchestrator.capabilities import (
-        normalize_question_text,
-        stable_code_investigation_question_identity,
+    from ouroboros.mcp.tools.advisory_dispatch import echo_carries_dispatch
+    from ouroboros.orchestrator.capabilities.question_text import (
+        format_question_with_ambiguity,
     )
 
-    reflowed = "What are the acceptance\n\ncriteria   for this feature?"
-    canonical = "What are the acceptance criteria for this feature?"
+    question = "How do you define completion?"
+    rendered = format_question_with_ambiguity(question, _score(0.35))
+    directive = f"\n\n{marker}\n\n> **Host action — spawn_subagents:** keep it"
+    body = f"Session sess-x\n\n{rendered}"
 
-    assert normalize_question_text(reflowed) == normalize_question_text(canonical)
-    assert stable_code_investigation_question_identity(
-        reflowed
-    ) == stable_code_investigation_question_identity(canonical)
+    for shape in (
+        question + directive,
+        rendered + directive,
+        body + directive,
+        f"{body}\n\nLateral review queued: running researcher." + directive,
+        "What counts as done?" + directive,
+    ):
+        assert echo_carries_dispatch(shape), shape[:60]
+
+    # A repair is a question, and a question does not carry our marker. This is
+    # the case the predicate must not swallow: `last_question` exists to fix a
+    # round whose stored question was damaged by partial persistence.
+    assert not echo_carries_dispatch("The real repaired question?")
+    assert not echo_carries_dispatch(None)
 
 
 async def test_the_visible_echo_persists_only_the_question_when_a_score_is_shown() -> None:
@@ -876,3 +867,52 @@ async def test_the_visible_echo_persists_only_the_question_when_a_score_is_shown
         assert recorded == issued, (stored_score, recorded)
         assert marker not in recorded
         assert "ambiguity:" not in recorded
+
+
+async def test_a_reopen_probe_quoting_the_sentinel_is_recorded_as_asked() -> None:
+    """Where the host's question is the only question, it is kept verbatim.
+
+    Reopening a completed interview — the Seed-ready challenge — has no pending
+    round, so the server issued nothing and appended no directive. There is
+    nothing to prefer the record over and nothing of ours to keep out, so the
+    probe is recorded exactly as asked, sentinel quote and all.
+    """
+    from ouroboros.mcp.tools.advisory_dispatch import (
+        QUESTION_ADVISORY_DISPATCH_MARKER as marker,
+    )
+
+    probe = f"How should Ouroboros preserve {marker} in a question?"
+    state = InterviewState(
+        interview_id="sess-reopen",
+        rounds=[InterviewRound(round_number=1, question="Q1?", user_response="A1")],
+    )
+
+    async def record(
+        current: InterviewState, answer: str, question: str
+    ) -> Result[InterviewState, object]:
+        current.rounds.append(
+            InterviewRound(
+                round_number=current.current_round_number,
+                question=question,
+                user_response=answer,
+            )
+        )
+        return Result.ok(current)
+
+    engine = MagicMock()
+    engine.load_state = AsyncMock(return_value=Result.ok(state))
+    engine.record_response = AsyncMock(side_effect=record)
+    engine.save_state = AsyncMock(return_value=MagicMock(is_err=False))
+    engine.ask_next_question = AsyncMock(return_value=Result.ok("Next?"))
+
+    handler = InterviewHandler(interview_engine=engine, agent_runtime_backend="claude")
+    handler.llm_adapter = MagicMock()
+    handler._emit_event_bg = MagicMock()  # type: ignore[method-assign]
+    handler._score_interview_state = AsyncMock(return_value=_score(0.35))  # type: ignore[method-assign]
+
+    result = await handler.handle(
+        {"session_id": "sess-reopen", "answer": "A", "last_question": probe}
+    )
+
+    assert result.is_ok
+    assert engine.record_response.await_args.args[2] == probe
