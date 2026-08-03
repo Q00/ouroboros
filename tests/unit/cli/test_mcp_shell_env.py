@@ -174,7 +174,18 @@ def test_shell_env_whitelist_admits_proxy_and_gateway_vars(monkeypatch, tmp_path
     assert os.environ["GH_TOKEN"] == "gho_x"
 
 
+_LEAK_CHECK_BASELINE = {
+    key: os.environ.get(key)
+    for key in ("HTTPS_PROXY", "NO_PROXY", "ANTHROPIC_BASE_URL", "GH_TOKEN", "SOME_VENDOR_API_KEY")
+}
+
+
 def test_environ_mutations_do_not_survive_past_the_test() -> None:
-    """Regression test for #1793: no earlier test's env vars survive teardown."""
-    for key in ("HTTPS_PROXY", "NO_PROXY", "ANTHROPIC_BASE_URL", "GH_TOKEN", "SOME_VENDOR_API_KEY"):
-        assert key not in os.environ
+    """Regression test for #1793: no earlier test's env vars survive teardown.
+
+    Compares against the baseline captured at module import (before any test's
+    autouse fixture ran) rather than asserting absence, so a legitimately
+    ambient proxy/gateway/token value is not mistaken for a leak.
+    """
+    for key, baseline in _LEAK_CHECK_BASELINE.items():
+        assert os.environ.get(key) == baseline
