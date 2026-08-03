@@ -324,6 +324,14 @@ async def test_completed_receipt_waits_for_delayed_waiter_acknowledgement(
         await asyncio.sleep(0)
         assert not next_generation.done()
         assert calls == ["generation-1"]
+        retained = await lineage_claims.observe(
+            next_store,
+            scope="evolve-core",
+            lineage_id="lineage",
+        )
+        assert retained is not None
+        assert retained.generation_number == 1
+        assert retained.completed
 
         release_waiter.set()
         assert await waiter == "generation-1-winner"
@@ -332,6 +340,217 @@ async def test_completed_receipt_waits_for_delayed_waiter_acknowledgement(
     finally:
         for store in (owner_store, waiter_store, next_store):
             await store.close()
+
+
+@pytest.mark.asyncio
+async def test_waiter_heartbeat_extends_lease_and_retains_winner_authority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A live waiter's heartbeat prevents a later generation from displacing it."""
+    database_url = f"sqlite+aiosqlite:///{tmp_path / 'waiter-heartbeat.db'}"
+    owner_store = EventStore(database_url)
+    waiter_store = EventStore(database_url)
+    next_store = EventStore(database_url)
+    for store in (owner_store, waiter_store, next_store):
+        await store.initialize()
+
+    clock_ms = 1_000
+    monkeypatch.setattr(lineage_claims, "_now_ms", lambda: clock_ms)
+    monkeypatch.setattr(lineage_claims, "WAITER_LEASE_SECONDS", 0.03)
+    owner_entered = asyncio.Event()
+    release_owner = asyncio.Event()
+    waiter_observing = asyncio.Event()
+    release_waiter = asyncio.Event()
+    waiter_renewed = asyncio.Event()
+    next_attempted = asyncio.Event()
+    calls: list[str] = []
+    original_observe = lineage_claims.observe
+    original_renew_waiter = lineage_claims.renew_waiter
+    original_try_acquire = lineage_claims.try_acquire
+
+    async def delay_waiter_observation(*args, **kwargs):  # type: ignore[no-untyped-def]
+        if args and args[0] is waiter_store and not release_waiter.is_set():
+            waiter_observing.set()
+            await release_waiter.wait()
+        return await original_observe(*args, **kwargs)
+
+    async def track_waiter_renewal(*args, **kwargs):  # type: ignore[no-untyped-def]
+        nonlocal clock_ms
+        if args and args[0] is waiter_store and not waiter_renewed.is_set():
+            clock_ms = 1_020
+        renewed = await original_renew_waiter(*args, **kwargs)
+        if args and args[0] is waiter_store and renewed:
+            waiter_renewed.set()
+        return renewed
+
+    async def track_next_acquisition(*args, **kwargs):  # type: ignore[no-untyped-def]
+        if args and args[0] is next_store:
+            next_attempted.set()
+        return await original_try_acquire(*args, **kwargs)
+
+    monkeypatch.setattr(lineage_claims, "observe", delay_waiter_observation)
+    monkeypatch.setattr(lineage_claims, "renew_waiter", track_waiter_renewal)
+    monkeypatch.setattr(lineage_claims, "try_acquire", track_next_acquisition)
+
+    async def generation_one() -> str:
+        calls.append("generation-1")
+        owner_entered.set()
+        await release_owner.wait()
+        return "generation-1-winner"
+
+    async def forbidden_duplicate() -> str:
+        calls.append("duplicate")
+        return "duplicate"
+
+    async def generation_two() -> str:
+        calls.append("generation-2")
+        return "generation-2-winner"
+
+    encode = lambda value: {"value": value}  # noqa: E731
+    decode = lambda payload: str(payload["value"])  # noqa: E731
+    try:
+        owner = asyncio.create_task(
+            run_durable_lineage_single_flight(
+                owner_store,
+                "lineage",
+                "request-1",
+                generation_one,
+                generation_number=1,
+                encode=encode,
+                decode=decode,
+            )
+        )
+        await owner_entered.wait()
+        waiter = asyncio.create_task(
+            run_durable_lineage_single_flight(
+                waiter_store,
+                "lineage",
+                "request-1",
+                forbidden_duplicate,
+                generation_number=1,
+                encode=encode,
+                decode=decode,
+            )
+        )
+        await waiter_observing.wait()
+        release_owner.set()
+        assert await owner == "generation-1-winner"
+        await asyncio.wait_for(waiter_renewed.wait(), timeout=1.0)
+
+        # Move past the registration's original t=1,030 lease, but remain
+        # inside the heartbeat-renewed t=1,050 lease.
+        clock_ms = 1_040
+        next_generation = asyncio.create_task(
+            run_durable_lineage_single_flight(
+                next_store,
+                "lineage",
+                "request-2",
+                generation_two,
+                generation_number=2,
+                encode=encode,
+                decode=decode,
+            )
+        )
+        await next_attempted.wait()
+        await asyncio.sleep(0)
+        assert not next_generation.done()
+        assert calls == ["generation-1"]
+
+        release_waiter.set()
+        assert await waiter == "generation-1-winner"
+        assert await next_generation == "generation-2-winner"
+        assert calls == ["generation-1", "generation-2"]
+    finally:
+        release_owner.set()
+        release_waiter.set()
+        for store in (owner_store, waiter_store, next_store):
+            await store.close()
+
+
+@pytest.mark.asyncio
+async def test_hard_crashed_waiter_expires_without_pinning_next_generation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An orphaned waiter lease expires so a later generation can acquire."""
+    owner_store, waiter_store = await _stores(tmp_path / "crashed-waiter.db")
+    next_store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'crashed-waiter.db'}")
+    await next_store.initialize()
+    clock_ms = 1_000
+    monkeypatch.setattr(lineage_claims, "_now_ms", lambda: clock_ms)
+    monkeypatch.setattr(lineage_claims, "WAITER_LEASE_SECONDS", 1.0)
+    calls: list[str] = []
+    try:
+        owner = await lineage_claims.try_acquire(
+            owner_store,
+            scope="evolve-core",
+            lineage_id="lineage",
+            generation_number=1,
+            owner_id="generation-1-owner",
+            request_key="request-1",
+        )
+        assert owner is not None and owner.acquired
+        crashed_waiter = await lineage_claims.try_acquire(
+            waiter_store,
+            scope="evolve-core",
+            lineage_id="lineage",
+            generation_number=1,
+            owner_id="crashed-waiter",
+            request_key="request-1",
+        )
+        assert crashed_waiter is not None and crashed_waiter.waiter_registered
+        assert crashed_waiter.waiter_id == "crashed-waiter"
+        assert await lineage_claims.complete(
+            owner_store,
+            scope="evolve-core",
+            lineage_id="lineage",
+            owner_id="generation-1-owner",
+            result_payload={"value": "generation-1-winner"},
+        )
+
+        # Simulate the waiter process disappearing without its heartbeat or
+        # finally acknowledgement, then move beyond both bounded leases.
+        clock_ms = 7_000
+
+        async def generation_two() -> str:
+            calls.append("generation-2")
+            return "generation-2-winner"
+
+        advanced = await asyncio.wait_for(
+            run_durable_lineage_single_flight(
+                next_store,
+                "lineage",
+                "request-2",
+                generation_two,
+                generation_number=2,
+                encode=lambda value: {"value": value},
+                decode=lambda payload: str(payload["value"]),
+            ),
+            timeout=1.0,
+        )
+        assert advanced == "generation-2-winner"
+        assert calls == ["generation-2"]
+        assert not await lineage_claims.renew_waiter(
+            waiter_store,
+            scope="evolve-core",
+            lineage_id="lineage",
+            owner_id="generation-1-owner",
+            waiter_id="crashed-waiter",
+        )
+
+        current = await lineage_claims.observe(
+            next_store,
+            scope="evolve-core",
+            lineage_id="lineage",
+        )
+        assert current is not None
+        assert current.generation_number == 2
+        assert current.completed
+    finally:
+        await owner_store.close()
+        await waiter_store.close()
+        await next_store.close()
 
 
 @pytest.mark.asyncio

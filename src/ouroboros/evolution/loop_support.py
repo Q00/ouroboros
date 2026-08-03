@@ -682,8 +682,29 @@ async def run_durable_lineage_single_flight[T](
             await asyncio.sleep(0.01)
             continue
 
+        waiter_id = claim.waiter_id
+        if waiter_id is None:
+            raise RuntimeError("Durable lineage waiter registration has no identity")
+        waiter_heartbeat = asyncio.create_task(
+            _renew_waiter_until_cancelled(
+                event_store,
+                scope=scope,
+                lineage_id=lineage_id,
+                owner_id=claim.owner_id,
+                waiter_id=waiter_id,
+            )
+        )
         try:
             while True:
+                if waiter_heartbeat.done():
+                    heartbeat_error = (
+                        None if waiter_heartbeat.cancelled() else waiter_heartbeat.exception()
+                    )
+                    if heartbeat_error is not None:
+                        raise RuntimeError(
+                            "Durable lineage waiter heartbeat failed before receipt replay"
+                        ) from heartbeat_error
+                    raise RuntimeError("Lost durable lineage waiter registration")
                 winner = await lineage_claims.observe(
                     event_store,
                     scope=scope,
@@ -703,11 +724,19 @@ async def run_durable_lineage_single_flight[T](
                     raise LineageWinnerAdvanced
                 await asyncio.sleep(0.01)
         finally:
+            waiter_heartbeat.cancel()
+            try:
+                await waiter_heartbeat
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
             await lineage_claims.acknowledge_waiter(
                 event_store,
                 scope=scope,
                 lineage_id=lineage_id,
                 owner_id=claim.owner_id,
+                waiter_id=waiter_id,
             )
 
 
@@ -729,6 +758,29 @@ async def _renew_claim_until_cancelled(
             owner_id=owner_id,
         ):
             raise RuntimeError("Lost durable lineage advancement claim during renewal")
+
+
+async def _renew_waiter_until_cancelled(
+    event_store: EventStore,
+    *,
+    scope: str,
+    lineage_id: str,
+    owner_id: str,
+    waiter_id: str,
+) -> None:
+    """Heartbeat one waiter registration until its winner receipt is consumed."""
+    from ouroboros.persistence import lineage_claims
+
+    while True:
+        await asyncio.sleep(lineage_claims.WAITER_LEASE_SECONDS / 3)
+        if not await lineage_claims.renew_waiter(
+            event_store,
+            scope=scope,
+            lineage_id=lineage_id,
+            owner_id=owner_id,
+            waiter_id=waiter_id,
+        ):
+            raise RuntimeError("Lost durable lineage waiter registration during renewal")
 
 
 async def planned_evolve_generation(

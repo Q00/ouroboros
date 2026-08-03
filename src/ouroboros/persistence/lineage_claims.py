@@ -6,15 +6,19 @@ from dataclasses import dataclass
 import time
 from typing import Any
 
-from sqlalchemy import delete, insert, select, update
+from sqlalchemy import delete, func, insert, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from ouroboros.core.errors import PersistenceError
 from ouroboros.persistence.event_store import EventStore
-from ouroboros.persistence.schema import lineage_advancement_claims_table
+from ouroboros.persistence.schema import (
+    lineage_advancement_claims_table,
+    lineage_advancement_waiters_table,
+)
 
 DEFAULT_LEASE_SECONDS = 120.0
+WAITER_LEASE_SECONDS = 120.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,6 +29,7 @@ class ClaimObservation:
     acquired: bool
     lease_expires_at_ms: int
     waiter_registered: bool = False
+    waiter_id: str | None = None
     completed: bool = False
     result_payload: dict[str, Any] | None = None
 
@@ -36,6 +41,10 @@ def _now_ms() -> int:
 def _lease_ms(seconds: float | None = None) -> int:
     duration = DEFAULT_LEASE_SECONDS if seconds is None else seconds
     return _now_ms() + max(1, int(duration * 1000))
+
+
+def _waiter_lease_ms() -> int:
+    return _now_ms() + max(1, int(WAITER_LEASE_SECONDS * 1000))
 
 
 def _engine(event_store: EventStore) -> AsyncEngine | None:
@@ -69,6 +78,48 @@ async def _commit(connection: AsyncConnection, transaction: Any) -> None:
         await connection.commit()
     elif transaction is not None:
         await transaction.commit()
+
+
+async def _prune_and_count_waiters(
+    connection: AsyncConnection,
+    *,
+    scope: str,
+    lineage_id: str,
+    claim_owner_id: str,
+) -> int:
+    """Remove expired registrations and return the live waiter cardinality."""
+    await connection.execute(
+        delete(lineage_advancement_waiters_table).where(
+            lineage_advancement_waiters_table.c.scope == scope,
+            lineage_advancement_waiters_table.c.lineage_id == lineage_id,
+            lineage_advancement_waiters_table.c.claim_owner_id == claim_owner_id,
+            lineage_advancement_waiters_table.c.lease_expires_at_ms <= _now_ms(),
+        )
+    )
+    count = await connection.scalar(
+        select(func.count())
+        .select_from(lineage_advancement_waiters_table)
+        .where(
+            lineage_advancement_waiters_table.c.scope == scope,
+            lineage_advancement_waiters_table.c.lineage_id == lineage_id,
+            lineage_advancement_waiters_table.c.claim_owner_id == claim_owner_id,
+        )
+    )
+    return int(count or 0)
+
+
+async def _delete_claim_waiters(
+    connection: AsyncConnection,
+    *,
+    scope: str,
+    lineage_id: str,
+) -> None:
+    await connection.execute(
+        delete(lineage_advancement_waiters_table).where(
+            lineage_advancement_waiters_table.c.scope == scope,
+            lineage_advancement_waiters_table.c.lineage_id == lineage_id,
+        )
+    )
 
 
 async def try_acquire(
@@ -105,13 +156,28 @@ async def try_acquire(
                     .mappings()
                     .first()
                 )
-                waiter_count = int(row["waiter_count"]) if row is not None else 0
-                # A completed receipt is exact winner authority for every
-                # caller that registered while its owner was active.  Time
-                # alone cannot revoke that authority: a live waiter may be
-                # descheduled or blocked on the database beyond the short
-                # receipt lease.  Only its atomic acknowledgement drains the
-                # receipt for ordinary next-generation acquisition.
+                waiter_count = 0
+                if row is not None:
+                    waiter_count = await _prune_and_count_waiters(
+                        connection,
+                        scope=scope,
+                        lineage_id=lineage_id,
+                        claim_owner_id=str(row["owner_id"]),
+                    )
+                    if waiter_count != int(row["waiter_count"]):
+                        await connection.execute(
+                            update(lineage_advancement_claims_table)
+                            .where(
+                                lineage_advancement_claims_table.c.scope == scope,
+                                lineage_advancement_claims_table.c.lineage_id == lineage_id,
+                                lineage_advancement_claims_table.c.owner_id == row["owner_id"],
+                            )
+                            .values(waiter_count=waiter_count)
+                        )
+                # A completed receipt is exact winner authority for every live
+                # waiter registered on its owner.  Short receipt-lease expiry
+                # alone cannot revoke it; individually leased waiter rows
+                # distinguish a delayed live process from a hard-crashed one.
                 receipt_drained = row is not None and waiter_count == 0
                 replaceable = row is None or (
                     bool(row["completed"])
@@ -133,6 +199,11 @@ async def try_acquire(
                     "result_payload": None,
                 }
                 if replaceable:
+                    await _delete_claim_waiters(
+                        connection,
+                        scope=scope,
+                        lineage_id=lineage_id,
+                    )
                     if row is None:
                         await connection.execute(
                             insert(lineage_advancement_claims_table).values(
@@ -162,13 +233,22 @@ async def try_acquire(
                 assert row is not None
                 if not bool(row["completed"]):
                     await connection.execute(
+                        insert(lineage_advancement_waiters_table).values(
+                            scope=scope,
+                            lineage_id=lineage_id,
+                            claim_owner_id=row["owner_id"],
+                            waiter_id=owner_id,
+                            lease_expires_at_ms=_waiter_lease_ms(),
+                        )
+                    )
+                    await connection.execute(
                         update(lineage_advancement_claims_table)
                         .where(
                             lineage_advancement_claims_table.c.scope == scope,
                             lineage_advancement_claims_table.c.lineage_id == lineage_id,
                             lineage_advancement_claims_table.c.owner_id == row["owner_id"],
                         )
-                        .values(waiter_count=lineage_advancement_claims_table.c.waiter_count + 1)
+                        .values(waiter_count=waiter_count + 1)
                     )
                     await _commit(connection, transaction)
                     return ClaimObservation(
@@ -178,6 +258,7 @@ async def try_acquire(
                         acquired=False,
                         lease_expires_at_ms=int(row["lease_expires_at_ms"]),
                         waiter_registered=True,
+                        waiter_id=owner_id,
                     )
 
                 await _commit(connection, transaction)
@@ -280,17 +361,29 @@ async def complete(
     async with engine.connect() as connection:
         transaction = await _begin_write(connection)
         row = (
-            await connection.execute(
-                select(lineage_advancement_claims_table.c.waiter_count).where(
-                    lineage_advancement_claims_table.c.scope == scope,
-                    lineage_advancement_claims_table.c.lineage_id == lineage_id,
-                    lineage_advancement_claims_table.c.owner_id == owner_id,
+            (
+                await connection.execute(
+                    select(lineage_advancement_claims_table)
+                    .where(
+                        lineage_advancement_claims_table.c.scope == scope,
+                        lineage_advancement_claims_table.c.lineage_id == lineage_id,
+                        lineage_advancement_claims_table.c.owner_id == owner_id,
+                    )
+                    .with_for_update()
                 )
             )
-        ).first()
+            .mappings()
+            .first()
+        )
         if row is None:
             await _commit(connection, transaction)
             return False
+        waiter_count = await _prune_and_count_waiters(
+            connection,
+            scope=scope,
+            lineage_id=lineage_id,
+            claim_owner_id=owner_id,
+        )
         result = await connection.execute(
             update(lineage_advancement_claims_table)
             .where(
@@ -304,6 +397,7 @@ async def complete(
                 completed=True,
                 result_payload=result_payload,
                 lease_expires_at_ms=_lease_ms(5.0),
+                waiter_count=waiter_count,
             )
         )
         await _commit(connection, transaction)
@@ -322,7 +416,7 @@ async def release(
     if engine is None:
         return
     async with engine.begin() as connection:
-        await connection.execute(
+        removed = await connection.execute(
             delete(lineage_advancement_claims_table).where(
                 lineage_advancement_claims_table.c.scope == scope,
                 lineage_advancement_claims_table.c.lineage_id == lineage_id,
@@ -330,6 +424,14 @@ async def release(
                 lineage_advancement_claims_table.c.completed.is_(False),
             )
         )
+        if removed.rowcount:
+            await connection.execute(
+                delete(lineage_advancement_waiters_table).where(
+                    lineage_advancement_waiters_table.c.scope == scope,
+                    lineage_advancement_waiters_table.c.lineage_id == lineage_id,
+                    lineage_advancement_waiters_table.c.claim_owner_id == owner_id,
+                )
+            )
 
 
 async def recover_expired(
@@ -351,6 +453,39 @@ async def recover_expired(
                 lineage_advancement_claims_table.c.lease_expires_at_ms <= _now_ms(),
             )
         )
+        if result.rowcount:
+            await _delete_claim_waiters(
+                connection,
+                scope=scope,
+                lineage_id=lineage_id,
+            )
+    return bool(result.rowcount)
+
+
+async def renew_waiter(
+    event_store: EventStore,
+    *,
+    scope: str,
+    lineage_id: str,
+    owner_id: str,
+    waiter_id: str,
+) -> bool:
+    """Renew one live waiter's independent receipt-registration lease."""
+    engine = _engine(event_store)
+    if engine is None:
+        return False
+    async with engine.begin() as connection:
+        result = await connection.execute(
+            update(lineage_advancement_waiters_table)
+            .where(
+                lineage_advancement_waiters_table.c.scope == scope,
+                lineage_advancement_waiters_table.c.lineage_id == lineage_id,
+                lineage_advancement_waiters_table.c.claim_owner_id == owner_id,
+                lineage_advancement_waiters_table.c.waiter_id == waiter_id,
+                lineage_advancement_waiters_table.c.lease_expires_at_ms > _now_ms(),
+            )
+            .values(lease_expires_at_ms=_waiter_lease_ms())
+        )
     return bool(result.rowcount)
 
 
@@ -360,19 +495,44 @@ async def acknowledge_waiter(
     scope: str,
     lineage_id: str,
     owner_id: str,
+    waiter_id: str,
 ) -> None:
-    """Atomically consume one registered waiter without a lost update."""
+    """Atomically consume one exact waiter registration without a lost update."""
     engine = _engine(event_store)
     if engine is None:
         return
-    async with engine.begin() as connection:
+    async with engine.connect() as connection:
+        transaction = await _begin_write(connection)
+        await connection.execute(
+            select(lineage_advancement_claims_table.c.owner_id)
+            .where(
+                lineage_advancement_claims_table.c.scope == scope,
+                lineage_advancement_claims_table.c.lineage_id == lineage_id,
+                lineage_advancement_claims_table.c.owner_id == owner_id,
+            )
+            .with_for_update()
+        )
+        await connection.execute(
+            delete(lineage_advancement_waiters_table).where(
+                lineage_advancement_waiters_table.c.scope == scope,
+                lineage_advancement_waiters_table.c.lineage_id == lineage_id,
+                lineage_advancement_waiters_table.c.claim_owner_id == owner_id,
+                lineage_advancement_waiters_table.c.waiter_id == waiter_id,
+            )
+        )
+        waiter_count = await _prune_and_count_waiters(
+            connection,
+            scope=scope,
+            lineage_id=lineage_id,
+            claim_owner_id=owner_id,
+        )
         await connection.execute(
             update(lineage_advancement_claims_table)
             .where(
                 lineage_advancement_claims_table.c.scope == scope,
                 lineage_advancement_claims_table.c.lineage_id == lineage_id,
                 lineage_advancement_claims_table.c.owner_id == owner_id,
-                lineage_advancement_claims_table.c.waiter_count > 0,
             )
-            .values(waiter_count=lineage_advancement_claims_table.c.waiter_count - 1)
+            .values(waiter_count=waiter_count)
         )
+        await _commit(connection, transaction)
