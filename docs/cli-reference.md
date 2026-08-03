@@ -48,6 +48,7 @@ ouroboros [OPTIONS] COMMAND [ARGS]...
 | `cleanup` | Prune leftover auto-session worktrees, branches, locks, and state files |
 | `config` | Manage Ouroboros configuration (show, switch backend, set values) |
 | `uninstall` | Cleanly remove all Ouroboros configuration from your system |
+| `update` | Update Ouroboros to the latest version (package + runtime integration) |
 | `status` | Check Ouroboros system status |
 | `tui` | Interactive TUI monitor for real-time workflow monitoring |
 | `monitor` | Shorthand for `tui monitor` |
@@ -804,6 +805,56 @@ ouroboros uninstall --keep-data
 - Your project source code or git history
 
 See [UNINSTALL.md](../UNINSTALL.md) for the full guide.
+
+---
+
+## `ouroboros update`
+
+Update Ouroboros to the latest version. Native counterpart of the `ooo update` skill — works in any shell, with no AI session required.
+
+```bash
+ouroboros update [OPTIONS]
+```
+
+**Options:**
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `--check` | flag | off | Only report installed vs latest version — change nothing |
+| `-y, --yes` | flag | off | Skip confirmation prompt (for scripts) |
+| `--dry-run` | flag | off | Show the commands that would run without executing them |
+| `--prerelease / --no-prerelease` | flag | auto | Include pre-releases (default: only when a pre-release is installed) |
+| `-r, --runtime` | text | `auto` | Runtime integration to refresh after upgrading (`auto`, `claude`, `codex`, ..., or `none` to skip) |
+
+**Examples:**
+
+```bash
+# Version check only
+ouroboros update --check
+
+# Interactive update
+ouroboros update
+
+# Non-interactive (scripts, CI)
+ouroboros update -y
+
+# Preview the commands without running them
+ouroboros update --dry-run
+
+# Upgrade the package but skip runtime integration refresh
+ouroboros update --runtime none -y
+```
+
+**What it does:**
+
+1. Compares the installed version against the latest on PyPI (pre-release aware)
+2. Upgrades `ouroboros-ai[claude]` with the same installer that installed it (`uv tool` > `pipx` > `pip`)
+3. Refreshes the Claude Code plugin (`claude plugin marketplace update` + `claude plugin install`) when the `claude` CLI is available
+4. Re-runs `ouroboros setup --runtime <rt> --non-interactive` for the selected runtime
+
+With `--runtime auto` (the default), the runtime is picked by probing for the `claude` CLI first, then `codex`; when neither is found the runtime refresh is skipped with a notice — the package upgrade still completes.
+
+> **Note**: The `[claude]` extra is never combined with `[mcp]` — the Claude Agent SDK embeds MCP 1.x while the protocol server requires MCP 2. MCP hosts launch their own isolated `ouroboros-ai[mcp]` process via `uvx`/`pipx run`.
 
 ---
 

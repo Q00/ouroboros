@@ -20,25 +20,54 @@ ooo update
 
 When the user invokes this skill:
 
-1. **Check current version**:
+1. **Prefer the native CLI command** (single source of truth for the update flow):
 
-   First, try reading the version from the CLI binary (works for all install methods):
+   ```bash
+   ouroboros update --check
+   ```
+
+   If the command succeeds, show its output to the user.
+
+   - If it reports **up to date**, you are done — skip to step 4.
+   - If it reports an **update available**, ask the user with AskUserQuestion:
+     - **"Update now"** — run the update
+     - **"Skip"** — do nothing
+
+   If the user chose to update, run:
+
+   ```bash
+   ouroboros update --yes
+   ```
+
+   The CLI performs the full flow natively: PyPI version check, package
+   upgrade with the original installer (uv tool > pipx > pip, preserving the
+   `[claude]` extra), Claude Code plugin refresh, and
+   `ouroboros setup --non-interactive` for the detected runtime. When it
+   finishes, continue at step 3.
+
+   If `ouroboros update` is **not available** (the installed binary predates
+   the command), fall back to the manual procedure in step 2.
+
+2. **Manual fallback (older installs only)**:
+
+   a. **Check current version**:
+
    ```bash
    ouroboros --version 2>/dev/null
    ```
 
    If that fails, try the plugin version:
+
    ```bash
    cat .claude-plugin/plugin.json 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('version','unknown'))" 2>/dev/null
    ```
 
-   If both fail, the package is not installed — skip to step 3.
-
-2. **Check latest version on PyPI**:
+   b. **Check latest version on PyPI**:
 
    First, determine if the current installed version is a pre-release (contains `a`, `b`, `rc`, or `dev`).
 
    If the current version **is a pre-release**, scan all PyPI releases to find the latest (including betas):
+
    ```bash
    python3 -c "
    import json, ssl, urllib.request
@@ -51,6 +80,7 @@ When the user invokes this skill:
    ```
 
    If the current version **is stable**, use the standard latest:
+
    ```bash
    python3 -c "
    import json, ssl, urllib.request
@@ -60,14 +90,14 @@ When the user invokes this skill:
    "
    ```
 
-3. **Compare and report**:
+   c. **Compare and report**. If already on the latest version:
 
-   If already on the latest version:
    ```
    Ouroboros is up to date (v0.X.Y)
    ```
 
    If a newer version is available, show:
+
    ```
    Update available: v0.X.Y → v0.X.Z
 
@@ -78,12 +108,11 @@ When the user invokes this skill:
    - **"Update now"** — Proceed with update
    - **"Skip"** — Do nothing
 
-4. **Run update** (if user chose to update):
-
-   a. **Update PyPI package** — detect the original install method and preserve
-   the standalone `[claude]` profile:
+   d. **Update PyPI package** (if user chose to update) — detect the original
+   install method and preserve the standalone `[claude]` profile:
 
    Check which installer was used:
+
    ```bash
    uv tool list 2>/dev/null | grep -q ouroboros && echo "uv"
    pipx list 2>/dev/null | grep -q ouroboros && echo "pipx"
@@ -119,38 +148,34 @@ When the user invokes this skill:
      python3 -m pip install --upgrade 'ouroboros-ai[claude]'
      ```
 
-   > **Note**: `[claude]` is the complete standalone Claude SDK profile. MCP tools
-   > are intentionally not registered by this profile; configure a supported
-   > CLI-backed runtime separately when MCP 2 is required.
-
-   b. **Update runtime integration**:
+   e. **Update runtime integration**:
 
    For Claude Code:
+
    ```bash
    claude plugin marketplace update ouroboros 2>/dev/null || true
    claude plugin install ouroboros@ouroboros
    ```
 
    For Codex CLI (re-install skills/rules to ~/.codex/):
+
    ```bash
    ouroboros setup --runtime codex --non-interactive
    ```
 
-   c. **Refresh runtime config**:
+   f. **Refresh runtime config** (Claude Code only — Codex is already handled
+   by step e):
 
-   Run the same setup command used in step b to ensure runtime config is current:
-
-   For Claude Code:
    ```bash
    ouroboros setup --runtime claude --non-interactive
    ```
 
-   For Codex CLI (already handled by step b above — skip this step).
-
    Standalone Claude setup leaves `~/.claude/mcp.json` untouched. It refreshes
    the Claude runtime/LLM settings and preserves the MCP 1.x / MCP 2 boundary.
 
-   d. **Verify and update CLAUDE.md version marker**:
+3. **Verify and update CLAUDE.md version marker** (the CLI does not touch
+   project files):
+
    ```bash
    NEW_VERSION=$(ouroboros --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+[a-z0-9.]*')
    echo "Installed: v$NEW_VERSION"
@@ -169,7 +194,8 @@ When the user invokes this skill:
    > **Note**: This only updates the version marker. If the block content itself
    > changed between versions, the user should run `ooo setup` to regenerate it.
 
-5. **Post-update guidance**:
+4. **Post-update guidance**:
+
    ```
    Updated to v0.X.Z
 
@@ -188,6 +214,8 @@ When the user invokes this skill:
 - Plugin update (Claude Code) pulls the latest from the marketplace.
 - No data is lost during updates — event stores and session data are preserved.
 - **Always use the same installer** that was used for the original installation (uv tool > pipx > pip).
+- `ouroboros update` supports `--check`, `--yes`, `--dry-run`, `--prerelease`,
+  and `--runtime` — see `ouroboros update --help`.
 
 ## RFC #1392 State Breadcrumb Footer
 
