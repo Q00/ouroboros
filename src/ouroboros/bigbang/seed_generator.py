@@ -1897,6 +1897,9 @@ class SeedGenerator:
                 parent_seed_id=parent_seed.metadata.seed_id,
             )
 
+            refined_patches = (
+                reflect_output.ac_patches if reflect_output.ac_patch_identity_explicit else None
+            )
             seed = Seed(
                 goal=reflect_output.refined_goal,
                 task_type=parent_seed.task_type,
@@ -1906,7 +1909,9 @@ class SeedGenerator:
                 evaluation_principles=parent_seed.evaluation_principles,
                 exit_conditions=parent_seed.exit_conditions,
                 metadata=metadata,
-                **evolve_seed_contract_fields(parent_seed, reflect_output.refined_acs),
+                **evolve_seed_contract_fields(
+                    parent_seed, reflect_output.refined_acs, refined_patches
+                ),
             )
 
             log.info(

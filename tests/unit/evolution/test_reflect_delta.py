@@ -487,9 +487,36 @@ class TestReflectEndToEnd:
         assert result.is_ok
         out = result.value
         assert out.refined_acs == ("AC zero", "fixed AC one", "AC two")
+        assert out.ac_patch_identity_explicit is True
         assert 0 in out.settled_ac_indices
         assert 2 in out.settled_ac_indices
         assert 1 not in out.settled_ac_indices
+
+    async def test_reflect_marks_legacy_full_list_patch_identity_as_inferred(self) -> None:
+        response = json.dumps(
+            {
+                "refined_goal": "Build a thing better",
+                "refined_constraints": ["c1"],
+                "refined_acs": ["AC zero", "fixed AC one", "AC two"],
+                "ontology_mutations": [],
+                "reasoning": "r",
+            }
+        )
+
+        result = await ReflectEngine(
+            llm_adapter=_FakeAdapter(response),
+            model="test",
+        ).reflect(
+            current_seed=_seed(),
+            execution_output="out",
+            evaluation_summary=_summary({0: True, 1: True, 2: True}),
+            wonder_output=_wonder(challenge_indices=(1,)),
+            lineage=OntologyLineage(lineage_id="l", goal="Build a thing"),
+        )
+
+        assert result.is_ok
+        assert result.value.ac_patches
+        assert result.value.ac_patch_identity_explicit is False
 
     async def test_valid_mutations_materialize_downstream_seed(self) -> None:
         parent = _seed_with_ontology(
@@ -572,6 +599,7 @@ class TestReflectEndToEnd:
                 ACPatch(op="keep", index=1),
                 ACPatch(op="keep", index=2),
             ),
+            ac_patch_identity_explicit=True,
         )
 
         result = SeedGenerator(llm_adapter=_FakeAdapter("")).generate_from_reflect(
@@ -634,6 +662,145 @@ class TestReflectEndToEnd:
         assert result.is_err
         assert expected_reason in str(result.error)
         assert "structured acceptance contracts" in str(result.error)
+
+    def test_seed_generation_rejects_edited_structured_contract_reordering(self) -> None:
+        parent = _seed(
+            (
+                AcceptanceCriterionSpec(
+                    description="Approve the invoice",
+                    verify_command="python verify_invoice.py",
+                    expected_artifacts=("invoice.json",),
+                ),
+                AcceptanceCriterionSpec(
+                    description="Delete the account",
+                    verify_command="python verify_delete.py",
+                    expected_artifacts=("deleted.json",),
+                ),
+            )
+        )
+        reflected = ReflectOutput(
+            refined_goal=parent.goal,
+            refined_constraints=parent.constraints,
+            refined_acs=(
+                "Delete the account permanently",
+                "Approve the invoice safely",
+            ),
+        )
+
+        result = SeedGenerator(llm_adapter=_FakeAdapter("")).generate_from_reflect(
+            parent,
+            reflected,
+        )
+
+        assert result.is_err
+        assert "explicit stable AC identity" in str(result.error)
+
+    def test_seed_generation_uses_explicit_patch_identity_for_multiple_revisions(self) -> None:
+        parent = _seed(
+            (
+                AcceptanceCriterionSpec(
+                    description="Approve the invoice",
+                    verify_command="python verify_invoice.py",
+                    expected_artifacts=("invoice.json",),
+                ),
+                AcceptanceCriterionSpec(
+                    description="Delete the account",
+                    verify_command="python verify_delete.py",
+                    expected_artifacts=("deleted.json",),
+                ),
+            )
+        )
+        reflected = ReflectOutput(
+            refined_goal=parent.goal,
+            refined_constraints=parent.constraints,
+            refined_acs=("Approve the invoice safely", "Delete the account permanently"),
+            ac_patches=(
+                ACPatch(op="revise", index=0, content="Approve the invoice safely"),
+                ACPatch(op="revise", index=1, content="Delete the account permanently"),
+            ),
+            ac_patch_identity_explicit=True,
+        )
+
+        result = SeedGenerator(llm_adapter=_FakeAdapter("")).generate_from_reflect(
+            parent,
+            reflected,
+        )
+
+        assert result.is_ok
+        criteria = result.value.acceptance_criteria
+        assert criteria[0].verify_command == "python verify_invoice.py"
+        assert criteria[1].verify_command == "python verify_delete.py"
+
+    def test_seed_generation_rejects_legacy_positional_patches_for_edited_reorder(
+        self,
+    ) -> None:
+        parent = _seed(
+            (
+                AcceptanceCriterionSpec(
+                    description="Approve the invoice",
+                    verify_command="python verify_invoice.py",
+                ),
+                AcceptanceCriterionSpec(
+                    description="Delete the account",
+                    verify_command="python verify_delete.py",
+                ),
+            )
+        )
+        reflected = ReflectOutput(
+            refined_goal=parent.goal,
+            refined_constraints=parent.constraints,
+            refined_acs=("Delete the account permanently", "Approve the invoice safely"),
+            ac_patches=(
+                ACPatch(op="revise", index=0, content="Delete the account permanently"),
+                ACPatch(op="revise", index=1, content="Approve the invoice safely"),
+            ),
+        )
+
+        result = SeedGenerator(llm_adapter=_FakeAdapter("")).generate_from_reflect(
+            parent,
+            reflected,
+        )
+
+        assert result.is_err
+        assert "explicit stable AC identity" in str(result.error)
+
+    def test_seed_generation_rejects_inconsistent_explicit_patch_for_plain_ac(self) -> None:
+        parent = _seed(("original",))
+        reflected = ReflectOutput(
+            refined_goal=parent.goal,
+            refined_constraints=parent.constraints,
+            refined_acs=("changed despite keep",),
+            ac_patches=(ACPatch(op="keep", index=0),),
+            ac_patch_identity_explicit=True,
+        )
+
+        result = SeedGenerator(llm_adapter=_FakeAdapter("")).generate_from_reflect(
+            parent,
+            reflected,
+        )
+
+        assert result.is_err
+        assert "keep patch changed an acceptance criterion" in str(result.error)
+
+    @pytest.mark.parametrize(
+        ("refined_acs", "expected_reason"),
+        [
+            (("   ",), "non-empty string"),
+            (("criterion\x00suffix",), "control characters"),
+            ((42,), "contain strings"),
+        ],
+        ids=("whitespace", "control-character", "non-string"),
+    )
+    def test_reflect_output_rejects_invalid_acceptance_criteria(
+        self,
+        refined_acs: tuple[object, ...],
+        expected_reason: str,
+    ) -> None:
+        with pytest.raises((TypeError, ValueError), match=expected_reason):
+            ReflectOutput(
+                refined_goal="Build a thing",
+                refined_acs=refined_acs,  # type: ignore[arg-type]
+            )
 
 
 class _FakeAdapter:

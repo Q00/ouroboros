@@ -25,7 +25,7 @@ from ouroboros.core.conductor import ConductorDirective
 from ouroboros.core.errors import ProviderError
 from ouroboros.core.json_utils import extract_json_payload
 from ouroboros.core.lineage import EvaluationSummary, MutationAction, OntologyDelta, OntologyLineage
-from ouroboros.core.seed import Seed, ac_texts
+from ouroboros.core.seed import AcceptanceCriterionSpec, Seed, ac_texts
 from ouroboros.core.text import truncate_head_tail
 from ouroboros.core.types import Result
 from ouroboros.evolution.regression import RegressionDetector, RegressionReport
@@ -88,6 +88,7 @@ class ReflectOutput(BaseModel, frozen=True):
     refined_constraints: tuple[str, ...] = Field(default_factory=tuple)
     refined_acs: tuple[str, ...] = Field(default_factory=tuple)
     ac_patches: tuple[ACPatch, ...] = Field(default_factory=tuple)
+    ac_patch_identity_explicit: bool = False
     settled_ac_indices: tuple[int, ...] = Field(default_factory=tuple)
     ontology_mutations: tuple[OntologyMutation, ...] = Field(default_factory=tuple)
     reasoning: str = ""
@@ -96,7 +97,19 @@ class ReflectOutput(BaseModel, frozen=True):
     @classmethod
     def _coerce_refined_acs(cls, value: object) -> object:
         if isinstance(value, list | tuple):
-            return ac_texts(value)
+            if any(not isinstance(item, str | AcceptanceCriterionSpec) for item in value):
+                raise TypeError("Expected refined acceptance criteria to contain strings")
+            descriptions = tuple(
+                _clean_required_text(description, "refined acceptance criterion")
+                for description in ac_texts(value)
+            )
+            if any(
+                ord(character) < 32 or ord(character) == 127
+                for description in descriptions
+                for character in description
+            ):
+                raise TypeError("Expected refined acceptance criteria without control characters")
+            return descriptions
         return value
 
 
@@ -796,6 +809,7 @@ Guidelines:
                 refined_constraints=refined_constraints,
                 refined_acs=refined_acs,
                 ac_patches=ac_patches,
+                ac_patch_identity_explicit="ac_patches" in data,
                 settled_ac_indices=settled,
                 ontology_mutations=tuple(mutations),
                 reasoning=reasoning,
