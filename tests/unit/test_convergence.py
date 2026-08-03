@@ -530,7 +530,7 @@ class TestConvergenceGating:
             lineage,
             latest_evaluation=_approved_evaluation(seed),
             latest_seed=seed,
-            validation_output="Validation passed: all checks green",
+            validation_output="Validation passed (attempt 1/3)",
         )
 
         assert signal.should_stop
@@ -648,7 +648,7 @@ class TestLoopEngineeringExitSignals:
         signal = criteria.evaluate(
             lineage,
             latest_evaluation=evaluation,
-            validation_output="Validation passed: all checks green",
+            validation_output="Validation passed (attempt 1/3)",
             latest_seed=seed,
         )
 
@@ -705,7 +705,7 @@ class TestLoopEngineeringExitSignals:
             lineage,
             latest_evaluation=evaluation,
             latest_seed=seed,
-            validation_output="Validation passed: all checks green",
+            validation_output="Validation passed (attempt 1/3)",
         )
 
         assert not signal.converged
@@ -1012,7 +1012,7 @@ class TestValidationGate:
         )
         signal = criteria.evaluate(
             lineage,
-            validation_output="Validation passed: all checks green",
+            validation_output="Validation passed (attempt 1/3)",
             latest_evaluation=_approved_evaluation(seed),
             latest_seed=seed,
         )
@@ -1066,6 +1066,9 @@ class TestValidationGate:
             "Validation fix failed (attempt 1): timeout",
             "Validation: no fixable errors detected (exit code 2)",
             "False",
+            "Validation passed: false",
+            "Validation passed but 3 errors remain",
+            "Validation passed\nValidation error: tests failed",
         ),
     )
     def test_blocks_configured_validator_without_explicit_pass(

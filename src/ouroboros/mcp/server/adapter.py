@@ -2096,6 +2096,8 @@ def create_ouroboros_server(
         import re
         import subprocess  # noqa: S404  # nosec
 
+        from ouroboros.evolution.validation_result import BUILTIN_COLLECTION_ATTEMPT_LIMIT
+
         project_dir = _extract_project_dir(execution_output or "", seed=seed)
 
         if not project_dir:
@@ -2123,7 +2125,7 @@ def create_ouroboros_server(
                 timeout=60,
             )
 
-        max_attempts = 3
+        max_attempts = BUILTIN_COLLECTION_ATTEMPT_LIMIT
         # Use Sonnet for validation fixes — import error resolution doesn't need Opus
         validation_model = os.environ.get("OUROBOROS_VALIDATION_MODEL") or execution_model
         if validation_model is None and execute_runtime_backend == "claude":
