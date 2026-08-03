@@ -187,6 +187,35 @@ class TestWonderEvolutionFocus:
         assert "AC 2: refresh test failed" in prompt
         assert "very large full execution output" not in prompt
 
+    def test_prompt_keeps_non_authoritative_pass_unresolved(self) -> None:
+        from unittest.mock import AsyncMock
+
+        engine = WonderEngine(llm_adapter=AsyncMock(), model="test")
+        seed = _make_seed()
+        summary = EvaluationSummary(
+            final_approved=True,
+            highest_stage_passed=2,
+            ac_results=(
+                ACResult(
+                    ac_index=0,
+                    ac_content="User can log in via Google",
+                    passed=True,
+                    ac_verdict_state="not_evaluated",
+                ),
+            ),
+        )
+
+        prompt = engine._build_prompt(
+            seed.ontology_schema,
+            summary,
+            execution_output=None,
+            lineage=OntologyLineage(lineage_id="lineage-unresolved", goal=seed.goal),
+            seed=seed,
+        )
+
+        assert "Active unresolved ACs (1)" in prompt
+        assert "Visible AC pass rate: 0/1" in prompt
+
     def test_response_drops_gaps_and_frozen_challenges(self) -> None:
         import json
         from unittest.mock import AsyncMock

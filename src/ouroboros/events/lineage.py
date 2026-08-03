@@ -30,17 +30,21 @@ def lineage_generation_started(
     generation_number: int,
     phase: str,
     seed_id: str | None = None,
+    seed_json: str | None = None,
 ) -> BaseEvent:
     """Create event when a generation begins."""
+    data = {
+        "generation_number": generation_number,
+        "phase": phase,
+        "seed_id": seed_id,
+    }
+    if seed_json is not None:
+        data["seed_json"] = seed_json
     return BaseEvent(
         type="lineage.generation.started",
         aggregate_type="lineage",
         aggregate_id=lineage_id,
-        data={
-            "generation_number": generation_number,
-            "phase": phase,
-            "seed_id": seed_id,
-        },
+        data=data,
     )
 
 
@@ -57,6 +61,7 @@ def lineage_generation_completed(
     seed_quality_canary_feedback: list[dict] | None = None,
     active_ac_indices: list[int] | None = None,
     frozen_ac_indices: list[int] | None = None,
+    verification_handoff_pending: bool = False,
 ) -> BaseEvent:
     """Create event when a generation completes successfully."""
     data = {
@@ -65,6 +70,7 @@ def lineage_generation_completed(
         "ontology_snapshot": ontology_snapshot,
         "evaluation_summary": evaluation_summary,
         "wonder_questions": wonder_questions or [],
+        "verification_handoff_pending": verification_handoff_pending,
     }
     if seed_quality_canary_feedback is not None:
         data["seed_quality_canary_feedback"] = seed_quality_canary_feedback

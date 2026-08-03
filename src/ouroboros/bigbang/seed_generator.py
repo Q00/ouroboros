@@ -1875,8 +1875,9 @@ class SeedGenerator:
     ) -> Result[Seed, ValidationError | ProviderError]:
         """Generate a successor Seed while preserving structured AC authority.
 
-        Reflect applies ontology and prose deltas without Gen-1 ambiguity
-        gating; mechanical AC contracts remain intact across the boundary.
+        Reflect applies ontology and identity-bearing prose deltas without
+        Gen-1 ambiguity gating. Mechanical AC contracts cross only explicit
+        keeps; description changes require a future replacement-contract patch.
         """
         log.info(
             "seed.generation.from_reflect",

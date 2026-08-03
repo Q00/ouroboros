@@ -2166,8 +2166,8 @@ def build_evolve_subagent(
     else:
         mode_note = (
             "\n## Mode\nOntology-only: skip execution and evaluation. Perform "
-            "Wonder → Reflect to evolve the ontology from prior generation "
-            "state.\n"
+            "Wonder → Reflect; return ontology_stable, never converged, when stable. "
+            "The caller must rerun the same lineage with execute=true.\n"
         )
 
     prompt = f"""## Your Task
@@ -2192,8 +2192,8 @@ Gen 2+ lifecycle (no seed — reconstruct from prior generation):
 {lineage_id}
 {seed_note}{mode_note}{parallel_note}{project_dir_note}{qa_note}{conductor_note}
 Return a generation report: generation, phase, action, ontology similarity,
-evaluation verdict, active/frozen AC indices, and ontology delta. Report
-converged immediately on verified PASS; stop after one generation."""
+evaluation verdict, active/frozen AC indices, and ontology delta. Report only
+verified convergence; ontology-only stability is ontology_stable. Stop after one generation."""
 
     context: dict[str, Any] = {
         "lineage_id": lineage_id,
@@ -2322,7 +2322,7 @@ def build_ralph_subagent(
         if execute
         else (
             "\n## Mode\nOntology-only: skip execution/evaluation and evolve "
-            "from prior generation state.\n"
+            "from prior state. On ontology_stable, rerun the same lineage with execute=true.\n"
         )
     )
 
@@ -2410,7 +2410,7 @@ Run a Ralph loop for the given lineage inside this OpenCode child session.
 
 Repeat one evolutionary generation at a time until one stop condition is met:
 - QA passes
-- action is converged
+- action is converged (ontology_stable must first rerun the same lineage with execute=true)
 - action is failed / interrupted / exhausted / stagnated
 - max_generations is reached
 - total elapsed time exceeds max_total_seconds (when supplied) — return

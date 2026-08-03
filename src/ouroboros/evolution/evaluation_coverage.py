@@ -26,8 +26,15 @@ class ACVerdictCoverage:
 def validate_seed_ac_coverage(
     seed: Seed,
     evaluation: EvaluationSummary,
+    *,
+    require_authoritative: bool = True,
 ) -> ACVerdictCoverage:
-    """Require complete, unique, in-range verdicts for the current Seed."""
+    """Require complete, unique, current verdicts for the current Seed.
+
+    Convergence callers use the authoritative default. Working-set selection
+    may validate structural coverage alone, then keep each non-authoritative
+    criterion active while still freezing unrelated authoritative passes.
+    """
     expected_acs = ac_texts(seed.acceptance_criteria)
     expected_indices = tuple(range(len(expected_acs)))
     reported_indices = tuple(result.ac_index for result in evaluation.ac_results)
@@ -89,6 +96,19 @@ def validate_seed_ac_coverage(
             reason=(
                 "per-AC verdict semantic identity differs from Seed at indices: "
                 f"{list(identity_mismatched)}"
+            ),
+            expected_indices=expected_indices,
+            reported_indices=reported_indices,
+        )
+
+    non_authoritative = tuple(
+        result.ac_index for result in evaluation.ac_results if not result.verdict_is_authoritative
+    )
+    if require_authoritative and non_authoritative:
+        return ACVerdictCoverage(
+            complete=False,
+            reason=(
+                f"non-authoritative per-AC verdict states at indices: {list(non_authoritative)}"
             ),
             expected_indices=expected_indices,
             reported_indices=reported_indices,

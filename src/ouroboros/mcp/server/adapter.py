@@ -629,7 +629,7 @@ def _agent_results_from_execution_summary(mechanical: Any) -> dict[int, bool]:
     ``source_ac_index`` so skipped/unverifiable assertions do not convert a
     worker-reported failure into formal approval.
     """
-    agent_results = {ac.ac_index: ac.passed for ac in mechanical.ac_results}
+    agent_results = {ac.ac_index: ac.authoritative_pass for ac in mechanical.ac_results}
     for task in mechanical.task_results:
         source_ac_index = task.source_ac_index
         if source_ac_index is None:
@@ -727,7 +727,7 @@ def _evaluation_summary_from_spec_verification(
         )
 
     total = len(ac_results)
-    passed_count = sum(1 for result in ac_results if result.passed)
+    passed_count = sum(1 for result in ac_results if result.authoritative_pass)
     score = passed_count / total if total > 0 else 0.0
     complete_coverage = bool(expected_indices) and expected_indices.issubset(reports_by_index)
     execution_completed = mechanical.execution_completion_status == "completed"
@@ -735,7 +735,7 @@ def _evaluation_summary_from_spec_verification(
 
     failure_reason = None
     if not approved:
-        failed_indices = [result.ac_index + 1 for result in ac_results if not result.passed]
+        failed_indices = [result.ac_index + 1 for result in ac_results if result.unresolved]
         discrepancy_count = getattr(verification_summary, "discrepancy_count", 0)
         reason_parts = []
         if failed_indices:

@@ -6,11 +6,13 @@ import json
 
 import pytest
 
+from ouroboros.core.directive import Directive
 from ouroboros.core.lineage import (
     ACResult,
     EvaluationSummary,
     GenerationPhase,
     GenerationRecord,
+    LineageStatus,
     OntologyDelta,
     OntologyLineage,
 )
@@ -405,14 +407,15 @@ class TestConvergenceGating:
         """
         return _lineage_with_schemas(SCHEMA_B, SCHEMA_A, SCHEMA_A)
 
-    def test_gate_disabled_explicitly(self) -> None:
-        """Explicitly disabled gate: convergence proceeds despite bad eval."""
+    def test_optional_gate_disabled_cannot_authorize_rejected_evaluation(self) -> None:
+        """Disabling score policy cannot bypass approval or all-AC authority."""
         lineage = self._converging_lineage()
         seed = _seed("AC zero")
         criteria = ConvergenceCriteria(
             convergence_threshold=0.95,
             min_generations=2,
             eval_gate_enabled=False,
+            outcome_gate_enabled=False,
         )
         signal = criteria.evaluate(
             lineage,
@@ -424,8 +427,174 @@ class TestConvergenceGating:
             ),
             latest_seed=seed,
         )
-        # Gate disabled -> converges despite bad result
+        assert not signal.converged
+        assert signal.failed_acs == (0,)
+        assert "Per-AC authority" in signal.reason
+
+    def test_optional_gate_disabled_allows_low_score_with_authoritative_pass(self) -> None:
+        """The optional gate still controls only the configured score threshold."""
+        lineage = self._converging_lineage()
+        seed = _seed("AC zero")
+
+        signal = ConvergenceCriteria(
+            convergence_threshold=0.95,
+            min_generations=2,
+            eval_gate_enabled=False,
+            eval_min_score=0.7,
+        ).evaluate(
+            lineage,
+            latest_evaluation=_approved_evaluation(seed, score=0.1),
+            latest_seed=seed,
+        )
+
         assert signal.converged
+
+    def test_outcome_gate_runs_when_optional_eval_policy_is_disabled(self) -> None:
+        """A verified Gen 1 outcome must not wait for ontology convergence."""
+        seed = _seed("AC zero")
+        evaluation = _approved_evaluation(seed, score=0.1)
+        lineage = _lineage_with_generations(
+            GenerationRecord(
+                generation_number=1,
+                seed_id="seed_1",
+                ontology_snapshot=SCHEMA_A,
+                evaluation_summary=evaluation,
+                phase=GenerationPhase.COMPLETED,
+            )
+        )
+
+        signal = ConvergenceCriteria(
+            min_generations=3,
+            eval_gate_enabled=False,
+            eval_min_score=0.7,
+            outcome_gate_enabled=True,
+        ).evaluate(
+            lineage,
+            latest_evaluation=evaluation,
+            latest_seed=seed,
+        )
+
+        assert signal.should_stop
+        assert signal.converged
+        assert "Outcome gate passed" in signal.reason
+
+    def test_all_ac_pass_authority_cannot_be_disabled(self) -> None:
+        """Neither the optional eval gate nor ac_gate_mode can admit a failed AC."""
+        lineage = self._converging_lineage()
+        seed = _seed("AC zero", "AC one")
+        evaluation = EvaluationSummary(
+            final_approved=False,
+            highest_stage_passed=2,
+            score=1.0,
+            ac_results=(
+                ACResult(ac_index=0, ac_content="AC zero", passed=True),
+                ACResult(ac_index=1, ac_content="AC one", passed=False),
+            ),
+        )
+
+        signal = ConvergenceCriteria(
+            convergence_threshold=0.95,
+            min_generations=2,
+            eval_gate_enabled=False,
+            ac_gate_mode="off",
+        ).evaluate(
+            lineage,
+            latest_evaluation=evaluation,
+            latest_seed=seed,
+        )
+
+        assert not signal.converged
+        assert signal.failed_acs == (1,)
+        assert "Per-AC authority" in signal.reason
+
+    def test_not_evaluated_pass_cannot_authorize_convergence(self) -> None:
+        """Exact indices and PASS labels are insufficient without verdict authority."""
+        lineage = self._converging_lineage()
+        seed = _seed("AC zero", "AC one")
+        evaluation = EvaluationSummary(
+            final_approved=True,
+            highest_stage_passed=2,
+            score=1.0,
+            ac_results=tuple(
+                ACResult(
+                    ac_index=index,
+                    ac_content=criterion.description,
+                    passed=True,
+                    ac_verdict_state="not_evaluated",
+                    verification_method="unknown",
+                )
+                for index, criterion in enumerate(seed.acceptance_criteria)
+            ),
+        )
+
+        coverage = validate_seed_ac_coverage(seed, evaluation)
+        signal = ConvergenceCriteria(
+            convergence_threshold=0.95,
+            min_generations=2,
+            eval_gate_enabled=False,
+            ac_gate_mode="off",
+        ).evaluate(
+            lineage,
+            latest_evaluation=evaluation,
+            latest_seed=seed,
+        )
+
+        assert not coverage.complete
+        assert "non-authoritative" in coverage.reason
+        assert not evaluation.final_approved
+        assert not signal.converged
+
+    def test_opaque_override_pass_cannot_authorize_convergence(self) -> None:
+        seed = _seed("AC zero")
+        evaluation = EvaluationSummary(
+            final_approved=True,
+            highest_stage_passed=2,
+            ac_results=(
+                ACResult(
+                    ac_index=0,
+                    ac_content="AC zero",
+                    passed=True,
+                    ac_verdict_state="overridden",
+                    verification_method="unknown",
+                    evidence="",
+                ),
+            ),
+        )
+
+        signal = ConvergenceCriteria(eval_gate_enabled=False).evaluate(
+            self._converging_lineage(),
+            latest_evaluation=evaluation,
+            latest_seed=seed,
+        )
+
+        assert not evaluation.final_approved
+        assert not signal.converged
+
+    def test_explicit_final_rejection_cannot_be_upgraded_to_convergence(self) -> None:
+        seed = _seed("AC zero")
+        evaluation = EvaluationSummary(
+            final_approved=False,
+            approval_status="rejected",
+            highest_stage_passed=3,
+            failure_reason="Stage 3 consensus rejected the artifact",
+            ac_results=(
+                ACResult(
+                    ac_index=0,
+                    ac_content="AC zero",
+                    passed=True,
+                    verification_method="semantic",
+                ),
+            ),
+        )
+
+        signal = ConvergenceCriteria(eval_gate_enabled=False).evaluate(
+            self._converging_lineage(),
+            latest_evaluation=evaluation,
+            latest_seed=seed,
+        )
+
+        assert not evaluation.final_approved
+        assert not signal.converged
 
     def test_gate_blocks_when_not_approved(self) -> None:
         """Gate enabled + approved=False -> converged=False."""
@@ -734,10 +903,19 @@ class TestLoopEngineeringExitSignals:
         result = await loop.evolve_step("lin_ontology_only", execute=False)
 
         assert result.is_ok
-        assert result.value.action == StepAction.CONVERGED
+        assert result.value.action == StepAction.ONTOLOGY_STABLE
+        assert result.value.convergence_signal.converged is False
+        assert result.value.convergence_signal.ontology_stable is True
         assert result.value.convergence_signal.ontology_similarity == pytest.approx(1.0)
+        assert result.value.lineage.status == LineageStatus.ACTIVE
         assert run_generation.await_args.kwargs["execute"] is False
         validator.assert_not_awaited()
+
+        events = await store.replay_lineage("lin_ontology_only")
+        assert not any(event.type == "lineage.converged" for event in events)
+        directive = [event for event in events if event.type == "control.directive.emitted"][-1]
+        assert directive.data["directive"] == Directive.EVALUATE.value
+        assert directive.data["is_terminal"] is False
 
     @pytest.mark.parametrize(
         "results",
@@ -987,6 +1165,7 @@ class TestEvolutionGateDetection:
             convergence_threshold=0.95,
             min_generations=2,
             eval_gate_enabled=False,
+            outcome_gate_enabled=False,
         )
         signal = criteria.evaluate(lineage)
         assert signal.should_stop
@@ -1001,6 +1180,7 @@ class TestEvolutionGateDetection:
             convergence_threshold=0.95,
             min_generations=2,
             eval_gate_enabled=False,
+            outcome_gate_enabled=False,
         )
         signal = criteria.evaluate(
             lineage,
@@ -1018,6 +1198,7 @@ class TestEvolutionGateDetection:
             convergence_threshold=0.95,
             min_generations=2,
             eval_gate_enabled=False,
+            outcome_gate_enabled=False,
         )
         signal = criteria.evaluate(
             lineage,
@@ -1026,6 +1207,23 @@ class TestEvolutionGateDetection:
         )
         assert not signal.converged
         assert "Convergence withheld" in signal.reason
+
+    def test_ontology_only_identical_generations_handoff_for_verification(self) -> None:
+        """Stability needs verification, not a fake mutation, in ontology-only mode."""
+        lineage = _lineage_with_schemas(SCHEMA_A, SCHEMA_A)
+        criteria = ConvergenceCriteria(
+            convergence_threshold=0.95,
+            min_generations=2,
+            eval_gate_enabled=False,
+            outcome_gate_enabled=False,
+        )
+
+        signal = criteria.evaluate(lineage, evaluation_expected=False)
+
+        assert signal.should_stop
+        assert signal.ontology_stable
+        assert not signal.converged
+        assert "evaluation are required" in signal.reason
 
     def test_max_generations_overrides_withheld_convergence(self) -> None:
         """Hard cap still terminates even with withheld convergence."""

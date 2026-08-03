@@ -125,11 +125,15 @@ def select_externally_satisfied_acs(
     reflect_ran_fresh: bool,
 ) -> dict[int, dict[str, str]] | None:
     """Map frozen nodes to the executor while retaining legacy opt-out behavior."""
-    if not scoped_reexecution or not reflect_ran_fresh:
+    if not scoped_reexecution:
         return None
-    if focused_evolution and focus.is_scoped:
-        return focus.externally_satisfied_acs()
-    if focused_evolution or not settled_ac_indices:
+    if focused_evolution:
+        # Focus is reconstructed deterministically from the prior authoritative
+        # evaluation and the persisted candidate Seed.  Unlike legacy
+        # ``settled_ac_indices`` it remains authoritative when Reflect was
+        # restored from an interruption checkpoint rather than run afresh.
+        return focus.externally_satisfied_acs() if focus.is_scoped else None
+    if not reflect_ran_fresh or not settled_ac_indices:
         return None
     return {
         index: {
@@ -165,7 +169,11 @@ def select_evolution_focus(
             reason="full generation: no per-AC PASS evidence available",
         )
 
-    coverage = validate_seed_ac_coverage(parent_seed, evaluation)
+    coverage = validate_seed_ac_coverage(
+        parent_seed,
+        evaluation,
+        require_authoritative=False,
+    )
     if not coverage.complete:
         return EvolutionFocus(
             active_ac_indices=tuple(sorted(all_candidate)),
@@ -176,12 +184,12 @@ def select_evolution_focus(
     passed = {
         result.ac_index
         for result in evaluation.ac_results
-        if result.passed and 0 <= result.ac_index < len(parent_acs)
+        if result.authoritative_pass and 0 <= result.ac_index < len(parent_acs)
     }
     failed = {
         result.ac_index
         for result in evaluation.ac_results
-        if not result.passed and 0 <= result.ac_index < len(parent_acs)
+        if result.unresolved and 0 <= result.ac_index < len(parent_acs)
     }
 
     # If the aggregate run failed without naming a failed AC, the failure sits

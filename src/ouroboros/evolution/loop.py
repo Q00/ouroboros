@@ -46,7 +46,6 @@ from ouroboros.events.lineage import (
     lineage_generation_failed,
     lineage_generation_interrupted,
     lineage_generation_phase_changed,
-    lineage_generation_started,
     lineage_ontology_evolved,
     lineage_stagnated,
     lineage_wonder_degraded,
@@ -55,7 +54,6 @@ from ouroboros.evolution import focus, loop_support
 from ouroboros.evolution.convergence import ConvergenceCriteria, ConvergenceSignal
 from ouroboros.evolution.directive_mapping import (
     is_terminal_directive,
-    step_action_to_directive,
     watchdog_timeout_to_directive,
 )
 from ouroboros.evolution.projector import LineageProjector
@@ -144,6 +142,7 @@ class StepAction(StrEnum):
 
     CONTINUE = "continue"
     CONVERGED = "converged"
+    ONTOLOGY_STABLE = "ontology_stable"
     STAGNATED = "stagnated"
     EXHAUSTED = "exhausted"
     FAILED = "failed"
@@ -171,21 +170,6 @@ class _StepResultContainer:
     """Mutable container for passing StepResult out of AgentProcess work."""
 
     result: Result[StepResult, OuroborosError] | None = None
-
-
-def _watchdog_timeout_step_action(timeout_kind: str) -> StepAction:
-    """Return the public ``evolve_step`` action matching a watchdog directive."""
-    directive = watchdog_timeout_to_directive(timeout_kind)
-    if directive is None:
-        return StepAction.FAILED
-    if is_terminal_directive(directive):
-        return StepAction.EXHAUSTED
-    return StepAction.STAGNATED
-
-
-def _watchdog_timeout_has_directive_metadata(exc: GenerationWatchdogTimeout) -> bool:
-    """Return True when a timeout came from the watchdog directive path."""
-    return isinstance(exc.details.get("execution_id"), str) and bool(exc.details["execution_id"])
 
 
 class EvolutionaryLoop:
@@ -305,55 +289,6 @@ class EvolutionaryLoop:
         """Restore the previous task-local project directory context."""
         self._project_dir_context.reset(token)
 
-    async def _emit_step_directive(
-        self,
-        action: StepAction,
-        *,
-        lineage_id: str,
-        generation_number: int,
-        phase: str,
-        reason: str,
-        retry_budget_remaining: int = 1,
-    ) -> None:
-        """Emit ``control.directive.emitted`` at a ``StepAction`` decision point.
-
-        Slice 1 of #472 — translates the local ``StepAction`` outcome onto
-        the shared :class:`Directive` vocabulary and persists the
-        translation so projectors (#514) can render the decision lane
-        alongside ``lineage.*`` state events. ``StepAction.CONTINUE``
-        deliberately produces no event (the underlying
-        ``lineage.generation.completed`` event already records the
-        no-op continuation; emitting on every CONTINUE would flood the
-        journal).
-
-        Args:
-            action: Outcome being returned to the caller.
-            lineage_id: Target aggregate id (required by the factory).
-            generation_number: Correlation field for projector
-                interleaving.
-            phase: Current pipeline phase string for the projector.
-            reason: Short audit-level rationale.
-            retry_budget_remaining: Forwarded to
-                :func:`step_action_to_directive` for the
-                ``StepAction.FAILED`` branch.
-        """
-        directive = step_action_to_directive(action, retry_budget_remaining=retry_budget_remaining)
-        if directive is None:
-            return
-        await self.event_store.append(
-            create_control_directive_emitted_event(
-                target_type="lineage",
-                target_id=lineage_id,
-                emitted_by="evolver",
-                directive=directive,
-                reason=reason,
-                lineage_id=lineage_id,
-                generation_number=generation_number,
-                phase=phase,
-                extra={"step_action": str(action), "is_terminal": is_terminal_directive(directive)},
-            )
-        )
-
     async def _emit_watchdog_timeout_directive(
         self,
         exc: GenerationWatchdogTimeout,
@@ -386,41 +321,6 @@ class EvolutionaryLoop:
                 },
             )
         )
-
-    async def _phase_for_failed_step_directive(
-        self,
-        *,
-        lineage_id: str,
-        generation_number: int,
-    ) -> str:
-        """Return the phase recorded by the generation failure event.
-
-        ``evolve_step`` emits its StepAction-level directive after
-        ``_run_generation`` has already emitted the phase-specific
-        ``lineage.generation.failed`` event. Replaying that last failure
-        preserves the real phase (wondering/reflecting/seeding/etc.)
-        instead of stamping every failed step as ``executing``.
-        """
-        events = await self.event_store.replay_lineage(lineage_id)
-        saw_cancelled_failure = False
-        for event in reversed(events):
-            if event.data.get("generation_number") != generation_number:
-                continue
-            if event.type == "lineage.generation.failed":
-                phase = event.data.get("phase")
-                if isinstance(phase, str) and phase:
-                    if phase != GenerationPhase.CANCELLED.value:
-                        return phase
-                    saw_cancelled_failure = True
-                    continue
-            if saw_cancelled_failure and event.type in {
-                "lineage.generation.phase_changed",
-                "lineage.generation.started",
-            }:
-                phase = event.data.get("phase")
-                if isinstance(phase, str) and phase:
-                    return phase
-        return GenerationPhase.FAILED.value
 
     async def run(
         self,
@@ -499,16 +399,19 @@ class EvolutionaryLoop:
                         "details": gen_result.error.details,
                     },
                 )
-                if _watchdog_timeout_has_directive_metadata(gen_result.error):
+                if loop_support.watchdog_has_directive_metadata(gen_result.error.details):
                     await self._emit_watchdog_timeout_directive(
                         gen_result.error,
                         lineage_id=lineage.lineage_id,
                         generation_number=generation_number,
-                        phase=await self._phase_for_failed_step_directive(
+                        phase=await loop_support.phase_for_failed_step_directive(
+                            self.event_store,
                             lineage_id=lineage.lineage_id,
                             generation_number=generation_number,
                         ),
-                        action=_watchdog_timeout_step_action(gen_result.error.timeout_kind),
+                        action=StepAction(
+                            loop_support.watchdog_timeout_action(gen_result.error.timeout_kind)
+                        ),
                     )
                 break
 
@@ -681,21 +584,64 @@ class EvolutionaryLoop:
         parallel: bool = True,
         conductor_directive: ConductorDirective | None = None,
     ) -> Result[StepResult, OuroborosError]:
-        """Run exactly one generation of the evolutionary loop.
+        """Advance one lineage exactly once while concurrent retries coalesce.
 
-        Stateless between calls: all state is reconstructed from EventStore
-        via LineageProjector. Designed for Ralph integration where each call
-        may happen in a different session context.
-
-        Args:
-            lineage_id: Lineage ID to continue (or new ID for Gen 1).
-            initial_seed: Seed for Gen 1 (required if no events exist).
-                          Omit for Gen 2+ (reconstructed from events).
-
-        Returns:
-            Result containing StepResult with generation result, convergence
-            signal, and action (CONTINUE/CONVERGED/STAGNATED/EXHAUSTED/FAILED).
+        The replay that chooses a generation number and the provider-backed work
+        that completes it form one lineage-owned critical section.  A concurrent
+        caller with the same request observes the winner's result; a different
+        request waits and then replays the durable winner. Completed tasks remove
+        their single-flight entry so the registry remains bounded.
         """
+        from ouroboros.evolution.step_receipt import decode_step_result, encode_step_result
+
+        while True:
+            generation_number = await loop_support.planned_evolve_generation(
+                self.event_store,
+                lineage_id,
+                execute=execute,
+            )
+            request_key = loop_support.evolve_request_key(
+                initial_seed,
+                execute=execute,
+                parallel=parallel,
+                conductor_directive=conductor_directive,
+                project_dir=self.get_project_dir(),
+                generation_number=generation_number,
+            )
+            try:
+                return await loop_support.run_lineage_single_flight(
+                    self.event_store,
+                    lineage_id,
+                    request_key,
+                    lambda: loop_support.run_durable_lineage_single_flight(
+                        self.event_store,
+                        lineage_id,
+                        request_key,
+                        lambda: self._evolve_step_once(
+                            lineage_id,
+                            initial_seed=initial_seed,
+                            execute=execute,
+                            parallel=parallel,
+                            conductor_directive=conductor_directive,
+                        ),
+                        generation_number=generation_number,
+                        encode=encode_step_result,
+                        decode=lambda payload: decode_step_result(self.event_store, payload),
+                    ),
+                    replan_on_different=True,
+                )
+            except loop_support.LineageWinnerAdvanced:
+                continue
+
+    async def _evolve_step_once(
+        self,
+        lineage_id: str,
+        initial_seed: Seed | None = None,
+        execute: bool = True,
+        parallel: bool = True,
+        conductor_directive: ConductorDirective | None = None,
+    ) -> Result[StepResult, OuroborosError]:
+        """Run one event-reconstructed generation under lineage ownership."""
         projector = LineageProjector()
 
         # Step 1: Replay events to reconstruct state
@@ -745,7 +691,7 @@ class EvolutionaryLoop:
                 generation_number = last_gen + 1
 
             # Reconstruct seed — prefer interrupted gen's seed_json (has evolved state)
-            if initial_seed is not None:
+            if initial_seed is not None and not lineage.verification_handoff_pending:
                 # Caller provided seed explicitly (e.g., after rewind)
                 current_seed = initial_seed
             elif last_phase == GenerationPhase.INTERRUPTED:
@@ -842,6 +788,37 @@ class EvolutionaryLoop:
             else:
                 return Result.err(OuroborosError("Events exist but no completed generations found"))
 
+        if lineage.verification_handoff_pending and not execute:
+            previous = next(
+                record
+                for record in reversed(lineage.generations)
+                if record.phase == GenerationPhase.COMPLETED
+            )
+            reason = "Stable Seed is awaiting Execute -> Evaluate verification"
+            return Result.ok(
+                StepResult(
+                    generation_result=GenerationResult(
+                        generation_number=previous.generation_number,
+                        seed=current_seed,
+                        execution_output=previous.execution_output,
+                        evaluation_summary=previous.evaluation_summary,
+                        active_ac_indices=previous.active_ac_indices,
+                        frozen_ac_indices=previous.frozen_ac_indices,
+                    ),
+                    convergence_signal=ConvergenceSignal(
+                        converged=False,
+                        reason=reason,
+                        ontology_similarity=1.0,
+                        generation=previous.generation_number,
+                        should_stop=True,
+                        ontology_stable=True,
+                    ),
+                    lineage=lineage,
+                    action=StepAction.ONTOLOGY_STABLE,
+                    next_generation=generation_number,
+                )
+            )
+
         approved_seed = current_seed
         if conductor_directive is not None:
             current_seed = Seed.from_dict(
@@ -883,7 +860,8 @@ class EvolutionaryLoop:
                         ontology_similarity=0.0,
                         generation=generation_number,
                     )
-                    await self._emit_step_directive(
+                    await loop_support.emit_step_directive(
+                        self.event_store,
                         StepAction.INTERRUPTED,
                         lineage_id=lineage.lineage_id,
                         generation_number=generation_number,
@@ -894,7 +872,7 @@ class EvolutionaryLoop:
                         StepResult(
                             generation_result=interrupted_before_start,
                             convergence_signal=conv_signal,
-                            lineage=lineage,
+                            lineage=await loop_support.refresh_lineage(self.event_store, lineage),
                             action=StepAction.INTERRUPTED,
                             next_generation=generation_number,
                         )
@@ -927,13 +905,16 @@ class EvolutionaryLoop:
                     ontology_similarity=0.0,
                     generation=generation_number,
                 )
-                if _watchdog_timeout_has_directive_metadata(gen_result.error):
-                    watchdog_action = _watchdog_timeout_step_action(gen_result.error.timeout_kind)
+                if loop_support.watchdog_has_directive_metadata(gen_result.error.details):
+                    watchdog_action = StepAction(
+                        loop_support.watchdog_timeout_action(gen_result.error.timeout_kind)
+                    )
                     await self._emit_watchdog_timeout_directive(
                         gen_result.error,
                         lineage_id=lineage.lineage_id,
                         generation_number=generation_number,
-                        phase=await self._phase_for_failed_step_directive(
+                        phase=await loop_support.phase_for_failed_step_directive(
+                            self.event_store,
                             lineage_id=lineage.lineage_id,
                             generation_number=generation_number,
                         ),
@@ -945,7 +926,7 @@ class EvolutionaryLoop:
                     StepResult(
                         generation_result=failed_gen,
                         convergence_signal=conv_signal,
-                        lineage=lineage,
+                        lineage=await loop_support.refresh_lineage(self.event_store, lineage),
                         action=watchdog_action,
                         next_generation=generation_number,
                     )
@@ -967,11 +948,13 @@ class EvolutionaryLoop:
                     ontology_similarity=0.0,
                     generation=generation_number,
                 )
-                await self._emit_step_directive(
+                await loop_support.emit_step_directive(
+                    self.event_store,
                     StepAction.FAILED,
                     lineage_id=lineage.lineage_id,
                     generation_number=generation_number,
-                    phase=await self._phase_for_failed_step_directive(
+                    phase=await loop_support.phase_for_failed_step_directive(
+                        self.event_store,
                         lineage_id=lineage.lineage_id,
                         generation_number=generation_number,
                     ),
@@ -981,7 +964,7 @@ class EvolutionaryLoop:
                     StepResult(
                         generation_result=failed_gen,
                         convergence_signal=conv_signal,
-                        lineage=lineage,
+                        lineage=await loop_support.refresh_lineage(self.event_store, lineage),
                         action=StepAction.FAILED,
                         next_generation=generation_number,
                     )
@@ -1026,7 +1009,8 @@ class EvolutionaryLoop:
                     ontology_similarity=0.0,
                     generation=generation_number,
                 )
-                await self._emit_step_directive(
+                await loop_support.emit_step_directive(
+                    self.event_store,
                     StepAction.INTERRUPTED,
                     lineage_id=lineage.lineage_id,
                     generation_number=generation_number,
@@ -1037,7 +1021,7 @@ class EvolutionaryLoop:
                     StepResult(
                         generation_result=result,
                         convergence_signal=conv_signal,
-                        lineage=lineage,
+                        lineage=await loop_support.refresh_lineage(self.event_store, lineage),
                         action=StepAction.INTERRUPTED,
                         next_generation=generation_number,
                     )
@@ -1063,7 +1047,19 @@ class EvolutionaryLoop:
                 frozen_ac_indices=result.frozen_ac_indices,
             )
             nonlocal_lineage = nonlocal_lineage.with_generation(record)
-
+            # Persist the stable Seed and its verification handoff atomically.
+            conv_signal = self._convergence.evaluate(
+                nonlocal_lineage,
+                result.wonder_output,
+                latest_evaluation=result.evaluation_summary,
+                validation_output=result.validation_output,
+                latest_seed=result.seed,
+                evaluation_expected=execute,
+                validation_expected=execute and self.validator is not None,
+            )
+            if conv_signal.ontology_stable:
+                record = record.model_copy(update={"verification_handoff_pending": True})
+                nonlocal_lineage = nonlocal_lineage.with_generation(record)
             await self.event_store.append(
                 lineage_generation_completed(
                     nonlocal_lineage.lineage_id,
@@ -1084,9 +1080,9 @@ class EvolutionaryLoop:
                     or None,
                     active_ac_indices=list(result.active_ac_indices),
                     frozen_ac_indices=list(result.frozen_ac_indices),
+                    verification_handoff_pending=record.verification_handoff_pending,
                 )
             )
-
             # Emit ontology evolved event if delta exists.
             if result.ontology_delta and result.ontology_delta.similarity < 1.0:
                 await self.event_store.append(
@@ -1096,18 +1092,6 @@ class EvolutionaryLoop:
                         result.ontology_delta.model_dump(mode="json"),
                     )
                 )
-
-            # Step 4: Check convergence.
-            conv_signal = self._convergence.evaluate(
-                nonlocal_lineage,
-                result.wonder_output,
-                latest_evaluation=result.evaluation_summary,
-                validation_output=result.validation_output,
-                latest_seed=result.seed,
-                evaluation_expected=execute,
-                validation_expected=execute and self.validator is not None,
-            )
-
             action = StepAction.CONTINUE
             if conv_signal.should_stop:
                 if conv_signal.converged:
@@ -1121,6 +1105,8 @@ class EvolutionaryLoop:
                     )
                     nonlocal_lineage = nonlocal_lineage.with_status(LineageStatus.CONVERGED)
                     action = StepAction.CONVERGED
+                elif conv_signal.ontology_stable:
+                    action = StepAction.ONTOLOGY_STABLE
                 elif generation_number >= self.config.max_generations:
                     await self.event_store.append(
                         lineage_exhausted(
@@ -1144,13 +1130,19 @@ class EvolutionaryLoop:
                     # Directive contract maps STAGNATED to UNSTUCK, so keep the
                     # lineage resumable for the lateral-thinking recovery path.
                     action = StepAction.STAGNATED
-            await self._emit_step_directive(
-                action,
-                lineage_id=nonlocal_lineage.lineage_id,
-                generation_number=generation_number,
-                phase=str(result.phase),
-                reason=conv_signal.reason,
-            )
+            try:
+                await loop_support.emit_step_directive(
+                    self.event_store,
+                    action,
+                    lineage_id=nonlocal_lineage.lineage_id,
+                    generation_number=generation_number,
+                    phase=str(result.phase),
+                    reason=conv_signal.reason,
+                )
+            except Exception:
+                if action is not StepAction.ONTOLOGY_STABLE:
+                    raise
+                logger.warning("evolution.ontology_stable.directive_emit_failed", exc_info=True)
             container.result = Result.ok(
                 StepResult(
                     generation_result=result,
@@ -1509,13 +1501,21 @@ class EvolutionaryLoop:
                 if _should_skip("evaluating") and ps.get("validation_output"):
                     restored_validation_output = ps["validation_output"]
 
-        # Gen 2+: Wonder and Reflect phases
-        if generation_number > 1 and lineage.generations:
-            prev_gen = next(
+        prev_gen = (
+            next(
                 (g for g in reversed(lineage.generations) if g.phase == GenerationPhase.COMPLETED),
                 lineage.generations[-1],  # fallback if no completed gen exists
             )
-
+            if generation_number > 1 and lineage.generations
+            else None
+        )
+        try:
+            # The previous evaluation belongs to the completed parent, not an
+            # interrupted generation's candidate Seed.
+            generation_parent_seed = loop_support.generation_parent_seed(current_seed, prev_gen)
+        except ValueError as exc:
+            return Result.err(OuroborosError(str(exc)))
+        if prev_gen is not None and not (execute and lineage.verification_handoff_pending):
             regression_report: RegressionReport = RegressionDetector().detect(lineage)
             generation_focus = focus.select_evolution_focus(
                 generation_parent_seed,
@@ -1526,12 +1526,12 @@ class EvolutionaryLoop:
             )
 
             # Emit generation started
-            await self.event_store.append(
-                lineage_generation_started(
-                    lineage.lineage_id,
-                    generation_number,
-                    GenerationPhase.WONDERING.value,
-                )
+            await loop_support.emit_generation_started_once(
+                self.event_store,
+                lineage_id=lineage.lineage_id,
+                generation_number=generation_number,
+                phase=GenerationPhase.WONDERING.value,
+                seed=current_seed,
             )
 
             # Wonder phase (skip if already completed before interruption)
@@ -1551,7 +1551,11 @@ class EvolutionaryLoop:
                 wonder_result = await self.wonder_engine.wonder(**wonder_kwargs)
                 if wonder_result.is_ok:
                     wonder_output = wonder_result.value
-                    if not wonder_output.should_continue and not wonder_output.questions:
+                    if (
+                        not execute
+                        and not wonder_output.should_continue
+                        and not wonder_output.questions
+                    ):
                         # Only early-return if Wonder has NO questions at all.
                         # If questions exist, we must continue to Reflect even if
                         # should_continue=false, because the questions represent
@@ -1616,7 +1620,7 @@ class EvolutionaryLoop:
             if (
                 self.reflect_engine
                 and wonder_output
-                and prev_gen.evaluation_summary
+                and (wonder_output.should_continue or wonder_output.questions)
                 and not _should_skip("reflecting")
             ):
                 max_reflect_attempts = 2
@@ -1771,17 +1775,16 @@ class EvolutionaryLoop:
                     current_seed = new_seed
 
         else:
-            # Gen 1: just emit started event
-            await self.event_store.append(
-                lineage_generation_started(
-                    lineage.lineage_id,
-                    generation_number,
-                    GenerationPhase.EXECUTING.value,
-                    current_seed.metadata.seed_id,
-                )
+            # Gen 1, or a Gen 2+ ontology-stable verification handoff.
+            await loop_support.emit_generation_started_once(
+                self.event_store,
+                lineage_id=lineage.lineage_id,
+                generation_number=generation_number,
+                phase=GenerationPhase.EXECUTING.value,
+                seed=current_seed,
             )
 
-        if generation_number > 1 and lineage.generations:
+        if prev_gen is not None and not (execute and lineage.verification_handoff_pending):
             generation_focus = focus.select_evolution_focus(
                 generation_parent_seed,
                 current_seed,

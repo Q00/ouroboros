@@ -412,12 +412,12 @@ Focus on ONTOLOGICAL questions (what IS the thing?) not implementation questions
                 visible_results = [
                     ac for ac in eval_summary.ac_results if not focused or ac.ac_index in active
                 ]
-                failed_acs = [ac for ac in visible_results if not ac.passed]
-                if failed_acs:
-                    parts.append(f"\n  Active failed ACs ({len(failed_acs)}):")
-                    for ac in failed_acs:
+                unresolved_acs = [ac for ac in visible_results if ac.unresolved]
+                if unresolved_acs:
+                    parts.append(f"\n  Active unresolved ACs ({len(unresolved_acs)}):")
+                    for ac in unresolved_acs:
                         parts.append(f"    - AC {ac.ac_index + 1}: {ac.ac_content}")
-                passed_count = sum(1 for ac in visible_results if ac.passed)
+                passed_count = sum(1 for ac in visible_results if ac.authoritative_pass)
                 parts.append(f"  Visible AC pass rate: {passed_count}/{len(visible_results)}")
 
         # Regression context

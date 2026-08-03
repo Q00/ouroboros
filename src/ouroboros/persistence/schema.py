@@ -14,6 +14,7 @@ from datetime import UTC, datetime
 
 from sqlalchemy import (
     JSON,
+    BigInteger,
     Boolean,
     Column,
     DateTime,
@@ -117,6 +118,22 @@ ac_acceptance_guards_table = Table(
         default=lambda: datetime.now(UTC),
         server_default=text("CURRENT_TIMESTAMP"),
     ),
+)
+
+# One cross-process advancement owner per lineage/scope. Results are retained
+# only while already-registered waiters replay the winner, then deleted.
+lineage_advancement_claims_table = Table(
+    "lineage_advancement_claims",
+    metadata,
+    Column("scope", String(64), primary_key=True),
+    Column("lineage_id", String(256), primary_key=True),
+    Column("generation_number", Integer, nullable=False),
+    Column("owner_id", String(36), nullable=False),
+    Column("request_key", String(64), nullable=False),
+    Column("lease_expires_at_ms", BigInteger, nullable=False),
+    Column("waiter_count", Integer, nullable=False, default=0, server_default=text("0")),
+    Column("completed", Boolean, nullable=False, default=False, server_default=text("0")),
+    Column("result_payload", JSON, nullable=True),
 )
 
 # Brownfield repos table - registered repositories/worktrees from brownfield scan.

@@ -64,6 +64,50 @@ def test_only_failed_node_stays_active() -> None:
     assert set(focus.externally_satisfied_acs()) == {0, 2}
 
 
+def test_not_evaluated_pass_is_active_not_frozen() -> None:
+    seed = _seed("unknown 0", "failed 1")
+    evaluation = EvaluationSummary(
+        final_approved=False,
+        highest_stage_passed=1,
+        ac_results=(
+            ACResult(
+                ac_index=0,
+                ac_content="unknown 0",
+                passed=True,
+                ac_verdict_state="not_evaluated",
+            ),
+            ACResult(ac_index=1, ac_content="failed 1", passed=False),
+        ),
+    )
+
+    focus = select_evolution_focus(seed, seed, evaluation)
+
+    assert focus.active_ac_indices == (0, 1)
+    assert focus.frozen_ac_indices == ()
+
+
+def test_unknown_node_stays_active_while_authoritative_pass_freezes() -> None:
+    seed = _seed("passed 0", "unknown 1")
+    evaluation = EvaluationSummary(
+        final_approved=False,
+        highest_stage_passed=1,
+        ac_results=(
+            ACResult(ac_index=0, ac_content="passed 0", passed=True),
+            ACResult(
+                ac_index=1,
+                ac_content="unknown 1",
+                passed=True,
+                ac_verdict_state="not_evaluated",
+            ),
+        ),
+    )
+
+    focus = select_evolution_focus(seed, seed, evaluation)
+
+    assert focus.active_ac_indices == (1,)
+    assert focus.frozen_ac_indices == (0,)
+
+
 def test_challenge_reopens_a_previously_passing_node() -> None:
     seed = _seed("passed but challenged", "failed")
     wonder = WonderOutput(

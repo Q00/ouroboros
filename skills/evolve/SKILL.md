@@ -86,13 +86,23 @@ documented fallback / Path B instead of retrying the failing call.
    - `continue` → Inspect `active_ac_indices`, then call `ouroboros_evolve_step`
      again with just `lineage_id`. Only active failed/reopened nodes evolve;
      frozen PASS nodes stay immutable and are boundary-reverified.
+   - `ontology_stable` → This is not success. Call `ouroboros_evolve_step`
+     again for the same `lineage_id` with `execute: true` so the stable Seed
+     goes through Execute→Evaluate. Do not call standalone evaluate or report
+     convergence before that step returns `converged`.
    - `converged` → Evolution complete! Display final ontology
    - `stagnated` → Ontology unchanged for 3+ gens. Consider `ouroboros_lateral_think`
    - `exhausted` → Max 30 generations reached. Display best result
-   - `failed` → Check error, possibly retry
-7. **Repeat step 6** until action ≠ `continue`
+   - `failed` → Check error, possibly retry. If the error reports an expired
+     lineage owner, first confirm that the prior owner process is dead, then
+     make one explicit recovery call with `recover_expired_claim: true`.
+     Never set this flag for a merely slow or still-running owner.
+7. **Repeat step 6** while action is `continue`. Treat `ontology_stable` as the
+   explicit transition above, then process the `execute: true` response using
+   step 6. Stop only on `converged`, `stagnated`, `exhausted`, or `failed`.
 8. When the loop terminates, display a result summary with next step:
    - `converged`: `◆ Current state → next: Ontology converged! Run ooo evaluate for formal verification`
+   - `ontology_stable`: `◆ Current state → next: Run the same lineage with execute=true for Execute→Evaluate; this is not verified convergence yet`
    - `stagnated`: `◆ Current state → next: ooo unstuck to break through, then ooo evolve --status <lineage_id> to resume`
    - `exhausted`: `◆ Current state → next: ooo evaluate to check best result — or ooo unstuck to try a new approach`
    - `failed`: `◆ Current state → next: Check the error above. ooo status to inspect session, or ooo unstuck if blocked`
@@ -124,9 +134,11 @@ Then add to your runtime's MCP configuration (e.g., `~/.claude/mcp.json` for Cla
   to identify ontological gaps and hidden assumptions
 - **Reflect**: "How should the ontology evolve?" - proposes specific
   mutations to fields, acceptance criteria, and constraints
-- **Convergence**: Loop stops when ontology similarity ≥ 0.95 between
-  consecutive generations, when the independently verified outcome passes,
-  when judge scores plateau for 3 generations, or after 30 generations max
+- **Convergence**: Verified success requires the independently evaluated
+  outcome to pass. In ontology-only mode, similarity ≥ 0.95 returns the
+  non-success `ontology_stable` handoff and the same lineage must run once with
+  `execute: true`. Judge-score plateau and the 30-generation cap are also
+  non-success stops.
 - **Focused evolution**: Gen 1 establishes the baseline. Gen 2+ derives an
   active node set from failed/regressed verifier results. Only those nodes are
   open to Wonder, Reflect, and execution; PASS nodes are frozen. The active
@@ -143,7 +155,9 @@ Then add to your runtime's MCP configuration (e.g., `~/.claude/mcp.json` for Cla
   Ralph integration — state is fully reconstructed from events between calls
 - **execute flag**: `true` (default) runs full Execute→Evaluate each generation.
   `false` skips execution for fast ontology exploration. Previous generation's
-  execution output is fed into Wonder/Reflect for informed evolution
+  execution output is fed into Wonder/Reflect for informed evolution. An
+  `ontology_stable` response from `execute: false` must be followed by the same
+  lineage with `execute: true`; ontology stability alone is never convergence.
 - **QA verdict**: Each generation's response includes a QA Verdict section
   (when `execute=true` and `skip_qa` is not set). Use the QA score to track
   quality progression across generations. Pass `skip_qa: true` to disable

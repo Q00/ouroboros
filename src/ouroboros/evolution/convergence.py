@@ -34,6 +34,7 @@ class ConvergenceSignal:
     generation: int
     failed_acs: tuple[int, ...] = ()
     should_stop: bool = False
+    ontology_stable: bool = False
 
 
 @dataclass
@@ -54,6 +55,9 @@ class ConvergenceCriteria:
     min_generations: int = 2
     max_generations: int = 30
     enable_oscillation_detection: bool = True
+    # Backward-compatible optional evaluation policy gate.  Disabling it may
+    # skip score/ratio thresholds, but never the authoritative approval,
+    # Seed-wide coverage, or all-AC-PASS requirements below.
     eval_gate_enabled: bool = False
     eval_min_score: float = 0.7
     outcome_gate_enabled: bool = True
@@ -92,12 +96,7 @@ class ConvergenceCriteria:
         # that point spends generations optimizing the loop rather than the
         # product.  This gate deliberately precedes ``min_generations`` so a
         # correct Gen 1 can stop after one expensive Execute→Evaluate cycle.
-        if (
-            self.outcome_gate_enabled
-            and self.eval_gate_enabled
-            and evaluation_expected
-            and latest_evaluation is not None
-        ):
+        if self.outcome_gate_enabled and evaluation_expected and latest_evaluation is not None:
             outcome_block = self._outcome_gate_block(
                 lineage,
                 latest_evaluation,
@@ -143,8 +142,10 @@ class ConvergenceCriteria:
         latest_sim = self._latest_similarity(lineage)
         stable_block: ConvergenceSignal | None = None
         if latest_sim >= self.convergence_threshold:
-            # Eval gate: missing authority is not satisfactory authority.
-            if evaluation_expected and self.eval_gate_enabled:
+            # Approval is convergence authority, not an optional policy dial.
+            # Evaluation-backed modes must never converge from rejected or
+            # absent evidence even when ``eval_gate_enabled`` is false.
+            if evaluation_expected:
                 if latest_evaluation is None:
                     stable_block = ConvergenceSignal(
                         converged=False,
@@ -156,11 +157,34 @@ class ConvergenceCriteria:
                         generation=current_gen,
                     )
                 else:
-                    eval_blocks = not latest_evaluation.final_approved or (
-                        latest_evaluation.score is not None
-                        and latest_evaluation.score < self.eval_min_score
+                    failed_indices = tuple(
+                        result.ac_index
+                        for result in latest_evaluation.ac_results
+                        if result.unresolved
                     )
-                    if eval_blocks:
+                    eval_blocks = (
+                        not latest_evaluation.final_approved
+                        or not latest_evaluation.run_verdict_passed
+                    )
+                    if self.eval_gate_enabled:
+                        eval_blocks = eval_blocks or (
+                            latest_evaluation.score is not None
+                            and latest_evaluation.score < self.eval_min_score
+                        )
+                    if failed_indices:
+                        failed_display = ", ".join(str(index + 1) for index in failed_indices)
+                        stable_block = ConvergenceSignal(
+                            converged=False,
+                            reason=(
+                                "Per-AC authority: "
+                                f"{len(failed_indices)} AC(s) still unresolved "
+                                f"(AC {failed_display})"
+                            ),
+                            ontology_similarity=latest_sim,
+                            generation=current_gen,
+                            failed_acs=failed_indices,
+                        )
+                    elif eval_blocks:
                         stable_block = ConvergenceSignal(
                             converged=False,
                             reason=(
@@ -202,8 +226,8 @@ class ConvergenceCriteria:
                             generation=current_gen,
                         )
 
-            # Per-AC policy: complete evidence may still be rejected when
-            # individual ACs fail the configured all/ratio threshold.
+            # Optional per-AC policy: complete passing evidence may still be
+            # subject to configured thresholds while the policy gate is on.
             if stable_block is None and (
                 evaluation_expected
                 and self.eval_gate_enabled
@@ -244,7 +268,7 @@ class ConvergenceCriteria:
             # preserving a well-performing ontology, or Wonder/Reflect encountered
             # errors. Either way, withhold convergence until genuine evolution occurs.
             evolved_count = self._count_evolved_generations(lineage)
-            if stable_block is None and evolved_count == 0:
+            if stable_block is None and evaluation_expected and evolved_count == 0:
                 stable_block = ConvergenceSignal(
                     converged=False,
                     reason=(
@@ -273,6 +297,19 @@ class ConvergenceCriteria:
                     )
 
             if stable_block is None:
+                if not evaluation_expected:
+                    return ConvergenceSignal(
+                        converged=False,
+                        reason=(
+                            f"Ontology stable: similarity {latest_sim:.3f} "
+                            f">= threshold {self.convergence_threshold}; "
+                            "execution and evaluation are required for verified convergence"
+                        ),
+                        ontology_similarity=latest_sim,
+                        generation=current_gen,
+                        should_stop=True,
+                        ontology_stable=True,
+                    )
                 return ConvergenceSignal(
                     converged=True,
                     reason=(
@@ -368,11 +405,21 @@ class ConvergenceCriteria:
         coverage = validate_seed_ac_coverage(latest_seed, evaluation)
         if not coverage.complete:
             return coverage.reason
-        if not evaluation.run_verdict_passed:
+        if not evaluation.final_approved or not evaluation.run_verdict_passed:
             return "evaluation rejected"
-        if evaluation.score is not None and evaluation.score < self.eval_min_score:
+        if any(result.unresolved for result in evaluation.ac_results):
+            return "per-AC authority rejected"
+        if (
+            self.eval_gate_enabled
+            and evaluation.score is not None
+            and evaluation.score < self.eval_min_score
+        ):
             return "evaluation score below threshold"
-        if self.ac_gate_mode != "off" and self._check_ac_gate(evaluation, latest_seed) is not None:
+        if (
+            self.eval_gate_enabled
+            and self.ac_gate_mode != "off"
+            and self._check_ac_gate(evaluation, latest_seed) is not None
+        ):
             return "per-AC gate rejected"
         if self.validation_gate_enabled:
             if (validation_expected or validation_output is not None) and not validation_passed(
@@ -468,7 +515,7 @@ class ConvergenceCriteria:
         if not evaluation.ac_results:
             return None
 
-        failed = tuple(ac.ac_index for ac in evaluation.ac_results if not ac.passed)
+        failed = tuple(ac.ac_index for ac in evaluation.ac_results if ac.unresolved)
         if not failed:
             return None
 
@@ -479,7 +526,7 @@ class ConvergenceCriteria:
         if self.ac_gate_mode == "all":
             failed_display = ", ".join(str(i + 1) for i in failed)
             return failed, (
-                f"Per-AC gate (mode=all): {len(failed)} AC(s) still failing (AC {failed_display})"
+                f"Per-AC gate (mode=all): {len(failed)} AC(s) still unresolved (AC {failed_display})"
             )
         elif self.ac_gate_mode == "ratio":
             if ratio < self.ac_min_pass_ratio:

@@ -78,6 +78,7 @@ class LineageProjector:
                         ontology_snapshot=_PENDING_ONTOLOGY,
                         phase=phase,
                         created_at=event.timestamp,
+                        seed_json=data.get("seed_json"),
                     )
 
             elif event.type == "lineage.generation.completed":
@@ -104,6 +105,11 @@ class LineageProjector:
                     execution_output=data.get("execution_output"),
                     active_ac_indices=tuple(data.get("active_ac_indices", [])),
                     frozen_ac_indices=tuple(data.get("frozen_ac_indices", [])),
+                    verification_handoff_pending=(
+                        data.get("verification_handoff_pending", False)
+                        if isinstance(data.get("verification_handoff_pending", False), bool)
+                        else False
+                    ),
                 )
                 generations[gen_num] = record
 
@@ -243,6 +249,12 @@ class LineageProjector:
                 is_terminal = data.get("is_terminal", False)
                 if not isinstance(is_terminal, bool):
                     continue
+                extra = data.get("extra")
+                step_action = None
+                if isinstance(extra, dict):
+                    raw_step_action = extra.get("step_action")
+                    if isinstance(raw_step_action, str) and raw_step_action.strip():
+                        step_action = raw_step_action
                 parent_directive_id = data.get("parent_directive_id")
                 if parent_directive_id is not None and (
                     not isinstance(parent_directive_id, str) or not parent_directive_id.strip()
@@ -265,6 +277,7 @@ class LineageProjector:
                         generation_number=generation_number,
                         phase=phase,
                         is_terminal=is_terminal,
+                        step_action=step_action,
                         parent_directive_id=parent_directive_id,
                         idempotency_key=idempotency_key,
                     )

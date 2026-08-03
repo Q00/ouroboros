@@ -75,6 +75,17 @@ class TestRegressionDetector:
         assert reg.failed_in_generation == 2
         assert reg.consecutive_failures == 1
 
+    def test_non_authoritative_pass_is_a_regression_from_verified_pass(self) -> None:
+        unknown = _ac(0, True).model_copy(update={"ac_verdict_state": "not_evaluated"})
+        lineage = _lineage(
+            _gen(1, (_ac(0, True),)),
+            _gen(2, (unknown,)),
+        )
+
+        report = RegressionDetector().detect(lineage)
+
+        assert report.regressed_ac_indices == (0,)
+
     def test_persistent_failure_not_regression(self) -> None:
         """AC that always failed is not a regression."""
         lineage = _lineage(

@@ -87,6 +87,35 @@ class ACResult(BaseModel, frozen=True):
         return self.final_verdict.upper()
 
     @property
+    def verdict_is_authoritative(self) -> bool:
+        """Whether this result records a completed evaluator/verifier verdict."""
+        if self.ac_verdict_state == "evaluated":
+            return True
+        if self.ac_verdict_state != "overridden":
+            return False
+        method = self.verification_method.strip().lower()
+        return bool(method and method != "unknown" and self.evidence.strip())
+
+    @property
+    def authoritative_pass(self) -> bool:
+        """Whether this AC may be consumed as proven passing evidence."""
+        return self.passed and self.verdict_is_authoritative
+
+    @property
+    def unresolved(self) -> bool:
+        """Whether this AC must remain in the evolution working set."""
+        return not self.authoritative_pass
+
+    @property
+    def authority_state(self) -> str:
+        """Return ``pass``, ``fail``, or ``unresolved`` at the authority boundary."""
+        if self.authoritative_pass:
+            return "pass"
+        if self.verdict_is_authoritative:
+            return "fail"
+        return "unresolved"
+
+    @property
     def provisional_verdict(self) -> str:
         """What the evaluator originally said before any override."""
         # If overridden, the original was the opposite
@@ -208,9 +237,17 @@ class EvaluationSummary(BaseModel, frozen=True):
     def _reconcile_approval_with_ac_results(self) -> EvaluationSummary:
         """Eagerly reconcile approval fields with AC results at construction time."""
         if self.ac_results:
-            ac_passed = all(ac.passed for ac in self.ac_results)
+            ac_passed = all(ac.authoritative_pass for ac in self.ac_results)
             execution_completed = self.execution_completion_status == "completed"
-            final_approved = ac_passed and execution_completed
+            # Detailed AC results may veto approval, never mint it. Final
+            # approval is an independent authority gate (RFC #1888), so an
+            # explicitly rejected consensus cannot be upgraded by AC PASSes.
+            final_approved = (
+                self.final_approved
+                and self.approval_status == "approved"
+                and ac_passed
+                and execution_completed
+            )
             expected_status = "approved" if final_approved else "rejected"
             if self.approval_status != expected_status:
                 object.__setattr__(self, "approval_status", expected_status)
@@ -227,11 +264,11 @@ class EvaluationSummary(BaseModel, frozen=True):
         """
         if self.execution_completion_status != "completed":
             return False
-        if self.ac_results:
-            return all(ac.passed for ac in self.ac_results)
-        if self.approval_status != "approved":
+        if not self.final_approved or self.approval_status != "approved":
             return False
-        return self.final_approved
+        if self.ac_results:
+            return all(ac.authoritative_pass for ac in self.ac_results)
+        return True
 
     @property
     def run_verdict(self) -> str:
@@ -358,6 +395,7 @@ class GenerationRecord(BaseModel, frozen=True):
     execution_output: str | None = None
     active_ac_indices: tuple[int, ...] = Field(default_factory=tuple)
     frozen_ac_indices: tuple[int, ...] = Field(default_factory=tuple)
+    verification_handoff_pending: bool = False
     seed_quality_canary_feedback: tuple[FeedbackMetadata, ...] = Field(
         default_factory=tuple,
         description=(
@@ -422,6 +460,7 @@ class ControlDirectiveEmission(BaseModel, frozen=True):
     generation_number: int | None = None
     phase: str | None = None
     is_terminal: bool = False
+    step_action: str | None = None
     parent_directive_id: str | None = None
     idempotency_key: str | None = None
 
@@ -452,6 +491,31 @@ class OntologyLineage(BaseModel, frozen=True):
     def current_ontology(self) -> OntologySchema | None:
         """Return the latest ontology snapshot, or None if no generations."""
         return self.generations[-1].ontology_snapshot if self.generations else None
+
+    @property
+    def verification_handoff_pending(self) -> bool:
+        """Whether the latest completed generation requested evaluation."""
+        previous = next(
+            (
+                record
+                for record in reversed(self.generations)
+                if record.phase == GenerationPhase.COMPLETED
+            ),
+            None,
+        )
+        if previous is None:
+            return False
+        if previous.verification_handoff_pending:
+            return True
+        # Legacy events stored the handoff only in the audit directive. Keep
+        # that replay fallback while new completions carry atomic authority.
+        for emission in reversed(self.directive_emissions):
+            if emission.generation_number != previous.generation_number:
+                continue
+            if emission.emitted_by != "evolver" or emission.timestamp < previous.created_at:
+                continue
+            return emission.step_action == "ontology_stable"
+        return False
 
     def with_generation(self, record: GenerationRecord) -> OntologyLineage:
         """Return new lineage with appended or replaced generation.

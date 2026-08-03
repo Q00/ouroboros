@@ -224,6 +224,34 @@ class TestComposition:
         assert len(refined) == 3
         assert all(p.op == "keep" for p in patches)
 
+    def test_add_index_is_normalized_before_seed_materialization(self) -> None:
+        refined, patches, _ = _compose(
+            {"ac_patches": [{"op": "add", "index": 99, "content": "brand new"}]}
+        )
+
+        addition = patches[-1]
+        assert refined[-1] == "brand new"
+        assert addition.op == "add"
+        assert addition.index is None
+
+    @pytest.mark.parametrize(
+        "patches",
+        [
+            [
+                {"op": "revise", "index": 0, "content": "AC one"},
+                {"op": "revise", "index": 1, "content": "AC zero"},
+            ],
+            [{"op": "add", "content": "AC one"}],
+        ],
+        ids=["semantic-swap", "add-parent-identity"],
+    )
+    def test_fresh_parent_identity_reuse_is_rejected_for_reflect_retry(
+        self,
+        patches: list[dict[str, object]],
+    ) -> None:
+        with pytest.raises(ValueError, match="reuses another parent identity"):
+            _compose({"ac_patches": patches})
+
     def test_focused_evolution_drops_new_nodes(self) -> None:
         refined, patches, _ = _compose(
             {
@@ -255,6 +283,33 @@ class TestComposition:
 
 
 class TestSatisficingBackstop:
+    def test_non_authoritative_pass_is_revisable_and_never_settled(self) -> None:
+        summary = EvaluationSummary(
+            final_approved=True,
+            highest_stage_passed=2,
+            ac_results=(
+                ACResult(
+                    ac_index=0,
+                    ac_content=PARENT_ACS[0],
+                    passed=True,
+                    ac_verdict_state="not_evaluated",
+                ),
+            ),
+        )
+
+        refined, patches, settled = ReflectEngine._compose_acs(
+            {"ac_patches": [{"op": "revise", "index": 0, "content": "verified AC zero"}]},
+            PARENT_ACS,
+            summary,
+            _wonder(),
+            _regression(),
+            (0,),
+        )
+
+        assert refined[0] == "verified AC zero"
+        assert patches[0].op == "revise"
+        assert 0 not in settled
+
     def test_forces_keep_on_protected(self) -> None:
         # AC 0 passed, unchallenged, unregressed → protected. LLM tries to revise.
         patches = [ACPatch(op="revise", index=0, content="sneaky rewrite")]
@@ -273,6 +328,13 @@ class TestSatisficingBackstop:
         )
         assert refined[1] == "challenged fix"
         assert 1 not in settled  # revised, not kept
+
+    def test_challenged_ac_is_not_settled_when_kept(self) -> None:
+        _, _, settled = _compose(
+            {"ac_patches": [{"op": "keep", "index": 1}]},
+            challenge=(1,),
+        )
+        assert 1 not in settled
 
     def test_failed_ac_may_revise(self) -> None:
         refined, _, settled = _compose(
@@ -298,6 +360,24 @@ class TestSatisficingBackstop:
             regressed=(1,),
         )
         assert 1 not in settled
+
+    def test_missing_evaluation_mints_no_protection_or_settlement(self) -> None:
+        refined, _, settled = ReflectEngine._compose_acs(
+            {
+                "ac_patches": [
+                    {"op": "revise", "index": 0, "content": "ontology revision"},
+                    {"op": "keep", "index": 1},
+                    {"op": "keep", "index": 2},
+                ]
+            },
+            PARENT_ACS,
+            None,
+            _wonder(),
+            _regression(),
+        )
+
+        assert refined[0] == "ontology revision"
+        assert settled == ()
 
 
 class TestSettledIndices:
@@ -328,12 +408,15 @@ class TestLegacyFallbackDiff:
         assert ops == ["keep", "revise", "keep", "add"]
         assert set(settled) == {0, 2}  # kept + passed; index 1 revised
 
-    def test_shorter_list_full_rewrite_semantics(self) -> None:
+    def test_shorter_list_is_rejected_as_identity_ambiguous(self) -> None:
         data = {"refined_acs": ["only one"]}
-        refined, patches, settled = _compose(data)
-        assert refined == ("only one",)
-        assert patches == ()
-        assert settled == ()
+        with pytest.raises(ValueError, match="cannot delete or reorder"):
+            _compose(data)
+
+    def test_reordered_list_is_rejected_as_identity_ambiguous(self) -> None:
+        data = {"refined_acs": ["AC one", "AC zero", "AC two"]}
+        with pytest.raises(ValueError, match="cannot delete or reorder"):
+            _compose(data)
 
     def test_derive_legacy_patches_shorter_returns_none(self) -> None:
         assert _derive_legacy_patches(("a",), ("a", "b", "c")) is None
@@ -383,6 +466,43 @@ class TestMalformedPatches:
 
 
 class TestReflectEndToEnd:
+    async def test_ontology_only_reflect_uses_no_synthetic_evaluation_authority(self) -> None:
+        response = json.dumps(
+            {
+                "refined_goal": "Build a thing with explicit ownership",
+                "refined_constraints": ["c1"],
+                "ac_patches": [
+                    {"op": "revise", "index": 0, "content": "AC zero clarified"},
+                    {"op": "keep", "index": 1},
+                    {"op": "keep", "index": 2},
+                ],
+                "ontology_mutations": [
+                    {
+                        "action": "add",
+                        "field_name": "owner",
+                        "field_type": "entity",
+                        "reason": "answer the Wonder question",
+                    }
+                ],
+                "reasoning": "ontology-only exploration",
+            }
+        )
+        adapter = _FakeAdapter(response)
+
+        result = await ReflectEngine(llm_adapter=adapter, model="test").reflect(
+            current_seed=_seed(),
+            execution_output="",
+            evaluation_summary=None,
+            wonder_output=_wonder(),
+            lineage=OntologyLineage(lineage_id="l", goal="Build a thing"),
+        )
+
+        assert result.is_ok
+        assert result.value.refined_acs[0] == "AC zero clarified"
+        assert result.value.settled_ac_indices == ()
+        assert "Not evaluated (ontology-only exploration)" in adapter.messages[1].content
+        assert "No AC has PASS, protection, or settling authority" in adapter.messages[1].content
+
     async def test_whitespace_only_refined_constraints_rejected_before_seed_materialization(
         self,
     ) -> None:
@@ -1017,11 +1137,13 @@ class _FakeAdapter:
     def __init__(self, content: str) -> None:
         self.content = content
         self._max_turns = 1
+        self.messages = ()
 
     async def complete(self, messages, config):  # type: ignore[no-untyped-def]
         from ouroboros.core.types import Result
         from ouroboros.providers.base import CompletionResponse, UsageInfo
 
+        self.messages = messages
         return Result.ok(
             CompletionResponse(
                 content=self.content,

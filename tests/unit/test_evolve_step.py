@@ -1,5 +1,6 @@
 """Unit tests for evolve_step() — single-generation stepping API."""
 
+import asyncio
 import inspect
 import json
 from types import SimpleNamespace
@@ -7,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from ouroboros.bigbang.seed_generator import SeedGenerator
 from ouroboros.config.models import RuntimeControlsConfig
 from ouroboros.core.directive import Directive
 from ouroboros.core.errors import OuroborosError
@@ -21,6 +23,7 @@ from ouroboros.core.lineage import (
     OntologyLineage,
 )
 from ouroboros.core.seed import (
+    AcceptanceCriterionSpec,
     EvaluationPrinciple,
     ExitCondition,
     OntologyField,
@@ -38,6 +41,7 @@ from ouroboros.events.lineage import (
     lineage_generation_phase_changed,
     lineage_generation_started,
 )
+from ouroboros.evolution import loop_support
 from ouroboros.evolution.convergence import ConvergenceSignal
 from ouroboros.evolution.loop import (
     EvolutionaryLoop,
@@ -292,11 +296,12 @@ class TestStepTypes:
         """StepAction has all expected values."""
         assert StepAction.CONTINUE == "continue"
         assert StepAction.CONVERGED == "converged"
+        assert StepAction.ONTOLOGY_STABLE == "ontology_stable"
         assert StepAction.STAGNATED == "stagnated"
         assert StepAction.EXHAUSTED == "exhausted"
         assert StepAction.FAILED == "failed"
         assert StepAction.INTERRUPTED == "interrupted"
-        assert len(StepAction) == 6
+        assert len(StepAction) == 7
 
     def test_step_result_is_frozen(self) -> None:
         """StepResult is frozen dataclass."""
@@ -611,6 +616,839 @@ class TestEvolveStepGen2:
         call_args = loop._run_generation.call_args
         passed_seed = call_args.kwargs.get("current_seed") or call_args[0][2]
         assert passed_seed.metadata.seed_id == "seed_v1"
+
+    @pytest.mark.asyncio
+    async def test_ontology_only_generations_keep_reflecting_without_evaluation(self) -> None:
+        """No-execute exploration must keep mutating after evaluation disappears."""
+        store = await create_event_store()
+        seed_v1 = make_seed(
+            seed_id="seed_ontology_1",
+            fields=(OntologyField(name="task", field_type="entity", description="task"),),
+        )
+        seed_v2 = make_seed(
+            seed_id="seed_ontology_2",
+            parent_seed_id="seed_ontology_1",
+            fields=(OntologyField(name="owner", field_type="entity", description="owner"),),
+        )
+        seed_v3 = make_seed(
+            seed_id="seed_ontology_3",
+            parent_seed_id="seed_ontology_2",
+            fields=(OntologyField(name="policy", field_type="entity", description="policy"),),
+        )
+        await seed_events_for_gen1(store, "lin_ontology_reflect", seed_v1)
+
+        wonder_engine = MagicMock()
+        wonder_engine.wonder = AsyncMock(
+            side_effect=(
+                Result.ok(make_wonder_output(("Who owns each task?",))),
+                Result.ok(make_wonder_output(("Which policy governs the owner?",))),
+            )
+        )
+        reflect_engine = MagicMock()
+        reflect_engine.reflect = AsyncMock(
+            side_effect=(
+                Result.ok(
+                    ReflectOutput(
+                        refined_goal=seed_v1.goal,
+                        refined_constraints=seed_v1.constraints,
+                        refined_acs=("Tasks can be created",),
+                        reasoning="add owner",
+                    )
+                ),
+                Result.ok(
+                    ReflectOutput(
+                        refined_goal=seed_v2.goal,
+                        refined_constraints=seed_v2.constraints,
+                        refined_acs=("Tasks can be created",),
+                        reasoning="add policy",
+                    )
+                ),
+            )
+        )
+        seed_generator = MagicMock()
+        seed_generator.generate_from_reflect = MagicMock(
+            side_effect=(Result.ok(seed_v2), Result.ok(seed_v3))
+        )
+        loop = EvolutionaryLoop(
+            event_store=store,
+            config=EvolutionaryLoopConfig(min_generations=2, convergence_threshold=0.99),
+            wonder_engine=wonder_engine,
+            reflect_engine=reflect_engine,
+            seed_generator=seed_generator,
+        )
+
+        generation_2 = await loop.evolve_step("lin_ontology_reflect", execute=False)
+        generation_3 = await loop.evolve_step("lin_ontology_reflect", execute=False)
+
+        assert generation_2.is_ok and generation_3.is_ok
+        assert generation_2.value.action is StepAction.CONTINUE
+        assert generation_3.value.action is StepAction.CONTINUE
+        assert generation_2.value.generation_result.seed.metadata.seed_id == "seed_ontology_2"
+        assert generation_3.value.generation_result.seed.metadata.seed_id == "seed_ontology_3"
+        assert reflect_engine.reflect.await_count == 2
+        assert all(
+            call.kwargs["evaluation_summary"] is None
+            for call in reflect_engine.reflect.await_args_list
+        )
+        assert seed_generator.generate_from_reflect.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_ontology_stable_handoff_verifies_current_seed_without_wonder(self) -> None:
+        """The durable EVALUATE handoff must force Execute -> Evaluate on the stable Seed."""
+        store = await create_event_store()
+        seed_v1 = make_seed(
+            seed_id="seed_handoff_1",
+            fields=(OntologyField(name="task", field_type="entity", description="task"),),
+        )
+        seed_v2 = make_seed(
+            seed_id="seed_handoff_2",
+            parent_seed_id="seed_handoff_1",
+            fields=(OntologyField(name="owner", field_type="entity", description="owner"),),
+        )
+        await seed_events_for_gen1(store, "lin_verification_handoff", seed_v1)
+        await store.append(
+            lineage_generation_completed(
+                "lin_verification_handoff",
+                generation_number=2,
+                seed_id=seed_v2.metadata.seed_id,
+                ontology_snapshot=seed_v2.ontology_schema.model_dump(mode="json"),
+                evaluation_summary=None,
+                wonder_questions=["ownership clarified"],
+                seed_json=json.dumps(seed_v2.to_dict()),
+                parent_seed_id=seed_v2.metadata.parent_seed_id,
+            )
+        )
+
+        wonder_engine = MagicMock()
+        wonder_engine.wonder = AsyncMock(
+            return_value=Result.ok(make_wonder_output(questions=(), should_continue=False))
+        )
+        reflect_engine = MagicMock()
+        reflect_engine.reflect = AsyncMock()
+        seed_generator = MagicMock()
+        seed_generator.generate_from_reflect = MagicMock()
+        executor = AsyncMock(return_value="verified output")
+        evaluator = AsyncMock(return_value=make_eval_summary(approved=True, score=1.0))
+        loop = EvolutionaryLoop(
+            event_store=store,
+            config=EvolutionaryLoopConfig(min_generations=2, convergence_threshold=0.95),
+            wonder_engine=wonder_engine,
+            reflect_engine=reflect_engine,
+            seed_generator=seed_generator,
+            executor=executor,
+            evaluator=evaluator,
+        )
+
+        stable = await loop.evolve_step("lin_verification_handoff", execute=False)
+
+        assert stable.is_ok
+        assert stable.value.action is StepAction.ONTOLOGY_STABLE
+        assert stable.value.convergence_signal.converged is False
+        assert stable.value.lineage.status is LineageStatus.ACTIVE
+        wonder_engine.wonder.reset_mock()
+        reflect_engine.reflect.reset_mock()
+        seed_generator.generate_from_reflect.reset_mock()
+
+        verified = await loop.evolve_step("lin_verification_handoff", execute=True)
+
+        assert verified.is_ok
+        assert verified.value.action is StepAction.CONVERGED
+        assert verified.value.generation_result.seed == seed_v2
+        assert verified.value.generation_result.active_ac_indices == (0,)
+        assert verified.value.generation_result.frozen_ac_indices == ()
+        wonder_engine.wonder.assert_not_awaited()
+        reflect_engine.reflect.assert_not_awaited()
+        seed_generator.generate_from_reflect.assert_not_called()
+        executor.assert_awaited_once()
+        assert executor.await_args.args[0] == seed_v2
+        evaluator.assert_awaited_once_with(seed_v2, "verified output")
+
+    @pytest.mark.asyncio
+    async def test_ontology_stable_handoff_survives_directive_append_failure(self) -> None:
+        """Completed generation atomically retains the verification handoff authority."""
+        store = await create_event_store()
+        seed_v1 = make_seed(
+            seed_id="seed_atomic_handoff_1",
+            fields=(OntologyField(name="task", field_type="entity", description="task"),),
+        )
+        seed_v2 = make_seed(
+            seed_id="seed_atomic_handoff_2",
+            parent_seed_id=seed_v1.metadata.seed_id,
+            fields=(OntologyField(name="owner", field_type="entity", description="owner"),),
+        )
+        await seed_events_for_gen1(store, "lin_atomic_handoff", seed_v1)
+        await store.append(
+            lineage_generation_completed(
+                "lin_atomic_handoff",
+                generation_number=2,
+                seed_id=seed_v2.metadata.seed_id,
+                ontology_snapshot=seed_v2.ontology_schema.model_dump(mode="json"),
+                evaluation_summary=None,
+                wonder_questions=["ownership clarified"],
+                seed_json=json.dumps(seed_v2.to_dict()),
+                parent_seed_id=seed_v2.metadata.parent_seed_id,
+            )
+        )
+
+        wonder_engine = MagicMock()
+        wonder_engine.wonder = AsyncMock(
+            return_value=Result.ok(make_wonder_output(questions=(), should_continue=False))
+        )
+        reflect_engine = MagicMock()
+        reflect_engine.reflect = AsyncMock()
+        executor = AsyncMock(return_value="verified output")
+        evaluator = AsyncMock(return_value=make_eval_summary(approved=True, score=1.0))
+        loop = EvolutionaryLoop(
+            event_store=store,
+            config=EvolutionaryLoopConfig(min_generations=2, convergence_threshold=0.95),
+            wonder_engine=wonder_engine,
+            reflect_engine=reflect_engine,
+            executor=executor,
+            evaluator=evaluator,
+        )
+        original_append = store.append
+
+        async def fail_ontology_stable_directive(event):  # type: ignore[no-untyped-def]
+            if (
+                event.type == "control.directive.emitted"
+                and event.data.get("extra", {}).get("step_action") == "ontology_stable"
+            ):
+                raise OSError("injected directive append failure")
+            return await original_append(event)
+
+        with patch.object(store, "append", side_effect=fail_ontology_stable_directive):
+            first = await loop.evolve_step("lin_atomic_handoff", execute=False)
+
+        assert first.is_ok
+        assert first.value.action is StepAction.ONTOLOGY_STABLE
+        events = await store.replay_lineage("lin_atomic_handoff")
+        completed = [event for event in events if event.type == "lineage.generation.completed"][-1]
+        assert completed.data["verification_handoff_pending"] is True
+        replayed = LineageProjector().project(events)
+        assert replayed is not None
+        assert replayed.verification_handoff_pending is True
+
+        wonder_engine.wonder.reset_mock()
+        reflect_engine.reflect.reset_mock()
+        repeated = await loop.evolve_step("lin_atomic_handoff", execute=False)
+
+        assert repeated.is_ok
+        assert repeated.value.action is StepAction.ONTOLOGY_STABLE
+        assert repeated.value.generation_result.seed == seed_v2
+        wonder_engine.wonder.assert_not_awaited()
+        reflect_engine.reflect.assert_not_awaited()
+
+        override = make_seed(seed_id="seed_must_not_replace_pending_handoff")
+        repeated_with_override = await loop.evolve_step(
+            "lin_atomic_handoff",
+            initial_seed=override,
+            execute=False,
+        )
+
+        assert repeated_with_override.is_ok
+        assert repeated_with_override.value.generation_result.seed == seed_v2
+        verified = await loop.evolve_step(
+            "lin_atomic_handoff",
+            initial_seed=override,
+            execute=True,
+        )
+
+        assert verified.is_ok
+        assert verified.value.generation_result.seed == seed_v2
+        wonder_engine.wonder.assert_not_awaited()
+        reflect_engine.reflect.assert_not_awaited()
+        executor.assert_awaited_once()
+        evaluator.assert_awaited_once_with(seed_v2, "verified output")
+
+    @pytest.mark.asyncio
+    async def test_concurrent_same_lineage_replays_one_ontology_stable_winner(self) -> None:
+        """Overlapping retries must share one provider path and durable generation."""
+        store = await create_event_store()
+        lineage_id = "lin_concurrent_evolve"
+        seed_v1 = make_seed(
+            seed_id="seed_concurrent_1",
+            fields=(OntologyField(name="task", field_type="entity", description="task"),),
+        )
+        seed_v2 = make_seed(
+            seed_id="seed_concurrent_2",
+            parent_seed_id=seed_v1.metadata.seed_id,
+            fields=(OntologyField(name="owner", field_type="entity", description="owner"),),
+        )
+        seed_v3 = make_seed(
+            seed_id="seed_concurrent_3",
+            parent_seed_id=seed_v2.metadata.seed_id,
+            fields=seed_v2.ontology_schema.fields,
+        )
+        await seed_events_for_gen1(store, lineage_id, seed_v1)
+        await store.append(
+            lineage_generation_completed(
+                lineage_id,
+                generation_number=2,
+                seed_id=seed_v2.metadata.seed_id,
+                ontology_snapshot=seed_v2.ontology_schema.model_dump(mode="json"),
+                evaluation_summary=None,
+                wonder_questions=["ownership clarified"],
+                seed_json=json.dumps(seed_v2.to_dict()),
+                parent_seed_id=seed_v2.metadata.parent_seed_id,
+            )
+        )
+
+        wonder_entered = asyncio.Event()
+        release_wonder = asyncio.Event()
+
+        async def stable_wonder(*args, **kwargs):  # type: ignore[no-untyped-def]
+            wonder_entered.set()
+            await release_wonder.wait()
+            return Result.ok(make_wonder_output(("What remains unresolved?",)))
+
+        wonder_engine = MagicMock()
+        wonder_engine.wonder = AsyncMock(side_effect=stable_wonder)
+        reflect_engine = MagicMock()
+        reflect_engine.reflect = AsyncMock(
+            return_value=Result.ok(
+                ReflectOutput(
+                    refined_goal=seed_v2.goal,
+                    refined_constraints=seed_v2.constraints,
+                    refined_acs=("Tasks can be created",),
+                    reasoning="stable ontology",
+                )
+            )
+        )
+        seed_generator = MagicMock()
+        seed_generator.generate_from_reflect = MagicMock(return_value=Result.ok(seed_v3))
+        config = EvolutionaryLoopConfig(min_generations=2, convergence_threshold=0.95)
+        first_loop = EvolutionaryLoop(
+            event_store=store,
+            config=config,
+            wonder_engine=wonder_engine,
+            reflect_engine=reflect_engine,
+            seed_generator=seed_generator,
+        )
+        retry_loop = EvolutionaryLoop(
+            event_store=store,
+            config=config,
+            wonder_engine=wonder_engine,
+            reflect_engine=reflect_engine,
+            seed_generator=seed_generator,
+        )
+
+        first_task = asyncio.create_task(first_loop.evolve_step(lineage_id, execute=False))
+        await wonder_entered.wait()
+        retry_task = asyncio.create_task(retry_loop.evolve_step(lineage_id, execute=False))
+        await asyncio.sleep(0)
+        assert not retry_task.done()
+        release_wonder.set()
+        first, retry = await asyncio.gather(first_task, retry_task)
+
+        assert first.is_ok and retry.is_ok
+        assert first is retry
+        assert first.value.action is StepAction.ONTOLOGY_STABLE
+        assert retry.value.action is StepAction.ONTOLOGY_STABLE
+        assert first.value.generation_result.generation_number == 3
+        assert retry.value.generation_result.generation_number == 3
+        assert first.value.generation_result.seed == retry.value.generation_result.seed
+        assert first.value.next_generation == retry.value.next_generation == 4
+        wonder_engine.wonder.assert_awaited_once()
+        reflect_engine.reflect.assert_awaited_once()
+        seed_generator.generate_from_reflect.assert_called_once()
+
+        events = await store.replay_lineage(lineage_id)
+        generation_started = [
+            event
+            for event in events
+            if event.type == "lineage.generation.started"
+            and event.data.get("generation_number") == 3
+        ]
+        generation_completed = [
+            event
+            for event in events
+            if event.type == "lineage.generation.completed"
+            and event.data.get("generation_number") == 3
+        ]
+        stable_directives = [
+            event
+            for event in events
+            if event.type == "control.directive.emitted"
+            and event.data.get("generation_number") == 3
+            and event.data.get("extra", {}).get("step_action") == "ontology_stable"
+        ]
+        assert len(generation_started) == 1
+        assert len(generation_completed) == 1
+        assert len(stable_directives) == 1
+
+    @pytest.mark.asyncio
+    async def test_different_single_flight_request_waits_before_retrying(self) -> None:
+        """A changed evolve request starts only after the winner is durable."""
+        store = await create_event_store()
+        winner_entered = asyncio.Event()
+        release_winner = asyncio.Event()
+        order: list[str] = []
+
+        async def winner() -> str:
+            order.append("winner_started")
+            winner_entered.set()
+            await release_winner.wait()
+            order.append("winner_completed")
+            return "winner"
+
+        async def retry() -> str:
+            order.append("retry_started")
+            return "retry"
+
+        first = asyncio.create_task(
+            loop_support.run_lineage_single_flight(store, "lineage", "request-a", winner)
+        )
+        await winner_entered.wait()
+        second = asyncio.create_task(
+            loop_support.run_lineage_single_flight(store, "lineage", "request-b", retry)
+        )
+        await asyncio.sleep(0)
+
+        assert order == ["winner_started"]
+        release_winner.set()
+        assert await asyncio.gather(first, second) == ["winner", "retry"]
+        assert order == ["winner_started", "winner_completed", "retry_started"]
+
+    @pytest.mark.asyncio
+    async def test_cancelled_duplicate_does_not_cancel_single_flight_winner(self) -> None:
+        """One retry caller cannot abort provider work shared by another caller."""
+        store = await create_event_store()
+        winner_entered = asyncio.Event()
+        release_winner = asyncio.Event()
+
+        async def winner() -> str:
+            winner_entered.set()
+            await release_winner.wait()
+            return "durable"
+
+        first = asyncio.create_task(
+            loop_support.run_lineage_single_flight(store, "lineage", "same-request", winner)
+        )
+        await winner_entered.wait()
+        duplicate = asyncio.create_task(
+            loop_support.run_lineage_single_flight(store, "lineage", "same-request", winner)
+        )
+        await asyncio.sleep(0)
+        duplicate.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await duplicate
+        release_winner.set()
+        assert await first == "durable"
+
+    @pytest.mark.asyncio
+    async def test_failed_generation_same_request_retries_without_second_started_event(
+        self,
+    ) -> None:
+        """A transient failure deduplicates overlap but does not pin the lineage forever."""
+        store = await create_event_store()
+        seed = make_seed(seed_id="seed_retryable_failure")
+        executor = AsyncMock(side_effect=[RuntimeError("transient"), "recovered output"])
+        evaluator = AsyncMock(return_value=make_eval_summary(approved=True, score=1.0))
+        loop = EvolutionaryLoop(
+            event_store=store,
+            config=EvolutionaryLoopConfig(min_generations=1),
+            executor=executor,
+            evaluator=evaluator,
+        )
+
+        failed = await loop.evolve_step("lin_retryable_failure", initial_seed=seed)
+        recovered = await loop.evolve_step("lin_retryable_failure", initial_seed=seed)
+
+        assert failed.is_ok and failed.value.action is StepAction.FAILED
+        assert recovered.is_ok and recovered.value.action is StepAction.CONVERGED
+        assert executor.await_count == 2
+        events = await store.replay_lineage("lin_retryable_failure")
+        started = [
+            event
+            for event in events
+            if event.type == "lineage.generation.started"
+            and event.data.get("generation_number") == 1
+        ]
+        completed = [
+            event
+            for event in events
+            if event.type == "lineage.generation.completed"
+            and event.data.get("generation_number") == 1
+        ]
+        assert len(started) == 1
+        assert len(completed) == 1
+
+    @pytest.mark.asyncio
+    async def test_no_question_wonder_reverifies_non_authoritative_pass(self) -> None:
+        """Wonder may skip Reflect, but execute=True must still verify every unknown AC."""
+        store = await create_event_store()
+        seed = make_seed(seed_id="seed_unknown_pass")
+        unknown_pass = EvaluationSummary(
+            final_approved=True,
+            highest_stage_passed=2,
+            ac_results=(
+                ACResult(
+                    ac_index=0,
+                    ac_content="Tasks can be created",
+                    passed=True,
+                    ac_verdict_state="not_evaluated",
+                ),
+            ),
+        )
+        await seed_events_for_gen1(store, "lin_unknown_pass", seed, unknown_pass)
+        wonder_engine = MagicMock()
+        wonder_engine.wonder = AsyncMock(
+            return_value=Result.ok(make_wonder_output(questions=(), should_continue=False))
+        )
+        reflect_engine = MagicMock()
+        reflect_engine.reflect = AsyncMock()
+        executor = AsyncMock(return_value="fresh execution")
+        evaluator = AsyncMock(return_value=make_eval_summary(approved=True, score=1.0))
+        loop = EvolutionaryLoop(
+            event_store=store,
+            config=EvolutionaryLoopConfig(min_generations=2),
+            wonder_engine=wonder_engine,
+            reflect_engine=reflect_engine,
+            executor=executor,
+            evaluator=evaluator,
+        )
+
+        result = await loop.evolve_step("lin_unknown_pass", execute=True)
+
+        assert result.is_ok
+        assert result.value.generation_result.active_ac_indices == (0,)
+        assert result.value.generation_result.frozen_ac_indices == ()
+        reflect_engine.reflect.assert_not_awaited()
+        executor.assert_awaited_once()
+        evaluator.assert_awaited_once_with(seed, "fresh execution")
+
+    @pytest.mark.asyncio
+    async def test_resume_preserves_ambiguous_legacy_unstructured_ac_list(self) -> None:
+        """Old interrupted Reflect output cannot delete/reorder parent prose ACs on resume."""
+        store = await create_event_store()
+        seed = make_seed(seed_id="seed_legacy_resume").model_copy(
+            update={
+                "acceptance_criteria": (
+                    "Tasks can be created",
+                    "Tasks can be deleted",
+                    "Tasks can be listed",
+                )
+            }
+        )
+        await seed_events_for_gen1(store, "lin_legacy_resume", seed, make_eval_summary(False))
+        await store.append(lineage_generation_started("lin_legacy_resume", 2, "wondering"))
+        await store.append(lineage_generation_phase_changed("lin_legacy_resume", 2, "reflecting"))
+        await store.append(
+            lineage_generation_interrupted(
+                "lin_legacy_resume",
+                2,
+                last_completed_phase="reflecting",
+                partial_state={
+                    "wonder_questions": ["What remains unresolved?"],
+                    "reflect_output": {
+                        "refined_goal": seed.goal,
+                        "refined_constraints": list(seed.constraints),
+                        "refined_acs": ["Tasks can be created"],
+                        "ontology_mutations": [],
+                        "reasoning": "legacy persisted output",
+                    },
+                },
+                seed_json=json.dumps(seed.to_dict()),
+            )
+        )
+        wonder_engine = MagicMock()
+        wonder_engine.wonder = AsyncMock()
+        reflect_engine = MagicMock()
+        reflect_engine.reflect = AsyncMock()
+        loop = EvolutionaryLoop(
+            event_store=store,
+            wonder_engine=wonder_engine,
+            reflect_engine=reflect_engine,
+            seed_generator=SeedGenerator(llm_adapter=AsyncMock()),
+        )
+
+        result = await loop.evolve_step("lin_legacy_resume", execute=False)
+
+        assert result.is_ok
+        assert tuple(
+            criterion.description
+            for criterion in result.value.generation_result.seed.acceptance_criteria
+        ) == (
+            "Tasks can be created",
+            "Tasks can be deleted",
+            "Tasks can be listed",
+        )
+        wonder_engine.wonder.assert_not_awaited()
+        reflect_engine.reflect.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_resume_discards_unsafe_legacy_structured_ac_rewrite(self) -> None:
+        """Resume keeps structured parent authority instead of failing or rebinding it."""
+        store = await create_event_store()
+        seed = make_seed(seed_id="seed_structured_resume").model_copy(
+            update={
+                "acceptance_criteria": (
+                    AcceptanceCriterionSpec(
+                        description="Tasks can be created",
+                        verify_command="pytest -q tests/test_create.py",
+                    ),
+                    AcceptanceCriterionSpec(
+                        description="Tasks can be deleted",
+                        verify_command="pytest -q tests/test_delete.py",
+                    ),
+                )
+            }
+        )
+        seed = Seed.from_dict(seed.to_dict())
+        await seed_events_for_gen1(store, "lin_structured_resume", seed, make_eval_summary(False))
+        await store.append(lineage_generation_started("lin_structured_resume", 2, "wondering"))
+        await store.append(
+            lineage_generation_phase_changed("lin_structured_resume", 2, "reflecting")
+        )
+        await store.append(
+            lineage_generation_interrupted(
+                "lin_structured_resume",
+                2,
+                last_completed_phase="reflecting",
+                partial_state={
+                    "wonder_questions": ["What remains unresolved?"],
+                    "reflect_output": {
+                        "refined_goal": seed.goal,
+                        "refined_constraints": list(seed.constraints),
+                        "refined_acs": ["Rewrite structured task creation"],
+                        "ontology_mutations": [],
+                        "reasoning": "legacy persisted output",
+                    },
+                },
+                seed_json=json.dumps(seed.to_dict()),
+            )
+        )
+        loop = EvolutionaryLoop(
+            event_store=store,
+            seed_generator=SeedGenerator(llm_adapter=AsyncMock()),
+        )
+
+        result = await loop.evolve_step("lin_structured_resume", execute=False)
+
+        assert result.is_ok
+        assert result.value.generation_result.seed.acceptance_criteria == seed.acceptance_criteria
+
+    @pytest.mark.asyncio
+    async def test_resume_reruns_patch_bearing_structured_ac_rewrite(self) -> None:
+        """Serialized patches cannot restore process-local parser provenance."""
+        store = await create_event_store()
+        seed = make_seed(seed_id="seed_patch_resume").model_copy(
+            update={
+                "acceptance_criteria": (
+                    AcceptanceCriterionSpec(
+                        description="Tasks can be created",
+                        verify_command="pytest -q tests/test_create.py",
+                    ),
+                    AcceptanceCriterionSpec(
+                        description="Tasks can be deleted",
+                        verify_command="pytest -q tests/test_delete.py",
+                    ),
+                )
+            }
+        )
+        seed = Seed.from_dict(seed.to_dict())
+        await seed_events_for_gen1(store, "lin_patch_resume", seed, make_eval_summary(False))
+        await store.append(lineage_generation_started("lin_patch_resume", 2, "wondering"))
+        await store.append(lineage_generation_phase_changed("lin_patch_resume", 2, "reflecting"))
+        await store.append(
+            lineage_generation_interrupted(
+                "lin_patch_resume",
+                2,
+                last_completed_phase="reflecting",
+                partial_state={
+                    "wonder_questions": ["What remains unresolved?"],
+                    "reflect_output": {
+                        "refined_goal": seed.goal,
+                        "refined_constraints": list(seed.constraints),
+                        "refined_acs": [
+                            "Rewrite structured task creation",
+                            "Tasks can be deleted",
+                        ],
+                        "ac_patches": [
+                            {
+                                "op": "revise",
+                                "index": 0,
+                                "content": "Rewrite structured task creation",
+                            },
+                            {"op": "keep", "index": 1},
+                        ],
+                        "ontology_mutations": [],
+                        "reasoning": "pre-upgrade persisted output",
+                    },
+                },
+                seed_json=json.dumps(seed.to_dict()),
+            )
+        )
+        wonder_engine = MagicMock()
+        wonder_engine.wonder = AsyncMock()
+        reflect_engine = MagicMock()
+        reflect_engine.reflect = AsyncMock(
+            return_value=Result.ok(
+                ReflectOutput(
+                    refined_goal=seed.goal,
+                    refined_constraints=seed.constraints,
+                    refined_acs=tuple(
+                        criterion.description for criterion in seed.acceptance_criteria
+                    ),
+                    ontology_mutations=(),
+                    reasoning="safe replay",
+                )
+            )
+        )
+        loop = EvolutionaryLoop(
+            event_store=store,
+            wonder_engine=wonder_engine,
+            reflect_engine=reflect_engine,
+            seed_generator=SeedGenerator(llm_adapter=AsyncMock()),
+        )
+
+        result = await loop.evolve_step("lin_patch_resume", execute=False)
+
+        assert result.is_ok
+        assert result.value.generation_result.seed.acceptance_criteria == seed.acceptance_criteria
+        wonder_engine.wonder.assert_not_awaited()
+        reflect_engine.reflect.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_resume_after_seeding_preserves_focused_parent_authority(self) -> None:
+        """A resumed candidate must not reactivate an unrelated authoritative PASS."""
+        store = await create_event_store()
+        parent = make_seed(seed_id="seed_resume_focus_parent").model_copy(
+            update={
+                "acceptance_criteria": (
+                    "Stable AC must remain frozen",
+                    "Failed AC original contract",
+                )
+            }
+        )
+        parent = Seed.from_dict(parent.to_dict())
+        prior_evaluation = EvaluationSummary(
+            final_approved=False,
+            highest_stage_passed=2,
+            score=0.5,
+            ac_results=(
+                ACResult(
+                    ac_index=0,
+                    ac_content="Stable AC must remain frozen",
+                    passed=True,
+                ),
+                ACResult(
+                    ac_index=1,
+                    ac_content="Failed AC original contract",
+                    passed=False,
+                ),
+            ),
+        )
+        await seed_events_for_gen1(store, "lin_seeding_resume_focus", parent, prior_evaluation)
+
+        candidate = parent.model_copy(
+            update={
+                "acceptance_criteria": (
+                    "Stable AC must remain frozen",
+                    "Failed AC revised contract",
+                ),
+                "metadata": parent.metadata.model_copy(
+                    update={
+                        "seed_id": "seed_resume_focus_candidate",
+                        "parent_seed_id": parent.metadata.seed_id,
+                    }
+                ),
+            }
+        )
+        candidate = Seed.from_dict(candidate.to_dict())
+        await store.append(lineage_generation_started("lin_seeding_resume_focus", 2, "wondering"))
+        await store.append(
+            lineage_generation_phase_changed("lin_seeding_resume_focus", 2, "reflecting")
+        )
+        await store.append(
+            lineage_generation_phase_changed("lin_seeding_resume_focus", 2, "seeding")
+        )
+        await store.append(
+            lineage_generation_interrupted(
+                "lin_seeding_resume_focus",
+                2,
+                last_completed_phase="seeding",
+                partial_state={
+                    "wonder_questions": ["What remains unresolved?"],
+                    "reflect_output": {
+                        "refined_goal": candidate.goal,
+                        "refined_constraints": list(candidate.constraints),
+                        "refined_acs": [
+                            criterion.description for criterion in candidate.acceptance_criteria
+                        ],
+                        "ontology_mutations": [],
+                        "reasoning": "persisted focused revision",
+                    },
+                },
+                seed_json=json.dumps(candidate.to_dict()),
+            )
+        )
+
+        captured: dict[str, object] = {}
+
+        async def _capture_executor(
+            seed: Seed,
+            *,
+            parallel: bool = True,
+            execution_id: str | None = None,
+            externally_satisfied_acs: dict[int, dict[str, object]] | None = None,
+        ) -> str:
+            captured["seed"] = seed
+            captured["parallel"] = parallel
+            captured["execution_id"] = execution_id
+            captured["externally_satisfied_acs"] = externally_satisfied_acs
+            return "fresh execution"
+
+        candidate_evaluation = EvaluationSummary(
+            final_approved=True,
+            highest_stage_passed=2,
+            score=1.0,
+            ac_results=tuple(
+                ACResult(
+                    ac_index=index,
+                    ac_content=criterion.description,
+                    passed=True,
+                )
+                for index, criterion in enumerate(candidate.acceptance_criteria)
+            ),
+        )
+        wonder_engine = MagicMock()
+        wonder_engine.wonder = AsyncMock()
+        reflect_engine = MagicMock()
+        reflect_engine.reflect = AsyncMock()
+        seed_generator = MagicMock()
+        seed_generator.generate_from_reflect = MagicMock()
+        evaluator = AsyncMock(return_value=candidate_evaluation)
+        loop = EvolutionaryLoop(
+            event_store=store,
+            config=EvolutionaryLoopConfig(focused_evolution=True, scoped_reexecution=True),
+            wonder_engine=wonder_engine,
+            reflect_engine=reflect_engine,
+            seed_generator=seed_generator,
+            executor=_capture_executor,
+            evaluator=evaluator,
+        )
+
+        result = await loop.evolve_step("lin_seeding_resume_focus", execute=True)
+
+        assert result.is_ok
+        generation = result.value.generation_result
+        assert generation.seed == candidate
+        assert generation.active_ac_indices == (1,)
+        assert generation.frozen_ac_indices == (0,)
+        assert captured["externally_satisfied_acs"] == {
+            0: {
+                "reason": (
+                    "frozen by prior PASS evidence; excluded from evolve and "
+                    "reverified at the final boundary"
+                )
+            }
+        }
+        wonder_engine.wonder.assert_not_awaited()
+        reflect_engine.reflect.assert_not_awaited()
+        seed_generator.generate_from_reflect.assert_not_called()
+        evaluator.assert_awaited_once_with(candidate, "fresh execution")
 
 
 class TestEvolveStepConvergence:
@@ -1285,9 +2123,8 @@ class TestRunGenerationFailures:
                 "Generation cancelled by timeout",
             )
         )
-        loop = make_loop(store)
-
-        phase = await loop._phase_for_failed_step_directive(
+        phase = await loop_support.phase_for_failed_step_directive(
+            store,
             lineage_id="lin_timeout_phase",
             generation_number=2,
         )
@@ -1420,6 +2257,142 @@ class TestEvolveStepHandler:
         assert result.value.meta["qa_attempted"] is False
 
     @pytest.mark.asyncio
+    async def test_concurrent_public_handler_reuses_workspace_evidence_and_qa(
+        self,
+        tmp_path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Distinct processes share the full handler result, not only the core step."""
+        from ouroboros.core.errors import ProviderError
+        from ouroboros.mcp.tools.definitions import EvolveStepHandler
+        from ouroboros.persistence import lineage_claims
+
+        database_url = f"sqlite+aiosqlite:///{tmp_path / 'public-handler.db'}"
+        owner_store = EventStore(database_url)
+        duplicate_store = EventStore(database_url)
+        await owner_store.initialize()
+        await duplicate_store.initialize()
+        seed = make_seed(seed_id="seed_public_single_flight")
+        generation = GenerationResult(
+            generation_number=1,
+            seed=seed,
+            execution_output="verified output",
+            validation_output="validated\n" + ("x" * 60_000),
+            evaluation_summary=make_eval_summary(),
+            phase=GenerationPhase.COMPLETED,
+            success=True,
+        )
+        step = StepResult(
+            generation_result=generation,
+            convergence_signal=ConvergenceSignal(
+                converged=True,
+                reason="verified",
+                ontology_similarity=1.0,
+                generation=1,
+                should_stop=True,
+            ),
+            lineage=OntologyLineage(lineage_id="lin_public_single_flight", goal=seed.goal),
+            action=StepAction.CONVERGED,
+            next_generation=2,
+        )
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def blocked_evolve(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+            entered.set()
+            await release.wait()
+            return Result.ok(step)
+
+        owner_loop = make_loop(owner_store)
+        owner_loop.evolve_step = AsyncMock(side_effect=blocked_evolve)
+        duplicate_loop = make_loop(duplicate_store)
+        duplicate_loop.evolve_step = AsyncMock(side_effect=AssertionError("duplicate core step"))
+        owner_handler = EvolveStepHandler(evolutionary_loop=owner_loop)
+        duplicate_handler = EvolveStepHandler(evolutionary_loop=duplicate_loop)
+        workspace_calls = 0
+        qa_calls = 0
+        waiter_registered = asyncio.Event()
+        original_try_acquire = lineage_claims.try_acquire
+
+        async def observe_waiter(*args, **kwargs):  # type: ignore[no-untyped-def]
+            claim = await original_try_acquire(*args, **kwargs)
+            if (
+                kwargs.get("scope") == "evolve-handler"
+                and claim is not None
+                and claim.waiter_registered
+            ):
+                waiter_registered.set()
+            return claim
+
+        monkeypatch.setattr(lineage_claims, "try_acquire", observe_waiter)
+        monkeypatch.setattr(
+            loop_support,
+            "_event_store_authority",
+            lambda event_store: f"object:{id(event_store)}",
+        )
+
+        def restore_workspace(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+            nonlocal workspace_calls
+            workspace_calls += 1
+            return None
+
+        class _CountingQAHandler:
+            async def handle(self, _arguments):  # noqa: ANN001
+                nonlocal qa_calls
+                qa_calls += 1
+                return Result.err(ProviderError(message="counted QA"))
+
+        import yaml
+
+        arguments = {
+            "lineage_id": "lin_public_single_flight",
+            "seed_content": yaml.safe_dump(seed.to_dict()),
+        }
+        equivalent_arguments = {
+            "lineage_id": "lin_public_single_flight",
+            "seed_content": yaml.safe_dump(seed.to_dict(), default_flow_style=True),
+            "execute": True,
+            "parallel": True,
+            "skip_qa": False,
+            "project_dir": None,
+            "recover_expired_claim": False,
+        }
+        assert arguments["seed_content"] != equivalent_arguments["seed_content"]
+        verification = SimpleNamespace(artifact="artifact", reference="reference")
+        try:
+            with (
+                patch(
+                    "ouroboros.mcp.tools.evolution_handlers.maybe_restore_task_workspace",
+                    side_effect=restore_workspace,
+                ),
+                patch("ouroboros.mcp.tools.qa.QAHandler", _CountingQAHandler),
+                patch(
+                    "ouroboros.mcp.tools.evolution_handlers.build_verification_artifacts",
+                    new=AsyncMock(return_value=verification),
+                ) as verification_mock,
+            ):
+                owner = asyncio.create_task(owner_handler.handle(dict(arguments)))
+                await entered.wait()
+                duplicate = asyncio.create_task(duplicate_handler.handle(equivalent_arguments))
+                await waiter_registered.wait()
+                assert not duplicate.done()
+                release.set()
+                owner_result, duplicate_result = await asyncio.gather(owner, duplicate)
+
+            assert owner_result.is_ok
+            assert duplicate_result.is_ok
+            assert duplicate_result is not owner_result
+            assert duplicate_result.value == owner_result.value
+            owner_loop.evolve_step.assert_awaited_once()
+            duplicate_loop.evolve_step.assert_not_awaited()
+            verification_mock.assert_awaited_once()
+            assert workspace_calls == 1
+            assert qa_calls == 1
+        finally:
+            await owner_store.close()
+            await duplicate_store.close()
+
+    @pytest.mark.asyncio
     async def test_handler_does_not_publish_stagnation_as_verified_convergence(self) -> None:
         from ouroboros.mcp.tools.definitions import EvolveStepHandler
 
@@ -1511,6 +2484,122 @@ class TestEvolveStepHandler:
         assert result.is_ok
         assert result.value.meta["qa_attempted"] is True
         assert "qa" not in result.value.meta
+
+    @pytest.mark.asyncio
+    async def test_handler_qa_uses_canonical_generation_seed_not_caller_override(
+        self,
+        tmp_path,
+    ) -> None:
+        """Post-execution QA must follow the Seed actually executed by the core loop."""
+        from ouroboros.core.errors import ProviderError
+        from ouroboros.mcp.tools.definitions import EvolveStepHandler
+
+        store = await create_event_store()
+        stable_seed = make_seed(seed_id="seed_qa_stable")
+        override_seed = make_seed(seed_id="seed_qa_override").model_copy(
+            update={"acceptance_criteria": ("ATTACKER-ONLY ACCEPTANCE CRITERION",)}
+        )
+        generation = GenerationResult(
+            generation_number=3,
+            seed=stable_seed,
+            execution_output="verified output",
+            evaluation_summary=make_eval_summary(),
+        )
+        loop = make_loop(store, gen_result=generation)
+        loop.evolve_step = AsyncMock(
+            return_value=Result.ok(
+                StepResult(
+                    generation_result=generation,
+                    convergence_signal=ConvergenceSignal(
+                        converged=True,
+                        reason="verified",
+                        ontology_similarity=1.0,
+                        generation=3,
+                        should_stop=True,
+                    ),
+                    lineage=OntologyLineage(lineage_id="lin_qa_authority", goal=stable_seed.goal),
+                    action=StepAction.CONVERGED,
+                    next_generation=4,
+                )
+            )
+        )
+        captured: dict[str, object] = {}
+        parent_dir = tmp_path / "parent"
+        worktree_dir = tmp_path / "worktree"
+        parent_dir.mkdir()
+        worktree_dir.mkdir()
+        epoch_file = worktree_dir / "generation.txt"
+        epoch_file.write_text("generation-3", encoding="utf-8")
+        workspace = SimpleNamespace(
+            effective_cwd=str(worktree_dir),
+            lock_path=tmp_path / "task.lock",
+            worktree_path=str(worktree_dir),
+            branch="codex/test-worktree",
+        )
+        order: list[str] = []
+
+        class _CapturingQAHandler:
+            async def handle(self, arguments):  # type: ignore[no-untyped-def]
+                order.append("qa")
+                captured.update(arguments)
+                return Result.err(ProviderError(message="stop after capture"))
+
+        def _capture_checkpoint(*arguments):  # type: ignore[no-untyped-def]
+            order.append("checkpoint")
+            captured["checkpoint_dir"] = arguments[2]
+            return [], []
+
+        async def _capture_verification_dir(*arguments):  # type: ignore[no-untyped-def]
+            order.append("build_verification")
+            captured["verification_dir"] = arguments[2]
+            captured["filesystem_epoch"] = epoch_file.read_text(encoding="utf-8")
+            raise RuntimeError("stop after working-dir capture")
+
+        def _release_and_advance_epoch(*_arguments):  # type: ignore[no-untyped-def]
+            order.append("release_lock")
+            epoch_file.write_text("generation-4", encoding="utf-8")
+
+        handler = EvolveStepHandler(evolutionary_loop=loop)
+
+        import yaml
+
+        with (
+            patch(
+                "ouroboros.mcp.tools.evolution_handlers.maybe_restore_task_workspace",
+                return_value=workspace,
+            ),
+            patch("ouroboros.mcp.tools.evolution_handlers.is_git_repo", return_value=True),
+            patch(
+                "ouroboros.mcp.tools.evolution_handlers.release_lock",
+                side_effect=_release_and_advance_epoch,
+            ),
+            patch(
+                "ouroboros.mcp.tools.evolution_handlers._checkpoint_passed_generation_acs",
+                side_effect=_capture_checkpoint,
+            ),
+            patch("ouroboros.mcp.tools.qa.QAHandler", _CapturingQAHandler),
+            patch(
+                "ouroboros.mcp.tools.evolution_handlers.build_verification_artifacts",
+                new=AsyncMock(side_effect=_capture_verification_dir),
+            ),
+        ):
+            result = await handler.handle(
+                {
+                    "lineage_id": "lin_qa_authority",
+                    "seed_content": yaml.safe_dump(override_seed.to_dict()),
+                    "project_dir": str(parent_dir),
+                }
+            )
+
+        assert result.is_ok
+        assert "Tasks can be created" in str(captured["quality_bar"])
+        assert "ATTACKER-ONLY" not in str(captured["quality_bar"])
+        qa_seed = yaml.safe_load(str(captured["seed_content"]))
+        assert qa_seed["metadata"]["seed_id"] == stable_seed.metadata.seed_id
+        assert captured["checkpoint_dir"] == worktree_dir
+        assert captured["verification_dir"] == worktree_dir
+        assert captured["filesystem_epoch"] == "generation-3"
+        assert order == ["checkpoint", "build_verification", "release_lock", "qa"]
 
     @pytest.mark.asyncio
     async def test_handler_resets_project_dir_after_call(self) -> None:
@@ -1613,6 +2702,174 @@ class TestEvolveStepHandler:
 
         assert result.is_err
         assert "Task workspace error" in str(result.error)
+
+    @pytest.mark.asyncio
+    async def test_handler_explicitly_recovers_expired_writer_claim(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Recovery is operator-authorized and limited to an actually expired owner."""
+        from ouroboros.mcp.tools.definitions import EvolveStepHandler
+        from ouroboros.persistence import lineage_claims
+
+        store = await create_event_store()
+        seed = make_seed(seed_id="seed_explicit_recovery")
+        generation = GenerationResult(
+            generation_number=1,
+            seed=seed,
+            evaluation_summary=make_eval_summary(),
+            phase=GenerationPhase.COMPLETED,
+            success=True,
+        )
+        loop = make_loop(store, gen_result=generation)
+        handler = EvolveStepHandler(evolutionary_loop=loop)
+        default_lease_seconds = lineage_claims.DEFAULT_LEASE_SECONDS
+        monkeypatch.setattr(lineage_claims, "DEFAULT_LEASE_SECONDS", 0.01)
+        claim = await lineage_claims.try_acquire(
+            store,
+            scope="evolve-core",
+            lineage_id="lin_explicit_recovery",
+            generation_number=1,
+            owner_id="dead-owner",
+            request_key="dead-request",
+        )
+        assert claim is not None and claim.acquired
+        await asyncio.sleep(0.02)
+        monkeypatch.setattr(
+            lineage_claims,
+            "DEFAULT_LEASE_SECONDS",
+            default_lease_seconds,
+        )
+
+        import yaml
+
+        with patch(
+            "ouroboros.mcp.tools.evolution_handlers.maybe_restore_task_workspace",
+            return_value=None,
+        ):
+            result = await handler.handle(
+                {
+                    "lineage_id": "lin_explicit_recovery",
+                    "seed_content": yaml.safe_dump(seed.to_dict()),
+                    "recover_expired_claim": True,
+                    "skip_qa": True,
+                }
+            )
+
+        assert result.is_ok
+        current = await lineage_claims.observe(
+            store,
+            scope="evolve-core",
+            lineage_id="lin_explicit_recovery",
+        )
+        assert current is not None and current.completed
+        assert current.owner_id != "dead-owner"
+
+    @pytest.mark.asyncio
+    async def test_handler_recovery_replays_completed_core_before_advancing(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A crash after core commit resumes handler evidence for that generation."""
+        from pathlib import Path
+
+        from ouroboros.mcp.tools.definitions import EvolveStepHandler
+        from ouroboros.mcp.tools.evolution_handlers import _evolve_handler_request_key
+        from ouroboros.persistence import lineage_claims
+
+        store = await create_event_store()
+        seed = make_seed(seed_id="seed_handler_recovery")
+        generation = GenerationResult(
+            generation_number=1,
+            seed=seed,
+            evaluation_summary=make_eval_summary(),
+            phase=GenerationPhase.COMPLETED,
+            success=True,
+        )
+        step = StepResult(
+            generation_result=generation,
+            convergence_signal=ConvergenceSignal(
+                converged=True,
+                reason="verified",
+                ontology_similarity=1.0,
+                generation=1,
+                should_stop=True,
+            ),
+            lineage=OntologyLineage(lineage_id="lin_handler_recovery", goal=seed.goal),
+            action=StepAction.CONVERGED,
+            next_generation=2,
+        )
+        loop = make_loop(store)
+        loop.evolve_step = AsyncMock(side_effect=AssertionError("must replay core receipt"))
+        handler = EvolveStepHandler(evolutionary_loop=loop)
+
+        import yaml
+
+        original_arguments = {
+            "lineage_id": "lin_handler_recovery",
+            "seed_content": yaml.safe_dump(seed.to_dict()),
+            "skip_qa": True,
+        }
+        request_key = _evolve_handler_request_key(
+            original_arguments,
+            configured_project_dir=None,
+            fallback_cwd=Path.cwd().resolve(),
+        )
+        default_lease_seconds = lineage_claims.DEFAULT_LEASE_SECONDS
+        monkeypatch.setattr(lineage_claims, "DEFAULT_LEASE_SECONDS", 0.01)
+        handler_claim = await lineage_claims.try_acquire(
+            store,
+            scope="evolve-handler",
+            lineage_id="lin_handler_recovery",
+            generation_number=1,
+            owner_id="dead-handler",
+            request_key=request_key,
+        )
+        core_claim = await lineage_claims.try_acquire(
+            store,
+            scope="evolve-core",
+            lineage_id="lin_handler_recovery",
+            generation_number=1,
+            owner_id="completed-core",
+            request_key="core-request",
+        )
+        assert handler_claim is not None and handler_claim.acquired
+        assert core_claim is not None and core_claim.acquired
+        assert await lineage_claims.complete(
+            store,
+            scope="evolve-core",
+            lineage_id="lin_handler_recovery",
+            owner_id="completed-core",
+            result_payload={"durable": "core-result"},
+        )
+        await asyncio.sleep(0.02)
+        monkeypatch.setattr(
+            lineage_claims,
+            "DEFAULT_LEASE_SECONDS",
+            default_lease_seconds,
+        )
+
+        with (
+            patch(
+                "ouroboros.evolution.step_receipt.decode_step_result",
+                new=AsyncMock(return_value=Result.ok(step)),
+            ) as decode_mock,
+            patch(
+                "ouroboros.mcp.tools.evolution_handlers.maybe_restore_task_workspace",
+                return_value=None,
+            ),
+        ):
+            result = await handler.handle(
+                {
+                    **original_arguments,
+                    "recover_expired_claim": True,
+                }
+            )
+
+        assert result.is_ok
+        assert result.value.meta["generation"] == 1
+        decode_mock.assert_awaited_once()
+        loop.evolve_step.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_handler_no_loop_returns_error(self) -> None:

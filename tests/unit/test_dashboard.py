@@ -172,6 +172,16 @@ class TestFormatSummary:
         assert "Create tasks" in output
         assert "Delete tasks" in output
 
+    def test_non_authoritative_pass_displays_as_unresolved(self) -> None:
+        unknown = _ac_result(0, True, "Unverified task creation").model_copy(
+            update={"ac_verdict_state": "not_evaluated"}
+        )
+
+        output = format_summary(_lineage_with_gens((unknown,)))
+
+        assert "UNRESOLVED" in output
+        assert "F (0/1)" in output
+
     def test_no_generations(self) -> None:
         lineage = OntologyLineage(lineage_id="empty", goal="test")
         output = format_summary(lineage)
