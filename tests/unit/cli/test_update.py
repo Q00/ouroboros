@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 import re
 import sys
 from unittest.mock import MagicMock, patch
@@ -16,6 +17,7 @@ from ouroboros.cli.commands.update import (
     _fallback_version_key,
     _is_prerelease,
     _latest_pypi_version,
+    _manager_env_root,
     _resolve_runtime,
     _upgrade_command,
     app,
@@ -25,8 +27,14 @@ runner = CliRunner()
 
 
 def _plain(output: str) -> str:
-    """Strip ANSI escapes — rich highlighting splits version strings mid-token."""
-    return re.sub(r"\x1b\[[0-9;]*m", "", output)
+    """Flatten CLI output for substring assertions.
+
+    Strips ANSI escapes and rich panel borders, and collapses the wrapping
+    whitespace that splits long commands and messages across lines.
+    """
+    text = re.sub(r"\x1b\[[0-9;]*m", "", output)
+    text = re.sub(r"[│╭╮╰╯─]", " ", text)
+    return re.sub(r"\s+", " ", text)
 
 
 # ── Version helpers ──────────────────────────────────────────────
@@ -96,8 +104,9 @@ class TestLatestPypiVersion:
         "releases": {
             "0.40.0": [{"filename": "old.whl"}],
             "0.50.7": [{"filename": "stable.whl"}],
-            "0.50.8b1": [{"filename": "beta.whl"}],
-            "0.99.0": [],  # yanked/empty release must be ignored
+            "0.50.8b1": [{"filename": "beta.whl", "yanked": False}],
+            "0.60.0": [{"filename": "pulled.whl", "yanked": True}],  # fully yanked
+            "0.99.0": [],  # empty release must be ignored
         },
     }
 
@@ -113,6 +122,7 @@ class TestLatestPypiVersion:
             "ouroboros.cli.commands.update.urllib.request.urlopen",
             _urlopen_returning(self.PAYLOAD),
         ):
+            # 0.60.0 is newer but fully yanked — pip/uv would skip it, so we must too.
             assert _latest_pypi_version(include_prereleases=True) == "0.50.8b1"
 
     def test_network_error_returns_none(self) -> None:
@@ -126,43 +136,92 @@ class TestLatestPypiVersion:
 # ── Installer detection and upgrade commands ─────────────────────
 
 
-class TestDetectInstaller:
-    """Tests for _detect_installer."""
+class TestManagerEnvRoot:
+    """Tests for _manager_env_root."""
 
-    def test_uv_owns_the_install(self) -> None:
-        result = MagicMock(returncode=0, stdout="ouroboros-ai v0.50.7\n- ooo\n- ouroboros\n")
+    def test_returns_reported_root(self) -> None:
+        result = MagicMock(returncode=0, stdout="/home/u/.local/share/uv/tools\n")
         with (
-            patch("ouroboros.cli.commands.update.shutil.which", return_value="/usr/bin/tool"),
-            patch("ouroboros.cli.commands.update.subprocess.run", return_value=result) as run,
+            patch("ouroboros.cli.commands.update.shutil.which", return_value="/usr/bin/uv"),
+            patch("ouroboros.cli.commands.update.subprocess.run", return_value=result),
         ):
-            assert _detect_installer() == "uv"
-        assert run.call_args_list[0].args[0] == ["uv", "tool", "list"]
+            root = _manager_env_root(["uv", "tool", "dir"])
+        assert root == Path("/home/u/.local/share/uv/tools").resolve()
 
-    def test_pipx_owns_when_uv_does_not(self) -> None:
-        uv_result = MagicMock(returncode=0, stdout="other-tool v1.0.0\n")
-        pipx_result = MagicMock(returncode=0, stdout="package ouroboros-ai 0.50.7\n")
-        with (
-            patch("ouroboros.cli.commands.update.shutil.which", return_value="/usr/bin/tool"),
-            patch(
-                "ouroboros.cli.commands.update.subprocess.run",
-                side_effect=[uv_result, pipx_result],
-            ),
-        ):
-            assert _detect_installer() == "pipx"
-
-    def test_falls_back_to_pip_when_no_tool_manager_found(self) -> None:
+    def test_missing_binary_returns_none(self) -> None:
         with patch("ouroboros.cli.commands.update.shutil.which", return_value=None):
-            assert _detect_installer() == "pip"
+            assert _manager_env_root(["uv", "tool", "dir"]) is None
 
-    def test_probe_failure_falls_through(self) -> None:
+    def test_probe_failure_returns_none(self) -> None:
         with (
-            patch("ouroboros.cli.commands.update.shutil.which", return_value="/usr/bin/tool"),
+            patch("ouroboros.cli.commands.update.shutil.which", return_value="/usr/bin/uv"),
             patch(
                 "ouroboros.cli.commands.update.subprocess.run",
                 side_effect=OSError("cannot exec"),
             ),
         ):
-            assert _detect_installer() == "pip"
+            assert _manager_env_root(["uv", "tool", "dir"]) is None
+
+    def test_relative_output_returns_none(self) -> None:
+        result = MagicMock(returncode=0, stdout="not/an/absolute/path\n")
+        with (
+            patch("ouroboros.cli.commands.update.shutil.which", return_value="/usr/bin/uv"),
+            patch("ouroboros.cli.commands.update.subprocess.run", return_value=result),
+        ):
+            assert _manager_env_root(["uv", "tool", "dir"]) is None
+
+
+class TestDetectInstaller:
+    """Tests for _detect_installer — ownership anchored to the running env.
+
+    Roots are real tmp_path directories: _detect_installer resolves the
+    prefix, and fabricated paths (e.g. /home/... on macOS) resolve through
+    automount symlinks to something else entirely.
+    """
+
+    @staticmethod
+    def _roots(tmp_path: Path) -> tuple[Path, Path]:
+        uv_root = tmp_path / "uv" / "tools"
+        pipx_root = tmp_path / "pipx" / "venvs"
+        (uv_root / "ouroboros-ai").mkdir(parents=True)
+        (pipx_root / "ouroboros-ai").mkdir(parents=True)
+        return uv_root, pipx_root
+
+    def test_uv_owns_the_running_env(self, tmp_path: Path) -> None:
+        uv_root, _ = self._roots(tmp_path)
+        with patch(
+            "ouroboros.cli.commands.update._manager_env_root",
+            side_effect=[uv_root],
+        ):
+            assert _detect_installer(prefix=uv_root / "ouroboros-ai") == "uv"
+
+    def test_pipx_env_wins_over_stale_uv_install(self, tmp_path: Path) -> None:
+        # Regression: a stale uv-tool installation elsewhere must not hijack
+        # the upgrade target when the running CLI lives in a pipx venv.
+        uv_root, pipx_root = self._roots(tmp_path)
+        with patch(
+            "ouroboros.cli.commands.update._manager_env_root",
+            side_effect=[uv_root, pipx_root],
+        ):
+            assert _detect_installer(prefix=pipx_root / "ouroboros-ai") == "pipx"
+
+    def test_unmanaged_env_falls_back_to_pip(self, tmp_path: Path) -> None:
+        uv_root, pipx_root = self._roots(tmp_path)
+        with patch(
+            "ouroboros.cli.commands.update._manager_env_root",
+            side_effect=[uv_root, pipx_root],
+        ):
+            assert _detect_installer(prefix=tmp_path / "project" / ".venv") == "pip"
+
+    def test_heuristic_fallback_when_managers_report_nothing(self, tmp_path: Path) -> None:
+        uv_root, pipx_root = self._roots(tmp_path)
+        with patch(
+            "ouroboros.cli.commands.update._manager_env_root",
+            return_value=None,
+        ):
+            assert _detect_installer(prefix=pipx_root / "ouroboros-ai") == "pipx"
+            assert _detect_installer(prefix=uv_root / "ouroboros-ai") == "uv"
+            assert _detect_installer(prefix=tmp_path / "project" / ".venv") == "pip"
 
 
 class TestUpgradeCommand:
@@ -287,10 +346,11 @@ class TestUpdateFlow:
             result = runner.invoke(app, ["--dry-run"])
 
         assert result.exit_code == 0
-        assert "uv tool install --upgrade" in result.output
-        assert "claude plugin install" in result.output
-        assert "setup --runtime claude --non-interactive" in result.output
-        assert "Dry run" in result.output
+        output = _plain(result.output)
+        assert "uv tool install --upgrade" in output
+        assert "claude plugin install" in output
+        assert "setup --runtime claude --non-interactive" in output
+        assert "Dry run" in output
         run.assert_not_called()
 
     def test_auto_runtime_without_claude_or_codex_skips_refresh(self) -> None:
@@ -329,9 +389,46 @@ class TestUpdateFlow:
             result = runner.invoke(app, ["--dry-run", "--runtime", "claude"])
 
         assert result.exit_code == 0
-        assert "claude CLI not found" in result.output
-        assert "setup --runtime claude --non-interactive" in result.output
+        output = _plain(result.output)
+        assert "claude CLI not found" in output
+        # Setup requires claude on PATH, so the config refresh is skipped too
+        # — a notice, not a failure.
+        assert "Skipping claude runtime config refresh" in output
+        # The skip notice mentions the setup command to run later, but no
+        # setup step was previewed for execution.
+        assert "setup --runtime claude --non-interactive" not in output
         run.assert_not_called()
+
+    def test_non_dry_run_without_claude_cli_completes_successfully(self) -> None:
+        upgrade = MagicMock(returncode=0)
+        version_probe = MagicMock(returncode=0, stdout="Ouroboros version 99.0.0\n")
+
+        def which(name: str) -> str | None:
+            return None if name == "claude" else f"/usr/bin/{name}"
+
+        with (
+            patch("ouroboros.cli.commands.update.__version__", "0.1.0"),
+            patch(
+                "ouroboros.cli.commands.update._latest_pypi_version",
+                return_value="99.0.0",
+            ),
+            patch("ouroboros.cli.commands.update._detect_installer", return_value="pip"),
+            patch("ouroboros.cli.commands.update.shutil.which", side_effect=which),
+            patch(
+                "ouroboros.cli.commands.update.subprocess.run",
+                side_effect=[upgrade, version_probe],
+            ) as run,
+        ):
+            result = runner.invoke(app, ["--yes", "--runtime", "claude"])
+
+        assert result.exit_code == 0
+        output = _plain(result.output)
+        assert "claude CLI not found" in output
+        assert "Skipping claude runtime config refresh" in output
+        assert "Updated to v99.0.0" in output
+        # Only the package upgrade and the version probe ran — no plugin or
+        # setup subprocesses were attempted without the claude CLI.
+        assert run.call_count == 2
 
     def test_failed_package_upgrade_aborts_with_exit_code_one(self) -> None:
         failed_step = MagicMock(returncode=1)

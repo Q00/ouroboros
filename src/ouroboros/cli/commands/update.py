@@ -13,6 +13,8 @@ launch their own isolated `ouroboros-ai[mcp]` process via uvx/pipx run.
 from __future__ import annotations
 
 import json
+import os
+from pathlib import Path
 import re
 import shutil
 import ssl
@@ -114,7 +116,15 @@ def _latest_pypi_version(include_prereleases: bool, timeout: float = 10.0) -> st
     if not include_prereleases:
         return stable
     # Pre-release installs may sit ahead of info.version — scan all releases.
-    candidates = [version for version, files in data.get("releases", {}).items() if files]
+    # A release only counts with at least one non-yanked file: pip/uv skip
+    # fully-yanked releases, so reporting one as "latest" would prompt an
+    # update that installs something else.
+    candidates = [
+        version
+        for version, files in data.get("releases", {}).items()
+        if isinstance(files, list)
+        and any(isinstance(file, dict) and not file.get("yanked", False) for file in files)
+    ]
     if stable:
         candidates.append(stable)
     if not candidates:
@@ -129,25 +139,46 @@ def _latest_pypi_version(include_prereleases: bool, timeout: float = 10.0) -> st
 # ── Installer detection and upgrade ──────────────────────────────
 
 
-def _detect_installer() -> str:
-    """Return the installer that owns this install: 'uv', 'pipx', or 'pip'.
+def _manager_env_root(command: list[str]) -> Path | None:
+    """Ask a tool manager where it keeps its environments; None if unavailable."""
+    if shutil.which(command[0]) is None:
+        return None
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    lines = result.stdout.strip().splitlines()
+    if not lines:
+        return None
+    root = Path(lines[0].strip())
+    if not root.is_absolute():
+        return None
+    return root.resolve()
 
-    Mirrors the skill's precedence (uv tool > pipx > pip). Falls back to pip
-    against the running interpreter when neither tool manager owns the package.
+
+def _detect_installer(prefix: Path | None = None) -> str:
+    """Return the installer that owns the *running* install: 'uv', 'pipx', or 'pip'.
+
+    Ownership is anchored to the running interpreter's environment
+    (sys.prefix), not to global tool listings — a stale uv or pipx
+    installation elsewhere must not hijack the upgrade target. Falls back
+    to pip against the running interpreter when no manager owns this env.
     """
-    probes = (
-        ("uv", ["uv", "tool", "list"]),
-        ("pipx", ["pipx", "list"]),
-    )
-    for name, command in probes:
-        if shutil.which(command[0]) is None:
-            continue
-        try:
-            result = subprocess.run(command, capture_output=True, text=True, timeout=30)
-        except (OSError, subprocess.SubprocessError):
-            continue
-        if result.returncode == 0 and "ouroboros-ai" in result.stdout:
-            return name
+    env = (prefix or Path(sys.prefix)).resolve()
+    uv_root = _manager_env_root(["uv", "tool", "dir"])
+    if uv_root is not None and env.is_relative_to(uv_root):
+        return "uv"
+    pipx_root = _manager_env_root(["pipx", "environment", "--value", "PIPX_LOCAL_VENVS"])
+    if pipx_root is not None and env.is_relative_to(pipx_root):
+        return "pipx"
+    # Heuristic fallback for managers that cannot report their roots.
+    parts = [part.lower() for part in env.parts]
+    if "pipx" in parts and "venvs" in parts:
+        return "pipx"
+    if "uv" in parts and "tools" in parts:
+        return "uv"
     return "pip"
 
 
@@ -214,12 +245,30 @@ def _refresh_claude_plugin(dry_run: bool) -> bool | None:
     )
 
 
+def _resolve_cli_binary() -> str | None:
+    """Locate the console script to run post-upgrade steps through.
+
+    Prefers the running environment's own script over PATH lookup so a
+    stale binary earlier on PATH cannot serve the refreshed steps.
+    """
+    script_dir = Path(sys.prefix) / ("Scripts" if os.name == "nt" else "bin")
+    for name in ("ouroboros", "ooo"):
+        candidate = script_dir / name
+        if candidate.exists():
+            return str(candidate)
+    for name in ("ouroboros", "ooo"):
+        found = shutil.which(name)
+        if found is not None:
+            return found
+    return None
+
+
 def _refresh_runtime_config(runtime: str, dry_run: bool) -> bool:
     """Re-run setup through the (freshly upgraded) console script."""
-    binary = shutil.which("ouroboros") or shutil.which("ooo")
+    binary = _resolve_cli_binary()
     if binary is None:
         print_warning(
-            "ouroboros binary not found on PATH — run "
+            "ouroboros binary not found — run "
             f"`ouroboros setup --runtime {runtime} --non-interactive` manually."
         )
         return False
@@ -242,8 +291,8 @@ def _resolve_runtime(runtime: str) -> str:
 
 
 def _installed_version() -> str | None:
-    """Read the version from the on-PATH binary (post-upgrade, fresh process)."""
-    binary = shutil.which("ouroboros") or shutil.which("ooo")
+    """Read the version from the refreshed binary (post-upgrade, fresh process)."""
+    binary = _resolve_cli_binary()
     if binary is None:
         return None
     try:
@@ -356,10 +405,19 @@ def update(
     if resolved_runtime == "none":
         print_info("Runtime refresh skipped — package upgrade only.")
     elif resolved_runtime == "claude":
-        if _refresh_claude_plugin(dry_run) is False:
-            failed.append("Claude Code plugin refresh")
-        if not _refresh_runtime_config("claude", dry_run):
-            failed.append("claude runtime config refresh")
+        plugin_refreshed = _refresh_claude_plugin(dry_run)
+        if plugin_refreshed is None:
+            # claude CLI absent: a notice, not a failure — setup would also
+            # fail without claude on PATH, so skip the config refresh too.
+            print_info(
+                "Skipping claude runtime config refresh — install the claude CLI "
+                "and run `ouroboros setup --runtime claude` later."
+            )
+        else:
+            if plugin_refreshed is False:
+                failed.append("Claude Code plugin refresh")
+            if not _refresh_runtime_config("claude", dry_run):
+                failed.append("claude runtime config refresh")
     else:
         # Codex and the other setup-supported runtimes: setup re-installs
         # the packaged rules/skills, so no separate plugin step is needed.
@@ -380,7 +438,11 @@ def update(
         console.print()
     else:
         console.print(f"[bold green]Updated to v{installed or latest}.[/bold green]")
-    console.print("[dim]Restart your Claude Code session to apply the update.[/dim]")
-    console.print("[dim]If the CLAUDE.md block content changed, regenerate it: ooo setup[/dim]\n")
+    if resolved_runtime == "claude":
+        console.print("[dim]Restart your Claude Code session to apply the update.[/dim]")
+        console.print("[dim]If the CLAUDE.md block content changed, regenerate it: ooo setup[/dim]")
+    elif resolved_runtime != "none":
+        console.print(f"[dim]Restart your {resolved_runtime} session to apply the update.[/dim]")
+    console.print()
     if failed:
         raise typer.Exit(1)
