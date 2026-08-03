@@ -43,9 +43,19 @@ def encode_step_result(result: Result[StepResult, OuroborosError]) -> dict[str, 
         "generation_success": generation.success,
         "action": step.action.value,
         "next_generation": step.next_generation,
-        "wonder_should_continue": (
-            generation.wonder_output.should_continue
+        "wonder_output": (
+            generation.wonder_output.model_dump(mode="json")
             if generation.wonder_output is not None
+            else None
+        ),
+        "reflect_output": (
+            generation.reflect_output.model_dump(mode="json")
+            if generation.reflect_output is not None
+            else None
+        ),
+        "reflect_patch_identity_explicit": (
+            generation.reflect_output.ac_patch_identity_explicit
+            if generation.reflect_output is not None
             else None
         ),
         "validation_output": _bounded(generation.validation_output, MAX_VALIDATION_TEXT),
@@ -97,31 +107,47 @@ async def decode_step_result(
         raise ValueError("Durable evolve receipt generation has no structured Seed")
     seed = Seed.from_dict(json.loads(record.seed_json))
     partial_state = record.partial_state if isinstance(record.partial_state, Mapping) else {}
-    partial_questions = partial_state.get("wonder_questions")
-    wonder_questions = (
-        tuple(str(question) for question in partial_questions)
-        if isinstance(partial_questions, (list, tuple))
-        else record.wonder_questions
-    )
-    should_continue = payload.get("wonder_should_continue")
-    wonder = (
-        WonderOutput(
-            questions=wonder_questions,
-            grounded_questions=ground_questions(wonder_questions, len(seed.acceptance_criteria)),
-            should_continue=bool(should_continue),
-            reasoning="replayed from durable generation receipt",
+    wonder_data = payload.get("wonder_output")
+    if isinstance(wonder_data, Mapping):
+        wonder = WonderOutput.model_validate(wonder_data)
+    else:
+        partial_questions = partial_state.get("wonder_questions")
+        wonder_questions = (
+            tuple(str(question) for question in partial_questions)
+            if isinstance(partial_questions, (list, tuple))
+            else record.wonder_questions
         )
-        if wonder_questions or should_continue is not None
-        else None
-    )
-    reflect_data = partial_state.get("reflect_output")
+        should_continue = payload.get("wonder_should_continue")
+        wonder = (
+            WonderOutput(
+                questions=wonder_questions,
+                grounded_questions=ground_questions(
+                    wonder_questions, len(seed.acceptance_criteria)
+                ),
+                should_continue=bool(should_continue),
+                reasoning="replayed from legacy durable generation receipt",
+            )
+            if wonder_questions or should_continue is not None
+            else None
+        )
+    reflect_data = payload.get("reflect_output", partial_state.get("reflect_output"))
     reflect = (
         ReflectOutput.model_validate(reflect_data) if isinstance(reflect_data, Mapping) else None
     )
-    if reflect is not None and reflect.ac_patches:
-        # Explicit parser provenance is process-local by design. A durable
-        # waiter must not turn serialized patches back into identity authority.
-        reflect = None
+    if reflect is not None and payload.get("reflect_patch_identity_explicit") is True:
+        previous = next(
+            (
+                generation
+                for generation in reversed(lineage.generations)
+                if generation.generation_number < generation_number
+                and generation.phase == GenerationPhase.COMPLETED
+            ),
+            None,
+        )
+        parent_seed = seed
+        if previous is not None and previous.seed_json:
+            parent_seed = Seed.from_dict(json.loads(previous.seed_json))
+        reflect.restore_durable_patch_identity(parent_seed)
     execution_output = partial_state.get("execution_output", record.execution_output)
     evaluation_data = partial_state.get("evaluation_summary")
     evaluation_summary = (

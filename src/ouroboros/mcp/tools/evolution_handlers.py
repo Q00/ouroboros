@@ -108,19 +108,16 @@ def _evolve_handler_request_key(
         if isinstance(project_dir, str) and project_dir
         else None
     )
-    normalized["project_dir"] = (
-        str(resolved_project_dir) if resolved_project_dir is not None else None
-    )
     configured = (
         resolve_path_against_base(configured_project_dir, stable_base=fallback_cwd)
         if configured_project_dir
         else None
     )
+    effective_project_dir = resolved_project_dir or configured or fallback_cwd
+    normalized["project_dir"] = str(effective_project_dir)
     return stable_payload_digest(
         {
             "arguments": normalized,
-            "configured_project_dir": str(configured) if configured is not None else None,
-            "fallback_cwd": str(fallback_cwd),
             "execution_policy": execution_policy,
         }
     )

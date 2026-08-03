@@ -4,6 +4,7 @@ import asyncio
 from dataclasses import fields, replace
 import inspect
 import json
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -376,6 +377,32 @@ class TestEvolutionaryLoopConfig:
         config = EvolutionaryLoopConfig(runtime_controls=controls)
 
         assert config.runtime_controls == controls
+
+    def test_explicit_absolute_project_shadows_config_and_cwd_in_handler_identity(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Only the effective workspace participates in the durable request key."""
+        from ouroboros.mcp.tools.evolution_handlers import _evolve_handler_request_key
+
+        explicit = (tmp_path / "explicit").resolve()
+        arguments = {
+            "lineage_id": "lin_explicit_workspace_identity",
+            "project_dir": str(explicit),
+        }
+
+        first = _evolve_handler_request_key(
+            arguments,
+            configured_project_dir=str(tmp_path / "configured-a"),
+            fallback_cwd=(tmp_path / "cwd-a").resolve(),
+        )
+        second = _evolve_handler_request_key(
+            arguments,
+            configured_project_dir=str(tmp_path / "configured-b"),
+            fallback_cwd=(tmp_path / "cwd-b").resolve(),
+        )
+
+        assert first == second
 
     def test_non_introspectable_executor_preserves_legacy_call_shape(
         self,
@@ -2828,6 +2855,10 @@ class TestEvolveStepHandler:
         owner_loop.evolve_step = AsyncMock(side_effect=blocked_evolve)
         duplicate_loop = make_loop(duplicate_store)
         duplicate_loop.evolve_step = AsyncMock(side_effect=AssertionError("duplicate core step"))
+        owner_project_token = owner_loop.set_project_dir(str(tmp_path / "configured-owner"))
+        duplicate_project_token = duplicate_loop.set_project_dir(
+            str(tmp_path / "configured-duplicate")
+        )
         owner_handler = EvolveStepHandler(evolutionary_loop=owner_loop)
         duplicate_handler = EvolveStepHandler(evolutionary_loop=duplicate_loop)
         workspace_calls = 0
@@ -2868,6 +2899,7 @@ class TestEvolveStepHandler:
         arguments = {
             "lineage_id": "lin_public_single_flight",
             "seed_content": yaml.safe_dump(seed.to_dict()),
+            "project_dir": str((tmp_path / "explicit-project").resolve()),
         }
         equivalent_arguments = {
             "lineage_id": "lin_public_single_flight",
@@ -2875,7 +2907,7 @@ class TestEvolveStepHandler:
             "execute": True,
             "parallel": True,
             "skip_qa": False,
-            "project_dir": None,
+            "project_dir": str((tmp_path / "explicit-project").resolve()),
             "recover_expired_claim": False,
         }
         assert arguments["seed_content"] != equivalent_arguments["seed_content"]
@@ -2885,6 +2917,10 @@ class TestEvolveStepHandler:
                 patch(
                     "ouroboros.mcp.tools.evolution_handlers.maybe_restore_task_workspace",
                     side_effect=restore_workspace,
+                ),
+                patch(
+                    "ouroboros.mcp.tools.evolution_handlers.is_git_repo",
+                    return_value=True,
                 ),
                 patch("ouroboros.mcp.tools.qa.QAHandler", _CountingQAHandler),
                 patch(
@@ -2910,6 +2946,8 @@ class TestEvolveStepHandler:
             assert workspace_calls == 1
             assert qa_calls == 1
         finally:
+            owner_loop.reset_project_dir(owner_project_token)
+            duplicate_loop.reset_project_dir(duplicate_project_token)
             await owner_store.close()
             await duplicate_store.close()
 

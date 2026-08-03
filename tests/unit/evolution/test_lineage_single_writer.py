@@ -22,6 +22,7 @@ from ouroboros.core.seed import (
 from ouroboros.core.types import Result
 from ouroboros.events.lineage import (
     lineage_created,
+    lineage_generation_completed,
     lineage_generation_failed,
     lineage_generation_interrupted,
     lineage_generation_started,
@@ -31,9 +32,9 @@ from ouroboros.evolution.convergence import ConvergenceSignal
 from ouroboros.evolution.loop import GenerationResult, StepAction, StepResult
 from ouroboros.evolution.loop_support import run_durable_lineage_single_flight
 from ouroboros.evolution.projector import LineageProjector
-from ouroboros.evolution.reflect import ReflectOutput
+from ouroboros.evolution.reflect import ACPatch, ReflectOutput
 from ouroboros.evolution.step_receipt import decode_step_result, encode_step_result
-from ouroboros.evolution.wonder import WonderOutput
+from ouroboros.evolution.wonder import GroundedQuestion, WonderOutput
 from ouroboros.persistence import lineage_claims
 from ouroboros.persistence.event_store import EventStore
 
@@ -582,13 +583,23 @@ async def test_interrupted_step_receipt_replays_partial_generation(tmp_path: Pat
     seed = _seed()
     lineage_id = "interrupted-lineage"
     questions = ("[AC 1] What writer evidence remains unresolved?",)
-    wonder = WonderOutput(questions=questions, should_continue=True, reasoning="challenge")
+    wonder = WonderOutput(
+        questions=questions,
+        grounded_questions=(
+            GroundedQuestion(question=questions[0], kind="challenge", ac_indices=(0,)),
+        ),
+        ontology_tensions=("owner and waiter observe one contract",),
+        should_continue=True,
+        reasoning="challenge",
+    )
     reflect = ReflectOutput(
         refined_goal=seed.goal,
         refined_constraints=seed.constraints,
         refined_acs=("One generation has one writer",),
+        ac_patches=(ACPatch(op="keep", index=0, reason="preserve identity"),),
         reasoning="preserve the partial reflection",
     )
+    reflect.restore_durable_patch_identity(seed)
     try:
         await writer.append(lineage_created(lineage_id, seed.goal))
         await writer.append(
@@ -644,12 +655,84 @@ async def test_interrupted_step_receipt_replays_partial_generation(tmp_path: Pat
         generation = replayed.value.generation_result
         assert replayed.value.action is StepAction.INTERRUPTED
         assert generation.phase is GenerationPhase.INTERRUPTED
-        assert generation.wonder_output is not None
-        assert generation.wonder_output.questions == questions
+        assert generation.wonder_output == wonder
+        assert generation.reflect_output == reflect
         assert generation.reflect_output is not None
-        assert generation.reflect_output.reasoning == reflect.reasoning
+        assert generation.reflect_output.ac_patch_identity_explicit is True
         assert generation.execution_output == "partial execution"
         assert not generation.success
+    finally:
+        await writer.close()
+        await reader.close()
+
+
+@pytest.mark.asyncio
+async def test_completed_step_receipt_preserves_structured_phase_outputs(tmp_path: Path) -> None:
+    """Completed projection cannot erase the winner result observed by a waiter."""
+    writer, reader = await _stores(tmp_path / "completed-structured-receipt.db")
+    seed = _seed()
+    lineage_id = "completed-structured-lineage"
+    wonder = WonderOutput(
+        questions=(),
+        grounded_questions=(),
+        ontology_tensions=("empty questions still carry a tension",),
+        should_continue=True,
+        reasoning="authoritative empty-question result",
+    )
+    reflect = ReflectOutput(
+        refined_goal=seed.goal,
+        refined_constraints=seed.constraints,
+        refined_acs=("One generation has one writer",),
+        ac_patches=(ACPatch(op="keep", index=0, reason="stable contract"),),
+        settled_ac_indices=(0,),
+        reasoning="parser-issued keep",
+    )
+    reflect.restore_durable_patch_identity(seed)
+    try:
+        await writer.append(lineage_created(lineage_id, seed.goal))
+        await writer.append(
+            lineage_generation_completed(
+                lineage_id,
+                generation_number=1,
+                seed_id=seed.metadata.seed_id,
+                ontology_snapshot=seed.ontology_schema.model_dump(mode="json"),
+                wonder_questions=[],
+                seed_json=json.dumps(seed.to_dict()),
+            )
+        )
+        lineage = LineageProjector().project(await writer.replay_lineage(lineage_id))
+        assert lineage is not None
+        assert lineage.generations[-1].partial_state is None
+        winner = Result.ok(
+            StepResult(
+                generation_result=GenerationResult(
+                    generation_number=1,
+                    seed=seed,
+                    wonder_output=wonder,
+                    reflect_output=reflect,
+                    phase=GenerationPhase.COMPLETED,
+                    success=True,
+                ),
+                convergence_signal=ConvergenceSignal(
+                    converged=False,
+                    reason="continue",
+                    ontology_similarity=0.0,
+                    generation=1,
+                ),
+                lineage=lineage,
+                action=StepAction.CONTINUE,
+                next_generation=2,
+            )
+        )
+
+        replayed = await decode_step_result(reader, encode_step_result(winner))
+
+        assert replayed.is_ok
+        waiter_generation = replayed.value.generation_result
+        assert waiter_generation.wonder_output == wonder
+        assert waiter_generation.reflect_output == reflect
+        assert waiter_generation.reflect_output is not None
+        assert waiter_generation.reflect_output.ac_patch_identity_explicit is True
     finally:
         await writer.close()
         await reader.close()
