@@ -712,6 +712,8 @@ Additional context (intentional deferrals — do not penalise):
             data = json.loads(text, parse_constant=_reject_non_finite_score)
         except json.JSONDecodeError as e:
             raise ValueError(f"Invalid JSON response: {e}") from e
+        if not isinstance(data, dict):
+            raise ValueError("Invalid JSON response: payload must be an object")
 
         # Numeric score fields must be present. Missing justifications are recoverable.
         required_score_fields = [
@@ -852,6 +854,8 @@ Additional context (intentional deferrals — do not penalise):
             data = json.loads(text, parse_constant=_reject_non_finite_score)
         except json.JSONDecodeError as exc:
             raise ValueError(f"Invalid JSON response: {exc}") from exc
+        if not isinstance(data, dict):
+            raise ValueError("Invalid JSON response: payload must be an object")
 
         if "clarity_score" not in data:
             raise ValueError("Missing required field: clarity_score")

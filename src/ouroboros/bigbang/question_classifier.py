@@ -317,6 +317,8 @@ class QuestionClassifier:
             raise ValueError("no unambiguous JSON payload in classification response")
 
         data = json.loads(text)
+        if not isinstance(data, dict):
+            raise ValueError("classification payload must be a JSON object")
 
         category_str = data.get("category", "planning").lower()
         if category_str == "decide_later":

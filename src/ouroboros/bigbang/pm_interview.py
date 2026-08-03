@@ -1329,6 +1329,8 @@ Include them as original question text in "decide_later_items":
             raise ValueError("no unambiguous JSON payload in PM seed response")
 
         data = json.loads(text)
+        if not isinstance(data, dict):
+            raise ValueError("PM seed payload must be a JSON object")
 
         # Parse user stories
         stories = tuple(

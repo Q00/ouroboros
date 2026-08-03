@@ -148,6 +148,23 @@ class TestEchoedSchemaFailsClosed:
         assert breakdown.goal_clarity.clarity_score == 0.6
 
 
+class TestNonObjectPayloadsRejected:
+    """The extractor accepts top-level arrays; every consumer must not."""
+
+    def test_scoring_response_rejects_array_payload(self) -> None:
+        response = (
+            '```json\n["goal_clarity_score", "constraint_clarity_score",'
+            ' "success_criteria_clarity_score"]\n```'
+        )
+        with pytest.raises(ValueError):
+            _scorer()._parse_scoring_response(response)
+
+    def test_dimension_response_rejects_array_payload(self) -> None:
+        spec = _DimensionSpec(key="goal_clarity", name="Goal Clarity", weight=0.4, rubric="rubric")
+        with pytest.raises(ValueError):
+            _scorer()._parse_dimension_response('```json\n["clarity_score"]\n```', spec)
+
+
 class TestNonFiniteScoresRejected:
     """NaN clamps up to perfect clarity today; all non-finite input must fail."""
 
