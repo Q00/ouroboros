@@ -18,7 +18,7 @@ import logging
 from typing import Any
 
 from ouroboros.core.lineage import EvaluationSummary
-from ouroboros.core.seed import Seed, ac_texts
+from ouroboros.core.seed import Seed
 from ouroboros.evolution.evaluation_coverage import validate_seed_ac_coverage
 from ouroboros.evolution.regression import RegressionReport
 from ouroboros.evolution.wonder import WonderOutput
@@ -154,8 +154,8 @@ def select_evolution_focus(
     passed but the aggregate gate still did not end the lineage, every node
     remains active.  This avoids treating missing evidence as a PASS.
     """
-    parent_acs = ac_texts(parent_seed.acceptance_criteria)
-    candidate_acs = ac_texts(candidate_seed.acceptance_criteria)
+    parent_acs = parent_seed.acceptance_criteria
+    candidate_acs = candidate_seed.acceptance_criteria
     all_candidate = set(range(len(candidate_acs)))
 
     if not enabled or evaluation is None or not evaluation.ac_results:
@@ -206,6 +206,9 @@ def select_evolution_focus(
     changed = {
         index
         for index in range(min(len(parent_acs), len(candidate_acs)))
+        # Display prose is not the authority boundary. Reopen whenever any
+        # structured verifier, artifact, assertion, investment, or semantic
+        # identity field changed beneath the previously passing verdict.
         if parent_acs[index] != candidate_acs[index]
     }
     added = set(range(len(parent_acs), len(candidate_acs)))

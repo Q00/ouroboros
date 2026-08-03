@@ -3,7 +3,14 @@
 import pytest
 
 from ouroboros.core.lineage import ACResult, EvaluationSummary
-from ouroboros.core.seed import OntologyField, OntologySchema, Seed, SeedMetadata
+from ouroboros.core.seed import (
+    AcceptanceCriterionSpec,
+    InvestmentSpec,
+    OntologyField,
+    OntologySchema,
+    Seed,
+    SeedMetadata,
+)
 from ouroboros.events.lineage import lineage_created, lineage_generation_completed
 from ouroboros.evolution.focus import select_evolution_focus
 from ouroboros.evolution.projector import LineageProjector
@@ -11,7 +18,7 @@ from ouroboros.evolution.regression import RegressionReport
 from ouroboros.evolution.wonder import GroundedQuestion, WonderOutput
 
 
-def _seed(*acs: str) -> Seed:
+def _seed(*acs: str | AcceptanceCriterionSpec) -> Seed:
     return Seed(
         metadata=SeedMetadata(ambiguity_score=0.1),
         goal="Build the product",
@@ -34,6 +41,7 @@ def _evaluation(seed: Seed, *passed: bool) -> EvaluationSummary:
             ACResult(
                 ac_index=index,
                 ac_content=seed.acceptance_criteria[index].description,
+                semantic_ac_key=seed.acceptance_criteria[index].semantic_ac_key,
                 passed=value,
             )
             for index, value in enumerate(passed)
@@ -94,6 +102,96 @@ def test_new_candidate_node_is_active_not_silently_frozen() -> None:
 
     assert focus.active_ac_indices == (1, 2)
     assert focus.frozen_ac_indices == (0,)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("description", "passed with revised prose"),
+        ("semantic_ac_key", "ac_0000000000000000"),
+        ("verify_command", "python -m pytest new.py"),
+        ("expected_artifacts", ("new-report.json",)),
+        ("output_assertion", "2 passed"),
+        (
+            "investment",
+            InvestmentSpec(
+                difficulty="medium",
+                stakes="low",
+                provenance="declared",
+                confidence="low",
+            ),
+        ),
+        (
+            "investment",
+            InvestmentSpec(
+                difficulty="low",
+                stakes="medium",
+                provenance="declared",
+                confidence="low",
+            ),
+        ),
+        (
+            "investment",
+            InvestmentSpec(
+                difficulty="low",
+                stakes="low",
+                provenance="measured",
+                confidence="low",
+            ),
+        ),
+        (
+            "investment",
+            InvestmentSpec(
+                difficulty="low",
+                stakes="low",
+                provenance="declared",
+                confidence="high",
+            ),
+        ),
+    ],
+    ids=(
+        "description",
+        "semantic-key",
+        "verify-command",
+        "expected-artifacts",
+        "output-assertion",
+        "investment-difficulty",
+        "investment-stakes",
+        "investment-provenance",
+        "investment-confidence",
+    ),
+)
+def test_any_structured_contract_change_reopens_prior_pass(
+    field: str,
+    value: object,
+) -> None:
+    parent = _seed(
+        AcceptanceCriterionSpec(
+            description="passed",
+            verify_command="python -m pytest old.py",
+            expected_artifacts=("old-report.json",),
+            output_assertion="1 passed",
+            investment=InvestmentSpec(
+                difficulty="low",
+                stakes="low",
+                provenance="declared",
+                confidence="low",
+            ),
+        ),
+        "failed",
+    )
+    revised = parent.acceptance_criteria[0].model_copy(update={field: value})
+    candidate = _seed(revised, parent.acceptance_criteria[1])
+
+    focus = select_evolution_focus(
+        parent,
+        candidate,
+        _evaluation(parent, True, False),
+        regression_report=RegressionReport(),
+    )
+
+    assert focus.active_ac_indices == (0, 1)
+    assert focus.frozen_ac_indices == ()
 
 
 def test_missing_per_ac_evidence_keeps_full_graph_open() -> None:
