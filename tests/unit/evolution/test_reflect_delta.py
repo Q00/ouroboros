@@ -123,6 +123,39 @@ def _compose(
     )
 
 
+def _parse_explicit(
+    parent: Seed,
+    patches: list[dict[str, object]],
+    *,
+    refined_acs: tuple[str, ...] | None = None,
+) -> ReflectOutput | None:
+    data: dict[str, object] = {
+        "refined_goal": parent.goal,
+        "refined_constraints": list(parent.constraints),
+        "ac_patches": patches,
+        "ontology_mutations": [],
+        "reasoning": "r",
+    }
+    if refined_acs is not None:
+        data["refined_acs"] = list(refined_acs)
+    evaluation = EvaluationSummary(
+        final_approved=False,
+        highest_stage_passed=2,
+        score=0.5,
+        ac_results=tuple(
+            ACResult(ac_index=index, ac_content=criterion.description, passed=False)
+            for index, criterion in enumerate(parent.acceptance_criteria)
+        ),
+    )
+    return ReflectEngine(llm_adapter=_FakeAdapter(""), model="test")._parse_response(
+        json.dumps(data),
+        parent,
+        evaluation,
+        _wonder(),
+        _regression(),
+    )
+
+
 class TestPatchParse:
     def test_parses_keep_revise_add(self) -> None:
         patches = _parse_ac_patches(
@@ -714,7 +747,6 @@ class TestReflectEndToEnd:
                 ACPatch(op="keep", index=1),
                 ACPatch(op="keep", index=2),
             ),
-            ac_patch_identity_explicit=True,
         )
 
         result = SeedGenerator(llm_adapter=_FakeAdapter("")).generate_from_reflect(
@@ -825,16 +857,14 @@ class TestReflectEndToEnd:
                 ),
             )
         )
-        reflected = ReflectOutput(
-            refined_goal=parent.goal,
-            refined_constraints=parent.constraints,
-            refined_acs=("Approve the invoice safely", "Delete the account permanently"),
-            ac_patches=(
-                ACPatch(op="revise", index=0, content="Approve the invoice safely"),
-                ACPatch(op="revise", index=1, content="Delete the account permanently"),
-            ),
-            ac_patch_identity_explicit=True,
+        reflected = _parse_explicit(
+            parent,
+            [
+                {"op": "revise", "index": 0, "content": "Approve the invoice safely"},
+                {"op": "revise", "index": 1, "content": "Delete the account permanently"},
+            ],
         )
+        assert reflected is not None
 
         result = SeedGenerator(llm_adapter=_FakeAdapter("")).generate_from_reflect(
             parent,
@@ -881,21 +911,86 @@ class TestReflectEndToEnd:
 
     def test_seed_generation_rejects_inconsistent_explicit_patch_for_plain_ac(self) -> None:
         parent = _seed(("original",))
-        reflected = ReflectOutput(
-            refined_goal=parent.goal,
-            refined_constraints=parent.constraints,
+        reflected = _parse_explicit(
+            parent,
+            [{"op": "keep", "index": 0}],
             refined_acs=("changed despite keep",),
-            ac_patches=(ACPatch(op="keep", index=0),),
-            ac_patch_identity_explicit=True,
+        )
+        assert reflected is None
+
+    def test_serialized_or_copied_boolean_cannot_forge_explicit_patch_provenance(
+        self,
+    ) -> None:
+        direct = ReflectOutput(
+            refined_goal="Build a thing",
+            refined_acs=("changed",),
+            ac_patches=(ACPatch(op="revise", index=0, content="changed"),),
+        )
+        serialized = direct.model_dump(mode="json")
+        serialized["ac_patch_identity_explicit"] = True
+
+        assert ReflectOutput.model_validate(serialized).ac_patch_identity_explicit is False
+        assert (
+            direct.model_copy(
+                update={"ac_patch_identity_explicit": True}
+            ).ac_patch_identity_explicit
+            is False
         )
 
+    def test_explicit_patch_provenance_is_not_serialized(self) -> None:
+        parsed = _parse_explicit(
+            _seed(("original",)),
+            [{"op": "revise", "index": 0, "content": "changed"}],
+        )
+        assert parsed is not None
+        assert parsed.ac_patch_identity_explicit is True
+        assert (
+            ReflectOutput.model_validate(parsed.model_dump(mode="json")).ac_patch_identity_explicit
+            is False
+        )
+
+    def test_model_copy_content_update_invalidates_explicit_patch_provenance(self) -> None:
+        parent = _seed(
+            (
+                AcceptanceCriterionSpec(
+                    description="first",
+                    verify_command="python verify_first.py",
+                ),
+                AcceptanceCriterionSpec(
+                    description="second",
+                    verify_command="python verify_second.py",
+                ),
+            )
+        )
+        parsed = _parse_explicit(
+            parent,
+            [
+                {"op": "revise", "index": 0, "content": "first revised"},
+                {"op": "revise", "index": 1, "content": "second revised"},
+            ],
+        )
+        assert parsed is not None
+        forged = parsed.model_copy(
+            update={
+                "refined_acs": ("second", "first"),
+                "ac_patches": (
+                    ACPatch(op="revise", index=0, content="second"),
+                    ACPatch(op="revise", index=1, content="first"),
+                ),
+            }
+        )
+
+        assert forged.ac_patch_identity_explicit is False
         result = SeedGenerator(llm_adapter=_FakeAdapter("")).generate_from_reflect(
             parent,
-            reflected,
+            forged,
         )
-
         assert result.is_err
-        assert "keep patch changed an acceptance criterion" in str(result.error)
+        assert "explicit stable AC identity" in str(result.error)
+
+    def test_ac_result_rejects_boolean_index(self) -> None:
+        with pytest.raises(ValueError):
+            ACResult(ac_index=True, ac_content="criterion", passed=True)
 
     @pytest.mark.parametrize(
         ("refined_acs", "expected_reason"),

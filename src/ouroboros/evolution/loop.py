@@ -1480,7 +1480,15 @@ class EvolutionaryLoop:
                     )
                 if _should_skip("reflecting") and ps.get("reflect_output"):
                     try:
-                        reflect_output = ReflectOutput.model_validate(ps["reflect_output"])
+                        restored_reflect_output = ReflectOutput.model_validate(ps["reflect_output"])
+                        if restored_reflect_output.ac_patches:
+                            # Parser-issued patch provenance is intentionally not
+                            # serialized. Re-run Reflect rather than trusting a
+                            # replay payload to preserve authority-bearing fields.
+                            resume_after_phase = "wondering"
+                            reflect_output = None
+                        else:
+                            reflect_output = restored_reflect_output
                     except Exception as e:
                         logger.warning(
                             "evolution.resume.reflect_output_restore_failed",

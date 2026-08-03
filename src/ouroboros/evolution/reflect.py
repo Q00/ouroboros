@@ -18,7 +18,7 @@ import json
 import logging
 from typing import Literal
 
-from pydantic import BaseModel, Field, ValidationError, field_validator
+from pydantic import BaseModel, Field, PrivateAttr, ValidationError, field_validator
 
 from ouroboros.config import get_llm_backend_for_role, get_llm_model_for_role
 from ouroboros.core.conductor import ConductorDirective
@@ -88,10 +88,17 @@ class ReflectOutput(BaseModel, frozen=True):
     refined_constraints: tuple[str, ...] = Field(default_factory=tuple)
     refined_acs: tuple[str, ...] = Field(default_factory=tuple)
     ac_patches: tuple[ACPatch, ...] = Field(default_factory=tuple)
-    ac_patch_identity_explicit: bool = False
     settled_ac_indices: tuple[int, ...] = Field(default_factory=tuple)
     ontology_mutations: tuple[OntologyMutation, ...] = Field(default_factory=tuple)
     reasoning: str = ""
+    _ac_patch_provenance: tuple[tuple[str, ...], tuple[ACPatch, ...]] | None = PrivateAttr(
+        default=None
+    )
+
+    @property
+    def ac_patch_identity_explicit(self) -> bool:
+        """Whether this output carries parser-issued, non-serialized patch provenance."""
+        return self._ac_patch_provenance == (self.refined_acs, self.ac_patches)
 
     @field_validator("refined_acs", mode="before")
     @classmethod
@@ -824,6 +831,18 @@ Guidelines:
                 regression_report,
                 active_ac_indices,
             )
+            if explicit_patch_identity and "refined_acs" in data:
+                raw_refined_acs = data["refined_acs"]
+                if not isinstance(raw_refined_acs, list | tuple) or not all(
+                    isinstance(criterion, str) for criterion in raw_refined_acs
+                ):
+                    raise TypeError("Expected refined_acs to be a list of strings")
+                supplied_refined_acs = tuple(
+                    _clean_required_text(criterion, "refined acceptance criterion")
+                    for criterion in raw_refined_acs
+                )
+                if supplied_refined_acs != refined_acs:
+                    raise ValueError("Explicit ac_patches conflict with refined_acs")
             refined_goal = data.get("refined_goal", current_seed.goal)
             if not isinstance(refined_goal, str):
                 raise TypeError("Expected refined_goal to be a string")
@@ -849,16 +868,18 @@ Guidelines:
             if not isinstance(reasoning, str):
                 raise TypeError("Expected reasoning to be a string")
 
-            return ReflectOutput(
+            output = ReflectOutput(
                 refined_goal=refined_goal,
                 refined_constraints=refined_constraints,
                 refined_acs=refined_acs,
                 ac_patches=ac_patches,
-                ac_patch_identity_explicit=explicit_patch_identity,
                 settled_ac_indices=settled,
                 ontology_mutations=tuple(mutations),
                 reasoning=reasoning,
             )
+            if explicit_patch_identity:
+                output._ac_patch_provenance = (output.refined_acs, output.ac_patches)
+            return output
         except (ValueError, KeyError, TypeError, ValidationError) as e:
             logger.warning(
                 "reflect.parse_failed",

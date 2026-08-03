@@ -55,7 +55,7 @@ class MutationAction(StrEnum):
 class ACResult(BaseModel, frozen=True):
     """Result of evaluating a single acceptance criterion."""
 
-    ac_index: int
+    ac_index: int = Field(strict=True, ge=0)
     ac_content: str
     semantic_ac_key: str | None = Field(default=None, pattern=r"^ac_[a-f0-9]{16}$")
     passed: bool
