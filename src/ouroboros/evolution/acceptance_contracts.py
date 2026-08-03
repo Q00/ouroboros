@@ -17,9 +17,11 @@ def evolve_acceptance_contracts(
     Reflect intentionally reasons over human-readable descriptions.  Existing
     mechanical verification and investment fields remain authoritative and are
     carried forward by position.  A revised description receives a fresh
-    semantic key; missing reflected entries cannot silently delete a contract.
+    semantic key.  Ambiguous deletion and reordering are rejected before they
+    can rebind structured authority to a different criterion.
     """
     refined = tuple(refined_descriptions)
+    _reject_ambiguous_structured_rewrite(parent_criteria, refined)
     evolved: list[AcceptanceCriterionSpec] = []
     for index, parent in enumerate(parent_criteria):
         if index >= len(refined) or refined[index] == parent.description:
@@ -38,6 +40,35 @@ def evolve_acceptance_contracts(
         for description in refined[len(parent_criteria) :]
     )
     return tuple(evolved)
+
+
+def _reject_ambiguous_structured_rewrite(
+    parent_criteria: tuple[AcceptanceCriterionSpec, ...],
+    refined_descriptions: tuple[str, ...],
+) -> None:
+    """Reject legacy prose rewrites that cannot preserve structured identity."""
+    has_structured_authority = any(
+        criterion.has_success_contract or criterion.investment is not None
+        for criterion in parent_criteria
+    )
+    if not has_structured_authority:
+        return
+
+    if len(refined_descriptions) < len(parent_criteria):
+        raise ValueError(
+            "shorter refined_acs cannot preserve structured acceptance contracts; "
+            "explicit stable AC identity is required"
+        )
+
+    parent_descriptions = tuple(criterion.description for criterion in parent_criteria)
+    for index, description in enumerate(refined_descriptions[: len(parent_criteria)]):
+        if description == parent_descriptions[index]:
+            continue
+        if description in parent_descriptions:
+            raise ValueError(
+                "refined_acs reorders structured acceptance contracts; "
+                "explicit stable AC identity is required"
+            )
 
 
 def evolve_seed_contract_fields(

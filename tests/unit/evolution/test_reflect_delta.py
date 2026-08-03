@@ -589,6 +589,52 @@ class TestReflectEndToEnd:
         assert revised.semantic_ac_key != original.semantic_ac_key
         assert result.value.to_dict()["plugin_contract"] == {"items": ["one", {"nested": ["two"]}]}
 
+    @pytest.mark.parametrize(
+        ("refined_acs", "expected_reason"),
+        [
+            (("AC one",), "shorter"),
+            (("AC one", "AC zero"), "reorders"),
+        ],
+        ids=("deletion", "reordering"),
+    )
+    def test_seed_generation_rejects_ambiguous_structured_contract_rewrites(
+        self,
+        refined_acs: tuple[str, ...],
+        expected_reason: str,
+    ) -> None:
+        parent = _seed(
+            (
+                AcceptanceCriterionSpec(
+                    description="AC zero",
+                    verify_command="python verify_zero.py",
+                    expected_artifacts=("dist/zero.json",),
+                    output_assertion="zero passed",
+                    investment=InvestmentSpec(difficulty="high", stakes="medium"),
+                ),
+                AcceptanceCriterionSpec(
+                    description="AC one",
+                    verify_command="python verify_one.py",
+                    expected_artifacts=("dist/one.json",),
+                    output_assertion="one passed",
+                    investment=InvestmentSpec(difficulty="medium", stakes="high"),
+                ),
+            )
+        )
+        reflected = ReflectOutput(
+            refined_goal=parent.goal,
+            refined_constraints=parent.constraints,
+            refined_acs=refined_acs,
+        )
+
+        result = SeedGenerator(llm_adapter=_FakeAdapter("")).generate_from_reflect(
+            parent,
+            reflected,
+        )
+
+        assert result.is_err
+        assert expected_reason in str(result.error)
+        assert "structured acceptance contracts" in str(result.error)
+
 
 class _FakeAdapter:
     def __init__(self, content: str) -> None:
