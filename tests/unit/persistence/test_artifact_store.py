@@ -261,3 +261,30 @@ def test_path_unsafe_contract_id_is_rejected(tmp_path: Path) -> None:
     store = _store(tmp_path)
     with pytest.raises(ValueError, match="path-safe"):
         _put(store, "../escape", {"unsafe": True})
+
+
+@pytest.mark.parametrize("linked_component", ["artifact_root", "contracts"])
+def test_project_store_rejects_external_directory_symlink(
+    tmp_path: Path,
+    linked_component: str,
+) -> None:
+    project = tmp_path / "project"
+    artifact_root = project / ".ouroboros" / "artifacts"
+    external = tmp_path / f"external-{linked_component}"
+    external.mkdir()
+    artifact_root.parent.mkdir(parents=True)
+    if linked_component == "artifact_root":
+        link = artifact_root
+    else:
+        artifact_root.mkdir()
+        link = artifact_root / "contracts"
+    try:
+        link.symlink_to(external, target_is_directory=True)
+    except OSError:
+        pytest.skip("directory symlinks are not supported in this environment")
+
+    with pytest.raises(ArtifactIntegrityError, match="project|symlink"):
+        store = ContentAddressedArtifactStore.for_project(project)
+        _put(store, "CONTRACT1", {"must_stay_local": True})
+
+    assert list(external.iterdir()) == []

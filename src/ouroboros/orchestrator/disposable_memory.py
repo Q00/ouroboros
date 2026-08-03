@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 import time
@@ -38,10 +39,19 @@ class DisposableMemory:
     ) -> DisposableResultEnvelope:
         """Execute child work and return only a bounded result envelope."""
         resolved_contract_id = contract_id or new_call_id()
+        existing = self.artifact_store.fetch_if_exists(resolved_contract_id)
+        if existing is not None:
+            await self._append_reference_event(existing.envelope)
+            return existing.envelope
+
         started = time.monotonic()
 
         async def persist_before_completion(handle: AgentProcessHandle) -> DisposableResultEnvelope:
+            if handle.should_cancel():
+                raise asyncio.CancelledError("disposable work cancelled before execution")
             body = await work_fn(handle)
+            if handle.should_cancel():
+                raise asyncio.CancelledError("disposable work cancelled before publication")
             duration_ms = max(0, round((time.monotonic() - started) * 1000))
             envelope = self.artifact_store.put_for_contract(
                 contract_id=resolved_contract_id,
@@ -50,6 +60,7 @@ class DisposableMemory:
                 duration_ms=duration_ms,
                 events_emitted_count=events_emitted_count,
             )
+            handle.complete_on_return_after_cancel()
             await self._append_reference_event(envelope)
             return envelope
 

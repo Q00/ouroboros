@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 
@@ -13,8 +14,10 @@ from ouroboros.core.disposable_memory import (
     DisposableResultEnvelope,
 )
 from ouroboros.events.base import BaseEvent
+from ouroboros.orchestrator.agent_process import AgentProcessHandle
 from ouroboros.orchestrator.disposable_memory import DisposableMemory
 from ouroboros.persistence.artifact_store import (
+    ArtifactNotFoundError,
     ContentAddressedArtifactStore,
     canonical_artifact_bytes,
 )
@@ -35,6 +38,19 @@ class _EventStore:
             for event in self.appended
             if event.aggregate_type == aggregate_type and event.aggregate_id == aggregate_id
         ]
+
+
+class _FailReferenceOnceEventStore(_EventStore):
+    def __init__(self) -> None:
+        super().__init__()
+        self.reference_attempts = 0
+
+    async def append(self, event: BaseEvent) -> None:
+        if event.type == "artifact.referenced":
+            self.reference_attempts += 1
+            if self.reference_attempts == 1:
+                raise RuntimeError("simulated reference append failure")
+        await super().append(event)
 
 
 def _service(tmp_path: Path) -> tuple[DisposableMemory, _EventStore]:
@@ -166,6 +182,105 @@ async def test_reference_event_is_idempotent_when_same_contract_is_recovered(
     assert first.artifact_ref == second.artifact_ref
     references = [event for event in event_store.appended if event.type == "artifact.referenced"]
     assert len(references) == 1
+
+
+@pytest.mark.asyncio
+async def test_retry_repairs_reference_without_reexecuting_durable_contract(
+    tmp_path: Path,
+) -> None:
+    event_store = _FailReferenceOnceEventStore()
+    service = DisposableMemory(
+        artifact_store=ContentAddressedArtifactStore(tmp_path / "artifacts"),
+        event_store=event_store,
+        checkpoint_store=CheckpointStore(tmp_path / "checkpoints"),
+    )
+    calls = 0
+
+    async def child_work(_handle):
+        nonlocal calls
+        calls += 1
+        return {"stable": True}
+
+    contract_id = "01K1DISPOSABLEMEMORY00007"
+    with pytest.raises(RuntimeError, match="reference append failure"):
+        await service.run(
+            intent="researcher",
+            runtime_id="fixture-runtime",
+            work_fn=child_work,
+            contract_id=contract_id,
+        )
+
+    assert calls == 1
+    assert service.fetch(contract_id).body == {"stable": True}
+
+    recovered = await service.run(
+        intent="researcher",
+        runtime_id="fixture-runtime",
+        work_fn=child_work,
+        contract_id=contract_id,
+    )
+
+    assert recovered.contract_id == contract_id
+    assert calls == 1
+    references = [event for event in event_store.appended if event.type == "artifact.referenced"]
+    assert len(references) == 1
+
+
+@pytest.mark.asyncio
+async def test_persisted_cancel_prevents_child_execution_and_publication(tmp_path: Path) -> None:
+    contract_id = "01K1DISPOSABLEMEMORY00008"
+    checkpoint_store = CheckpointStore(tmp_path / "checkpoints")
+    checkpoint_store.initialize()
+    AgentProcessHandle.persist_cancel_signal(
+        contract_id,
+        store=checkpoint_store,
+        reason="cancelled before restart",
+    )
+    service = DisposableMemory(
+        artifact_store=ContentAddressedArtifactStore(tmp_path / "artifacts"),
+        event_store=_EventStore(),
+        checkpoint_store=checkpoint_store,
+    )
+    calls = 0
+
+    async def child_work(_handle):
+        nonlocal calls
+        calls += 1
+        return {"must_not_publish": True}
+
+    with pytest.raises(asyncio.CancelledError):
+        await service.run(
+            intent="qa-judge",
+            runtime_id="fixture-runtime",
+            work_fn=child_work,
+            contract_id=contract_id,
+        )
+
+    assert calls == 0
+    with pytest.raises(ArtifactNotFoundError):
+        service.fetch(contract_id)
+
+
+@pytest.mark.asyncio
+async def test_cancel_requested_by_child_prevents_completed_publication(tmp_path: Path) -> None:
+    contract_id = "01K1DISPOSABLEMEMORY00009"
+    service, event_store = _service(tmp_path)
+
+    async def child_work(handle: AgentProcessHandle):
+        await handle.cancel("cancel after child effect")
+        return {"must_not_publish": True}
+
+    with pytest.raises(asyncio.CancelledError):
+        await service.run(
+            intent="qa-judge",
+            runtime_id="fixture-runtime",
+            work_fn=child_work,
+            contract_id=contract_id,
+        )
+
+    with pytest.raises(ArtifactNotFoundError):
+        service.fetch(contract_id)
+    assert not [event for event in event_store.appended if event.type == "artifact.referenced"]
 
 
 @pytest.mark.asyncio

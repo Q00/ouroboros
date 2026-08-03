@@ -121,15 +121,18 @@ class ContentAddressedArtifactStore:
         artifact_root: Path,
         *,
         max_artifact_bytes: int = MAX_DISPOSABLE_ARTIFACT_BYTES,
+        project_root: Path | None = None,
     ) -> None:
         if not 0 < max_artifact_bytes <= MAX_DISPOSABLE_ARTIFACT_BYTES:
             raise ValueError(
                 "max_artifact_bytes must be positive and cannot exceed the 1 MiB hard cap"
             )
-        self.root = artifact_root.expanduser().resolve()
+        self.root = Path(os.path.abspath(artifact_root.expanduser()))
+        self._project_root = project_root.expanduser().resolve() if project_root else None
         self.max_artifact_bytes = max_artifact_bytes
         self._contracts_root = self.root / "contracts"
         self._lock_target = self.root / ".artifact-store"
+        self._validate_project_boundary()
 
     @classmethod
     def for_project(
@@ -142,11 +145,14 @@ class ContentAddressedArtifactStore:
         return cls(
             project_dir.expanduser().resolve() / ".ouroboros" / "artifacts",
             max_artifact_bytes=max_artifact_bytes,
+            project_root=project_dir.expanduser().resolve(),
         )
 
     def initialize(self) -> None:
         """Create the content and contract directories idempotently."""
+        self._validate_project_boundary()
         self._contracts_root.mkdir(parents=True, exist_ok=True)
+        self._validate_project_boundary()
 
     def put_for_contract(
         self,
@@ -233,17 +239,24 @@ class ContentAddressedArtifactStore:
 
     def fetch(self, contract_id: str) -> FetchedArtifact:
         """Explicitly fetch and verify the body referenced by one contract."""
+        fetched = self.fetch_if_exists(contract_id)
+        if fetched is None:
+            raise ArtifactNotFoundError(
+                "Artifact contract manifest does not exist",
+                operation="read",
+                details={"contract_id": contract_id},
+            )
+        return fetched
+
+    def fetch_if_exists(self, contract_id: str) -> FetchedArtifact | None:
+        """Fetch a durable contract, returning ``None`` only when no binding exists."""
         self.initialize()
         contract_id = _validate_contract_id(contract_id)
         with file_lock(self._lock_target, exclusive=False):
-            manifest = self._load_manifest_locked(contract_id, missing_ok=False)
+            manifest = self._load_manifest_locked(contract_id, missing_ok=True)
             event = _latest_artifact_event(manifest)
             if event is None:
-                raise ArtifactNotFoundError(
-                    "Contract has no artifact reference",
-                    operation="read",
-                    details={"contract_id": contract_id},
-                )
+                return None
             artifact_ref = _event_artifact_ref(event, contract_id=contract_id)
             if event.get("type") == "artifact.tombstoned":
                 raise ArtifactTombstonedError(
@@ -461,6 +474,7 @@ class ContentAddressedArtifactStore:
         return payload
 
     def _blob_path_from_digest(self, digest: str) -> Path:
+        self._validate_project_boundary()
         if not _DIGEST_PATTERN.fullmatch(digest):
             raise ValueError("invalid SHA-256 digest")
         prefix = self.root / digest[:2]
@@ -475,6 +489,7 @@ class ContentAddressedArtifactStore:
         return path
 
     def _manifest_path(self, contract_id: str) -> Path:
+        self._validate_project_boundary()
         path = self._contracts_root / contract_id / _MANIFEST_FILENAME
         _require_contained(path, root=self._contracts_root, label="artifact manifest")
         if path.parent.is_symlink() or path.is_symlink():
@@ -572,6 +587,7 @@ class ContentAddressedArtifactStore:
         _atomic_write_bytes(path, payload)
 
     def _iter_blob_paths_locked(self) -> list[Path]:
+        self._validate_project_boundary()
         paths: list[Path] = []
         for prefix in sorted(self.root.iterdir() if self.root.exists() else []):
             if not prefix.is_dir() or prefix.name == "contracts":
@@ -594,6 +610,57 @@ class ContentAddressedArtifactStore:
                 if _DIGEST_PATTERN.fullmatch(path.stem) and path.stem.startswith(prefix.name):
                     paths.append(path)
         return paths
+
+    def _validate_project_boundary(self) -> None:
+        project_root = self._project_root
+        if project_root is None:
+            return
+        try:
+            relative_root = self.root.relative_to(project_root)
+        except ValueError as exc:
+            raise ArtifactIntegrityError(
+                "Project artifact store path escapes the project root",
+                operation="path_resolution",
+                details={"path": str(self.root), "project_root": str(project_root)},
+            ) from exc
+
+        current = project_root
+        for component in relative_root.parts:
+            current /= component
+            if _is_link_like(current):
+                raise ArtifactIntegrityError(
+                    "Project artifact store path must not traverse a symlink",
+                    operation="path_resolution",
+                    details={"path": str(current), "project_root": str(project_root)},
+                )
+
+        if _is_link_like(self._contracts_root):
+            raise ArtifactIntegrityError(
+                "Project artifact contracts path must not be a symlink",
+                operation="path_resolution",
+                details={"path": str(self._contracts_root), "project_root": str(project_root)},
+            )
+        try:
+            resolved_root = self.root.resolve()
+            resolved_contracts = self._contracts_root.resolve()
+        except (OSError, RuntimeError) as exc:
+            raise ArtifactIntegrityError(
+                "Project artifact store path could not be resolved safely",
+                operation="path_resolution",
+                details={"path": str(self.root), "project_root": str(project_root)},
+            ) from exc
+        if not resolved_root.is_relative_to(project_root) or not resolved_contracts.is_relative_to(
+            resolved_root
+        ):
+            raise ArtifactIntegrityError(
+                "Project artifact store path escapes the project-owned store",
+                operation="path_resolution",
+                details={
+                    "path": str(resolved_contracts),
+                    "root": str(resolved_root),
+                    "project_root": str(project_root),
+                },
+            )
 
 
 def _validate_contract_id(contract_id: str) -> str:
@@ -763,6 +830,14 @@ def _require_contained(path: Path, *, root: Path, label: str) -> None:
             operation="path_resolution",
             details={"path": str(resolved_path), "root": str(resolved_root)},
         )
+
+
+def _is_link_like(path: Path) -> bool:
+    """Return whether an existing path is a symlink or Windows junction."""
+    if path.is_symlink():
+        return True
+    is_junction = getattr(path, "is_junction", None)
+    return bool(callable(is_junction) and is_junction())
 
 
 def _atomic_write_bytes(path: Path, payload: bytes) -> None:
