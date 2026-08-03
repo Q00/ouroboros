@@ -493,7 +493,11 @@ class TestConvergenceGating:
             min_generations=2,
             eval_gate_enabled=True,
         )
-        signal = criteria.evaluate(lineage, latest_evaluation=None)
+        signal = criteria.evaluate(
+            lineage,
+            latest_evaluation=None,
+            evaluation_expected=True,
+        )
         assert not signal.converged
         assert "evaluation unavailable" in signal.reason
 
@@ -656,6 +660,85 @@ class TestLoopEngineeringExitSignals:
         assert "Outcome gate passed" in signal.reason
         assert signal.generation == 1
 
+    @pytest.mark.asyncio
+    async def test_ontology_only_evolve_step_converges_after_real_change(self) -> None:
+        from unittest.mock import AsyncMock
+
+        from ouroboros.core.types import Result
+        from ouroboros.events.lineage import lineage_created, lineage_generation_completed
+        from ouroboros.evolution.loop import (
+            EvolutionaryLoop,
+            EvolutionaryLoopConfig,
+            GenerationResult,
+            StepAction,
+        )
+        from ouroboros.persistence.event_store import EventStore
+
+        def ontology_seed(
+            seed_id: str,
+            parent_seed_id: str | None,
+            schema: OntologySchema,
+        ) -> Seed:
+            return Seed(
+                metadata=SeedMetadata(
+                    seed_id=seed_id,
+                    parent_seed_id=parent_seed_id,
+                    ambiguity_score=0.1,
+                ),
+                goal="test goal",
+                constraints=("stay deterministic",),
+                acceptance_criteria=("AC zero",),
+                ontology_schema=schema,
+            )
+
+        store = EventStore("sqlite+aiosqlite:///:memory:")
+        await store.initialize()
+        seed_1 = ontology_seed("seed_1", None, SCHEMA_B)
+        seed_2 = ontology_seed("seed_2", "seed_1", SCHEMA_A)
+        seed_3 = ontology_seed("seed_3", "seed_2", SCHEMA_A)
+
+        await store.append(lineage_created("lin_ontology_only", "test goal"))
+        for generation_number, seed in enumerate((seed_1, seed_2), start=1):
+            await store.append(
+                lineage_generation_completed(
+                    "lin_ontology_only",
+                    generation_number,
+                    seed.metadata.seed_id,
+                    seed.ontology_schema.model_dump(mode="json"),
+                    None,
+                    [f"question {generation_number}"],
+                    seed_json=json.dumps(seed.to_dict()),
+                )
+            )
+
+        generation = GenerationResult(
+            generation_number=3,
+            seed=seed_3,
+            ontology_delta=OntologyDelta.compute(SCHEMA_A, SCHEMA_A),
+            phase=GenerationPhase.COMPLETED,
+            success=True,
+        )
+        validator = AsyncMock()
+        loop = EvolutionaryLoop(
+            event_store=store,
+            config=EvolutionaryLoopConfig(
+                min_generations=2,
+                convergence_threshold=0.95,
+                eval_gate_enabled=True,
+            ),
+            validator=validator,
+        )
+        run_generation = AsyncMock(return_value=Result.ok(generation))
+        loop._run_generation = run_generation
+
+        result = await loop.evolve_step("lin_ontology_only", execute=False)
+
+        assert result.is_ok
+        assert result.value.action == StepAction.CONVERGED
+        assert result.value.convergence_signal.ontology_similarity == pytest.approx(1.0)
+        assert run_generation.await_args.kwargs["execute"] is False
+        validator.assert_not_awaited()
+
     @pytest.mark.parametrize(
         "results",
         [
@@ -787,6 +870,7 @@ class TestLoopEngineeringExitSignals:
             lineage,
             latest_evaluation=evaluation,
             latest_seed=seed,
+            evaluation_expected=True,
         )
 
         assert not signal.converged

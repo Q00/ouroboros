@@ -599,6 +599,7 @@ class EvolutionaryLoop:
                 latest_evaluation=result.evaluation_summary,
                 validation_output=result.validation_output,
                 latest_seed=result.seed,
+                evaluation_expected=True,
                 validation_expected=self.validator is not None,
             )
 
@@ -1103,7 +1104,8 @@ class EvolutionaryLoop:
                 latest_evaluation=result.evaluation_summary,
                 validation_output=result.validation_output,
                 latest_seed=result.seed,
-                validation_expected=self.validator is not None,
+                evaluation_expected=execute,
+                validation_expected=execute and self.validator is not None,
             )
 
             action = StepAction.CONTINUE

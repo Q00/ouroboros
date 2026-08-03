@@ -70,6 +70,7 @@ class ConvergenceCriteria:
         latest_evaluation: EvaluationSummary | None = None,
         validation_output: str | None = None,
         latest_seed: Seed | None = None,
+        evaluation_expected: bool = True,
         validation_expected: bool = False,
     ) -> ConvergenceSignal:
         """Check if the loop should terminate.
@@ -77,6 +78,7 @@ class ConvergenceCriteria:
         Args:
             lineage: Current lineage with all generation records.
             latest_wonder: Latest wonder output (for repetitive feedback check).
+            evaluation_expected: Whether this mode executes and evaluates the Seed.
 
         Returns:
             ConvergenceSignal with convergence status and reason.
@@ -90,7 +92,12 @@ class ConvergenceCriteria:
         # that point spends generations optimizing the loop rather than the
         # product.  This gate deliberately precedes ``min_generations`` so a
         # correct Gen 1 can stop after one expensive Execute→Evaluate cycle.
-        if self.outcome_gate_enabled and self.eval_gate_enabled and latest_evaluation is not None:
+        if (
+            self.outcome_gate_enabled
+            and self.eval_gate_enabled
+            and evaluation_expected
+            and latest_evaluation is not None
+        ):
             outcome_block = self._outcome_gate_block(
                 lineage,
                 latest_evaluation,
@@ -137,7 +144,7 @@ class ConvergenceCriteria:
         stable_block: ConvergenceSignal | None = None
         if latest_sim >= self.convergence_threshold:
             # Eval gate: missing authority is not satisfactory authority.
-            if self.eval_gate_enabled:
+            if evaluation_expected and self.eval_gate_enabled:
                 if latest_evaluation is None:
                     stable_block = ConvergenceSignal(
                         converged=False,
@@ -167,7 +174,7 @@ class ConvergenceCriteria:
             # Coverage is an authority requirement, not a configurable pass
             # policy.  Even ``ac_gate_mode=off`` cannot turn partial evidence
             # into verified stability convergence.
-            if stable_block is None:
+            if stable_block is None and evaluation_expected:
                 if latest_evaluation is None:
                     stable_block = ConvergenceSignal(
                         converged=False,
@@ -198,7 +205,8 @@ class ConvergenceCriteria:
             # Per-AC policy: complete evidence may still be rejected when
             # individual ACs fail the configured all/ratio threshold.
             if stable_block is None and (
-                self.eval_gate_enabled
+                evaluation_expected
+                and self.eval_gate_enabled
                 and self.ac_gate_mode != "off"
                 and latest_evaluation is not None
             ):
