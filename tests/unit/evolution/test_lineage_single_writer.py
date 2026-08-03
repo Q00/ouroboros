@@ -693,6 +693,7 @@ async def test_completed_step_receipt_preserves_structured_phase_outputs(tmp_pat
     )
     reflect.restore_durable_patch_identity(seed)
     execution_output = "execution-start\n" + ("x" * 12_000) + "\nTRAILING FAILURE MARKER"
+    validation_output = "validation-start\n" + ("v" * 4_000) + "\nVALIDATION TAIL"
     try:
         await writer.append(lineage_created(lineage_id, seed.goal))
         await writer.append(
@@ -717,6 +718,7 @@ async def test_completed_step_receipt_preserves_structured_phase_outputs(tmp_pat
                     wonder_output=wonder,
                     reflect_output=reflect,
                     execution_output=execution_output,
+                    validation_output=validation_output,
                     phase=GenerationPhase.COMPLETED,
                     success=True,
                 ),
@@ -742,6 +744,8 @@ async def test_completed_step_receipt_preserves_structured_phase_outputs(tmp_pat
         assert waiter_generation.reflect_output.ac_patch_identity_explicit is True
         assert waiter_generation.execution_output == execution_output
         assert waiter_generation.execution_output.endswith("TRAILING FAILURE MARKER")
+        assert waiter_generation.validation_output == validation_output
+        assert waiter_generation.validation_output.endswith("VALIDATION TAIL")
     finally:
         await writer.close()
         await reader.close()

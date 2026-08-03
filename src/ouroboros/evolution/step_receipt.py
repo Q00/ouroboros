@@ -65,6 +65,10 @@ def encode_step_result(result: Result[StepResult, OuroborosError]) -> dict[str, 
             or len(generation.execution_output) <= MAX_EXECUTION_TEXT
         ),
         "validation_output": _bounded(generation.validation_output, MAX_VALIDATION_TEXT),
+        "validation_output_complete": (
+            generation.validation_output is None
+            or len(generation.validation_output) <= MAX_VALIDATION_TEXT
+        ),
         "ontology_delta": (
             generation.ontology_delta.model_dump(mode="json")
             if generation.ontology_delta is not None
@@ -169,6 +173,14 @@ async def decode_step_result(
             raise ValueError(
                 "Legacy durable evolve receipt cannot prove execution-output completeness"
             )
+    validation_output = payload.get("validation_output")
+    if validation_output is not None and not isinstance(validation_output, str):
+        raise ValueError("Durable evolve receipt validation output must be text or null")
+    if payload.get("validation_output_complete") is not True and validation_output is not None:
+        raise ValueError(
+            "Durable evolve receipt validation output is incomplete; public result cannot "
+            "be reconstructed safely"
+        )
     evaluation_data = partial_state.get("evaluation_summary")
     evaluation_summary = (
         EvaluationSummary.model_validate(evaluation_data)
@@ -187,7 +199,7 @@ async def decode_step_result(
         ontology_delta=(
             OntologyDelta.model_validate(delta_data) if delta_data is not None else None
         ),
-        validation_output=payload.get("validation_output"),
+        validation_output=validation_output,
         active_ac_indices=record.active_ac_indices,
         frozen_ac_indices=record.frozen_ac_indices,
         phase=GenerationPhase(str(payload["generation_phase"])),
