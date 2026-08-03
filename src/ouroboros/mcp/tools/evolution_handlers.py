@@ -676,13 +676,22 @@ class EvolveStepHandler(BridgeAwareMixin):
         normalized_project_dir = (
             project_dir if isinstance(project_dir, str) and project_dir else None
         )
+        configured_project_dir = self.evolutionary_loop.get_project_dir()
+        normalized_configured_project_dir = (
+            configured_project_dir
+            if isinstance(configured_project_dir, str) and configured_project_dir
+            else None
+        )
+        effective_source_project_dir = normalized_project_dir or normalized_configured_project_dir
         workspace: TaskWorkspace | None = None
-        if execute and (normalized_project_dir is None or is_git_repo(normalized_project_dir)):
+        if execute and (
+            effective_source_project_dir is None or is_git_repo(effective_source_project_dir)
+        ):
             try:
                 workspace = maybe_restore_task_workspace(
                     lineage_id,
                     persisted=None,
-                    fallback_source_cwd=normalized_project_dir or os.getcwd(),
+                    fallback_source_cwd=effective_source_project_dir or os.getcwd(),
                 )
             except WorktreeError as e:
                 return Result.err(
@@ -693,7 +702,7 @@ class EvolveStepHandler(BridgeAwareMixin):
                 )
 
         project_dir_token = self.evolutionary_loop.set_project_dir(
-            workspace.effective_cwd if workspace else normalized_project_dir
+            workspace.effective_cwd if workspace else effective_source_project_dir
         )
         resolved_verification_working_dir = Path.cwd()
         workspace_evidence_pending = False
@@ -718,7 +727,7 @@ class EvolveStepHandler(BridgeAwareMixin):
                     workspace,
                     _resolve_evolve_verification_working_dir(
                         normalized_project_dir,
-                        self.evolutionary_loop.get_project_dir(),
+                        normalized_configured_project_dir,
                         getattr(step.generation_result, "seed", None),
                         initial_seed,
                     ),

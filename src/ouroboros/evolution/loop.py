@@ -1932,7 +1932,7 @@ class EvolutionaryLoop:
         # Evaluate phase (placeholder - actual evaluation via EvaluationPipeline)
         # Skip if already completed before interruption (use restored summary)
         evaluation_summary: EvaluationSummary | None = restored_evaluation_summary
-        if evaluation_summary and _should_skip("evaluating"):
+        if _should_skip("evaluating"):
             logger.info(
                 "evolution.generation.evaluation_restored_from_checkpoint",
                 extra={"generation": generation_number},

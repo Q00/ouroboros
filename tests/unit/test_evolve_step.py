@@ -404,6 +404,35 @@ class TestEvolutionaryLoopConfig:
 
         assert first == second
 
+    def test_configured_project_shadows_cwd_in_handler_identity(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Configured workspace identity matches the handler's fallback target."""
+        from ouroboros.mcp.tools.evolution_handlers import _evolve_handler_request_key
+
+        configured = (tmp_path / "configured").resolve()
+        arguments = {"lineage_id": "lin_configured_workspace_identity"}
+
+        first = _evolve_handler_request_key(
+            arguments,
+            configured_project_dir=str(configured),
+            fallback_cwd=(tmp_path / "cwd-a").resolve(),
+        )
+        second = _evolve_handler_request_key(
+            arguments,
+            configured_project_dir=str(configured),
+            fallback_cwd=(tmp_path / "cwd-b").resolve(),
+        )
+        different = _evolve_handler_request_key(
+            arguments,
+            configured_project_dir=str((tmp_path / "configured-other").resolve()),
+            fallback_cwd=(tmp_path / "cwd-a").resolve(),
+        )
+
+        assert first == second
+        assert first != different
+
     def test_non_introspectable_executor_preserves_legacy_call_shape(
         self,
         monkeypatch: pytest.MonkeyPatch,
@@ -2575,6 +2604,68 @@ class TestEvolveStepResume:
             == 1
         )
 
+    @pytest.mark.asyncio
+    async def test_hard_crash_after_empty_evaluation_does_not_redispatch_evaluator(self) -> None:
+        """A completed evaluation boundary is authoritative even without a summary."""
+        store = await create_event_store()
+        parent = make_seed(seed_id="seed_empty_eval_parent")
+        candidate = make_seed(
+            seed_id="seed_empty_eval_candidate",
+            parent_seed_id=parent.metadata.seed_id,
+        )
+        lineage_id = "lin_empty_eval_checkpoint"
+        await seed_events_for_gen1(store, lineage_id, parent, make_eval_summary(False))
+        await store.append(
+            lineage_generation_started(
+                lineage_id,
+                2,
+                GenerationPhase.WONDERING.value,
+                parent.metadata.seed_id,
+                json.dumps(parent.to_dict()),
+            )
+        )
+        await store.append(
+            loop_support.generation_phase_checkpoint(
+                lineage_id=lineage_id,
+                generation_number=2,
+                phase=GenerationPhase.EVALUATING,
+                last_completed_phase=GenerationPhase.EVALUATING.value,
+                seed=candidate,
+                active_ac_indices=(0,),
+                frozen_ac_indices=(),
+                execution_output="durable execution",
+                execution_boundary_completed=True,
+                validation_boundary_completed=True,
+                evaluation_summary=None,
+            )
+        )
+        executor = AsyncMock(return_value="must not run")
+        evaluator = AsyncMock(return_value=make_eval_summary(True))
+        loop = EvolutionaryLoop(
+            event_store=store,
+            config=EvolutionaryLoopConfig(min_generations=3),
+            executor=executor,
+            evaluator=evaluator,
+        )
+
+        result = await loop.evolve_step(lineage_id, execute=True)
+
+        assert result.is_ok
+        assert result.value.generation_result.seed == candidate
+        assert result.value.generation_result.execution_output == "durable execution"
+        assert result.value.generation_result.evaluation_summary is None
+        executor.assert_not_awaited()
+        evaluator.assert_not_awaited()
+        replayed = await store.replay_lineage(lineage_id)
+        assert (
+            sum(
+                event.type == "lineage.generation.completed"
+                and event.data.get("generation_number") == 2
+                for event in replayed
+            )
+            == 1
+        )
+
 
 class TestRunGenerationFailures:
     """Test failure event emission inside _run_generation()."""
@@ -2803,6 +2894,65 @@ class TestEvolveStepHandler:
         assert result.value.meta["action"] == "converged"
         assert result.value.meta["converged"] is True
         assert result.value.meta["qa_attempted"] is False
+
+    @pytest.mark.asyncio
+    async def test_handler_uses_configured_project_when_explicit_project_is_absent(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """The workspace hashed into the request key is the workspace used by evolve."""
+        from ouroboros.mcp.tools.definitions import EvolveStepHandler
+
+        store = await create_event_store()
+        seed = make_seed(seed_id="seed_configured_handler_workspace")
+        generation = GenerationResult(
+            generation_number=1,
+            seed=seed,
+            evaluation_summary=make_eval_summary(),
+            phase=GenerationPhase.COMPLETED,
+            success=True,
+        )
+        step = StepResult(
+            generation_result=generation,
+            convergence_signal=ConvergenceSignal(
+                converged=True,
+                reason="verified",
+                ontology_similarity=1.0,
+                generation=1,
+                should_stop=True,
+            ),
+            lineage=OntologyLineage(
+                lineage_id="lin_configured_handler_workspace",
+                goal=seed.goal,
+            ),
+            action=StepAction.CONVERGED,
+            next_generation=2,
+        )
+        loop = make_loop(store)
+        configured = str((tmp_path / "configured-project").resolve())
+        configured_token = loop.set_project_dir(configured)
+        observed_project_dirs: list[str | None] = []
+
+        async def observe_workspace(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+            observed_project_dirs.append(loop.get_project_dir())
+            return Result.ok(step)
+
+        loop.evolve_step = AsyncMock(side_effect=observe_workspace)
+        handler = EvolveStepHandler(evolutionary_loop=loop)
+        try:
+            result = await handler.handle(
+                {
+                    "lineage_id": "lin_configured_handler_workspace",
+                    "execute": False,
+                    "skip_qa": True,
+                }
+            )
+        finally:
+            loop.reset_project_dir(configured_token)
+            await store.close()
+
+        assert result.is_ok
+        assert observed_project_dirs == [configured]
 
     @pytest.mark.asyncio
     async def test_concurrent_public_handler_reuses_workspace_evidence_and_qa(
