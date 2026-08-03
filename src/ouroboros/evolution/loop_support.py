@@ -326,7 +326,9 @@ def restore_phase_state(
     execution_boundary_completed = (
         should_skip("executing") and partial_state.get("execution_boundary_completed") is True
     )
-    execution_output = partial_state.get("execution_output")
+    execution_output = (
+        partial_state.get("execution_output") if execution_boundary_completed else None
+    )
     if not isinstance(execution_output, str):
         execution_output = None
     evaluation_summary = None
@@ -343,7 +345,9 @@ def restore_phase_state(
     validation_boundary_completed = (
         should_skip("executing") and partial_state.get("validation_boundary_completed") is True
     )
-    validation_output = partial_state.get("validation_output")
+    validation_output = (
+        partial_state.get("validation_output") if validation_boundary_completed else None
+    )
     if not isinstance(validation_output, str):
         validation_output = None
     return RestoredPhaseState(
