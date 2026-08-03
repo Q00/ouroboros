@@ -679,7 +679,6 @@ class EvolveStepHandler(BridgeAwareMixin):
             "generation": gen.generation_number,
             "action": step.action.value,
             "similarity": sig.ontology_similarity,
-            "converged": sig.converged,
             "next_generation": step.next_generation,
             "executed": execute,
             "qa_attempted": qa_attempted,
@@ -696,6 +695,10 @@ class EvolveStepHandler(BridgeAwareMixin):
             meta["worktree_branch"] = workspace.branch
         if qa_meta:
             meta["qa"] = qa_meta
+
+        from ouroboros.evolution.loop import StepAction
+
+        meta["converged"] = step.action is StepAction.CONVERGED
 
         return Result.ok(
             MCPToolResult(

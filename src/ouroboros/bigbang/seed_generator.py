@@ -53,6 +53,7 @@ from ouroboros.core.seed import (
     parse_expected_artifact_list,
 )
 from ouroboros.core.types import Result
+from ouroboros.evolution.acceptance_contracts import evolve_seed_contract_fields
 from ouroboros.providers.base import CompletionConfig, LLMAdapter, Message, MessageRole
 
 log = structlog.get_logger()
@@ -1872,17 +1873,10 @@ class SeedGenerator:
         parent_seed: Seed,
         reflect_output: Any,
     ) -> Result[Seed, ValidationError | ProviderError]:
-        """Generate a new Seed from ReflectOutput (Gen 2+ path).
+        """Generate a successor Seed while preserving structured AC authority.
 
-        Applies ontology mutations to parent's schema and uses refined
-        ACs from the reflect phase. No ambiguity gating needed.
-
-        Args:
-            parent_seed: The parent seed to evolve from.
-            reflect_output: ReflectOutput with refined goal/constraints/ACs/mutations.
-
-        Returns:
-            Result containing the evolved Seed.
+        Reflect applies ontology and prose deltas without Gen-1 ambiguity
+        gating; mechanical AC contracts remain intact across the boundary.
         """
         log.info(
             "seed.generation.from_reflect",
@@ -1908,11 +1902,11 @@ class SeedGenerator:
                 task_type=parent_seed.task_type,
                 brownfield_context=parent_seed.brownfield_context,
                 constraints=reflect_output.refined_constraints,
-                acceptance_criteria=reflect_output.refined_acs,
                 ontology_schema=new_ontology,
                 evaluation_principles=parent_seed.evaluation_principles,
                 exit_conditions=parent_seed.exit_conditions,
                 metadata=metadata,
+                **evolve_seed_contract_fields(parent_seed, reflect_output.refined_acs),
             )
 
             log.info(

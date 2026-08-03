@@ -641,18 +641,19 @@ def _agent_results_from_execution_summary(mechanical: Any) -> dict[int, bool]:
 def _evaluation_summary_from_spec_verification(
     mechanical: Any,
     verification_summary: Any,
+    seed: Any | None = None,
 ) -> Any | None:
-    """Promote complete verifier coverage into formal AC verdict results.
-
-    Spec verification may only return reports for ACs that produced extractable
-    assertions. Missing reports and reports with no concrete verification
-    results are not formal approval: they become failed/not-evaluated AC
-    results so a partial verifier pass cannot approve the whole run.
-    """
+    """Promote complete verifier coverage into Seed-bound formal AC verdicts."""
     from ouroboros.core.lineage import ACResult, EvaluationSummary
 
     reports = tuple(getattr(verification_summary, "reports", ()) or ())
     if not reports:
+        return None
+    seed_criteria = tuple(getattr(seed, "acceptance_criteria", ()) or ())
+
+    def semantic_key(ac_index: int) -> str | None:
+        if 0 <= ac_index < len(seed_criteria):
+            return getattr(seed_criteria[ac_index], "semantic_ac_key", None)
         return None
 
     expected_ac_content: dict[int, str] = {
@@ -682,6 +683,7 @@ def _evaluation_summary_from_spec_verification(
                     ac_content=expected_ac_content.get(
                         ac_index, f"Acceptance criterion {ac_index + 1}"
                     ),
+                    semantic_ac_key=semantic_key(ac_index),
                     passed=False,
                     score=0.0,
                     evidence="No spec verification report was produced for this AC.",
@@ -713,6 +715,7 @@ def _evaluation_summary_from_spec_verification(
             ACResult(
                 ac_index=report.ac_index,
                 ac_content=report.ac_text,
+                semantic_ac_key=semantic_key(report.ac_index),
                 passed=passed,
                 score=1.0 if passed else 0.0,
                 evidence=evidence,
@@ -1990,7 +1993,6 @@ def create_ouroboros_server(
         if not seed_id:
             return None
 
-        # Extract assertions from ACs (cached by seed_id)
         extract_result = await spec_extractor.extract(seed_id, ac_texts(seed_acs))
         if extract_result.is_err:
             log.warning("spec_verification.extraction_failed", error=str(extract_result.error))
@@ -2000,10 +2002,8 @@ def create_ouroboros_server(
         if not assertions:
             return None
 
-        # Build agent results map from formal AC results or legacy task completion.
         agent_results = _agent_results_from_execution_summary(mechanical)
 
-        # Run verification
         verifier = SpecVerifier(project_dir=project_dir)
         summary = verifier.verify_all(assertions, agent_results)
 
@@ -2014,7 +2014,7 @@ def create_ouroboros_server(
                 project_dir=project_dir,
             )
 
-        return _evaluation_summary_from_spec_verification(mechanical, summary)
+        return _evaluation_summary_from_spec_verification(mechanical, summary, seed)
 
     async def _evolution_evaluator(seed: Any, execution_output: str | None) -> EvaluationSummary:
         await _ensure_evolution_store_initialized()

@@ -19,6 +19,7 @@ from typing import Any
 
 from ouroboros.core.lineage import EvaluationSummary
 from ouroboros.core.seed import Seed, ac_texts
+from ouroboros.evolution.evaluation_coverage import validate_seed_ac_coverage
 from ouroboros.evolution.regression import RegressionReport
 from ouroboros.evolution.wonder import WonderOutput
 
@@ -162,6 +163,14 @@ def select_evolution_focus(
             active_ac_indices=tuple(sorted(all_candidate)),
             frozen_ac_indices=(),
             reason="full generation: no per-AC PASS evidence available",
+        )
+
+    coverage = validate_seed_ac_coverage(parent_seed, evaluation)
+    if not coverage.complete:
+        return EvolutionFocus(
+            active_ac_indices=tuple(sorted(all_candidate)),
+            frozen_ac_indices=(),
+            reason=f"full generation: {coverage.reason}",
         )
 
     passed = {

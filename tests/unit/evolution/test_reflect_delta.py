@@ -16,10 +16,18 @@ import pytest
 
 from ouroboros.bigbang.seed_generator import SeedGenerator
 from ouroboros.core.lineage import ACResult, EvaluationSummary, OntologyLineage
-from ouroboros.core.seed import OntologyField, OntologySchema, Seed, SeedMetadata
+from ouroboros.core.seed import (
+    AcceptanceCriterionSpec,
+    InvestmentSpec,
+    OntologyField,
+    OntologySchema,
+    Seed,
+    SeedMetadata,
+)
 from ouroboros.evolution.reflect import (
     ACPatch,
     ReflectEngine,
+    ReflectOutput,
     _apply_satisficing_backstop,
     _derive_legacy_patches,
     _parse_ac_patches,
@@ -30,7 +38,10 @@ from ouroboros.evolution.wonder import GroundedQuestion, WonderOutput
 PARENT_ACS = ("AC zero", "AC one", "AC two")
 
 
-def _seed(acs: tuple[str, ...] = PARENT_ACS) -> Seed:
+def _seed(
+    acs: tuple[str | AcceptanceCriterionSpec, ...] = PARENT_ACS,
+    **extra_fields: object,
+) -> Seed:
     return Seed(
         metadata=SeedMetadata(ambiguity_score=0.1),
         goal="Build a thing",
@@ -41,6 +52,7 @@ def _seed(acs: tuple[str, ...] = PARENT_ACS) -> Seed:
             description="d",
             fields=(OntologyField(name="f", field_type="entity", description="a field"),),
         ),
+        **extra_fields,
     )
 
 
@@ -530,6 +542,52 @@ class TestReflectEndToEnd:
         assert fields["f"].field_type == "object"
         assert fields["f"].description == "a field"
         assert "obsolete" not in fields
+
+    def test_seed_generation_preserves_structured_ac_contracts(self) -> None:
+        parent = _seed(
+            (
+                AcceptanceCriterionSpec(
+                    description="AC zero",
+                    verify_command="pytest -q tests/test_zero.py",
+                    expected_artifacts=("dist/zero.json",),
+                    output_assertion="1 passed",
+                    investment=InvestmentSpec(
+                        difficulty="high",
+                        stakes="medium",
+                        confidence="high",
+                    ),
+                ),
+                "AC one",
+                "AC two",
+            ),
+            plugin_contract={"items": ["one", {"nested": ["two"]}]},
+        )
+        original = parent.acceptance_criteria[0]
+        reflected = ReflectOutput(
+            refined_goal=parent.goal,
+            refined_constraints=parent.constraints,
+            refined_acs=("AC zero revised", "AC one", "AC two"),
+            ac_patches=(
+                ACPatch(op="revise", index=0, content="AC zero revised"),
+                ACPatch(op="keep", index=1),
+                ACPatch(op="keep", index=2),
+            ),
+        )
+
+        result = SeedGenerator(llm_adapter=_FakeAdapter("")).generate_from_reflect(
+            parent,
+            reflected,
+        )
+
+        assert result.is_ok
+        revised = result.value.acceptance_criteria[0]
+        assert revised.description == "AC zero revised"
+        assert revised.verify_command == original.verify_command
+        assert revised.expected_artifacts == original.expected_artifacts
+        assert revised.output_assertion == original.output_assertion
+        assert revised.investment == original.investment
+        assert revised.semantic_ac_key != original.semantic_ac_key
+        assert result.value.to_dict()["plugin_contract"] == {"items": ["one", {"nested": ["two"]}]}
 
 
 class _FakeAdapter:

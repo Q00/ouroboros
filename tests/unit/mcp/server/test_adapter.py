@@ -347,6 +347,41 @@ Parallel Execution Verification Report
         assert summary.approval_status == "rejected"
         assert summary.run_verdict == "FAIL"
 
+    def test_spec_verification_binds_verdict_to_seed_semantic_identity(self) -> None:
+        semantic_key = "ac_0123456789abcdef"
+        seed = SimpleNamespace(acceptance_criteria=(SimpleNamespace(semantic_ac_key=semantic_key),))
+        mechanical = EvaluationSummary(
+            final_approved=False,
+            highest_stage_passed=1,
+            task_results=(
+                TaskResult(
+                    task_index=0,
+                    task_content="Implement feature",
+                    status="failed",
+                    completed=False,
+                    source_ac_index=0,
+                ),
+            ),
+            execution_completion_status="failed",
+            approval_status="not_evaluated",
+        )
+        verification = SpecVerificationSummary.from_reports(
+            (
+                ACVerificationReport(
+                    ac_index=0,
+                    ac_text="Implement feature",
+                    results=(),
+                    agent_reported_pass=False,
+                ),
+            ),
+            project_dir="/tmp/project",
+        )
+
+        summary = _evaluation_summary_from_spec_verification(mechanical, verification, seed)
+
+        assert summary is not None
+        assert summary.ac_results[0].semantic_ac_key == semantic_key
+
     def test_partial_spec_verification_coverage_does_not_approve_run(self) -> None:
         """Verifier reports must cover every expected AC before run approval."""
         mechanical = EvaluationSummary(

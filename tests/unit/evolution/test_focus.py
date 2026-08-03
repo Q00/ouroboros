@@ -1,5 +1,7 @@
 """Focused evolution selects a shrinking, evidence-backed AC working set."""
 
+import pytest
+
 from ouroboros.core.lineage import ACResult, EvaluationSummary
 from ouroboros.core.seed import OntologyField, OntologySchema, Seed, SeedMetadata
 from ouroboros.events.lineage import lineage_created, lineage_generation_completed
@@ -23,13 +25,17 @@ def _seed(*acs: str) -> Seed:
     )
 
 
-def _evaluation(*passed: bool) -> EvaluationSummary:
+def _evaluation(seed: Seed, *passed: bool) -> EvaluationSummary:
     return EvaluationSummary(
         final_approved=all(passed),
         highest_stage_passed=2,
         score=sum(passed) / len(passed),
         ac_results=tuple(
-            ACResult(ac_index=index, ac_content=f"AC {index}", passed=value)
+            ACResult(
+                ac_index=index,
+                ac_content=seed.acceptance_criteria[index].description,
+                passed=value,
+            )
             for index, value in enumerate(passed)
         ),
     )
@@ -41,7 +47,7 @@ def test_only_failed_node_stays_active() -> None:
     focus = select_evolution_focus(
         seed,
         seed,
-        _evaluation(True, False, True),
+        _evaluation(seed, True, False, True),
         regression_report=RegressionReport(),
     )
 
@@ -66,7 +72,7 @@ def test_challenge_reopens_a_previously_passing_node() -> None:
     focus = select_evolution_focus(
         seed,
         seed,
-        _evaluation(True, False),
+        _evaluation(seed, True, False),
         wonder=wonder,
         regression_report=RegressionReport(),
     )
@@ -82,7 +88,7 @@ def test_new_candidate_node_is_active_not_silently_frozen() -> None:
     focus = select_evolution_focus(
         parent,
         candidate,
-        _evaluation(True, False),
+        _evaluation(parent, True, False),
         regression_report=RegressionReport(),
     )
 
@@ -104,6 +110,42 @@ def test_missing_per_ac_evidence_keeps_full_graph_open() -> None:
     assert focus.frozen_ac_indices == ()
 
 
+@pytest.mark.parametrize(
+    "results",
+    [
+        (ACResult(ac_index=0, ac_content="one", passed=True),),
+        (
+            ACResult(ac_index=0, ac_content="one", passed=True),
+            ACResult(ac_index=0, ac_content="one", passed=False),
+        ),
+        (
+            ACResult(ac_index=0, ac_content="one", passed=True),
+            ACResult(ac_index=2, ac_content="outside", passed=False),
+        ),
+        (
+            ACResult(ac_index=0, ac_content="not one", passed=True),
+            ACResult(ac_index=1, ac_content="two", passed=False),
+        ),
+    ],
+    ids=("missing", "duplicate", "out-of-range", "content-mismatch"),
+)
+def test_incomplete_or_invalid_verdict_coverage_keeps_full_graph_open(
+    results: tuple[ACResult, ...],
+) -> None:
+    seed = _seed("one", "two")
+    evaluation = EvaluationSummary(
+        final_approved=False,
+        highest_stage_passed=1,
+        score=0.0,
+        ac_results=results,
+    )
+
+    focus = select_evolution_focus(seed, seed, evaluation)
+
+    assert focus.active_ac_indices == (0, 1)
+    assert focus.frozen_ac_indices == ()
+
+
 def test_focus_is_persisted_in_lineage_trace() -> None:
     seed = _seed("passed", "failed")
     events = [
@@ -113,7 +155,7 @@ def test_focus_is_persisted_in_lineage_trace() -> None:
             1,
             seed.metadata.seed_id,
             seed.ontology_schema.model_dump(mode="json"),
-            _evaluation(True, False).model_dump(mode="json"),
+            _evaluation(seed, True, False).model_dump(mode="json"),
             active_ac_indices=[1],
             frozen_ac_indices=[0],
         ),

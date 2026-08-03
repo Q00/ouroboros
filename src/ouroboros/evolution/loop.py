@@ -66,6 +66,7 @@ from ouroboros.evolution.rewind import (
     NoOpRewindObserver,
     RewindObserver,
 )
+from ouroboros.evolution.validation_result import normalize_validation_result
 from ouroboros.evolution.watchdog import (
     GenerationProgressWatchdog,
     GenerationWatchdogTimeout,
@@ -541,6 +542,7 @@ class EvolutionaryLoop:
             generation_results.append(result)
 
             # Record generation in lineage
+            seed_json = json.dumps(result.seed.to_dict())
             record = GenerationRecord(
                 generation_number=generation_number,
                 seed_id=result.seed.metadata.seed_id,
@@ -549,6 +551,7 @@ class EvolutionaryLoop:
                 evaluation_summary=result.evaluation_summary,
                 wonder_questions=result.wonder_output.questions if result.wonder_output else (),
                 phase=result.phase,
+                seed_json=seed_json,
                 execution_output=result.execution_output,
                 active_ac_indices=result.active_ac_indices,
                 frozen_ac_indices=result.frozen_ac_indices,
@@ -566,7 +569,7 @@ class EvolutionaryLoop:
                     if result.evaluation_summary
                     else None,
                     list(result.wonder_output.questions) if result.wonder_output else None,
-                    seed_json=json.dumps(result.seed.to_dict()),
+                    seed_json=seed_json,
                     execution_output=result.execution_output,
                     parent_seed_id=result.seed.metadata.parent_seed_id,
                     seed_quality_canary_feedback=[
@@ -595,21 +598,34 @@ class EvolutionaryLoop:
                 result.wonder_output,
                 latest_evaluation=result.evaluation_summary,
                 validation_output=result.validation_output,
+                latest_seed=result.seed,
+                validation_expected=self.validator is not None,
             )
 
-            if conv_signal.converged:
+            if conv_signal.should_stop:
                 logger.info(
-                    "evolution.converged",
+                    "evolution.converged" if conv_signal.converged else "evolution.stopped",
                     extra={
                         "lineage_id": lineage.lineage_id,
                         "generation": generation_number,
                         "reason": conv_signal.reason,
                         "similarity": conv_signal.ontology_similarity,
+                        "converged": conv_signal.converged,
                     },
                 )
 
                 # Emit appropriate termination event
-                if generation_number >= self.config.max_generations:
+                if conv_signal.converged:
+                    await self.event_store.append(
+                        lineage_converged(
+                            lineage.lineage_id,
+                            generation_number,
+                            conv_signal.reason,
+                            conv_signal.ontology_similarity,
+                        )
+                    )
+                    lineage = lineage.with_status(LineageStatus.CONVERGED)
+                elif generation_number >= self.config.max_generations:
                     await self.event_store.append(
                         lineage_exhausted(
                             lineage.lineage_id,
@@ -618,7 +634,7 @@ class EvolutionaryLoop:
                         )
                     )
                     lineage = lineage.with_status(LineageStatus.EXHAUSTED)
-                elif "Stagnation" in conv_signal.reason or "Oscillation" in conv_signal.reason:
+                else:
                     await self.event_store.append(
                         lineage_stagnated(
                             lineage.lineage_id,
@@ -630,17 +646,6 @@ class EvolutionaryLoop:
                     # Stagnation is a non-terminal control handoff: the shared
                     # Directive contract maps STAGNATED to UNSTUCK, so keep the
                     # lineage resumable for the lateral-thinking recovery path.
-                else:
-                    await self.event_store.append(
-                        lineage_converged(
-                            lineage.lineage_id,
-                            generation_number,
-                            conv_signal.reason,
-                            conv_signal.ontology_similarity,
-                        )
-                    )
-                    lineage = lineage.with_status(LineageStatus.CONVERGED)
-
                 break
 
             # Prepare for next generation
@@ -1042,6 +1047,7 @@ class EvolutionaryLoop:
 
             # Step 3: Emit generation completed event (with seed_json).
             nonlocal_lineage = lineage
+            seed_json = json.dumps(result.seed.to_dict())
             record = GenerationRecord(
                 generation_number=generation_number,
                 seed_id=result.seed.metadata.seed_id,
@@ -1050,7 +1056,7 @@ class EvolutionaryLoop:
                 evaluation_summary=result.evaluation_summary,
                 wonder_questions=result.wonder_output.questions if result.wonder_output else (),
                 phase=result.phase,
-                seed_json=json.dumps(result.seed.to_dict()),
+                seed_json=seed_json,
                 execution_output=result.execution_output,
                 active_ac_indices=result.active_ac_indices,
                 frozen_ac_indices=result.frozen_ac_indices,
@@ -1067,7 +1073,7 @@ class EvolutionaryLoop:
                     if result.evaluation_summary
                     else None,
                     list(result.wonder_output.questions) if result.wonder_output else None,
-                    seed_json=json.dumps(result.seed.to_dict()),
+                    seed_json=seed_json,
                     execution_output=result.execution_output,
                     parent_seed_id=result.seed.metadata.parent_seed_id,
                     seed_quality_canary_feedback=[
@@ -1096,11 +1102,24 @@ class EvolutionaryLoop:
                 result.wonder_output,
                 latest_evaluation=result.evaluation_summary,
                 validation_output=result.validation_output,
+                latest_seed=result.seed,
+                validation_expected=self.validator is not None,
             )
 
             action = StepAction.CONTINUE
-            if conv_signal.converged:
-                if generation_number >= self.config.max_generations:
+            if conv_signal.should_stop:
+                if conv_signal.converged:
+                    await self.event_store.append(
+                        lineage_converged(
+                            nonlocal_lineage.lineage_id,
+                            generation_number,
+                            conv_signal.reason,
+                            conv_signal.ontology_similarity,
+                        )
+                    )
+                    nonlocal_lineage = nonlocal_lineage.with_status(LineageStatus.CONVERGED)
+                    action = StepAction.CONVERGED
+                elif generation_number >= self.config.max_generations:
                     await self.event_store.append(
                         lineage_exhausted(
                             nonlocal_lineage.lineage_id,
@@ -1110,7 +1129,7 @@ class EvolutionaryLoop:
                     )
                     nonlocal_lineage = nonlocal_lineage.with_status(LineageStatus.EXHAUSTED)
                     action = StepAction.EXHAUSTED
-                elif "Stagnation" in conv_signal.reason or "Oscillation" in conv_signal.reason:
+                else:
                     await self.event_store.append(
                         lineage_stagnated(
                             nonlocal_lineage.lineage_id,
@@ -1123,18 +1142,6 @@ class EvolutionaryLoop:
                     # Directive contract maps STAGNATED to UNSTUCK, so keep the
                     # lineage resumable for the lateral-thinking recovery path.
                     action = StepAction.STAGNATED
-                else:
-                    await self.event_store.append(
-                        lineage_converged(
-                            nonlocal_lineage.lineage_id,
-                            generation_number,
-                            conv_signal.reason,
-                            conv_signal.ontology_similarity,
-                        )
-                    )
-                    nonlocal_lineage = nonlocal_lineage.with_status(LineageStatus.CONVERGED)
-                    action = StepAction.CONVERGED
-
             await self._emit_step_directive(
                 action,
                 lineage_id=nonlocal_lineage.lineage_id,
@@ -1887,15 +1894,7 @@ class EvolutionaryLoop:
         elif execute and execution_output and self.validator:
             try:
                 validation_result = await self.validator(current_seed, execution_output)
-                if isinstance(validation_result, str):
-                    validation_output = validation_result
-                elif hasattr(validation_result, "is_ok"):
-                    if validation_result.is_ok:
-                        validation_output = str(validation_result.value)
-                    else:
-                        validation_output = f"Validation error: {validation_result.error}"
-                else:
-                    validation_output = str(validation_result)
+                validation_output = normalize_validation_result(validation_result)
                 if validation_output and "skipped" in validation_output.lower():
                     logger.warning(
                         "evolution.generation.validation_skipped",

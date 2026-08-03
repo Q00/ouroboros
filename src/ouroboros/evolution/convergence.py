@@ -17,7 +17,10 @@ from ouroboros.core.lineage import (
     OntologyDelta,
     OntologyLineage,
 )
+from ouroboros.core.seed import Seed
+from ouroboros.evolution.evaluation_coverage import validate_seed_ac_coverage
 from ouroboros.evolution.regression import RegressionDetector
+from ouroboros.evolution.validation_result import validation_passed
 from ouroboros.evolution.wonder import WonderOutput
 
 
@@ -30,6 +33,7 @@ class ConvergenceSignal:
     ontology_similarity: float
     generation: int
     failed_acs: tuple[int, ...] = ()
+    should_stop: bool = False
 
 
 @dataclass
@@ -65,6 +69,8 @@ class ConvergenceCriteria:
         latest_wonder: WonderOutput | None = None,
         latest_evaluation: EvaluationSummary | None = None,
         validation_output: str | None = None,
+        latest_seed: Seed | None = None,
+        validation_expected: bool = False,
     ) -> ConvergenceSignal:
         """Check if the loop should terminate.
 
@@ -79,15 +85,6 @@ class ConvergenceCriteria:
         num_completed = len(completed)
         current_gen = lineage.current_generation
 
-        # Signal 4: Hard cap (only count completed generations)
-        if num_completed >= self.max_generations:
-            return ConvergenceSignal(
-                converged=True,
-                reason=f"Max generations reached ({self.max_generations})",
-                ontology_similarity=self._latest_similarity(lineage),
-                generation=current_gen,
-            )
-
         # Loop-engineering exit gate: a convergence loop is finished when its
         # independently checked outcome passes.  Requiring ontology churn after
         # that point spends generations optimizing the loop rather than the
@@ -98,6 +95,8 @@ class ConvergenceCriteria:
                 lineage,
                 latest_evaluation,
                 validation_output,
+                latest_seed,
+                validation_expected,
             )
             if outcome_block is None:
                 score = latest_evaluation.score
@@ -107,7 +106,19 @@ class ConvergenceCriteria:
                     reason=f"Outcome gate passed: evaluation approved ({score_text})",
                     ontology_similarity=self._latest_similarity(lineage),
                     generation=current_gen,
+                    should_stop=True,
                 )
+
+        # Signal 4: hard cap after the verified outcome gate, so a first PASS
+        # on the final allowed generation is recorded as success, not exhaustion.
+        if num_completed >= self.max_generations:
+            return ConvergenceSignal(
+                converged=False,
+                reason=f"Max generations reached ({self.max_generations})",
+                ontology_similarity=self._latest_similarity(lineage),
+                generation=current_gen,
+                should_stop=True,
+            )
 
         # Need at least min_generations completed before checking other signals
         if num_completed < self.min_generations:
@@ -125,31 +136,73 @@ class ConvergenceCriteria:
         latest_sim = self._latest_similarity(lineage)
         stable_block: ConvergenceSignal | None = None
         if latest_sim >= self.convergence_threshold:
-            # Eval gate: block convergence if evaluation is unsatisfactory
-            if self.eval_gate_enabled and latest_evaluation is not None:
-                eval_blocks = not latest_evaluation.final_approved or (
-                    latest_evaluation.score is not None
-                    and latest_evaluation.score < self.eval_min_score
-                )
-                if eval_blocks:
+            # Eval gate: missing authority is not satisfactory authority.
+            if self.eval_gate_enabled:
+                if latest_evaluation is None:
                     stable_block = ConvergenceSignal(
                         converged=False,
                         reason=(
                             f"Ontology stable (similarity {latest_sim:.3f}) "
-                            f"but evaluation unsatisfactory"
+                            "but evaluation unavailable"
                         ),
                         ontology_similarity=latest_sim,
                         generation=current_gen,
                     )
+                else:
+                    eval_blocks = not latest_evaluation.final_approved or (
+                        latest_evaluation.score is not None
+                        and latest_evaluation.score < self.eval_min_score
+                    )
+                    if eval_blocks:
+                        stable_block = ConvergenceSignal(
+                            converged=False,
+                            reason=(
+                                f"Ontology stable (similarity {latest_sim:.3f}) "
+                                "but evaluation unsatisfactory"
+                            ),
+                            ontology_similarity=latest_sim,
+                            generation=current_gen,
+                        )
 
-            # Per-AC gate: block convergence if individual ACs are failing
+            # Coverage is an authority requirement, not a configurable pass
+            # policy.  Even ``ac_gate_mode=off`` cannot turn partial evidence
+            # into verified stability convergence.
+            if stable_block is None:
+                if latest_evaluation is None:
+                    stable_block = ConvergenceSignal(
+                        converged=False,
+                        reason=(
+                            f"Ontology stable (similarity {latest_sim:.3f}) "
+                            "but evaluation unavailable"
+                        ),
+                        ontology_similarity=latest_sim,
+                        generation=current_gen,
+                    )
+                elif latest_seed is None:
+                    stable_block = ConvergenceSignal(
+                        converged=False,
+                        reason="Per-AC gate: current Seed unavailable for coverage validation",
+                        ontology_similarity=latest_sim,
+                        generation=current_gen,
+                    )
+                else:
+                    coverage = validate_seed_ac_coverage(latest_seed, latest_evaluation)
+                    if not coverage.complete:
+                        stable_block = ConvergenceSignal(
+                            converged=False,
+                            reason=f"Per-AC gate: {coverage.reason}",
+                            ontology_similarity=latest_sim,
+                            generation=current_gen,
+                        )
+
+            # Per-AC policy: complete evidence may still be rejected when
+            # individual ACs fail the configured all/ratio threshold.
             if stable_block is None and (
                 self.eval_gate_enabled
                 and self.ac_gate_mode != "off"
                 and latest_evaluation is not None
-                and latest_evaluation.ac_results
             ):
-                ac_block = self._check_ac_gate(latest_evaluation)
+                ac_block = self._check_ac_gate(latest_evaluation, latest_seed)
                 if ac_block is not None:
                     failed_indices, reason = ac_block
                     stable_block = ConvergenceSignal(
@@ -195,12 +248,18 @@ class ConvergenceCriteria:
                     generation=current_gen,
                 )
 
-            # Validation gate: block convergence if validation was skipped or failed
-            if stable_block is None and self.validation_gate_enabled and validation_output:
-                if "skipped" in validation_output.lower() or "error" in validation_output.lower():
+            # A configured validator must produce explicit, non-error evidence.
+            if stable_block is None and self.validation_gate_enabled:
+                if (validation_expected or validation_output is not None) and not validation_passed(
+                    validation_output
+                ):
+                    rendered = (validation_output or "").strip()
                     stable_block = ConvergenceSignal(
                         converged=False,
-                        reason=(f"Validation gate blocked: {validation_output}"),
+                        reason=(
+                            "Validation gate blocked: "
+                            f"{rendered or 'configured validator returned no result'}"
+                        ),
                         ontology_similarity=latest_sim,
                         generation=current_gen,
                     )
@@ -214,6 +273,7 @@ class ConvergenceCriteria:
                     ),
                     ontology_similarity=latest_sim,
                     generation=current_gen,
+                    should_stop=True,
                 )
 
         # Signal 2: Stagnation (unchanged for N consecutive gens)
@@ -221,13 +281,14 @@ class ConvergenceCriteria:
             stagnant = self._check_stagnation(lineage)
             if stagnant:
                 return ConvergenceSignal(
-                    converged=True,
+                    converged=False,
                     reason=(
                         f"Stagnation detected: ontology unchanged for "
                         f"{self.stagnation_window} consecutive generations"
                     ),
                     ontology_similarity=latest_sim,
                     generation=current_gen,
+                    should_stop=True,
                 )
 
         # Signal 2.25: the judge score has stopped moving.  This is the
@@ -237,7 +298,7 @@ class ConvergenceCriteria:
         if self._check_evaluation_plateau(lineage):
             scores = self._recent_evaluation_scores(lineage)
             return ConvergenceSignal(
-                converged=True,
+                converged=False,
                 reason=(
                     "Stagnation detected: evaluation score plateau over "
                     f"{self.stagnation_window} generations "
@@ -245,6 +306,7 @@ class ConvergenceCriteria:
                 ),
                 ontology_similarity=latest_sim,
                 generation=current_gen,
+                should_stop=True,
             )
 
         # Signal 2.5: Oscillation detection (A→B→A→B cycling)
@@ -252,10 +314,11 @@ class ConvergenceCriteria:
             oscillating = self._check_oscillation(lineage)
             if oscillating:
                 return ConvergenceSignal(
-                    converged=True,
+                    converged=False,
                     reason=("Oscillation detected: ontology is cycling between similar states"),
                     ontology_similarity=latest_sim,
                     generation=current_gen,
+                    should_stop=True,
                 )
 
         # Signal 3: Repetitive wonder questions
@@ -263,10 +326,13 @@ class ConvergenceCriteria:
             repetitive = self._check_repetitive_feedback(lineage, latest_wonder)
             if repetitive:
                 return ConvergenceSignal(
-                    converged=True,
-                    reason="Repetitive feedback: wonder questions are repeating across generations",
+                    converged=False,
+                    reason=(
+                        "Stagnation detected: repetitive feedback questions across generations"
+                    ),
                     ontology_similarity=latest_sim,
                     generation=current_gen,
+                    should_stop=True,
                 )
 
         if stable_block is not None:
@@ -285,17 +351,25 @@ class ConvergenceCriteria:
         lineage: OntologyLineage,
         evaluation: EvaluationSummary,
         validation_output: str | None,
+        latest_seed: Seed | None,
+        validation_expected: bool,
     ) -> str | None:
         """Return why the deterministic outcome gate cannot end the loop."""
+        if latest_seed is None:
+            return "current Seed unavailable for per-AC coverage validation"
+        coverage = validate_seed_ac_coverage(latest_seed, evaluation)
+        if not coverage.complete:
+            return coverage.reason
         if not evaluation.run_verdict_passed:
             return "evaluation rejected"
         if evaluation.score is not None and evaluation.score < self.eval_min_score:
             return "evaluation score below threshold"
-        if self.ac_gate_mode != "off" and self._check_ac_gate(evaluation) is not None:
+        if self.ac_gate_mode != "off" and self._check_ac_gate(evaluation, latest_seed) is not None:
             return "per-AC gate rejected"
-        if self.validation_gate_enabled and validation_output:
-            lowered = validation_output.lower()
-            if "skipped" in lowered or "error" in lowered:
+        if self.validation_gate_enabled:
+            if (validation_expected or validation_output is not None) and not validation_passed(
+                validation_output
+            ):
                 return "validation gate rejected"
         if self.regression_gate_enabled:
             completed = self._completed_generations(lineage)
@@ -375,8 +449,14 @@ class ConvergenceCriteria:
     def _check_ac_gate(
         self,
         evaluation: EvaluationSummary,
+        seed: Seed | None = None,
     ) -> tuple[tuple[int, ...], str] | None:
         """Check per-AC gate. Returns (failed_ac_indices, reason) if blocked, None if OK."""
+        if seed is None:
+            return (), "Per-AC gate: current Seed unavailable for coverage validation"
+        coverage = validate_seed_ac_coverage(seed, evaluation)
+        if not coverage.complete:
+            return (), f"Per-AC gate: {coverage.reason}"
         if not evaluation.ac_results:
             return None
 

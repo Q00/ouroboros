@@ -11,6 +11,7 @@ from ouroboros.config.models import RuntimeControlsConfig
 from ouroboros.core.directive import Directive
 from ouroboros.core.errors import OuroborosError
 from ouroboros.core.lineage import (
+    ACResult,
     EvaluationSummary,
     FeedbackMetadata,
     GenerationPhase,
@@ -124,6 +125,13 @@ def make_eval_summary(approved: bool = True, score: float = 0.85) -> EvaluationS
         final_approved=approved,
         highest_stage_passed=2,
         score=score,
+        ac_results=(
+            ACResult(
+                ac_index=0,
+                ac_content="Tasks can be created",
+                passed=approved,
+            ),
+        ),
     )
 
 
@@ -1408,7 +1416,56 @@ class TestEvolveStepHandler:
         assert result.is_ok
         assert "Generation 1" in result.value.text_content
         assert result.value.meta["action"] == "converged"
+        assert result.value.meta["converged"] is True
         assert result.value.meta["qa_attempted"] is False
+
+    @pytest.mark.asyncio
+    async def test_handler_does_not_publish_stagnation_as_verified_convergence(self) -> None:
+        from ouroboros.mcp.tools.definitions import EvolveStepHandler
+
+        store = await create_event_store()
+        seed = make_seed()
+        generation = GenerationResult(
+            generation_number=3,
+            seed=seed,
+            evaluation_summary=make_eval_summary(approved=False),
+            phase=GenerationPhase.COMPLETED,
+            success=True,
+        )
+        loop = make_loop(store, gen_result=generation)
+        loop.evolve_step = AsyncMock(
+            return_value=Result.ok(
+                StepResult(
+                    generation_result=generation,
+                    convergence_signal=ConvergenceSignal(
+                        converged=False,
+                        reason="Stagnation detected: repetitive feedback questions",
+                        ontology_similarity=0.0,
+                        generation=3,
+                        should_stop=True,
+                    ),
+                    lineage=OntologyLineage(lineage_id="lin_stagnated_meta", goal=seed.goal),
+                    action=StepAction.STAGNATED,
+                    next_generation=4,
+                )
+            )
+        )
+        handler = EvolveStepHandler(evolutionary_loop=loop)
+
+        with patch(
+            "ouroboros.mcp.tools.evolution_handlers.maybe_restore_task_workspace",
+            return_value=None,
+        ):
+            result = await handler.handle(
+                {
+                    "lineage_id": "lin_stagnated_meta",
+                    "skip_qa": True,
+                }
+            )
+
+        assert result.is_ok
+        assert result.value.meta["action"] == "stagnated"
+        assert result.value.meta["converged"] is False
 
     @pytest.mark.asyncio
     async def test_handler_publishes_qa_attempt_when_qa_returns_no_result(self) -> None:

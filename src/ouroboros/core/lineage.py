@@ -57,6 +57,7 @@ class ACResult(BaseModel, frozen=True):
 
     ac_index: int
     ac_content: str
+    semantic_ac_key: str | None = Field(default=None, pattern=r"^ac_[a-f0-9]{16}$")
     passed: bool
     score: float | None = None
     evidence: str = ""
