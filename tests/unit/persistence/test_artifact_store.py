@@ -14,6 +14,7 @@ from ouroboros.persistence.artifact_store import (
     ArtifactContractConflictError,
     ArtifactIntegrityError,
     ArtifactManifestError,
+    ArtifactStoreError,
     ArtifactTombstonedError,
     ArtifactTooLargeError,
     ContentAddressedArtifactStore,
@@ -85,6 +86,38 @@ def test_fetch_is_explicit_and_verifies_content_hash(tmp_path: Path) -> None:
     _blob_path(store, envelope.artifact_ref).write_text('{"tampered":true}', encoding="utf-8")
     with pytest.raises(ArtifactIntegrityError, match="hash does not match"):
         store.fetch("CONTRACT1")
+
+
+def test_json_native_values_round_trip_without_normalization(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    body = {
+        "null": None,
+        "boolean": True,
+        "integer": 42,
+        "number": 1.25,
+        "string": "value",
+        "nested": [False, {"items": [1, 2, 3]}],
+    }
+
+    _put(store, "CONTRACT1", body)
+
+    assert store.fetch("CONTRACT1").body == body
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"tuple": (1, 2)},
+        {1: "integer-key"},
+        {True: "boolean-key"},
+    ],
+    ids=["tuple", "integer-key", "boolean-key"],
+)
+def test_lossy_non_json_native_values_are_rejected(tmp_path: Path, body: object) -> None:
+    store = _store(tmp_path)
+
+    with pytest.raises(ArtifactStoreError, match="JSON-native|JSON strings"):
+        _put(store, "CONTRACT1", body)
 
 
 def test_contract_id_cannot_be_reused_for_different_content(tmp_path: Path) -> None:

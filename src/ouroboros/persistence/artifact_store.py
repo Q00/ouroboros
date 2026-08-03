@@ -9,10 +9,13 @@ reference cannot race a prune decision.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -97,6 +100,7 @@ class ArtifactPruneReport:
 
 def canonical_artifact_bytes(body: Any) -> bytes:
     """Encode a JSON artifact deterministically for hashing and exact limits."""
+    _validate_json_native(body)
     try:
         rendered = json.dumps(
             body,
@@ -153,6 +157,22 @@ class ContentAddressedArtifactStore:
         self._validate_project_boundary()
         self._contracts_root.mkdir(parents=True, exist_ok=True)
         self._validate_project_boundary()
+
+    @contextmanager
+    def contract_execution_lock(
+        self,
+        contract_id: str,
+        *,
+        blocking: bool = True,
+    ) -> Iterator[None]:
+        """Serialize one contract's child effects across processes."""
+        self.initialize()
+        contract_id = _validate_contract_id(contract_id)
+        lock_target = self._contract_execution_lock_target(contract_id)
+        with file_lock(lock_target, exclusive=True, blocking=blocking):
+            self._validate_project_boundary()
+            self._contract_execution_lock_target(contract_id)
+            yield
 
     def put_for_contract(
         self,
@@ -247,6 +267,28 @@ class ContentAddressedArtifactStore:
                 details={"contract_id": contract_id},
             )
         return fetched
+
+    def envelope_if_exists(self, contract_id: str) -> DisposableResultEnvelope | None:
+        """Read only a contract's bounded envelope, never its artifact body."""
+        self.initialize()
+        contract_id = _validate_contract_id(contract_id)
+        with file_lock(self._lock_target, exclusive=False):
+            manifest = self._load_manifest_locked(contract_id, missing_ok=True)
+            event = _latest_artifact_event(manifest)
+            if event is None:
+                return None
+            artifact_ref = _event_artifact_ref(event, contract_id=contract_id)
+            if event.get("type") == "artifact.tombstoned":
+                raise ArtifactTombstonedError(
+                    "Artifact was pruned; use an explicit force-rerun path to recompute it",
+                    operation="read",
+                    details={
+                        "contract_id": contract_id,
+                        "artifact_ref": artifact_ref,
+                        "tombstoned_at": event.get("timestamp"),
+                    },
+                )
+            return _envelope_from_event(event, contract_id=contract_id)
 
     def fetch_if_exists(self, contract_id: str) -> FetchedArtifact | None:
         """Fetch a durable contract, returning ``None`` only when no binding exists."""
@@ -500,6 +542,25 @@ class ContentAddressedArtifactStore:
             )
         return path
 
+    def _contract_execution_lock_target(self, contract_id: str) -> Path:
+        self._validate_project_boundary()
+        contract_root = self._contracts_root / contract_id
+        target = contract_root / ".execution"
+        lock_path = target.with_suffix(target.suffix + ".lock")
+        if not target.is_relative_to(self._contracts_root):
+            raise ArtifactIntegrityError(
+                "Contract execution lock path escapes the artifact store",
+                operation="path_resolution",
+                details={"path": str(target), "root": str(self._contracts_root)},
+            )
+        if _is_link_like(contract_root) or _is_link_like(target) or _is_link_like(lock_path):
+            raise ArtifactIntegrityError(
+                "Contract execution lock path must not traverse a symlink",
+                operation="path_resolution",
+                details={"path": str(lock_path)},
+            )
+        return target
+
     def _load_manifest_locked(
         self,
         contract_id: str,
@@ -669,6 +730,59 @@ def _validate_contract_id(contract_id: str) -> str:
             "contract_id must be 1-128 path-safe ASCII characters beginning with alphanumeric"
         )
     return contract_id
+
+
+def _validate_json_native(
+    value: Any,
+    *,
+    path: str = "$",
+    ancestors: set[int] | None = None,
+) -> None:
+    """Reject Python values that JSON cannot replay without normalization."""
+    value_type = type(value)
+    if value is None or value_type in {bool, int, str}:
+        return
+    if value_type is float:
+        if math.isfinite(value):
+            return
+        raise ArtifactStoreError(
+            "Disposable artifact contains a non-finite JSON number",
+            operation="serialize",
+            details={"path": path},
+        )
+
+    if value_type not in {dict, list}:
+        raise ArtifactStoreError(
+            "Disposable artifact values must use JSON-native types",
+            operation="serialize",
+            details={"path": path, "type": value_type.__name__},
+        )
+
+    active = ancestors if ancestors is not None else set()
+    marker = id(value)
+    if marker in active:
+        raise ArtifactStoreError(
+            "Disposable artifact contains a circular JSON value",
+            operation="serialize",
+            details={"path": path},
+        )
+    active.add(marker)
+    try:
+        if value_type is list:
+            for index, item in enumerate(value):
+                _validate_json_native(item, path=f"{path}[{index}]", ancestors=active)
+            return
+
+        for key, item in value.items():
+            if type(key) is not str:
+                raise ArtifactStoreError(
+                    "Disposable artifact object keys must be JSON strings",
+                    operation="serialize",
+                    details={"path": path, "key_type": type(key).__name__},
+                )
+            _validate_json_native(item, path=f"{path}.{key}", ancestors=active)
+    finally:
+        active.remove(marker)
 
 
 def _digest_from_ref(artifact_ref: str) -> str:

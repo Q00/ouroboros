@@ -21,12 +21,14 @@ The accepted C2-C5 contract is implemented by these production surfaces:
   tests at less than 4 KiB.
 - `persistence/artifact_store.py` stores canonical JSON bodies under
   `.ouroboros/artifacts/<sha256-prefix>/<sha256>.json`, binds them to durable
-  per-contract manifests, verifies hashes on every fetch, and refuses contract
-  reuse for different content.
+  per-contract manifests, verifies hashes on every explicit fetch, rejects
+  Python values that cannot round-trip as JSON, and refuses contract reuse for
+  different content.
 - `orchestrator/disposable_memory.py` runs child work through `AgentProcess`,
-  persists the body before completion, and returns only the bounded envelope.
-  Default replay reads the artifact; explicit force-rerun requires a new
-  contract id.
+  serializes each contract's effects with a cross-process lock, persists the
+  body before completion, and returns only the bounded envelope. Ordinary retry
+  recovery reads only the manifest envelope; default replay reads the artifact,
+  and explicit force-rerun requires a new contract id.
 - `ouroboros artifacts fetch|replay|prune` exposes explicit inspection and
   dry-run-first GC. `prune --apply` writes a tombstone for every referencing
   contract before deleting a shared blob.
@@ -35,7 +37,8 @@ The encoded JSON artifact limit is exactly 1 MiB: 1,048,576 bytes is accepted
 and the next byte is rejected. The 1 MiB regression fixture also proves that
 the EventStore row and caller envelope remain below 4 KiB and contain no body
 substring. A global cross-process file lock serializes reference publication
-with pruning; malformed manifests abort GC fail-closed.
+with pruning, while per-contract locks prevent overlapping retry deliveries
+from dispatching child effects twice. Malformed manifests abort GC fail-closed.
 
 ## Scope
 

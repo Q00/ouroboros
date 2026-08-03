@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import contextmanager
+import errno
 import os
 from pathlib import Path
 from typing import TextIO
@@ -14,15 +15,23 @@ else:  # pragma: no branch
     import fcntl
 
 
+_LOCK_BUSY_ERRNOS = frozenset({errno.EACCES, errno.EAGAIN, errno.EDEADLK})
+
+
 @contextmanager
-def file_lock(file_path: Path, exclusive: bool = True) -> Iterator[None]:
-    """Context manager for cross-platform file locking."""
+def file_lock(
+    file_path: Path,
+    exclusive: bool = True,
+    *,
+    blocking: bool = True,
+) -> Iterator[None]:
+    """Context manager for blocking or fail-fast cross-platform file locking."""
     lock_path = file_path.with_suffix(file_path.suffix + ".lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
 
     with lock_path.open("a+", encoding="utf-8") as handle:
         _ensure_lockfile_content(handle)
-        _acquire_lock(handle, exclusive=exclusive)
+        _acquire_lock(handle, exclusive=exclusive, blocking=blocking)
         try:
             yield
         finally:
@@ -37,13 +46,35 @@ def _ensure_lockfile_content(handle: TextIO) -> None:
         handle.seek(0)
 
 
-def _acquire_lock(handle: TextIO, *, exclusive: bool = True) -> None:
+def _acquire_lock(
+    handle: TextIO,
+    *,
+    exclusive: bool = True,
+    blocking: bool = True,
+) -> None:
     if os.name == "nt":  # pragma: no cover - exercised on Windows
         handle.seek(0)
-        msvcrt.locking(handle.fileno(), msvcrt.LK_RLCK if not exclusive else msvcrt.LK_LOCK, 1)
+        if exclusive:
+            mode = msvcrt.LK_LOCK if blocking else msvcrt.LK_NBLCK
+        else:
+            mode = msvcrt.LK_RLCK if blocking else msvcrt.LK_NBRLCK
+        try:
+            msvcrt.locking(handle.fileno(), mode, 1)
+        except OSError as exc:
+            if not blocking and exc.errno in _LOCK_BUSY_ERRNOS:
+                raise BlockingIOError(exc.errno, "file lock is already held") from exc
+            raise
         return
 
-    fcntl.flock(handle.fileno(), fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+    mode = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
+    if not blocking:
+        mode |= fcntl.LOCK_NB
+    try:
+        fcntl.flock(handle.fileno(), mode)
+    except OSError as exc:
+        if not blocking and exc.errno in _LOCK_BUSY_ERRNOS:
+            raise BlockingIOError(exc.errno, "file lock is already held") from exc
+        raise
 
 
 def _release_lock(handle: TextIO) -> None:

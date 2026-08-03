@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import multiprocessing
+import os
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -61,6 +64,46 @@ def _service(tmp_path: Path) -> tuple[DisposableMemory, _EventStore]:
         checkpoint_store=CheckpointStore(tmp_path / "checkpoints"),
     )
     return service, event_store
+
+
+def _run_disposable_process(
+    artifact_root: str,
+    counter_path: str,
+    ready: Any,
+    start: Any,
+    results: Any,
+) -> None:
+    ready.put(os.getpid())
+    if not start.wait(20):
+        results.put(("error", "start timeout"))
+        return
+
+    async def invoke() -> str:
+        service = DisposableMemory(
+            artifact_store=ContentAddressedArtifactStore(Path(artifact_root)),
+            checkpoint_store=CheckpointStore(
+                Path(artifact_root).parent / f"checkpoints-{os.getpid()}"
+            ),
+        )
+
+        async def child_work(_handle: AgentProcessHandle) -> dict[str, bool]:
+            with Path(counter_path).open("a", encoding="utf-8") as handle:
+                handle.write(f"{os.getpid()}\n")
+            await asyncio.sleep(0.25)
+            return {"stable": True}
+
+        envelope = await service.run(
+            intent="process-overlap",
+            runtime_id="fixture-runtime",
+            work_fn=child_work,
+            contract_id="01K1DISPOSABLEMEMORY00012",
+        )
+        return envelope.artifact_ref
+
+    try:
+        results.put(("ok", asyncio.run(invoke())))
+    except BaseException as exc:  # noqa: BLE001 - report child-process failures to pytest
+        results.put(("error", f"{type(exc).__name__}: {exc}"))
 
 
 @pytest.mark.asyncio
@@ -185,6 +228,138 @@ async def test_reference_event_is_idempotent_when_same_contract_is_recovered(
 
 
 @pytest.mark.asyncio
+async def test_overlapping_tasks_execute_same_contract_child_once(tmp_path: Path) -> None:
+    service, _ = _service(tmp_path)
+    calls = 0
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def child_work(_handle: AgentProcessHandle) -> dict[str, bool]:
+        nonlocal calls
+        calls += 1
+        entered.set()
+        await release.wait()
+        return {"stable": True}
+
+    first_task = asyncio.create_task(
+        service.run(
+            intent="task-overlap",
+            runtime_id="fixture-runtime",
+            work_fn=child_work,
+            contract_id="01K1DISPOSABLEMEMORY00010",
+        )
+    )
+    await asyncio.wait_for(entered.wait(), 2)
+    second_task = asyncio.create_task(
+        service.run(
+            intent="task-overlap",
+            runtime_id="fixture-runtime",
+            work_fn=child_work,
+            contract_id="01K1DISPOSABLEMEMORY00010",
+        )
+    )
+    try:
+        await asyncio.sleep(0.1)
+        assert calls == 1
+    finally:
+        release.set()
+
+    first, second = await asyncio.gather(first_task, second_task)
+    assert calls == 1
+    assert first == second
+
+
+@pytest.mark.asyncio
+async def test_cancelled_lock_waiter_leaves_no_claim_or_child_effect(tmp_path: Path) -> None:
+    service, _ = _service(tmp_path)
+    calls = 0
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def child_work(_handle: AgentProcessHandle) -> dict[str, bool]:
+        nonlocal calls
+        calls += 1
+        entered.set()
+        await release.wait()
+        return {"stable": True}
+
+    contract_id = "01K1DISPOSABLEMEMORY00013"
+    first_task = asyncio.create_task(
+        service.run(
+            intent="cancelled-waiter",
+            runtime_id="fixture-runtime",
+            work_fn=child_work,
+            contract_id=contract_id,
+        )
+    )
+    await asyncio.wait_for(entered.wait(), 2)
+    waiting_task = asyncio.create_task(
+        service.run(
+            intent="cancelled-waiter",
+            runtime_id="fixture-runtime",
+            work_fn=child_work,
+            contract_id=contract_id,
+        )
+    )
+    await asyncio.sleep(0.1)
+    waiting_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiting_task
+
+    release.set()
+    first = await first_task
+    recovered = await asyncio.wait_for(
+        service.run(
+            intent="cancelled-waiter",
+            runtime_id="fixture-runtime",
+            work_fn=child_work,
+            contract_id=contract_id,
+        ),
+        2,
+    )
+
+    assert calls == 1
+    assert recovered == first
+
+
+def test_overlapping_processes_execute_same_contract_child_once(tmp_path: Path) -> None:
+    context = multiprocessing.get_context("spawn")
+    ready = context.Queue()
+    start = context.Event()
+    results = context.Queue()
+    artifact_root = tmp_path / "artifacts"
+    counter_path = tmp_path / "child-calls.txt"
+    processes = [
+        context.Process(
+            target=_run_disposable_process,
+            args=(str(artifact_root), str(counter_path), ready, start, results),
+        )
+        for _ in range(2)
+    ]
+
+    try:
+        for process in processes:
+            process.start()
+        assert len({ready.get(timeout=20) for _ in processes}) == 2
+        start.set()
+        for process in processes:
+            process.join(30)
+        records = [results.get(timeout=5) for _ in processes]
+    finally:
+        start.set()
+        for process in processes:
+            if process.is_alive():
+                process.terminate()
+            process.join(5)
+
+    assert [process.exitcode for process in processes] == [0, 0]
+    errors = [record[1] for record in records if record[0] == "error"]
+    assert not errors, "\n".join(errors)
+    assert records[0][1] == records[1][1]
+    assert len(counter_path.read_text(encoding="utf-8").splitlines()) == 1
+
+
+@pytest.mark.asyncio
 async def test_retry_repairs_reference_without_reexecuting_durable_contract(
     tmp_path: Path,
 ) -> None:
@@ -224,6 +399,44 @@ async def test_retry_repairs_reference_without_reexecuting_durable_contract(
     assert calls == 1
     references = [event for event in event_store.appended if event.type == "artifact.referenced"]
     assert len(references) == 1
+
+
+@pytest.mark.asyncio
+async def test_large_retry_recovers_envelope_without_reading_body(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, _ = _service(tmp_path)
+    empty_size = len(canonical_artifact_bytes({"output": ""}))
+    body = {"output": "x" * (MAX_DISPOSABLE_ARTIFACT_BYTES - empty_size)}
+    calls = 0
+
+    async def child_work(_handle: AgentProcessHandle) -> dict[str, str]:
+        nonlocal calls
+        calls += 1
+        return body
+
+    contract_id = "01K1DISPOSABLEMEMORY00011"
+    first = await service.run(
+        intent="large-retry",
+        runtime_id="fixture-runtime",
+        work_fn=child_work,
+        contract_id=contract_id,
+    )
+
+    def fail_body_read(_artifact_ref: str) -> bytes:
+        raise AssertionError("ordinary retry must not materialize the artifact body")
+
+    monkeypatch.setattr(service.artifact_store, "_read_blob_locked", fail_body_read)
+    recovered = await service.run(
+        intent="large-retry",
+        runtime_id="fixture-runtime",
+        work_fn=child_work,
+        contract_id=contract_id,
+    )
+
+    assert recovered == first
+    assert calls == 1
 
 
 @pytest.mark.asyncio

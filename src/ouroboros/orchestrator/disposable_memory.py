@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 import time
 from typing import Any
@@ -39,40 +40,43 @@ class DisposableMemory:
     ) -> DisposableResultEnvelope:
         """Execute child work and return only a bounded result envelope."""
         resolved_contract_id = contract_id or new_call_id()
-        existing = self.artifact_store.fetch_if_exists(resolved_contract_id)
-        if existing is not None:
-            await self._append_reference_event(existing.envelope)
-            return existing.envelope
+        async with _contract_execution_lock(self.artifact_store, resolved_contract_id):
+            existing = self.artifact_store.envelope_if_exists(resolved_contract_id)
+            if existing is not None:
+                await self._append_reference_event(existing)
+                return existing
 
-        started = time.monotonic()
+            started = time.monotonic()
 
-        async def persist_before_completion(handle: AgentProcessHandle) -> DisposableResultEnvelope:
-            if handle.should_cancel():
-                raise asyncio.CancelledError("disposable work cancelled before execution")
-            body = await work_fn(handle)
-            if handle.should_cancel():
-                raise asyncio.CancelledError("disposable work cancelled before publication")
-            duration_ms = max(0, round((time.monotonic() - started) * 1000))
-            envelope = self.artifact_store.put_for_contract(
-                contract_id=resolved_contract_id,
-                body=body,
-                runtime_id=runtime_id,
-                duration_ms=duration_ms,
-                events_emitted_count=events_emitted_count,
+            async def persist_before_completion(
+                handle: AgentProcessHandle,
+            ) -> DisposableResultEnvelope:
+                if handle.should_cancel():
+                    raise asyncio.CancelledError("disposable work cancelled before execution")
+                body = await work_fn(handle)
+                if handle.should_cancel():
+                    raise asyncio.CancelledError("disposable work cancelled before publication")
+                duration_ms = max(0, round((time.monotonic() - started) * 1000))
+                envelope = self.artifact_store.put_for_contract(
+                    contract_id=resolved_contract_id,
+                    body=body,
+                    runtime_id=runtime_id,
+                    duration_ms=duration_ms,
+                    events_emitted_count=events_emitted_count,
+                )
+                handle.complete_on_return_after_cancel()
+                await self._append_reference_event(envelope)
+                return envelope
+
+            return await run_with_agent_process(
+                event_store=self.event_store,
+                intent=intent,
+                work_fn=persist_before_completion,
+                timeout=timeout,
+                checkpoint_store=self.checkpoint_store,
+                process_id=resolved_contract_id,
+                cancel_key=resolved_contract_id,
             )
-            handle.complete_on_return_after_cancel()
-            await self._append_reference_event(envelope)
-            return envelope
-
-        return await run_with_agent_process(
-            event_store=self.event_store,
-            intent=intent,
-            work_fn=persist_before_completion,
-            timeout=timeout,
-            checkpoint_store=self.checkpoint_store,
-            process_id=resolved_contract_id,
-            cancel_key=resolved_contract_id,
-        )
 
     def fetch(self, contract_id: str) -> FetchedArtifact:
         """Explicitly fetch a disposable body by contract id."""
@@ -130,6 +134,26 @@ async def _event_already_persisted(store: Any, event_id: str, contract_id: str) 
         return False
     events = await replay("contract", contract_id)
     return any(getattr(event, "id", None) == event_id for event in events)
+
+
+@asynccontextmanager
+async def _contract_execution_lock(
+    store: ContentAddressedArtifactStore,
+    contract_id: str,
+) -> AsyncIterator[None]:
+    """Poll a cross-process claim without blocking or leaking a worker thread."""
+    while True:
+        lock = store.contract_execution_lock(contract_id, blocking=False)
+        try:
+            lock.__enter__()
+        except BlockingIOError:
+            await asyncio.sleep(0.05)
+            continue
+        try:
+            yield
+        finally:
+            lock.__exit__(None, None, None)
+        return
 
 
 __all__ = ["DisposableMemory"]
