@@ -607,6 +607,7 @@ class EvolutionaryLoop:
                 conductor_directive=conductor_directive,
                 project_dir=self.get_project_dir(),
                 generation_number=generation_number,
+                execution_policy=loop_support.evolution_execution_policy(self.config),
             )
             try:
                 return await loop_support.run_lineage_single_flight(
@@ -684,14 +685,15 @@ class EvolutionaryLoop:
             # Determine resume point
             last_gen, last_phase, interrupted_at_phase = projector.find_resume_point(events)
 
-            if last_phase in (GenerationPhase.FAILED, GenerationPhase.INTERRUPTED):
-                # Resume the failed/interrupted generation
-                generation_number = last_gen
-            else:
-                generation_number = last_gen + 1
-
-            # Reconstruct seed — prefer interrupted gen's seed_json (has evolved state)
-            if initial_seed is not None and not lineage.verification_handoff_pending:
+            try:
+                generation_number, recovered_seed = loop_support.recovery_plan(
+                    lineage, last_gen, last_phase
+                )
+            except ValueError as exc:
+                return Result.err(OuroborosError(str(exc)))
+            if recovered_seed is not None:
+                current_seed = recovered_seed
+            elif initial_seed is not None and not lineage.verification_handoff_pending:
                 # Caller provided seed explicitly (e.g., after rewind)
                 current_seed = initial_seed
             elif last_phase == GenerationPhase.INTERRUPTED:
@@ -828,9 +830,7 @@ class EvolutionaryLoop:
                 }
             )
 
-        # Step 2: Run one generation wrapped in AgentProcess for pause/cancel/replay
-        # primitives. State reconstruction above is outside the process boundary
-        # so that replays start with a clean slate.
+        # Run one generation in AgentProcess; replayed state stays outside its boundary.
         resume_after_phase = (
             interrupted_at_phase if last_phase == GenerationPhase.INTERRUPTED else None
         )
@@ -839,9 +839,7 @@ class EvolutionaryLoop:
         async def _generation_work(handle: AgentProcessHandle) -> None:
             self._install_sigint_handler()
             try:
-                # Cooperative checkpoint before generation phases begin. Route
-                # through the normal shutdown checkpoint so pause, cancel, and
-                # SIGINT all persist a lineage interruption consistently.
+                # Persist pause, cancel, and SIGINT through the normal shutdown checkpoint.
                 interrupted_before_start = await self._check_shutdown(
                     lineage.lineage_id,
                     generation_number,

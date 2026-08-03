@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, fields, is_dataclass
 import inspect
 import json
 import time
@@ -57,6 +57,34 @@ def generation_execution_id(lineage_id: str, generation_number: int) -> str:
     return f"evolve:{lineage_id}:generation:{generation_number}"
 
 
+def _execution_policy_value(value: Any) -> Any:
+    """Project nested config values into a stable, field-complete JSON tree."""
+    if value is None or isinstance(value, str | int | float | bool):
+        return value
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        return _execution_policy_value(model_dump(mode="json"))
+    if is_dataclass(value) and not isinstance(value, type):
+        return {
+            item.name: _execution_policy_value(getattr(value, item.name)) for item in fields(value)
+        }
+    if isinstance(value, Mapping):
+        return {str(key): _execution_policy_value(item) for key, item in value.items()}
+    if isinstance(value, list | tuple):
+        return [_execution_policy_value(item) for item in value]
+    raise TypeError(f"Unsupported evolution execution-policy value: {type(value).__qualname__}")
+
+
+def evolution_execution_policy(config: Any | None) -> dict[str, Any] | None:
+    """Return every declared evolution config field for durable request identity."""
+    if config is None:
+        return None
+    projected = _execution_policy_value(config)
+    if not isinstance(projected, dict):
+        raise TypeError("Evolution execution policy must project to an object")
+    return projected
+
+
 async def emit_generation_started_once(
     event_store: EventStore,
     *,
@@ -92,6 +120,7 @@ def evolve_request_key(
     conductor_directive: ConductorDirective | None,
     project_dir: str | None = None,
     generation_number: int | None = None,
+    execution_policy: Mapping[str, Any] | None = None,
 ) -> str:
     """Identify inputs whose concurrent callers may share one evolve result."""
     return stable_payload_digest(
@@ -101,6 +130,7 @@ def evolve_request_key(
             "parallel": parallel,
             "project_dir": project_dir,
             "generation_number": generation_number,
+            "execution_policy": dict(execution_policy) if execution_policy is not None else None,
             "conductor_directive": (
                 conductor_directive.to_event_data() if conductor_directive is not None else None
             ),
@@ -393,6 +423,44 @@ def generation_parent_seed(current_seed: Seed, previous: GenerationRecord | None
         raise ValueError(
             f"Failed to reconstruct generation parent Seed from seed_json: {exc}"
         ) from exc
+
+
+def unfinished_generation_seed(
+    lineage: OntologyLineage,
+    generation_number: int,
+) -> Seed:
+    """Restore the durable starting Seed for a hard-crashed generation."""
+    unfinished = next(
+        (
+            generation
+            for generation in reversed(lineage.generations)
+            if generation.generation_number == generation_number
+        ),
+        None,
+    )
+    if unfinished is None or not unfinished.seed_json:
+        raise ValueError(
+            "Cannot recover unfinished generation: its durable starting Seed is unavailable"
+        )
+    try:
+        return Seed.from_dict(json.loads(unfinished.seed_json))
+    except Exception as exc:
+        raise ValueError(
+            f"Failed to reconstruct unfinished generation seed from seed_json: {exc}"
+        ) from exc
+
+
+def recovery_plan(
+    lineage: OntologyLineage,
+    last_generation: int,
+    last_phase: GenerationPhase,
+) -> tuple[int, Seed | None]:
+    """Keep unfinished generation identity and recover hard-crash Seed authority."""
+    if last_phase == GenerationPhase.COMPLETED:
+        return last_generation + 1, None
+    if last_phase in {GenerationPhase.FAILED, GenerationPhase.INTERRUPTED}:
+        return last_generation, None
+    return last_generation, unfinished_generation_seed(lineage, last_generation)
 
 
 def watchdog_timeout_action(timeout_kind: str) -> str:

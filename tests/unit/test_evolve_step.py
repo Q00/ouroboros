@@ -1,6 +1,7 @@
 """Unit tests for evolve_step() — single-generation stepping API."""
 
 import asyncio
+from dataclasses import fields, replace
 import inspect
 import json
 from types import SimpleNamespace
@@ -261,6 +262,109 @@ class TestEvolutionaryLoopConfig:
         )
 
         assert config.runtime_controls.generation_no_progress_timeout_seconds == 123
+
+    def test_every_execution_policy_field_changes_core_and_handler_request_identity(self) -> None:
+        """Rolling workers with any execution-significant config drift cannot coalesce."""
+        from pathlib import Path
+
+        from ouroboros.mcp.tools.evolution_handlers import _evolve_handler_request_key
+
+        base = EvolutionaryLoopConfig(runtime_controls=RuntimeControlsConfig())
+        alternatives = {
+            "max_generations": 31,
+            "convergence_threshold": 0.9,
+            "stagnation_window": 4,
+            "min_generations": 2,
+            "generation_timeout_seconds": 1,
+            "runtime_controls": RuntimeControlsConfig(mcp_tool_timeout_seconds=1),
+            "enable_oscillation_detection": False,
+            "eval_gate_enabled": False,
+            "eval_min_score": 0.8,
+            "outcome_gate_enabled": False,
+            "evaluation_plateau_epsilon": 0.02,
+            "scoped_reexecution": False,
+            "focused_evolution": False,
+        }
+        declared_fields = {item.name for item in fields(EvolutionaryLoopConfig)}
+        assert set(alternatives) == declared_fields
+
+        base_policy = loop_support.evolution_execution_policy(base)
+        assert base_policy is not None
+        assert set(base_policy) == declared_fields
+        core_key = loop_support.evolve_request_key(
+            None,
+            execute=True,
+            parallel=True,
+            conductor_directive=None,
+            generation_number=2,
+            execution_policy=base_policy,
+        )
+        handler_key = _evolve_handler_request_key(
+            {"lineage_id": "lin_policy"},
+            configured_project_dir=None,
+            fallback_cwd=Path.cwd().resolve(),
+            execution_policy=base_policy,
+        )
+
+        for field_name, alternative in alternatives.items():
+            changed_policy = loop_support.evolution_execution_policy(
+                replace(base, **{field_name: alternative})
+            )
+            assert changed_policy is not None
+            assert changed_policy != base_policy, field_name
+            assert (
+                loop_support.evolve_request_key(
+                    None,
+                    execute=True,
+                    parallel=True,
+                    conductor_directive=None,
+                    generation_number=2,
+                    execution_policy=changed_policy,
+                )
+                != core_key
+            ), field_name
+            assert (
+                _evolve_handler_request_key(
+                    {"lineage_id": "lin_policy"},
+                    configured_project_dir=None,
+                    fallback_cwd=Path.cwd().resolve(),
+                    execution_policy=changed_policy,
+                )
+                != handler_key
+            ), field_name
+
+        declared_runtime_fields = set(RuntimeControlsConfig.model_fields)
+        assert set(base_policy["runtime_controls"]) == declared_runtime_fields
+        for field_name in declared_runtime_fields:
+            runtime_values = base.runtime_controls.model_dump()
+            runtime_values[field_name] = float(runtime_values[field_name]) + 1.0
+            changed_policy = loop_support.evolution_execution_policy(
+                replace(
+                    base,
+                    runtime_controls=RuntimeControlsConfig.model_validate(runtime_values),
+                )
+            )
+            assert changed_policy is not None
+            assert (
+                loop_support.evolve_request_key(
+                    None,
+                    execute=True,
+                    parallel=True,
+                    conductor_directive=None,
+                    generation_number=2,
+                    execution_policy=changed_policy,
+                )
+                != core_key
+            ), f"runtime_controls.{field_name}"
+            assert (
+                _evolve_handler_request_key(
+                    {"lineage_id": "lin_policy"},
+                    configured_project_dir=None,
+                    fallback_cwd=Path.cwd().resolve(),
+                    execution_policy=changed_policy,
+                )
+                != handler_key
+            ), f"runtime_controls.{field_name}"
 
     def test_explicit_runtime_controls_are_preserved(self) -> None:
         controls = RuntimeControlsConfig(
@@ -2027,6 +2131,78 @@ class TestEvolveStepResume:
         step = result.value
         assert step.generation_result.generation_number == 2
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "hard_crash_phase",
+        [
+            GenerationPhase.WONDERING,
+            GenerationPhase.REFLECTING,
+            GenerationPhase.SEEDING,
+            GenerationPhase.EXECUTING,
+            GenerationPhase.EVALUATING,
+        ],
+    )
+    async def test_hard_crash_replays_the_unfinished_generation(
+        self,
+        hard_crash_phase: GenerationPhase,
+    ) -> None:
+        """A recovered nonterminal generation never advances under a new identity."""
+        store = await create_event_store()
+        parent = make_seed(seed_id="seed_hard_crash_parent")
+        lineage_id = f"lin_hard_crash_{hard_crash_phase.value}"
+        await seed_events_for_gen1(store, lineage_id, parent, make_eval_summary(False))
+        await store.append(
+            lineage_generation_started(
+                lineage_id,
+                2,
+                hard_crash_phase.value,
+                parent.metadata.seed_id,
+                json.dumps(parent.to_dict()),
+            )
+        )
+
+        successor = make_seed(
+            seed_id=f"seed_recovered_{hard_crash_phase.value}",
+            parent_seed_id=parent.metadata.seed_id,
+        )
+        loop = make_loop(
+            store,
+            gen_result=GenerationResult(
+                generation_number=2,
+                seed=successor,
+                evaluation_summary=make_eval_summary(),
+                phase=GenerationPhase.COMPLETED,
+                success=True,
+            ),
+        )
+
+        planned = await loop_support.planned_evolve_generation(store, lineage_id, execute=True)
+        result = await loop.evolve_step(lineage_id)
+
+        assert planned == 2
+        assert result.is_ok
+        assert result.value.generation_result.generation_number == 2
+        call = loop._run_generation.call_args
+        assert call.kwargs["generation_number"] == 2
+        assert call.kwargs["current_seed"] == parent
+        replayed = await store.replay_lineage(lineage_id)
+        assert (
+            sum(
+                event.type == "lineage.generation.started"
+                and event.data.get("generation_number") == 2
+                for event in replayed
+            )
+            == 1
+        )
+        assert (
+            sum(
+                event.type == "lineage.generation.completed"
+                and event.data.get("generation_number") == 2
+                for event in replayed
+            )
+            == 1
+        )
+
 
 class TestRunGenerationFailures:
     """Test failure event emission inside _run_generation()."""
@@ -2714,6 +2890,16 @@ class TestEvolveStepHandler:
 
         store = await create_event_store()
         seed = make_seed(seed_id="seed_explicit_recovery")
+        await store.append(lineage_created("lin_explicit_recovery", seed.goal))
+        await store.append(
+            lineage_generation_started(
+                "lin_explicit_recovery",
+                1,
+                GenerationPhase.EXECUTING.value,
+                seed.metadata.seed_id,
+                json.dumps(seed.to_dict()),
+            )
+        )
         generation = GenerationResult(
             generation_number=1,
             seed=seed,
@@ -2757,6 +2943,31 @@ class TestEvolveStepHandler:
             )
 
         assert result.is_ok
+        assert result.value.meta["generation"] == 1
+        loop._run_generation.assert_awaited_once()
+        assert loop._run_generation.call_args.kwargs["generation_number"] == 1
+        replayed = await store.replay_lineage("lin_explicit_recovery")
+        assert not any(
+            event.data.get("generation_number") == 2
+            for event in replayed
+            if event.type.startswith("lineage.generation.")
+        )
+        assert (
+            sum(
+                event.type == "lineage.generation.started"
+                and event.data.get("generation_number") == 1
+                for event in replayed
+            )
+            == 1
+        )
+        assert (
+            sum(
+                event.type == "lineage.generation.completed"
+                and event.data.get("generation_number") == 1
+                for event in replayed
+            )
+            == 1
+        )
         current = await lineage_claims.observe(
             store,
             scope="evolve-core",
@@ -2814,6 +3025,7 @@ class TestEvolveStepHandler:
             original_arguments,
             configured_project_dir=None,
             fallback_cwd=Path.cwd().resolve(),
+            execution_policy=loop_support.evolution_execution_policy(loop.config),
         )
         default_lease_seconds = lineage_claims.DEFAULT_LEASE_SECONDS
         monkeypatch.setattr(lineage_claims, "DEFAULT_LEASE_SECONDS", 0.01)

@@ -85,6 +85,7 @@ def _evolve_handler_request_key(
     *,
     configured_project_dir: str | None,
     fallback_cwd: Path,
+    execution_policy: dict[str, Any] | None = None,
 ) -> str:
     """Canonicalize semantically equivalent public retries before hashing."""
     normalized = dict(arguments)
@@ -120,6 +121,7 @@ def _evolve_handler_request_key(
             "arguments": normalized,
             "configured_project_dir": str(configured) if configured is not None else None,
             "fallback_cwd": str(fallback_cwd),
+            "execution_policy": execution_policy,
         }
     )
 
@@ -472,6 +474,9 @@ class EvolveStepHandler(BridgeAwareMixin):
             arguments,
             configured_project_dir=configured_project_dir,
             fallback_cwd=Path.cwd().resolve(),
+            execution_policy=loop_support.evolution_execution_policy(
+                getattr(self.evolutionary_loop, "config", None)
+            ),
         )
         recovered_generation: int | None = None
         recovered_evolve_result: Any | None = None
