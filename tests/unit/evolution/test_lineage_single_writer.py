@@ -224,6 +224,117 @@ async def test_durable_claim_coalesces_distinct_event_store_instances(tmp_path: 
 
 
 @pytest.mark.asyncio
+async def test_completed_receipt_waits_for_delayed_waiter_acknowledgement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A short receipt lease cannot move a registered waiter into the next generation."""
+    database_url = f"sqlite+aiosqlite:///{tmp_path / 'delayed-waiter.db'}"
+    owner_store = EventStore(database_url)
+    waiter_store = EventStore(database_url)
+    next_store = EventStore(database_url)
+    for store in (owner_store, waiter_store, next_store):
+        await store.initialize()
+
+    clock_ms = 1_000
+    monkeypatch.setattr(lineage_claims, "_now_ms", lambda: clock_ms)
+    owner_entered = asyncio.Event()
+    release_owner = asyncio.Event()
+    waiter_observing = asyncio.Event()
+    release_waiter = asyncio.Event()
+    next_attempted = asyncio.Event()
+    calls: list[str] = []
+    original_observe = lineage_claims.observe
+    original_try_acquire = lineage_claims.try_acquire
+
+    async def delay_waiter_observation(*args, **kwargs):  # type: ignore[no-untyped-def]
+        if args and args[0] is waiter_store and not release_waiter.is_set():
+            waiter_observing.set()
+            await release_waiter.wait()
+        return await original_observe(*args, **kwargs)
+
+    monkeypatch.setattr(lineage_claims, "observe", delay_waiter_observation)
+
+    async def track_next_acquisition(*args, **kwargs):  # type: ignore[no-untyped-def]
+        if args and args[0] is next_store:
+            next_attempted.set()
+        return await original_try_acquire(*args, **kwargs)
+
+    monkeypatch.setattr(lineage_claims, "try_acquire", track_next_acquisition)
+
+    async def generation_one() -> str:
+        calls.append("generation-1")
+        owner_entered.set()
+        await release_owner.wait()
+        return "generation-1-winner"
+
+    async def forbidden_duplicate() -> str:
+        calls.append("duplicate")
+        return "duplicate"
+
+    async def generation_two() -> str:
+        calls.append("generation-2")
+        return "generation-2-winner"
+
+    encode = lambda value: {"value": value}  # noqa: E731
+    decode = lambda payload: str(payload["value"])  # noqa: E731
+    try:
+        owner = asyncio.create_task(
+            run_durable_lineage_single_flight(
+                owner_store,
+                "lineage",
+                "request-1",
+                generation_one,
+                generation_number=1,
+                encode=encode,
+                decode=decode,
+            )
+        )
+        await owner_entered.wait()
+        waiter = asyncio.create_task(
+            run_durable_lineage_single_flight(
+                waiter_store,
+                "lineage",
+                "request-1",
+                forbidden_duplicate,
+                generation_number=1,
+                encode=encode,
+                decode=decode,
+            )
+        )
+        await waiter_observing.wait()
+        release_owner.set()
+        assert await owner == "generation-1-winner"
+
+        # The completed receipt has a five-second cleanup lease.  Advancing
+        # beyond it must not revoke the registered waiter's winner authority.
+        clock_ms = 7_000
+        next_generation = asyncio.create_task(
+            run_durable_lineage_single_flight(
+                next_store,
+                "lineage",
+                "request-2",
+                generation_two,
+                generation_number=2,
+                encode=encode,
+                decode=decode,
+            )
+        )
+        await next_attempted.wait()
+        await asyncio.sleep(0)
+        assert not next_generation.done()
+        assert calls == ["generation-1"]
+
+        release_waiter.set()
+        assert await waiter == "generation-1-winner"
+        assert await next_generation == "generation-2-winner"
+        assert calls == ["generation-1", "generation-2"]
+    finally:
+        for store in (owner_store, waiter_store, next_store):
+            await store.close()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("retryable_action", ["failed", "interrupted"])
 async def test_retryable_receipt_replays_waiters_but_allows_later_attempt(
     tmp_path: Path,

@@ -105,11 +105,14 @@ async def try_acquire(
                     .mappings()
                     .first()
                 )
-                now_ms = _now_ms()
                 waiter_count = int(row["waiter_count"]) if row is not None else 0
-                receipt_drained = row is not None and (
-                    waiter_count == 0 or int(row["lease_expires_at_ms"]) <= now_ms
-                )
+                # A completed receipt is exact winner authority for every
+                # caller that registered while its owner was active.  Time
+                # alone cannot revoke that authority: a live waiter may be
+                # descheduled or blocked on the database beyond the short
+                # receipt lease.  Only its atomic acknowledgement drains the
+                # receipt for ordinary next-generation acquisition.
+                receipt_drained = row is not None and waiter_count == 0
                 replaceable = row is None or (
                     bool(row["completed"])
                     and receipt_drained
