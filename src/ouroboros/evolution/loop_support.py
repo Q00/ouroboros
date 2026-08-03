@@ -163,6 +163,7 @@ def generation_partial_state(
         "validation_boundary_completed": validation_boundary_completed,
         "wonder_output_complete": True,
         "reflect_output_complete": True,
+        "evaluation_summary_complete": True,
     }
     if focus_checkpointed:
         partial_state["focus_checkpointed"] = True
@@ -234,6 +235,14 @@ def hard_crash_recovery(
         if record.last_completed_phase in {
             GenerationPhase.REFLECTING.value,
             GenerationPhase.SEEDING.value,
+        } and not isinstance(partial_state.get("wonder_output"), Mapping):
+            return record, (
+                "Cannot safely recover hard-crashed generation: complete Wonder output is "
+                "unavailable"
+            )
+        if record.last_completed_phase in {
+            GenerationPhase.REFLECTING.value,
+            GenerationPhase.SEEDING.value,
         } and (
             partial_state.get("reflect_output_complete") is not True
             or not isinstance(partial_state.get("reflect_output"), Mapping)
@@ -242,6 +251,14 @@ def hard_crash_recovery(
             return record, (
                 "Cannot safely recover hard-crashed generation: complete Reflect output and "
                 "patch provenance are unavailable"
+            )
+        if (
+            record.last_completed_phase == GenerationPhase.EVALUATING.value
+            and partial_state.get("evaluation_summary_complete") is not True
+        ):
+            return record, (
+                "Cannot safely recover hard-crashed generation: complete evaluation summary "
+                "is unavailable"
             )
     if last_phase == GenerationPhase.EVALUATING and execute:
         assert partial_state is not None
@@ -395,6 +412,10 @@ def restore_phase_state(
                 partial_state["evaluation_summary"]
             )
         except Exception as exc:
+            if partial_state.get("evaluation_summary_complete") is True:
+                raise ValueError(
+                    f"Failed to restore complete evaluation checkpoint: {exc}"
+                ) from exc
             logger.warning(
                 "evolution.resume.evaluation_summary_restore_failed",
                 extra={"error": str(exc)},

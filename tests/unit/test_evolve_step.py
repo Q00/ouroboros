@@ -896,6 +896,7 @@ class TestEvolveStepGen2:
                 partial_state={
                     "focus_checkpointed": True,
                     "wonder_output_complete": True,
+                    "wonder_output": make_wonder_output().model_dump(mode="json"),
                     "reflect_output_complete": True,
                     "reflect_output": {
                         "refined_goal": parent.goal,
@@ -2239,6 +2240,11 @@ class TestEvolveStepResume:
                     seed=checkpoint_seed,
                     active_ac_indices=(0,),
                     frozen_ac_indices=(),
+                    wonder_output=(
+                        make_wonder_output()
+                        if hard_crash_phase == GenerationPhase.SEEDING
+                        else None
+                    ),
                     reflect_output=(
                         ReflectOutput(
                             refined_goal=parent.goal,

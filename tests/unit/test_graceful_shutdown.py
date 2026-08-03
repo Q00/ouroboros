@@ -331,6 +331,9 @@ class TestCheckShutdownSerialization:
         assert ps["reflect_output"]["refined_goal"] == "g"
         assert ps["execution_output"] == "exec output"
         assert ps["evaluation_summary"]["score"] == 0.6
+        assert ps["wonder_output_complete"] is True
+        assert ps["reflect_output_complete"] is True
+        assert ps["evaluation_summary_complete"] is True
 
 
 # -- Resume restore tests --
