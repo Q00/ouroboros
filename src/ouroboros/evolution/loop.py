@@ -1437,12 +1437,29 @@ class EvolutionaryLoop:
         ontology_delta: OntologyDelta | None = None
         generation_parent_seed = current_seed
         generation_focus = focus.initial_evolution_focus(current_seed)
-        restored = loop_support.restore_phase_state(
-            lineage,
-            generation_number,
-            current_seed,
-            resume_after_phase,
+        prev_gen = (
+            next(
+                (g for g in reversed(lineage.generations) if g.phase == GenerationPhase.COMPLETED),
+                lineage.generations[-1],  # fallback if no completed gen exists
+            )
+            if generation_number > 1 and lineage.generations
+            else None
         )
+        try:
+            # Previous evaluation belongs to the completed parent, not the interrupted candidate.
+            generation_parent_seed = loop_support.generation_parent_seed(current_seed, prev_gen)
+        except ValueError as exc:
+            return Result.err(OuroborosError(str(exc)))
+        try:
+            restored = loop_support.restore_phase_state(
+                lineage,
+                generation_number,
+                current_seed,
+                generation_parent_seed,
+                resume_after_phase,
+            )
+        except ValueError as exc:
+            return Result.err(OuroborosError(str(exc)))
         resume_after_phase = restored.resume_after_phase
         wonder_output = restored.wonder_output
         reflect_output = restored.reflect_output
@@ -1454,21 +1471,6 @@ class EvolutionaryLoop:
         checkpoint_focus = restored.checkpoint_focus
         if checkpoint_focus is not None:
             generation_focus = checkpoint_focus
-
-        prev_gen = (
-            next(
-                (g for g in reversed(lineage.generations) if g.phase == GenerationPhase.COMPLETED),
-                lineage.generations[-1],  # fallback if no completed gen exists
-            )
-            if generation_number > 1 and lineage.generations
-            else None
-        )
-        try:
-            # The previous evaluation belongs to the completed parent, not an
-            # interrupted generation's candidate Seed.
-            generation_parent_seed = loop_support.generation_parent_seed(current_seed, prev_gen)
-        except ValueError as exc:
-            return Result.err(OuroborosError(str(exc)))
         if prev_gen is not None and not (execute and lineage.verification_handoff_pending):
             regression_report: RegressionReport = RegressionDetector().detect(lineage)
             generation_focus = focus.select_evolution_focus(
@@ -1479,7 +1481,6 @@ class EvolutionaryLoop:
                 enabled=self.config.focused_evolution,
             )
 
-            # Emit generation started
             await loop_support.emit_generation_started_once(
                 self.event_store,
                 lineage_id=lineage.lineage_id,

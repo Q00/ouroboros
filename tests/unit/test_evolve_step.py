@@ -52,7 +52,7 @@ from ouroboros.evolution.loop import (
     StepResult,
 )
 from ouroboros.evolution.projector import LineageProjector
-from ouroboros.evolution.reflect import ReflectOutput
+from ouroboros.evolution.reflect import ACPatch, ReflectOutput
 from ouroboros.evolution.watchdog import GenerationWatchdogTimeout
 from ouroboros.evolution.wonder import WonderOutput
 from ouroboros.mcp.server.adapter import _extract_feedback_metadata_from_artifact
@@ -866,6 +866,64 @@ class TestEvolveStepGen2:
         executor.assert_awaited_once()
         assert executor.await_args.args[0] == seed_v2
         evaluator.assert_awaited_once_with(seed_v2, "verified output")
+
+    @pytest.mark.asyncio
+    async def test_hard_crash_after_reflect_without_provenance_fails_closed(self) -> None:
+        """A truncated pre-Seed checkpoint cannot trigger provider replay."""
+        store = await create_event_store()
+        parent = make_seed(seed_id="seed_truncated_reflect_parent")
+        lineage_id = "lin_truncated_reflect_checkpoint"
+        await seed_events_for_gen1(store, lineage_id, parent, make_eval_summary(False))
+        await store.append(
+            lineage_generation_started(
+                lineage_id,
+                2,
+                GenerationPhase.WONDERING.value,
+                parent.metadata.seed_id,
+                json.dumps(parent.to_dict()),
+            )
+        )
+        await store.append(
+            lineage_generation_phase_changed(
+                lineage_id,
+                2,
+                GenerationPhase.SEEDING.value,
+                last_completed_phase=GenerationPhase.REFLECTING.value,
+                seed_id=parent.metadata.seed_id,
+                seed_json=json.dumps(parent.to_dict()),
+                active_ac_indices=[0],
+                frozen_ac_indices=[],
+                partial_state={
+                    "focus_checkpointed": True,
+                    "wonder_output_complete": True,
+                    "reflect_output_complete": True,
+                    "reflect_output": {
+                        "refined_goal": parent.goal,
+                        "refined_constraints": list(parent.constraints),
+                        "refined_acs": ["Tasks can be created"],
+                        "ac_patches": [{"op": "keep", "index": 0}],
+                    },
+                    # reflect_patch_identity_explicit was truncated.
+                },
+            )
+        )
+        wonder_engine = MagicMock()
+        wonder_engine.wonder = AsyncMock()
+        reflect_engine = MagicMock()
+        reflect_engine.reflect = AsyncMock()
+        loop = EvolutionaryLoop(
+            event_store=store,
+            wonder_engine=wonder_engine,
+            reflect_engine=reflect_engine,
+            seed_generator=SeedGenerator(llm_adapter=AsyncMock()),
+        )
+
+        result = await loop.evolve_step(lineage_id, execute=False)
+
+        assert result.is_err
+        assert "patch provenance" in str(result.error)
+        wonder_engine.wonder.assert_not_awaited()
+        reflect_engine.reflect.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_ontology_stable_handoff_survives_directive_append_failure(self) -> None:
@@ -2181,6 +2239,18 @@ class TestEvolveStepResume:
                     seed=checkpoint_seed,
                     active_ac_indices=(0,),
                     frozen_ac_indices=(),
+                    reflect_output=(
+                        ReflectOutput(
+                            refined_goal=parent.goal,
+                            refined_constraints=parent.constraints,
+                            refined_acs=tuple(
+                                criterion.description for criterion in parent.acceptance_criteria
+                            ),
+                            reasoning="durable reflect",
+                        )
+                        if hard_crash_phase == GenerationPhase.SEEDING
+                        else None
+                    ),
                     execution_output=(
                         "durable execution"
                         if hard_crash_phase == GenerationPhase.EVALUATING
@@ -2234,6 +2304,113 @@ class TestEvolveStepResume:
             )
             == 1
         )
+
+    @pytest.mark.asyncio
+    async def test_hard_crash_after_reflect_restores_exact_outputs_without_model_replay(
+        self,
+    ) -> None:
+        """A complete Reflect checkpoint resumes at Seed with identical authority."""
+        store = await create_event_store()
+        parent = make_seed(seed_id="seed_reflect_checkpoint_parent").model_copy(
+            update={
+                "acceptance_criteria": (
+                    "Tasks can be created",
+                    "Tasks can be deleted",
+                )
+            }
+        )
+        parent = Seed.from_dict(parent.to_dict())
+        prior_evaluation = EvaluationSummary(
+            final_approved=False,
+            highest_stage_passed=2,
+            score=0.5,
+            ac_results=(
+                ACResult(
+                    ac_index=0,
+                    ac_content="Tasks can be created",
+                    passed=True,
+                ),
+                ACResult(
+                    ac_index=1,
+                    ac_content="Tasks can be deleted",
+                    passed=False,
+                ),
+            ),
+        )
+        lineage_id = "lin_reflect_checkpoint"
+        await seed_events_for_gen1(store, lineage_id, parent, prior_evaluation)
+        await store.append(
+            lineage_generation_started(
+                lineage_id,
+                2,
+                GenerationPhase.WONDERING.value,
+                parent.metadata.seed_id,
+                json.dumps(parent.to_dict()),
+            )
+        )
+        wonder_output = WonderOutput(
+            questions=(),
+            grounded_questions=(),
+            ontology_tensions=("Deletion semantics remain underspecified",),
+            should_continue=True,
+            reasoning="Continue despite the empty question list",
+        )
+        reflect_output = ReflectOutput(
+            refined_goal=parent.goal,
+            refined_constraints=parent.constraints,
+            refined_acs=("Tasks can be created", "Tasks can be archived"),
+            ac_patches=(
+                ACPatch(op="keep", index=0, reason="authoritative pass"),
+                ACPatch(
+                    op="revise",
+                    index=1,
+                    content="Tasks can be archived",
+                    reason="repair failed node",
+                ),
+            ),
+            settled_ac_indices=(0,),
+            ontology_mutations=(),
+            reasoning="Patch only the failed node",
+        )
+        reflect_output.restore_durable_patch_identity(parent)
+        await store.append(
+            loop_support.generation_phase_checkpoint(
+                lineage_id=lineage_id,
+                generation_number=2,
+                phase=GenerationPhase.SEEDING,
+                last_completed_phase=GenerationPhase.REFLECTING.value,
+                seed=parent,
+                active_ac_indices=(1,),
+                frozen_ac_indices=(0,),
+                wonder_output=wonder_output,
+                reflect_output=reflect_output,
+            )
+        )
+
+        wonder_engine = MagicMock()
+        wonder_engine.wonder = AsyncMock()
+        reflect_engine = MagicMock()
+        reflect_engine.reflect = AsyncMock()
+        loop = EvolutionaryLoop(
+            event_store=store,
+            config=EvolutionaryLoopConfig(focused_evolution=True),
+            wonder_engine=wonder_engine,
+            reflect_engine=reflect_engine,
+            seed_generator=SeedGenerator(llm_adapter=AsyncMock()),
+        )
+
+        result = await loop.evolve_step(lineage_id, execute=False)
+
+        assert result.is_ok
+        generation = result.value.generation_result
+        assert generation.wonder_output == wonder_output
+        assert generation.reflect_output is not None
+        assert generation.reflect_output.ac_patch_identity_explicit is True
+        assert tuple(
+            criterion.description for criterion in generation.seed.acceptance_criteria
+        ) == ("Tasks can be created", "Tasks can be archived")
+        wonder_engine.wonder.assert_not_awaited()
+        reflect_engine.reflect.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_hard_crash_during_execute_fails_closed_without_redispatch(self) -> None:

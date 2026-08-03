@@ -108,6 +108,33 @@ class ReflectOutput(BaseModel, frozen=True):
         """Whether this output carries parser-issued, non-serialized patch provenance."""
         return self._ac_patch_provenance == (self.refined_acs, self.ac_patches)
 
+    def restore_durable_patch_identity(self, parent_seed: Seed) -> None:
+        """Restore explicit identity from a complete, trusted phase checkpoint.
+
+        Generic model serialization intentionally cannot manufacture parser
+        provenance.  The evolution checkpoint boundary persists that provenance
+        separately and calls this method only after replay.  Revalidate the
+        complete patch mapping against the durable parent Seed before restoring
+        it so corrupt or mismatched checkpoint data still fails closed.
+        """
+        raw_patches = [patch.model_dump(mode="python") for patch in self.ac_patches]
+        parent_acs = ac_texts(parent_seed.acceptance_criteria)
+        _validate_explicit_ac_patch_identity(raw_patches, len(parent_acs))
+
+        parent_patches = {
+            patch.index: patch for patch in self.ac_patches if patch.op in {"keep", "revise"}
+        }
+        restored_acs = list(parent_acs)
+        for index in range(len(parent_acs)):
+            patch = parent_patches[index]
+            if patch.op == "revise":
+                assert patch.content is not None
+                restored_acs[index] = patch.content
+        restored_acs.extend(patch.content or "" for patch in self.ac_patches if patch.op == "add")
+        if tuple(restored_acs) != self.refined_acs:
+            raise ValueError("Durable ac_patches conflict with refined_acs")
+        self._ac_patch_provenance = (self.refined_acs, self.ac_patches)
+
     @field_validator("refined_acs", mode="before")
     @classmethod
     def _coerce_refined_acs(cls, value: object) -> object:

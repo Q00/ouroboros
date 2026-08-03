@@ -161,13 +161,19 @@ def generation_partial_state(
     partial_state: dict[str, Any] = {
         "execution_boundary_completed": execution_boundary_completed,
         "validation_boundary_completed": validation_boundary_completed,
+        "wonder_output_complete": True,
+        "reflect_output_complete": True,
     }
     if focus_checkpointed:
         partial_state["focus_checkpointed"] = True
     if wonder_output is not None:
         partial_state["wonder_questions"] = list(wonder_output.questions)
+        partial_state["wonder_output"] = wonder_output.model_dump(mode="json")
     if reflect_output is not None:
         partial_state["reflect_output"] = reflect_output.model_dump(mode="json")
+        partial_state["reflect_patch_identity_explicit"] = bool(
+            reflect_output.ac_patch_identity_explicit
+        )
     if execution_output is not None:
         partial_state["execution_output"] = execution_output[:10_000]
         partial_state["execution_output_complete"] = len(execution_output) <= 10_000
@@ -216,6 +222,27 @@ def hard_crash_recovery(
             "Cannot safely redispatch a hard-crashed executing generation; reconcile the "
             "external execution before retrying"
         )
+    if last_phase != GenerationPhase.WONDERING:
+        assert record is not None
+        partial_state = record.partial_state
+        assert partial_state is not None
+        if partial_state.get("wonder_output_complete") is not True:
+            return record, (
+                "Cannot safely recover hard-crashed generation: complete Wonder output is "
+                "unavailable"
+            )
+        if record.last_completed_phase in {
+            GenerationPhase.REFLECTING.value,
+            GenerationPhase.SEEDING.value,
+        } and (
+            partial_state.get("reflect_output_complete") is not True
+            or not isinstance(partial_state.get("reflect_output"), Mapping)
+            or not isinstance(partial_state.get("reflect_patch_identity_explicit"), bool)
+        ):
+            return record, (
+                "Cannot safely recover hard-crashed generation: complete Reflect output and "
+                "patch provenance are unavailable"
+            )
     if last_phase == GenerationPhase.EVALUATING and execute:
         assert partial_state is not None
         if partial_state.get("execution_boundary_completed") is not True or (
@@ -255,6 +282,7 @@ def restore_phase_state(
     lineage: OntologyLineage,
     generation_number: int,
     current_seed: Seed,
+    generation_parent_seed: Seed,
     resume_after_phase: str | None,
 ) -> RestoredPhaseState:
     """Restore checkpointed outputs without trusting them across unfinished boundaries."""
@@ -300,13 +328,20 @@ def restore_phase_state(
                 reason="restored durable phase checkpoint",
             )
     wonder_output = None
-    if should_skip("wondering") and partial_state.get("wonder_questions"):
+    if should_skip("wondering") and partial_state.get("wonder_output_complete") is True:
+        checkpointed_wonder = partial_state.get("wonder_output")
+        if checkpointed_wonder is not None:
+            try:
+                wonder_output = WonderOutput.model_validate(checkpointed_wonder)
+            except Exception as exc:
+                raise ValueError(f"Failed to restore complete Wonder checkpoint: {exc}") from exc
+    elif should_skip("wondering") and "wonder_questions" in partial_state:
         questions = tuple(partial_state["wonder_questions"])
         wonder_output = WonderOutput(
             questions=questions,
             grounded_questions=ground_questions(
                 questions,
-                len(current_seed.acceptance_criteria),
+                len(generation_parent_seed.acceptance_criteria),
             ),
             should_continue=True,
         )
@@ -314,17 +349,39 @@ def restore_phase_state(
     if should_skip("reflecting") and partial_state.get("reflect_output"):
         try:
             restored_reflect_output = ReflectOutput.model_validate(partial_state["reflect_output"])
-            if restored_reflect_output.ac_patches and not should_skip("seeding"):
+            durable_reflect = partial_state.get("reflect_output_complete") is True
+            explicit_patch_identity = partial_state.get("reflect_patch_identity_explicit")
+            if durable_reflect and not isinstance(explicit_patch_identity, bool):
+                raise ValueError("Complete Reflect checkpoint lacks patch provenance")
+            if durable_reflect and explicit_patch_identity is True:
+                restored_reflect_output.restore_durable_patch_identity(generation_parent_seed)
+            if (
+                restored_reflect_output.ac_patches
+                and not restored_reflect_output.ac_patch_identity_explicit
+                and not durable_reflect
+                and not should_skip("seeding")
+            ):
                 resume_after_phase = "wondering"
             else:
                 reflect_output = restored_reflect_output
         except Exception as exc:
+            if partial_state.get("reflect_output_complete") is True:
+                raise ValueError(f"Failed to restore complete Reflect checkpoint: {exc}") from exc
             logger.warning(
                 "evolution.resume.reflect_output_restore_failed",
                 extra={"error": str(exc)},
             )
-    execution_boundary_completed = (
-        should_skip("executing") and partial_state.get("execution_boundary_completed") is True
+    # Graceful-interruption events written before durable phase checkpoints
+    # carried ``last_completed_phase`` but no explicit boundary marker.  That
+    # event is itself an authoritative acknowledgement that the boundary
+    # completed.  Hard-crash records must still carry the explicit marker and
+    # therefore remain fail-closed.
+    graceful_execution_completed = record.phase == GenerationPhase.INTERRUPTED and (
+        record.last_completed_phase
+        in {GenerationPhase.EXECUTING.value, GenerationPhase.EVALUATING.value}
+    )
+    execution_boundary_completed = should_skip("executing") and (
+        partial_state.get("execution_boundary_completed") is True or graceful_execution_completed
     )
     execution_output = (
         partial_state.get("execution_output") if execution_boundary_completed else None
@@ -342,8 +399,8 @@ def restore_phase_state(
                 "evolution.resume.evaluation_summary_restore_failed",
                 extra={"error": str(exc)},
             )
-    validation_boundary_completed = (
-        should_skip("executing") and partial_state.get("validation_boundary_completed") is True
+    validation_boundary_completed = should_skip("executing") and (
+        partial_state.get("validation_boundary_completed") is True or graceful_execution_completed
     )
     validation_output = (
         partial_state.get("validation_output") if validation_boundary_completed else None
