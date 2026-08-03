@@ -20,6 +20,7 @@ from ouroboros.persistence.event_store import EventStore
 
 MAX_RECEIPT_TEXT = 2_000
 MAX_VALIDATION_TEXT = 5_000
+MAX_EXECUTION_TEXT = 50_000
 
 
 def _bounded(value: str | None, limit: int) -> str | None:
@@ -57,6 +58,11 @@ def encode_step_result(result: Result[StepResult, OuroborosError]) -> dict[str, 
             generation.reflect_output.ac_patch_identity_explicit
             if generation.reflect_output is not None
             else None
+        ),
+        "execution_output": _bounded(generation.execution_output, MAX_EXECUTION_TEXT),
+        "execution_output_complete": (
+            generation.execution_output is None
+            or len(generation.execution_output) <= MAX_EXECUTION_TEXT
         ),
         "validation_output": _bounded(generation.validation_output, MAX_VALIDATION_TEXT),
         "ontology_delta": (
@@ -148,7 +154,21 @@ async def decode_step_result(
         if previous is not None and previous.seed_json:
             parent_seed = Seed.from_dict(json.loads(previous.seed_json))
         reflect.restore_durable_patch_identity(parent_seed)
-    execution_output = partial_state.get("execution_output", record.execution_output)
+    if "execution_output_complete" in payload:
+        if payload.get("execution_output_complete") is not True:
+            raise ValueError(
+                "Durable evolve receipt execution output is incomplete; handler evidence "
+                "cannot be rematerialized safely"
+            )
+        execution_output = payload.get("execution_output")
+        if execution_output is not None and not isinstance(execution_output, str):
+            raise ValueError("Durable evolve receipt execution output must be text or null")
+    else:
+        execution_output = partial_state.get("execution_output", record.execution_output)
+        if execution_output is not None:
+            raise ValueError(
+                "Legacy durable evolve receipt cannot prove execution-output completeness"
+            )
     evaluation_data = partial_state.get("evaluation_summary")
     evaluation_summary = (
         EvaluationSummary.model_validate(evaluation_data)

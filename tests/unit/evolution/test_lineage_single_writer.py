@@ -33,7 +33,11 @@ from ouroboros.evolution.loop import GenerationResult, StepAction, StepResult
 from ouroboros.evolution.loop_support import run_durable_lineage_single_flight
 from ouroboros.evolution.projector import LineageProjector
 from ouroboros.evolution.reflect import ACPatch, ReflectOutput
-from ouroboros.evolution.step_receipt import decode_step_result, encode_step_result
+from ouroboros.evolution.step_receipt import (
+    MAX_EXECUTION_TEXT,
+    decode_step_result,
+    encode_step_result,
+)
 from ouroboros.evolution.wonder import GroundedQuestion, WonderOutput
 from ouroboros.persistence import lineage_claims
 from ouroboros.persistence.event_store import EventStore
@@ -688,6 +692,7 @@ async def test_completed_step_receipt_preserves_structured_phase_outputs(tmp_pat
         reasoning="parser-issued keep",
     )
     reflect.restore_durable_patch_identity(seed)
+    execution_output = "execution-start\n" + ("x" * 12_000) + "\nTRAILING FAILURE MARKER"
     try:
         await writer.append(lineage_created(lineage_id, seed.goal))
         await writer.append(
@@ -698,6 +703,7 @@ async def test_completed_step_receipt_preserves_structured_phase_outputs(tmp_pat
                 ontology_snapshot=seed.ontology_schema.model_dump(mode="json"),
                 wonder_questions=[],
                 seed_json=json.dumps(seed.to_dict()),
+                execution_output=execution_output,
             )
         )
         lineage = LineageProjector().project(await writer.replay_lineage(lineage_id))
@@ -710,6 +716,7 @@ async def test_completed_step_receipt_preserves_structured_phase_outputs(tmp_pat
                     seed=seed,
                     wonder_output=wonder,
                     reflect_output=reflect,
+                    execution_output=execution_output,
                     phase=GenerationPhase.COMPLETED,
                     success=True,
                 ),
@@ -733,6 +740,59 @@ async def test_completed_step_receipt_preserves_structured_phase_outputs(tmp_pat
         assert waiter_generation.reflect_output == reflect
         assert waiter_generation.reflect_output is not None
         assert waiter_generation.reflect_output.ac_patch_identity_explicit is True
+        assert waiter_generation.execution_output == execution_output
+        assert waiter_generation.execution_output.endswith("TRAILING FAILURE MARKER")
+    finally:
+        await writer.close()
+        await reader.close()
+
+
+@pytest.mark.asyncio
+async def test_step_receipt_fails_closed_when_execution_output_exceeds_cap(
+    tmp_path: Path,
+) -> None:
+    """Incomplete bounded evidence never becomes a handler verification artifact."""
+    writer, reader = await _stores(tmp_path / "oversized-execution-receipt.db")
+    seed = _seed()
+    lineage_id = "oversized-execution-lineage"
+    execution_output = "x" * (MAX_EXECUTION_TEXT + 1)
+    try:
+        await writer.append(lineage_created(lineage_id, seed.goal))
+        await writer.append(
+            lineage_generation_completed(
+                lineage_id,
+                generation_number=1,
+                seed_id=seed.metadata.seed_id,
+                ontology_snapshot=seed.ontology_schema.model_dump(mode="json"),
+                seed_json=json.dumps(seed.to_dict()),
+                execution_output=execution_output,
+            )
+        )
+        lineage = LineageProjector().project(await writer.replay_lineage(lineage_id))
+        assert lineage is not None
+        winner = Result.ok(
+            StepResult(
+                generation_result=GenerationResult(
+                    generation_number=1,
+                    seed=seed,
+                    execution_output=execution_output,
+                ),
+                convergence_signal=ConvergenceSignal(
+                    converged=False,
+                    reason="continue",
+                    ontology_similarity=0.0,
+                    generation=1,
+                ),
+                lineage=lineage,
+                action=StepAction.CONTINUE,
+                next_generation=2,
+            )
+        )
+        payload = encode_step_result(winner)
+        assert payload["execution_output_complete"] is False
+
+        with pytest.raises(ValueError, match="execution output is incomplete"):
+            await decode_step_result(reader, payload)
     finally:
         await writer.close()
         await reader.close()
