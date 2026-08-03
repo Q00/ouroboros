@@ -357,7 +357,11 @@ class TestReflectEndToEnd:
             {
                 "refined_goal": "Build a thing better",
                 "refined_constraints": ["c1", "   "],
-                "ac_patches": [{"op": "keep", "index": 0}],
+                "ac_patches": [
+                    {"op": "keep", "index": 0},
+                    {"op": "keep", "index": 1},
+                    {"op": "keep", "index": 2},
+                ],
                 "ontology_mutations": [],
                 "reasoning": "r",
             }
@@ -381,7 +385,11 @@ class TestReflectEndToEnd:
             {
                 "refined_goal": "Build a thing better",
                 "refined_constraints": ["c1"],
-                "ac_patches": [{"op": "revise", "index": 1, "content": "   "}],
+                "ac_patches": [
+                    {"op": "keep", "index": 0},
+                    {"op": "revise", "index": 1, "content": "   "},
+                    {"op": "keep", "index": 2},
+                ],
                 "ontology_mutations": [],
                 "reasoning": "r",
             }
@@ -439,7 +447,11 @@ class TestReflectEndToEnd:
             {
                 "refined_goal": "Build a thing better",
                 "refined_constraints": ["c1"],
-                "ac_patches": [{"op": "keep", "index": 0}],
+                "ac_patches": [
+                    {"op": "keep", "index": 0},
+                    {"op": "keep", "index": 1},
+                    {"op": "keep", "index": 2},
+                ],
                 "ontology_mutations": [mutation],
                 "reasoning": "r",
             }
@@ -492,6 +504,105 @@ class TestReflectEndToEnd:
         assert 2 in out.settled_ac_indices
         assert 1 not in out.settled_ac_indices
 
+    @pytest.mark.parametrize(
+        "ac_patches",
+        [
+            [
+                {"op": "keep", "index": 0},
+                {"op": "keep", "index": 2},
+            ],
+            [
+                {"op": "keep", "index": 0},
+                {"op": "revise", "index": 0, "content": "conflict"},
+                {"op": "keep", "index": 1},
+                {"op": "keep", "index": 2},
+            ],
+            [
+                {"op": "keep", "index": 0},
+                {"op": "keep", "index": 1},
+                {"op": "keep", "index": 2},
+                {"op": "keep", "index": 3},
+            ],
+            [
+                {"op": "keep", "index": 0},
+                {"op": "keep", "index": 1},
+                {"op": "remove", "index": 2},
+            ],
+            [
+                {"op": "keep", "index": 0, "content": "replacement"},
+                {"op": "keep", "index": 1},
+                {"op": "keep", "index": 2},
+            ],
+            [
+                {"op": "keep", "index": 0},
+                {"op": "revise", "index": 1},
+                {"op": "keep", "index": 2},
+            ],
+            [
+                {"op": "keep", "index": 0},
+                {"op": "revise", "index": 1, "content": 42},
+                {"op": "keep", "index": 2},
+            ],
+            [
+                {"op": "keep", "index": 0},
+                {"op": "keep", "index": 1},
+                {"op": "keep", "index": 2},
+                {"op": "add"},
+            ],
+            [
+                {"op": "keep", "index": 0},
+                {"op": "keep", "index": 1},
+                {"op": "keep", "index": 2},
+                {"op": "add", "content": 42},
+            ],
+            [
+                {"op": "keep", "index": 0},
+                {"op": "keep", "index": 1},
+                {"op": "keep", "index": 2},
+                {"op": "add", "index": 0, "content": "new criterion"},
+            ],
+        ],
+        ids=(
+            "missing",
+            "duplicate",
+            "out-of-range",
+            "unsupported-op",
+            "keep-content",
+            "revise-missing-content",
+            "revise-non-string-content",
+            "add-missing-content",
+            "add-non-string-content",
+            "add-parent-index",
+        ),
+    )
+    async def test_reflect_rejects_malformed_explicit_patch_identity(
+        self,
+        ac_patches: list[dict[str, object]],
+    ) -> None:
+        response = json.dumps(
+            {
+                "refined_goal": "Build a thing better",
+                "refined_constraints": ["c1"],
+                "ac_patches": ac_patches,
+                "ontology_mutations": [],
+                "reasoning": "r",
+            }
+        )
+
+        result = await ReflectEngine(
+            llm_adapter=_FakeAdapter(response),
+            model="test",
+        ).reflect(
+            current_seed=_seed(),
+            execution_output="out",
+            evaluation_summary=_summary({0: True, 1: True, 2: True}),
+            wonder_output=_wonder(),
+            lineage=OntologyLineage(lineage_id="l", goal="Build a thing"),
+        )
+
+        assert result.is_err
+        assert "failed to parse" in result.error.message.lower()
+
     async def test_reflect_marks_legacy_full_list_patch_identity_as_inferred(self) -> None:
         response = json.dumps(
             {
@@ -529,7 +640,11 @@ class TestReflectEndToEnd:
             {
                 "refined_goal": "Build a thing with materialized ontology",
                 "refined_constraints": ["c1"],
-                "ac_patches": [{"op": "keep", "index": 0}],
+                "ac_patches": [
+                    {"op": "keep", "index": 0},
+                    {"op": "keep", "index": 1},
+                    {"op": "keep", "index": 2},
+                ],
                 "ontology_mutations": [
                     {
                         "action": "add",

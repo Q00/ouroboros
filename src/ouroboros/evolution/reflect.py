@@ -197,6 +197,48 @@ def _parse_ac_patches(raw_patches: object) -> list[ACPatch]:
     return patches
 
 
+def _validate_explicit_ac_patch_identity(raw_patches: object, parent_count: int) -> None:
+    """Require a complete, unique parent-index map before trusting patch provenance."""
+    if not isinstance(raw_patches, list):
+        raise TypeError("Expected ac_patches to be a list")
+
+    seen_parent_indices: set[int] = set()
+    for item in raw_patches:
+        if not isinstance(item, dict):
+            raise TypeError("Expected each ac_patch to be an object")
+        op = item.get("op")
+        if op in ("keep", "revise"):
+            index = item.get("index")
+            if isinstance(index, bool) or not isinstance(index, int):
+                raise TypeError("Expected keep/revise ac_patch index to be an integer")
+            if index < 0 or index >= parent_count:
+                raise ValueError("Explicit ac_patch index is outside the parent AC range")
+            if index in seen_parent_indices:
+                raise ValueError("Explicit ac_patches contain a duplicate parent AC index")
+            seen_parent_indices.add(index)
+            if op == "keep":
+                if item.get("content") is not None:
+                    raise ValueError("Explicit keep ac_patch cannot carry replacement content")
+            else:
+                content = item.get("content")
+                if not isinstance(content, str):
+                    raise TypeError("Expected revise ac_patch content to be a string")
+                _clean_required_text(content, "acceptance criterion patch content")
+            continue
+        if op == "add":
+            if item.get("index") is not None:
+                raise ValueError("Explicit add ac_patch cannot carry a parent AC index")
+            content = item.get("content")
+            if not isinstance(content, str):
+                raise TypeError("Expected add ac_patch content to be a string")
+            _clean_required_text(content, "acceptance criterion patch content")
+            continue
+        raise ValueError("Explicit ac_patch op must be keep, revise, or add")
+
+    if seen_parent_indices != set(range(parent_count)):
+        raise ValueError("Explicit ac_patches must identify every parent AC exactly once")
+
+
 def _derive_legacy_patches(
     refined_acs: tuple[str, ...], parent_acs: tuple[str, ...]
 ) -> list[ACPatch] | None:
@@ -771,6 +813,9 @@ Guidelines:
             mutations = _parse_ontology_mutations(data)
 
             parent_acs = ac_texts(current_seed.acceptance_criteria)
+            explicit_patch_identity = "ac_patches" in data
+            if explicit_patch_identity:
+                _validate_explicit_ac_patch_identity(data["ac_patches"], len(parent_acs))
             refined_acs, ac_patches, settled = self._compose_acs(
                 data,
                 parent_acs,
@@ -809,7 +854,7 @@ Guidelines:
                 refined_constraints=refined_constraints,
                 refined_acs=refined_acs,
                 ac_patches=ac_patches,
-                ac_patch_identity_explicit="ac_patches" in data,
+                ac_patch_identity_explicit=explicit_patch_identity,
                 settled_ac_indices=settled,
                 ontology_mutations=tuple(mutations),
                 reasoning=reasoning,
