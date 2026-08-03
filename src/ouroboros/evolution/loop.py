@@ -45,7 +45,6 @@ from ouroboros.events.lineage import (
     lineage_generation_completed,
     lineage_generation_failed,
     lineage_generation_interrupted,
-    lineage_generation_phase_changed,
     lineage_ontology_evolved,
     lineage_stagnated,
     lineage_wonder_degraded,
@@ -69,7 +68,7 @@ from ouroboros.evolution.watchdog import (
     GenerationProgressWatchdog,
     GenerationWatchdogTimeout,
 )
-from ouroboros.evolution.wonder import WonderEngine, WonderOutput, ground_questions
+from ouroboros.evolution.wonder import WonderEngine, WonderOutput
 from ouroboros.observability.drift import DriftMeasuredEvent, DriftMeasurement
 from ouroboros.orchestrator.agent_process import AgentProcess, AgentProcessHandle
 from ouroboros.persistence.event_store import EventStore
@@ -644,6 +643,7 @@ class EvolutionaryLoop:
     ) -> Result[StepResult, OuroborosError]:
         """Run one event-reconstructed generation under lineage ownership."""
         projector = LineageProjector()
+        hard_crash_record: GenerationRecord | None = None
 
         # Step 1: Replay events to reconstruct state
         events = await self.event_store.replay_lineage(lineage_id)
@@ -691,6 +691,14 @@ class EvolutionaryLoop:
                 )
             except ValueError as exc:
                 return Result.err(OuroborosError(str(exc)))
+            hard_crash_record, recovery_error = loop_support.hard_crash_recovery(
+                lineage,
+                generation_number,
+                last_phase,
+                execute=execute,
+            )
+            if recovery_error is not None:
+                return Result.err(OuroborosError(recovery_error))
             if recovered_seed is not None:
                 current_seed = recovered_seed
             elif initial_seed is not None and not lineage.verification_handoff_pending:
@@ -831,9 +839,11 @@ class EvolutionaryLoop:
             )
 
         # Run one generation in AgentProcess; replayed state stays outside its boundary.
-        resume_after_phase = (
-            interrupted_at_phase if last_phase == GenerationPhase.INTERRUPTED else None
-        )
+        resume_after_phase = None
+        if last_phase == GenerationPhase.INTERRUPTED:
+            resume_after_phase = interrupted_at_phase
+        elif hard_crash_record is not None:
+            resume_after_phase = hard_crash_record.last_completed_phase
         container = _StepResultContainer()
 
         async def _generation_work(handle: AgentProcessHandle) -> None:
@@ -1343,21 +1353,23 @@ class EvolutionaryLoop:
             },
         )
 
-        # Build partial state from whatever we have so far
-        partial_state: dict[str, Any] = {}
         try:
-            if wonder_output:
-                partial_state["wonder_questions"] = list(wonder_output.questions)
-            if reflect_output:
-                partial_state["reflect_output"] = reflect_output.model_dump(mode="json")
-            if execution_output:
-                partial_state["execution_output"] = execution_output[:10_000]
-            if evaluation_summary:
-                partial_state["evaluation_summary"] = evaluation_summary.model_dump(mode="json")
-            if validation_output:
-                partial_state["validation_output"] = validation_output[:5_000]
+            execution_completed = last_completed_phase in {
+                GenerationPhase.EXECUTING.value,
+                GenerationPhase.EVALUATING.value,
+            }
+            partial_state = loop_support.generation_partial_state(
+                wonder_output=wonder_output,
+                reflect_output=reflect_output,
+                execution_output=execution_output,
+                execution_boundary_completed=execution_completed,
+                validation_output=validation_output,
+                validation_boundary_completed=execution_completed,
+                evaluation_summary=evaluation_summary,
+            )
         except (TypeError, ValueError, KeyError):
             logger.warning("evolution.generation.partial_state_build_failed", exc_info=True)
+            partial_state = {}
 
         try:
             try:
@@ -1417,87 +1429,31 @@ class EvolutionaryLoop:
 
         Separated from _run_generation to allow CancelledError guard at the
         outer level without deeply nesting the entire method body.
-
-        Args:
-            resume_after_phase: If set, skip phases that were already completed
-                before interruption. Phase order: wondering → reflecting →
-                seeding → executing → evaluating.
         """
-        # Phase ordering for resume skip logic
-        _PHASE_ORDER = ["wondering", "reflecting", "seeding", "executing", "evaluating"]
 
         def _should_skip(phase: str) -> bool:
-            """Return True if this phase was already completed before interruption."""
-            if resume_after_phase is None:
-                return False
-            try:
-                return _PHASE_ORDER.index(phase) <= _PHASE_ORDER.index(resume_after_phase)
-            except ValueError:
-                return False
+            return loop_support.phase_should_skip(phase, resume_after_phase)
 
-        wonder_output: WonderOutput | None = None
-        reflect_output: ReflectOutput | None = None
         ontology_delta: OntologyDelta | None = None
-        restored_execution_output: str | None = None
-        restored_evaluation_summary: EvaluationSummary | None = None
-        restored_validation_output: str | None = None
         generation_parent_seed = current_seed
         generation_focus = focus.initial_evolution_focus(current_seed)
-
-        # Restore partial state from interrupted generation if resuming
-        if resume_after_phase and lineage.generations:
-            interrupted_gen = next(
-                (
-                    g
-                    for g in reversed(lineage.generations)
-                    if g.phase == GenerationPhase.INTERRUPTED
-                ),
-                None,
-            )
-            if interrupted_gen and interrupted_gen.partial_state:
-                ps = interrupted_gen.partial_state
-                if _should_skip("wondering") and ps.get("wonder_questions"):
-                    # partial_state persists only plain strings — re-ground them
-                    # via the deterministic regex so a restored challenge is not
-                    # silently demoted to a gap (which would over-protect its AC).
-                    restored_questions = tuple(ps["wonder_questions"])
-                    wonder_output = WonderOutput(
-                        questions=restored_questions,
-                        grounded_questions=ground_questions(
-                            restored_questions, len(current_seed.acceptance_criteria)
-                        ),
-                        should_continue=True,
-                    )
-                if _should_skip("reflecting") and ps.get("reflect_output"):
-                    try:
-                        restored_reflect_output = ReflectOutput.model_validate(ps["reflect_output"])
-                        if restored_reflect_output.ac_patches:
-                            # Parser-issued patch provenance is intentionally not
-                            # serialized. Re-run Reflect rather than trusting a
-                            # replay payload to preserve authority-bearing fields.
-                            resume_after_phase = "wondering"
-                            reflect_output = None
-                        else:
-                            reflect_output = restored_reflect_output
-                    except Exception as e:
-                        logger.warning(
-                            "evolution.resume.reflect_output_restore_failed",
-                            extra={"error": str(e)},
-                        )
-                if _should_skip("executing") and ps.get("execution_output"):
-                    restored_execution_output = ps["execution_output"]
-                if _should_skip("evaluating") and ps.get("evaluation_summary"):
-                    try:
-                        restored_evaluation_summary = EvaluationSummary.model_validate(
-                            ps["evaluation_summary"]
-                        )
-                    except Exception as e:
-                        logger.warning(
-                            "evolution.resume.evaluation_summary_restore_failed",
-                            extra={"error": str(e)},
-                        )
-                if _should_skip("evaluating") and ps.get("validation_output"):
-                    restored_validation_output = ps["validation_output"]
+        restored = loop_support.restore_phase_state(
+            lineage,
+            generation_number,
+            current_seed,
+            resume_after_phase,
+        )
+        resume_after_phase = restored.resume_after_phase
+        wonder_output = restored.wonder_output
+        reflect_output = restored.reflect_output
+        restored_execution_output = restored.execution_output
+        restored_execution_boundary_completed = restored.execution_boundary_completed
+        restored_evaluation_summary = restored.evaluation_summary
+        restored_validation_output = restored.validation_output
+        restored_validation_boundary_completed = restored.validation_boundary_completed
+        checkpoint_focus = restored.checkpoint_focus
+        if checkpoint_focus is not None:
+            generation_focus = checkpoint_focus
 
         prev_gen = (
             next(
@@ -1532,7 +1488,6 @@ class EvolutionaryLoop:
                 seed=current_seed,
             )
 
-            # Wonder phase (skip if already completed before interruption)
             if self.wonder_engine and not _should_skip("wondering"):
                 wonder_kwargs: dict[str, Any] = {
                     "current_ontology": current_seed.ontology_schema,
@@ -1589,7 +1544,6 @@ class EvolutionaryLoop:
                         )
                     )
 
-            # Check for graceful shutdown after Wonder phase
             post_wonder_phase = (
                 GenerationPhase.WONDERING.value if wonder_output is not None else None
             )
@@ -1604,17 +1558,21 @@ class EvolutionaryLoop:
             if interrupted:
                 return Result.ok(interrupted)
 
-            # Phase transition: wondering → reflecting
-            await self.event_store.append(
-                lineage_generation_phase_changed(
-                    lineage.lineage_id,
-                    generation_number,
-                    GenerationPhase.REFLECTING.value,
+            if not _should_skip("reflecting"):
+                # Phase transition: wondering → reflecting
+                await self.event_store.append(
+                    loop_support.generation_phase_checkpoint(
+                        lineage_id=lineage.lineage_id,
+                        generation_number=generation_number,
+                        phase=GenerationPhase.REFLECTING,
+                        last_completed_phase=GenerationPhase.WONDERING.value,
+                        seed=current_seed,
+                        active_ac_indices=generation_focus.active_ac_indices,
+                        frozen_ac_indices=generation_focus.frozen_ac_indices,
+                        wonder_output=wonder_output,
+                    )
                 )
-            )
 
-            # Reflect phase (with retry on parse failure)
-            # Skip if already completed before interruption
             if (
                 self.reflect_engine
                 and wonder_output
@@ -1715,10 +1673,16 @@ class EvolutionaryLoop:
             elif reflect_output and not _should_skip("seeding"):
                 # Phase transition: reflecting → seeding
                 await self.event_store.append(
-                    lineage_generation_phase_changed(
-                        lineage.lineage_id,
-                        generation_number,
-                        GenerationPhase.SEEDING.value,
+                    loop_support.generation_phase_checkpoint(
+                        lineage_id=lineage.lineage_id,
+                        generation_number=generation_number,
+                        phase=GenerationPhase.SEEDING,
+                        last_completed_phase=GenerationPhase.REFLECTING.value,
+                        seed=current_seed,
+                        active_ac_indices=generation_focus.active_ac_indices,
+                        frozen_ac_indices=generation_focus.frozen_ac_indices,
+                        wonder_output=wonder_output,
+                        reflect_output=reflect_output,
                     )
                 )
 
@@ -1791,6 +1755,8 @@ class EvolutionaryLoop:
                 regression_report=regression_report,
                 enabled=self.config.focused_evolution,
             )
+            if checkpoint_focus is not None:
+                generation_focus = checkpoint_focus
             generation_focus.log_selection(generation_number)
 
         # Check for graceful shutdown before executing.
@@ -1816,19 +1782,24 @@ class EvolutionaryLoop:
         if interrupted:
             return Result.ok(interrupted)
 
-        # Phase transition: → executing
-        await self.event_store.append(
-            lineage_generation_phase_changed(
-                lineage.lineage_id,
-                generation_number,
-                GenerationPhase.EXECUTING.value,
+        if not _should_skip("executing"):
+            # Phase transition: → executing
+            await self.event_store.append(
+                loop_support.generation_phase_checkpoint(
+                    lineage_id=lineage.lineage_id,
+                    generation_number=generation_number,
+                    phase=GenerationPhase.EXECUTING,
+                    last_completed_phase=pre_exec_phase,
+                    seed=current_seed,
+                    active_ac_indices=generation_focus.active_ac_indices,
+                    frozen_ac_indices=generation_focus.frozen_ac_indices,
+                    wonder_output=wonder_output,
+                    reflect_output=reflect_output,
+                )
             )
-        )
 
-        # Execute phase (placeholder - actual execution via OrchestratorRunner)
-        # Skip if already completed before interruption (use restored output)
         execution_output: str | None = restored_execution_output
-        if execution_output and _should_skip("executing"):
+        if restored_execution_boundary_completed and _should_skip("executing"):
             logger.info(
                 "evolution.generation.execution_restored_from_checkpoint",
                 extra={"generation": generation_number},
@@ -1897,7 +1868,7 @@ class EvolutionaryLoop:
         # Validate phase - reconcile parallel execution artifacts
         # Skip if restored from checkpoint (resume after evaluating)
         validation_output: str | None = restored_validation_output
-        if validation_output and _should_skip("evaluating"):
+        if restored_validation_boundary_completed and _should_skip("executing"):
             logger.info(
                 "evolution.generation.validation_restored_from_checkpoint",
                 extra={"generation": generation_number},
@@ -1937,14 +1908,25 @@ class EvolutionaryLoop:
         if interrupted:
             return Result.ok(interrupted)
 
-        # Phase transition: → evaluating
-        await self.event_store.append(
-            lineage_generation_phase_changed(
-                lineage.lineage_id,
-                generation_number,
-                GenerationPhase.EVALUATING.value,
+        if not _should_skip("evaluating"):
+            # Phase transition: → evaluating
+            await self.event_store.append(
+                loop_support.generation_phase_checkpoint(
+                    lineage_id=lineage.lineage_id,
+                    generation_number=generation_number,
+                    phase=GenerationPhase.EVALUATING,
+                    last_completed_phase=GenerationPhase.EXECUTING.value,
+                    seed=current_seed,
+                    active_ac_indices=generation_focus.active_ac_indices,
+                    frozen_ac_indices=generation_focus.frozen_ac_indices,
+                    wonder_output=wonder_output,
+                    reflect_output=reflect_output,
+                    execution_output=execution_output,
+                    execution_boundary_completed=True,
+                    validation_output=validation_output,
+                    validation_boundary_completed=True,
+                )
             )
-        )
 
         # Evaluate phase (placeholder - actual evaluation via EvaluationPipeline)
         # Skip if already completed before interruption (use restored summary)
@@ -1966,6 +1948,25 @@ class EvolutionaryLoop:
                     "evolution.evaluation.failed",
                     extra={"error": str(e), "generation": generation_number},
                 )
+
+        await self.event_store.append(
+            loop_support.generation_phase_checkpoint(
+                lineage_id=lineage.lineage_id,
+                generation_number=generation_number,
+                phase=GenerationPhase.EVALUATING,
+                last_completed_phase=GenerationPhase.EVALUATING.value,
+                seed=current_seed,
+                active_ac_indices=generation_focus.active_ac_indices,
+                frozen_ac_indices=generation_focus.frozen_ac_indices,
+                wonder_output=wonder_output,
+                reflect_output=reflect_output,
+                execution_output=execution_output,
+                execution_boundary_completed=True,
+                validation_output=validation_output,
+                validation_boundary_completed=True,
+                evaluation_summary=evaluation_summary,
+            )
+        )
 
         # Measure drift after evaluation
         if execution_output:

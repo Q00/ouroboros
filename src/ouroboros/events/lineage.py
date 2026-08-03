@@ -7,6 +7,8 @@ These events carry enough data to reconstruct OntologyLineage state via
 LineageProjector.project().
 """
 
+from typing import Any
+
 from ouroboros.events.base import BaseEvent
 
 
@@ -96,13 +98,33 @@ def lineage_generation_phase_changed(
     lineage_id: str,
     generation_number: int,
     phase: str,
+    *,
+    last_completed_phase: str | None = None,
+    seed_id: str | None = None,
+    seed_json: str | None = None,
+    partial_state: dict[str, Any] | None = None,
+    active_ac_indices: list[int] | None = None,
+    frozen_ac_indices: list[int] | None = None,
 ) -> BaseEvent:
-    """Create event when a generation transitions to a new phase."""
+    """Create a phase transition with an optional durable recovery checkpoint."""
+    data: dict[str, Any] = {"generation_number": generation_number, "phase": phase}
+    if last_completed_phase is not None:
+        data["last_completed_phase"] = last_completed_phase
+    if seed_id is not None:
+        data["seed_id"] = seed_id
+    if seed_json is not None:
+        data["seed_json"] = seed_json
+    if partial_state is not None:
+        data["partial_state"] = partial_state
+    if active_ac_indices is not None:
+        data["active_ac_indices"] = active_ac_indices
+    if frozen_ac_indices is not None:
+        data["frozen_ac_indices"] = frozen_ac_indices
     return BaseEvent(
         type="lineage.generation.phase_changed",
         aggregate_type="lineage",
         aggregate_id=lineage_id,
-        data={"generation_number": generation_number, "phase": phase},
+        data=data,
     )
 
 

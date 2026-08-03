@@ -7,25 +7,45 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, fields, is_dataclass
 import inspect
 import json
+import logging
 import time
 from typing import Any
 from uuid import uuid4
 
 from ouroboros.config.models import RuntimeControlsConfig
 from ouroboros.core.conductor import ConductorDirective, stable_payload_digest
-from ouroboros.core.lineage import GenerationPhase, GenerationRecord, OntologyLineage
+from ouroboros.core.lineage import (
+    EvaluationSummary,
+    GenerationPhase,
+    GenerationRecord,
+    OntologyLineage,
+)
 from ouroboros.core.seed import Seed
+from ouroboros.events.base import BaseEvent
 from ouroboros.events.control import create_control_directive_emitted_event
-from ouroboros.events.lineage import lineage_generation_started
+from ouroboros.events.lineage import lineage_generation_phase_changed, lineage_generation_started
 from ouroboros.evolution.directive_mapping import (
     is_terminal_directive,
     step_action_to_directive,
 )
 from ouroboros.persistence.event_store import EventStore
 
+logger = logging.getLogger(__name__)
+_PHASE_ORDER = ("wondering", "reflecting", "seeding", "executing", "evaluating")
+
 
 class LineageWinnerAdvanced(RuntimeError):
     """The caller must recompute its request from the durable winner state."""
+
+
+def phase_should_skip(phase: str, resume_after_phase: str | None) -> bool:
+    """Return whether a phase completed before the durable resume boundary."""
+    if resume_after_phase is None:
+        return False
+    try:
+        return _PHASE_ORDER.index(phase) <= _PHASE_ORDER.index(resume_after_phase)
+    except ValueError:
+        return False
 
 
 @dataclass(slots=True)
@@ -83,6 +103,260 @@ def evolution_execution_policy(config: Any | None) -> dict[str, Any] | None:
     if not isinstance(projected, dict):
         raise TypeError("Evolution execution policy must project to an object")
     return projected
+
+
+def generation_phase_checkpoint(
+    *,
+    lineage_id: str,
+    generation_number: int,
+    phase: GenerationPhase,
+    last_completed_phase: str | None,
+    seed: Seed,
+    active_ac_indices: tuple[int, ...],
+    frozen_ac_indices: tuple[int, ...],
+    wonder_output: Any | None = None,
+    reflect_output: Any | None = None,
+    execution_output: str | None = None,
+    execution_boundary_completed: bool = False,
+    validation_output: str | None = None,
+    validation_boundary_completed: bool = False,
+    evaluation_summary: Any | None = None,
+) -> BaseEvent:
+    """Persist bounded state needed to resume without replaying prior side effects."""
+    partial_state = generation_partial_state(
+        wonder_output=wonder_output,
+        reflect_output=reflect_output,
+        execution_output=execution_output,
+        execution_boundary_completed=execution_boundary_completed,
+        validation_output=validation_output,
+        validation_boundary_completed=validation_boundary_completed,
+        evaluation_summary=evaluation_summary,
+        focus_checkpointed=True,
+    )
+    return lineage_generation_phase_changed(
+        lineage_id,
+        generation_number,
+        phase.value,
+        last_completed_phase=last_completed_phase,
+        seed_id=seed.metadata.seed_id,
+        seed_json=json.dumps(seed.to_dict()),
+        partial_state=partial_state,
+        active_ac_indices=list(active_ac_indices),
+        frozen_ac_indices=list(frozen_ac_indices),
+    )
+
+
+def generation_partial_state(
+    *,
+    wonder_output: Any | None = None,
+    reflect_output: Any | None = None,
+    execution_output: str | None = None,
+    execution_boundary_completed: bool = False,
+    validation_output: str | None = None,
+    validation_boundary_completed: bool = False,
+    evaluation_summary: Any | None = None,
+    focus_checkpointed: bool = False,
+) -> dict[str, Any]:
+    """Serialize bounded phase outputs with explicit completeness markers."""
+    partial_state: dict[str, Any] = {
+        "execution_boundary_completed": execution_boundary_completed,
+        "validation_boundary_completed": validation_boundary_completed,
+    }
+    if focus_checkpointed:
+        partial_state["focus_checkpointed"] = True
+    if wonder_output is not None:
+        partial_state["wonder_questions"] = list(wonder_output.questions)
+    if reflect_output is not None:
+        partial_state["reflect_output"] = reflect_output.model_dump(mode="json")
+    if execution_output is not None:
+        partial_state["execution_output"] = execution_output[:10_000]
+        partial_state["execution_output_complete"] = len(execution_output) <= 10_000
+    if validation_output is not None:
+        partial_state["validation_output"] = validation_output[:5_000]
+        partial_state["validation_output_complete"] = len(validation_output) <= 5_000
+    if evaluation_summary is not None:
+        partial_state["evaluation_summary"] = evaluation_summary.model_dump(mode="json")
+    return partial_state
+
+
+def hard_crash_recovery(
+    lineage: OntologyLineage,
+    generation_number: int,
+    last_phase: GenerationPhase,
+    *,
+    execute: bool,
+) -> tuple[GenerationRecord | None, str | None]:
+    """Validate whether a nonterminal generation has enough authority to resume."""
+    if last_phase in {
+        GenerationPhase.COMPLETED,
+        GenerationPhase.FAILED,
+        GenerationPhase.INTERRUPTED,
+    }:
+        return None, None
+    record = next(
+        (
+            generation
+            for generation in reversed(lineage.generations)
+            if generation.generation_number == generation_number
+        ),
+        None,
+    )
+    partial_state = record.partial_state if record is not None else None
+    if last_phase != GenerationPhase.WONDERING and (
+        record is None
+        or record.last_completed_phase is None
+        or not partial_state
+        or partial_state.get("focus_checkpointed") is not True
+    ):
+        return record, (
+            "Cannot safely recover hard-crashed generation: durable phase checkpoint is unavailable"
+        )
+    if last_phase == GenerationPhase.EXECUTING and execute:
+        return record, (
+            "Cannot safely redispatch a hard-crashed executing generation; reconcile the "
+            "external execution before retrying"
+        )
+    if last_phase == GenerationPhase.EVALUATING and execute:
+        assert partial_state is not None
+        if partial_state.get("execution_boundary_completed") is not True or (
+            "execution_output" in partial_state
+            and partial_state.get("execution_output_complete") is not True
+        ):
+            return record, (
+                "Cannot safely recover evaluation: durable execution output is unavailable "
+                "or incomplete"
+            )
+        if (
+            "validation_output" in partial_state
+            and partial_state.get("validation_output_complete") is not True
+        ):
+            return record, (
+                "Cannot safely recover evaluation: durable validation output is incomplete"
+            )
+    return record, None
+
+
+@dataclass(frozen=True, slots=True)
+class RestoredPhaseState:
+    """Typed in-memory projection of one durable nonterminal phase checkpoint."""
+
+    resume_after_phase: str | None
+    wonder_output: Any | None = None
+    reflect_output: Any | None = None
+    execution_output: str | None = None
+    execution_boundary_completed: bool = False
+    evaluation_summary: EvaluationSummary | None = None
+    validation_output: str | None = None
+    validation_boundary_completed: bool = False
+    checkpoint_focus: Any | None = None
+
+
+def restore_phase_state(
+    lineage: OntologyLineage,
+    generation_number: int,
+    current_seed: Seed,
+    resume_after_phase: str | None,
+) -> RestoredPhaseState:
+    """Restore checkpointed outputs without trusting them across unfinished boundaries."""
+    if not resume_after_phase or not lineage.generations:
+        return RestoredPhaseState(resume_after_phase=resume_after_phase)
+    from ouroboros.evolution import focus
+    from ouroboros.evolution.reflect import ReflectOutput
+    from ouroboros.evolution.wonder import WonderOutput, ground_questions
+
+    phase_order = ["wondering", "reflecting", "seeding", "executing", "evaluating"]
+
+    def should_skip(phase: str) -> bool:
+        try:
+            return phase_order.index(phase) <= phase_order.index(resume_after_phase)
+        except ValueError:
+            return False
+
+    record = next(
+        (
+            generation
+            for generation in reversed(lineage.generations)
+            if generation.generation_number == generation_number
+        ),
+        None,
+    )
+    if record is None or not record.partial_state:
+        return RestoredPhaseState(resume_after_phase=resume_after_phase)
+    partial_state = record.partial_state
+    checkpoint_focus = None
+    if partial_state.get("focus_checkpointed") is True:
+        active = record.active_ac_indices
+        frozen = record.frozen_ac_indices
+        expected = set(range(len(current_seed.acceptance_criteria)))
+        if (
+            len(active) == len(set(active))
+            and len(frozen) == len(set(frozen))
+            and not set(active) & set(frozen)
+            and set(active) | set(frozen) == expected
+        ):
+            checkpoint_focus = focus.EvolutionFocus(
+                active_ac_indices=active,
+                frozen_ac_indices=frozen,
+                reason="restored durable phase checkpoint",
+            )
+    wonder_output = None
+    if should_skip("wondering") and partial_state.get("wonder_questions"):
+        questions = tuple(partial_state["wonder_questions"])
+        wonder_output = WonderOutput(
+            questions=questions,
+            grounded_questions=ground_questions(
+                questions,
+                len(current_seed.acceptance_criteria),
+            ),
+            should_continue=True,
+        )
+    reflect_output = None
+    if should_skip("reflecting") and partial_state.get("reflect_output"):
+        try:
+            restored_reflect_output = ReflectOutput.model_validate(partial_state["reflect_output"])
+            if restored_reflect_output.ac_patches and not should_skip("seeding"):
+                resume_after_phase = "wondering"
+            else:
+                reflect_output = restored_reflect_output
+        except Exception as exc:
+            logger.warning(
+                "evolution.resume.reflect_output_restore_failed",
+                extra={"error": str(exc)},
+            )
+    execution_boundary_completed = (
+        should_skip("executing") and partial_state.get("execution_boundary_completed") is True
+    )
+    execution_output = partial_state.get("execution_output")
+    if not isinstance(execution_output, str):
+        execution_output = None
+    evaluation_summary = None
+    if should_skip("evaluating") and partial_state.get("evaluation_summary"):
+        try:
+            evaluation_summary = EvaluationSummary.model_validate(
+                partial_state["evaluation_summary"]
+            )
+        except Exception as exc:
+            logger.warning(
+                "evolution.resume.evaluation_summary_restore_failed",
+                extra={"error": str(exc)},
+            )
+    validation_boundary_completed = (
+        should_skip("executing") and partial_state.get("validation_boundary_completed") is True
+    )
+    validation_output = partial_state.get("validation_output")
+    if not isinstance(validation_output, str):
+        validation_output = None
+    return RestoredPhaseState(
+        resume_after_phase=resume_after_phase,
+        wonder_output=wonder_output,
+        reflect_output=reflect_output,
+        execution_output=execution_output,
+        execution_boundary_completed=execution_boundary_completed,
+        evaluation_summary=evaluation_summary,
+        validation_output=validation_output,
+        validation_boundary_completed=validation_boundary_completed,
+        checkpoint_focus=checkpoint_focus,
+    )
 
 
 async def emit_generation_started_once(

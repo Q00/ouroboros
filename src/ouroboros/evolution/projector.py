@@ -122,7 +122,21 @@ class LineageProjector:
                     except ValueError:
                         continue  # Skip events with invalid/legacy phase values
                     old = generations[gen_num]
-                    generations[gen_num] = old.model_copy(update={"phase": phase})
+                    update: dict = {"phase": phase}
+                    for field_name in (
+                        "last_completed_phase",
+                        "seed_json",
+                        "partial_state",
+                    ):
+                        if field_name in data:
+                            update[field_name] = data[field_name]
+                    if "seed_id" in data:
+                        update["seed_id"] = data["seed_id"] or old.seed_id
+                    if "active_ac_indices" in data:
+                        update["active_ac_indices"] = tuple(data["active_ac_indices"])
+                    if "frozen_ac_indices" in data:
+                        update["frozen_ac_indices"] = tuple(data["frozen_ac_indices"])
+                    generations[gen_num] = old.model_copy(update=update)
 
             elif event.type == "lineage.generation.failed":
                 data = event.data

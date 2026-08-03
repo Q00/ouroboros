@@ -2138,7 +2138,6 @@ class TestEvolveStepResume:
             GenerationPhase.WONDERING,
             GenerationPhase.REFLECTING,
             GenerationPhase.SEEDING,
-            GenerationPhase.EXECUTING,
             GenerationPhase.EVALUATING,
         ],
     )
@@ -2149,17 +2148,48 @@ class TestEvolveStepResume:
         """A recovered nonterminal generation never advances under a new identity."""
         store = await create_event_store()
         parent = make_seed(seed_id="seed_hard_crash_parent")
+        candidate = make_seed(
+            seed_id=f"seed_checkpointed_{hard_crash_phase.value}",
+            parent_seed_id=parent.metadata.seed_id,
+        )
         lineage_id = f"lin_hard_crash_{hard_crash_phase.value}"
         await seed_events_for_gen1(store, lineage_id, parent, make_eval_summary(False))
         await store.append(
             lineage_generation_started(
                 lineage_id,
                 2,
-                hard_crash_phase.value,
+                GenerationPhase.WONDERING.value,
                 parent.metadata.seed_id,
                 json.dumps(parent.to_dict()),
             )
         )
+        last_completed = {
+            GenerationPhase.REFLECTING: GenerationPhase.WONDERING.value,
+            GenerationPhase.SEEDING: GenerationPhase.REFLECTING.value,
+            GenerationPhase.EVALUATING: GenerationPhase.EXECUTING.value,
+        }.get(hard_crash_phase)
+        if last_completed is not None:
+            checkpoint_seed = (
+                candidate if hard_crash_phase == GenerationPhase.EVALUATING else parent
+            )
+            await store.append(
+                loop_support.generation_phase_checkpoint(
+                    lineage_id=lineage_id,
+                    generation_number=2,
+                    phase=hard_crash_phase,
+                    last_completed_phase=last_completed,
+                    seed=checkpoint_seed,
+                    active_ac_indices=(0,),
+                    frozen_ac_indices=(),
+                    execution_output=(
+                        "durable execution"
+                        if hard_crash_phase == GenerationPhase.EVALUATING
+                        else None
+                    ),
+                    execution_boundary_completed=(hard_crash_phase == GenerationPhase.EVALUATING),
+                    validation_boundary_completed=(hard_crash_phase == GenerationPhase.EVALUATING),
+                )
+            )
 
         successor = make_seed(
             seed_id=f"seed_recovered_{hard_crash_phase.value}",
@@ -2184,7 +2214,139 @@ class TestEvolveStepResume:
         assert result.value.generation_result.generation_number == 2
         call = loop._run_generation.call_args
         assert call.kwargs["generation_number"] == 2
-        assert call.kwargs["current_seed"] == parent
+        expected_seed = candidate if hard_crash_phase == GenerationPhase.EVALUATING else parent
+        assert call.kwargs["current_seed"] == expected_seed
+        assert call.kwargs["resume_after_phase"] == last_completed
+        replayed = await store.replay_lineage(lineage_id)
+        assert (
+            sum(
+                event.type == "lineage.generation.started"
+                and event.data.get("generation_number") == 2
+                for event in replayed
+            )
+            == 1
+        )
+        assert (
+            sum(
+                event.type == "lineage.generation.completed"
+                and event.data.get("generation_number") == 2
+                for event in replayed
+            )
+            == 1
+        )
+
+    @pytest.mark.asyncio
+    async def test_hard_crash_during_execute_fails_closed_without_redispatch(self) -> None:
+        """Unknown executor outcome requires reconciliation, never a duplicate call."""
+        store = await create_event_store()
+        parent = make_seed(seed_id="seed_execute_crash_parent")
+        candidate = make_seed(
+            seed_id="seed_execute_crash_candidate",
+            parent_seed_id=parent.metadata.seed_id,
+        )
+        lineage_id = "lin_execute_crash"
+        await seed_events_for_gen1(store, lineage_id, parent, make_eval_summary(False))
+        await store.append(
+            lineage_generation_started(
+                lineage_id,
+                2,
+                GenerationPhase.WONDERING.value,
+                parent.metadata.seed_id,
+                json.dumps(parent.to_dict()),
+            )
+        )
+        await store.append(
+            loop_support.generation_phase_checkpoint(
+                lineage_id=lineage_id,
+                generation_number=2,
+                phase=GenerationPhase.EXECUTING,
+                last_completed_phase=GenerationPhase.SEEDING.value,
+                seed=candidate,
+                active_ac_indices=(0,),
+                frozen_ac_indices=(),
+            )
+        )
+        loop = make_loop(
+            store,
+            gen_result=GenerationResult(
+                generation_number=2,
+                seed=candidate,
+                evaluation_summary=make_eval_summary(),
+            ),
+        )
+
+        result = await loop.evolve_step(lineage_id, execute=True)
+
+        assert result.is_err
+        assert "Cannot safely redispatch" in str(result.error)
+        loop._run_generation.assert_not_awaited()
+        replayed = await store.replay_lineage(lineage_id)
+        assert not any(
+            event.type == "lineage.generation.completed"
+            and event.data.get("generation_number") == 2
+            for event in replayed
+        )
+
+    @pytest.mark.asyncio
+    async def test_hard_crash_during_evaluation_resumes_without_executor(self) -> None:
+        """Durable candidate/output authority lets evaluation continue exactly once."""
+        store = await create_event_store()
+        parent = make_seed(seed_id="seed_eval_crash_parent")
+        candidate = make_seed(
+            seed_id="seed_eval_crash_candidate",
+            parent_seed_id=parent.metadata.seed_id,
+        )
+        lineage_id = "lin_eval_crash"
+        await seed_events_for_gen1(store, lineage_id, parent, make_eval_summary(False))
+        await store.append(
+            lineage_generation_started(
+                lineage_id,
+                2,
+                GenerationPhase.WONDERING.value,
+                parent.metadata.seed_id,
+                json.dumps(parent.to_dict()),
+            )
+        )
+        await store.append(
+            loop_support.generation_phase_checkpoint(
+                lineage_id=lineage_id,
+                generation_number=2,
+                phase=GenerationPhase.EVALUATING,
+                last_completed_phase=GenerationPhase.EXECUTING.value,
+                seed=candidate,
+                active_ac_indices=(0,),
+                frozen_ac_indices=(),
+                execution_output="durable execution",
+                execution_boundary_completed=True,
+                validation_boundary_completed=True,
+            )
+        )
+        projected = LineageProjector().project(await store.replay_lineage(lineage_id))
+        assert projected is not None
+        checkpoint = projected.generations[-1]
+        assert checkpoint.phase == GenerationPhase.EVALUATING
+        assert checkpoint.last_completed_phase == GenerationPhase.EXECUTING.value
+        assert Seed.from_dict(json.loads(checkpoint.seed_json or "{}")) == candidate
+        assert checkpoint.active_ac_indices == (0,)
+        assert checkpoint.frozen_ac_indices == ()
+        assert checkpoint.partial_state is not None
+        assert checkpoint.partial_state["execution_output"] == "durable execution"
+        executor = AsyncMock(return_value="must not run")
+        evaluator = AsyncMock(return_value=make_eval_summary(True))
+        loop = EvolutionaryLoop(
+            event_store=store,
+            config=EvolutionaryLoopConfig(min_generations=3),
+            executor=executor,
+            evaluator=evaluator,
+        )
+
+        result = await loop.evolve_step(lineage_id, execute=True)
+
+        assert result.is_ok
+        assert result.value.generation_result.seed == candidate
+        assert result.value.generation_result.execution_output == "durable execution"
+        executor.assert_not_awaited()
+        evaluator.assert_awaited_once_with(candidate, "durable execution")
         replayed = await store.replay_lineage(lineage_id)
         assert (
             sum(
@@ -2900,6 +3062,20 @@ class TestEvolveStepHandler:
                 json.dumps(seed.to_dict()),
             )
         )
+        await store.append(
+            loop_support.generation_phase_checkpoint(
+                lineage_id="lin_explicit_recovery",
+                generation_number=1,
+                phase=GenerationPhase.EVALUATING,
+                last_completed_phase=GenerationPhase.EXECUTING.value,
+                seed=seed,
+                active_ac_indices=(0,),
+                frozen_ac_indices=(),
+                execution_output="durable execution",
+                execution_boundary_completed=True,
+                validation_boundary_completed=True,
+            )
+        )
         generation = GenerationResult(
             generation_number=1,
             seed=seed,
@@ -2946,6 +3122,11 @@ class TestEvolveStepHandler:
         assert result.value.meta["generation"] == 1
         loop._run_generation.assert_awaited_once()
         assert loop._run_generation.call_args.kwargs["generation_number"] == 1
+        assert loop._run_generation.call_args.kwargs["current_seed"] == seed
+        assert (
+            loop._run_generation.call_args.kwargs["resume_after_phase"]
+            == GenerationPhase.EXECUTING.value
+        )
         replayed = await store.replay_lineage("lin_explicit_recovery")
         assert not any(
             event.data.get("generation_number") == 2
