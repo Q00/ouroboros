@@ -339,6 +339,23 @@ class LocalStepClaims:
             if held is not None and held[0] == claim_token:
                 del self._claims[lineage_id]
 
+    async def append_event_if_owner(
+        self, lineage_id: str, claim_token: str, event_store: Any, event: Any
+    ) -> bool:
+        """Ownership check and append in one critical section.
+
+        The lock is held across the store append, so an expiry-and-reclaim
+        cannot interleave between validation and persistence — acquire()
+        serializes behind an in-flight owner append, mirroring the durable
+        backend's single-transaction ordering.
+        """
+        async with self._lock:
+            held = self._claims.get(lineage_id)
+            if held is None or held[0] != claim_token or held[2] is not None:
+                return False
+            await event_store.append(event)
+            return True
+
 
 _CLAIMS_BY_URL: dict[str, DurableStepClaims] = {}
 # Fallback claims are namespaced by store object: two unrelated fake or
@@ -413,6 +430,8 @@ async def append_lineage_event_if_owner(
             refuse_when=refuse_when,
             operation="append_lineage_event_if_owner",
         )
+    if isinstance(claims, LocalStepClaims):
+        return await claims.append_event_if_owner(lineage_id, claim_token, event_store, event)
     if not await claims.refresh(lineage_id, claim_token):
         return False
     await event_store.append(event)

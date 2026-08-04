@@ -235,8 +235,10 @@ async def test_fenced_cancellation_appends_no_lineage_events(tmp_path, monkeypat
     await store.initialize()
     try:
         # A short lease keeps the default heartbeat (lease/6) fast enough
-        # for the loss to be observed promptly and deterministically.
-        claims = _RecordingClaims(refresh_result=False, lease_seconds=0.6)
+        # for the loss to be observed promptly and deterministically. The
+        # first refresh (the creation append's ownership gate) succeeds; the
+        # heartbeat then observes the loss.
+        claims = _RecordingClaims(refresh_results=[True, False], lease_seconds=0.6)
         monkeypatch.setattr(loop_module, "step_claims_for", lambda _store: claims)
 
         config = EvolutionaryLoopConfig(
@@ -441,7 +443,7 @@ async def test_denied_caller_cannot_clear_another_attempts_fence(tmp_path, monke
     store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'evolve-fence-race.db'}")
     await store.initialize()
     try:
-        claims = _RecordingClaims(refresh_result=False, lease_seconds=0.6)
+        claims = _RecordingClaims(refresh_results=[True, False], lease_seconds=0.6)
         acquisitions = {"n": 0}
         real_acquire = claims.acquire
 
@@ -615,7 +617,12 @@ async def test_takeover_during_preservation_append_refuses_the_write(tmp_path, m
 
 
 class _RecordingClaims:
-    """Fake claims whose refresh behavior is scripted per test."""
+    """Fake claims whose refresh behavior is scripted per test.
+
+    ``refresh_results`` is consumed call by call (last value repeats), so a
+    test can let the ownership gate on the creation append pass and then
+    report the loss on the first heartbeat.
+    """
 
     def __init__(
         self,
@@ -623,11 +630,13 @@ class _RecordingClaims:
         refresh_result: bool = True,
         refresh_raises: bool = False,
         lease_seconds: float = 0.09,
+        refresh_results: list[bool] | None = None,
     ) -> None:
         self.lease_seconds = lease_seconds
         self.released: list[str] = []
         self._refresh_result = refresh_result
         self._refresh_raises = refresh_raises
+        self._refresh_results = list(refresh_results) if refresh_results else None
 
     async def acquire(self, lineage_id: str, claim_token: str) -> bool:
         return True
@@ -635,6 +644,10 @@ class _RecordingClaims:
     async def refresh(self, lineage_id: str, claim_token: str) -> bool:
         if self._refresh_raises:
             raise RuntimeError("simulated refresh outage")
+        if self._refresh_results is not None:
+            if len(self._refresh_results) > 1:
+                return self._refresh_results.pop(0)
+            return self._refresh_results[0]
         return self._refresh_result
 
     async def release(self, lineage_id: str, claim_token: str) -> None:

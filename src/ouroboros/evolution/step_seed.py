@@ -17,10 +17,16 @@ import json
 from typing import Any
 
 from ouroboros.core.errors import OuroborosError
-from ouroboros.core.lineage import GenerationPhase, GenerationRecord, OntologyLineage
+from ouroboros.core.lineage import (
+    GenerationPhase,
+    GenerationRecord,
+    LineageStatus,
+    OntologyLineage,
+)
 from ouroboros.core.seed import Seed
 from ouroboros.core.types import Result
 from ouroboros.events.lineage import lineage_generation_completed
+from ouroboros.evolution.projector import LineageProjector
 
 
 def reconstruct_step_seed(
@@ -149,3 +155,28 @@ def generation_completed_event(lineage_id: str, result: Any, record: GenerationR
         ]
         or None,
     )
+
+
+def project_step_state(
+    events: list[Any],
+) -> Result[tuple[OntologyLineage, int, GenerationPhase, str | None], OuroborosError]:
+    """Project the lineage and pick the generation this attempt must run.
+
+    A terminated lineage is refused; a last phase of COMPLETED advances to
+    the next generation; FAILED, INTERRUPTED, or a nonterminal phase
+    abandoned by an expired lease retries its generation, never skips it.
+    """
+    projector = LineageProjector()
+    lineage = projector.project(events)
+    if lineage is None:
+        return Result.err(OuroborosError("Failed to project lineage from events"))
+    if lineage.status in (LineageStatus.CONVERGED, LineageStatus.EXHAUSTED):
+        return Result.err(
+            OuroborosError(f"Lineage already terminated with status: {lineage.status.value}")
+        )
+    last_gen, last_phase, interrupted_at_phase = projector.find_resume_point(events)
+    if last_phase is GenerationPhase.COMPLETED:
+        generation_number = last_gen + 1
+    else:
+        generation_number = last_gen
+    return Result.ok((lineage, generation_number, last_phase, interrupted_at_phase))

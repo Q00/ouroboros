@@ -64,7 +64,6 @@ from ouroboros.evolution.generation_claims import (
     owned_lineage_step,
     step_claims_for,
 )
-from ouroboros.evolution.projector import LineageProjector
 from ouroboros.evolution.reflect import ReflectEngine, ReflectOutput
 from ouroboros.evolution.regression import RegressionDetector, RegressionReport
 from ouroboros.evolution.rewind import (
@@ -75,6 +74,7 @@ from ouroboros.evolution.rewind import (
 from ouroboros.evolution.step_seed import (
     generation_completed_event,
     generation_record_for,
+    project_step_state,
     reconstruct_step_seed,
 )
 from ouroboros.evolution.watchdog import (
@@ -743,6 +743,13 @@ class EvolutionaryLoop:
         except LineageStepClaimDenied as denied:
             return Result.err(OuroborosError(str(denied)))
 
+    @staticmethod
+    def _lease_lost_error(context: str) -> OuroborosError:
+        return OuroborosError(
+            f"evolve_step: lineage step lease was lost {context}; "
+            "the reclaiming caller owns this lineage's record"
+        )
+
     async def _evolve_step_owned(
         self,
         lineage_id: str,
@@ -754,8 +761,6 @@ class EvolutionaryLoop:
         lease: StepLease,
     ) -> Result[StepResult, OuroborosError]:
         """One evolve_step attempt while holding the lineage lease."""
-        projector = LineageProjector()
-
         # Step 1: Replay events to reconstruct state
         events = await self.event_store.replay_lineage(lineage_id)
 
@@ -773,7 +778,18 @@ class EvolutionaryLoop:
                 lineage_id=lineage_id,
                 goal=initial_seed.goal,
             )
-            await self.event_store.append(lineage_created(lineage.lineage_id, lineage.goal))
+            # Even the creation write is conditional on still holding the
+            # lease: a caller whose lease was reclaimed during a delayed
+            # replay must not seed durable state for an attempt it cannot
+            # run (#1889 round six).
+            if not await append_lineage_event_if_owner(
+                self.event_store,
+                step_claims_for(self.event_store),
+                lineage_id,
+                lease.claim_token,
+                lineage_created(lineage.lineage_id, lineage.goal),
+            ):
+                return Result.err(self._lease_lost_error("before the lineage was created"))
             generation_number = 1
             current_seed = initial_seed
             last_phase = GenerationPhase.COMPLETED  # Gen 1: no prior state
@@ -781,28 +797,10 @@ class EvolutionaryLoop:
 
         else:
             # Gen 2+: reconstruct from events
-            lineage = projector.project(events)
-            if lineage is None:
-                return Result.err(OuroborosError("Failed to project lineage from events"))
-
-            # Check if lineage is already terminated
-            if lineage.status in (LineageStatus.CONVERGED, LineageStatus.EXHAUSTED):
-                return Result.err(
-                    OuroborosError(
-                        f"Lineage already terminated with status: {lineage.status.value}"
-                    )
-                )
-
-            # Determine resume point
-            last_gen, last_phase, interrupted_at_phase = projector.find_resume_point(events)
-
-            if last_phase is GenerationPhase.COMPLETED:
-                generation_number = last_gen + 1
-            else:
-                # FAILED, INTERRUPTED, or a nonterminal phase abandoned by an
-                # expired lease: the unfinished generation is retried, never
-                # skipped past (#1889 round four).
-                generation_number = last_gen
+            projected = project_step_state(events)
+            if projected.is_err:
+                return Result.err(projected.error)
+            lineage, generation_number, last_phase, interrupted_at_phase = projected.value
 
             seed_state = reconstruct_step_seed(
                 initial_seed=initial_seed,
@@ -984,13 +982,7 @@ class EvolutionaryLoop:
                             "generation": generation_number,
                         },
                     )
-                    container.result = Result.err(
-                        OuroborosError(
-                            "evolve_step: lineage step lease was lost before "
-                            "persistence; the reclaiming caller owns this "
-                            "generation's record"
-                        )
-                    )
+                    container.result = Result.err(self._lease_lost_error("before persistence"))
                 return appended
 
             preservation_error = _conductor_preservation_error(
@@ -1135,6 +1127,12 @@ class EvolutionaryLoop:
                     next_generation=generation_number + 1,
                 )
             )
+
+        if lease.lost.is_set():
+            # The lease can be lost during any pre-spawn preparation (a slow
+            # replay, seed reconstruction); never start external work after
+            # authority has already moved to a reclaimer.
+            return Result.err(self._lease_lost_error("before the generation started"))
 
         handle = await self._agent_process.spawn(
             intent=f"evolve_step generation={generation_number}",
