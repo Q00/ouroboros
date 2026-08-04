@@ -63,16 +63,19 @@ events_table = Table(
     Index("ix_events_agg_type_id_timestamp", "aggregate_type", "aggregate_id", "timestamp"),
 )
 
-# Durable single-owner leases for evolve_step generations (#1889). The event
-# stream stays append-only; this table only decides which concurrent caller
-# owns one (lineage_id, generation_number) attempt. The owner refreshes the
-# lease while working and deletes the row on exit; a row whose lease expired
-# without a refresh is presumed crashed and may be reclaimed by token CAS.
-lineage_generation_claims_table = Table(
-    "lineage_generation_claims",
+# Durable single-owner leases for evolve_step (#1889). The event stream stays
+# append-only; this table decides which concurrent caller owns a lineage's
+# replay/selection/execution boundary. Serializing at lineage level (not per
+# generation) means a released lease hands the next caller a fresh replay —
+# it can never re-run a generation the previous owner already completed, and
+# it cannot skip ahead past a generation that is still running. The owner
+# refreshes the lease while working and deletes the row on exit; a row whose
+# lease expired without a refresh is presumed crashed and may be reclaimed
+# by token CAS.
+lineage_step_claims_table = Table(
+    "lineage_step_claims",
     metadata,
     Column("lineage_id", String(128), primary_key=True),
-    Column("generation_number", Integer, primary_key=True),
     Column("claim_token", String(64), nullable=False),
     Column("refreshed_at", Float, nullable=False),
 )

@@ -58,9 +58,10 @@ from ouroboros.evolution.directive_mapping import (
     watchdog_timeout_to_directive,
 )
 from ouroboros.evolution.generation_claims import (
-    GenerationClaimDenied,
-    generation_claims_for,
-    owned_generation,
+    LineageStepClaimDenied,
+    StepLease,
+    owned_lineage_step,
+    step_claims_for,
 )
 from ouroboros.evolution.projector import LineageProjector
 from ouroboros.evolution.reflect import ReflectEngine, ReflectOutput
@@ -707,6 +708,14 @@ class EvolutionaryLoop:
         via LineageProjector. Designed for Ralph integration where each call
         may happen in a different session context.
 
+        A durable lease serializes the whole replay/selection/execution
+        boundary per lineage (#1889): a concurrent second caller fails
+        closed here, before it can observe a stale snapshot, write
+        lineage-creation state, or select a generation number while another
+        generation is still running. The lease is released on every exit —
+        completion, failure, and interruption alike — so the next caller
+        re-replays fresh state under its own lease.
+
         Args:
             lineage_id: Lineage ID to continue (or new ID for Gen 1).
             initial_seed: Seed for Gen 1 (required if no events exist).
@@ -716,6 +725,30 @@ class EvolutionaryLoop:
             Result containing StepResult with generation result, convergence
             signal, and action (CONTINUE/CONVERGED/STAGNATED/EXHAUSTED/FAILED).
         """
+        try:
+            async with owned_lineage_step(step_claims_for(self.event_store), lineage_id) as lease:
+                return await self._evolve_step_owned(
+                    lineage_id,
+                    initial_seed=initial_seed,
+                    execute=execute,
+                    parallel=parallel,
+                    conductor_directive=conductor_directive,
+                    lease=lease,
+                )
+        except LineageStepClaimDenied as denied:
+            return Result.err(OuroborosError(str(denied)))
+
+    async def _evolve_step_owned(
+        self,
+        lineage_id: str,
+        *,
+        initial_seed: Seed | None,
+        execute: bool,
+        parallel: bool,
+        conductor_directive: ConductorDirective | None,
+        lease: StepLease,
+    ) -> Result[StepResult, OuroborosError]:
+        """One evolve_step attempt while holding the lineage lease."""
         projector = LineageProjector()
 
         # Step 1: Replay events to reconstruct state
@@ -1086,45 +1119,47 @@ class EvolutionaryLoop:
                 )
             )
 
-        # The durable claim is the last gate before external work: the losing
-        # concurrent caller fails closed here, and interruption or completion
-        # releases ownership on exit so the resuming call proceeds (#1889).
-        try:
-            async with owned_generation(
-                generation_claims_for(self.event_store), lineage_id, generation_number
-            ):
-                handle = await self._agent_process.spawn(
-                    intent=f"evolve_step generation={generation_number}",
-                    work_fn=_generation_work,
-                )
-                try:
-                    await handle.wait_until_complete()
-                except asyncio.CancelledError:
-                    if handle.should_complete_on_return_after_cancel():
-                        await handle.cancel(
-                            reason="evolve_step caller cancelled after generation completed"
-                        )
-                    else:
-                        await handle.abort(reason="evolve_step caller cancelled")
-                    with suppress(asyncio.CancelledError):
-                        await asyncio.shield(handle.wait_until_complete())
-                    raise
+        handle = await self._agent_process.spawn(
+            intent=f"evolve_step generation={generation_number}",
+            work_fn=_generation_work,
+        )
 
-                if container.result is None:
-                    failure = handle.failure()
-                    if failure is not None:
-                        return Result.err(
-                            OuroborosError(
-                                "evolve_step: agent process failed during generation work: "
-                                f"{type(failure).__name__}: {failure!s}"
-                            )
-                        )
-                    return Result.err(
-                        OuroborosError("evolve_step: agent process exited without result")
+        async def _fence_on_lease_loss() -> None:
+            # A reclaimer that stole the expired lease is authoritative from
+            # the moment of the steal; this owner's in-flight work must stop
+            # rather than keep appending alongside it (#1889).
+            await lease.lost.wait()
+            await handle.abort(reason="lineage step lease lost to a reclaimer")
+
+        fence = asyncio.create_task(_fence_on_lease_loss())
+        try:
+            await handle.wait_until_complete()
+        except asyncio.CancelledError:
+            if handle.should_complete_on_return_after_cancel():
+                await handle.cancel(
+                    reason="evolve_step caller cancelled after generation completed"
+                )
+            else:
+                await handle.abort(reason="evolve_step caller cancelled")
+            with suppress(asyncio.CancelledError):
+                await asyncio.shield(handle.wait_until_complete())
+            raise
+        finally:
+            fence.cancel()
+            with suppress(asyncio.CancelledError):
+                await fence
+
+        if container.result is None:
+            failure = handle.failure()
+            if failure is not None:
+                return Result.err(
+                    OuroborosError(
+                        "evolve_step: agent process failed during generation work: "
+                        f"{type(failure).__name__}: {failure!s}"
                     )
-                return container.result
-        except GenerationClaimDenied as denied:
-            return Result.err(OuroborosError(str(denied)))
+                )
+            return Result.err(OuroborosError("evolve_step: agent process exited without result"))
+        return container.result
 
     async def _run_generation(
         self,
