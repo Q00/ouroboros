@@ -290,7 +290,7 @@ async def test_lease_lost_before_completion_append_refuses_the_write(tmp_path, m
     store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'evolve-inflight.db'}")
     await store.initialize()
     try:
-        claims = DurableStepClaims(store.database_url, lease_seconds=60.0)
+        claims = DurableStepClaims(store.database_url, lease_seconds=0.6)
         monkeypatch.setattr(loop_module, "step_claims_for", lambda _store: claims)
 
         executions: list[int] = []
@@ -304,10 +304,13 @@ async def test_lease_lost_before_completion_append_refuses_the_write(tmp_path, m
         await asyncio.wait_for(entered.wait(), timeout=5)
 
         # Transfer ownership while the executor result is still pending:
-        # expire the lease row, then reclaim exactly as a successor would.
+        # expire the lease row, then reclaim exactly as a successor would —
+        # revocation first, takeover after the grace.
         engine = await claims._engine_once()
         async with engine.begin() as conn:
             await conn.execute(sa_update(lineage_step_claims_table).values(refreshed_at=0.0))
+        assert await claims.acquire("lineage-inflight", "reclaimer") is False
+        await asyncio.sleep(0.15)  # grace = lease/6 = 0.1s
         assert await claims.acquire("lineage-inflight", "reclaimer") is True
 
         stolen.set()
@@ -342,6 +345,160 @@ async def test_wall_clock_jump_cannot_steal_a_fresh_lease(tmp_path, monkeypatch)
     assert await claims.acquire("lin", "thief") is False, (
         "a stepped client clock stole a fresh lease from a live owner"
     )
+
+
+@pytest.mark.asyncio
+async def test_abandoned_nonterminal_generation_is_resumed_not_skipped(tmp_path) -> None:
+    """A crash mid-phase leaves EXECUTING history; reclaim retries that generation.
+
+    The resume branch used to advance past any phase other than FAILED or
+    INTERRUPTED, so an expired EXECUTING claim skipped its unfinished work.
+    """
+    from ouroboros.events.lineage import lineage_created, lineage_generation_started
+
+    store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'evolve-abandoned.db'}")
+    await store.initialize()
+    try:
+        await store.append(lineage_created("lineage-abandoned", "goal"))
+        await store.append(lineage_generation_started("lineage-abandoned", 1, "executing"))
+
+        executions: list[int] = []
+        result = await _build_loop(store, executions).evolve_step(
+            "lineage-abandoned", initial_seed=_make_seed()
+        )
+        assert result.is_ok, str(result.error) if result.is_err else ""
+        assert executions == [1], (
+            f"the abandoned generation must be retried, not skipped: ran {executions}"
+        )
+
+        seedless = await _build_loop(store, executions).evolve_step(
+            "lineage-abandoned-2", initial_seed=None
+        )
+        assert seedless.is_err, "an empty lineage without a seed reports a clear error"
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_revocation_fences_the_owner_before_takeover(tmp_path, monkeypatch) -> None:
+    """Phase one of a reclaim stops the owner inside the grace window.
+
+    A revoked lease refuses the owner's refresh, so a scheduling owner is
+    fenced and aborted before the reclaimer's takeover CAS can succeed —
+    the successor never runs alongside the stale executor.
+    """
+    from sqlalchemy import update as sa_update
+
+    from ouroboros.evolution import loop as loop_module
+    from ouroboros.evolution.generation_claims import DurableStepClaims
+    from ouroboros.persistence.schema import lineage_step_claims_table
+
+    store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'evolve-revoke.db'}")
+    await store.initialize()
+    try:
+        claims = DurableStepClaims(store.database_url, lease_seconds=0.6)
+        monkeypatch.setattr(loop_module, "step_claims_for", lambda _store: claims)
+
+        executions: list[int] = []
+        entered = asyncio.Event()
+        never = asyncio.Event()
+        owner_loop = _build_loop(store, executions, entered=entered, proceed=never)
+
+        owner = asyncio.create_task(
+            owner_loop.evolve_step("lineage-revoke", initial_seed=_make_seed())
+        )
+        await asyncio.wait_for(entered.wait(), timeout=5)
+
+        engine = await claims._engine_once()
+        async with engine.begin() as conn:
+            await conn.execute(sa_update(lineage_step_claims_table).values(refreshed_at=0.0))
+        assert await claims.acquire("lineage-revoke", "reclaimer") is False, (
+            "reclaim starts with revocation, never immediate takeover"
+        )
+
+        # The owner's next heartbeat observes the revocation and aborts the
+        # blocked generation — before the grace elapses and any takeover.
+        owner_result = await asyncio.wait_for(owner, timeout=5)
+        assert owner_result.is_err, "a revoked owner must not report success"
+        assert executions == [1]
+
+        await asyncio.sleep(0.15)  # grace = lease/6 = 0.1s
+        assert await claims.acquire("lineage-revoke", "reclaimer") is True
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_denied_caller_cannot_clear_another_attempts_fence(tmp_path, monkeypatch) -> None:
+    """Fence identity is attempt-scoped: unrelated invocations cannot race it.
+
+    While a fenced owner's cancellation is still unwinding, a concurrent
+    same-loop caller is denied and finishes first; the stale cancellation
+    must still append no lineage history.
+    """
+    from ouroboros.evolution import loop as loop_module
+
+    store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'evolve-fence-race.db'}")
+    await store.initialize()
+    try:
+        claims = _RecordingClaims(refresh_result=False, lease_seconds=0.6)
+        acquisitions = {"n": 0}
+        real_acquire = claims.acquire
+
+        async def scripted_acquire(lineage_id: str, claim_token: str) -> bool:
+            acquisitions["n"] += 1
+            if acquisitions["n"] == 1:
+                return await real_acquire(lineage_id, claim_token)
+            return False
+
+        claims.acquire = scripted_acquire  # type: ignore[method-assign]
+        monkeypatch.setattr(loop_module, "step_claims_for", lambda _store: claims)
+
+        config = EvolutionaryLoopConfig(
+            max_generations=10,
+            convergence_threshold=0.95,
+            min_generations=1,
+        )
+        loop = EvolutionaryLoop(event_store=store, config=config)
+        entered = asyncio.Event()
+        denied_done = asyncio.Event()
+
+        async def _blocked_phases(**kwargs: Any) -> Result[GenerationResult, Any]:
+            entered.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                # Hold the cancellation window open until the denied caller
+                # has come and gone, reproducing the add/discard race shape.
+                await denied_done.wait()
+                raise
+            raise AssertionError("unreachable")
+
+        loop._run_generation_phases = _blocked_phases  # type: ignore[method-assign]
+
+        owner = asyncio.create_task(
+            loop.evolve_step("lineage-fence-race", initial_seed=_make_seed())
+        )
+        await asyncio.wait_for(entered.wait(), timeout=5)
+
+        # The lost lease fires on the first heartbeat and the abort begins;
+        # a second caller on the same loop is denied while it unwinds.
+        await asyncio.sleep(0.15)
+        denied = await loop.evolve_step("lineage-fence-race", initial_seed=_make_seed())
+        assert denied.is_err
+        denied_done.set()
+
+        owner_result = await asyncio.wait_for(owner, timeout=10)
+        assert owner_result.is_err
+
+        events = await store.replay_lineage("lineage-fence-race")
+        failed = [e for e in events if e.type == "lineage.generation.failed"]
+        assert failed == [], (
+            "a denied caller cleared the stale attempt's fence and a failed "
+            "event was appended after authority transferred"
+        )
+    finally:
+        await store.close()
 
 
 class _RecordingClaims:
@@ -412,11 +569,15 @@ class TestDurableClaimLease:
             "a fresh claim must not be stealable"
         )
         await asyncio.sleep(0.25)
-        assert await claims.acquire("lin", "owner-b") is True, (
-            "an expired claim must be reclaimable"
+        assert await claims.acquire("lin", "owner-b") is False, (
+            "reclaim is two-phase: the first call only marks revocation"
         )
         assert await claims.refresh("lin", "owner-a") is False, (
-            "the presumed-crashed owner must observe the loss"
+            "the presumed-crashed owner must observe the revocation"
+        )
+        await asyncio.sleep(0.05)  # grace = lease/6 ≈ 0.033s
+        assert await claims.acquire("lin", "owner-b") is True, (
+            "an expired claim must be reclaimable after the grace"
         )
         assert await claims.refresh("lin", "owner-b") is True
 
@@ -449,15 +610,23 @@ class TestDurableClaimLease:
 
     @pytest.mark.asyncio
     async def test_concurrent_reclaim_of_expired_lease_has_one_winner(self, tmp_path) -> None:
-        claims = self._claims(tmp_path, lease_seconds=0.1)
+        claims = self._claims(tmp_path, lease_seconds=0.12)
         assert await claims.acquire("lin", "crashed") is True
         await asyncio.sleep(0.15)
+        first_round = await asyncio.gather(
+            claims.acquire("lin", "reclaim-a"),
+            claims.acquire("lin", "reclaim-b"),
+        )
+        assert first_round == [False, False], (
+            "the revocation phase never grants ownership immediately"
+        )
+        await asyncio.sleep(0.05)  # grace = lease/6 = 0.02s
         outcomes = await asyncio.gather(
             claims.acquire("lin", "reclaim-a"),
             claims.acquire("lin", "reclaim-b"),
         )
         assert sorted(outcomes) == [False, True], (
-            f"exactly one reclaimer may win the CAS steal, got {outcomes}"
+            f"exactly one reclaimer may win the takeover CAS, got {outcomes}"
         )
 
 

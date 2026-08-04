@@ -258,9 +258,6 @@ class EvolutionaryLoop:
     ) -> None:
         self.event_store = event_store
         self.config = config or EvolutionaryLoopConfig()
-        # Lineages whose step lease was lost mid-attempt: their cancellation
-        # must leave no lineage history behind (#1889).
-        self._fenced_lineages: set[str] = set()
         self.wonder_engine = wonder_engine
         self.reflect_engine = reflect_engine
         self.seed_generator = seed_generator
@@ -745,8 +742,6 @@ class EvolutionaryLoop:
                 )
         except LineageStepClaimDenied as denied:
             return Result.err(OuroborosError(str(denied)))
-        finally:
-            self._fenced_lineages.discard(lineage_id)
 
     async def _evolve_step_owned(
         self,
@@ -801,11 +796,13 @@ class EvolutionaryLoop:
             # Determine resume point
             last_gen, last_phase, interrupted_at_phase = projector.find_resume_point(events)
 
-            if last_phase in (GenerationPhase.FAILED, GenerationPhase.INTERRUPTED):
-                # Resume the failed/interrupted generation
-                generation_number = last_gen
-            else:
+            if last_phase is GenerationPhase.COMPLETED:
                 generation_number = last_gen + 1
+            else:
+                # FAILED, INTERRUPTED, or a nonterminal phase abandoned by an
+                # expired lease: the unfinished generation is retried, never
+                # skipped past (#1889 round four).
+                generation_number = last_gen
 
             seed_state = reconstruct_step_seed(
                 initial_seed=initial_seed,
@@ -885,6 +882,7 @@ class EvolutionaryLoop:
                     resume_after_phase=resume_after_phase,
                     agent_process_handle=handle,
                     conductor_directive=conductor_directive,
+                    lease=lease,
                 )
             finally:
                 self._uninstall_sigint_handler()
@@ -1145,11 +1143,10 @@ class EvolutionaryLoop:
         async def _fence_on_lease_loss() -> None:
             # A reclaimer that stole the expired lease is authoritative from
             # the moment of the steal; this owner's in-flight work must stop
-            # rather than keep appending alongside it (#1889). Marking the
-            # lineage first routes the resulting cancellation through the
-            # fenced path, which appends no lineage events.
+            # rather than keep appending alongside it (#1889). The lease
+            # handle itself travels with the attempt, so the cancellation
+            # path can consult it without any shared mutable state.
             await lease.lost.wait()
-            self._fenced_lineages.add(lineage_id)
             await handle.abort(reason="lineage step lease lost to a reclaimer")
 
         fence = asyncio.create_task(_fence_on_lease_loss())
@@ -1193,6 +1190,7 @@ class EvolutionaryLoop:
         execution_id: str | None = None,
         agent_process_handle: AgentProcessHandle | None = None,
         conductor_directive: ConductorDirective | None = None,
+        lease: StepLease | None = None,
     ) -> Result[GenerationResult, OuroborosError]:
         """Run a single generation within the loop.
 
@@ -1216,10 +1214,12 @@ class EvolutionaryLoop:
                 conductor_directive=conductor_directive,
             )
         except asyncio.CancelledError:
-            if lineage.lineage_id in self._fenced_lineages:
+            if lease is not None and lease.lost.is_set():
                 # Lease-loss fencing: authority already moved to a reclaimer,
                 # so this stale attempt must append no lineage history — the
                 # successor owns the generation's terminal record (#1889).
+                # The lease handle is attempt-scoped, so no other caller of
+                # this lineage can clear or race this decision.
                 logger.warning(
                     "evolution.generation.fenced",
                     extra={
@@ -1261,6 +1261,7 @@ class EvolutionaryLoop:
         resume_after_phase: str | None = None,
         agent_process_handle: AgentProcessHandle | None = None,
         conductor_directive: ConductorDirective | None = None,
+        lease: StepLease | None = None,
     ) -> Result[GenerationResult, OuroborosError]:
         """Run one generation under progress-aware liveness controls."""
         execution_id = self._generation_execution_id(lineage.lineage_id, generation_number)
@@ -1283,6 +1284,7 @@ class EvolutionaryLoop:
                     execution_id=execution_id,
                     agent_process_handle=agent_process_handle,
                     conductor_directive=conductor_directive,
+                    lease=lease,
                 )
             )
         except GenerationWatchdogTimeout as exc:

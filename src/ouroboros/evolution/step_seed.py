@@ -2,10 +2,13 @@
 
 Extracted from ``EvolutionaryLoop.evolve_step`` so the resume ladder is
 testable on its own and the loop module stays inside its size budget. The
-precedence is unchanged: an explicit caller seed wins; an interrupted
-generation resumes from its own durable ``seed_json``; otherwise the last
-completed generation's seed is used, resetting phase-level resume so stale
-phases are never skipped with a different generation's seed.
+precedence: an explicit caller seed wins; an interrupted generation
+resumes from its own durable ``seed_json``; any other unfinished
+generation — including one abandoned by an expired lease mid-phase —
+restarts from the last completed generation's seed, resetting phase-level
+resume so stale phases are never skipped with a different generation's
+seed; and a lineage with nothing completed asks for an explicit seed
+rather than guessing.
 """
 
 from __future__ import annotations
@@ -36,8 +39,11 @@ def reconstruct_step_seed(
         # Caller provided seed explicitly (e.g., after rewind)
         return Result.ok((initial_seed, interrupted_at_phase))
 
-    if last_phase == GenerationPhase.INTERRUPTED:
-        # Try to use the interrupted generation's seed (preserves evolved state)
+    if last_phase not in (GenerationPhase.COMPLETED, GenerationPhase.FAILED):
+        # INTERRUPTED, or a nonterminal phase abandoned by an expired lease.
+        # Try to use the interrupted generation's seed (preserves evolved
+        # state); abandoned phases journal no seed of their own and fall to
+        # the last completed generation below, or to the explicit-seed error.
         interrupted_gen = next(
             (g for g in reversed(lineage.generations) if g.phase == GenerationPhase.INTERRUPTED),
             None,

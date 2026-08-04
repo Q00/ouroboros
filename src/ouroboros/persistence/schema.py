@@ -78,6 +78,12 @@ lineage_step_claims_table = Table(
     Column("lineage_id", String(128), primary_key=True),
     Column("claim_token", String(64), nullable=False),
     Column("refreshed_at", Float, nullable=False),
+    # Two-phase reclaim (#1889 round four): a reclaimer first marks the
+    # expired lease as revoked and only takes ownership after a grace period
+    # of one heartbeat interval, so a scheduling owner provably observes the
+    # revocation (its refresh fails) and stops before the successor starts.
+    Column("revoking_token", String(64), nullable=True),
+    Column("revoked_at", Float, nullable=True),
 )
 
 # One durable compare-and-set guard for explicit terminal session lifecycle

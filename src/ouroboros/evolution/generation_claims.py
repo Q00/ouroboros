@@ -18,8 +18,13 @@ sharing one store:
   state under its own lease — a released lease is an invitation to replay,
   never to reuse a previously selected generation.
 - A lease that stops being refreshed for ``lease_seconds`` is presumed
-  crashed and may be reclaimed. The steal is a compare-and-set on the
-  observed token, so two reclaimers cannot both win. Fencing is two-sided:
+  crashed and may be reclaimed — in two phases: the reclaimer first marks
+  the lease revoked, then takes ownership only after a grace period of one
+  heartbeat interval. A revoked lease refuses the owner's refresh, so a
+  scheduling owner provably observes the transfer and stops inside the
+  grace window, before the successor can begin. Each phase is a
+  compare-and-set on the observed state, so two reclaimers cannot both
+  win. Fencing is two-sided:
   an owner that observes a replacement token stops immediately, and an
   owner that cannot *prove* ownership (refresh outage) fences itself once
   half the lease has elapsed since its last confirmed refresh — strictly
@@ -126,9 +131,12 @@ class DurableStepClaims:
                 now = await self._db_now(conn)
                 row = (
                     await conn.execute(
-                        select(table.c.claim_token, table.c.refreshed_at).where(
-                            table.c.lineage_id == lineage_id
-                        )
+                        select(
+                            table.c.claim_token,
+                            table.c.refreshed_at,
+                            table.c.revoking_token,
+                            table.c.revoked_at,
+                        ).where(table.c.lineage_id == lineage_id)
                     )
                 ).first()
                 if row is None:
@@ -148,7 +156,7 @@ class DurableStepClaims:
                         return False
                     await conn.commit()
                     return True
-                observed_token, refreshed_at = row
+                observed_token, refreshed_at, revoking_token, revoked_at = row
                 if observed_token == claim_token:
                     # Re-entrant acquire by the current owner refreshes.
                     await conn.execute(
@@ -162,18 +170,51 @@ class DurableStepClaims:
                     await conn.commit()
                     return True
                 if now - float(refreshed_at) > self.lease_seconds:
-                    # Presumed-crashed owner: steal by CAS on the token we
-                    # observed, so two concurrent reclaimers cannot both win.
-                    stolen = await conn.execute(
-                        update(table)
-                        .where(
-                            table.c.lineage_id == lineage_id,
-                            table.c.claim_token == observed_token,
+                    # Two-phase reclaim: mark the expired lease revoked, wait
+                    # one grace period (a heartbeat interval, so a scheduling
+                    # owner provably observes the revocation and stops), then
+                    # take ownership by CAS on the observed state. Two
+                    # concurrent reclaimers cannot both win either phase.
+                    grace = self.lease_seconds / 6
+                    if (
+                        revoking_token == claim_token
+                        and revoked_at is not None
+                        and now - float(revoked_at) > grace
+                    ):
+                        stolen = await conn.execute(
+                            update(table)
+                            .where(
+                                table.c.lineage_id == lineage_id,
+                                table.c.claim_token == observed_token,
+                                table.c.revoking_token == claim_token,
+                            )
+                            .values(
+                                claim_token=claim_token,
+                                refreshed_at=now,
+                                revoking_token=None,
+                                revoked_at=None,
+                            )
                         )
-                        .values(claim_token=claim_token, refreshed_at=now)
-                    )
-                    await conn.commit()
-                    return stolen.rowcount == 1
+                        await conn.commit()
+                        return stolen.rowcount == 1
+                    if revoking_token is None or (
+                        revoked_at is not None and now - float(revoked_at) > self.lease_seconds
+                    ):
+                        # Start revocation, or restart it if the previous
+                        # reclaimer itself went silent for a whole lease.
+                        await conn.execute(
+                            update(table)
+                            .where(
+                                table.c.lineage_id == lineage_id,
+                                table.c.claim_token == observed_token,
+                                table.c.revoking_token.is_(revoking_token),
+                            )
+                            .values(revoking_token=claim_token, revoked_at=now)
+                        )
+                        await conn.commit()
+                        return False
+                    await conn.rollback()
+                    return False
                 await conn.rollback()
                 return False
             except BaseException:
@@ -205,6 +246,10 @@ class DurableStepClaims:
                 .where(
                     table.c.lineage_id == lineage_id,
                     table.c.claim_token == claim_token,
+                    # A revoked lease no longer refreshes: this is how a
+                    # scheduling owner observes the transfer within one
+                    # heartbeat and fences itself before the grace elapses.
+                    table.c.revoking_token.is_(None),
                 )
                 .values(refreshed_at=await self._db_now(conn))
             )
@@ -252,24 +297,41 @@ class LocalStepClaims:
 
     def __init__(self, *, lease_seconds: float = DEFAULT_LEASE_SECONDS) -> None:
         self.lease_seconds = lease_seconds
-        self._claims: dict[str, tuple[str, float]] = {}
+        # lineage_id -> [claim_token, refreshed_at, revoking_token, revoked_at]
+        self._claims: dict[str, list[Any]] = {}
         self._lock = asyncio.Lock()
 
     async def acquire(self, lineage_id: str, claim_token: str) -> bool:
         now = time.monotonic()
+        grace = self.lease_seconds / 6
         async with self._lock:
             held = self._claims.get(lineage_id)
-            if held is None or held[0] == claim_token or now - held[1] > self.lease_seconds:
-                self._claims[lineage_id] = (claim_token, now)
+            if held is None or held[0] == claim_token:
+                self._claims[lineage_id] = [claim_token, now, None, None]
                 return True
+            token, refreshed_at, revoking_token, revoked_at = held
+            if now - refreshed_at <= self.lease_seconds:
+                return False
+            if (
+                revoking_token == claim_token
+                and revoked_at is not None
+                and now - revoked_at > grace
+            ):
+                self._claims[lineage_id] = [claim_token, now, None, None]
+                return True
+            if revoking_token is None or (
+                revoked_at is not None and now - revoked_at > self.lease_seconds
+            ):
+                held[2] = claim_token
+                held[3] = now
             return False
 
     async def refresh(self, lineage_id: str, claim_token: str) -> bool:
         async with self._lock:
             held = self._claims.get(lineage_id)
-            if held is None or held[0] != claim_token:
+            if held is None or held[0] != claim_token or held[2] is not None:
                 return False
-            self._claims[lineage_id] = (claim_token, time.monotonic())
+            held[1] = time.monotonic()
             return True
 
     async def release(self, lineage_id: str, claim_token: str) -> None:
