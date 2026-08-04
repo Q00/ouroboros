@@ -19,9 +19,13 @@ sharing one store:
   never to reuse a previously selected generation.
 - A lease that stops being refreshed for ``lease_seconds`` is presumed
   crashed and may be reclaimed. The steal is a compare-and-set on the
-  observed token, so two reclaimers cannot both win. An owner that loses
-  its lease is *fenced*: the loss is exposed on the yielded lease handle so
-  the caller can abort its in-flight work, and heartbeating stops.
+  observed token, so two reclaimers cannot both win. Fencing is two-sided:
+  an owner that observes a replacement token stops immediately, and an
+  owner that cannot *prove* ownership (refresh outage) fences itself once
+  half the lease has elapsed since its last confirmed refresh — strictly
+  before a reclaimer is allowed to steal at the full lease — so a stale
+  attempt can never continue effects alongside its successor. The loss is
+  exposed on the yielded lease handle so the caller aborts in-flight work.
 
 Stores that expose no database URL (unit-test fakes) or an in-memory URL
 (private to one process by construction) fall back to a per-store claim
@@ -39,6 +43,7 @@ from uuid import uuid4
 import weakref
 
 from sqlalchemy import delete, select, update
+from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from sqlalchemy.pool import NullPool
@@ -242,6 +247,19 @@ _LOCAL_CLAIMS_BY_STORE: weakref.WeakKeyDictionary[Any, LocalStepClaims] = (
 )
 
 
+def _is_shared_database_url(url: str) -> bool:
+    """True when the URL names a database another process could open too."""
+    try:
+        parsed = make_url(url)
+    except Exception:
+        return False
+    if parsed.get_backend_name() == "sqlite":
+        # Every pathless or explicit-:memory: SQLite form is in-memory and
+        # therefore private to this process by construction.
+        return bool(parsed.database) and parsed.database != ":memory:"
+    return True
+
+
 def step_claims_for(event_store: Any) -> StepClaims:
     """Resolve the claims backend for a store.
 
@@ -250,7 +268,7 @@ def step_claims_for(event_store: Any) -> StepClaims:
     fakes expose no URL at all, so both use a per-store table.
     """
     url = getattr(event_store, "database_url", None)
-    if not isinstance(url, str) or "://" not in url or ":memory:" in url:
+    if not isinstance(url, str) or not _is_shared_database_url(url):
         claims = _LOCAL_CLAIMS_BY_STORE.get(event_store)
         if claims is None:
             claims = LocalStepClaims()
@@ -277,7 +295,9 @@ async def owned_lineage_step(
     a heartbeat. If the refresh reports the lease was reclaimed (this owner
     was presumed crashed), the yielded handle's ``lost`` event fires so the
     caller can fence its in-flight work; the reclaimer is authoritative from
-    that point. Heartbeat failures never bypass cleanup: the lease is always
+    that point. If refreshes cannot be confirmed at all, the owner fences
+    itself at half the lease — strictly before a reclaimer may steal — so
+    the ``lost`` event always fires before a successor can begin. Heartbeat failures never bypass cleanup: the lease is always
     released on exit, so interruption hands ownership straight to the
     resuming call.
     """
@@ -286,9 +306,10 @@ async def owned_lineage_step(
         raise LineageStepClaimDenied(lineage_id)
     lease = StepLease()
     stop = asyncio.Event()
-    interval = heartbeat_interval if heartbeat_interval is not None else claims.lease_seconds / 3
+    interval = heartbeat_interval if heartbeat_interval is not None else claims.lease_seconds / 6
 
     async def _heartbeat() -> None:
+        last_confirmed = time.monotonic()
         while True:
             try:
                 await asyncio.wait_for(stop.wait(), timeout=interval)
@@ -298,19 +319,26 @@ async def owned_lineage_step(
             try:
                 still_owner = await claims.refresh(lineage_id, claim_token)
             except Exception:
-                # A transient refresh failure is not a loss of ownership;
-                # the next beat retries. Persistent failure ends in lease
-                # expiry, which the reclaim path already handles.
+                # A transient refresh failure is retried — but only while
+                # ownership is still provable. Past half the lease without a
+                # confirmed refresh this owner must fence itself, strictly
+                # before a reclaimer may steal at the full lease, so a stale
+                # attempt can never keep working alongside its successor.
                 log.warning(
                     "evolve.step_lease.refresh_failed",
                     lineage_id=lineage_id,
                     exc_info=True,
                 )
+                if time.monotonic() - last_confirmed > claims.lease_seconds / 2:
+                    log.warning("evolve.step_lease.self_fenced", lineage_id=lineage_id)
+                    lease.lost.set()
+                    return
                 continue
             if not still_owner:
                 log.warning("evolve.step_lease.lost", lineage_id=lineage_id)
                 lease.lost.set()
                 return
+            last_confirmed = time.monotonic()
 
     heartbeat = asyncio.create_task(_heartbeat())
     try:

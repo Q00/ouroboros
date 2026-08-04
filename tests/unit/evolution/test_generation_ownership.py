@@ -166,8 +166,16 @@ async def test_released_lease_hands_the_next_caller_a_fresh_replay(tmp_path) -> 
 
 
 @pytest.mark.asyncio
-async def test_lost_lease_fences_the_running_generation(tmp_path, monkeypatch) -> None:
-    """A reclaimed lease aborts the presumed-crashed owner's in-flight work."""
+async def test_reclaimed_lease_fences_the_stale_owner_before_the_successor_starts(
+    tmp_path, monkeypatch
+) -> None:
+    """The stale owner stops on its own, strictly before a steal is possible.
+
+    A refresh outage means the owner cannot prove it still holds the lease.
+    It must fence itself at half the lease — without any reclaimer acting —
+    so by the time the lease is stealable the previous attempt has already
+    stopped, and the successor never runs alongside it.
+    """
     from ouroboros.evolution import loop as loop_module
 
     class _OutageClaims(LocalStepClaims):
@@ -183,7 +191,7 @@ async def test_lost_lease_fences_the_running_generation(tmp_path, monkeypatch) -
     store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'evolve-fence.db'}")
     await store.initialize()
     try:
-        claims = _OutageClaims(lease_seconds=0.15)
+        claims = _OutageClaims(lease_seconds=0.12)
         monkeypatch.setattr(loop_module, "step_claims_for", lambda _store: claims)
 
         executions: list[int] = []
@@ -196,16 +204,68 @@ async def test_lost_lease_fences_the_running_generation(tmp_path, monkeypatch) -
         )
         await asyncio.wait_for(entered.wait(), timeout=5)
 
-        # The refresh outage keeps the lease unrefreshed past expiry; a
-        # reclaimer then steals it while the owner is still mid-generation.
-        await asyncio.sleep(0.2)
-        assert await LocalStepClaims.acquire(claims, "lineage-fence", "reclaimer") is True
-
-        # Once refresh works again it reports the loss; the fence aborts the
-        # blocked generation instead of letting it run alongside the thief.
-        claims.refresh_blocked = False
+        # No reclaimer acts here: the owner must fence itself once half the
+        # lease passes without a confirmed refresh.
         owner_result = await asyncio.wait_for(owner, timeout=5)
         assert owner_result.is_err, "a fenced owner must not report success"
+        assert executions == [1]
+
+        # Only after the owner has provably stopped does the successor run.
+        claims.refresh_blocked = False
+        successor = await _build_loop(store, executions).evolve_step(
+            "lineage-fence", initial_seed=_make_seed()
+        )
+        assert successor.is_ok, str(successor.error) if successor.is_err else ""
+        assert executions == [1, 1], "the successor re-runs the unfinished generation"
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_fenced_cancellation_appends_no_lineage_events(tmp_path, monkeypatch) -> None:
+    """The stale owner's cancellation writes no lineage history.
+
+    Authority already moved to a reclaimer, so the generic cancellation
+    handler must not append lineage.generation.failed for a generation the
+    successor may be executing; the successor owns the terminal record.
+    """
+    from ouroboros.evolution import loop as loop_module
+
+    store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'evolve-fenced-writes.db'}")
+    await store.initialize()
+    try:
+        claims = _RecordingClaims(refresh_result=False, lease_seconds=60.0)
+        monkeypatch.setattr(loop_module, "step_claims_for", lambda _store: claims)
+
+        config = EvolutionaryLoopConfig(
+            max_generations=10,
+            convergence_threshold=0.95,
+            min_generations=1,
+        )
+        loop = EvolutionaryLoop(event_store=store, config=config)
+        entered = asyncio.Event()
+        never = asyncio.Event()
+
+        # Stub one layer deeper than the watchdog so the real cancellation
+        # handler in _run_generation stays on the path the fence aborts.
+        async def _blocked_phases(**kwargs: Any) -> Result[GenerationResult, Any]:
+            entered.set()
+            await never.wait()
+            return Result.ok(_completed_result(kwargs["generation_number"], kwargs["current_seed"]))
+
+        loop._run_generation_phases = _blocked_phases  # type: ignore[method-assign]
+
+        owner = asyncio.create_task(
+            loop.evolve_step("lineage-fenced-writes", initial_seed=_make_seed())
+        )
+        await asyncio.wait_for(entered.wait(), timeout=5)
+
+        owner_result = await asyncio.wait_for(owner, timeout=10)
+        assert owner_result.is_err
+
+        events = await store.replay_lineage("lineage-fenced-writes")
+        failed = [e for e in events if e.type == "lineage.generation.failed"]
+        assert failed == [], "a fenced cancellation appended lineage history it no longer owns"
     finally:
         await store.close()
 
@@ -213,8 +273,14 @@ async def test_lost_lease_fences_the_running_generation(tmp_path, monkeypatch) -
 class _RecordingClaims:
     """Fake claims whose refresh behavior is scripted per test."""
 
-    def __init__(self, *, refresh_result: bool = True, refresh_raises: bool = False) -> None:
-        self.lease_seconds = 0.09
+    def __init__(
+        self,
+        *,
+        refresh_result: bool = True,
+        refresh_raises: bool = False,
+        lease_seconds: float = 0.09,
+    ) -> None:
+        self.lease_seconds = lease_seconds
         self.released: list[str] = []
         self._refresh_result = refresh_result
         self._refresh_raises = refresh_raises
@@ -241,11 +307,19 @@ class TestOwnedLineageStep:
 
     @pytest.mark.asyncio
     async def test_refresh_exception_never_bypasses_release(self) -> None:
-        claims = _RecordingClaims(refresh_raises=True)
+        claims = _RecordingClaims(refresh_raises=True, lease_seconds=60.0)
         async with owned_lineage_step(claims, "lin", heartbeat_interval=0.02) as lease:
             await asyncio.sleep(0.08)
             assert not lease.lost.is_set(), "a transient refresh failure is not a loss of ownership"
         assert claims.released == ["lin"], "release must survive heartbeat exceptions"
+
+    @pytest.mark.asyncio
+    async def test_unprovable_ownership_self_fences_at_half_the_lease(self) -> None:
+        """A refresh outage must fence the owner before a steal is possible."""
+        claims = _RecordingClaims(refresh_raises=True, lease_seconds=0.08)
+        async with owned_lineage_step(claims, "lin", heartbeat_interval=0.02) as lease:
+            await asyncio.wait_for(lease.lost.wait(), timeout=2)
+        assert claims.released == ["lin"]
 
 
 class TestDurableClaimLease:
@@ -326,3 +400,28 @@ class TestLocalClaimNamespacing:
         assert step_claims_for(store_a) is step_claims_for(store_a), (
             "one store must keep one claim table"
         )
+
+
+class TestClaimBackendClassification:
+    def test_every_sqlite_in_memory_form_is_local(self, tmp_path) -> None:
+        from ouroboros.evolution.generation_claims import _is_shared_database_url
+
+        assert _is_shared_database_url("sqlite+aiosqlite://") is False
+        assert _is_shared_database_url("sqlite+aiosqlite:///:memory:") is False
+        assert _is_shared_database_url(f"sqlite+aiosqlite:///{tmp_path / 'a.db'}") is True
+
+    @pytest.mark.asyncio
+    async def test_ownership_holds_on_a_pathless_in_memory_store(self) -> None:
+        """The supported pathless SQLite URL must not crash the claim path."""
+        store = EventStore("sqlite+aiosqlite://")
+        await store.initialize()
+        try:
+            assert isinstance(step_claims_for(store), LocalStepClaims)
+            executions: list[int] = []
+            result = await _build_loop(store, executions).evolve_step(
+                "lineage-memory", initial_seed=_make_seed()
+            )
+            assert result.is_ok, str(result.error) if result.is_err else ""
+            assert executions == [1]
+        finally:
+            await store.close()

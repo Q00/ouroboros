@@ -253,6 +253,9 @@ class EvolutionaryLoop:
     ) -> None:
         self.event_store = event_store
         self.config = config or EvolutionaryLoopConfig()
+        # Lineages whose step lease was lost mid-attempt: their cancellation
+        # must leave no lineage history behind (#1889).
+        self._fenced_lineages: set[str] = set()
         self.wonder_engine = wonder_engine
         self.reflect_engine = reflect_engine
         self.seed_generator = seed_generator
@@ -737,6 +740,8 @@ class EvolutionaryLoop:
                 )
         except LineageStepClaimDenied as denied:
             return Result.err(OuroborosError(str(denied)))
+        finally:
+            self._fenced_lineages.discard(lineage_id)
 
     async def _evolve_step_owned(
         self,
@@ -1127,8 +1132,11 @@ class EvolutionaryLoop:
         async def _fence_on_lease_loss() -> None:
             # A reclaimer that stole the expired lease is authoritative from
             # the moment of the steal; this owner's in-flight work must stop
-            # rather than keep appending alongside it (#1889).
+            # rather than keep appending alongside it (#1889). Marking the
+            # lineage first routes the resulting cancellation through the
+            # fenced path, which appends no lineage events.
             await lease.lost.wait()
+            self._fenced_lineages.add(lineage_id)
             await handle.abort(reason="lineage step lease lost to a reclaimer")
 
         fence = asyncio.create_task(_fence_on_lease_loss())
@@ -1195,6 +1203,18 @@ class EvolutionaryLoop:
                 conductor_directive=conductor_directive,
             )
         except asyncio.CancelledError:
+            if lineage.lineage_id in self._fenced_lineages:
+                # Lease-loss fencing: authority already moved to a reclaimer,
+                # so this stale attempt must append no lineage history — the
+                # successor owns the generation's terminal record (#1889).
+                logger.warning(
+                    "evolution.generation.fenced",
+                    extra={
+                        "lineage_id": lineage.lineage_id,
+                        "generation": generation_number,
+                    },
+                )
+                raise
             # MCP transport disconnect, timeout, or external task cancellation.
             # Use 'failed' (not 'interrupted') to avoid conflicting with the
             # graceful SIGINT shutdown path which emits 'interrupted'.
