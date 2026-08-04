@@ -39,6 +39,24 @@ from ouroboros.evolution.loop import (
 from ouroboros.persistence.event_store import EventStore
 
 
+async def _rewind_claim(
+    claims, *, refreshed_at: float | None = None, revoked_at: float | None = None
+) -> None:
+    """Deterministically age a durable claim row instead of sleeping."""
+    from sqlalchemy import update as sa_update
+
+    from ouroboros.persistence.schema import lineage_step_claims_table
+
+    values = {}
+    if refreshed_at is not None:
+        values["refreshed_at"] = refreshed_at
+    if revoked_at is not None:
+        values["revoked_at"] = revoked_at
+    engine = await claims._engine_once()
+    async with engine.begin() as conn:
+        await conn.execute(sa_update(lineage_step_claims_table).values(**values))
+
+
 def _make_seed(seed_id: str = "seed-1") -> Seed:
     ontology = OntologySchema(name="test", description="test ontology", fields=[])
     seed = MagicMock(spec=Seed)
@@ -514,13 +532,13 @@ async def test_reclaim_completes_through_fresh_public_retries(tmp_path) -> None:
     from ouroboros.evolution.generation_claims import DurableStepClaims
 
     claims = DurableStepClaims(
-        f"sqlite+aiosqlite:///{tmp_path / 'claims-retry.db'}", lease_seconds=0.12
+        f"sqlite+aiosqlite:///{tmp_path / 'claims-retry.db'}", lease_seconds=600.0
     )
     assert await claims.acquire("lin", "crashed") is True
-    await asyncio.sleep(0.15)
+    await _rewind_claim(claims, refreshed_at=0.0)
 
     assert await claims.acquire("lin", "retry-a") is False, "first retry marks revocation"
-    await asyncio.sleep(0.05)  # grace = lease/6 = 0.02s
+    await _rewind_claim(claims, refreshed_at=0.0, revoked_at=0.0)
     assert await claims.acquire("lin", "retry-b") is True, (
         "a later retry with a different token must complete the reclaim"
     )
@@ -616,6 +634,137 @@ async def test_takeover_during_preservation_append_refuses_the_write(tmp_path, m
         await store.close()
 
 
+@pytest.mark.asyncio
+async def test_lost_lease_suppresses_a_cancellation_resistant_success(
+    tmp_path, monkeypatch
+) -> None:
+    """An owner that declared its lease lost may never report success.
+
+    A cancellation-resistant executor can swallow the fence's abort and
+    return a completed result; the lost state must still fail every
+    persistence path closed and surface an error, not a success.
+    """
+    from ouroboros.evolution import loop as loop_module
+
+    store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'evolve-resistant.db'}")
+    await store.initialize()
+    try:
+        # Creation gate passes, the first heartbeat reports the loss.
+        claims = _RecordingClaims(refresh_results=[True, False], lease_seconds=0.6)
+        monkeypatch.setattr(loop_module, "step_claims_for", lambda _store: claims)
+
+        config = EvolutionaryLoopConfig(
+            max_generations=10,
+            convergence_threshold=0.95,
+            min_generations=1,
+        )
+        loop = EvolutionaryLoop(event_store=store, config=config)
+        entered = asyncio.Event()
+
+        async def _resistant_run(**kwargs: Any) -> Result[GenerationResult, Any]:
+            entered.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                pass  # swallow the fence's abort and "finish" anyway
+            return Result.ok(_completed_result(kwargs["generation_number"], kwargs["current_seed"]))
+
+        loop._run_generation_with_watchdog = _resistant_run  # type: ignore[method-assign]
+
+        owner = asyncio.create_task(
+            loop.evolve_step("lineage-resistant", initial_seed=_make_seed())
+        )
+        await asyncio.wait_for(entered.wait(), timeout=5)
+
+        owner_result = await asyncio.wait_for(owner, timeout=10)
+        assert owner_result.is_err, "a lost lease must suppress a cancellation-resistant success"
+        events = await store.replay_lineage("lineage-resistant")
+        completed = [e for e in events if e.type == "lineage.generation.completed"]
+        assert completed == [], "a fenced owner persisted a completion event"
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_takeover_waits_for_the_stale_attempt_to_stop(tmp_path, monkeypatch) -> None:
+    """Liveness of a fenced-but-running attempt blocks the takeover.
+
+    After the fence fires, the lingering liveness beat keeps the claim row
+    fresh, so phase two — which requires an expired lease — stays denied
+    until the stale attempt actually exits and releases; the release is the
+    termination acknowledgement.
+    """
+    from sqlalchemy import select as sa_select
+
+    from ouroboros.evolution import loop as loop_module
+    from ouroboros.evolution.generation_claims import DurableStepClaims
+    from ouroboros.persistence.schema import lineage_step_claims_table
+
+    store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'evolve-liveness.db'}")
+    await store.initialize()
+    try:
+        claims = DurableStepClaims(store.database_url, lease_seconds=0.6)
+        monkeypatch.setattr(loop_module, "step_claims_for", lambda _store: claims)
+
+        config = EvolutionaryLoopConfig(
+            max_generations=10,
+            convergence_threshold=0.95,
+            min_generations=1,
+        )
+        loop = EvolutionaryLoop(event_store=store, config=config)
+        entered = asyncio.Event()
+        finish = asyncio.Event()
+
+        async def _resistant_run(**kwargs: Any) -> Result[GenerationResult, Any]:
+            entered.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                await finish.wait()  # stale work keeps running past the abort
+            return Result.ok(_completed_result(kwargs["generation_number"], kwargs["current_seed"]))
+
+        loop._run_generation_with_watchdog = _resistant_run  # type: ignore[method-assign]
+
+        owner = asyncio.create_task(loop.evolve_step("lineage-liveness", initial_seed=_make_seed()))
+        await asyncio.wait_for(entered.wait(), timeout=5)
+
+        # Expire the lease and mark the revocation; the owner's heartbeat
+        # observes it, fences, and switches to the lingering liveness beat.
+        await _rewind_claim(claims, refreshed_at=0.0)
+        assert await claims.acquire("lineage-liveness", "reclaimer") is False
+
+        # Wait until a lingering beat has provably refreshed the row.
+        engine = await claims._engine_once()
+        for _ in range(100):
+            async with engine.connect() as conn:
+                refreshed_at = await conn.scalar(
+                    sa_select(lineage_step_claims_table.c.refreshed_at)
+                )
+            if refreshed_at and refreshed_at > 1.0:
+                break
+            await asyncio.sleep(0.05)
+        else:
+            raise AssertionError("the fenced owner never produced a liveness beat")
+
+        # Even with the revocation aged past the grace, the live stale
+        # attempt blocks the takeover.
+        await _rewind_claim(claims, revoked_at=0.0)
+        assert await claims.acquire("lineage-liveness", "reclaimer") is False, (
+            "takeover succeeded while the stale attempt was provably alive"
+        )
+
+        # Let the stale work stop; its release acknowledges termination.
+        finish.set()
+        owner_result = await asyncio.wait_for(owner, timeout=10)
+        assert owner_result.is_err
+
+        assert await claims.acquire("lineage-liveness", "reclaimer") is True, (
+            "the released claim must be acquirable after termination"
+        )
+    finally:
+        await store.close()
+
+
 class _RecordingClaims:
     """Fake claims whose refresh behavior is scripted per test.
 
@@ -649,6 +798,9 @@ class _RecordingClaims:
                 return self._refresh_results.pop(0)
             return self._refresh_results[0]
         return self._refresh_result
+
+    async def refresh_fenced(self, lineage_id: str, claim_token: str) -> bool:
+        return True
 
     async def release(self, lineage_id: str, claim_token: str) -> None:
         self.released.append(lineage_id)
@@ -689,19 +841,19 @@ class TestDurableClaimLease:
 
     @pytest.mark.asyncio
     async def test_fresh_claim_blocks_and_expired_claim_is_reclaimable(self, tmp_path) -> None:
-        claims = self._claims(tmp_path, lease_seconds=0.2)
+        claims = self._claims(tmp_path, lease_seconds=600.0)
         assert await claims.acquire("lin", "owner-a") is True
         assert await claims.acquire("lin", "owner-b") is False, (
             "a fresh claim must not be stealable"
         )
-        await asyncio.sleep(0.25)
+        await _rewind_claim(claims, refreshed_at=0.0)
         assert await claims.acquire("lin", "owner-b") is False, (
             "reclaim is two-phase: the first call only marks revocation"
         )
         assert await claims.refresh("lin", "owner-a") is False, (
             "the presumed-crashed owner must observe the revocation"
         )
-        await asyncio.sleep(0.05)  # grace = lease/6 ≈ 0.033s
+        await _rewind_claim(claims, refreshed_at=0.0, revoked_at=0.0)
         assert await claims.acquire("lin", "owner-b") is True, (
             "an expired claim must be reclaimable after the grace"
         )
@@ -736,9 +888,11 @@ class TestDurableClaimLease:
 
     @pytest.mark.asyncio
     async def test_concurrent_reclaim_of_expired_lease_has_one_winner(self, tmp_path) -> None:
-        claims = self._claims(tmp_path, lease_seconds=0.12)
+        # A huge lease makes the grace impossible to cross by scheduler
+        # delay; both phase transitions are driven by explicit row aging.
+        claims = self._claims(tmp_path, lease_seconds=600.0)
         assert await claims.acquire("lin", "crashed") is True
-        await asyncio.sleep(0.15)
+        await _rewind_claim(claims, refreshed_at=0.0)
         first_round = await asyncio.gather(
             claims.acquire("lin", "reclaim-a"),
             claims.acquire("lin", "reclaim-b"),
@@ -746,7 +900,7 @@ class TestDurableClaimLease:
         assert first_round == [False, False], (
             "the revocation phase never grants ownership immediately"
         )
-        await asyncio.sleep(0.05)  # grace = lease/6 = 0.02s
+        await _rewind_claim(claims, refreshed_at=0.0, revoked_at=0.0)
         outcomes = await asyncio.gather(
             claims.acquire("lin", "reclaim-a"),
             claims.acquire("lin", "reclaim-b"),

@@ -786,7 +786,7 @@ class EvolutionaryLoop:
                 self.event_store,
                 step_claims_for(self.event_store),
                 lineage_id,
-                lease.claim_token,
+                lease,
                 lineage_created(lineage.lineage_id, lineage.goal),
             ):
                 return Result.err(self._lease_lost_error("before the lineage was created"))
@@ -971,7 +971,7 @@ class EvolutionaryLoop:
                     self.event_store,
                     step_claims_for(self.event_store),
                     lineage.lineage_id,
-                    lease.claim_token,
+                    lease,
                     event,
                 )
                 if not appended:

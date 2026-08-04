@@ -258,6 +258,28 @@ class DurableStepClaims:
             )
             return refreshed.rowcount == 1
 
+    async def refresh_fenced(self, lineage_id: str, claim_token: str) -> bool:
+        """Liveness beat for a fenced owner whose work has not stopped yet.
+
+        Keeps ``refreshed_at`` fresh without touching the revocation marker,
+        so phase-two takeover — which requires the lease to be expired —
+        stays blocked while the stale attempt is still provably alive. The
+        row's deletion on exit is the termination acknowledgement that
+        finally lets a reclaimer proceed.
+        """
+        engine = await self._engine_once()
+        table = lineage_step_claims_table
+        async with engine.begin() as conn:
+            beat = await conn.execute(
+                update(table)
+                .where(
+                    table.c.lineage_id == lineage_id,
+                    table.c.claim_token == claim_token,
+                )
+                .values(refreshed_at=await self._db_now(conn))
+            )
+            return beat.rowcount == 1
+
     async def _append_event_if_owner(self, lineage_id: str, claim_token: str, event: Any) -> bool:
         """Token check and event insert in one transaction (see module doc)."""
         engine = await self._engine_once()
@@ -339,6 +361,14 @@ class LocalStepClaims:
             if held is not None and held[0] == claim_token:
                 del self._claims[lineage_id]
 
+    async def refresh_fenced(self, lineage_id: str, claim_token: str) -> bool:
+        async with self._lock:
+            held = self._claims.get(lineage_id)
+            if held is None or held[0] != claim_token:
+                return False
+            held[1] = time.monotonic()
+            return True
+
     async def append_event_if_owner(
         self, lineage_id: str, claim_token: str, event_store: Any, event: Any
     ) -> bool:
@@ -405,7 +435,7 @@ async def append_lineage_event_if_owner(
     event_store: Any,
     claims: StepClaims,
     lineage_id: str,
-    claim_token: str,
+    lease: StepLease,
     event: Any,
 ) -> bool:
     """Append one lineage event only while ``claim_token`` still owns the step.
@@ -419,6 +449,12 @@ async def append_lineage_event_if_owner(
     mid-transaction. Fallback backends are private to one process and check
     ownership immediately before appending.
     """
+    if lease.lost.is_set():
+        # Self-fencing is process-local: the stored token may still be
+        # valid, but an owner that has declared its ownership unprovable
+        # must fail every persistence path closed (#1889 round seven).
+        return False
+    claim_token = lease.claim_token
     if isinstance(claims, DurableStepClaims):
         registry = getattr(event_store, "_settling_writes", None)
         refuse_when = None
@@ -480,7 +516,7 @@ async def owned_lineage_step(
             if fence_budget <= 0:
                 log.warning("evolve.step_lease.self_fenced", lineage_id=lineage_id)
                 lease.lost.set()
-                return
+                break
             try:
                 still_owner = await asyncio.wait_for(
                     claims.refresh(lineage_id, claim_token), timeout=fence_budget
@@ -488,7 +524,7 @@ async def owned_lineage_step(
             except TimeoutError:
                 log.warning("evolve.step_lease.self_fenced", lineage_id=lineage_id)
                 lease.lost.set()
-                return
+                break
             except Exception:
                 # A transient refresh failure is retried — but only while
                 # ownership is still provable. Past half the lease without a
@@ -503,13 +539,33 @@ async def owned_lineage_step(
                 if time.monotonic() - last_confirmed > claims.lease_seconds / 2:
                     log.warning("evolve.step_lease.self_fenced", lineage_id=lineage_id)
                     lease.lost.set()
-                    return
+                    break
                 continue
             if not still_owner:
                 log.warning("evolve.step_lease.lost", lineage_id=lineage_id)
                 lease.lost.set()
-                return
+                break
             last_confirmed = time.monotonic()
+        # Fenced-lingering mode: authority is gone but the attempt may not
+        # have physically stopped (a cancellation-resistant executor). Keep
+        # a liveness beat on the still-held token so a reclaimer cannot
+        # take over while the stale work is provably alive; the release on
+        # exit is the termination acknowledgement that unblocks takeover.
+        while True:
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=interval)
+                return
+            except TimeoutError:
+                pass
+            try:
+                if not await claims.refresh_fenced(lineage_id, claim_token):
+                    return
+            except Exception:
+                log.warning(
+                    "evolve.step_lease.fenced_beat_failed",
+                    lineage_id=lineage_id,
+                    exc_info=True,
+                )
 
     heartbeat = asyncio.create_task(_heartbeat())
     try:
