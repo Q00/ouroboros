@@ -1,4 +1,4 @@
-"""Seed reconstruction for one evolve_step resume decision.
+"""Seed and event construction helpers for one evolve_step attempt.
 
 Extracted from ``EvolutionaryLoop.evolve_step`` so the resume ladder is
 testable on its own and the loop module stays inside its size budget. The
@@ -11,11 +11,13 @@ phases are never skipped with a different generation's seed.
 from __future__ import annotations
 
 import json
+from typing import Any
 
 from ouroboros.core.errors import OuroborosError
-from ouroboros.core.lineage import GenerationPhase, OntologyLineage
+from ouroboros.core.lineage import GenerationPhase, GenerationRecord, OntologyLineage
 from ouroboros.core.seed import Seed
 from ouroboros.core.types import Result
+from ouroboros.events.lineage import lineage_generation_completed
 
 
 def reconstruct_step_seed(
@@ -107,3 +109,37 @@ def reconstruct_step_seed(
         )
 
     return Result.err(OuroborosError("Events exist but no completed generations found"))
+
+
+def generation_record_for(result: Any) -> GenerationRecord:
+    """Build the lineage record for one finished generation result."""
+    return GenerationRecord(
+        generation_number=result.generation_number,
+        seed_id=result.seed.metadata.seed_id,
+        parent_seed_id=result.seed.metadata.parent_seed_id,
+        ontology_snapshot=result.seed.ontology_schema,
+        evaluation_summary=result.evaluation_summary,
+        wonder_questions=result.wonder_output.questions if result.wonder_output else (),
+        phase=result.phase,
+        seed_json=json.dumps(result.seed.to_dict()),
+        execution_output=result.execution_output,
+    )
+
+
+def generation_completed_event(lineage_id: str, result: Any, record: GenerationRecord) -> Any:
+    """Build the completion event carrying the durable cross-session state."""
+    return lineage_generation_completed(
+        lineage_id,
+        result.generation_number,
+        result.seed.metadata.seed_id,
+        result.seed.ontology_schema.model_dump(mode="json"),
+        result.evaluation_summary.model_dump(mode="json") if result.evaluation_summary else None,
+        list(result.wonder_output.questions) if result.wonder_output else None,
+        seed_json=json.dumps(result.seed.to_dict()),
+        execution_output=result.execution_output,
+        parent_seed_id=result.seed.metadata.parent_seed_id,
+        seed_quality_canary_feedback=[
+            feedback.model_dump(mode="json") for feedback in record.seed_quality_canary_feedback
+        ]
+        or None,
+    )

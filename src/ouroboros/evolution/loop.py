@@ -60,6 +60,7 @@ from ouroboros.evolution.directive_mapping import (
 from ouroboros.evolution.generation_claims import (
     LineageStepClaimDenied,
     StepLease,
+    append_lineage_event_if_owner,
     owned_lineage_step,
     step_claims_for,
 )
@@ -71,7 +72,11 @@ from ouroboros.evolution.rewind import (
     NoOpRewindObserver,
     RewindObserver,
 )
-from ouroboros.evolution.step_seed import reconstruct_step_seed
+from ouroboros.evolution.step_seed import (
+    generation_completed_event,
+    generation_record_for,
+    reconstruct_step_seed,
+)
 from ouroboros.evolution.watchdog import (
     GenerationProgressWatchdog,
     GenerationWatchdogTimeout,
@@ -1018,49 +1023,54 @@ class EvolutionaryLoop:
 
             # Step 3: Emit generation completed event (with seed_json).
             nonlocal_lineage = lineage
-            record = GenerationRecord(
-                generation_number=generation_number,
-                seed_id=result.seed.metadata.seed_id,
-                parent_seed_id=result.seed.metadata.parent_seed_id,
-                ontology_snapshot=result.seed.ontology_schema,
-                evaluation_summary=result.evaluation_summary,
-                wonder_questions=result.wonder_output.questions if result.wonder_output else (),
-                phase=result.phase,
-                seed_json=json.dumps(result.seed.to_dict()),
-                execution_output=result.execution_output,
-            )
+            record = generation_record_for(result)
             nonlocal_lineage = nonlocal_lineage.with_generation(record)
 
-            await self.event_store.append(
-                lineage_generation_completed(
+            async def _append_owned(event: Any) -> bool:
+                # Every post-executor lineage transition is conditional on
+                # still holding the step lease: a write that commits is
+                # serialized before any successor's replay, and a stale
+                # owner's write after a steal is refused instead of
+                # journaling alongside the reclaimer (#1889).
+                appended = await append_lineage_event_if_owner(
+                    self.event_store,
+                    step_claims_for(self.event_store),
                     nonlocal_lineage.lineage_id,
-                    generation_number,
-                    result.seed.metadata.seed_id,
-                    result.seed.ontology_schema.model_dump(mode="json"),
-                    result.evaluation_summary.model_dump(mode="json")
-                    if result.evaluation_summary
-                    else None,
-                    list(result.wonder_output.questions) if result.wonder_output else None,
-                    seed_json=json.dumps(result.seed.to_dict()),
-                    execution_output=result.execution_output,
-                    parent_seed_id=result.seed.metadata.parent_seed_id,
-                    seed_quality_canary_feedback=[
-                        feedback.model_dump(mode="json")
-                        for feedback in record.seed_quality_canary_feedback
-                    ]
-                    or None,
+                    lease.claim_token,
+                    event,
                 )
-            )
+                if not appended:
+                    logger.warning(
+                        "evolution.generation.fenced_write_refused",
+                        extra={
+                            "lineage_id": nonlocal_lineage.lineage_id,
+                            "generation": generation_number,
+                        },
+                    )
+                    container.result = Result.err(
+                        OuroborosError(
+                            "evolve_step: lineage step lease was lost before "
+                            "persistence; the reclaiming caller owns this "
+                            "generation's record"
+                        )
+                    )
+                return appended
+
+            if not await _append_owned(
+                generation_completed_event(nonlocal_lineage.lineage_id, result, record)
+            ):
+                return
 
             # Emit ontology evolved event if delta exists.
             if result.ontology_delta and result.ontology_delta.similarity < 1.0:
-                await self.event_store.append(
+                if not await _append_owned(
                     lineage_ontology_evolved(
                         nonlocal_lineage.lineage_id,
                         generation_number,
                         result.ontology_delta.model_dump(mode="json"),
                     )
-                )
+                ):
+                    return
 
             # Step 4: Check convergence.
             conv_signal = self._convergence.evaluate(
@@ -1073,37 +1083,40 @@ class EvolutionaryLoop:
             action = StepAction.CONTINUE
             if conv_signal.converged:
                 if generation_number >= self.config.max_generations:
-                    await self.event_store.append(
+                    if not await _append_owned(
                         lineage_exhausted(
                             nonlocal_lineage.lineage_id,
                             generation_number,
                             self.config.max_generations,
                         )
-                    )
+                    ):
+                        return
                     nonlocal_lineage = nonlocal_lineage.with_status(LineageStatus.EXHAUSTED)
                     action = StepAction.EXHAUSTED
                 elif "Stagnation" in conv_signal.reason or "Oscillation" in conv_signal.reason:
-                    await self.event_store.append(
+                    if not await _append_owned(
                         lineage_stagnated(
                             nonlocal_lineage.lineage_id,
                             generation_number,
                             conv_signal.reason,
                             self.config.stagnation_window,
                         )
-                    )
+                    ):
+                        return
                     # Stagnation is a non-terminal control handoff: the shared
                     # Directive contract maps STAGNATED to UNSTUCK, so keep the
                     # lineage resumable for the lateral-thinking recovery path.
                     action = StepAction.STAGNATED
                 else:
-                    await self.event_store.append(
+                    if not await _append_owned(
                         lineage_converged(
                             nonlocal_lineage.lineage_id,
                             generation_number,
                             conv_signal.reason,
                             conv_signal.ontology_similarity,
                         )
-                    )
+                    ):
+                        return
                     nonlocal_lineage = nonlocal_lineage.with_status(LineageStatus.CONVERGED)
                     action = StepAction.CONVERGED
 

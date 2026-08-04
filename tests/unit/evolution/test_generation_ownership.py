@@ -234,7 +234,9 @@ async def test_fenced_cancellation_appends_no_lineage_events(tmp_path, monkeypat
     store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'evolve-fenced-writes.db'}")
     await store.initialize()
     try:
-        claims = _RecordingClaims(refresh_result=False, lease_seconds=60.0)
+        # A short lease keeps the default heartbeat (lease/6) fast enough
+        # for the loss to be observed promptly and deterministically.
+        claims = _RecordingClaims(refresh_result=False, lease_seconds=0.6)
         monkeypatch.setattr(loop_module, "step_claims_for", lambda _store: claims)
 
         config = EvolutionaryLoopConfig(
@@ -268,6 +270,78 @@ async def test_fenced_cancellation_appends_no_lineage_events(tmp_path, monkeypat
         assert failed == [], "a fenced cancellation appended lineage history it no longer owns"
     finally:
         await store.close()
+
+
+@pytest.mark.asyncio
+async def test_lease_lost_before_completion_append_refuses_the_write(tmp_path, monkeypatch) -> None:
+    """A stale owner's completion cannot commit after ownership transferred.
+
+    The executor finishes only after a reclaimer has taken the lease; the
+    completion append shares one transaction with the token check, so the
+    stale write is refused instead of journaling a generation the successor
+    may already be executing.
+    """
+    from sqlalchemy import update as sa_update
+
+    from ouroboros.evolution import loop as loop_module
+    from ouroboros.evolution.generation_claims import DurableStepClaims
+    from ouroboros.persistence.schema import lineage_step_claims_table
+
+    store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'evolve-inflight.db'}")
+    await store.initialize()
+    try:
+        claims = DurableStepClaims(store.database_url, lease_seconds=60.0)
+        monkeypatch.setattr(loop_module, "step_claims_for", lambda _store: claims)
+
+        executions: list[int] = []
+        entered = asyncio.Event()
+        stolen = asyncio.Event()
+        owner_loop = _build_loop(store, executions, entered=entered, proceed=stolen)
+
+        owner = asyncio.create_task(
+            owner_loop.evolve_step("lineage-inflight", initial_seed=_make_seed())
+        )
+        await asyncio.wait_for(entered.wait(), timeout=5)
+
+        # Transfer ownership while the executor result is still pending:
+        # expire the lease row, then reclaim exactly as a successor would.
+        engine = await claims._engine_once()
+        async with engine.begin() as conn:
+            await conn.execute(sa_update(lineage_step_claims_table).values(refreshed_at=0.0))
+        assert await claims.acquire("lineage-inflight", "reclaimer") is True
+
+        stolen.set()
+        owner_result = await asyncio.wait_for(owner, timeout=10)
+        assert owner_result.is_err, "a stale owner must not report a persisted completion"
+
+        events = await store.replay_lineage("lineage-inflight")
+        completed = [e for e in events if e.type == "lineage.generation.completed"]
+        assert completed == [], "a completion event committed after ownership had transferred"
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_wall_clock_jump_cannot_steal_a_fresh_lease(tmp_path, monkeypatch) -> None:
+    """Lease expiry is decided by database time, not client clocks.
+
+    A contender whose wall clock stepped forward past the lease duration
+    must still be denied: otherwise a live, recently refreshed owner could
+    be stolen from before its own monotonic half-lease fence can fire.
+    """
+    from ouroboros.evolution import generation_claims as claims_module
+    from ouroboros.evolution.generation_claims import DurableStepClaims
+
+    claims = DurableStepClaims(
+        f"sqlite+aiosqlite:///{tmp_path / 'claims-skew.db'}", lease_seconds=300.0
+    )
+    assert await claims.acquire("lin", "owner") is True
+
+    real_time = claims_module.time.time
+    monkeypatch.setattr(claims_module.time, "time", lambda: real_time() + 400.0)
+    assert await claims.acquire("lin", "thief") is False, (
+        "a stepped client clock stole a fresh lease from a live owner"
+    )
 
 
 class _RecordingClaims:

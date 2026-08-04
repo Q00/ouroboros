@@ -42,14 +42,15 @@ from typing import Any, Protocol
 from uuid import uuid4
 import weakref
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, select, text, update
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from sqlalchemy.pool import NullPool
 import structlog
 
-from ouroboros.persistence.schema import lineage_step_claims_table, metadata
+from ouroboros.persistence.event_store import _run_to_settlement
+from ouroboros.persistence.schema import events_table, lineage_step_claims_table, metadata
 
 log = structlog.get_logger(__name__)
 
@@ -70,7 +71,8 @@ class LineageStepClaimDenied(Exception):
 class StepLease:
     """Live handle to an owned lease; ``lost`` fires if a reclaimer takes it."""
 
-    def __init__(self) -> None:
+    def __init__(self, claim_token: str) -> None:
+        self.claim_token = claim_token
         self.lost = asyncio.Event()
 
 
@@ -110,7 +112,6 @@ class DurableStepClaims:
     async def acquire(self, lineage_id: str, claim_token: str) -> bool:
         engine = await self._engine_once()
         table = lineage_step_claims_table
-        now = time.time()
         async with engine.connect() as conn:
             # SQLite needs an immediate write transaction: a deferred SELECT
             # followed by INSERT leaves a gap in which a second caller can
@@ -122,6 +123,7 @@ class DurableStepClaims:
             else:
                 await conn.begin()
             try:
+                now = await self._db_now(conn)
                 row = (
                     await conn.execute(
                         select(table.c.claim_token, table.c.refreshed_at).where(
@@ -179,6 +181,21 @@ class DurableStepClaims:
                     await conn.rollback()
                 raise
 
+    @staticmethod
+    async def _db_now(conn: Any) -> float:
+        """Epoch seconds from the database itself.
+
+        Lease expiry must never compare wall-clock values written by
+        different owners: a skewed or stepped client clock could steal a
+        fresh lease from a live owner. The database connection is the one
+        shared time authority every contender already agrees on.
+        """
+        if conn.dialect.name == "sqlite":
+            query = "SELECT (julianday('now') - 2440587.5) * 86400.0"
+        else:
+            query = "SELECT EXTRACT(EPOCH FROM NOW())"
+        return float(await conn.scalar(text(query)))
+
     async def refresh(self, lineage_id: str, claim_token: str) -> bool:
         engine = await self._engine_once()
         table = lineage_step_claims_table
@@ -189,9 +206,34 @@ class DurableStepClaims:
                     table.c.lineage_id == lineage_id,
                     table.c.claim_token == claim_token,
                 )
-                .values(refreshed_at=time.time())
+                .values(refreshed_at=await self._db_now(conn))
             )
             return refreshed.rowcount == 1
+
+    async def _append_event_if_owner(self, lineage_id: str, claim_token: str, event: Any) -> bool:
+        """Token check and event insert in one transaction (see module doc)."""
+        engine = await self._engine_once()
+        table = lineage_step_claims_table
+        async with engine.connect() as conn:
+            sqlite = conn.dialect.name == "sqlite"
+            if sqlite:
+                await conn.exec_driver_sql("BEGIN IMMEDIATE")
+            else:
+                await conn.begin()
+            try:
+                held = await conn.scalar(
+                    select(table.c.claim_token).where(table.c.lineage_id == lineage_id)
+                )
+                if held != claim_token:
+                    await conn.rollback()
+                    return False
+                await conn.execute(events_table.insert().values(**event.to_db_dict()))
+                await conn.commit()
+                return True
+            except BaseException:
+                if conn.in_transaction():
+                    await conn.rollback()
+                raise
 
     async def release(self, lineage_id: str, claim_token: str) -> None:
         engine = await self._engine_once()
@@ -281,6 +323,41 @@ def step_claims_for(event_store: Any) -> StepClaims:
     return durable
 
 
+async def append_lineage_event_if_owner(
+    event_store: Any,
+    claims: StepClaims,
+    lineage_id: str,
+    claim_token: str,
+    event: Any,
+) -> bool:
+    """Append one lineage event only while ``claim_token`` still owns the step.
+
+    On the durable backend the token check and the event insert share one
+    database transaction, so the single-writer database serializes them
+    against any steal: a write that commits necessarily precedes the
+    successor's post-steal replay, and a steal that commits first refuses
+    the stale write. The write still runs to settlement inside the store's
+    registry, so close() drains it and cancellation cannot abandon it
+    mid-transaction. Fallback backends are private to one process and check
+    ownership immediately before appending.
+    """
+    if isinstance(claims, DurableStepClaims):
+        registry = getattr(event_store, "_settling_writes", None)
+        refuse_when = None
+        if hasattr(event_store, "_closing"):
+            refuse_when = lambda: event_store._closing  # noqa: E731
+        return await _run_to_settlement(
+            claims._append_event_if_owner(lineage_id, claim_token, event),
+            registry=registry,
+            refuse_when=refuse_when,
+            operation="append_lineage_event_if_owner",
+        )
+    if not await claims.refresh(lineage_id, claim_token):
+        return False
+    await event_store.append(event)
+    return True
+
+
 @asynccontextmanager
 async def owned_lineage_step(
     claims: StepClaims,
@@ -304,7 +381,7 @@ async def owned_lineage_step(
     claim_token = uuid4().hex
     if not await claims.acquire(lineage_id, claim_token):
         raise LineageStepClaimDenied(lineage_id)
-    lease = StepLease()
+    lease = StepLease(claim_token)
     stop = asyncio.Event()
     interval = heartbeat_interval if heartbeat_interval is not None else claims.lease_seconds / 6
 
