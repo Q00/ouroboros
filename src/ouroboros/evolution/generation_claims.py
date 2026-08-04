@@ -43,6 +43,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 import time
 from typing import Any, Protocol
 from uuid import uuid4
@@ -61,6 +62,20 @@ from ouroboros.persistence.schema import events_table, lineage_step_claims_table
 log = structlog.get_logger(__name__)
 
 DEFAULT_LEASE_SECONDS = 300.0
+
+# The lease of the evolve_step attempt running in the current task tree.
+# Effectful executors read it through current_step_fence() and must stop
+# producing effects once its ``lost`` event fires: this is the fencing
+# token that reaches work no database check can interrupt. The owner
+# self-fences at half the lease, and a reclaimer needs the full lease plus
+# a grace period, so fencing-aware work provably stops before a successor
+# can begin even when the owner's database path has failed entirely.
+_CURRENT_STEP_LEASE: ContextVar[StepLease | None] = ContextVar("evolve_step_lease", default=None)
+
+
+def current_step_fence() -> StepLease | None:
+    """Return the running evolve_step attempt's lease handle, if any."""
+    return _CURRENT_STEP_LEASE.get()
 
 
 class LineageStepClaimDenied(Exception):
@@ -280,8 +295,20 @@ class DurableStepClaims:
             )
             return beat.rowcount == 1
 
-    async def _append_event_if_owner(self, lineage_id: str, claim_token: str, event: Any) -> bool:
-        """Token check and event insert in one transaction (see module doc)."""
+    async def _append_event_if_owner(
+        self, lineage_id: str, claim_token: str, event: Any, lease: StepLease
+    ) -> bool:
+        """Token check and event insert in one transaction (see module doc).
+
+        The attempt's process-local lost state is consulted both on entry
+        and immediately before the commit, so a self-fence that fires while
+        the append is already admitted still fails the write closed. The
+        claim row is read with a row lock so a reclaimer on a non-SQLite
+        backend cannot update the token between this read and the insert
+        (SQLite's immediate write transaction covers the same window).
+        """
+        if lease.lost.is_set():
+            return False
         engine = await self._engine_once()
         table = lineage_step_claims_table
         async with engine.connect() as conn:
@@ -292,12 +319,19 @@ class DurableStepClaims:
                 await conn.begin()
             try:
                 held = await conn.scalar(
-                    select(table.c.claim_token).where(table.c.lineage_id == lineage_id)
+                    select(table.c.claim_token)
+                    .where(table.c.lineage_id == lineage_id)
+                    .with_for_update()
                 )
                 if held != claim_token:
                     await conn.rollback()
                     return False
                 await conn.execute(events_table.insert().values(**event.to_db_dict()))
+                if lease.lost.is_set():
+                    # The self-fence fired after admission: authority is no
+                    # longer provable, so the admitted write must not commit.
+                    await conn.rollback()
+                    return False
                 await conn.commit()
                 return True
             except BaseException:
@@ -461,7 +495,7 @@ async def append_lineage_event_if_owner(
         if hasattr(event_store, "_closing"):
             refuse_when = lambda: event_store._closing  # noqa: E731
         return await _run_to_settlement(
-            claims._append_event_if_owner(lineage_id, claim_token, event),
+            claims._append_event_if_owner(lineage_id, claim_token, event, lease),
             registry=registry,
             refuse_when=refuse_when,
             operation="append_lineage_event_if_owner",
@@ -568,9 +602,11 @@ async def owned_lineage_step(
                 )
 
     heartbeat = asyncio.create_task(_heartbeat())
+    fence_token = _CURRENT_STEP_LEASE.set(lease)
     try:
         yield lease
     finally:
+        _CURRENT_STEP_LEASE.reset(fence_token)
         stop.set()
         heartbeat.cancel()
         try:

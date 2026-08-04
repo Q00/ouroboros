@@ -765,6 +765,115 @@ async def test_takeover_waits_for_the_stale_attempt_to_stop(tmp_path, monkeypatc
         await store.close()
 
 
+@pytest.mark.asyncio
+async def test_loss_after_admission_fails_the_commit_closed(tmp_path) -> None:
+    """A self-fence firing after the append was admitted must refuse commit.
+
+    The outer lost check can be passed before the heartbeat fires; the
+    transaction itself consults the lost state again immediately before
+    committing, so the admitted write rolls back instead of persisting.
+    """
+    from ouroboros.events.lineage import lineage_created
+    from ouroboros.evolution.generation_claims import DurableStepClaims, StepLease
+
+    store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'claims-admit.db'}")
+    await store.initialize()
+    try:
+        claims = DurableStepClaims(store.database_url, lease_seconds=600.0)
+        assert await claims.acquire("lin", "owner") is True
+        lease = StepLease("owner")
+        lease.lost.set()
+
+        # Direct inner call: the token is still durably valid, so only the
+        # lost-state coupling can refuse this write.
+        appended = await claims._append_event_if_owner(
+            "lin", "owner", lineage_created("lin", "goal"), lease
+        )
+        assert appended is False, "a lost attempt committed an admitted write"
+
+        events = await store.replay_lineage("lin")
+        assert events == [], "the refused write still persisted an event"
+    finally:
+        await store.close()
+
+
+def test_claim_read_locks_the_row_on_non_sqlite_backends() -> None:
+    """The ownership read compiles with FOR UPDATE on lock-based backends."""
+    from sqlalchemy import select as sa_select
+    from sqlalchemy.dialects import postgresql
+
+    from ouroboros.persistence.schema import lineage_step_claims_table
+
+    statement = (
+        sa_select(lineage_step_claims_table.c.claim_token)
+        .where(lineage_step_claims_table.c.lineage_id == "lin")
+        .with_for_update()
+    )
+    compiled = str(statement.compile(dialect=postgresql.dialect()))
+    assert "FOR UPDATE" in compiled
+
+
+@pytest.mark.asyncio
+async def test_fencing_aware_executor_stops_before_takeover_under_partition() -> None:
+    """The context fence reaches effectful work no database check can stop.
+
+    With the owner's database path failed entirely, the lingering beat
+    cannot testify liveness — but a fencing-aware executor observes the
+    self-fence at half the lease and stops its effects strictly before a
+    reclaimer, who needs the full lease plus a grace, can take over.
+    """
+    from ouroboros.evolution.generation_claims import (
+        current_step_fence,
+        owned_lineage_step,
+    )
+
+    class _PartitionedClaims(LocalStepClaims):
+        """Every database interaction fails after acquisition."""
+
+        partitioned = False
+
+        async def refresh(self, lineage_id: str, claim_token: str) -> bool:
+            if self.partitioned:
+                raise RuntimeError("database unreachable")
+            return await super().refresh(lineage_id, claim_token)
+
+        async def refresh_fenced(self, lineage_id: str, claim_token: str) -> bool:
+            if self.partitioned:
+                raise RuntimeError("database unreachable")
+            return await super().refresh_fenced(lineage_id, claim_token)
+
+    claims = _PartitionedClaims(lease_seconds=0.3)
+    effects: list[float] = []
+    stopped = asyncio.Event()
+
+    async def _fencing_aware_work() -> None:
+        fence = current_step_fence()
+        assert fence is not None, "the executor must see the attempt's fence"
+        while not fence.lost.is_set():
+            effects.append(asyncio.get_running_loop().time())
+            await asyncio.sleep(0.01)
+        stopped.set()
+
+    async def _owner() -> None:
+        async with owned_lineage_step(claims, "lin"):
+            claims.partitioned = True
+            work = asyncio.create_task(_fencing_aware_work())
+            await asyncio.wait_for(stopped.wait(), timeout=5)
+            await work
+
+    owner = asyncio.create_task(_owner())
+    # The reclaimer cannot acquire while the work is running: it needs the
+    # full lease (0.3s) plus the grace, while the fencing-aware work stops
+    # at the half-lease self-fence (0.15s).
+    await asyncio.wait_for(stopped.wait(), timeout=5)
+    assert await claims.acquire("lin", "reclaimer") is False, (
+        "the reclaimer acquired before the lease could have expired"
+    )
+    await asyncio.wait_for(owner, timeout=5)
+    # After the owner exits (releasing), the reclaimer proceeds normally.
+    assert await claims.acquire("lin", "reclaimer") is True
+
+
 class _RecordingClaims:
     """Fake claims whose refresh behavior is scripted per test.
 
