@@ -963,20 +963,51 @@ class EvolutionaryLoop:
 
             result = gen_result.value
 
+            async def _append_owned(event: Any) -> bool:
+                # Every post-executor lineage transition is conditional on
+                # still holding the step lease: a write that commits is
+                # serialized before any successor's replay, and a stale
+                # owner's write after a steal is refused instead of
+                # journaling alongside the reclaimer (#1889).
+                appended = await append_lineage_event_if_owner(
+                    self.event_store,
+                    step_claims_for(self.event_store),
+                    lineage.lineage_id,
+                    lease.claim_token,
+                    event,
+                )
+                if not appended:
+                    logger.warning(
+                        "evolution.generation.fenced_write_refused",
+                        extra={
+                            "lineage_id": lineage.lineage_id,
+                            "generation": generation_number,
+                        },
+                    )
+                    container.result = Result.err(
+                        OuroborosError(
+                            "evolve_step: lineage step lease was lost before "
+                            "persistence; the reclaiming caller owns this "
+                            "generation's record"
+                        )
+                    )
+                return appended
+
             preservation_error = _conductor_preservation_error(
                 approved_seed,
                 result.seed,
                 conductor_directive,
             )
             if preservation_error is not None:
-                await self.event_store.append(
+                if not await _append_owned(
                     lineage_generation_failed(
                         lineage.lineage_id,
                         generation_number,
                         "conductor_preservation",
                         preservation_error,
                     )
-                )
+                ):
+                    return
                 container.result = Result.err(OuroborosError(preservation_error))
                 return
 
@@ -1023,36 +1054,6 @@ class EvolutionaryLoop:
             nonlocal_lineage = lineage
             record = generation_record_for(result)
             nonlocal_lineage = nonlocal_lineage.with_generation(record)
-
-            async def _append_owned(event: Any) -> bool:
-                # Every post-executor lineage transition is conditional on
-                # still holding the step lease: a write that commits is
-                # serialized before any successor's replay, and a stale
-                # owner's write after a steal is refused instead of
-                # journaling alongside the reclaimer (#1889).
-                appended = await append_lineage_event_if_owner(
-                    self.event_store,
-                    step_claims_for(self.event_store),
-                    nonlocal_lineage.lineage_id,
-                    lease.claim_token,
-                    event,
-                )
-                if not appended:
-                    logger.warning(
-                        "evolution.generation.fenced_write_refused",
-                        extra={
-                            "lineage_id": nonlocal_lineage.lineage_id,
-                            "generation": generation_number,
-                        },
-                    )
-                    container.result = Result.err(
-                        OuroborosError(
-                            "evolve_step: lineage step lease was lost before "
-                            "persistence; the reclaiming caller owns this "
-                            "generation's record"
-                        )
-                    )
-                return appended
 
             if not await _append_owned(
                 generation_completed_event(nonlocal_lineage.lineage_id, result, record)

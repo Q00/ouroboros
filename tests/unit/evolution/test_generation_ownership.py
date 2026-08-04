@@ -501,6 +501,119 @@ async def test_denied_caller_cannot_clear_another_attempts_fence(tmp_path, monke
         await store.close()
 
 
+@pytest.mark.asyncio
+async def test_reclaim_completes_through_fresh_public_retries(tmp_path) -> None:
+    """Each retry carries a new token; a graced reclaim must still complete.
+
+    Phase two is open to any caller: the revocation carries fencing intent,
+    not reclaimer identity, so the realistic evolve_step retry — a fresh
+    UUID every invocation — finishes the reclaim a previous call started.
+    """
+    from ouroboros.evolution.generation_claims import DurableStepClaims
+
+    claims = DurableStepClaims(
+        f"sqlite+aiosqlite:///{tmp_path / 'claims-retry.db'}", lease_seconds=0.12
+    )
+    assert await claims.acquire("lin", "crashed") is True
+    await asyncio.sleep(0.15)
+
+    assert await claims.acquire("lin", "retry-a") is False, "first retry marks revocation"
+    await asyncio.sleep(0.05)  # grace = lease/6 = 0.02s
+    assert await claims.acquire("lin", "retry-b") is True, (
+        "a later retry with a different token must complete the reclaim"
+    )
+
+
+@pytest.mark.asyncio
+async def test_hanging_refresh_still_self_fences_by_the_deadline() -> None:
+    """A refresh that never returns must not suspend the self-fence."""
+    from ouroboros.evolution.generation_claims import owned_lineage_step
+
+    class _HangingClaims(_RecordingClaims):
+        async def refresh(self, lineage_id: str, claim_token: str) -> bool:
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+    claims = _HangingClaims(lease_seconds=0.12)
+    async with owned_lineage_step(claims, "lin", heartbeat_interval=0.02) as lease:
+        await asyncio.wait_for(lease.lost.wait(), timeout=2)
+    assert claims.released == ["lin"], "release must survive a hung refresh"
+
+
+@pytest.mark.asyncio
+async def test_takeover_during_preservation_append_refuses_the_write(tmp_path, monkeypatch) -> None:
+    """The conductor-preservation failure is token-fenced like every transition."""
+    from sqlalchemy import update as sa_update
+
+    from ouroboros.evolution import loop as loop_module
+    from ouroboros.evolution.generation_claims import DurableStepClaims
+    from ouroboros.persistence.schema import lineage_step_claims_table
+
+    store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'evolve-preserve.db'}")
+    await store.initialize()
+    try:
+        claims = DurableStepClaims(store.database_url, lease_seconds=0.6)
+        monkeypatch.setattr(loop_module, "step_claims_for", lambda _store: claims)
+
+        # Silence the heartbeat: this test isolates the append-fence
+        # contract, so the owner must NOT be aborted by the lost-lease fence
+        # before its executor returns — the write itself has to be refused.
+        from ouroboros.evolution.generation_claims import (
+            owned_lineage_step as real_owned_lineage_step,
+        )
+
+        def _quiet_owned(claims_arg, lineage_id, **_kw):
+            return real_owned_lineage_step(claims_arg, lineage_id, heartbeat_interval=1000.0)
+
+        monkeypatch.setattr(loop_module, "owned_lineage_step", _quiet_owned)
+
+        # Force the preservation-failure branch without real directive
+        # plumbing: this test is about the append being token-fenced.
+        monkeypatch.setattr(
+            loop_module,
+            "_conductor_preservation_error",
+            lambda *args: "conductor directive dropped by generation",
+        )
+
+        config = EvolutionaryLoopConfig(
+            max_generations=10,
+            convergence_threshold=0.95,
+            min_generations=1,
+        )
+        loop = EvolutionaryLoop(event_store=store, config=config)
+        entered = asyncio.Event()
+        stolen = asyncio.Event()
+
+        async def _blocked_run(**kwargs: Any) -> Result[GenerationResult, Any]:
+            entered.set()
+            await stolen.wait()
+            return Result.ok(_completed_result(kwargs["generation_number"], kwargs["current_seed"]))
+
+        loop._run_generation_with_watchdog = _blocked_run  # type: ignore[method-assign]
+
+        owner = asyncio.create_task(loop.evolve_step("lineage-preserve", initial_seed=_make_seed()))
+        await asyncio.wait_for(entered.wait(), timeout=5)
+
+        engine = await claims._engine_once()
+        async with engine.begin() as conn:
+            await conn.execute(sa_update(lineage_step_claims_table).values(refreshed_at=0.0))
+        assert await claims.acquire("lineage-preserve", "reclaimer") is False
+        await asyncio.sleep(0.15)  # grace = lease/6 = 0.1s
+        assert await claims.acquire("lineage-preserve", "reclaimer") is True
+
+        stolen.set()
+        owner_result = await asyncio.wait_for(owner, timeout=10)
+        assert owner_result.is_err
+
+        events = await store.replay_lineage("lineage-preserve")
+        failed = [e for e in events if e.type == "lineage.generation.failed"]
+        assert failed == [], (
+            "a preservation-failure event committed after ownership had transferred"
+        )
+    finally:
+        await store.close()
+
+
 class _RecordingClaims:
     """Fake claims whose refresh behavior is scripted per test."""
 

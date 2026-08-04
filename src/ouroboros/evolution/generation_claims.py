@@ -22,9 +22,10 @@ sharing one store:
   the lease revoked, then takes ownership only after a grace period of one
   heartbeat interval. A revoked lease refuses the owner's refresh, so a
   scheduling owner provably observes the transfer and stops inside the
-  grace window, before the successor can begin. Each phase is a
-  compare-and-set on the observed state, so two reclaimers cannot both
-  win. Fencing is two-sided:
+  grace window, before the successor can begin. Phase two is open to any
+  caller — the revocation carries no reclaimer identity, so a fresh retry
+  completes a graced reclaim — and each phase is a compare-and-set on the
+  observed state, so two reclaimers cannot both win. Fencing is two-sided:
   an owner that observes a replacement token stops immediately, and an
   owner that cannot *prove* ownership (refresh outage) fences itself once
   half the lease has elapsed since its last confirmed refresh — strictly
@@ -176,17 +177,19 @@ class DurableStepClaims:
                     # take ownership by CAS on the observed state. Two
                     # concurrent reclaimers cannot both win either phase.
                     grace = self.lease_seconds / 6
-                    if (
-                        revoking_token == claim_token
-                        and revoked_at is not None
-                        and now - float(revoked_at) > grace
-                    ):
+                    if revoked_at is not None and now - float(revoked_at) > grace:
+                        # Phase two is open to any caller: the revocation's
+                        # job is fencing notification plus the grace window,
+                        # not reclaimer identity — a fresh retry with a new
+                        # token must be able to complete a graced reclaim.
+                        # The CAS on the full observed state still leaves
+                        # exactly one winner.
                         stolen = await conn.execute(
                             update(table)
                             .where(
                                 table.c.lineage_id == lineage_id,
                                 table.c.claim_token == observed_token,
-                                table.c.revoking_token == claim_token,
+                                table.c.revoking_token == revoking_token,
                             )
                             .values(
                                 claim_token=claim_token,
@@ -312,11 +315,7 @@ class LocalStepClaims:
             token, refreshed_at, revoking_token, revoked_at = held
             if now - refreshed_at <= self.lease_seconds:
                 return False
-            if (
-                revoking_token == claim_token
-                and revoked_at is not None
-                and now - revoked_at > grace
-            ):
+            if revoked_at is not None and now - revoked_at > grace:
                 self._claims[lineage_id] = [claim_token, now, None, None]
                 return True
             if revoking_token is None or (
@@ -455,8 +454,22 @@ async def owned_lineage_step(
                 return
             except TimeoutError:
                 pass
+            # Each refresh attempt is bounded by the self-fence deadline: a
+            # refresh that hangs must not suspend the fence, or a reclaimer
+            # could take over while this owner still runs unaware.
+            fence_budget = last_confirmed + claims.lease_seconds / 2 - time.monotonic()
+            if fence_budget <= 0:
+                log.warning("evolve.step_lease.self_fenced", lineage_id=lineage_id)
+                lease.lost.set()
+                return
             try:
-                still_owner = await claims.refresh(lineage_id, claim_token)
+                still_owner = await asyncio.wait_for(
+                    claims.refresh(lineage_id, claim_token), timeout=fence_budget
+                )
+            except TimeoutError:
+                log.warning("evolve.step_lease.self_fenced", lineage_id=lineage_id)
+                lease.lost.set()
+                return
             except Exception:
                 # A transient refresh failure is retried — but only while
                 # ownership is still provable. Past half the lease without a
