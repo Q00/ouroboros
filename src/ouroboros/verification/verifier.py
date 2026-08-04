@@ -36,33 +36,90 @@ MAX_SCALAR_LENGTH = 4096
 # Emptiness is a property of the file, and reading it is ground truth; asking a
 # regex what it *could* match is inference, and inference run against a fixed
 # list of sample strings only ever rejects what the list literally contains.
-_EMPTINESS_WORDS = ("empty", "blank")
+_EMPTINESS_WORDS = frozenset({"empty", "blank"})
+
+# A criterion that *forbids* emptiness reads almost identically to one that
+# requires it, and the difference is one short word standing before the noun.
+# Polarity has to be read here, from `ac_text`, because the only other thing in
+# the assertion that could carry it is the extracted pattern — and `\A\Z` is
+# what a model writes for both readings.
+_NEGATIONS = frozenset(
+    {
+        "not",
+        "never",
+        "no",
+        "non",
+        "nor",
+        "without",
+        "cannot",
+        "cant",
+        "isnt",
+        "arent",
+        "wasnt",
+        "werent",
+        "doesnt",
+        "dont",
+        "wont",
+        "shouldnt",
+        "mustnt",
+        "neednt",
+    }
+)
+# Far enough to cross "must not be", "should never be", "cannot ever be";
+# short enough that a negation belonging to a different clause does not reach.
+_NEGATION_LOOKBACK = 4
+
+
+def _positively_requires_emptiness(ac_text: str) -> bool:
+    """True when the criterion asks for the file to be empty, not for it not to be.
+
+    Read off words, not substrings, so `nonempty` is its own word and never an
+    occurrence of `empty` at all. Hyphenated and spaced forms split into two
+    words, which puts `non` in the lookback where the other negations are.
+
+    One un-negated occurrence is enough: "must be empty, and must not be
+    deleted" requires emptiness despite carrying a negation elsewhere. Every
+    occurrence being negated is what makes the criterion the opposite one.
+    """
+    words = re.findall(r"[a-z]+", ac_text.lower().replace("'", "").replace("’", ""))
+    for position, word in enumerate(words):
+        if word not in _EMPTINESS_WORDS:
+            continue
+        lookback = words[max(0, position - _NEGATION_LOOKBACK) : position]
+        if not any(token in _NEGATIONS for token in lookback):
+            return True
+    return False
 
 
 def _asks_whether_a_named_file_is_empty(assertion: SpecAssertion) -> bool:
     """True when the criterion itself asks whether the file its hint names is empty.
 
-    Both halves are load-bearing. The hint must name one file, because `\\A\\Z`
-    over `**/*.py` stops at whichever candidate is empty first — in a Python
-    project some package marker no criterion ever mentioned. And the criterion
-    must name that same file, because `pkg/__init__.py` is empty in most
-    repositories, so an exact hint pointed at it would otherwise "verify" a
-    criterion about something else entirely. The hint comes from the same model
-    completion as the pattern and licenses nothing on its own; `ac_text` is the
-    spec's own wording, which the model selects by index but does not write.
+    All three halves are load-bearing. The hint must name one file, because
+    `\\A\\Z` over `**/*.py` stops at whichever candidate is empty first — in a
+    Python project some package marker no criterion ever mentioned. The
+    criterion must name that same file, because `pkg/__init__.py` is empty in
+    most repositories, so an exact hint pointed at it would otherwise "verify" a
+    criterion about something else entirely. And the criterion must *require*
+    emptiness rather than forbid it, because an empty file satisfies one reading
+    and violates the other while the pattern looks the same either way.
+
+    The hint comes from the same model completion as the pattern and licenses
+    nothing on its own; `ac_text` is the spec's own wording, which the model
+    selects by index but does not write. Anything this returns False for falls
+    through to the ordinary path, where `_safe_compile` refuses `\\A\\Z` and the
+    criterion fails closed.
     """
     hint = assertion.file_hint
     if not hint or any(c in hint for c in "*?["):
         return False
-    ac_text = assertion.ac_text.lower()
-    if not any(word in ac_text for word in _EMPTINESS_WORDS):
+    if not _positively_requires_emptiness(assertion.ac_text):
         return False
     # As a whole token, not a substring: `a.py` sits inside `data.py`, and a
     # criterion about the latter must not license a hint pointed at the former.
     return (
         re.search(
             rf"(?:\A|[\s'\"`(\[]){re.escape(hint.lower())}(?=\Z|[\s'\"`)\],.;:])",
-            ac_text,
+            assertion.ac_text.lower(),
         )
         is not None
     )

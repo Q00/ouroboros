@@ -56,6 +56,7 @@ from ouroboros.verification.models import (
     SpecVerificationSummary,
     VerificationTier,
 )
+from ouroboros.verification.verifier import SpecVerifier
 
 
 class _FakeEventStore:
@@ -668,6 +669,62 @@ Parallel Execution Verification Report
         assert summary.approval_status == "rejected"
         assert summary.failure_reason == "1/1 ACs failed (AC 1) [1 spec verification override(s)]"
         assert summary.drift_score is None
+        assert summary.run_verdict == "FAIL"
+
+    @pytest.mark.parametrize(
+        "tier",
+        [VerificationTier.T1_CONSTANT, VerificationTier.T2_STRUCTURAL],
+        ids=["T1", "T2"],
+    )
+    def test_a_forbidden_empty_file_cannot_be_approved_through_the_adapter(
+        self, tmp_path: Any, tier: VerificationTier
+    ) -> None:
+        """A zero-width pattern on an empty file must not approve "MUST NOT be empty".
+
+        This drives the real verifier, not a hand-built report: an extracted
+        pattern of ``\\A\\Z`` matches an empty file, so a verifier that took its
+        polarity from the pattern rather than from the AC text handed the
+        adapter a passing report and the adapter dutifully published
+        final_approved=True / score=1.0 / final_verdict="pass" for a criterion
+        the project violates.
+        """
+        marker = tmp_path / "marker.txt"
+        marker.write_text("")
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="marker.txt MUST NOT be empty",
+            tier=tier,
+            pattern=r"\A\Z",
+            file_hint="marker.txt",
+        )
+        verification = SpecVerifier(project_dir=str(tmp_path)).verify_all(
+            (assertion,), agent_results={0: True}
+        )
+        mechanical = EvaluationSummary(
+            final_approved=True,
+            highest_stage_passed=2,
+            task_results=(
+                TaskResult(
+                    task_index=0,
+                    task_content="marker.txt MUST NOT be empty",
+                    status="completed",
+                    completed=True,
+                    source_ac_index=0,
+                    execution_method="legacy_parallel_report",
+                ),
+            ),
+            execution_completion_status="completed",
+            approval_status="approved",
+        )
+
+        summary = _evaluation_summary_from_spec_verification(mechanical, verification)
+
+        assert summary is not None
+        assert summary.ac_results[0].passed is False
+        assert summary.ac_results[0].final_verdict != "pass"
+        assert summary.final_approved is False
+        assert summary.score == 0.0
+        assert summary.approval_status == "rejected"
         assert summary.run_verdict == "FAIL"
 
     def test_spec_verification_rejects_partial_ac_coverage(self) -> None:

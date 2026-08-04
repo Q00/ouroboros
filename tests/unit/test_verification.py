@@ -765,8 +765,7 @@ class TestSpecVerifier:
 
         Routing on the word alone would invert this one: the emptiness answer would
         read a file that is correctly non-empty and report a discrepancy against an AC
-        the project satisfies. The pattern carries the polarity — only one that
-        survives on a file with nothing in it needs rescuing.
+        the project satisfies.
         """
         project = self._create_project({"pkg/config.py": "FPS = 60\n"})
         assertion = SpecAssertion(
@@ -782,6 +781,72 @@ class TestSpecVerifier:
         )
 
         assert summary.verified_count == 1
+        assert summary.reports[0].verified_pass is True
+        assert summary.discrepancy_count == 0
+
+    @pytest.mark.parametrize("tier", [VerificationTier.T2_STRUCTURAL, VerificationTier.T1_CONSTANT])
+    @pytest.mark.parametrize(
+        "ac_text",
+        [
+            "pkg/config.py MUST NOT be empty",
+            "pkg/config.py must never be empty",
+            "pkg/config.py cannot be blank",
+            "pkg/config.py must not be blank",
+            "pkg/config.py must be non-empty",
+            "pkg/config.py must contain a nonempty value",
+        ],
+        ids=["must-not", "never", "cannot-blank", "not-blank", "hyphenated", "nonempty-word"],
+    )
+    def test_a_criterion_forbidding_emptiness_is_not_satisfied_by_an_empty_file(
+        self, tier: VerificationTier, ac_text: str
+    ) -> None:
+        """The violated reading must not pass, and the pattern cannot tell them apart.
+
+        `\\A\\Z` is what a model writes for "must be empty" and for "must not be
+        empty" alike, so polarity has to be read from `ac_text`. Deciding it from
+        the pattern verified a criterion the file breaks: an empty `config.py`
+        against an AC that requires content.
+
+        `nonempty` is here because reading the word as a substring saw `empty`
+        inside it and called the criterion an emptiness requirement.
+        """
+        project = self._create_project({"pkg/config.py": ""})
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text=ac_text,
+            tier=tier,
+            pattern=r"\A\Z",
+            file_hint="pkg/config.py",
+        )
+
+        summary = SpecVerifier(project_dir=project).verify_all(
+            (assertion,), agent_results={0: True}
+        )
+
+        assert summary.reports[0].verified_pass is False, f"{ac_text!r} must not verify"
+        assert summary.discrepancy_count == 1
+        assert summary.override_approval is False
+
+    @pytest.mark.parametrize("tier", [VerificationTier.T2_STRUCTURAL, VerificationTier.T1_CONSTANT])
+    def test_a_negation_in_another_clause_does_not_disarm_the_requirement(
+        self, tier: VerificationTier
+    ) -> None:
+        """One un-negated occurrence is the requirement; a later `not` is a different clause.
+
+        Failing closed on any `not` anywhere would re-open the original blocker in a
+        narrower form — a satisfied emptiness AC turned into a formal failure.
+        """
+        project = self._create_project({"pkg/marker.txt": ""})
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="pkg/marker.txt MUST be empty and must not be deleted",
+            tier=tier,
+            pattern=r"\A\Z",
+            file_hint="pkg/marker.txt",
+        )
+
+        summary = SpecVerifier(project_dir=project).verify_all((assertion,))
+
         assert summary.reports[0].verified_pass is True
         assert summary.discrepancy_count == 0
 
