@@ -3580,6 +3580,22 @@ class TestEvolveStepHandler:
             execution_policy=loop_support.evolution_execution_policy(loop.config),
         )
         default_lease_seconds = lineage_claims.DEFAULT_LEASE_SECONDS
+        core_claim = await lineage_claims.try_acquire(
+            store,
+            scope="evolve-core",
+            lineage_id="lin_handler_recovery",
+            generation_number=1,
+            owner_id="completed-core",
+            request_key="core-request",
+        )
+        assert core_claim is not None and core_claim.acquired
+        assert await lineage_claims.complete(
+            store,
+            scope="evolve-core",
+            lineage_id="lin_handler_recovery",
+            owner_id="completed-core",
+            result_payload={"durable": "core-result"},
+        )
         monkeypatch.setattr(lineage_claims, "DEFAULT_LEASE_SECONDS", 0.01)
         handler_claim = await lineage_claims.try_acquire(
             store,
@@ -3589,23 +3605,7 @@ class TestEvolveStepHandler:
             owner_id="dead-handler",
             request_key=request_key,
         )
-        core_claim = await lineage_claims.try_acquire(
-            store,
-            scope="evolve-core",
-            lineage_id="lin_handler_recovery",
-            generation_number=1,
-            owner_id="completed-core",
-            request_key="core-request",
-        )
         assert handler_claim is not None and handler_claim.acquired
-        assert core_claim is not None and core_claim.acquired
-        assert await lineage_claims.complete(
-            store,
-            scope="evolve-core",
-            lineage_id="lin_handler_recovery",
-            owner_id="completed-core",
-            result_payload={"durable": "core-result"},
-        )
         await asyncio.sleep(0.02)
         monkeypatch.setattr(
             lineage_claims,
