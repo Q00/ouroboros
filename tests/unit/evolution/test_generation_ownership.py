@@ -572,7 +572,7 @@ async def test_takeover_during_preservation_append_refuses_the_write(tmp_path, m
         monkeypatch.setattr(
             loop_module,
             "_conductor_preservation_error",
-            lambda *args: "conductor directive dropped by generation",
+            lambda *_args: "conductor directive dropped by generation",
         )
 
         config = EvolutionaryLoopConfig(
