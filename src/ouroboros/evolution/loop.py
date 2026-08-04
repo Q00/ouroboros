@@ -57,6 +57,11 @@ from ouroboros.evolution.directive_mapping import (
     step_action_to_directive,
     watchdog_timeout_to_directive,
 )
+from ouroboros.evolution.generation_claims import (
+    GenerationClaimDenied,
+    generation_claims_for,
+    owned_generation,
+)
 from ouroboros.evolution.projector import LineageProjector
 from ouroboros.evolution.reflect import ReflectEngine, ReflectOutput
 from ouroboros.evolution.regression import RegressionDetector, RegressionReport
@@ -65,6 +70,7 @@ from ouroboros.evolution.rewind import (
     NoOpRewindObserver,
     RewindObserver,
 )
+from ouroboros.evolution.step_seed import reconstruct_step_seed
 from ouroboros.evolution.watchdog import (
     GenerationProgressWatchdog,
     GenerationWatchdogTimeout,
@@ -758,103 +764,15 @@ class EvolutionaryLoop:
             else:
                 generation_number = last_gen + 1
 
-            # Reconstruct seed — prefer interrupted gen's seed_json (has evolved state)
-            if initial_seed is not None:
-                # Caller provided seed explicitly (e.g., after rewind)
-                current_seed = initial_seed
-            elif last_phase == GenerationPhase.INTERRUPTED:
-                # Try to use the interrupted generation's seed (preserves evolved state)
-                interrupted_gen = next(
-                    (
-                        g
-                        for g in reversed(lineage.generations)
-                        if g.phase == GenerationPhase.INTERRUPTED
-                    ),
-                    None,
-                )
-                if interrupted_gen and interrupted_gen.seed_json:
-                    try:
-                        current_seed = Seed.from_dict(json.loads(interrupted_gen.seed_json))
-                    except Exception as e:
-                        # A present interrupted Seed is the durable state for
-                        # this generation. If its structured contract is no
-                        # longer valid, rolling back to the prior completed
-                        # Seed would silently change acceptance semantics and
-                        # may redispatch work under stale direction.
-                        return Result.err(
-                            OuroborosError(
-                                f"Failed to reconstruct interrupted seed from seed_json: {e}"
-                            )
-                        )
-
-                if not interrupted_gen or not interrupted_gen.seed_json:
-                    # Fallback: use last completed generation's seed.
-                    # IMPORTANT: also reset interrupted_at_phase so we don't
-                    # skip phases with a stale seed from a different generation.
-                    interrupted_at_phase = None
-                    last_completed = next(
-                        (
-                            g
-                            for g in reversed(lineage.generations)
-                            if g.phase == GenerationPhase.COMPLETED
-                        ),
-                        None,
-                    )
-                    if last_completed and last_completed.seed_json:
-                        try:
-                            current_seed = Seed.from_dict(json.loads(last_completed.seed_json))
-                        except Exception as e:
-                            return Result.err(
-                                OuroborosError(
-                                    f"Failed to reconstruct fallback seed from seed_json: {e}"
-                                )
-                            )
-                    else:
-                        return Result.err(
-                            OuroborosError(
-                                "Lineage was interrupted before any generation completed. "
-                                "Re-provide initial_seed to resume."
-                            )
-                        )
-            elif lineage.generations:
-                last_completed = next(
-                    (
-                        g
-                        for g in reversed(lineage.generations)
-                        if g.phase == GenerationPhase.COMPLETED
-                    ),
-                    None,
-                )
-                if last_completed is None:
-                    has_interrupted = any(
-                        g.phase == GenerationPhase.INTERRUPTED for g in lineage.generations
-                    )
-                    if has_interrupted:
-                        return Result.err(
-                            OuroborosError(
-                                "Lineage was interrupted before any generation completed. "
-                                "Re-provide initial_seed to resume."
-                            )
-                        )
-                    return Result.err(
-                        OuroborosError("Events exist but no completed generations found")
-                    )
-                if last_completed.seed_json:
-                    try:
-                        current_seed = Seed.from_dict(json.loads(last_completed.seed_json))
-                    except Exception as e:
-                        return Result.err(
-                            OuroborosError(f"Failed to reconstruct seed from seed_json: {e}")
-                        )
-                else:
-                    return Result.err(
-                        OuroborosError(
-                            "Cannot reconstruct seed: no seed_json in last generation's events. "
-                            "This lineage may have been created with an older version."
-                        )
-                    )
-            else:
-                return Result.err(OuroborosError("Events exist but no completed generations found"))
+            seed_state = reconstruct_step_seed(
+                initial_seed=initial_seed,
+                last_phase=last_phase,
+                lineage=lineage,
+                interrupted_at_phase=interrupted_at_phase,
+            )
+            if seed_state.is_err:
+                return Result.err(seed_state.error)
+            current_seed, interrupted_at_phase = seed_state.value
 
         approved_seed = current_seed
         if conductor_directive is not None:
@@ -1168,34 +1086,45 @@ class EvolutionaryLoop:
                 )
             )
 
-        handle = await self._agent_process.spawn(
-            intent=f"evolve_step generation={generation_number}",
-            work_fn=_generation_work,
-        )
+        # The durable claim is the last gate before external work: the losing
+        # concurrent caller fails closed here, and interruption or completion
+        # releases ownership on exit so the resuming call proceeds (#1889).
         try:
-            await handle.wait_until_complete()
-        except asyncio.CancelledError:
-            if handle.should_complete_on_return_after_cancel():
-                await handle.cancel(
-                    reason="evolve_step caller cancelled after generation completed"
+            async with owned_generation(
+                generation_claims_for(self.event_store), lineage_id, generation_number
+            ):
+                handle = await self._agent_process.spawn(
+                    intent=f"evolve_step generation={generation_number}",
+                    work_fn=_generation_work,
                 )
-            else:
-                await handle.abort(reason="evolve_step caller cancelled")
-            with suppress(asyncio.CancelledError):
-                await asyncio.shield(handle.wait_until_complete())
-            raise
+                try:
+                    await handle.wait_until_complete()
+                except asyncio.CancelledError:
+                    if handle.should_complete_on_return_after_cancel():
+                        await handle.cancel(
+                            reason="evolve_step caller cancelled after generation completed"
+                        )
+                    else:
+                        await handle.abort(reason="evolve_step caller cancelled")
+                    with suppress(asyncio.CancelledError):
+                        await asyncio.shield(handle.wait_until_complete())
+                    raise
 
-        if container.result is None:
-            failure = handle.failure()
-            if failure is not None:
-                return Result.err(
-                    OuroborosError(
-                        "evolve_step: agent process failed during generation work: "
-                        f"{type(failure).__name__}: {failure!s}"
+                if container.result is None:
+                    failure = handle.failure()
+                    if failure is not None:
+                        return Result.err(
+                            OuroborosError(
+                                "evolve_step: agent process failed during generation work: "
+                                f"{type(failure).__name__}: {failure!s}"
+                            )
+                        )
+                    return Result.err(
+                        OuroborosError("evolve_step: agent process exited without result")
                     )
-                )
-            return Result.err(OuroborosError("evolve_step: agent process exited without result"))
-        return container.result
+                return container.result
+        except GenerationClaimDenied as denied:
+            return Result.err(OuroborosError(str(denied)))
 
     async def _run_generation(
         self,
