@@ -38,7 +38,7 @@ Options:
   --seed-file PATH       Seed YAML for Gen 1
   --max-cycles N         Max loop iterations (default: 30)
   --max-retries N        Lateral-think retries per stagnation (default: 2)
-  --no-execute           Ontology-only evolution (skip execution)
+  --no-execute           Explore ontology only, then verify a stable Seed
   --no-parallel          Sequential AC execution (slower, more stable)
   --no-qa                Skip post-execution QA evaluation
   --server-command CMD   MCP server executable (default: ouroboros)
@@ -250,6 +250,11 @@ while (( cycle < MAX_CYCLES )); do
 
     case "$action" in
         continue)
+            stagnation_count=0
+            ;;
+        ontology_stable)
+            log "ONTOLOGY STABLE — switching same lineage to Execute→Evaluate"
+            NO_EXECUTE=false
             stagnation_count=0
             ;;
         converged)

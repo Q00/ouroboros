@@ -94,6 +94,26 @@ def build_ac_dispatch_authority_scope(
     return _sha256_text(_canonical_json(payload))
 
 
+def build_ac_dispatch_request_digest(
+    *,
+    dispatch_contract: Mapping[str, object],
+    execution_policy: Mapping[str, object],
+) -> str:
+    """Hash the cross-worktree semantic request authority for one AC dispatch.
+
+    The durable capsule authority also binds execution/workspace identity through
+    ``base_scope``.  Those arm-specific values must not be compared across an
+    isolated frugality pair, while the provider-facing contract and execution
+    policy must match exactly for every shared root attempt.
+    """
+    payload = {
+        "version": 1,
+        "dispatch_contract": dict(dispatch_contract),
+        "execution_policy": dict(execution_policy),
+    }
+    return _sha256_text(_canonical_json(payload))
+
+
 class ACContextReferenceKind(StrEnum):
     """External context source named by an execution capsule."""
 
@@ -865,5 +885,6 @@ __all__ = [
     "bind_capsule_to_runtime_handle",
     "build_ac_dependency_references",
     "build_ac_dispatch_authority_scope",
+    "build_ac_dispatch_request_digest",
     "compile_ac_execution_capsule",
 ]

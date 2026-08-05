@@ -20,6 +20,7 @@ import pytest
 from ouroboros.mcp.tools.subagent import (
     SubagentPayload,
     build_evaluate_subagent,
+    build_evolve_subagent,
     build_execute_subagent,
     build_generate_seed_subagent,
     build_interview_question_advisory_subagents,
@@ -232,6 +233,18 @@ class TestBuildSubagentResult:
         assert result.value.is_error is False
 
 
+class TestBuildEvolveSubagent:
+    def test_ontology_only_prompt_never_claims_verified_convergence(self) -> None:
+        payload = build_evolve_subagent(
+            lineage_id="lin-single-ontology",
+            execute=False,
+        )
+
+        assert "return ontology_stable, never converged" in payload.prompt
+        assert "rerun the same lineage with execute=true" in payload.prompt
+        assert "ontology-only stability is ontology_stable" in payload.prompt
+
+
 class TestBuildRalphSubagent:
     """Ralph plugin dispatch payload preserves the full-loop contract."""
 
@@ -253,11 +266,8 @@ class TestBuildRalphSubagent:
         assert "delegation_depth: 1" in payload.prompt
         assert "allow_nested_ouroboros_ralph: false" in payload.prompt
         assert "Do not call ouroboros_ralph" in payload.prompt
-        # Without per_iteration_timeout_seconds, the timeout block is omitted.
         assert "Per-Iteration Timeout" not in payload.prompt
-        # Likewise the progress-stop block is omitted when no windows supplied.
         assert "Progress Stop Conditions" not in payload.prompt
-        # Without max_total_seconds, the wall-clock budget block is omitted.
         assert "Total Wall-Clock Budget" not in payload.prompt
         assert payload.context == {
             "lineage_id": "lin-ralph",
@@ -272,6 +282,17 @@ class TestBuildRalphSubagent:
         }
         assert "per_iteration_timeout_seconds" not in payload.context
         assert "max_total_seconds" not in payload.context
+
+    def test_ontology_only_prompt_requires_verified_same_lineage_handoff(self) -> None:
+        payload = build_ralph_subagent(
+            lineage_id="lin-ontology-only",
+            execute=False,
+            max_generations=3,
+        )
+
+        assert "On ontology_stable" in payload.prompt
+        assert "rerun the same lineage with execute=true" in payload.prompt
+        assert "ontology_stable must first rerun" in payload.prompt
 
     def test_forwards_per_iteration_timeout_to_prompt_and_context(self) -> None:
         payload = build_ralph_subagent(

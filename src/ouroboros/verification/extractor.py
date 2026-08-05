@@ -21,6 +21,7 @@ from ouroboros.config import get_llm_backend_for_role, get_llm_model_for_role
 from ouroboros.core.json_utils import extract_json_payload
 from ouroboros.core.seed import AcceptanceCriterionInput, ac_texts
 from ouroboros.core.types import Result
+from ouroboros.evolution.provider_usage import tracked_complete
 from ouroboros.providers.base import (
     CompletionConfig,
     LLMAdapter,
@@ -129,7 +130,7 @@ class AssertionExtractor:
             max_tokens=4096,
         )
 
-        result = await self.llm_adapter.complete(messages, config)
+        result = await tracked_complete(self.llm_adapter, messages, config)
         if result.is_err:
             logger.warning("AssertionExtractor LLM failed: %s", result.error)
             return Result.err(f"Extraction failed: {result.error}")

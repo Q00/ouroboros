@@ -87,6 +87,7 @@ authority for `StepAction` outcomes:
 |---|---|---|
 | `StepAction.CONTINUE` | no directive emission | No-op continuation; `lineage.generation.completed` already records progress. |
 | `StepAction.CONVERGED` | `CONVERGE` | Terminal success. |
+| `StepAction.ONTOLOGY_STABLE` | `EVALUATE` | Non-terminal handoff. The caller must run the same lineage with `execute=true` so Execute→Evaluate can establish verified convergence. |
 | `StepAction.STAGNATED` | `UNSTUCK` | Non-terminal recovery path; never terminal success. |
 | `StepAction.EXHAUSTED` | `CANCEL` | Terminal stop without claiming convergence. |
 | `StepAction.INTERRUPTED` | `CANCEL` | Current runtime stops the interrupted step and relies on resume state for continuation. |

@@ -87,6 +87,7 @@ import shutil
 import tempfile
 from typing import TYPE_CHECKING
 
+from ouroboros.evolution.provider_usage import tracked_agent_task
 from ouroboros.observability.logging import get_logger
 from ouroboros.orchestrator.effort_routing import resolve_execute_effort
 from ouroboros.orchestrator.model_routing import resolve_execute_model
@@ -436,7 +437,7 @@ async def _measure_baseline_spend(
     """
     # Lazy imports break the import cycle (parallel_executor imports this module)
     # and mirror the executor's own lazy ``create_agent_runtime`` use.
-    from ouroboros.orchestrator.parallel_executor import _harvest_token_spend
+    from ouroboros.orchestrator.frugality_evidence import harvest_token_spend
     from ouroboros.orchestrator.runtime_factory import create_agent_runtime
 
     try:
@@ -485,7 +486,9 @@ async def _measure_baseline_spend(
         # and closing it early can cancel sibling tasks (see the decomposition loop's
         # note). Let it complete; the timeout bounds a stuck baseline instead.
         async with asyncio.timeout(_BASELINE_TIMEOUT_SECONDS):
-            async for message in baseline_runtime.execute_task(
+            async for message in tracked_agent_task(
+                baseline_runtime,
+                role="executor_shadow_replay",
                 prompt=baseline_prompt,
                 tools=tools,
                 system_prompt=system_prompt,
@@ -516,7 +519,7 @@ async def _measure_baseline_spend(
             )
             return None
 
-        harvested = _harvest_token_spend(messages)
+        harvested = harvest_token_spend(messages)
         if harvested is None:
             return None
         baseline_token_spend, _breakdown = harvested
