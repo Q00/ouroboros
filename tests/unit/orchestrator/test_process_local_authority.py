@@ -5720,7 +5720,9 @@ def test_clear_cancellation_request_retries_and_surfaces_final_failure(
 
 def test_process_local_contract_is_not_a_cross_run_proof_cohort_key() -> None:
     runner = _runner()
-    contract = runner._build_execution_contract(seed=_seed())
+    contract = runner._build_execution_contract(
+        project_identity=runner._project_identity(), seed=_seed()
+    )
 
     assert (
         runner._proof_cohort_identity(
@@ -6998,7 +7000,9 @@ def test_diagnostic_contract_builds_do_not_leak_registry_issuances() -> None:
     issued_before = len(_PROCESS_LOCAL_AUTHORITY_REGISTRY._issued)
 
     for _ in range(25):
-        contract = runner._build_execution_contract(seed=_seed())
+        contract = runner._build_execution_contract(
+            project_identity=runner._project_identity(), seed=_seed()
+        )
         assert contract["foundation_a_authority"]["scope"] == "process_local"
 
     assert len(_PROCESS_LOCAL_AUTHORITY_REGISTRY._issued) == issued_before

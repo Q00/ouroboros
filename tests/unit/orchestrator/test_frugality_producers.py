@@ -1199,7 +1199,9 @@ class TestFrugalityProofConsumer:
             ontology_schema=OntologySchema(name="Proof", description="Proof cohort"),
             metadata=SeedMetadata(seed_id="seed-proof"),
         )
-        contract = runner._build_execution_contract(seed=cohort_seed)
+        contract = runner._build_execution_contract(
+            project_identity=runner._project_identity(), seed=cohort_seed
+        )
         other_project_contract = {
             **contract,
             "frugality_proof": {
@@ -1215,6 +1217,7 @@ class TestFrugalityProofConsumer:
             },
         }
         edited_seed_contract = runner._build_execution_contract(
+            project_identity=runner._project_identity(),
             seed=cohort_seed.model_copy(
                 update={
                     "acceptance_criteria": (
@@ -1223,7 +1226,7 @@ class TestFrugalityProofConsumer:
                         ),
                     )
                 }
-            )
+            ),
         )
         store.query_events.return_value = [
             BaseEvent(
