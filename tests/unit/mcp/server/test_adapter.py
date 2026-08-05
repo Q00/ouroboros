@@ -2583,14 +2583,23 @@ async def test_production_fanout_returns_only_disposable_envelope(
     from ouroboros.mcp.tools import fanout_handler
     from ouroboros.mcp.tools.fanout import FANOUT_KIND_QUESTION_ADVISORY
 
-    monkeypatch.setattr(adapter_module, "_safe_cwd", lambda: tmp_path)
-    event_store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'events.db'}")
+    launcher = tmp_path / "launcher"
+    project = tmp_path / "runtime-project"
+    launcher.mkdir()
+    project.mkdir()
+    monkeypatch.chdir(launcher)
+    event_store = EventStore(f"sqlite+aiosqlite:///{project / 'events.db'}")
     server = adapter_module.create_ouroboros_server(
         name="fanout-disposable-probe",
         event_store=event_store,
-        state_dir=tmp_path / "state",
+        state_dir=project / "state",
+        project_dir=project,
     )
     handler = server._tool_handlers["ouroboros_submit_fanout_results"]
+    assert handler.disposable_memory is not None
+    assert handler.disposable_memory.artifact_store.root == (
+        project.resolve() / ".ouroboros" / "artifacts"
+    )
     registry = handler.fanout_registry
     assert registry is not None
     fanout_id = registry.register(
@@ -2632,7 +2641,6 @@ async def test_production_fanout_returns_only_disposable_envelope(
         assert marker not in first_result.content[0].text
         assert marker not in json.dumps(first_result.meta)
 
-        assert handler.disposable_memory is not None
         fetched = handler.disposable_memory.fetch(envelope.contract_id)
         assert marker in json.dumps(fetched.body)
         events = await event_store.replay("contract", envelope.contract_id)

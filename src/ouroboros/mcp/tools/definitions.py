@@ -448,6 +448,7 @@ def get_ouroboros_tools(
     *,
     runtime_backend: str | None = None,
     llm_backend: str | None = None,
+    project_dir: str | Path | None = None,
     mcp_manager: object | None = None,
     mcp_tool_prefix: str = "",
     opencode_mode: str | None = None,
@@ -462,6 +463,11 @@ def get_ouroboros_tools(
     In every other combination (including ``opencode_mode=None``) the handler
     falls through to its real in-process path. See
     ``ouroboros.mcp.tools.subagent.should_dispatch_via_plugin``.
+
+    ``project_dir`` is the effective runtime workspace for project-local
+    disposable artifacts.  Callers that only inspect definitions may omit it;
+    executable runtime surfaces must pass their already-resolved workspace so
+    artifact placement never depends on the launcher process CWD.
 
     When ``context`` is provided and carries an ``mcp_bridge``, the
     bridge supersedes the explicit ``mcp_manager`` / ``mcp_tool_prefix``
@@ -478,9 +484,13 @@ def get_ouroboros_tools(
     from ouroboros.persistence.artifact_store import ContentAddressedArtifactStore
     from ouroboros.persistence.event_store import EventStore
 
-    fanout_disposable_memory = DisposableMemory(
-        artifact_store=ContentAddressedArtifactStore.for_project(Path.cwd()),
-        event_store=context.event_store if context is not None else EventStore(),
+    fanout_disposable_memory = (
+        DisposableMemory(
+            artifact_store=ContentAddressedArtifactStore.for_project(Path(project_dir)),
+            event_store=context.event_store if context is not None else EventStore(),
+        )
+        if project_dir is not None
+        else None
     )
     execute_seed = ExecuteSeedHandler(
         agent_runtime_backend=runtime_backend,

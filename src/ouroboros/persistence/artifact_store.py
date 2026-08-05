@@ -404,6 +404,14 @@ class ContentAddressedArtifactStore:
                     self._write_manifest_locked(contract_id, manifest)
 
                 try:
+                    # Revalidate after tombstones are durable and immediately
+                    # before both filesystem effects. A digest path may have
+                    # been replaced by a Windows junction after planning; the
+                    # store lock excludes cooperating writers, not hostile or
+                    # unrelated filesystem mutation.
+                    self._validate_blob_candidate_locked(candidate.path)
+                    candidate.path.stat()
+                    self._validate_blob_candidate_locked(candidate.path)
                     candidate.path.unlink()
                 except FileNotFoundError:
                     pass
@@ -435,6 +443,7 @@ class ContentAddressedArtifactStore:
 
         candidates: list[ArtifactPruneCandidate] = []
         for path in self._iter_blob_paths_locked():
+            self._validate_blob_candidate_locked(path)
             stat = path.stat()
             age_seconds = max(0.0, now.timestamp() - stat.st_mtime)
             if age_seconds < ttl.total_seconds():
@@ -651,26 +660,46 @@ class ContentAddressedArtifactStore:
         self._validate_project_boundary()
         paths: list[Path] = []
         for prefix in sorted(self.root.iterdir() if self.root.exists() else []):
+            if _is_link_like(prefix):
+                raise ArtifactIntegrityError(
+                    "Artifact digest prefix must not be a link or junction",
+                    operation="read",
+                    details={"path": str(prefix)},
+                )
             if not prefix.is_dir() or prefix.name == "contracts":
                 continue
             if not re.fullmatch(r"[0-9a-f]{2}", prefix.name):
                 continue
-            if prefix.is_symlink():
-                raise ArtifactIntegrityError(
-                    "Artifact digest prefix must not be a symlink",
-                    operation="read",
-                    details={"path": str(prefix)},
-                )
+            _require_contained(prefix, root=self.root, label="artifact digest prefix")
             for path in sorted(prefix.glob("*.json")):
-                if path.is_symlink():
-                    raise ArtifactIntegrityError(
-                        "Artifact body must not be a symlink",
-                        operation="read",
-                        details={"path": str(path)},
-                    )
                 if _DIGEST_PATTERN.fullmatch(path.stem) and path.stem.startswith(prefix.name):
+                    self._validate_blob_candidate_locked(path)
                     paths.append(path)
         return paths
+
+    def _validate_blob_candidate_locked(self, path: Path) -> None:
+        """Fail closed unless one prune candidate is a local regular path.
+
+        ``Path.is_symlink`` does not identify Windows directory junctions. Both
+        the digest prefix and body are therefore checked with ``_is_link_like``
+        and resolved containment is repeated at each destructive boundary.
+        """
+        self._validate_project_boundary()
+        prefix = path.parent
+        if _is_link_like(prefix):
+            raise ArtifactIntegrityError(
+                "Artifact digest prefix must not be a link or junction",
+                operation="path_resolution",
+                details={"path": str(prefix)},
+            )
+        if _is_link_like(path):
+            raise ArtifactIntegrityError(
+                "Artifact body must not be a link or junction",
+                operation="path_resolution",
+                details={"path": str(path)},
+            )
+        _require_contained(prefix, root=self.root, label="artifact digest prefix")
+        _require_contained(path, root=self.root, label="artifact body")
 
     def _validate_project_boundary(self) -> None:
         project_root = self._project_root

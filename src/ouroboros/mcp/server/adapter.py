@@ -1555,6 +1555,7 @@ def create_ouroboros_server(
     event_store: Any | None = None,
     brownfield_store: Any | None = None,
     state_dir: Any | None = None,
+    project_dir: Any | None = None,
     runtime_backend: str | None = None,
     llm_backend: str | None = None,
     opencode_mode: str | None = None,
@@ -1586,6 +1587,9 @@ def create_ouroboros_server(
         state_dir: Optional pathlib.Path for interview state directory.
                    If not provided, uses ``get_config_dir() / "data"``
                    (typically ``~/.ouroboros/data``).
+        project_dir: Effective runtime workspace for project-local state. When
+            omitted, resolves the launcher CWD through :func:`_safe_cwd` for
+            backward-compatible top-level server launches.
         runtime_backend: Optional orchestrator runtime backend override.
         llm_backend: Optional LLM-only backend override.
         opencode_mode: Optional OpenCode integration mode (``"plugin"`` or
@@ -1745,7 +1749,9 @@ def create_ouroboros_server(
     # Resolve a safe working directory once so all consumers agree.
     # When the MCP server is spawned with cwd=/, Path.cwd() is unusable as a
     # project root, so _safe_cwd() falls back to $HOME.
-    effective_cwd = _safe_cwd()
+    effective_cwd = (
+        Path(project_dir).expanduser().resolve() if project_dir is not None else _safe_cwd()
+    )
 
     # Materialize the default runtime once at server creation so backend wiring
     # is validated up front and composition-root tests can assert the selected

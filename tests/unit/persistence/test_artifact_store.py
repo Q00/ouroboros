@@ -290,6 +290,66 @@ def test_blob_survives_until_every_shared_contract_tombstone_is_durable(
     assert _manifest(store, "CONTRACT2")["events"][-1]["type"] == "artifact.referenced"
 
 
+@pytest.mark.parametrize("junction_component", ["digest_prefix", "body"])
+def test_prune_revalidates_modeled_windows_junction_before_unlink(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    junction_component: str,
+) -> None:
+    """A post-plan junction replacement can never delete an external body."""
+    store = _store(tmp_path)
+    envelope = _put(store, "CONTRACT1", {"external": "must survive"})
+    path = _blob_path(store, envelope.artifact_ref)
+    prefix = path.parent
+    (store.root / "contracts" / "CONTRACT1" / "events.json").unlink()
+    _age(path, days=100)
+
+    external_dir = tmp_path / "external"
+    external_dir.mkdir()
+    external_body = external_dir / path.name
+    external_body.write_bytes(path.read_bytes())
+    _age(external_body, days=100)
+
+    original_plan = store._plan_prune_locked
+    junction_path = prefix if junction_component == "digest_prefix" else path
+    junction_active = False
+
+    def replace_candidate_with_junction(*args, **kwargs):  # noqa: ANN002, ANN003
+        nonlocal junction_active
+        candidates = original_plan(*args, **kwargs)
+        path.unlink()
+        if junction_component == "digest_prefix":
+            prefix.rmdir()
+            prefix.symlink_to(external_dir, target_is_directory=True)
+        else:
+            path.symlink_to(external_body)
+        junction_active = True
+        return candidates
+
+    real_is_symlink = Path.is_symlink
+    real_is_junction = getattr(Path, "is_junction", lambda _path: False)
+
+    def modeled_is_symlink(candidate: Path) -> bool:
+        if junction_active and candidate == junction_path:
+            return False
+        return real_is_symlink(candidate)
+
+    def modeled_is_junction(candidate: Path) -> bool:
+        if junction_active and candidate == junction_path:
+            return True
+        return real_is_junction(candidate)
+
+    monkeypatch.setattr(store, "_plan_prune_locked", replace_candidate_with_junction)
+    monkeypatch.setattr(Path, "is_symlink", modeled_is_symlink)
+    monkeypatch.setattr(Path, "is_junction", modeled_is_junction, raising=False)
+
+    with pytest.raises(ArtifactIntegrityError, match="junction"):
+        store.prune(ttl=timedelta(days=90), apply=True, now=NOW)
+
+    assert external_body.exists()
+    assert external_body.read_bytes() == canonical_artifact_bytes({"external": "must survive"})
+
+
 def test_path_unsafe_contract_id_is_rejected(tmp_path: Path) -> None:
     store = _store(tmp_path)
     with pytest.raises(ValueError, match="path-safe"):
