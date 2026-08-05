@@ -883,6 +883,9 @@ Parallel Execution Verification Report
             ("", "Please ensure Marker.txt is empty", r"\A\Z"),
             ("aa\n", "marker.txt MUST contain a doubled letter", r"(a)?(?(1)|a)"),
             ("aa\n", "marker.txt MUST contain a doubled letter", r"(a?)(?(1)a|)"),
+            ("aa\n", "marker.txt MUST contain a doubled letter", r"(?=())(?(1)a|)"),
+            ("aa\n", "marker.txt MUST contain a doubled letter", r"(?<=())(?(1)a|)"),
+            ("aa\n", "marker.txt MUST contain a doubled letter", r"(?!()x)(?(1)|a)"),
         ],
         ids=[
             "politeness-frame",
@@ -896,6 +899,9 @@ Parallel Execution Verification Report
             "capitalized-in-frame",
             "conditional-on-an-absent-group",
             "conditional-on-a-present-group",
+            "conditional-on-a-capture-inside-a-lookahead",
+            "conditional-on-a-capture-inside-a-lookbehind",
+            "conditional-on-a-capture-inside-a-failed-negative-lookahead",
         ],
     )
     def test_a_satisfied_criterion_is_not_converted_into_a_formal_failure(

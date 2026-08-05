@@ -1469,12 +1469,31 @@ class TestSpecVerifier:
     @pytest.mark.parametrize("tier", [VerificationTier.T2_STRUCTURAL, VerificationTier.T1_CONSTANT])
     @pytest.mark.parametrize(
         "pattern",
-        [r"(a)?(?(1)|a)", r"(a)?(?(1)a|a)", r"(a|b)?(?(1)|a)", r"(a?)(?(1)a|)"],
+        [
+            r"(a)?(?(1)|a)",
+            r"(a)?(?(1)a|a)",
+            r"(a|b)?(?(1)|a)",
+            r"(a?)(?(1)a|)",
+            r"(?=())(?(1)a|)",
+            r"(?<=())(?(1)a|)",
+            r"(?=(a?))(?(1)a|)",
+            r"((?=()))(?(2)a|)",
+            r"(?=(?=()))(?(1)a|)",
+            r"(?!()x)(?(1)|a)",
+            r"(?!(a)x)(?(1)|a)",
+        ],
         ids=[
             "unparticipating-group-runs-the-other-arm",
             "both-arms-consume",
             "branching-group",
             "participating-group-runs-its-own-arm",
+            "capture-inside-a-lookahead",
+            "capture-inside-a-lookbehind",
+            "nullable-capture-inside-a-lookahead",
+            "lookahead-inside-a-capture",
+            "capture-inside-nested-lookaheads",
+            "capture-inside-a-failed-negative-lookahead",
+            "consuming-capture-inside-a-negative-lookahead",
         ],
     )
     def test_a_conditional_is_read_from_whether_its_group_could_have_taken_part(
@@ -1493,6 +1512,14 @@ class TestSpecVerifier:
         certainly consumes certainly did not take part in an empty match. Where
         participation really is undecidable the arms must still agree, and the
         refusal test below keeps that half honest.
+
+        An assertion is not an undecidable path. A positive one has to hold for
+        the match to happen, so a capture inside it took part exactly as much as
+        the same capture written outside it; a negative one succeeds only where
+        its body fails, and a failed subpattern leaves nothing captured, so a
+        capture inside it certainly did not. Reading both as "may have been
+        skipped" made every one of these unreadable and refused a criterion the
+        source plainly satisfies.
         """
         project = self._create_project({"marker.txt": "aa\n"})
         assertion = SpecAssertion(
@@ -1514,11 +1541,25 @@ class TestSpecVerifier:
     @pytest.mark.parametrize("tier", [VerificationTier.T2_STRUCTURAL, VerificationTier.T1_CONSTANT])
     @pytest.mark.parametrize(
         "pattern",
-        [r"(a)?(?(1)a|)", r"(a?)(?(1)|a)", r"(a?)?(?(1)a|)"],
+        [
+            r"(a)?(?(1)a|)",
+            r"(a?)(?(1)|a)",
+            r"(a?)?(?(1)a|)",
+            r"(?=())(?(1)|a)",
+            r"(?<=())(?(1)|a)",
+            r"(?=(a?))(?(1)|a)",
+            r"(?=())?(?(1)a|)",
+            r"(?!()x)(?(1)a|)",
+        ],
         ids=[
             "empty-arm-is-the-one-that-runs",
             "participating-group-empty-arm",
             "either-arm-may-run",
+            "lookahead-capture-empty-arm",
+            "lookbehind-capture-empty-arm",
+            "nullable-lookahead-capture-empty-arm",
+            "lookahead-that-may-be-skipped",
+            "failed-negative-lookahead-capture-empty-arm",
         ],
     )
     def test_a_conditional_that_can_run_an_empty_arm_is_still_refused(
@@ -1529,7 +1570,12 @@ class TestSpecVerifier:
         The first two are certain the other way — the arm that runs is the empty
         one — and the third is the case participation cannot settle, because the
         group's body can itself match nothing, so it may equally have taken part
-        or been skipped. All three match a subject with nothing in it, so none is
+        or been skipped. Reading assertions accurately has to leave that half
+        intact: a capture inside a positive assertion still runs the empty arm
+        when the empty arm is the one its participation selects, a capture inside
+        a failed negative one still runs the other, and an assertion that is
+        itself under a `?` is back to being a path that may have been skipped.
+        Every pattern here matches a subject with nothing in it, so none is
         evidence of anything.
         """
         project = self._create_project({"marker.txt": "aa\n"})

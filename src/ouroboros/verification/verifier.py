@@ -97,18 +97,32 @@ class _Group(NamedTuple):
     """Whether the group can have participated in such a match."""
 
 
-def _participation(body_empty: bool | None, optional: bool) -> bool | None:
+def _skippable(on_path: bool | None) -> bool | None:
+    """A path the match may have gone around — unless it was never on it at all.
+
+    A repeat that may run zero times, an alternative, and a conditional's arms
+    are all paths the match need not have taken. Inside a negative assertion the
+    answer is already the stronger `False` and stays there: something the match
+    certainly did not walk does not become something it merely might have.
+    """
+    return False if on_path is False else None
+
+
+def _participation(body_empty: bool | None, on_path: bool | None) -> bool | None:
     """Whether a group reached here can have taken part in an empty match.
 
-    A group whose body certainly consumes certainly did not take part: had it
-    run, the match would not have been empty. A group whose body can be empty
-    took part only if the path through it is the only path; under a repeat that
-    may run zero times, an alternative, or a lookaround, it may equally have
-    been skipped, and that is not something this reading can settle.
+    A group the match certainly never walked certainly did not take part, whether
+    or not its body consumes. Otherwise a group whose body certainly consumes
+    certainly did not take part either: had it run, the match would not have been
+    empty. A group whose body can be empty took part only if the path through it
+    is the only path; where the path may have been skipped it may equally have
+    taken part or not, and that is not something this reading can settle.
     """
+    if on_path is False:
+        return False
     if body_empty is False:
         return False
-    if body_empty is True and not optional:
+    if body_empty is True and on_path is True:
         return True
     return None
 
@@ -156,7 +170,7 @@ def _can_match_nothing(
     sequence: object,
     depth: int = 0,
     groups: dict[int, _Group] | None = None,
-    optional: bool = False,
+    on_path: bool | None = True,
 ) -> bool | None:
     """Whether a parsed regex can match the empty string, read rather than run.
 
@@ -177,8 +191,12 @@ def _can_match_nothing(
     `groups` carries, for each capture group once seen, what it can itself match
     and whether it can have taken part in an empty match — the first so a
     backreference can be judged by what it refers to, the second so a conditional
-    can be judged by which arm it would run. `optional` says whether the path
-    being walked is one the match could have avoided taking.
+    can be judged by which arm it would run.
+
+    `on_path` says what the match did with the path being walked, and is itself
+    three-valued: True for a path the match certainly took, False for one it
+    certainly did not — the inside of a negative assertion, which succeeds only
+    by failing — and None where it may have gone either way.
     """
     if groups is None:
         groups = {}
@@ -198,16 +216,18 @@ def _can_match_nothing(
             minimum, _maximum, item = argument
             # Walked whatever the count, so that groups inside a repeat that may
             # run zero times are still recorded for a later backreference.
-            item_empty = _can_match_nothing(item, depth + 1, groups, optional or minimum == 0)
+            item_empty = _can_match_nothing(
+                item, depth + 1, groups, _skippable(on_path) if minimum == 0 else on_path
+            )
             # A repeat that may run zero times is skippable; one that must run
             # is empty only if what it repeats is. The count itself is never
             # counted out.
             answers.append(True if minimum == 0 else item_empty)
         elif name == "SUBPATTERN":
-            body_empty = _can_match_nothing(argument[-1], depth + 1, groups, optional)
+            body_empty = _can_match_nothing(argument[-1], depth + 1, groups, on_path)
             number = argument[0]
             if number is not None:
-                groups[number] = _Group(body_empty, _participation(body_empty, optional))
+                groups[number] = _Group(body_empty, _participation(body_empty, on_path))
             answers.append(body_empty)
         elif name == "GROUPREF":
             # A backreference repeats whatever its group captured, so it is empty
@@ -224,8 +244,9 @@ def _can_match_nothing(
             # conditional fall back on the arms having to agree.
             reference, yes_arm, no_arm = argument
             took_part = groups[reference].took_part if reference in groups else None
-            yes = _can_match_nothing(yes_arm, depth + 1, groups, True)
-            no = True if no_arm is None else _can_match_nothing(no_arm, depth + 1, groups, True)
+            arm_path = _skippable(on_path)
+            yes = _can_match_nothing(yes_arm, depth + 1, groups, arm_path)
+            no = True if no_arm is None else _can_match_nothing(no_arm, depth + 1, groups, arm_path)
             if took_part is True:
                 answers.append(yes)
             elif took_part is False:
@@ -233,14 +254,17 @@ def _can_match_nothing(
             else:
                 answers.append(_agreed([yes, no]))
         elif name == "ATOMIC_GROUP":
-            answers.append(_can_match_nothing(argument, depth + 1, groups, optional))
+            answers.append(_can_match_nothing(argument, depth + 1, groups, on_path))
         elif name == "BRANCH":
             # Every branch is walked, not just up to the first empty one, so that
             # groups defined in a later branch are recorded too. Only one of them
             # runs, so none of them is a path the match had to take.
             answers.append(
                 _any_empty(
-                    [_can_match_nothing(branch, depth + 1, groups, True) for branch in argument[1]]
+                    [
+                        _can_match_nothing(branch, depth + 1, groups, _skippable(on_path))
+                        for branch in argument[1]
+                    ]
                 )
             )
         elif name == "ASSERT":
@@ -248,9 +272,19 @@ def _can_match_nothing(
             # a lookaround holds exactly when what it looks for can be empty.
             # `(?=.*foo)` cannot, which is why a lookahead-only pattern stays
             # admissible evidence.
-            answers.append(_can_match_nothing(argument[1], depth + 1, groups, True))
+            #
+            # A positive assertion has to hold for the match to happen, so the
+            # path through it is not one the match could have gone around — a
+            # capture inside it took part exactly as much as the same capture
+            # written outside it would have. Calling it optional here is what
+            # made `(?=())(?(1)x|)` unreadable and refused it as evidence.
+            answers.append(_can_match_nothing(argument[1], depth + 1, groups, on_path))
         elif name == "ASSERT_NOT":
-            inner = _can_match_nothing(argument[1], depth + 1, groups, True)
+            # A negative assertion succeeds only where its body fails, and a
+            # subpattern that fails leaves nothing captured behind it. So this is
+            # the one path the match certainly did not walk, and every capture
+            # inside it certainly did not take part.
+            inner = _can_match_nothing(argument[1], depth + 1, groups, False)
             answers.append(None if inner is None else not inner)
         else:
             answers.append(None)
