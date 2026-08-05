@@ -45,12 +45,14 @@ and the next byte is rejected. The 1 MiB regression fixture also proves that
 the EventStore row and caller envelope remain below 4 KiB and contain no body
 substring. A global cross-process file lock serializes reference publication
 with pruning, while per-contract locks prevent overlapping retry deliveries
-from dispatching child effects twice. Lockfiles are opened relative to a pinned,
-non-link parent (or a no-share-delete Windows lease). Failed in-place manifest
-publication restores the prior file through the pinned directory handle before
-reporting failure. Applied prune pins the digest directory, revalidates the
-planned body inode and size through that handle, and performs a
-directory-relative unlink. Malformed manifests abort GC fail-closed.
+from dispatching child effects twice. Required store directories are created one
+component at a time from a pinned project/store anchor; the final directory
+handle stays held across lock acquisition and publication. Windows retains a
+no-share-delete lease for every ancestor. Failed in-place manifest publication
+restores the prior file through the pinned directory handle before reporting
+failure. Applied prune pins the digest directory, revalidates the planned body
+inode and size through that handle, and performs a directory-relative unlink.
+Malformed manifests abort GC fail-closed.
 
 ## Scope
 

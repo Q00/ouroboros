@@ -10,7 +10,7 @@ reference cannot race a prune decision.
 from __future__ import annotations
 
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 import hashlib
@@ -42,6 +42,7 @@ _MANIFEST_FILENAME: Final[str] = "events.json"
 _DIRECTORY_FD_PUBLICATION_SUPPORTED: Final[bool] = bool(
     os.name != "nt"
     and os.open in os.supports_dir_fd
+    and os.mkdir in os.supports_dir_fd
     and os.rename in os.supports_dir_fd
     and os.stat in os.supports_dir_fd
     and os.unlink in os.supports_dir_fd
@@ -152,6 +153,7 @@ class ContentAddressedArtifactStore:
             )
         self.root = Path(os.path.abspath(artifact_root.expanduser()))
         self._project_root = project_root.expanduser().resolve() if project_root else None
+        self._directory_anchor = self._project_root or _nearest_existing_directory(self.root)
         self.max_artifact_bytes = max_artifact_bytes
         self._contracts_root = self.root / "contracts"
         self._lock_target = self.root / ".artifact-store"
@@ -174,8 +176,31 @@ class ContentAddressedArtifactStore:
     def initialize(self) -> None:
         """Create the content and contract directories idempotently."""
         self._validate_project_boundary()
-        self._contracts_root.mkdir(parents=True, exist_ok=True)
+        with _pinned_directory_tree(
+            self._contracts_root,
+            anchor=self._directory_anchor,
+            root=self.root,
+            label="artifact store",
+        ):
+            pass
         self._validate_project_boundary()
+
+    @contextmanager
+    def _store_lock(self, *, exclusive: bool) -> Iterator[None]:
+        """Hold the store directory authority together with its lockfile."""
+        with _pinned_directory_tree(
+            self.root,
+            anchor=self._directory_anchor,
+            root=self.root,
+            label="artifact store lock",
+        ) as directory_fd:
+            with file_lock(
+                self._lock_target,
+                exclusive=exclusive,
+                parent_fd=directory_fd,
+            ):
+                self._validate_project_boundary()
+                yield
 
     @contextmanager
     def contract_execution_lock(
@@ -188,10 +213,21 @@ class ContentAddressedArtifactStore:
         self.initialize()
         contract_id = _validate_contract_id(contract_id)
         lock_target = self._contract_execution_lock_target(contract_id)
-        with file_lock(lock_target, exclusive=True, blocking=blocking):
-            self._validate_project_boundary()
-            self._contract_execution_lock_target(contract_id)
-            yield
+        with _pinned_directory_tree(
+            lock_target.parent,
+            anchor=self._directory_anchor,
+            root=self._contracts_root,
+            label="contract execution lock",
+        ) as directory_fd:
+            with file_lock(
+                lock_target,
+                exclusive=True,
+                blocking=blocking,
+                parent_fd=directory_fd,
+            ):
+                self._validate_project_boundary()
+                self._contract_execution_lock_target(contract_id)
+                yield
 
     def put_for_contract(
         self,
@@ -236,7 +272,7 @@ class ContentAddressedArtifactStore:
             events_emitted_count=events_emitted_count,
         )
 
-        with file_lock(self._lock_target, exclusive=True):
+        with self._store_lock(exclusive=True):
             manifest = self._load_manifest_locked(contract_id, missing_ok=True)
             existing = _latest_artifact_event(manifest)
             if existing is not None:
@@ -291,7 +327,7 @@ class ContentAddressedArtifactStore:
         """Read only a contract's bounded envelope, never its artifact body."""
         self.initialize()
         contract_id = _validate_contract_id(contract_id)
-        with file_lock(self._lock_target, exclusive=False):
+        with self._store_lock(exclusive=False):
             manifest = self._load_manifest_locked(contract_id, missing_ok=True)
             event = _latest_artifact_event(manifest)
             if event is None:
@@ -313,7 +349,7 @@ class ContentAddressedArtifactStore:
         """Fetch a durable contract, returning ``None`` only when no binding exists."""
         self.initialize()
         contract_id = _validate_contract_id(contract_id)
-        with file_lock(self._lock_target, exclusive=False):
+        with self._store_lock(exclusive=False):
             manifest = self._load_manifest_locked(contract_id, missing_ok=True)
             event = _latest_artifact_event(manifest)
             if event is None:
@@ -370,7 +406,7 @@ class ContentAddressedArtifactStore:
         self.initialize()
         contract_id = _validate_contract_id(contract_id)
         timestamp = _as_utc(now or datetime.now(UTC))
-        with file_lock(self._lock_target, exclusive=True):
+        with self._store_lock(exclusive=True):
             manifest = self._load_manifest_locked(contract_id, missing_ok=False)
             manifest["active"] = bool(active)
             manifest["retain_until"] = _as_utc(retain_until).isoformat()
@@ -390,7 +426,7 @@ class ContentAddressedArtifactStore:
             raise ValueError("ttl must not be negative")
         self.initialize()
         timestamp = _as_utc(now or datetime.now(UTC))
-        with file_lock(self._lock_target, exclusive=True):
+        with self._store_lock(exclusive=True):
             manifests = self._load_all_manifests_locked()
             candidates = self._plan_prune_locked(
                 manifests,
@@ -506,21 +542,13 @@ class ContentAddressedArtifactStore:
 
     def _write_blob_locked(self, digest: str, payload: bytes) -> None:
         path = self._blob_path_from_digest(digest)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        if path.exists():
-            existing = path.read_bytes()
-            if existing != payload:
-                raise ArtifactIntegrityError(
-                    "Content-addressed path contains different bytes; refusing overwrite",
-                    operation="write",
-                    details={"artifact_ref": f"sha256:{digest}"},
-                )
-            return
         _atomic_write_bytes(
             path,
             payload,
             root=self.root,
+            anchor=self._directory_anchor,
             label="artifact body",
+            matching_existing=payload,
         )
 
     def _read_blob_locked(self, artifact_ref: str) -> bytes:
@@ -687,6 +715,7 @@ class ContentAddressedArtifactStore:
             path,
             payload,
             root=self._contracts_root,
+            anchor=self._directory_anchor,
             label="artifact manifest",
         )
 
@@ -1186,25 +1215,314 @@ def _unlink_blob_candidate_guarded(
         path.unlink()
 
 
-def _atomic_write_bytes(
+def _nearest_existing_directory(path: Path) -> Path:
+    """Choose the nearest lexical ancestor that can anchor safe creation."""
+    candidate = path
+    while not candidate.exists():
+        parent = candidate.parent
+        if parent == candidate:
+            break
+        candidate = parent
+    return candidate
+
+
+def _validate_pinned_directory(
+    directory_fd: int,
+    path: Path,
+    *,
+    anchor: Path,
+    label: str,
+) -> None:
+    """Prove one held directory is still the live descendant of its anchor."""
+    try:
+        path.relative_to(anchor)
+        opened = os.fstat(directory_fd)
+        current = os.stat(path, follow_symlinks=False)
+    except (OSError, ValueError) as exc:
+        raise ArtifactIntegrityError(
+            f"{label} directory ancestor changed during creation",
+            operation="path_resolution",
+            details={"path": str(path), "anchor": str(anchor)},
+        ) from exc
+    if (
+        not stat.S_ISDIR(opened.st_mode)
+        or not stat.S_ISDIR(current.st_mode)
+        or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)
+    ):
+        raise ArtifactIntegrityError(
+            f"{label} directory ancestor changed during creation",
+            operation="path_resolution",
+            details={"path": str(path), "anchor": str(anchor)},
+        )
+
+
+@contextmanager
+def _pinned_directory_tree(
+    path: Path,
+    *,
+    anchor: Path,
+    root: Path,
+    label: str,
+) -> Iterator[int | None]:
+    """Create and retain every directory from one trusted lexical anchor."""
+    if _supports_directory_fd_publication():
+        with _pinned_directory_tree_at(path, anchor=anchor, label=label) as directory_fd:
+            yield directory_fd
+        return
+    if os.name != "nt":
+        raise ArtifactIntegrityError(
+            f"{label} directory creation requires safe directory-relative operations",
+            operation="path_resolution",
+            details={"path": str(path), "anchor": str(anchor), "root": str(root)},
+        )
+    with _pinned_directory_tree_guarded(path, anchor=anchor, label=label):
+        yield None
+
+
+@contextmanager
+def _pinned_directory_tree_at(
+    path: Path,
+    *,
+    anchor: Path,
+    label: str,
+) -> Iterator[int]:
+    """Create descendants with mkdirat while retaining every opened parent."""
+    try:
+        relative = path.relative_to(anchor)
+    except ValueError as exc:
+        raise ArtifactIntegrityError(
+            f"{label} directory escapes its creation anchor",
+            operation="path_resolution",
+            details={"path": str(path), "anchor": str(anchor)},
+        ) from exc
+
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    directory_flags |= getattr(os, "O_CLOEXEC", 0)
+    try:
+        directory_fd = os.open(anchor, directory_flags)
+    except OSError as exc:
+        raise ArtifactIntegrityError(
+            f"{label} creation anchor is not a safe local directory",
+            operation="path_resolution",
+            details={"path": str(path), "anchor": str(anchor)},
+        ) from exc
+
+    current_path = anchor
+    try:
+        _validate_pinned_directory(
+            directory_fd,
+            current_path,
+            anchor=anchor,
+            label=label,
+        )
+        for component in relative.parts:
+            if component in {"", ".", ".."}:
+                raise ArtifactIntegrityError(
+                    f"{label} directory contains an unsafe component",
+                    operation="path_resolution",
+                    details={"path": str(path), "anchor": str(anchor)},
+                )
+            try:
+                os.mkdir(component, 0o700, dir_fd=directory_fd)
+            except FileExistsError:
+                pass
+            child_fd = -1
+            try:
+                child_fd = os.open(component, directory_flags, dir_fd=directory_fd)
+                entry = os.stat(component, dir_fd=directory_fd, follow_symlinks=False)
+                opened = os.fstat(child_fd)
+                if (
+                    not stat.S_ISDIR(entry.st_mode)
+                    or not stat.S_ISDIR(opened.st_mode)
+                    or (entry.st_dev, entry.st_ino) != (opened.st_dev, opened.st_ino)
+                ):
+                    raise ArtifactIntegrityError(
+                        f"{label} directory changed while it was opened",
+                        operation="path_resolution",
+                        details={"path": str(current_path / component)},
+                    )
+                current_path /= component
+                _validate_pinned_directory(
+                    child_fd,
+                    current_path,
+                    anchor=anchor,
+                    label=label,
+                )
+                os.close(directory_fd)
+                directory_fd = child_fd
+                child_fd = -1
+            except OSError as exc:
+                raise ArtifactIntegrityError(
+                    f"{label} directory is not a safe local directory",
+                    operation="path_resolution",
+                    details={"path": str(current_path / component)},
+                ) from exc
+            finally:
+                if child_fd >= 0:
+                    os.close(child_fd)
+        yield directory_fd
+    finally:
+        os.close(directory_fd)
+
+
+@contextmanager
+def _pinned_directory_tree_guarded(
+    path: Path,
+    *,
+    anchor: Path,
+    label: str,
+) -> Iterator[None]:
+    """Create a Windows directory tree while every ancestor is leased."""
+    try:
+        relative = path.relative_to(anchor)
+    except ValueError as exc:
+        raise ArtifactIntegrityError(
+            f"{label} directory escapes its creation anchor",
+            operation="path_resolution",
+            details={"path": str(path), "anchor": str(anchor)},
+        ) from exc
+
+    with ExitStack() as stack:
+        stack.enter_context(_windows_directory_lease(anchor, root=anchor, label=label))
+        current = anchor
+        for component in relative.parts:
+            if component in {"", ".", ".."}:
+                raise ArtifactIntegrityError(
+                    f"{label} directory contains an unsafe component",
+                    operation="path_resolution",
+                    details={"path": str(path), "anchor": str(anchor)},
+                )
+            current /= component
+            try:
+                current.mkdir(mode=0o700)
+            except FileExistsError:
+                pass
+            stack.enter_context(_windows_directory_lease(current, root=anchor, label=label))
+        yield
+
+
+def _matching_existing_payload_at(
+    directory_fd: int,
     path: Path,
     payload: bytes,
     *,
     root: Path,
     label: str,
-) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+) -> bool:
+    """Verify a deduplicated body through the same pinned parent handle."""
+    file_flags = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    file_flags |= getattr(os, "O_NONBLOCK", 0)
+    try:
+        file_fd = os.open(path.name, file_flags, dir_fd=directory_fd)
+    except FileNotFoundError:
+        return False
+    try:
+        opened = os.fstat(file_fd)
+        if not stat.S_ISREG(opened.st_mode):
+            raise ArtifactIntegrityError(
+                f"{label} existing destination must be a regular file",
+                operation="path_resolution",
+                details={"path": str(path), "root": str(root)},
+            )
+        with open(file_fd, "rb", closefd=False) as handle:
+            existing = handle.read()
+        current = os.stat(path.name, dir_fd=directory_fd, follow_symlinks=False)
+        _validate_directory_binding(directory_fd, path, root=root, label=label)
+        if not stat.S_ISREG(current.st_mode) or (opened.st_dev, opened.st_ino) != (
+            current.st_dev,
+            current.st_ino,
+        ):
+            raise ArtifactIntegrityError(
+                f"{label} existing destination changed during verification",
+                operation="path_resolution",
+                details={"path": str(path), "root": str(root)},
+            )
+        if existing != payload:
+            raise ArtifactIntegrityError(
+                "Content-addressed path contains different bytes; refusing overwrite",
+                operation="write",
+                details={"path": str(path)},
+            )
+        return True
+    finally:
+        os.close(file_fd)
+
+
+def _matching_existing_payload_guarded(
+    path: Path,
+    payload: bytes,
+    *,
+    root: Path,
+    label: str,
+) -> bool:
+    """Verify an existing Windows body while all ancestors are leased."""
+    if not path.exists():
+        return False
     _validate_publication_path(path, root=root, label=label)
-    if _supports_directory_fd_publication():
-        _atomic_write_bytes_at(path, payload, root=root, label=label)
-        return
-    if os.name != "nt":
+    with path.open("rb") as handle:
+        opened = os.fstat(handle.fileno())
+        existing = handle.read()
+    current = path.stat(follow_symlinks=False)
+    if (
+        not stat.S_ISREG(opened.st_mode)
+        or not stat.S_ISREG(current.st_mode)
+        or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)
+    ):
         raise ArtifactIntegrityError(
-            f"{label} publication requires safe directory-relative filesystem operations",
+            f"{label} existing destination changed during verification",
             operation="path_resolution",
             details={"path": str(path), "root": str(root)},
         )
-    _atomic_write_bytes_guarded(path, payload, root=root, label=label)
+    if existing != payload:
+        raise ArtifactIntegrityError(
+            "Content-addressed path contains different bytes; refusing overwrite",
+            operation="write",
+            details={"path": str(path)},
+        )
+    return True
+
+
+def _atomic_write_bytes(
+    path: Path,
+    payload: bytes,
+    *,
+    root: Path,
+    anchor: Path,
+    label: str,
+    matching_existing: bytes | None = None,
+) -> None:
+    with _pinned_directory_tree(
+        path.parent,
+        anchor=anchor,
+        root=root,
+        label=label,
+    ) as directory_fd:
+        _validate_publication_path(path, root=root, label=label)
+        if directory_fd is not None:
+            if matching_existing is not None and _matching_existing_payload_at(
+                directory_fd,
+                path,
+                matching_existing,
+                root=root,
+                label=label,
+            ):
+                return
+            _atomic_write_bytes_at(
+                directory_fd,
+                path,
+                payload,
+                root=root,
+                label=label,
+            )
+            return
+        if matching_existing is not None and _matching_existing_payload_guarded(
+            path,
+            matching_existing,
+            root=root,
+            label=label,
+        ):
+            return
+        _atomic_write_bytes_guarded(path, payload, root=root, label=label)
 
 
 def _supports_directory_fd_publication() -> bool:
@@ -1298,6 +1616,7 @@ def _restore_published_destination_at(
 
 
 def _atomic_write_bytes_at(
+    directory_fd: int,
     path: Path,
     payload: bytes,
     *,
@@ -1305,17 +1624,6 @@ def _atomic_write_bytes_at(
     label: str,
 ) -> None:
     """Publish relative to a pinned, non-link parent directory handle."""
-    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
-    directory_flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
-    try:
-        directory_fd = os.open(path.parent, directory_flags)
-    except OSError as exc:
-        raise ArtifactIntegrityError(
-            f"{label} publication parent is not a safe local directory",
-            operation="path_resolution",
-            details={"path": str(path.parent), "root": str(root)},
-        ) from exc
-
     temporary_name = f".{path.name}.{os.urandom(16).hex()}.tmp"
     temporary_fd = -1
     backup_name: str | None = None
@@ -1393,7 +1701,6 @@ def _atomic_write_bytes_at(
     finally:
         if temporary_fd >= 0:
             os.close(temporary_fd)
-        os.close(directory_fd)
 
 
 def _atomic_write_bytes_guarded(

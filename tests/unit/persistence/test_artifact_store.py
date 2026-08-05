@@ -432,6 +432,66 @@ def test_prune_rejects_same_size_body_replacement_after_planning(
 
 
 @pytest.mark.parametrize("publication", ["body", "manifest"])
+def test_directory_creation_never_follows_project_ancestor_swap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    publication: str,
+) -> None:
+    """Mutation inside mkdirat cannot publish a body or manifest externally."""
+    if not artifact_store_module._supports_directory_fd_publication():
+        pytest.skip("directory-relative creation is unavailable on this platform")
+
+    project = tmp_path / "project"
+    project.mkdir()
+    store = ContentAddressedArtifactStore.for_project(project)
+    store.initialize()
+    body = {"ancestor": "must remain project-owned"}
+    digest = hashlib.sha256(canonical_artifact_bytes(body)).hexdigest()
+    if publication == "manifest":
+        _put(store, "CONTRACT1", body)
+        creation_component = "CONTRACT2"
+    else:
+        creation_component = digest[:2]
+
+    ouroboros_dir = project / ".ouroboros"
+    displaced = tmp_path / f"ancestor-displaced-{publication}"
+    external = tmp_path / f"ancestor-external-{publication}"
+    external.mkdir()
+    original_mkdir = os.mkdir
+    original_rename = os.rename
+    swapped = False
+
+    def swap_ancestor_during_mkdir(
+        path: object,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> None:
+        nonlocal swapped
+        if dir_fd is not None and path == creation_component and not swapped:
+            original_rename(ouroboros_dir, displaced)
+            try:
+                ouroboros_dir.symlink_to(external, target_is_directory=True)
+            except OSError:
+                pytest.skip("directory symlinks are not supported in this environment")
+            swapped = True
+        original_mkdir(path, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(os, "mkdir", swap_ancestor_during_mkdir)
+
+    with pytest.raises(ArtifactIntegrityError, match="ancestor changed"):
+        _put(store, "CONTRACT2" if publication == "manifest" else "CONTRACT1", body)
+
+    assert swapped
+    assert list(external.iterdir()) == []
+    if publication == "body":
+        rejected_path = displaced / "artifacts" / digest[:2] / f"{digest}.json"
+    else:
+        rejected_path = displaced / "artifacts" / "contracts" / "CONTRACT2" / "events.json"
+    assert not rejected_path.exists()
+
+
+@pytest.mark.parametrize("publication", ["body", "manifest"])
 def test_publication_rejects_parent_swap_before_atomic_write(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

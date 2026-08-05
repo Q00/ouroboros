@@ -34,12 +34,14 @@ def file_lock(
     exclusive: bool = True,
     *,
     blocking: bool = True,
+    parent_fd: int | None = None,
 ) -> Iterator[None]:
     """Context manager for blocking or fail-fast cross-platform file locking."""
     lock_path = file_path.with_suffix(file_path.suffix + ".lock")
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    if parent_fd is None:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
 
-    with _open_lockfile(lock_path) as handle:
+    with _open_lockfile(lock_path, parent_fd=parent_fd) as handle:
         _ensure_lockfile_content(handle)
         _acquire_lock(handle, exclusive=exclusive, blocking=blocking)
         try:
@@ -49,12 +51,18 @@ def file_lock(
 
 
 @contextmanager
-def _open_lockfile(lock_path: Path) -> Iterator[TextIO]:
+def _open_lockfile(lock_path: Path, *, parent_fd: int | None = None) -> Iterator[TextIO]:
     """Open one lockfile without following a swapped parent or lock symlink."""
     if _supports_directory_fd_lock_open():
-        with _open_lockfile_at(lock_path) as handle:
+        with _open_lockfile_at(lock_path, directory_fd=parent_fd) as handle:
             yield handle
         return
+    if parent_fd is not None:
+        raise OSError(
+            getattr(errno, "ENOTSUP", errno.EPERM),
+            "directory-relative lockfile creation is unavailable",
+            str(lock_path),
+        )
     if os.name == "nt":  # pragma: no cover - exercised on Windows
         with _open_lockfile_guarded(lock_path) as handle:
             yield handle
@@ -117,18 +125,25 @@ def _open_lockfile_descriptor_at(directory_fd: int, name: str) -> tuple[int, boo
 
 
 @contextmanager
-def _open_lockfile_at(lock_path: Path) -> Iterator[TextIO]:
+def _open_lockfile_at(
+    lock_path: Path,
+    *,
+    directory_fd: int | None = None,
+) -> Iterator[TextIO]:
     """Open a lockfile relative to a pinned, no-follow parent directory."""
-    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
-    directory_flags |= getattr(os, "O_CLOEXEC", 0)
-    try:
-        directory_fd = os.open(lock_path.parent, directory_flags)
-    except OSError as exc:
-        raise OSError(
-            exc.errno,
-            "lockfile parent is not a safe local directory",
-            str(lock_path.parent),
-        ) from exc
+    if directory_fd is None:
+        directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        directory_flags |= getattr(os, "O_CLOEXEC", 0)
+        try:
+            directory_fd = os.open(lock_path.parent, directory_flags)
+        except OSError as exc:
+            raise OSError(
+                exc.errno,
+                "lockfile parent is not a safe local directory",
+                str(lock_path.parent),
+            ) from exc
+    else:
+        directory_fd = os.dup(directory_fd)
 
     lock_fd = -1
     created = False
