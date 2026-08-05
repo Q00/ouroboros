@@ -880,6 +880,8 @@ Parallel Execution Verification Report
             ("", "Marker.txt must be empty", r"\A\Z"),
             ("", "MARKER.TXT must be empty", r"\A\Z"),
             ("", "Please ensure Marker.txt is empty", r"\A\Z"),
+            ("aa\n", "marker.txt MUST contain a doubled letter", r"(a)?(?(1)|a)"),
+            ("aa\n", "marker.txt MUST contain a doubled letter", r"(a?)(?(1)a|)"),
         ],
         ids=[
             "politeness-frame",
@@ -891,6 +893,8 @@ Parallel Execution Verification Report
             "capitalized-mention",
             "shouted-mention",
             "capitalized-in-frame",
+            "conditional-on-an-absent-group",
+            "conditional-on-a-present-group",
         ],
     )
     def test_a_satisfied_criterion_is_not_converted_into_a_formal_failure(
@@ -908,9 +912,11 @@ Parallel Execution Verification Report
         is empty`, with an empty `marker.txt`, failed on `please`. The last two
         were refused because every backreference was treated as zero-width, so
         `(a)?\\1` — which cannot match nothing and does match this file — was
-        called unusable. The last three differ from the hint only in the case of
-        the filename, which the mention check ignored and the masking that
-        follows it did not. Both directions are driven through the real verifier
+        called unusable. Three differ from the hint only in the case of the
+        filename, which the mention check ignored and the masking that follows it
+        did not. The last two are conditionals whose arms disagree, refused
+        because the reading required agreement instead of asking whether the
+        group could have taken part. Both directions are driven through the real verifier
         and the real adapter, because the failure only becomes authoritative at
         this boundary.
         """
@@ -962,8 +968,16 @@ Parallel Execution Verification Report
             r"(?!(a)?(?(1)|c))",
             r"(?!(a)?(?(1)|x)b)",
             "(?!" + "(" * 45 + "x" + ")" * 45 + ")",
+            r"(?!\b)",
+            r"(?<!\b)",
         ],
-        ids=["negated-conditional", "negated-conditional-with-tail", "negated-past-depth-limit"],
+        ids=[
+            "negated-conditional",
+            "negated-conditional-with-tail",
+            "negated-past-depth-limit",
+            "negated-boundary",
+            "negated-lookbehind-boundary",
+        ],
     )
     def test_a_negated_guess_cannot_be_approved_through_the_adapter(
         self, tmp_path: Any, tier: VerificationTier, pattern: str

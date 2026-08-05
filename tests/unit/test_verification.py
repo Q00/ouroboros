@@ -1385,6 +1385,134 @@ class TestSpecVerifier:
     @pytest.mark.parametrize("tier", [VerificationTier.T2_STRUCTURAL, VerificationTier.T1_CONSTANT])
     @pytest.mark.parametrize(
         "pattern",
+        [r"(?!\b)", r"(?!\bx)", r"(?<!\b)", r"(?=\B)"],
+        ids=[
+            "negated-boundary",
+            "negated-boundary-with-tail",
+            "negated-lookbehind",
+            "non-boundary",
+        ],
+    )
+    def test_a_word_boundary_is_not_zero_width_once_something_negates_it(
+        self, tier: VerificationTier, pattern: str
+    ) -> None:
+        """`\\b` consumes nothing, which is not the same as holding on nothing.
+
+        Every anchor was treated alike, as a thing that holds wherever it
+        appears. That is true of `^`, `\\A`, `$`, `\\Z` and `\\B` on a subject
+        with nothing in it, and false of `\\b`, which needs a word character on
+        exactly one side and so can never hold there. On its own the error was
+        the harmless one — a pattern wrongly called nullable is only refused —
+        but `(?!\\b)` reverses it: `\\b` fails on an empty subject, so the
+        negation holds, so each of these matches every file including an empty
+        one, and each was admitted as evidence and published as a formal PASS.
+
+        Anchors are now classified one at a time by what they actually do, and
+        `\\bCameraProvider\\b` stays evidence in the acceptance test above.
+        """
+        project = self._create_project({"marker.txt": "hello\n"})
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="marker.txt MUST contain a CameraProvider declaration",
+            tier=tier,
+            pattern=pattern,
+            file_hint="marker.txt",
+        )
+
+        summary = SpecVerifier(project_dir=project).verify_all(
+            (assertion,), agent_results={0: True}
+        )
+
+        assert summary.reports[0].verified_pass is False, f"{pattern!r} must not be evidence"
+        assert summary.discrepancy_count == 1
+        assert summary.override_approval is False
+
+    @pytest.mark.parametrize("tier", [VerificationTier.T2_STRUCTURAL, VerificationTier.T1_CONSTANT])
+    @pytest.mark.parametrize(
+        "pattern",
+        [r"(a)?(?(1)|a)", r"(a)?(?(1)a|a)", r"(a|b)?(?(1)|a)", r"(a?)(?(1)a|)"],
+        ids=[
+            "unparticipating-group-runs-the-other-arm",
+            "both-arms-consume",
+            "branching-group",
+            "participating-group-runs-its-own-arm",
+        ],
+    )
+    def test_a_conditional_is_read_from_whether_its_group_could_have_taken_part(
+        self, tier: VerificationTier, pattern: str
+    ) -> None:
+        """`(?(1)yes|no)` runs one arm, and which one is not a coin toss.
+
+        Requiring both arms to agree refused patterns that plainly discriminate.
+        `(a)?(?(1)|a)` cannot match nothing: on a match that consumed nothing the
+        optional group cannot have taken part — taking part would have consumed
+        the `a` — so the empty arm is exactly the arm that does not run, and the
+        `a` is the arm that does. Refusing it turned a satisfied AC into an
+        authoritative failure.
+
+        Participation is now carried alongside nullability: a group whose body
+        certainly consumes certainly did not take part in an empty match. Where
+        participation really is undecidable the arms must still agree, and the
+        refusal test below keeps that half honest.
+        """
+        project = self._create_project({"marker.txt": "aa\n"})
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="marker.txt MUST contain a doubled letter",
+            tier=tier,
+            pattern=pattern,
+            file_hint="marker.txt",
+        )
+
+        summary = SpecVerifier(project_dir=project).verify_all(
+            (assertion,), agent_results={0: True}
+        )
+
+        assert summary.reports[0].verified_pass is True, f"{pattern!r} must stay evidence"
+        assert summary.discrepancy_count == 0
+        assert summary.override_approval is None
+
+    @pytest.mark.parametrize("tier", [VerificationTier.T2_STRUCTURAL, VerificationTier.T1_CONSTANT])
+    @pytest.mark.parametrize(
+        "pattern",
+        [r"(a)?(?(1)a|)", r"(a?)(?(1)|a)", r"(a?)?(?(1)a|)"],
+        ids=[
+            "empty-arm-is-the-one-that-runs",
+            "participating-group-empty-arm",
+            "either-arm-may-run",
+        ],
+    )
+    def test_a_conditional_that_can_run_an_empty_arm_is_still_refused(
+        self, tier: VerificationTier, pattern: str
+    ) -> None:
+        """Reading participation through must not open the hole it was closing.
+
+        The first two are certain the other way — the arm that runs is the empty
+        one — and the third is the case participation cannot settle, because the
+        group's body can itself match nothing, so it may equally have taken part
+        or been skipped. All three match a subject with nothing in it, so none is
+        evidence of anything.
+        """
+        project = self._create_project({"marker.txt": "aa\n"})
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="marker.txt MUST contain a doubled letter",
+            tier=tier,
+            pattern=pattern,
+            file_hint="marker.txt",
+        )
+
+        summary = SpecVerifier(project_dir=project).verify_all(
+            (assertion,), agent_results={0: True}
+        )
+
+        assert summary.reports[0].verified_pass is False, f"{pattern!r} must not be evidence"
+        assert summary.discrepancy_count == 1
+        assert summary.override_approval is False
+
+    @pytest.mark.parametrize("tier", [VerificationTier.T2_STRUCTURAL, VerificationTier.T1_CONSTANT])
+    @pytest.mark.parametrize(
+        "pattern",
         [
             r"(?!(a)?(?(1)|c))",
             r"(?!(a)?(?(1)|x)b)",

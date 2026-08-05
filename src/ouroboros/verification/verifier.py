@@ -17,6 +17,7 @@ import re
 # CPython this runs on; the alternative is to hand-write a regex parser, and a
 # second parser that disagrees with the real one in a corner is worse than this.
 from re import _parser as regex_parser
+from typing import NamedTuple
 
 from ouroboros.verification.models import (
     ACVerificationReport,
@@ -48,11 +49,53 @@ _MAX_PARSE_DEPTH = 40
 
 # Consumes at least one character, so a sequence containing one cannot be empty.
 _CONSUMING = frozenset({"LITERAL", "NOT_LITERAL", "IN", "ANY", "RANGE", "CATEGORY"})
-# Matches without consuming: `^`, `\A`, `\Z`, `\b`. `\b` cannot actually hold on
-# an empty subject, but calling it zero-width only ever refuses a pattern, and a
-# bare `\b` is vacuous evidence that deserves refusing.
-_ZERO_WIDTH = frozenset({"AT"})
+# Anchors consume nothing, but they still either hold or fail on a subject with
+# nothing in it, and which one it is has to be read off the individual anchor.
+# `^`, `\A`, `$`, `\Z` and `\B` all hold at the sole position of an empty
+# subject; `\b` needs a word character on exactly one side and so can never
+# hold there. Calling `\b` zero-width would be the safe error on its own — a
+# pattern wrongly called nullable is only refused — but `(?!\b)` negates it into
+# the unsafe one, so each anchor is classified by what it actually does.
+_ANCHORS_HOLDING_ON_EMPTY = frozenset(
+    {
+        "AT_BEGINNING",
+        "AT_BEGINNING_STRING",
+        "AT_BEGINNING_LINE",
+        "AT_END",
+        "AT_END_STRING",
+        "AT_END_LINE",
+        "AT_NON_BOUNDARY",
+        "AT_LOC_NON_BOUNDARY",
+        "AT_UNI_NON_BOUNDARY",
+    }
+)
+_ANCHORS_FAILING_ON_EMPTY = frozenset({"AT_BOUNDARY", "AT_LOC_BOUNDARY", "AT_UNI_BOUNDARY"})
 _REPEATS = frozenset({"MAX_REPEAT", "MIN_REPEAT", "POSSESSIVE_REPEAT"})
+
+
+class _Group(NamedTuple):
+    """What a capture group did on a match that consumed nothing."""
+
+    empty: bool | None
+    """Whether the group's own body can match nothing."""
+    took_part: bool | None
+    """Whether the group can have participated in such a match."""
+
+
+def _participation(body_empty: bool | None, optional: bool) -> bool | None:
+    """Whether a group reached here can have taken part in an empty match.
+
+    A group whose body certainly consumes certainly did not take part: had it
+    run, the match would not have been empty. A group whose body can be empty
+    took part only if the path through it is the only path; under a repeat that
+    may run zero times, an alternative, or a lookaround, it may equally have
+    been skipped, and that is not something this reading can settle.
+    """
+    if body_empty is False:
+        return False
+    if body_empty is True and not optional:
+        return True
+    return None
 
 
 def _all_empty(answers: list[bool | None]) -> bool | None:
@@ -95,7 +138,10 @@ def _agreed(answers: list[bool | None]) -> bool | None:
 
 
 def _can_match_nothing(
-    sequence: object, depth: int = 0, groups: dict[int, bool | None] | None = None
+    sequence: object,
+    depth: int = 0,
+    groups: dict[int, _Group] | None = None,
+    optional: bool = False,
 ) -> bool | None:
     """Whether a parsed regex can match the empty string, read rather than run.
 
@@ -113,8 +159,11 @@ def _can_match_nothing(
     strength of not having understood it. None negates to None, so the doubt
     survives the negation and `_matches_the_empty_string` still refuses.
 
-    `groups` carries what each capture group, once seen, can itself match, so a
-    backreference can be judged by what it refers to.
+    `groups` carries, for each capture group once seen, what it can itself match
+    and whether it can have taken part in an empty match — the first so a
+    backreference can be judged by what it refers to, the second so a conditional
+    can be judged by which arm it would run. `optional` says whether the path
+    being walked is one the match could have avoided taking.
     """
     if groups is None:
         groups = {}
@@ -123,46 +172,60 @@ def _can_match_nothing(
     answers: list[bool | None] = []
     for opcode, argument in sequence:  # type: ignore[attr-defined]
         name = getattr(opcode, "name", str(opcode))
-        if name in _ZERO_WIDTH:
-            continue
         if name in _CONSUMING:
             return False
-        if name in _REPEATS:
+        if name == "AT":
+            anchor = getattr(argument, "name", str(argument))
+            if anchor in _ANCHORS_HOLDING_ON_EMPTY:
+                continue
+            answers.append(False if anchor in _ANCHORS_FAILING_ON_EMPTY else None)
+        elif name in _REPEATS:
             minimum, _maximum, item = argument
             # Walked whatever the count, so that groups inside a repeat that may
             # run zero times are still recorded for a later backreference.
-            item_empty = _can_match_nothing(item, depth + 1, groups)
+            item_empty = _can_match_nothing(item, depth + 1, groups, optional or minimum == 0)
             # A repeat that may run zero times is skippable; one that must run
             # is empty only if what it repeats is. The count itself is never
             # counted out.
             answers.append(True if minimum == 0 else item_empty)
         elif name == "SUBPATTERN":
-            body_empty = _can_match_nothing(argument[-1], depth + 1, groups)
-            if argument[0] is not None:
-                groups[argument[0]] = body_empty
+            body_empty = _can_match_nothing(argument[-1], depth + 1, groups, optional)
+            number = argument[0]
+            if number is not None:
+                groups[number] = _Group(body_empty, _participation(body_empty, optional))
             answers.append(body_empty)
         elif name == "GROUPREF":
             # A backreference repeats whatever its group captured, so it is empty
             # only when that group can be. If the group never participated the
             # reference cannot match at all — never empty either. A group not yet
             # seen (a forward reference) is unknown, and stays unknown.
-            answers.append(groups.get(argument))
+            seen = groups.get(argument)
+            answers.append(None if seen is None else seen.empty)
         elif name == "GROUPREF_EXISTS":
-            # `(?(1)yes|no)`: which arm runs depends on whether the group took
-            # part, which this does not track. So the conditional is only certain
-            # when both arms agree, and unknown when they do not.
-            _reference, yes_arm, no_arm = argument
-            arms = [_can_match_nothing(yes_arm, depth + 1, groups)]
-            arms.append(True if no_arm is None else _can_match_nothing(no_arm, depth + 1, groups))
-            answers.append(_agreed(arms))
+            # `(?(1)yes|no)` runs the arm the group's participation selects. On a
+            # match that consumed nothing, a group whose body consumes cannot have
+            # taken part, so `(a)?(?(1)|b)` certainly runs `b` and certainly is
+            # not empty. Only when participation itself is undecidable does the
+            # conditional fall back on the arms having to agree.
+            reference, yes_arm, no_arm = argument
+            took_part = groups[reference].took_part if reference in groups else None
+            yes = _can_match_nothing(yes_arm, depth + 1, groups, True)
+            no = True if no_arm is None else _can_match_nothing(no_arm, depth + 1, groups, True)
+            if took_part is True:
+                answers.append(yes)
+            elif took_part is False:
+                answers.append(no)
+            else:
+                answers.append(_agreed([yes, no]))
         elif name == "ATOMIC_GROUP":
-            answers.append(_can_match_nothing(argument, depth + 1, groups))
+            answers.append(_can_match_nothing(argument, depth + 1, groups, optional))
         elif name == "BRANCH":
             # Every branch is walked, not just up to the first empty one, so that
-            # groups defined in a later branch are recorded too.
+            # groups defined in a later branch are recorded too. Only one of them
+            # runs, so none of them is a path the match had to take.
             answers.append(
                 _any_empty(
-                    [_can_match_nothing(branch, depth + 1, groups) for branch in argument[1]]
+                    [_can_match_nothing(branch, depth + 1, groups, True) for branch in argument[1]]
                 )
             )
         elif name == "ASSERT":
@@ -170,9 +233,9 @@ def _can_match_nothing(
             # a lookaround holds exactly when what it looks for can be empty.
             # `(?=.*foo)` cannot, which is why a lookahead-only pattern stays
             # admissible evidence.
-            answers.append(_can_match_nothing(argument[1], depth + 1, groups))
+            answers.append(_can_match_nothing(argument[1], depth + 1, groups, True))
         elif name == "ASSERT_NOT":
-            inner = _can_match_nothing(argument[1], depth + 1, groups)
+            inner = _can_match_nothing(argument[1], depth + 1, groups, True)
             answers.append(None if inner is None else not inner)
         else:
             answers.append(None)
