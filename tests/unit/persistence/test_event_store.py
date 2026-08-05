@@ -3045,3 +3045,13 @@ class TestSqliteOnlyBackendContract:
             "a named in-memory database is process-local regardless of its name"
         )
         assert named_memory.sqlite_path() is None
+
+        for query_bearing in (
+            "sqlite+aiosqlite:///?cache=shared",
+            "sqlite+aiosqlite:///:memory:?cache=shared",
+        ):
+            store = EventStore(query_bearing)
+            assert store.sqlite_path() is None, (
+                f"a query string masqueraded as a path: {query_bearing}"
+            )
+            assert store.supports_cross_process_workers is False

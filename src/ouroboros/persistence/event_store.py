@@ -20,6 +20,7 @@ from urllib.parse import quote, unquote
 from uuid import uuid4
 
 from sqlalchemy import and_, case, event, func, or_, select, text
+from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError, OperationalError
 
 if TYPE_CHECKING:
@@ -672,23 +673,23 @@ class EventStore:
     def _sqlite_path_from_url(database_url: str) -> str | None:
         """Filesystem path of the SQLite file this URL points at, else ``None``.
 
-        Returns ``None`` for in-memory or non-SQLite backends (they have no local
-        file). Understands both the plain ``sqlite+aiosqlite:///<path>`` form and
-        the read-only ``…///file:<path>?mode=ro&uri=true`` URI form.
+        Returns ``None`` for in-memory or non-SQLite backends. Parsed
+        structurally, so a query string on any accepted form — plain,
+        ``:memory:``, or ``file:`` URIs (``mode=ro``/``mode=memory``) —
+        never masquerades as part of a filesystem path.
         """
-        prefix = "sqlite+aiosqlite:///"
-        if not database_url.startswith(prefix):
+        try:
+            parsed = make_url(database_url)
+        except Exception:
             return None
-        path_part = database_url[len(prefix) :]
-        if path_part.startswith("file:"):
-            # URI form. A ``mode=memory`` database is process-local no matter
-            # its name — no file another process can open; otherwise decode
-            # the path back to its filesystem form.
-            rest, _, query = path_part[len("file:") :].partition("?")
-            if "mode=memory" in unquote(query.split("#", 1)[0]):
-                return None
-            path_part = unquote(rest.split("#", 1)[0])
-        return None if path_part in (":memory:", "") else path_part
+        if parsed.get_backend_name() != "sqlite":
+            return None
+        if str(parsed.query.get("mode", "")).lower() == "memory":
+            return None
+        database = parsed.database or ""
+        if database.startswith("file:"):
+            database = unquote(database[len("file:") :])
+        return None if database in (":memory:", "") else database
 
     def sqlite_path(self) -> str | None:
         """Filesystem path of the backing SQLite file, or ``None``.
