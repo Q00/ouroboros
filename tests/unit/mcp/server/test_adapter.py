@@ -2,6 +2,7 @@
 
 import asyncio
 from datetime import UTC, datetime
+import json
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, patch
@@ -2535,3 +2536,72 @@ def test_composition_root_builds_the_registry_at_its_final_directory(tmp_path) -
 
     assert handler.fanout_registry is not None
     assert handler.fanout_registry.directory == tmp_path / "fanout"
+
+
+@pytest.mark.asyncio
+async def test_production_fanout_returns_only_disposable_envelope(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A large terminal child body is artifact-only and retry does no synthesis."""
+    from ouroboros.core.disposable_memory import DisposableResultEnvelope
+    from ouroboros.mcp.server import adapter as adapter_module
+    from ouroboros.mcp.tools import fanout_handler
+    from ouroboros.mcp.tools.fanout import FANOUT_KIND_QUESTION_ADVISORY
+
+    monkeypatch.setattr(adapter_module, "_safe_cwd", lambda: tmp_path)
+    event_store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'events.db'}")
+    server = adapter_module.create_ouroboros_server(
+        name="fanout-disposable-probe",
+        event_store=event_store,
+        state_dir=tmp_path / "state",
+    )
+    handler = server._tool_handlers["ouroboros_submit_fanout_results"]
+    registry = handler.fanout_registry
+    assert registry is not None
+    fanout_id = registry.register(
+        kind=FANOUT_KIND_QUESTION_ADVISORY,
+        session_id="session-disposable",
+        correlation_key="context.lane_id",
+        expected_keys=["code_context"],
+        synthesizer_input={"lane_ids": ["code_context"]},
+        required_keys=["code_context"],
+    )
+    assert fanout_id is not None
+    marker = "large-child-body:" + ("x" * 900_000)
+    arguments = {
+        "session_id": "session-disposable",
+        "fanout_id": fanout_id,
+        "correlation_key": "context.lane_id",
+        "results": [{"key": "code_context", "content": marker}],
+    }
+    synthesis_calls = 0
+    original_synthesize = fanout_handler.synthesize_fanout_results
+
+    def tracked_synthesize(prepared):
+        nonlocal synthesis_calls
+        synthesis_calls += 1
+        return original_synthesize(prepared)
+
+    monkeypatch.setattr(fanout_handler, "synthesize_fanout_results", tracked_synthesize)
+    try:
+        first = await handler.handle(arguments)
+        second = await handler.handle(arguments)
+        assert first.is_ok and second.is_ok
+        first_result = first.unwrap()
+        second_result = second.unwrap()
+        envelope = DisposableResultEnvelope.model_validate(first_result.meta)
+
+        assert second_result.meta == first_result.meta
+        assert synthesis_calls == 1
+        assert len(json.dumps(first_result.meta).encode("utf-8")) < 4 * 1024
+        assert marker not in first_result.content[0].text
+        assert marker not in json.dumps(first_result.meta)
+
+        assert handler.disposable_memory is not None
+        fetched = handler.disposable_memory.fetch(envelope.contract_id)
+        assert marker in json.dumps(fetched.body)
+        events = await event_store.replay("contract", envelope.contract_id)
+        assert len(events) == 1
+        assert marker not in json.dumps(events[0].data)
+    finally:
+        await event_store.close()

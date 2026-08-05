@@ -22,6 +22,7 @@ Handler modules:
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ouroboros.mcp.tools.ac_tree_hud_handler import ACTreeHUDHandler
@@ -473,6 +474,14 @@ def get_ouroboros_tools(
     # One shared fan-out registry: interview/lateral producers register pending
     # fan-outs into it, and the submit tool reads them back for synthesis.
     fanout_registry = FanoutRegistry()
+    from ouroboros.orchestrator.disposable_memory import DisposableMemory
+    from ouroboros.persistence.artifact_store import ContentAddressedArtifactStore
+    from ouroboros.persistence.event_store import EventStore
+
+    fanout_disposable_memory = DisposableMemory(
+        artifact_store=ContentAddressedArtifactStore.for_project(Path.cwd()),
+        event_store=context.event_store if context is not None else EventStore(),
+    )
     execute_seed = ExecuteSeedHandler(
         agent_runtime_backend=runtime_backend,
         llm_backend=llm_backend,
@@ -554,7 +563,10 @@ def get_ouroboros_tools(
             opencode_mode=opencode_mode,
             fanout_registry=fanout_registry,
         ),
-        SubmitFanoutResultsHandler(fanout_registry=fanout_registry),
+        SubmitFanoutResultsHandler(
+            fanout_registry=fanout_registry,
+            disposable_memory=fanout_disposable_memory,
+        ),
         EvolveStepHandler(
             agent_runtime_backend=runtime_backend,
             opencode_mode=opencode_mode,

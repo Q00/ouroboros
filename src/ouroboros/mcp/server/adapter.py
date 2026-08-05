@@ -1664,6 +1664,7 @@ def create_ouroboros_server(
     from ouroboros.mcp.tools.registry import ToolRegistry
     from ouroboros.mcp.tools.synapse_handler import SynapseSignalHandler, SynapseTargetsHandler
     from ouroboros.orchestrator import create_agent_runtime, resolve_agent_runtime_backend
+    from ouroboros.orchestrator.disposable_memory import DisposableMemory
     from ouroboros.orchestrator.runner import (
         OrchestratorRunner,
     )
@@ -1677,6 +1678,7 @@ def create_ouroboros_server(
         parse_stage,
         resolve_runtime_for_stage,
     )
+    from ouroboros.persistence.artifact_store import ContentAddressedArtifactStore
     from ouroboros.providers import create_llm_adapter
 
     resolved_runtime_backend = resolve_agent_runtime_backend(runtime_backend)
@@ -2305,6 +2307,10 @@ def create_ouroboros_server(
     # issued fan-out id, whose valid submission then returns
     # ``unknown_fanout_id``.
     fanout_registry = FanoutRegistry(state_dir_path / "fanout")
+    fanout_disposable_memory = DisposableMemory(
+        artifact_store=ContentAddressedArtifactStore.for_project(effective_cwd),
+        event_store=event_store,
+    )
     # No shared-adapter injection for interview handlers: the injected stage
     # adapter has no strict MCP isolation, and ``self.llm_adapter or ...``
     # would bypass the handler's own strict factory (#765, #1768). Injection
@@ -2435,7 +2441,10 @@ def create_ouroboros_server(
             opencode_mode=opencode_mode,
             fanout_registry=fanout_registry,
         ),
-        SubmitFanoutResultsHandler(fanout_registry=fanout_registry),
+        SubmitFanoutResultsHandler(
+            fanout_registry=fanout_registry,
+            disposable_memory=fanout_disposable_memory,
+        ),
         evolve_step,
         StartEvolveStepHandler(
             evolve_handler=evolve_step,

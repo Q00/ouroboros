@@ -29,6 +29,10 @@ The accepted C2-C5 contract is implemented by these production surfaces:
   body before completion, and returns only the bounded envelope. Ordinary retry
   recovery reads only the manifest envelope; default replay reads the artifact,
   and explicit force-rerun requires a new contract id.
+- The shipped MCP composition routes terminal `ouroboros_submit_fanout_results`
+  synthesis through that service. Complete fan-out bodies live only in the
+  project-local artifact store; the tool response and EventStore receive the
+  bounded envelope, and same-fan-out retry returns it without synthesis.
 - `ouroboros artifacts fetch|replay|prune` exposes explicit inspection and
   dry-run-first GC. `prune --apply` writes a tombstone for every referencing
   contract before deleting a shared blob.
