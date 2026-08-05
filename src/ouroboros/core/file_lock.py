@@ -161,7 +161,7 @@ def _open_lockfile_at(lock_path: Path) -> Iterator[TextIO]:
                     pass
             raise
 
-        with os.fdopen(lock_fd, "a+", encoding="utf-8") as handle:
+        with open(lock_fd, "a+", encoding="utf-8", closefd=True) as handle:
             lock_fd = -1
             yield handle
     finally:
@@ -311,7 +311,7 @@ def _open_lockfile_guarded(lock_path: Path) -> Iterator[TextIO]:
                 os.O_RDWR | os.O_APPEND,
             )
             native_handle = None
-            with os.fdopen(fd, "a+", encoding="utf-8") as handle:
+            with open(fd, "a+", encoding="utf-8", closefd=True) as handle:
                 fd = -1
                 opened = os.fstat(handle.fileno())
                 current = lock_path.stat(follow_symlinks=False)
