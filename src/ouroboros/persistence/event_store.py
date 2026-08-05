@@ -29,6 +29,7 @@ from sqlalchemy.pool import AsyncAdaptedQueuePool
 
 from ouroboros.core.errors import PersistenceError
 from ouroboros.events.base import BaseEvent
+from ouroboros.persistence.backend_contract import require_sqlite_event_store_url
 from ouroboros.persistence.schema import (
     ac_acceptance_guards_table,
     events_table,
@@ -602,8 +603,8 @@ class EventStore:
         """Initialize EventStore with database URL.
 
         Args:
-            database_url: SQLAlchemy database URL.
-                         For async SQLite: "sqlite+aiosqlite:///path/to/db.sqlite"
+            database_url: SQLAlchemy database URL — SQLite-only, else ValueError
+                         (#1832). For async SQLite: "sqlite+aiosqlite:///path/to/db.sqlite"
                          If not provided, uses the configured EventStore path
                          with the legacy ~/.ouroboros/ouroboros.db fallback.
             read_only: When True, open the underlying SQLite database in true
@@ -615,7 +616,7 @@ class EventStore:
                 ``sqlite3.OperationalError: attempt to write a readonly database``.
                 Callers that opt in should also skip schema creation by calling
                 ``initialize(create_schema=False)`` — this is the default when
-                ``read_only=True``. ``read_only`` is a no-op for non-SQLite URLs.
+                ``read_only=True``.
         """
         self._configuration_error: ValueError | None = None
         if database_url is None:
@@ -636,6 +637,7 @@ class EventStore:
         self._lifecycle_lock = asyncio.Lock()
         if read_only:
             database_url = self._coerce_to_readonly_url(database_url)
+        require_sqlite_event_store_url(database_url)
         self._database_url = database_url
         self._engine: AsyncEngine | None = None
         # Anchor connection for process-shared in-memory databases (memdb VFS):
@@ -712,8 +714,6 @@ class EventStore:
     @property
     def supports_cross_process_workers(self) -> bool:
         """Whether another process can observe this store's event stream."""
-        if not self._database_url.startswith("sqlite+aiosqlite:///"):
-            return True
         return self.sqlite_path() is not None
 
     def _raise_invalid_append_input(
