@@ -356,6 +356,37 @@ def _matches_refactor_in_place(ledger: SeedDraftLedger) -> bool:
     )
 
 
+def _matches_web_app(ledger: SeedDraftLedger) -> bool:
+    outputs = _section_text(ledger, "outputs")
+    runtime = _section_text(ledger, "runtime_context")
+    goal = _goal_text(ledger)
+    if not (outputs or runtime):
+        # Same ledger-evidence gate as cli: goal text alone cannot classify.
+        return False
+    # Two-signal AND (the webhook shape): a browser-context signal keeps the
+    # generic UI vocabulary ("form" ⊂ "performance", "validation" ⊂
+    # "invalidation") from classifying non-UI goals on substring accidents.
+    browser_signal = _any_of(
+        " ".join((outputs, runtime, goal)),
+        (
+            "browser",
+            "web app",
+            "webapp",
+            "web application",
+            "frontend",
+            "front-end",
+            "single-page",
+        ),
+    )
+    # "screen" is intentionally absent — it is game_2d vocabulary and would
+    # make every browser "settings screen" dual-fire with games.
+    ui_signal = _any_of(
+        outputs + " " + goal,
+        ("form", "panel", "validation", "user interface", "button", "page"),
+    )
+    return browser_signal and ui_signal
+
+
 def _matches_library(ledger: SeedDraftLedger) -> bool:
     outputs = _section_text(ledger, "outputs")
     goal = _goal_text(ledger)
@@ -366,8 +397,14 @@ def _matches_library(ledger: SeedDraftLedger) -> bool:
     # many false positives that shadowed cli / web_service inference
     # under ledger_only closures. The remaining keywords are
     # library-distinctive surface terms. See #1170 R2 evidence.
+    #
+    # The literal manifest filename `package.json` is masked before keyword
+    # matching (#1813): every browser project ships one, and its "package"
+    # substring dragged browser UI ledgers to library. The word "package"
+    # itself keeps its library meaning.
+    text = (outputs + " " + goal).replace("package.json", " ")
     return _any_of(
-        outputs + " " + goal,
+        text,
         (
             "library",
             "package",
@@ -383,6 +420,7 @@ _PATTERN_REGISTRY: dict[TaskClass, _PatternFn] = {
     TaskClass.CLI: _matches_cli,
     TaskClass.WEBHOOK: _matches_webhook,
     TaskClass.WEB_SERVICE: _matches_web_service,
+    TaskClass.WEB_APP: _matches_web_app,
     TaskClass.DATA_PIPELINE: _matches_data_pipeline,
     TaskClass.GAME_2D: _matches_game_2d,
     TaskClass.REFACTOR_IN_PLACE: _matches_refactor_in_place,
@@ -395,8 +433,8 @@ def register_pattern(task_class: TaskClass, pattern_fn: _PatternFn) -> None:
 
     Intended for tests and future extension PRs that add a new
     :class:`TaskClass` value. Production code should not call this — the
-    static :data:`_PATTERN_REGISTRY` covers the 7-class catalog
-    declared in #1173.
+    static :data:`_PATTERN_REGISTRY` covers the 8-class catalog
+    (#1173 plus ``web_app`` from #1813).
     """
     _PATTERN_REGISTRY[task_class] = pattern_fn
 

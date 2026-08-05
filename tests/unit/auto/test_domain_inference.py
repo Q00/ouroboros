@@ -722,3 +722,66 @@ def test_cli_does_not_match_on_exclusion_phrasing() -> None:
         assert TaskClass.CLI not in result.classes, (
             f"exclusion-phrased goal must not match cli: goal={goal!r}, result={result}"
         )
+
+
+# ---------------------------------------------------------------------------
+# web_app inference and the package.json library false positive (#1813)
+# ---------------------------------------------------------------------------
+
+
+def test_single_match_web_app() -> None:
+    """The #1813 reproduction: browser form/panel/validation signals plus a
+    ``package.json`` mention must resolve to the product-complete web_app
+    class instead of being dragged to library by the manifest filename."""
+    ledger = _bare_ledger("Build a signup page that runs in the browser")
+    _seed_section(
+        ledger,
+        "outputs",
+        value=(
+            "Signup form with a settings panel shown in the browser; "
+            "client-side validation messages; package.json build scripts"
+        ),
+    )
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP
+
+
+def test_web_app_requires_browser_context_signal() -> None:
+    """Generic form/validation vocabulary without any browser-context signal
+    must not classify as web_app — those words appear in many non-UI goals
+    ("performance", "transform", "invalidation")."""
+    ledger = _bare_ledger("Improve the settings handling")
+    _seed_section(ledger, "outputs", value="A validation summary is printed per form entry")
+    result = derive_domain_from_ledger(ledger)
+    assert not (result.is_single and result.single is TaskClass.WEB_APP)
+
+
+def test_package_json_filename_is_not_a_library_signal() -> None:
+    ledger = _bare_ledger("Ship the project manifest")
+    _seed_section(ledger, "outputs", value="Updated package.json with build scripts")
+    assert _PATTERN_REGISTRY[TaskClass.LIBRARY](ledger) is False
+
+
+def test_package_word_still_matches_library() -> None:
+    ledger = _bare_ledger("Publish a reusable helper")
+    _seed_section(ledger, "outputs", value="A reusable package published to PyPI")
+    assert _PATTERN_REGISTRY[TaskClass.LIBRARY](ledger) is True
+
+
+def test_ambiguous_browser_ui_with_rest_backend() -> None:
+    """A browser frontend backed by REST endpoints fires both web_app and
+    web_service; the interview driver (L1-c) disambiguates."""
+    ledger = _bare_ledger("Build a metrics dashboard")
+    _seed_section(
+        ledger,
+        "outputs",
+        value=(
+            "Browser frontend with a filters panel; "
+            "multiple REST endpoints returning JSON body responses"
+        ),
+    )
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_ambiguous
+    assert TaskClass.WEB_APP in result.classes
+    assert TaskClass.WEB_SERVICE in result.classes

@@ -87,6 +87,7 @@ class TaskClass(StrEnum):
     LIBRARY = "library"
     CLI = "cli"
     WEB_SERVICE = "web_service"
+    WEB_APP = "web_app"
     WEBHOOK = "webhook"
     DATA_PIPELINE = "data_pipeline"
     GAME_2D = "game_2d"
@@ -170,6 +171,16 @@ _CATALOG: dict[TaskClass, TaskClassProfile] = {
         ),
         probes=("headless_run", "api_smoke"),
     ),
+    TaskClass.WEB_APP: _profile(
+        name=TaskClass.WEB_APP,
+        completion=CompletionMode.PRODUCT_COMPLETE,
+        ac_template=(
+            "The app builds and loads in a browser (or headless browser) without console errors.",
+            "Each documented user flow (form submit, panel interaction) completes against a running instance.",
+            "Client-side validation rejects the documented invalid inputs without crashing the page.",
+        ),
+        probes=("headless_run", "browser_smoke"),
+    ),
     TaskClass.WEBHOOK: _profile(
         name=TaskClass.WEBHOOK,
         completion=CompletionMode.PRODUCT_COMPLETE,
@@ -214,7 +225,8 @@ _CATALOG: dict[TaskClass, TaskClassProfile] = {
 
 
 TASK_CLASS_CATALOG: Mapping[TaskClass, TaskClassProfile] = MappingProxyType(_CATALOG)
-"""Immutable view of the frozen 7-class catalog.
+"""Immutable view of the 8-class catalog (7 frozen at L1-a plus ``web_app``,
+added per the PR-per-class growth path in #1813).
 
 Callers should treat this as the authoritative source of per-class
 defaults. Adding a class = adding an entry here + a unit test. Modifying
