@@ -19,6 +19,7 @@ from typing import Any
 from urllib.parse import quote
 
 from ouroboros.config.models import resolve_event_store_path
+from ouroboros.dashboard.board import reduce_board
 
 # Events relevant to the execution Kanban. Filtering at the SQL layer keeps the
 # tail cheap even on a mult-hundred-MB DB shared by many runs.
@@ -33,6 +34,9 @@ _RELEVANT_EVENT_TYPES: tuple[str, ...] = (
     "orchestrator.tool.called",
     "workflow.progress.updated",
     "execution.session.completed",
+    "orchestrator.session.completed",
+    "orchestrator.session.failed",
+    "orchestrator.session.cancelled",
     # Carries the run-level runtime_backend (provider) — lets the board tag the
     # provider on SIMPLE runs that emit no per-worker execution.session.started.
     "orchestrator.session.started",
@@ -160,33 +164,132 @@ class EventTail:
 
 
 def list_recent_executions(db_path: str | Path, *, limit: int = 10) -> list[dict[str, Any]]:
-    """Most-recently-active execution ids (for the CLI/picker).
+    """Return recent execution summaries for the dashboard run picker.
 
     Sources execution ids from ``orchestrator.session.started`` (present for EVERY
-    run, simple or decomposed) and counts AC nodes from ``execution.node.created``
-    when available — so simple, non-decomposed runs are listed too.
+    run, simple or decomposed). The start event also owns the unmodified
+    ``seed_goal`` shown by the list view. Each selected run is reduced from its
+    read-only event cluster so concurrent runs can be compared without opening
+    every SSE stream.
     """
     path = Path(db_path).expanduser()
     if not path.exists():
         return []
-    sql = (
-        "SELECT eid, MAX(last_row) AS last_row, SUM(n) AS n FROM ("
-        "  SELECT json_extract(payload, '$.execution_id') AS eid, "
-        "         rowid AS last_row, 0 AS n "
-        "  FROM events WHERE event_type = 'orchestrator.session.started' "
-        "  UNION ALL "
-        "  SELECT json_extract(payload, '$.execution_id') AS eid, "
-        "         rowid AS last_row, 1 AS n "
-        "  FROM events WHERE event_type = 'execution.node.created' "
-        ") WHERE eid IS NOT NULL "
-        "GROUP BY eid ORDER BY last_row DESC LIMIT ?"
+    start_sql = (
+        "SELECT rowid, aggregate_id, payload "
+        "FROM events WHERE event_type = 'orchestrator.session.started' "
+        "ORDER BY rowid DESC LIMIT ?"
+    )
+    event_types = (
+        "orchestrator.session.started",
+        "orchestrator.session.completed",
+        "orchestrator.session.failed",
+        "orchestrator.session.cancelled",
+        "execution.node.created",
+        "execution.node.updated",
+        "execution.subtask.updated",
+        "execution.session.started",
+        "execution.ac.completed",
+        "workflow.progress.updated",
     )
     conn = _connect_readonly(path)
     try:
-        rows = conn.execute(sql, [limit]).fetchall()
+        starts = conn.execute(start_sql, [max(1, limit)]).fetchall()
+        summaries: list[dict[str, Any]] = []
+        seen_execution_ids: set[str] = set()
+        type_ph = ",".join("?" for _ in event_types)
+        for start in starts:
+            start_payload = _decode_payload(start["payload"])
+            if not isinstance(start_payload, dict):
+                continue
+            execution_id = start_payload.get("execution_id")
+            if not isinstance(execution_id, str) or not execution_id:
+                continue
+            if execution_id in seen_execution_ids:
+                continue
+            seen_execution_ids.add(execution_id)
+            session_id = start["aggregate_id"] or start_payload.get("session_id")
+            ids = [value for value in (execution_id, session_id) if value]
+            id_ph = ",".join("?" for _ in ids)
+            scope = (
+                f"(aggregate_id IN ({id_ph}) "
+                f"OR json_extract(payload, '$.execution_id') IN ({id_ph}) "
+                f"OR json_extract(payload, '$.session_id') IN ({id_ph}))"
+            )
+            event_rows = conn.execute(
+                "SELECT rowid, event_type, payload FROM events "
+                f"WHERE event_type IN ({type_ph}) AND {scope} ORDER BY rowid",
+                [*event_types, *ids, *ids, *ids],
+            ).fetchall()
+            events = [
+                {
+                    "rowid": row["rowid"],
+                    "event_type": row["event_type"],
+                    "payload": payload,
+                }
+                for row in event_rows
+                if isinstance((payload := _decode_payload(row["payload"])), dict)
+            ]
+            board = reduce_board(events, execution_id=execution_id)
+            columns = board["columns"]
+            counts = {
+                key: len(columns.get(key, []))
+                for key in ("pending", "executing", "completed", "failed")
+            }
+            status = "running"
+            for event in events:
+                event_type = event["event_type"]
+                if event_type == "orchestrator.session.completed":
+                    status = "completed"
+                elif event_type in {
+                    "orchestrator.session.failed",
+                    "orchestrator.session.cancelled",
+                }:
+                    status = "failed"
+            if status == "running" and counts["executing"] == 0 and counts["pending"] == 0:
+                if counts["completed"]:
+                    status = "completed"
+                elif counts["failed"]:
+                    status = "failed"
+            meta = board["meta"]
+            goal = start_payload.get("seed_goal")
+            if not isinstance(goal, str):
+                goal = meta.get("goal") if isinstance(meta.get("goal"), str) else None
+            summaries.append(
+                {
+                    "execution_id": execution_id,
+                    "session_id": session_id,
+                    "goal": goal,
+                    "status": status,
+                    "node_count": sum(counts.values()),
+                    "completed_count": counts["completed"],
+                    "total_count": meta.get("total") or sum(counts.values()),
+                    "pending_count": counts["pending"],
+                    "executing_count": counts["executing"],
+                    "failed_count": counts["failed"],
+                    "phase": meta.get("phase"),
+                    "activity": meta.get("activity"),
+                    "provider": meta.get("provider"),
+                    "total_tokens": meta.get("total_tokens", 0.0),
+                    "start_time": start_payload.get("start_time"),
+                    "last_row": max(
+                        (int(event["rowid"]) for event in events), default=int(start["rowid"])
+                    ),
+                }
+            )
     finally:
         conn.close()
-    return [{"execution_id": r["eid"], "node_count": int(r["n"] or 0)} for r in rows if r["eid"]]
+    return summaries
+
+
+def _decode_payload(payload: object) -> Any:
+    """Decode one SQLite JSON payload without allowing malformed rows to break the picker."""
+    if isinstance(payload, str):
+        try:
+            return json.loads(payload)
+        except json.JSONDecodeError:
+            return None
+    return payload
 
 
 __all__ = ["EventTail", "default_db_path", "list_recent_executions"]

@@ -26,6 +26,8 @@ _PAGE_TEMPLATE = """<!doctype html>
     display: flex; gap: 18px; align-items: center; flex-wrap: wrap; }
   header h1 { font-size: 15px; margin: 0; letter-spacing: .5px; }
   .meta { color: var(--muted); font-size: 12px; }
+  .view-link { color: var(--text); text-decoration: none; font-size: 12px; }
+  .view-link:hover { color: #58a6ff; }
   .dot { display:inline-block; width:7px; height:7px; border-radius:50%;
     margin-right:5px; vertical-align:middle; }
   .live { color: var(--completed); }
@@ -35,6 +37,30 @@ _PAGE_TEMPLATE = """<!doctype html>
     margin-right:4px; vertical-align:middle; }
   #board { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px;
     padding: 18px; align-items: start; }
+  #run-list { padding: 18px; max-width: 1100px; margin: 0 auto; }
+  .list-head { display:flex; align-items:baseline; justify-content:space-between;
+    gap:12px; margin:0 0 12px; }
+  .list-head h2 { font-size:14px; margin:0; }
+  .list-hint { color:var(--muted); font-size:11px; }
+  .runs { display:flex; flex-direction:column; gap:9px; }
+  .run-row { display:block; color:var(--text); text-decoration:none; background:var(--panel);
+    border:1px solid var(--border); border-left:3px solid var(--muted); border-radius:7px;
+    padding:12px 14px; }
+  .run-row:hover { border-color:#58a6ff; background:#1b2430; }
+  .run-row.status-running { border-left-color:var(--executing); }
+  .run-row.status-completed { border-left-color:var(--completed); }
+  .run-row.status-failed { border-left-color:var(--failed); }
+  .run-goal { font-size:13px; white-space:pre-wrap; overflow-wrap:anywhere; }
+  .run-details { display:flex; flex-wrap:wrap; gap:8px 14px; margin-top:7px;
+    color:var(--muted); font-size:11px; }
+  .run-id { color:#8b949e; }
+  .run-status { text-transform:uppercase; letter-spacing:.4px; }
+  .run-status.running { color:var(--executing); }
+  .run-status.completed { color:var(--completed); }
+  .run-status.failed { color:var(--failed); }
+  .list-empty { color:var(--muted); border:1px dashed var(--border); border-radius:7px;
+    padding:28px 16px; text-align:center; font-size:12px; }
+  #detail-view[hidden], #run-list[hidden] { display:none; }
   .col { background: var(--panel); border: 1px solid var(--border);
     border-radius: 8px; min-height: 120px; display:flex; flex-direction:column; }
   .col-head { padding: 10px 12px; font-size: 12px; text-transform: uppercase;
@@ -67,7 +93,8 @@ _PAGE_TEMPLATE = """<!doctype html>
 </head>
 <body>
 <header>
-  <h1>OUROBOROS · LIVE AGENTS</h1>
+  <h1><a class="view-link" href="./">OUROBOROS</a> · <span id="view-title">LIVE AGENTS</span></h1>
+  <a class="view-link" id="all-runs" href="./" hidden>all runs</a>
   <span class="meta" id="m-status"><span class="dot" style="background:var(--muted)"></span>connecting…</span>
   <span class="meta" id="m-progress"></span>
   <span class="meta" id="m-phase"></span>
@@ -76,7 +103,8 @@ _PAGE_TEMPLATE = """<!doctype html>
   <span class="meta" id="m-frugality-evidence"></span>
   <div id="legend"></div>
 </header>
-<div id="board"></div>
+<main id="run-list" hidden></main>
+<main id="detail-view" hidden><div id="board"></div></main>
 <script>
 const COLS = [
   ["pending", "To Do"], ["executing", "In Progress"],
@@ -160,47 +188,97 @@ function cardHtml(c) {
     <div class="sub">${prov}${tier}${ac}${tokHtml}${tool}</div></div>`;
 }
 
+function setView(detail, runId) {
+  const list = document.getElementById("run-list");
+  const detailView = document.getElementById("detail-view");
+  const allRuns = document.getElementById("all-runs");
+  const viewTitle = document.getElementById("view-title");
+  list.hidden = detail;
+  detailView.hidden = !detail;
+  allRuns.hidden = !detail;
+  viewTitle.textContent = detail ? "LIVE AGENTS" : "RUNS";
+  if (!detail) {
+    document.getElementById("m-status").innerHTML =
+      '<span class="dot" style="background:var(--muted)"></span>run list';
+    document.getElementById("m-progress").textContent = "";
+    document.getElementById("m-phase").textContent = "";
+    document.getElementById("m-tokens").textContent = "";
+    document.getElementById("m-frugality").textContent = "";
+    document.getElementById("m-frugality-evidence").textContent = "";
+    document.getElementById("legend").innerHTML = "";
+  }
+}
+
+function fmtRunProgress(run) {
+  const total = Number(run.total_count || 0);
+  const completed = Number(run.completed_count || 0);
+  return total ? `${completed}/${total} ACs` : `${Number(run.node_count || 0)} nodes`;
+}
+
+function runRowHtml(run) {
+  const id = run.execution_id || "";
+  const goal = run.goal == null || run.goal === "" ? "(goal unavailable)" : run.goal;
+  const phase = [run.phase, run.activity].filter(Boolean).join(" · ");
+  const provider = run.provider ? ` · ${esc(run.provider)}` : "";
+  const phaseHtml = phase ? `<span>${esc(phase)}</span>` : "";
+  return `<a class="run-row status-${esc(run.status || "running")}" href="?run=${encodeURIComponent(id)}">
+    <div class="run-goal">${esc(goal)}</div>
+    <div class="run-details">
+      <span class="run-status ${esc(run.status || "running")}">${esc(run.status || "running")}</span>
+      <span>${esc(fmtRunProgress(run))}</span>${phaseHtml}
+      <span>${esc(run.status === "failed" ? `${Number(run.failed_count || 0)} failed` : "")}</span>
+      <span>${provider}</span>
+      <span class="run-id">${esc(id)}</span>
+    </div>
+  </a>`;
+}
+
+function renderRuns(runs) {
+  const list = document.getElementById("run-list");
+  const rows = Array.isArray(runs) ? runs : [];
+  const head = `<div class="list-head"><h2>Recent runs</h2><span class="list-hint">updates every ${WAIT_POLL_MS / 1000}s · click a run for live details</span></div>`;
+  list.innerHTML = head + (rows.length
+    ? `<div class="runs">${rows.map(runRowHtml).join("")}</div>`
+    : '<div class="list-empty">waiting for run… (ooo run / ooo auto)</div>');
+}
+
 __BOOTSTRAP__
 </script>
 </body>
 </html>"""
 
-# Live bootstrap: open an SSE stream and re-render on every pushed snapshot.
-#
-# The daemon's base URL is published to the user BEFORE any run exists (the auto
-# flow links it while interview/seed are still running), so the page must never
-# resolve "no run yet" into a dead end: it polls /api/runs until a run appears,
-# then attaches. The poll is interval-gated (setTimeout) so an idle page never
-# spins hot against the shared SQLite file.
+# Live bootstrap: show the multi-run picker by default, or open one run directly
+# when ``?run=<execution_id>`` is present. Both views are interval-gated so the
+# shared SQLite file is cheap to observe even when several runs are concurrent.
 _LIVE_BOOTSTRAP = """
 const WAIT_POLL_MS = 3000;
 function connect(runId) {
+  setView(true, runId);
+  if (window.dashboardSource) window.dashboardSource.close();
   const src = new EventSource("/events?run=" + encodeURIComponent(runId));
+  window.dashboardSource = src;
   const st = document.getElementById("m-status");
   src.onopen = () => st.innerHTML = '<span class="dot" style="background:var(--completed)"></span><span class="live">live</span> · ' + esc(runId);
   src.onmessage = (e) => { try { render(JSON.parse(e.data)); } catch (_) {} };
   src.onerror = () => st.innerHTML = '<span class="dot" style="background:var(--failed)"></span>reconnecting…';
 }
-async function pickRun() {
-  // One daemon serves every run; an explicit ?run= wins, else the latest run.
-  const explicit = new URLSearchParams(location.search).get("run");
-  if (explicit) return explicit;
+async function fetchRuns() {
   try {
-    const runs = (await (await fetch("/api/runs")).json()).runs || [];
-    if (runs.length) return runs[0].execution_id;
+    return (await (await fetch("/api/runs", {cache:"no-store"})).json()).runs || [];
   } catch (_) {}
-  return null;
+  return [];
 }
-async function start() {
-  const st = document.getElementById("m-status");
-  // Poll until a run exists — the base URL can be opened before one is created.
-  let runId = await pickRun();
-  while (!runId) {
-    st.innerHTML = '<span class="dot" style="background:var(--muted)"></span>waiting for run… (ooo run / ooo auto)';
+async function startList() {
+  setView(false);
+  while (!new URLSearchParams(location.search).get("run")) {
+    renderRuns(await fetchRuns());
     await new Promise(r => setTimeout(r, WAIT_POLL_MS));
-    runId = await pickRun();
   }
-  connect(runId);
+}
+function start() {
+  const runId = new URLSearchParams(location.search).get("run");
+  if (runId) connect(runId);
+  else startList();
 }
 start();
 """
@@ -231,6 +309,7 @@ def static_html(board: dict, *, run_id: str | None = None) -> str:
         status_html += f" · {label}"
     status_js = _json.dumps(status_html).replace("</", "<\\/")
     bootstrap = (
+        "setView(true);\n"
         f'document.getElementById("m-status").innerHTML = {status_js};\nrender({board_json});\n'
     )
     return _PAGE_TEMPLATE.replace("__BOOTSTRAP__", bootstrap)
