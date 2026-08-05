@@ -161,6 +161,24 @@ def _offers_an_alternative_to_emptiness(tokens: list[str], position: int) -> boo
     return False
 
 
+def _names_the_subject(tokens: list[str], position: int) -> bool:
+    """True when nothing turns this mention into the object of a preposition.
+
+    Scans the whole phrase back to the nearest clause boundary rather than the
+    adjacent token, because a preposition can stand any number of modifiers away
+    from the name it governs: in "the status field in the generated marker.txt",
+    two words separate `in` from the file it is still the object of. Stopping at
+    the boundary is what keeps a preposition belonging to an earlier clause —
+    "for the release, marker.txt must be empty" — from disqualifying anything.
+    """
+    for token in reversed(tokens[:position]):
+        if token in _CLAUSE_ENDS:
+            return True
+        if token in _PREPOSITIONS:
+            return False
+    return True
+
+
 def _emptiness_the_criterion_requires(ac_text: str, file_hint: str) -> str | None:
     """The emptiness word the criterion predicates of the file, or None.
 
@@ -169,8 +187,9 @@ def _emptiness_the_criterion_requires(ac_text: str, file_hint: str) -> str | Non
     actually asked.
 
     Walks forward from each mention of the file, and returns a word only when
-    every step of the walk holds: the mention is not the object of a preposition,
-    so the file is the subject rather than something the subject lives in; every
+    every step of the walk holds: no preposition governs the mention anywhere in
+    the phrase leading up to it, so the file is the subject rather than something
+    the subject lives in; every
     word between it and the emptiness word belongs to `_PREDICATE_CHAIN`, which
     no negation and no competing noun does; one of them is a copula, without
     which the emptiness is being predicated of something else; the emptiness word
@@ -188,7 +207,7 @@ def _emptiness_the_criterion_requires(ac_text: str, file_hint: str) -> str | Non
     for position, token in enumerate(tokens):
         if token != _FILE_TOKEN:
             continue
-        if position > 0 and tokens[position - 1] in _PREPOSITIONS:
+        if not _names_the_subject(tokens, position):
             continue
         saw_copula = False
         step = position + 1

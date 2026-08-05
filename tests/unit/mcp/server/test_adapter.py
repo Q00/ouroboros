@@ -686,6 +686,8 @@ Parallel Execution Verification Report
             ("marker.txt", "", "The status field in marker.txt must be empty."),
             ("marker.txt", "", "marker.txt entries must be empty"),
             ("marker.txt", "", "marker.txt must not under any circumstances be empty."),
+            ("marker.txt", "", "The status field in the generated marker.txt must be empty."),
+            ("marker.txt", "", "The first record of the newly created marker.txt must be blank"),
         ],
         ids=[
             "empty-filename",
@@ -695,6 +697,8 @@ Parallel Execution Verification Report
             "prepositional-subject",
             "competing-noun-subject",
             "distant-negation",
+            "modifier-separated-preposition",
+            "two-modifiers-separated-preposition",
         ],
     )
     def test_a_misread_emptiness_word_cannot_be_approved_through_the_adapter(

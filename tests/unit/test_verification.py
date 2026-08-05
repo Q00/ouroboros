@@ -883,6 +883,8 @@ class TestSpecVerifier:
             ("marker.txt", "The status field in marker.txt must be empty."),
             ("marker.txt", "Every record within marker.txt must be blank"),
             ("marker.txt", "marker.txt entries must be empty"),
+            ("marker.txt", "The status field in the generated marker.txt must be empty."),
+            ("marker.txt", "The first record of the newly created marker.txt must be blank"),
         ],
         ids=[
             "empty-filename",
@@ -893,6 +895,8 @@ class TestSpecVerifier:
             "prepositional-subject",
             "prepositional-subject-blank",
             "competing-noun-subject",
+            "modifier-separated-preposition",
+            "two-modifiers-separated-preposition",
         ],
     )
     def test_an_emptiness_word_that_is_not_about_the_file_earns_nothing(
@@ -903,9 +907,10 @@ class TestSpecVerifier:
         Each of these mentions emptiness while requiring the file to hold content,
         and each was read as an emptiness requirement: the word sat in the file's own
         name, or described a value nested inside it, or was the adjective on some
-        other noun, or the file was named as the object of a preposition while some
-        field inside it was the actual subject. With `\\A\\Z` and an empty file that
-        produced a formal PASS for a criterion the file plainly violates.
+        other noun, or the file was named as the object of a preposition — directly
+        or with modifiers standing between the two — while some field inside it was
+        the actual subject. With `\\A\\Z` and an empty file that produced a formal
+        PASS for a criterion the file plainly violates.
 
         Everything here falls through to the ordinary path, where `\\A\\Z` is refused
         and the criterion fails closed.
@@ -926,6 +931,48 @@ class TestSpecVerifier:
         assert summary.reports[0].verified_pass is False, f"{ac_text!r} must not verify"
         assert summary.discrepancy_count == 1
         assert summary.override_approval is False
+
+    @pytest.mark.parametrize("tier", [VerificationTier.T2_STRUCTURAL, VerificationTier.T1_CONSTANT])
+    @pytest.mark.parametrize(
+        "ac_text",
+        [
+            "marker.txt MUST be empty",
+            "The file marker.txt must be empty",
+            "For the release, marker.txt must be empty",
+            "Run the generator; marker.txt must be empty",
+        ],
+        ids=[
+            "bare",
+            "noun-modifier",
+            "preposition-in-earlier-clause",
+            "preposition-past-semicolon",
+        ],
+    )
+    def test_the_subject_check_does_not_reject_a_file_it_only_stands_near(
+        self, tier: VerificationTier, ac_text: str
+    ) -> None:
+        """A preposition has to actually govern the file, not merely precede it.
+
+        The phrase is scanned back to the nearest clause boundary rather than to
+        the start of the criterion, because failing closed on any earlier `for` or
+        `of` would turn satisfied emptiness ACs into formal failures — the same
+        false-failure this rescue exists to prevent, in a new place.
+        """
+        project = self._create_project({"marker.txt": ""})
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text=ac_text,
+            tier=tier,
+            pattern=r"\A\Z",
+            file_hint="marker.txt",
+        )
+
+        summary = SpecVerifier(project_dir=project).verify_all(
+            (assertion,), agent_results={0: True}
+        )
+
+        assert summary.reports[0].verified_pass is True, f"{ac_text!r} must still verify"
+        assert summary.discrepancy_count == 0
 
     @pytest.mark.parametrize("tier", [VerificationTier.T2_STRUCTURAL, VerificationTier.T1_CONSTANT])
     @pytest.mark.parametrize(
