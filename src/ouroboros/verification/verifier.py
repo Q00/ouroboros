@@ -55,16 +55,63 @@ _ZERO_WIDTH = frozenset({"AT"})
 _REPEATS = frozenset({"MAX_REPEAT", "MIN_REPEAT", "POSSESSIVE_REPEAT"})
 
 
+def _all_empty(answers: list[bool | None]) -> bool | None:
+    """Can a run of things, taken together, match nothing?
+
+    Only if each of them can. One that certainly cannot settles it for the whole
+    run; otherwise a single unknown leaves the run unknown.
+    """
+    if any(answer is False for answer in answers):
+        return False
+    if all(answer is True for answer in answers):
+        return True
+    return None
+
+
+def _any_empty(answers: list[bool | None]) -> bool | None:
+    """Can one of a set of alternatives match nothing?
+
+    Yes as soon as one certainly can; no only if every one certainly cannot.
+    """
+    if any(answer is True for answer in answers):
+        return True
+    if all(answer is False for answer in answers):
+        return False
+    return None
+
+
+def _agreed(answers: list[bool | None]) -> bool | None:
+    """The one answer they all give, or unknown if they do not all give it.
+
+    For a construct where which part runs is itself undecidable — a conditional
+    on whether a group took part — the result is only certain when the parts
+    cannot disagree.
+    """
+    if all(answer is True for answer in answers):
+        return True
+    if all(answer is False for answer in answers):
+        return False
+    return None
+
+
 def _can_match_nothing(
-    sequence: object, depth: int = 0, groups: dict[int, bool] | None = None
-) -> bool:
+    sequence: object, depth: int = 0, groups: dict[int, bool | None] | None = None
+) -> bool | None:
     """Whether a parsed regex can match the empty string, read rather than run.
 
-    Answers True whenever the answer cannot be worked out — an unknown construct,
-    a tree deeper than this follows. A pattern wrongly called nullable is refused
-    as evidence, which costs an honest criterion a formal failure; one wrongly
-    called discriminating is admitted, and admitting those is the whole defect
-    this file exists to close. So the doubt goes to refusal.
+    Three answers, not two: True, False, and None for "this reading cannot tell".
+    An unknown construct or a tree deeper than `_MAX_PARSE_DEPTH` is None, and so
+    is anything built out of a None.
+
+    The third answer is what keeps the doubt pointed at refusal. Refusal is the
+    safe direction — a pattern wrongly called nullable costs an honest criterion
+    a formal failure, while one wrongly called discriminating is admitted as
+    evidence, which is the defect this file exists to close — but "safe" is a
+    direction, and `(?!…)` reverses direction. Answering an unreadable inner
+    pattern with a plain True and then negating it produces a confident False:
+    the guard would report *certainty that the pattern discriminates* on the
+    strength of not having understood it. None negates to None, so the doubt
+    survives the negation and `_matches_the_empty_string` still refuses.
 
     `groups` carries what each capture group, once seen, can itself match, so a
     backreference can be judged by what it refers to.
@@ -72,7 +119,8 @@ def _can_match_nothing(
     if groups is None:
         groups = {}
     if depth > _MAX_PARSE_DEPTH:
-        return True
+        return None
+    answers: list[bool | None] = []
     for opcode, argument in sequence:  # type: ignore[attr-defined]
         name = getattr(opcode, "name", str(opcode))
         if name in _ZERO_WIDTH:
@@ -87,71 +135,60 @@ def _can_match_nothing(
             # A repeat that may run zero times is skippable; one that must run
             # is empty only if what it repeats is. The count itself is never
             # counted out.
-            if minimum == 0 or item_empty:
-                continue
-            return False
-        if name == "SUBPATTERN":
+            answers.append(True if minimum == 0 else item_empty)
+        elif name == "SUBPATTERN":
             body_empty = _can_match_nothing(argument[-1], depth + 1, groups)
             if argument[0] is not None:
                 groups[argument[0]] = body_empty
-            if body_empty:
-                continue
-            return False
-        if name == "GROUPREF":
+            answers.append(body_empty)
+        elif name == "GROUPREF":
             # A backreference repeats whatever its group captured, so it is empty
             # only when that group can be. If the group never participated the
             # reference cannot match at all — never empty either. A group not yet
-            # seen (a forward reference) is unknown, and unknown means refuse.
-            if groups.get(argument, True):
-                continue
-            return False
-        if name == "GROUPREF_EXISTS":
-            # `(?(1)yes|no)`: whichever arm runs, it has to be able to be empty.
-            reference, yes_arm, no_arm = argument
-            del reference
-            arms_empty = [_can_match_nothing(yes_arm, depth + 1, groups)]
-            arms_empty.append(
-                True if no_arm is None else _can_match_nothing(no_arm, depth + 1, groups)
-            )
-            if any(arms_empty):
-                continue
-            return False
-        if name == "ATOMIC_GROUP":
-            if _can_match_nothing(argument, depth + 1, groups):
-                continue
-            return False
-        if name == "BRANCH":
+            # seen (a forward reference) is unknown, and stays unknown.
+            answers.append(groups.get(argument))
+        elif name == "GROUPREF_EXISTS":
+            # `(?(1)yes|no)`: which arm runs depends on whether the group took
+            # part, which this does not track. So the conditional is only certain
+            # when both arms agree, and unknown when they do not.
+            _reference, yes_arm, no_arm = argument
+            arms = [_can_match_nothing(yes_arm, depth + 1, groups)]
+            arms.append(True if no_arm is None else _can_match_nothing(no_arm, depth + 1, groups))
+            answers.append(_agreed(arms))
+        elif name == "ATOMIC_GROUP":
+            answers.append(_can_match_nothing(argument, depth + 1, groups))
+        elif name == "BRANCH":
             # Every branch is walked, not just up to the first empty one, so that
             # groups defined in a later branch are recorded too.
-            branches_empty = [
-                _can_match_nothing(branch, depth + 1, groups) for branch in argument[1]
-            ]
-            if any(branches_empty):
-                continue
-            return False
-        if name == "ASSERT":
+            answers.append(
+                _any_empty(
+                    [_can_match_nothing(branch, depth + 1, groups) for branch in argument[1]]
+                )
+            )
+        elif name == "ASSERT":
             # On a subject with nothing in it there is nothing to either side, so
             # a lookaround holds exactly when what it looks for can be empty.
             # `(?=.*foo)` cannot, which is why a lookahead-only pattern stays
             # admissible evidence.
-            if _can_match_nothing(argument[1], depth + 1, groups):
-                continue
-            return False
-        if name == "ASSERT_NOT":
-            if not _can_match_nothing(argument[1], depth + 1, groups):
-                continue
-            return False
-        return True
-    return True
+            answers.append(_can_match_nothing(argument[1], depth + 1, groups))
+        elif name == "ASSERT_NOT":
+            inner = _can_match_nothing(argument[1], depth + 1, groups)
+            answers.append(None if inner is None else not inner)
+        else:
+            answers.append(None)
+    return _all_empty(answers)
 
 
 def _matches_the_empty_string(pattern: str, flags: int = 0) -> bool:
-    """Whether `pattern` can match a subject with nothing in it. Never runs it."""
+    """Whether `pattern` can match a subject with nothing in it. Never runs it.
+
+    Unknown counts as yes, which refuses the pattern as evidence.
+    """
     try:
         parsed = regex_parser.parse(pattern, flags)
     except Exception:  # pragma: no cover - re.compile has already accepted this
         return True
-    return _can_match_nothing(parsed)
+    return _can_match_nothing(parsed) is not False
 
 
 # Words that make an acceptance criterion a claim about a file holding nothing.
@@ -348,6 +385,13 @@ def _mask_file_hint(ac_text: str, file_hint: str) -> str:
 
     Names are matched as whole tokens for the same reason the mention check is —
     `a.py` sits inside `data.py`.
+
+    And case-insensitively for the same reason too. The mention check already
+    ignores case, so `Marker.txt must be empty` against a hint of `marker.txt`
+    reached this function, went unmasked because the substitution did not, and
+    lost the one token the reading anchors on — an ordinary criterion on a file
+    that satisfies it, turned into an authoritative failure by a capital letter.
+    Both places normalize the same way now.
     """
     if not file_hint:
         return ac_text
@@ -355,6 +399,7 @@ def _mask_file_hint(ac_text: str, file_hint: str) -> str:
         rf"(\A|[\s'\"`(\[]){re.escape(file_hint)}(?=\Z|[\s'\"`)\],.;:])",
         rf"\1{_FILE_TOKEN}",
         ac_text,
+        flags=re.IGNORECASE,
     )
 
 

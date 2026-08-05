@@ -877,6 +877,9 @@ Parallel Execution Verification Report
             ("", "Check that marker.txt is empty", r"\A\Z"),
             ("aa\n", "marker.txt MUST contain a doubled letter", r"(a)?\1"),
             ("aa\n", "marker.txt MUST contain a doubled letter", r"(?P<x>a)?(?P=x)"),
+            ("", "Marker.txt must be empty", r"\A\Z"),
+            ("", "MARKER.TXT must be empty", r"\A\Z"),
+            ("", "Please ensure Marker.txt is empty", r"\A\Z"),
         ],
         ids=[
             "politeness-frame",
@@ -885,6 +888,9 @@ Parallel Execution Verification Report
             "checking-verb",
             "numbered-backreference",
             "named-backreference",
+            "capitalized-mention",
+            "shouted-mention",
+            "capitalized-in-frame",
         ],
     )
     def test_a_satisfied_criterion_is_not_converted_into_a_formal_failure(
@@ -902,7 +908,9 @@ Parallel Execution Verification Report
         is empty`, with an empty `marker.txt`, failed on `please`. The last two
         were refused because every backreference was treated as zero-width, so
         `(a)?\\1` — which cannot match nothing and does match this file — was
-        called unusable. Both directions are driven through the real verifier
+        called unusable. The last three differ from the hint only in the case of
+        the filename, which the mention check ignored and the masking that
+        follows it did not. Both directions are driven through the real verifier
         and the real adapter, because the failure only becomes authoritative at
         this boundary.
         """
@@ -942,6 +950,71 @@ Parallel Execution Verification Report
         assert summary.final_approved is True
         assert summary.score == 1.0
         assert summary.run_verdict != "FAIL"
+
+    @pytest.mark.parametrize(
+        "tier",
+        [VerificationTier.T1_CONSTANT, VerificationTier.T2_STRUCTURAL],
+        ids=["T1", "T2"],
+    )
+    @pytest.mark.parametrize(
+        "pattern",
+        [
+            r"(?!(a)?(?(1)|c))",
+            r"(?!(a)?(?(1)|x)b)",
+            "(?!" + "(" * 45 + "x" + ")" * 45 + ")",
+        ],
+        ids=["negated-conditional", "negated-conditional-with-tail", "negated-past-depth-limit"],
+    )
+    def test_a_negated_guess_cannot_be_approved_through_the_adapter(
+        self, tmp_path: Any, tier: VerificationTier, pattern: str
+    ) -> None:
+        """A pattern the analyzer did not understand must not reach formal approval.
+
+        Each of these matches every file, so it verifies whatever it is pointed
+        at — the original defect. Each got there through a negation: the reading
+        sends its doubt to the side that is safe when the answer stands alone,
+        `(?!…)` flips which side that is, and the guess came back out as
+        confidence that the pattern discriminates. Published here as
+        `final_approved=True`, `score=1.0`, `run_verdict="PASS"` for an AC the
+        file does not satisfy.
+        """
+        (tmp_path / "marker.txt").write_text("hello\n")
+        ac_text = "marker.txt MUST declare a CameraProvider"
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text=ac_text,
+            tier=tier,
+            pattern=pattern,
+            file_hint="marker.txt",
+        )
+        verification = SpecVerifier(project_dir=str(tmp_path)).verify_all(
+            (assertion,), agent_results={0: True}
+        )
+        mechanical = EvaluationSummary(
+            final_approved=True,
+            highest_stage_passed=2,
+            task_results=(
+                TaskResult(
+                    task_index=0,
+                    task_content=ac_text,
+                    status="completed",
+                    completed=True,
+                    source_ac_index=0,
+                    execution_method="legacy_parallel_report",
+                ),
+            ),
+            execution_completion_status="completed",
+            approval_status="approved",
+        )
+
+        summary = _evaluation_summary_from_spec_verification(mechanical, verification)
+
+        assert summary is not None
+        assert summary.ac_results[0].passed is False, f"{pattern!r} must not be approved"
+        assert summary.ac_results[0].final_verdict != "pass"
+        assert summary.final_approved is False
+        assert summary.score == 0.0
+        assert summary.run_verdict == "FAIL"
 
     def test_spec_verification_rejects_partial_ac_coverage(self) -> None:
         """A subset of verifier reports must not approve unverified ACs."""

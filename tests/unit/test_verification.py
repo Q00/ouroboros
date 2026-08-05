@@ -1382,6 +1382,90 @@ class TestSpecVerifier:
         assert summary.discrepancy_count == 1
         assert summary.override_approval is False
 
+    @pytest.mark.parametrize("tier", [VerificationTier.T2_STRUCTURAL, VerificationTier.T1_CONSTANT])
+    @pytest.mark.parametrize(
+        "pattern",
+        [
+            r"(?!(a)?(?(1)|c))",
+            r"(?!(a)?(?(1)|x)b)",
+            "(?!" + "(" * 45 + "x" + ")" * 45 + ")",
+        ],
+        ids=["negated-conditional", "negated-conditional-with-tail", "negated-past-depth-limit"],
+    )
+    def test_doubt_inside_a_negation_does_not_become_confidence_outside_it(
+        self, tier: VerificationTier, pattern: str
+    ) -> None:
+        """A guess that is safe on its own is unsafe once something negates it.
+
+        The reading answers "can this match nothing?" and sends every doubt to
+        the safe side by answering yes, because a pattern wrongly called nullable
+        is only refused. `(?!…)` reverses which side is safe. A guessed yes about
+        the inside becomes a confident *no* about the outside, and the guard then
+        reports that the pattern discriminates on the strength of not having
+        understood it — the fabricated pass this PR exists to stop, produced by
+        the guard itself.
+
+        Each pattern here matches every file, empty or not, and each was admitted
+        as evidence: the first two because the conditional's arms disagree and
+        which one runs depends on a capture this does not track, the third
+        because nesting past `_MAX_PARSE_DEPTH` guessed yes about the inside.
+        The answer is a third value — unknown — that negation leaves unknown.
+        """
+        project = self._create_project({"marker.txt": "hello\n"})
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="marker.txt MUST contain a CameraProvider declaration",
+            tier=tier,
+            pattern=pattern,
+            file_hint="marker.txt",
+        )
+
+        summary = SpecVerifier(project_dir=project).verify_all(
+            (assertion,), agent_results={0: True}
+        )
+
+        assert summary.reports[0].verified_pass is False, f"{pattern!r} must not be evidence"
+        assert summary.discrepancy_count == 1
+        assert summary.override_approval is False
+
+    @pytest.mark.parametrize("tier", [VerificationTier.T2_STRUCTURAL, VerificationTier.T1_CONSTANT])
+    @pytest.mark.parametrize(
+        ("hint", "ac_text"),
+        [
+            ("marker.txt", "Marker.txt must be empty"),
+            ("marker.txt", "MARKER.TXT must be empty"),
+            ("Marker.txt", "marker.txt must be empty"),
+            ("marker.txt", "Please ensure Marker.txt is empty"),
+        ],
+        ids=["capitalized-mention", "shouted-mention", "capitalized-hint", "capitalized-in-frame"],
+    )
+    def test_a_capital_letter_in_the_filename_does_not_manufacture_a_failure(
+        self, tier: VerificationTier, hint: str, ac_text: str
+    ) -> None:
+        """One normalization, used in both places that read the filename.
+
+        The mention check lowered both sides before looking; the masking that
+        follows it did not. So a criterion whose spelling of the name differed
+        only in case got past the check, kept its unmasked name, and lost the one
+        token the reading anchors on — an ordinary emptiness requirement on a
+        file that satisfies it, failed formally by a capital letter.
+        """
+        project = self._create_project({"marker.txt": ""})
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text=ac_text,
+            tier=tier,
+            pattern=r"\A\Z",
+            file_hint=hint,
+        )
+
+        summary = SpecVerifier(project_dir=project).verify_all(
+            (assertion,), agent_results={0: True}
+        )
+
+        assert summary.reports[0].verified_pass is True, f"{ac_text!r} must still verify"
+        assert summary.discrepancy_count == 0
+
     def test_genuine_constant_match_still_verifies(self) -> None:
         """The same on the T1 path, so the guard is not proven only through T2."""
         project = self._create_project({"config.py": "WARMUP_FRAMES = 10\n"})
