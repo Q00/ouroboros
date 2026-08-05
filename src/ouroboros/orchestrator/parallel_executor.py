@@ -85,7 +85,7 @@ from ouroboros.harness.deliver_gate import (
 from ouroboros.harness.journal import EvidenceEntry, EvidenceManifest
 from ouroboros.harness.traceguard_validator import validate_evidence_claims
 from ouroboros.observability.logging import get_logger
-from ouroboros.orchestrator import adaptive_concurrency
+from ouroboros.orchestrator import adaptive_concurrency, provider_admission
 from ouroboros.orchestrator.ac_execution_capsule import (
     UnmaterializableSuccessContractError,
     bind_capsule_to_runtime_handle,
@@ -3768,6 +3768,7 @@ class ParallelACExecutor:
         retry_prompts: dict[int, str] | None = None,
         route_overrides: dict[int, RouteCandidate] | None = None,
         route_resume_states: Mapping[int, _ParallelRouteResumeState] | None = None,
+        batch_sibling_indices: list[int] | None = None,
         same_runtime_budget_exhausted: bool = True,
         force_legacy_routing: bool = False,
     ) -> list[ACExecutionResult | BaseException]:
@@ -3784,9 +3785,11 @@ class ParallelACExecutor:
         )
         recoverable_pause_detected = anyio.Event()
         sibling_cancel_scopes: dict[int, anyio.CancelScope] = {}
+        admission_sequence = provider_admission.AdmissionSequence(len(batch_indices))
+        sibling_indices = batch_sibling_indices or batch_indices
         sibling_acs: list[_SiblingACRef] = (
-            [(i, ac_text(seed.acceptance_criteria[i])) for i in batch_indices]
-            if len(batch_indices) > 1
+            [(i, ac_text(seed.acceptance_criteria[i])) for i in sibling_indices]
+            if len(sibling_indices) > 1
             else []
         )
 
@@ -3796,6 +3799,7 @@ class ParallelACExecutor:
             def _mark_provider_entry() -> None:
                 nonlocal provider_effect_entered
                 provider_effect_entered = True
+                admission_sequence.entered(idx)
 
             def _observe_batch_provider(
                 observation: adaptive_concurrency.ConcurrencyObservation,
@@ -3814,6 +3818,7 @@ class ParallelACExecutor:
                     if sibling_idx != idx:
                         scope.cancel()
 
+            admission_token = admission_sequence.bind(idx)
             observation_sink_token = _PROVIDER_OBSERVATION_SINK.set(
                 _observe_batch_provider if cancel_on_recoverable_pause else None
             )
@@ -3919,6 +3924,7 @@ class ParallelACExecutor:
                         raise
                     batch_results[idx] = e
                 finally:
+                    admission_sequence.finished(idx, admission_token)
                     sibling_cancel_scopes.pop(idx, None)
                     _PROVIDER_OBSERVATION_SINK.reset(observation_sink_token)
                     _PROVIDER_ENTRY_SINK.reset(entry_sink_token)
@@ -4766,6 +4772,7 @@ class ParallelACExecutor:
                             workspace_before = self._workspace_content_digest(workspace_root)
                             review: CoordinatorReview | None = None
                             async with self._adaptive_concurrency.slot() as permit_epoch:
+                                _invoke_execution_authority_guard(self)
                                 entry_sink = _PROVIDER_ENTRY_SINK.get()
                                 if entry_sink is not None:
                                     entry_sink()
@@ -4789,10 +4796,7 @@ class ParallelACExecutor:
                                 raise RuntimeError(
                                     "coordinator provider completed without a review artifact"
                                 )
-                            recoverable_coordinator_pause = any(
-                                is_usage_limit_pause_message(message)
-                                for message in reversed(review.messages)
-                            )
+                            review = review.with_recoverable_quota_state()
                             workspace_after = self._workspace_content_digest(workspace_root)
                             workspace_changed = (
                                 workspace_before is None
@@ -4824,6 +4828,7 @@ class ParallelACExecutor:
                                 f"  [cyan]Coordinator review restored for level "
                                 f"{level_num}; provider effect not repeated.[/cyan]"
                             )
+                        recoverable_coordinator_pause = review.recoverable_quota_pause
                         if coordinator_mutated_workspace:
                             post_coordinator_revalidation_required = True
                             post_coordinator_revalidated = False
@@ -6270,11 +6275,12 @@ class ParallelACExecutor:
             prompt=prompt,
             system_prompt=system_prompt,
         )
-        # Revalidate authority after the rate-budget await.
         _invoke_execution_authority_guard(self)
         response_text = ""
         feedback_messages: list[AgentMessage] = []
+        await provider_admission.wait()
         async with self._adaptive_concurrency.slot() as permit_epoch:
+            _invoke_execution_authority_guard(self)
             entry_sink = _PROVIDER_ENTRY_SINK.get()
             if entry_sink is not None:
                 entry_sink()
@@ -8664,25 +8670,25 @@ Respond with either ATOMIC or the structured JSON object only.
         dispatch_state = LeafDispatchState(messages=messages, runtime_handle=runtime_handle)
         active_dispatch_id = dispatch_id
         sealed_dispatch_ids: set[str] = set()
+        provider_effect_entered = False
 
-        async def _seal_dispatch(dispatch_id_to_seal: str, *, reason: str) -> None:
+        async def _seal_dispatch(sealed_id: str, *, reason: str, replayable: bool = False) -> None:
             """Seal one provider boundary at most once."""
-            if dispatch_id_to_seal in sealed_dispatch_ids:
+            if sealed_id in sealed_dispatch_ids:
                 return
-            # Poison the local recovery cache before the durable append.  If
-            # the event store rejects the seal, a same-executor retry must not
-            # treat the already-entered provider boundary as replayable merely
-            # because the in-memory handle is still present.
-            self._ac_runtime_handle_manager.mark_dispatch_non_replayable(dispatch_id_to_seal)
+            # Poison unsafe boundaries before the durable append so an append
+            # failure cannot expose a replayable in-memory handle.
+            if not replayable:
+                self._ac_runtime_handle_manager.mark_dispatch_non_replayable(sealed_id)
             await self._event_emitter.emit_ac_dispatch_sealed(
                 runtime_identity=runtime_identity,
-                dispatch_id=dispatch_id_to_seal,
+                dispatch_id=sealed_id,
                 execution_id=execution_context_id,
                 session_id=session_id,
                 capsule_fingerprint=capsule.fingerprint,
                 reason=reason,
             )
-            sealed_dispatch_ids.add(dispatch_id_to_seal)
+            sealed_dispatch_ids.add(sealed_id)
 
         async def _terminalize_route_drift(dispatch_id_to_terminalize: str) -> ACExecutionResult:
             """Close durable recovery state when live admission becomes stale."""
@@ -8710,12 +8716,18 @@ Respond with either ATOMIC or the structured JSON object only.
             *,
             call_prompt: str,
             call_tools: list[str],
-            provider_kwargs: dict[str, Any],
-        ) -> None:
-            """Admit and observe one exact runtime provider stream."""
+        ) -> bool:
+            """Return whether an admitted, revalidated provider stream was entered."""
 
+            nonlocal provider_effect_entered
             feedback_start = len(dispatch_state.messages)
+            await provider_admission.wait()
             async with self._adaptive_concurrency.slot() as permit_epoch:
+                provider_kwargs = _live_provider_kwargs()
+                if provider_kwargs is None:
+                    return False
+                _invoke_execution_authority_guard(self)
+                provider_effect_entered = True
                 entry_sink = _PROVIDER_ENTRY_SINK.get()
                 if entry_sink is not None:
                     entry_sink()
@@ -8754,6 +8766,7 @@ Respond with either ATOMIC or the structured JSON object only.
                             provider_completed=provider_completed,
                             on_observation=_PROVIDER_OBSERVATION_SINK.get(),
                         )
+            return True
 
         signal_target: SessionSignalTarget | None = None
         signal_target_registered = False
@@ -8779,15 +8792,12 @@ Respond with either ATOMIC or the structured JSON object only.
                 await self._session_signal_hub.register_replaying(signal_target)
                 signal_target_registered = True
 
-            provider_kwargs = _live_provider_kwargs()
-            if provider_kwargs is None:
-                return await _terminalize_route_drift(active_dispatch_id)
-            _invoke_execution_authority_guard(self)
-            await _stream_provider_call(
+            provider_entered = await _stream_provider_call(
                 call_prompt=prompt,
                 call_tools=tools,
-                provider_kwargs=provider_kwargs,
             )
+            if not provider_entered:
+                return await _terminalize_route_drift(active_dispatch_id)
             runtime_handle = dispatch_state.runtime_handle
             ac_session_id = dispatch_state.ac_session_id
             final_message = dispatch_state.final_message
@@ -8993,8 +9003,11 @@ Respond with either ATOMIC or the structured JSON object only.
                     )
                     inform_mode = queued_signal.effective_mode is SessionSignalMode.INFORM
                     try:
-                        provider_kwargs = _live_provider_kwargs()
-                        if provider_kwargs is None:
+                        provider_entered = await _stream_provider_call(
+                            call_prompt=follow_up_prompt,
+                            call_tools=[] if inform_mode else tools,
+                        )
+                        if not provider_entered:
                             await self._event_store.append(
                                 create_session_signal_rejected_event(
                                     queued_signal.signal,
@@ -9009,12 +9022,6 @@ Respond with either ATOMIC or the structured JSON object only.
                                 )
                             )
                             return await _terminalize_route_drift(follow_up_dispatch_id)
-                        _invoke_execution_authority_guard(self)
-                        await _stream_provider_call(
-                            call_prompt=follow_up_prompt,
-                            call_tools=[] if inform_mode else tools,
-                            provider_kwargs=provider_kwargs,
-                        )
                     except Exception as exc:
                         await self._event_store.append(
                             create_session_signal_delivery_uncertain_event(
@@ -9376,14 +9383,14 @@ Respond with either ATOMIC or the structured JSON object only.
             )
 
         except anyio.get_cancelled_exc_class():
-            # Cancellation after the durable dispatch event is an uncertain
-            # provider-effect boundary.  Shield the seal write so cancellation
-            # cannot leave a replayable handle that may resend work.
             try:
                 with anyio.CancelScope(shield=True):
+                    seal_policy = ACRuntimeHandleManager.cancellation_seal_policy
+                    reason, replayable = seal_policy(provider_effect_entered)
                     await _seal_dispatch(
                         active_dispatch_id,
-                        reason="provider attempt cancelled after dispatch boundary",
+                        reason=reason,
+                        replayable=replayable,
                     )
             except Exception as seal_error:
                 # A cancellation seal is the last durable protection against
@@ -9392,6 +9399,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 raise RuntimeError(
                     "AC dispatch cancellation seal failed; refusing replayable recovery"
                 ) from seal_error
+            clear_cached_runtime_handle = not provider_effect_entered
             self._remember_ac_runtime_handle(
                 ac_index,
                 dispatch_state.runtime_handle,
@@ -11196,7 +11204,11 @@ Respond with either ATOMIC or the structured JSON object only.
                 session_id=session_id,
                 execution_counters=execution_counters,
             )
-            round_indices = [ac_idx for ac_idx in batch_executable if ac_idx in pending]
+            resume_pending = pending & set(self._parallel_route_resumes)
+            resume_pending |= pending & partial_composite_resume_roots
+            round_indices = [
+                ac_idx for ac_idx in batch_executable if ac_idx in (resume_pending or pending)
+            ]
             round_results = await self._execute_ac_batch(
                 seed=seed,
                 batch_indices=round_indices,
@@ -11211,6 +11223,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 retry_prompts=retry_prompts,
                 route_overrides=route_overrides,
                 route_resume_states=self._parallel_route_resumes,
+                batch_sibling_indices=batch_executable,
                 # Route D owns recovery while active.  Legacy cross-harness and
                 # retry-count paths cannot run ahead of the finite route set.
                 same_runtime_budget_exhausted=False,
@@ -11219,9 +11232,9 @@ Respond with either ATOMIC or the structured JSON object only.
                 session_id=session_id,
                 execution_counters=execution_counters,
             )
-            next_pending: set[int] = set()
-            next_overrides: dict[int, RouteCandidate] = {}
-            next_prompts: dict[int, str] = {}
+            next_pending = pending - set(round_indices)
+            next_overrides = dict(route_overrides)
+            next_prompts = dict(retry_prompts)
             recoverable_pause_seen = any(
                 isinstance(value, ACExecutionResult) and _has_usage_limit_pause(value)
                 for value in round_results

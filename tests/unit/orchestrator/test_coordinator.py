@@ -169,6 +169,7 @@ class TestCoordinatorReview:
             session_scope_id="exec:l0:coord",
             session_state_path="execution/exec/level-0/coordinator.json",
             final_output="coordinator final output",
+            recoverable_quota_pause=True,
         )
         return (
             review.to_completed_event_payload(
@@ -193,6 +194,42 @@ class TestCoordinatorReview:
 
         assert restored.review_summary == "Reconciled shared.py"
         assert restored.conflicts_detected == (conflict,)
+        assert restored.recoverable_quota_pause is True
+
+    @pytest.mark.parametrize("invalid", (None, 0, 1, "true"))
+    def test_completed_artifact_rejects_untyped_quota_pause_state(
+        self,
+        invalid: object,
+    ) -> None:
+        payload, conflict = self._completed_payload()
+        payload["recoverable_quota_pause"] = invalid
+
+        with pytest.raises(ValueError, match="recoverable quota state"):
+            CoordinatorReview.from_artifact_payload(
+                payload,
+                level_number=1,
+                expected_conflicts=(conflict,),
+                execution_id="exec",
+                session_id="session",
+                session_scope_id="exec:l0:coord",
+                session_state_path="execution/exec/level-0/coordinator.json",
+            )
+
+    def test_completed_artifact_rejects_legacy_schema_without_quota_state(self) -> None:
+        payload, conflict = self._completed_payload()
+        payload["schema_version"] = 1
+        del payload["recoverable_quota_pause"]
+
+        with pytest.raises(ValueError, match="schema v2"):
+            CoordinatorReview.from_artifact_payload(
+                payload,
+                level_number=1,
+                expected_conflicts=(conflict,),
+                execution_id="exec",
+                session_id="session",
+                session_scope_id="exec:l0:coord",
+                session_state_path="execution/exec/level-0/coordinator.json",
+            )
 
     @pytest.mark.parametrize(
         ("field", "oversized"),

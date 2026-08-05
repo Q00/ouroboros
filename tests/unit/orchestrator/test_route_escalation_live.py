@@ -2231,7 +2231,9 @@ async def test_live_pre_entry_sibling_remains_pending_across_route_pause(
         )
         resumed = await resumed_executor._run_batch_with_bounded_route_escalation(**run_kwargs)
 
-        assert all(isinstance(result, ACExecutionResult) and result.success for result in resumed)
+        assert all(
+            isinstance(result, ACExecutionResult) and result.success for result in resumed
+        ), (resumed, calls)
         assert calls == ["first", "first", "second"]
     finally:
         await store.close()

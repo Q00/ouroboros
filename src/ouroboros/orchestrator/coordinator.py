@@ -47,6 +47,7 @@ from ouroboros.orchestrator.policy import (
     PolicySessionRole,
     allowed_capability_names,
 )
+from ouroboros.orchestrator.recoverable_failure import is_usage_limit_pause_message
 from ouroboros.orchestrator.runtime_param_negotiation import (
     announce_execution_param_degradations,
 )
@@ -337,6 +338,7 @@ class CoordinatorReview:
         session_scope_id: Stable identity for persisted reconciliation runtime state.
         session_state_path: Stable state path for persisted reconciliation runtime state.
         final_output: Raw final coordinator output captured for level-scoped artifacts.
+        recoverable_quota_pause: Typed durable consequence of a quota-ending review.
         messages: Runtime messages retained in memory for normalized audit emission.
     """
 
@@ -350,7 +352,17 @@ class CoordinatorReview:
     session_scope_id: str | None = None
     session_state_path: str | None = None
     final_output: str = ""
+    recoverable_quota_pause: bool = False
     messages: tuple[AgentMessage, ...] = field(default_factory=tuple)
+
+    def with_recoverable_quota_state(self) -> CoordinatorReview:
+        """Classify the durable quota consequence from this fresh review."""
+        return replace(
+            self,
+            recoverable_quota_pause=any(
+                is_usage_limit_pause_message(message) for message in reversed(self.messages)
+            ),
+        )
 
     @property
     def scope(self) -> str:
@@ -433,10 +445,11 @@ class CoordinatorReview:
             max_chars=_MAX_COORDINATOR_ID_CHARS,
         )
         return {
-            "schema_version": 1,
+            "schema_version": 2,
             "execution_id": execution_id,
             "session_id": session_id,
             "coordinator_session_id": self.session_id,
+            "recoverable_quota_pause": self.recoverable_quota_pause,
             **self.to_artifact_payload(),
             "conflicts_detected": [
                 {
@@ -508,6 +521,7 @@ class CoordinatorReview:
                 "execution_id",
                 "session_id",
                 "coordinator_session_id",
+                "recoverable_quota_pause",
                 "scope",
                 "session_role",
                 "stage_index",
@@ -527,14 +541,14 @@ class CoordinatorReview:
             }
         )
         if not _mapping_has_exact_keys(payload, expected_keys):
-            raise ValueError("coordinator artifact fields do not match schema v1")
+            raise ValueError("coordinator artifact fields do not match schema v2")
 
         def require_exact(key: str, expected: object) -> None:
             value = payload.get(key)
             if type(value) is not type(expected) or value != expected:
                 raise ValueError(f"coordinator artifact {key} does not match its owner")
 
-        require_exact("schema_version", 1)
+        require_exact("schema_version", 2)
         require_exact("execution_id", execution_id)
         require_exact("session_id", session_id)
         require_exact("scope", "level")
@@ -547,6 +561,9 @@ class CoordinatorReview:
         require_exact("artifact_owner", "coordinator")
         require_exact("artifact_owner_id", session_scope_id)
         require_exact("artifact_type", "coordinator_review")
+        recoverable_quota_pause = payload.get("recoverable_quota_pause")
+        if type(recoverable_quota_pause) is not bool:
+            raise ValueError("coordinator artifact recoverable quota state is invalid")
 
         raw_conflicts = payload.get("conflicts_detected")
         if type(raw_conflicts) is not list or len(raw_conflicts) != len(expected_conflicts):
@@ -644,6 +661,7 @@ class CoordinatorReview:
                 max_chars=_MAX_COORDINATOR_ARTIFACT_CHARS,
             )
             or "",
+            recoverable_quota_pause=recoverable_quota_pause,
         )
 
 
@@ -664,6 +682,7 @@ def _validate_coordinator_review(review: object) -> CoordinatorReview:
         or len(review.review_summary) > _MAX_COORDINATOR_SUMMARY_CHARS
         or type(review.final_output) is not str
         or len(review.final_output) > _MAX_COORDINATOR_ARTIFACT_CHARS
+        or type(review.recoverable_quota_pause) is not bool
         or any(
             type(item) is not str or len(item) > _MAX_COORDINATOR_ITEM_CHARS
             for item in (*review.fixes_applied, *review.warnings_for_next_level)
