@@ -120,6 +120,7 @@ from ouroboros.orchestrator.coordinator_quota import (
     normalize_published_coordinator_pause_owner,
     resolve_replayed_coordinator_quota_pause,
     resolve_usage_limit_pause_seconds,
+    restore_checkpointed_coordinator_quota,
 )
 from ouroboros.orchestrator.decomposition_limits import (
     DEFAULT_MAX_DECOMPOSITION_DEPTH,
@@ -3987,7 +3988,6 @@ class ParallelACExecutor:
             "tool_calls_count": 0,
         }
 
-        # Track AC statuses for TUI updates
         ac_statuses: dict[int, str] = dict.fromkeys(range(total_acs), "pending")
         ac_retry_attempts: dict[int, int] = dict.fromkeys(range(total_acs), 0)
         completed_count = 0
@@ -4009,7 +4009,6 @@ class ParallelACExecutor:
             session_id=session_id,
         )
 
-        # RC3: Attempt to recover from checkpoint
         if self._checkpoint_store:
             try:
                 seed_id = getattr(seed, "id", session_id)
@@ -4045,9 +4044,6 @@ class ParallelACExecutor:
                         )
                         if isinstance(raw_final_digest, str) and raw_final_digest:
                             post_coordinator_revalidation_workspace_digest = raw_final_digest
-                        # A checkpoint may have been written before the final
-                        # revalidation.  Never let its provisional successes be
-                        # accepted on recovery without replaying that boundary.
                         if post_coordinator_revalidation_required:
                             current_digest = self._workspace_content_digest(
                                 self._task_cwd
@@ -4082,11 +4078,17 @@ class ParallelACExecutor:
                         for idx in checkpoint_state.get("blocked_indices", []):
                             blocked_indices.add(int(idx))
                         completed_count = cp.state.get("completed_count", 0)
-                        # Restore level contexts so subsequent levels
-                        # have access to completed levels' output
                         saved_contexts = cp.state.get("level_contexts", [])
                         if saved_contexts:
                             level_contexts = deserialize_level_contexts(saved_contexts)
+                            restored_quota = await restore_checkpointed_coordinator_quota(
+                                event_store=self._event_store,
+                                level_contexts=level_contexts,
+                                execution_id=execution_id,
+                                session_id=session_id,
+                                published_owner=published_pause_owner,
+                            )
+                            recoverable_coordinator_pause, published_pause_owner = restored_quota
                         self._restore_checkpoint_decomposition_decisions(
                             checkpoint_state.get("decomposition_decisions", {}),
                             root_ac_count=total_acs,
@@ -4097,7 +4099,6 @@ class ParallelACExecutor:
                             seed_id=seed_id,
                             restored_contexts=len(level_contexts),
                         )
-                        # Reconstruct all_results for completed/failed/skipped ACs.
                         restored_outcomes = checkpoint_state.get(
                             "revalidated_ac_outcomes",
                             checkpoint_state.get("ac_outcomes", {}),
@@ -4251,7 +4252,6 @@ class ParallelACExecutor:
             dependency_edges=dependency_edges,
         )
 
-        # Emit initial progress for TUI
         await self._emit_workflow_progress(
             session_id=session_id,
             execution_id=execution_id,
@@ -4287,12 +4287,13 @@ class ParallelACExecutor:
             )
 
             for stage in execution_plan.stages:
+                if recoverable_coordinator_pause is not None:
+                    break
                 level_idx = stage.index
                 level = self._get_stage_ac_indices(stage)
                 stage_batches = self._get_stage_batches(stage)
                 level_num = level_idx + 1
 
-                # RC3: Skip already-completed levels on recovery
                 if level_idx < resume_from_level:
                     log.info(
                         "parallel_executor.recovery.skipping_level",

@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ouroboros.config import MAX_USAGE_LIMIT_PAUSE_SECONDS, get_usage_limit_pause_seconds
 from ouroboros.events.base import BaseEvent
 from ouroboros.orchestrator.coordinator import CoordinatorReview
 from ouroboros.orchestrator.parallel_executor_models import CoordinatorQuotaPause
+
+if TYPE_CHECKING:
+    from ouroboros.orchestrator.level_context import LevelContext
 
 
 def resolve_usage_limit_pause_seconds(value: int | None) -> int:
@@ -76,6 +79,41 @@ async def resolve_replayed_coordinator_quota_pause(
     return None, remaining_owner
 
 
+async def restore_checkpointed_coordinator_quota(
+    *,
+    event_store: Any,
+    level_contexts: list[LevelContext],
+    execution_id: str,
+    session_id: str,
+    published_owner: Mapping[str, object] | None,
+) -> tuple[CoordinatorQuotaPause | None, dict[str, object] | None]:
+    """Consume or surface every quota owner restored before the next stage."""
+
+    from ouroboros.orchestrator.execution_event_emitter import ExecutionEventEmitter
+
+    remaining_owner = dict(published_owner) if published_owner is not None else None
+    for context in level_contexts:
+        review = context.coordinator_review
+        if review is None or review.recoverable_quota_pause is None:
+            continue
+        pause, remaining_owner = await resolve_replayed_coordinator_quota_pause(
+            event_store=event_store,
+            review=review,
+            execution_id=execution_id,
+            session_id=session_id,
+            level_number=review.level_number,
+            coordinator_aggregate_id=ExecutionEventEmitter.coordinator_aggregate_id(
+                execution_id,
+                review.level_number,
+            ),
+            restored=True,
+            published_owner=remaining_owner,
+        )
+        if pause is not None:
+            return pause, remaining_owner
+    return None, remaining_owner
+
+
 async def consume_published_coordinator_pause(
     *,
     event_store: Any,
@@ -127,6 +165,7 @@ async def consume_published_coordinator_pause(
 __all__ = [
     "consume_published_coordinator_pause",
     "normalize_published_coordinator_pause_owner",
+    "restore_checkpointed_coordinator_quota",
     "resolve_replayed_coordinator_quota_pause",
     "resolve_usage_limit_pause_seconds",
 ]

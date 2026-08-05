@@ -102,6 +102,7 @@ from ouroboros.orchestrator.parallel_executor import (
 from ouroboros.orchestrator.profile_loader import EvidenceSchema, load_profile
 from ouroboros.orchestrator.recoverable_failure import UsageLimitPauseConsequence
 from ouroboros.orchestrator.verifier import VerifierVerdict
+from ouroboros.persistence.checkpoint import CheckpointStore
 from tests.unit.orchestrator.parallel_executor_test_support import ProcessLocalTestExecutor
 
 
@@ -15873,8 +15874,9 @@ class TestParallelACExecutor:
     async def test_restored_coordinator_quota_stops_before_next_stage_provider_effect(
         self,
         monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
     ) -> None:
-        """A restored completed review must replay its durable quota consequence."""
+        """Checkpoint replay consumes the exact pause before opening stage two."""
 
         quota = AgentMessage(
             type="result",
@@ -15883,6 +15885,7 @@ class TestParallelACExecutor:
         )
         conflict = FileConflict(file_path="src/shared.py", ac_indices=(0, 1))
         execution_id = "execution-restored-coordinator-quota"
+        session_id = "session-restored-coordinator-quota"
         runtime_scope = build_level_coordinator_runtime_scope(execution_id, 1)
         review_provider = AsyncMock(
             return_value=CoordinatorReview(
@@ -15905,6 +15908,8 @@ class TestParallelACExecutor:
             ),
             execution_levels=((0, 1), (2,)),
         )
+        checkpoint_store = CheckpointStore(tmp_path)
+        checkpoint_store.initialize()
 
         async def run_once(
             executor: ParallelACExecutor,
@@ -15923,12 +15928,16 @@ class TestParallelACExecutor:
                     final_message="done",
                 )
 
-            executor._coordinator.detect_file_conflicts = MagicMock(side_effect=([conflict], []))
+            executor._coordinator.detect_file_conflicts = MagicMock(
+                side_effect=lambda results: (
+                    [conflict] if {result.ac_index for result in results} == {0, 1} else []
+                )
+            )
             executor._execute_single_ac = execute_ac  # type: ignore[method-assign]
             return await executor.execute_parallel(
                 seed=seed,
                 execution_plan=graph.to_execution_plan(),
-                session_id="session-restored-coordinator-quota",
+                session_id=session_id,
                 execution_id=execution_id,
                 tools=["Read", "Edit"],
                 system_prompt="test",
@@ -15936,6 +15945,7 @@ class TestParallelACExecutor:
             )
 
         first = _make_executor(run_verify_commands=False)
+        first._checkpoint_store = checkpoint_store
         first._event_store.query_events = AsyncMock(return_value=[])
         first_effects: list[int] = []
         first_result = await run_once(first, first_effects)
@@ -15954,10 +15964,15 @@ class TestParallelACExecutor:
             ("execution.coordinator.started", "execution", expected_aggregate_id, True),
             ("execution.coordinator.completed", "execution", expected_aggregate_id, True),
         ]
+        first_checkpoint = checkpoint_store.load(session_id)
+        assert first_checkpoint.is_ok
+        assert first_checkpoint.value is not None
+        assert first_checkpoint.value.state["completed_levels"] == 1
 
         async def replay_query(*_args: Any, **kwargs: Any) -> list[BaseEvent]:
             event_type = kwargs.get("event_type")
-            assert kwargs.get("aggregate_id") == expected_aggregate_id
+            if kwargs.get("aggregate_id") != expected_aggregate_id:
+                return []
             matched = [
                 event
                 for event in first_events
@@ -15974,19 +15989,21 @@ class TestParallelACExecutor:
             return matched
 
         resumed = _make_executor(run_verify_commands=False)
+        resumed._checkpoint_store = checkpoint_store
         resumed._event_store.query_events = AsyncMock(side_effect=replay_query)
         resumed_effects: list[int] = []
         resumed_result = await run_once(resumed, resumed_effects)
 
         assert first_effects == [0, 1]
         assert isinstance(first_result.recoverable_coordinator_pause, CoordinatorQuotaPause)
-        assert resumed_effects == [0, 1]
+        assert resumed_effects == []
         assert isinstance(resumed_result.recoverable_coordinator_pause, CoordinatorQuotaPause)
-        assert len(resumed_result.stages) == 1
+        assert len(resumed_result.stages) == 0
         assert review_provider.await_count == 1
 
         published_owner = resumed_result.recoverable_coordinator_pause.owner_payload()
         published = _make_executor(run_verify_commands=False)
+        published._checkpoint_store = checkpoint_store
         published._event_store.query_events = AsyncMock(side_effect=replay_query)
         published_effects: list[int] = []
         published_result = await run_once(
@@ -15995,9 +16012,9 @@ class TestParallelACExecutor:
             published_owner=published_owner,
         )
 
-        assert published_effects == [0, 1, 2]
+        assert published_effects == [2]
         assert published_result.recoverable_coordinator_pause is None
-        assert len(published_result.stages) == 2
+        assert len(published_result.stages) == 1
         consumed_events = [
             call.args[0]
             for call in published._event_store.append.await_args_list
@@ -16013,13 +16030,14 @@ class TestParallelACExecutor:
             return [event for event in replay_events if event.type == event_type]
 
         after_consumption_crash = _make_executor(run_verify_commands=False)
+        after_consumption_crash._checkpoint_store = checkpoint_store
         after_consumption_crash._event_store.query_events = AsyncMock(side_effect=consumed_query)
         crash_effects: list[int] = []
         crash_result = await run_once(after_consumption_crash, crash_effects)
 
-        assert crash_effects == [0, 1, 2]
+        assert crash_effects == []
         assert crash_result.recoverable_coordinator_pause is None
-        assert len(crash_result.stages) == 2
+        assert len(crash_result.stages) == 0
         assert review_provider.await_count == 1
 
     @pytest.mark.asyncio
