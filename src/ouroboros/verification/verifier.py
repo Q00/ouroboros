@@ -44,11 +44,13 @@ _EMPTINESS_WORDS = frozenset({"empty", "blank"})
 # other thing in the assertion that could carry the difference is the extracted
 # pattern — and `\A\Z` is what a model writes for every one of these readings.
 #
-# The shape that licenses the rescue is narrow on purpose: the file, then a
-# chain of auxiliaries and adverbs, then a copula, then the emptiness word, then
-# the end of the clause. Everything is decided by what may appear *in* that
-# chain rather than by how near some other word happens to fall, because a
-# window has a far side and a criterion can always put its negation past it.
+# The shape that licenses the rescue is narrow on purpose, and it is matched
+# against the criterion in full: words that may precede a subject, the file, a
+# chain of auxiliaries and adverbs, a copula, the emptiness word, and then
+# nothing at all. Everything is decided by what may appear *in* that shape
+# rather than by how near some other word happens to fall, because a window has
+# a far side and a criterion can always put a negation, a governing verb or a
+# second obligation past it.
 
 # A copula is what puts the emptiness on the subject.
 _COPULAS = frozenset(
@@ -98,14 +100,14 @@ _PREDICATE_CHAIN = _COPULAS | {
     "initially",
     "currently",
 }
-# The only words allowed to stand between the start of a clause and the file
-# that heads it. Anything else means the file is not what the clause is about:
-# a preposition makes it the object of something ("the status field in
+# The only words allowed to stand between the start of the criterion and the
+# file. Anything else means the file is not what the criterion is about: a
+# preposition makes it the object of something ("the status field in
 # marker.txt"), a verb makes it the object of that verb ("do not let marker.txt
 # be empty"), and a competing noun makes it a modifier of that noun. This is an
 # allow-list for the same reason the forward chain is — no preposed phrasing can
 # outrun a rule that admits only what it names.
-_CLAUSE_LEAD = frozenset(
+_CRITERION_LEAD = frozenset(
     {
         "the",
         "a",
@@ -147,70 +149,9 @@ _CLAUSE_LEAD = frozenset(
         "expects",
     }
 )
-# A negation can also govern the file from an earlier clause: "do not remove the
-# guard and let marker.txt be empty" carries a clause that, read alone, asks for
-# emptiness. Nothing structural tells that adjunct apart from the innocent "for
-# the release,", so this is a screen and not a proof — it can only ever refuse
-# more. The clause-lead rule above is what makes the direct forms unreachable.
-_NEGATIONS = frozenset(
-    {
-        "not",
-        "never",
-        "no",
-        "none",
-        "nor",
-        "cannot",
-        "cant",
-        "dont",
-        "doesnt",
-        "didnt",
-        "wont",
-        "wouldnt",
-        "shouldnt",
-        "mustnt",
-        "isnt",
-        "arent",
-        "wasnt",
-        "werent",
-        "hasnt",
-        "havent",
-        "hadnt",
-        "couldnt",
-        "avoid",
-        "avoids",
-        "prevent",
-        "prevents",
-        "prohibit",
-        "prohibits",
-        "prohibited",
-        "forbid",
-        "forbids",
-        "forbidden",
-        "disallow",
-        "disallows",
-        "disallowed",
-        "deny",
-        "denies",
-        "refuse",
-        "refuses",
-        "without",
-        "unacceptable",
-        "illegal",
-        "banned",
-    }
-)
-# Where the predicate is allowed to stop. An emptiness word followed by anything
-# else is qualifying that thing rather than the file.
-_CLAUSE_ENDS = frozenset({".", ",", ";", ":", "and", "then"})
-# Emptiness offered as one option among several is not a requirement to be
-# empty, and answering it alone would throw away the evidence the other branch
-# names. The ordinary path can weigh a pattern that spells out both.
-_ALTERNATIVES = frozenset({"or", "unless", "otherwise", "either", "alternatively", "except"})
-_SENTENCE_ENDS = frozenset({".", ";"})
 
-
-# Stands in for the file's own name, so that the walk has one token to start
-# from and `empty.txt MUST contain data` stops carrying an emptiness word it
+# Stands in for the file's own name, so that the match has one token to anchor
+# on and `empty.txt MUST contain data` stops carrying an emptiness word it
 # never meant. Underscored to keep it out of reach of any English word.
 _FILE_TOKEN = "__the_file__"
 
@@ -230,46 +171,6 @@ def _mask_file_hint(ac_text: str, file_hint: str) -> str:
     )
 
 
-def _offers_an_alternative_to_emptiness(tokens: list[str], position: int) -> bool:
-    """True when the rest of the sentence lets something other than emptiness satisfy it."""
-    for token in tokens[position + 1 :]:
-        if token in _SENTENCE_ENDS:
-            return False
-        if token in _ALTERNATIVES:
-            return True
-    return False
-
-
-def _heads_its_clause(tokens: list[str], position: int) -> bool:
-    """True when the file is what its own clause is about.
-
-    Reads back to the nearest clause boundary and requires every word in
-    between to be one this can place ahead of a subject. Refusing on anything
-    else is what makes the whole class of preposed government — "the status
-    field in marker.txt", "do not let marker.txt be empty", "never allow
-    marker.txt to remain empty" — unreachable at once, rather than one cited
-    phrasing at a time. Stopping at the boundary is what keeps a word belonging
-    to an earlier clause, as in "for the release, marker.txt must be empty",
-    from disqualifying anything.
-    """
-    for token in reversed(tokens[:position]):
-        if token in _CLAUSE_ENDS:
-            return True
-        if token not in _CLAUSE_LEAD:
-            return False
-    return True
-
-
-def _a_negation_governs(tokens: list[str], position: int) -> bool:
-    """True when a negation stands earlier in the same sentence."""
-    for token in reversed(tokens[:position]):
-        if token in _SENTENCE_ENDS:
-            return False
-        if token in _NEGATIONS:
-            return True
-    return False
-
-
 def _emptiness_the_criterion_requires(ac_text: str, file_hint: str) -> str | None:
     """The emptiness word the criterion predicates of the file, or None.
 
@@ -277,45 +178,45 @@ def _emptiness_the_criterion_requires(ac_text: str, file_hint: str) -> str | Non
     file holding one tab, and the caller has to answer the question that was
     actually asked.
 
-    Walks out from each mention of the file, and returns a word only when every
-    step of the walk holds: the file heads its own clause, so nothing before it
-    governs it and the emptiness is asked of the file rather than of something
-    the file contains; no negation stands earlier in the sentence; every
-    word between it and the emptiness word belongs to `_PREDICATE_CHAIN`, which
-    no negation and no competing noun does; one of them is a copula, without
-    which the emptiness is being predicated of something else; the emptiness word
-    ends its clause, because `empty JSON object` describes contents rather than a
-    file; and the sentence offers no alternative to being empty.
+    The criterion has to be this shape and nothing besides::
+
+        <lead>* <file> <chain>* <copula> (empty | blank) ["."]
+
+    every token consumed. Matching the whole of it is what makes the rescue
+    safe to answer, and it is a stronger claim than matching a part: a criterion
+    that says more is also *asking* for more — "must be empty and contain a
+    header" carries a second obligation, and answering only the emptiness half
+    would publish a pass for a requirement nothing checked. Distinguishing a
+    second obligation from a harmless aside means reading English, which is the
+    guessing this exists to avoid. So anything it cannot consume in full returns
+    None and fails closed on the ordinary path, which says plainly that the
+    pattern is unusable rather than authoritatively answering the wrong question.
+
+    Consuming the whole criterion also leaves nowhere to put the words that
+    broke every narrower version of this: a negation, a governing verb, a
+    competing subject and a trailing obligation are all outside the shape, on
+    either side of the name, at any distance.
 
     Reading words rather than substrings is what keeps `nonempty` from being an
-    occurrence of `empty`. One qualifying mention is enough: "must be empty, and
-    must not be deleted" requires emptiness despite carrying a negation in its
-    other clause. Anything this cannot place on the file itself returns None,
-    and the criterion fails closed on the ordinary path.
+    occurrence of `empty`.
     """
     text = _mask_file_hint(ac_text, file_hint).lower().replace("'", "").replace("’", "")
     tokens = re.findall(r"[a-z_]+|[.,;:]", text)
-    for position, token in enumerate(tokens):
-        if token != _FILE_TOKEN:
-            continue
-        if not _heads_its_clause(tokens, position):
-            continue
-        if _a_negation_governs(tokens, position):
-            continue
-        saw_copula = False
-        step = position + 1
-        while step < len(tokens) and tokens[step] in _PREDICATE_CHAIN:
-            saw_copula = saw_copula or tokens[step] in _COPULAS
-            step += 1
-        if not saw_copula or step >= len(tokens) or tokens[step] not in _EMPTINESS_WORDS:
-            continue
-        following = tokens[step + 1] if step + 1 < len(tokens) else None
-        if following is not None and following not in _CLAUSE_ENDS:
-            continue
-        if _offers_an_alternative_to_emptiness(tokens, step):
-            continue
-        return tokens[step]
-    return None
+    if tokens and tokens[-1] == ".":
+        tokens.pop()
+    step = 0
+    while step < len(tokens) and tokens[step] in _CRITERION_LEAD:
+        step += 1
+    if step >= len(tokens) or tokens[step] != _FILE_TOKEN:
+        return None
+    step += 1
+    saw_copula = False
+    while step < len(tokens) and tokens[step] in _PREDICATE_CHAIN:
+        saw_copula = saw_copula or tokens[step] in _COPULAS
+        step += 1
+    if not saw_copula or step != len(tokens) - 1:
+        return None
+    return tokens[step] if tokens[step] in _EMPTINESS_WORDS else None
 
 
 def _asks_whether_a_named_file_is_empty(assertion: SpecAssertion) -> str | None:

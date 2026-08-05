@@ -859,18 +859,51 @@ class TestSpecVerifier:
         assert summary.override_approval is False
 
     @pytest.mark.parametrize("tier", [VerificationTier.T2_STRUCTURAL, VerificationTier.T1_CONSTANT])
-    def test_a_negation_in_another_clause_does_not_disarm_the_requirement(
-        self, tier: VerificationTier
+    @pytest.mark.parametrize(
+        "ac_text",
+        [
+            "pkg/marker.txt must be empty and contain a header",
+            "pkg/marker.txt must be empty and must be deleted",
+            "pkg/marker.txt must be empty, but must also contain generated metadata",
+            "pkg/marker.txt MUST be empty and must not be deleted",
+            "pkg/marker.txt must be deleted, and pkg/marker.txt must be empty",
+            "pkg/marker.txt must be empty then the build proceeds",
+            "For the release, pkg/marker.txt must be empty",
+            "Run the generator; pkg/marker.txt must be empty",
+        ],
+        ids=[
+            "and-obligation",
+            "and-modal-obligation",
+            "comma-but-also",
+            "and-negated-obligation",
+            "obligation-in-preamble",
+            "trailing-consequence",
+            "preposed-adjunct",
+            "preposed-clause",
+        ],
+    )
+    def test_a_criterion_that_asks_for_more_than_emptiness_is_not_answered_here(
+        self, tier: VerificationTier, ac_text: str
     ) -> None:
-        """One un-negated occurrence is the requirement; a later `not` is a different clause.
+        """Emptiness is only half of a compound criterion, and half is not an answer.
 
-        Failing closed on any `not` anywhere would re-open the original blocker in a
-        narrower form — a satisfied emptiness AC turned into a formal failure.
+        An earlier revision of this test asserted the opposite for the `and must
+        not be deleted` form, on the reasoning that one un-negated occurrence is
+        the requirement. That reasoning was wrong in a way the deletion clause
+        makes obvious: nothing verifies the second obligation, so reporting a
+        pass reports on a criterion that was never checked. The rescue now has
+        to consume the criterion in full, and everything here says something it
+        cannot consume — including the two preposed forms, which it has no way
+        to tell apart from an obligation without reading English.
+
+        Failing closed costs a satisfied emptiness AC its pass, but it costs it
+        an honest `Unusable regex pattern` failure rather than an authoritative
+        wrong answer, which is the trade this whole guard exists to make.
         """
         project = self._create_project({"pkg/marker.txt": ""})
         assertion = SpecAssertion(
             ac_index=0,
-            ac_text="pkg/marker.txt MUST be empty and must not be deleted",
+            ac_text=ac_text,
             tier=tier,
             pattern=r"\A\Z",
             file_hint="pkg/marker.txt",
@@ -878,8 +911,10 @@ class TestSpecVerifier:
 
         summary = SpecVerifier(project_dir=project).verify_all((assertion,))
 
-        assert summary.reports[0].verified_pass is True
-        assert summary.discrepancy_count == 0
+        assert summary.reports[0].verified_pass is False, f"{ac_text!r} must not verify"
+        detail = summary.reports[0].results[0].detail
+        assert "empty" not in detail, f"{ac_text!r} must not be answered as an emptiness claim"
+        assert "Unusable regex pattern" in detail
 
     @pytest.mark.parametrize("tier", [VerificationTier.T2_STRUCTURAL, VerificationTier.T1_CONSTANT])
     @pytest.mark.parametrize(
@@ -947,32 +982,32 @@ class TestSpecVerifier:
         "ac_text",
         [
             "marker.txt MUST be empty",
+            "marker.txt must be empty.",
             "The file marker.txt must be empty",
-            "For the release, marker.txt must be empty",
-            "Run the generator; marker.txt must be empty",
             "Ensure marker.txt is empty",
             "We require marker.txt to be empty",
+            "marker.txt MUST remain empty",
         ],
         ids=[
             "bare",
+            "trailing-period",
             "noun-modifier",
-            "preposition-in-earlier-clause",
-            "preposition-past-semicolon",
             "transparent-verb",
             "transparent-verb-with-subject",
+            "copula-variant",
         ],
     )
     def test_the_subject_check_does_not_reject_a_file_it_only_stands_near(
         self, tier: VerificationTier, ac_text: str
     ) -> None:
-        """A word has to actually govern the file, not merely precede it.
+        """The shapes the rescue must keep answering, pinned against over-tightening.
 
-        The phrase is scanned back to the nearest clause boundary rather than to
-        the start of the criterion, because failing closed on any earlier `for` or
-        `of` would turn satisfied emptiness ACs into formal failures — the same
-        false-failure this rescue exists to prevent, in a new place. `ensure` and
-        `require` ask for the clause after them without changing what it claims,
-        so a criterion that opens with one still says what it says.
+        A guard this strict is one edit away from refusing everything, and a
+        refusal is a formal failure for an AC the project satisfies — the
+        original blocker, relocated. `ensure` and `require` ask for the clause
+        after them without changing what it claims, so a criterion that opens
+        with one still says exactly what it says, and a determiner or a noun for
+        the file itself changes nothing either.
         """
         project = self._create_project({"marker.txt": ""})
         assertion = SpecAssertion(

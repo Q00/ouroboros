@@ -688,6 +688,14 @@ Parallel Execution Verification Report
             ("marker.txt", "", "marker.txt must not under any circumstances be empty."),
             ("marker.txt", "", "The status field in the generated marker.txt must be empty."),
             ("marker.txt", "", "The first record of the newly created marker.txt must be blank"),
+            ("marker.txt", "", "marker.txt must be empty and contain a header"),
+            ("marker.txt", "", "marker.txt must be empty and must be deleted"),
+            (
+                "marker.txt",
+                "",
+                "marker.txt must be empty, but must also contain generated metadata",
+            ),
+            ("marker.txt", "", "marker.txt must be deleted, and marker.txt must be empty"),
         ],
         ids=[
             "empty-filename",
@@ -699,6 +707,10 @@ Parallel Execution Verification Report
             "distant-negation",
             "modifier-separated-preposition",
             "two-modifiers-separated-preposition",
+            "compound-obligation",
+            "compound-modal-obligation",
+            "compound-after-comma",
+            "obligation-in-preamble",
         ],
     )
     def test_a_misread_emptiness_word_cannot_be_approved_through_the_adapter(
@@ -711,9 +723,12 @@ Parallel Execution Verification Report
         the file named as the object of a preposition while some field inside it is
         the subject. One is a whitespace-only file against an `empty` criterion,
         which `\\A\\Z` does not match either, and one puts its negation far enough
-        along that a bounded lookback loses it. Each produced `final_approved=True`,
-        `score=1.0`, `final_verdict="pass"` at the adapter for a criterion the
-        project violates.
+        along that a bounded lookback loses it. The last four are compound: the
+        file may well be empty, but the criterion also demands a header, a
+        deletion or some metadata, and nothing verified those — answering the
+        emptiness half alone publishes a pass for a requirement no one checked.
+        Each produced `final_approved=True`, `score=1.0`, `final_verdict="pass"`
+        at the adapter for a criterion the project violates or has not met.
         """
         (tmp_path / filename).write_text(content)
         assertion = SpecAssertion(
