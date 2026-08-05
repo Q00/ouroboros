@@ -215,6 +215,32 @@ map. Complete top-level anchors from the public low-level event producer also
 remain readable when no execution contract exists; nested identity is compared
 only when it is present.
 
+### Legacy pre-anchor sessions (transitional)
+
+Sessions started before the anchor landed carry no `project_id` on their
+durable `orchestrator.session.started` event. Resume detects this from the
+persisted start event itself (`has_project_anchor` is false) — never from a
+version heuristic — and takes a preserved legacy path instead of the resolver:
+the exact pre-anchor direct-cwd (or managed-task-workspace) representation is
+reproduced for the workspace comparison, and recoverable identity fields are
+validated against the start-event snapshot before any legacy migration writes
+a checkpoint. Rewriting these sessions under the current resolver would make
+resume disagree with their own immutable start events.
+
+This dual representation is a transitional surface, not a second contract:
+
+- **Implementation.** The legacy representation and its activation event live
+  in `orchestrator/legacy_identity.py`; the consuming branches in the runner
+  carry a comment pointing back here.
+- **Observability.** Every activation emits the structured log event
+  `project_map.legacy_identity_path` with an `entry_point` field
+  (`resume_workspace_comparison` or `resume_identity_validation`), so the
+  removal decision is argued from evidence.
+- **Removal criterion.** Delete `legacy_identity.py` and the legacy branches
+  once no `project_map.legacy_identity_path` activation has been observed for
+  90 consecutive days of production logs, and in no case while any session
+  started before the anchor is still within the operator's retention window.
+
 ## Authority boundary
 
 Project identity is an indexing and attribution contract only:
