@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import sys
 import tempfile
+import textwrap
 from unittest.mock import AsyncMock
 
 import pytest
@@ -915,6 +918,59 @@ class TestSpecVerifier:
         detail = summary.reports[0].results[0].detail
         assert "empty" not in detail, f"{ac_text!r} must not be answered as an emptiness claim"
         assert "Unusable regex pattern" in detail
+
+    def test_a_pattern_is_refused_by_reading_it_and_never_by_running_it(self) -> None:
+        """Deciding nullability by execution hands the verifier a denial of service.
+
+        Each pattern here is under twenty characters, so the length cap admits
+        it, and each compiles instantly — the cost is all in the matching, which
+        used to happen against `""` before the verifier had even looked for a
+        file. A repetition count is one number in the pattern and two billion
+        steps in the run, so no cap on the pattern's length caps the work. All
+        three run for over twelve seconds under execution and are refused in
+        under a millisecond by reading the parse tree, which is bounded by the
+        pattern's length whatever numbers are written inside it.
+
+        This runs in a child process rather than a thread because a runaway
+        `re.search` holds the GIL for its whole duration: no timeout, alarm or
+        `join` in this process could interrupt one, and a regression would hang
+        interpreter shutdown instead of failing. A child can simply be killed.
+        """
+        project = self._create_project({"marker.txt": "content"})
+        script = textwrap.dedent(
+            f"""
+            from ouroboros.verification.models import SpecAssertion, VerificationTier
+            from ouroboros.verification.verifier import SpecVerifier
+
+            for pattern in [r"(?:){{2000000000}}", r"(?:x?){{2000000000}}", r"(?:\\s*){{2000000000}}"]:
+                for tier in (VerificationTier.T1_CONSTANT, VerificationTier.T2_STRUCTURAL):
+                    assertion = SpecAssertion(
+                        ac_index=0,
+                        ac_text="marker.txt MUST contain a header",
+                        tier=tier,
+                        pattern=pattern,
+                        file_hint="marker.txt",
+                    )
+                    summary = SpecVerifier(project_dir={project!r}).verify_all(
+                        (assertion,), agent_results={{0: True}}
+                    )
+                    assert summary.reports[0].verified_pass is False
+                    assert summary.override_approval is False
+            """
+        )
+
+        try:
+            completed = subprocess.run(
+                [sys.executable, "-c", script],
+                capture_output=True,
+                text=True,
+                timeout=60,
+                env={**os.environ, "PYTHONPATH": os.pathsep.join(sys.path)},
+            )
+        except subprocess.TimeoutExpired:
+            pytest.fail("hostile patterns did not finish — nullability is being decided by running")
+
+        assert completed.returncode == 0, completed.stderr
 
     @pytest.mark.parametrize("tier", [VerificationTier.T2_STRUCTURAL, VerificationTier.T1_CONSTANT])
     @pytest.mark.parametrize(

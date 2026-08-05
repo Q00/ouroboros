@@ -12,6 +12,12 @@ import logging
 import os
 import re
 
+# The standard library's own regex parser, so that a pattern can be inspected
+# without being run. Private, but stable across 3.11–3.14 and vendored by every
+# CPython this runs on; the alternative is to hand-write a regex parser, and a
+# second parser that disagrees with the real one in a corner is worse than this.
+from re import _parser as regex_parser
+
 from ouroboros.verification.models import (
     ACVerificationReport,
     SpecAssertion,
@@ -26,6 +32,90 @@ MAX_FILE_SIZE = 50 * 1024  # 50KB per file
 MAX_FILES_PER_HINT = 100
 MAX_PATTERN_LENGTH = 200  # Limit LLM-generated regex length to reduce ReDoS risk
 MAX_SCALAR_LENGTH = 4096
+
+# Whether a pattern can match the empty string is decided by *reading* it, never
+# by running it. Running it is what a hostile pattern is waiting for: `(?:)
+# {100000000}` is fifteen characters, passes the length limit, compiles
+# instantly, and then takes longer than any timeout to match a subject with
+# nothing in it — a stall reached before the verifier has even looked for a file.
+# Capping the pattern's length does not cap a repetition count written inside it,
+# because that count is one number rather than one character each.
+#
+# The parse tree is bounded by the pattern's length, and in it a repetition count
+# is a number that is read rather than a number of steps that are taken. So the
+# analysis is linear in the pattern no matter what the pattern says.
+_MAX_PARSE_DEPTH = 40
+
+# Consumes at least one character, so a sequence containing one cannot be empty.
+_CONSUMING = frozenset({"LITERAL", "NOT_LITERAL", "IN", "ANY", "RANGE", "CATEGORY"})
+# Matches without consuming: `^`, `\A`, `\Z`, `\b`. `\b` cannot actually hold on
+# an empty subject, but calling it zero-width only ever refuses a pattern, and a
+# bare `\b` is vacuous evidence that deserves refusing.
+_ZERO_WIDTH = frozenset({"AT", "GROUPREF"})
+_REPEATS = frozenset({"MAX_REPEAT", "MIN_REPEAT", "POSSESSIVE_REPEAT"})
+
+
+def _can_match_nothing(sequence: object, depth: int = 0) -> bool:
+    """Whether a parsed regex can match the empty string, read rather than run.
+
+    Answers True whenever the answer cannot be worked out — an unknown construct,
+    a tree deeper than this follows. A pattern wrongly called nullable is refused
+    as evidence, which costs an honest criterion a formal failure; one wrongly
+    called discriminating is admitted, and admitting those is the whole defect
+    this file exists to close. So the doubt goes to refusal.
+    """
+    if depth > _MAX_PARSE_DEPTH:
+        return True
+    for opcode, argument in sequence:  # type: ignore[attr-defined]
+        name = getattr(opcode, "name", str(opcode))
+        if name in _ZERO_WIDTH:
+            continue
+        if name in _CONSUMING:
+            return False
+        if name in _REPEATS:
+            minimum, _maximum, item = argument
+            # A repeat that may run zero times is skippable; one that must run
+            # is empty only if what it repeats is. The count itself is never
+            # counted out.
+            if minimum == 0 or _can_match_nothing(item, depth + 1):
+                continue
+            return False
+        if name == "SUBPATTERN":
+            if _can_match_nothing(argument[-1], depth + 1):
+                continue
+            return False
+        if name == "ATOMIC_GROUP":
+            if _can_match_nothing(argument, depth + 1):
+                continue
+            return False
+        if name == "BRANCH":
+            if any(_can_match_nothing(branch, depth + 1) for branch in argument[1]):
+                continue
+            return False
+        if name == "ASSERT":
+            # On a subject with nothing in it there is nothing to either side, so
+            # a lookaround holds exactly when what it looks for can be empty.
+            # `(?=.*foo)` cannot, which is why a lookahead-only pattern stays
+            # admissible evidence.
+            if _can_match_nothing(argument[1], depth + 1):
+                continue
+            return False
+        if name == "ASSERT_NOT":
+            if not _can_match_nothing(argument[1], depth + 1):
+                continue
+            return False
+        return True
+    return True
+
+
+def _matches_the_empty_string(pattern: str, flags: int = 0) -> bool:
+    """Whether `pattern` can match a subject with nothing in it. Never runs it."""
+    try:
+        parsed = regex_parser.parse(pattern, flags)
+    except Exception:  # pragma: no cover - re.compile has already accepted this
+        return True
+    return _can_match_nothing(parsed)
+
 
 # Words that make an acceptance criterion a claim about a file holding nothing.
 # Such a criterion has no content for a regex to find, so every honest way to
@@ -452,7 +542,7 @@ class SpecVerifier:
         compiled = self._compile_or_none(pattern, flags)
         if compiled is None:
             return None
-        if compiled.search("") is not None:
+        if _matches_the_empty_string(pattern, flags):
             # A pattern that hits a file with no content in it hits every file:
             # `.*`, `x?`, `\s*`, `(?:)`, `|` and `^` all compile, and all verified
             # whatever criterion they were handed. A criterion that is genuinely
@@ -484,7 +574,7 @@ class SpecVerifier:
         # path, which can see the content it needs; only one that survives on a file
         # with nothing in it lands here, and that is the pattern this rescue is for.
         compiled = self._compile_or_none(assertion.pattern)
-        if compiled is None or compiled.search("") is None:
+        if compiled is None or not _matches_the_empty_string(assertion.pattern):
             return None
 
         files = self._find_files(assertion.file_hint)
