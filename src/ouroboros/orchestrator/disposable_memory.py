@@ -70,17 +70,22 @@ class DisposableMemory:
                 return existing
 
             started = time.monotonic()
+            committed: list[DisposableResultEnvelope] = []
+            cancelled = threading.Event()
+            commit_started = threading.Event()
+            commit_state = threading.Lock()
+            publication: asyncio.Task[DisposableResultEnvelope] | None = None
 
             async def persist_before_completion(
                 handle: AgentProcessHandle,
             ) -> DisposableResultEnvelope:
+                nonlocal publication
                 if handle.should_cancel():
                     raise asyncio.CancelledError("disposable work cancelled before execution")
                 body = await work_fn(handle)
                 if handle.should_cancel():
                     raise asyncio.CancelledError("disposable work cancelled before publication")
                 duration_ms = max(0, round((time.monotonic() - started) * 1000))
-                cancelled = threading.Event()
 
                 def ensure_active() -> None:
                     if cancelled.is_set() or handle.should_cancel():
@@ -88,8 +93,13 @@ class DisposableMemory:
                             "disposable work cancelled while awaiting artifact persistence"
                         )
 
-                try:
-                    envelope = await asyncio.to_thread(
+                def begin_commit() -> None:
+                    with commit_state:
+                        ensure_active()
+                        commit_started.set()
+
+                publication = asyncio.create_task(
+                    asyncio.to_thread(
                         self.artifact_store.put_for_contract,
                         contract_id=contract_id,
                         body=body,
@@ -97,23 +107,42 @@ class DisposableMemory:
                         duration_ms=duration_ms,
                         events_emitted_count=events_emitted_count,
                         precommit_check=ensure_active,
+                        commit_check=begin_commit,
                     )
+                )
+                try:
+                    envelope = await asyncio.shield(publication)
                 except asyncio.CancelledError:
-                    cancelled.set()
-                    raise
+                    with commit_state:
+                        cancelled.set()
+                        must_finish = commit_started.is_set()
+                    if not must_finish:
+                        publication.add_done_callback(_consume_background_result)
+                        raise
+                    envelope = await _settle_committed_publication(publication)
+                committed.append(envelope)
                 handle.complete_on_return_after_cancel()
                 await self._append_reference_event(envelope)
                 return envelope
 
-            return await run_with_agent_process(
-                event_store=self.event_store,
-                intent=intent,
-                work_fn=persist_before_completion,
-                timeout=None,
-                checkpoint_store=self.checkpoint_store,
-                process_id=contract_id,
-                cancel_key=contract_id,
-            )
+            try:
+                return await run_with_agent_process(
+                    event_store=self.event_store,
+                    intent=intent,
+                    work_fn=persist_before_completion,
+                    timeout=None,
+                    checkpoint_store=self.checkpoint_store,
+                    process_id=contract_id,
+                    cancel_key=contract_id,
+                )
+            except asyncio.CancelledError:
+                if committed:
+                    return committed[0]
+                if commit_started.is_set() and publication is not None:
+                    envelope = await _settle_committed_publication(publication)
+                    committed.append(envelope)
+                    return envelope
+                raise
 
     def fetch(self, contract_id: str) -> FetchedArtifact:
         """Explicitly fetch a disposable body by contract id."""
@@ -171,6 +200,24 @@ async def _event_already_persisted(store: Any, event_id: str, contract_id: str) 
         return False
     events = await replay("contract", contract_id)
     return any(getattr(event, "id", None) == event_id for event in events)
+
+
+def _consume_background_result(task: asyncio.Task[Any]) -> None:
+    """Retrieve an abandoned pre-commit worker result to avoid task warnings."""
+    if not task.cancelled():
+        task.exception()
+
+
+async def _settle_committed_publication(
+    publication: asyncio.Task[DisposableResultEnvelope],
+) -> DisposableResultEnvelope:
+    """Let an irreversible publication win despite repeated caller cancellation."""
+    while not publication.done():
+        try:
+            await asyncio.shield(publication)
+        except asyncio.CancelledError:
+            continue
+    return publication.result()
 
 
 @asynccontextmanager

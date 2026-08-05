@@ -33,17 +33,12 @@ from ouroboros.core.disposable_memory import (
 from ouroboros.core.errors import PersistenceError
 from ouroboros.core.file_lock import file_lock
 from ouroboros.persistence.artifact_io import read_fd_bounded as _read_fd_bounded
-from ouroboros.persistence.artifact_schema import (
-    MANIFEST_MAX_BYTES,
-    require_fields,
-)
-from ouroboros.persistence.artifact_schema import as_utc as _as_utc
-from ouroboros.persistence.artifact_schema import (
-    digest_from_ref as _digest_from_ref,
-)
-from ouroboros.persistence.artifact_schema import (
-    validate_contract_id as _validate_contract_id,
-)
+import ouroboros.persistence.artifact_schema as _artifact_schema
+from ouroboros.persistence.artifact_schema import MANIFEST_MAX_BYTES, require_fields
+
+_as_utc = _artifact_schema.as_utc
+_digest_from_ref = _artifact_schema.digest_from_ref
+_validate_contract_id = _artifact_schema.validate_contract_id
 
 DEFAULT_ARTIFACT_TTL = timedelta(days=90)
 DEFAULT_REPLAY_RETENTION = timedelta(days=90)
@@ -253,11 +248,14 @@ class ContentAddressedArtifactStore:
         retain_until: datetime | None = None,
         now: datetime | None = None,
         precommit_check: Callable[[], None] | None = None,
+        commit_check: Callable[[], None] | None = None,
     ) -> DisposableResultEnvelope:
         """Publish a body, then durably bind its small envelope to a contract.
 
         A contract may be retried idempotently with the same body.  Reusing it
         for different content is rejected; intentional reruns need a new id.
+        ``commit_check`` claims the point of no return immediately before the
+        first publication mutation while the exclusive store lock is held.
         """
         self.initialize()
         contract_id = _validate_contract_id(contract_id)
@@ -309,7 +307,9 @@ class ContentAddressedArtifactStore:
                 self._read_blob_locked(artifact_ref)
                 return _envelope_from_event(existing, contract_id=contract_id)
 
-            if precommit_check is not None:
+            if commit_check is not None:
+                commit_check()
+            elif precommit_check is not None:
                 precommit_check()
             self._write_blob_locked(digest, payload)
             manifest["active"] = bool(active)

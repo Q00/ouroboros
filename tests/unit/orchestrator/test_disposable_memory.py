@@ -19,6 +19,7 @@ from ouroboros.core.disposable_memory import (
     DisposableResultEnvelope,
 )
 from ouroboros.events.base import BaseEvent
+import ouroboros.orchestrator.agent_process as agent_process_module
 from ouroboros.orchestrator.agent_process import AgentProcessHandle
 from ouroboros.orchestrator.disposable_memory import DisposableMemory
 from ouroboros.persistence.artifact_store import (
@@ -418,6 +419,73 @@ async def test_store_contention_preserves_event_loop_timeout_and_cancellation(
     assert max(b - a for a, b in pairwise(heartbeat)) < 0.2
     with pytest.raises(ArtifactNotFoundError):
         service.fetch("01K1DISPOSABLEMEMORY00012")
+
+
+@pytest.mark.asyncio
+async def test_timeout_after_commit_gate_waits_for_durable_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(agent_process_module, "_CANCELLED_WORK_DRAIN_GRACE_SECONDS", 0.05)
+    service, _ = _service(tmp_path)
+    commit_entered = threading.Event()
+    release_commit = threading.Event()
+    original_write = service.artifact_store._write_blob_locked
+    child_calls = 0
+
+    def pause_after_commit_gate(digest: str, payload: bytes) -> None:
+        commit_entered.set()
+        if not release_commit.wait(2.0):
+            raise AssertionError("test did not release the durable commit")
+        original_write(digest, payload)
+
+    monkeypatch.setattr(service.artifact_store, "_write_blob_locked", pause_after_commit_gate)
+
+    async def child_work(_handle: AgentProcessHandle) -> dict[str, bool]:
+        nonlocal child_calls
+        child_calls += 1
+        return {"race": True}
+
+    contract_id = "01K1DISPOSABLEMEMORY00014"
+    first_task = asyncio.create_task(
+        service.run(
+            intent="commit-wins-timeout",
+            runtime_id="fixture-runtime",
+            work_fn=child_work,
+            contract_id=contract_id,
+            timeout=0.1,
+        )
+    )
+    retry_task: asyncio.Task[DisposableResultEnvelope] | None = None
+    try:
+        assert await asyncio.to_thread(commit_entered.wait, 1.0)
+        retry_task = asyncio.create_task(
+            service.run(
+                intent="commit-wins-timeout",
+                runtime_id="fixture-runtime",
+                work_fn=child_work,
+                contract_id=contract_id,
+            )
+        )
+        await asyncio.sleep(0.15)
+        first_was_pending = not first_task.done()
+        retry_was_pending = not retry_task.done()
+        calls_before_release = child_calls
+    finally:
+        release_commit.set()
+
+    assert retry_task is not None
+    first, retry = await asyncio.wait_for(
+        asyncio.gather(first_task, retry_task),
+        timeout=2.0,
+    )
+
+    assert first_was_pending
+    assert retry_was_pending
+    assert calls_before_release == 1
+    assert child_calls == 1
+    assert retry == first
+    assert service.fetch(contract_id).body == {"race": True}
 
 
 @pytest.mark.asyncio

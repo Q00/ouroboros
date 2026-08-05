@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -77,6 +78,40 @@ def test_put_uses_content_addressed_layout_and_deduplicates(tmp_path: Path) -> N
     assert path == store.root / first.artifact_ref[7:9] / f"{first.artifact_ref[7:]}.json"
     assert path.read_bytes() == canonical_artifact_bytes({"answer": 42})
     assert list(store.root.glob("[0-9a-f][0-9a-f]/*.json")) == [path]
+
+
+def test_commit_gate_immediately_precedes_first_publication_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _store(tmp_path)
+    sequence: list[str] = []
+    original_load = store._load_manifest_locked
+    original_write = store._write_blob_locked
+
+    def track_load(contract_id: str, *, missing_ok: bool) -> dict[str, Any]:
+        sequence.append("load")
+        return original_load(contract_id, missing_ok=missing_ok)
+
+    def track_write(digest: str, payload: bytes) -> None:
+        sequence.append("write")
+        original_write(digest, payload)
+
+    monkeypatch.setattr(store, "_load_manifest_locked", track_load)
+    monkeypatch.setattr(store, "_write_blob_locked", track_write)
+
+    store.put_for_contract(
+        contract_id="CONTRACT-GATE",
+        body={"durable": True},
+        runtime_id="test-runtime",
+        duration_ms=12,
+        events_emitted_count=3,
+        now=NOW,
+        precommit_check=lambda: sequence.append("precommit"),
+        commit_check=lambda: sequence.append("commit"),
+    )
+
+    assert sequence == ["precommit", "load", "commit", "write"]
 
 
 def test_fetch_is_explicit_and_verifies_content_hash(tmp_path: Path) -> None:
