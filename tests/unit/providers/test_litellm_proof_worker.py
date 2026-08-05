@@ -6,6 +6,10 @@ from types import SimpleNamespace
 
 import pytest
 
+pytest.importorskip("httpx")
+pytest.importorskip("litellm")
+pytest.importorskip("openai")
+
 from ouroboros.evolution.provider_usage import (
     capture_generation_provider_usage,
     tracked_complete,

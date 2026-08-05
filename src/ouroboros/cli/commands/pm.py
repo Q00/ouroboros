@@ -46,6 +46,7 @@ app = typer.Typer(
 )
 
 log = structlog.get_logger()
+_LITELLM_OPTIONAL_IMPORT_ROOTS = frozenset({"httpx", "litellm", "openai"})
 
 
 def _create_pm_litellm_adapter() -> Any:
@@ -58,19 +59,15 @@ def _create_pm_litellm_adapter() -> Any:
     try:
         from ouroboros.providers.litellm_adapter import LiteLLMAdapter
     except ModuleNotFoundError as exc:
-        if exc.name == "litellm":
-            msg = litellm_missing_dependency_message(
-                "PM interviews require the optional LiteLLM dependency."
-            )
-            raise RuntimeError(msg) from exc
-        raise
+        _raise_missing_litellm_dependency(exc)
 
     return LiteLLMAdapter()
 
 
 def _raise_missing_litellm_dependency(exc: ModuleNotFoundError) -> None:
     """Convert a missing optional LiteLLM import into install guidance."""
-    if exc.name == "litellm" or "litellm" in str(exc):
+    missing_root = (exc.name or "").split(".", 1)[0]
+    if missing_root in _LITELLM_OPTIONAL_IMPORT_ROOTS or "litellm" in str(exc):
         msg = litellm_missing_dependency_message(
             "PM interviews require the optional LiteLLM dependency."
         )
