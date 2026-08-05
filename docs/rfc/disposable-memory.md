@@ -32,7 +32,10 @@ The accepted C2-C5 contract is implemented by these production surfaces:
 - The shipped MCP composition routes terminal `ouroboros_submit_fanout_results`
   synthesis through that service. Complete fan-out bodies live only in the
   project-local artifact store; the tool response and EventStore receive the
-  bounded envelope, and same-fan-out retry returns it without synthesis.
+  bounded envelope. The disposable contract binds the fan-out record and
+  canonical validated terminal inputs: an identical retry returns the existing
+  envelope without synthesis, while changed child results allocate a distinct
+  contract and cannot receive a stale artifact.
 - `ouroboros artifacts fetch|replay|prune` exposes explicit inspection and
   dry-run-first GC. `prune --apply` writes a tombstone for every referencing
   contract before deleting a shared blob.

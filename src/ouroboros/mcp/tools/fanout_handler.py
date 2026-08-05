@@ -30,6 +30,27 @@ from ouroboros.orchestrator.disposable_memory import DisposableMemory
 
 log = structlog.get_logger(__name__)
 
+_FANOUT_SYNTHESIS_INPUT_SCHEMA = "ouroboros.mcp.fanout-synthesis-input.v1"
+_FANOUT_SYNTHESIS_RUNTIME_ID = "mcp:fanout-synthesis:v2"
+
+
+def _fanout_synthesis_contract_id(prepared: PreparedFanoutSynthesis) -> str:
+    """Bind disposable replay authority to the complete validated request."""
+    canonical_input = json.dumps(
+        {
+            "schema": _FANOUT_SYNTHESIS_INPUT_SCHEMA,
+            "fanout_id": prepared.fanout_id,
+            "record": prepared.record.to_dict(),
+            "provided": prepared.provided,
+            "completion_report": prepared.completion_report,
+        },
+        allow_nan=False,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return f"fanout:{hashlib.sha256(canonical_input).hexdigest()}"
+
 
 @dataclass
 class SubmitFanoutResultsHandler:
@@ -159,13 +180,13 @@ class SubmitFanoutResultsHandler:
         async def synthesize(_handle: AgentProcessHandle) -> dict[str, Any]:
             return synthesize_fanout_results(prepared)
 
-        contract_digest = hashlib.sha256(fanout_id.encode("utf-8")).hexdigest()
         try:
+            contract_id = _fanout_synthesis_contract_id(prepared)
             envelope = await self.disposable_memory.run(
                 intent=f"Synthesize terminal fan-out {fanout_id}",
-                runtime_id="mcp:fanout-synthesis:v1",
+                runtime_id=_FANOUT_SYNTHESIS_RUNTIME_ID,
                 work_fn=synthesize,
-                contract_id=f"fanout:{contract_digest}",
+                contract_id=contract_id,
             )
         except Exception as exc:
             log.error(

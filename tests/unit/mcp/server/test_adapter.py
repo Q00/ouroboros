@@ -2577,7 +2577,7 @@ def test_composition_root_builds_the_registry_at_its_final_directory(tmp_path) -
 async def test_production_fanout_returns_only_disposable_envelope(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A large terminal child body is artifact-only and retry does no synthesis."""
+    """Replay is input-exact while every terminal child body stays artifact-only."""
     from ouroboros.core.disposable_memory import DisposableResultEnvelope
     from ouroboros.mcp.server import adapter as adapter_module
     from ouroboros.mcp.tools import fanout_handler
@@ -2646,5 +2646,31 @@ async def test_production_fanout_returns_only_disposable_envelope(
         events = await event_store.replay("contract", envelope.contract_id)
         assert len(events) == 1
         assert marker not in json.dumps(events[0].data)
+
+        changed_marker = "changed-child-body:" + ("y" * 900_000)
+        changed = await handler.handle(
+            {
+                **arguments,
+                "results": [{"key": "code_context", "content": changed_marker}],
+            }
+        )
+        assert changed.is_ok
+        changed_result = changed.unwrap()
+        changed_envelope = DisposableResultEnvelope.model_validate(changed_result.meta)
+
+        assert changed_envelope.contract_id != envelope.contract_id
+        assert changed_envelope.artifact_ref != envelope.artifact_ref
+        assert synthesis_calls == 2
+        assert len(json.dumps(changed_result.meta).encode("utf-8")) < 4 * 1024
+        assert changed_marker not in changed_result.content[0].text
+        assert changed_marker not in json.dumps(changed_result.meta)
+
+        changed_fetched = handler.disposable_memory.fetch(changed_envelope.contract_id)
+        assert changed_marker in json.dumps(changed_fetched.body)
+        assert marker not in json.dumps(changed_fetched.body)
+        assert marker in json.dumps(handler.disposable_memory.fetch(envelope.contract_id).body)
+        changed_events = await event_store.replay("contract", changed_envelope.contract_id)
+        assert len(changed_events) == 1
+        assert changed_marker not in json.dumps(changed_events[0].data)
     finally:
         await event_store.close()
