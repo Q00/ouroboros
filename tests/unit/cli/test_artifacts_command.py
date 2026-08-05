@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from ouroboros.cli.commands.artifacts import parse_ttl
@@ -41,6 +42,11 @@ def test_artifacts_group_is_registered() -> None:
 def test_parse_ttl_uses_explicit_units() -> None:
     assert parse_ttl("30d") == timedelta(days=30)
     assert parse_ttl("12h") == timedelta(hours=12)
+
+
+def test_parse_ttl_rejects_values_larger_than_timedelta_supports() -> None:
+    with pytest.raises(ValueError, match="too large"):
+        parse_ttl(f"{10**100}w")
 
 
 def test_fetch_and_replay_are_explicit_read_only_commands(tmp_path: Path) -> None:

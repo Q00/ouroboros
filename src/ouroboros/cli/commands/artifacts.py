@@ -37,7 +37,10 @@ def parse_ttl(value: str) -> timedelta:
     if match is None:
         raise ValueError("ttl must be a non-negative duration such as 30d, 12h, or 90m")
     seconds = int(match.group("amount")) * _TTL_SECONDS[match.group("unit")]
-    return timedelta(seconds=seconds)
+    try:
+        return timedelta(seconds=seconds)
+    except OverflowError as exc:
+        raise ValueError("ttl is too large") from exc
 
 
 def _store(project_dir: Path) -> ContentAddressedArtifactStore:

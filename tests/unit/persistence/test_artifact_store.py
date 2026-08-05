@@ -352,6 +352,85 @@ def test_prune_revalidates_modeled_windows_junction_before_unlink(
     assert external_body.read_bytes() == canonical_artifact_bytes({"external": "must survive"})
 
 
+def test_prune_final_unlink_never_follows_digest_parent_swap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mutation inside final unlink cannot delete a same-named external body."""
+    if not artifact_store_module._supports_directory_fd_unlink():
+        pytest.skip("directory-relative unlink is unavailable on this platform")
+
+    store = _store(tmp_path)
+    envelope = _put(store, "CONTRACT1", {"external": "must survive final unlink"})
+    path = _blob_path(store, envelope.artifact_ref)
+    prefix = path.parent
+    (store.root / "contracts" / "CONTRACT1" / "events.json").unlink()
+    _age(path, days=100)
+
+    external = tmp_path / "unlink-external"
+    displaced = tmp_path / "unlink-displaced"
+    external.mkdir()
+    external_body = external / path.name
+    external_body.write_bytes(path.read_bytes())
+    original_unlink = os.unlink
+    original_rename = os.rename
+    swapped = False
+
+    def swap_parent_during_unlink(
+        target: object,
+        *,
+        dir_fd: int | None = None,
+    ) -> None:
+        nonlocal swapped
+        if dir_fd is not None and target == path.name and not swapped:
+            original_rename(prefix, displaced)
+            try:
+                prefix.symlink_to(external, target_is_directory=True)
+            except OSError:
+                pytest.skip("directory symlinks are not supported in this environment")
+            swapped = True
+        original_unlink(target, dir_fd=dir_fd)
+
+    monkeypatch.setattr(os, "unlink", swap_parent_during_unlink)
+
+    report = store.prune(ttl=timedelta(days=90), apply=True, now=NOW)
+
+    assert report.removed_refs == (envelope.artifact_ref,)
+    assert swapped
+    assert external_body.read_bytes() == canonical_artifact_bytes(
+        {"external": "must survive final unlink"}
+    )
+    assert list(displaced.iterdir()) == []
+
+
+def test_prune_rejects_same_size_body_replacement_after_planning(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _store(tmp_path)
+    envelope = _put(store, "CONTRACT1", {"planned": "identity"})
+    path = _blob_path(store, envelope.artifact_ref)
+    (store.root / "contracts" / "CONTRACT1" / "events.json").unlink()
+    _age(path, days=100)
+    original_plan = store._plan_prune_locked
+    replacement = b"x" * path.stat().st_size
+
+    def replace_body_after_plan(*args, **kwargs):  # noqa: ANN002, ANN003
+        candidates = original_plan(*args, **kwargs)
+        with path.open("rb") as original:
+            path.unlink()
+            path.write_bytes(replacement)
+            assert path.stat().st_ino != os.fstat(original.fileno()).st_ino
+        return candidates
+
+    monkeypatch.setattr(store, "_plan_prune_locked", replace_body_after_plan)
+
+    with pytest.raises(ArtifactIntegrityError, match="changed after prune planning"):
+        store.prune(ttl=timedelta(days=90), apply=True, now=NOW)
+
+    assert path.read_bytes() == replacement
+
+
 @pytest.mark.parametrize("publication", ["body", "manifest"])
 def test_publication_rejects_parent_swap_before_atomic_write(
     tmp_path: Path,

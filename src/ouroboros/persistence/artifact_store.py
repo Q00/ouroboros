@@ -46,6 +46,15 @@ _DIRECTORY_FD_PUBLICATION_SUPPORTED: Final[bool] = bool(
     and os.stat in os.supports_dir_fd
     and os.unlink in os.supports_dir_fd
 )
+_DIRECTORY_FD_UNLINK_SUPPORTED: Final[bool] = bool(
+    os.name != "nt"
+    and hasattr(os, "O_DIRECTORY")
+    and hasattr(os, "O_NOFOLLOW")
+    and os.open in os.supports_dir_fd
+    and os.stat in os.supports_dir_fd
+    and os.stat in os.supports_follow_symlinks
+    and os.unlink in os.supports_dir_fd
+)
 
 
 class ArtifactStoreError(PersistenceError):
@@ -91,6 +100,8 @@ class ArtifactPruneCandidate:
     artifact_ref: str
     path: Path
     size_bytes: int
+    device_id: int
+    inode: int
     age_seconds: float
     contract_ids: tuple[str, ...]
     reason: str
@@ -412,15 +423,12 @@ class ContentAddressedArtifactStore:
                     self._write_manifest_locked(contract_id, manifest)
 
                 try:
-                    # Revalidate after tombstones are durable and immediately
-                    # before both filesystem effects. A digest path may have
-                    # been replaced by a Windows junction after planning; the
-                    # store lock excludes cooperating writers, not hostile or
-                    # unrelated filesystem mutation.
-                    self._validate_blob_candidate_locked(candidate.path)
-                    candidate.path.stat()
-                    self._validate_blob_candidate_locked(candidate.path)
-                    candidate.path.unlink()
+                    # Tombstones become durable first. Deletion then pins the
+                    # digest parent and validates the planned body identity
+                    # through that same handle before a directory-relative
+                    # unlink. The store lock excludes cooperating writers, not
+                    # hostile or unrelated filesystem mutation.
+                    self._unlink_blob_candidate_locked(candidate)
                 except FileNotFoundError:
                     pass
                 removed_refs.append(candidate.artifact_ref)
@@ -452,8 +460,14 @@ class ContentAddressedArtifactStore:
         candidates: list[ArtifactPruneCandidate] = []
         for path in self._iter_blob_paths_locked():
             self._validate_blob_candidate_locked(path)
-            stat = path.stat()
-            age_seconds = max(0.0, now.timestamp() - stat.st_mtime)
+            status = path.lstat()
+            if not stat.S_ISREG(status.st_mode):
+                raise ArtifactIntegrityError(
+                    "Artifact body must be a regular file",
+                    operation="path_resolution",
+                    details={"path": str(path)},
+                )
+            age_seconds = max(0.0, now.timestamp() - status.st_mtime)
             if age_seconds < ttl.total_seconds():
                 continue
             digest = path.stem
@@ -480,7 +494,9 @@ class ContentAddressedArtifactStore:
                 ArtifactPruneCandidate(
                     artifact_ref=artifact_ref,
                     path=path,
-                    size_bytes=stat.st_size,
+                    size_bytes=status.st_size,
+                    device_id=status.st_dev,
+                    inode=status.st_ino,
                     age_seconds=age_seconds,
                     contract_ids=contract_ids,
                     reason=reason,
@@ -718,6 +734,20 @@ class ContentAddressedArtifactStore:
             )
         _require_contained(prefix, root=self.root, label="artifact digest prefix")
         _require_contained(path, root=self.root, label="artifact body")
+
+    def _unlink_blob_candidate_locked(self, candidate: ArtifactPruneCandidate) -> None:
+        """Delete exactly the planned local body without following parent swaps."""
+        self._validate_blob_candidate_locked(candidate.path)
+        if _supports_directory_fd_unlink():
+            _unlink_blob_candidate_at(candidate, root=self.root)
+            return
+        if os.name != "nt":
+            raise ArtifactIntegrityError(
+                "Artifact deletion requires safe directory-relative filesystem operations",
+                operation="path_resolution",
+                details={"path": str(candidate.path), "root": str(self.root)},
+            )
+        _unlink_blob_candidate_guarded(candidate, root=self.root)
 
     def _validate_project_boundary(self) -> None:
         project_root = self._project_root
@@ -1041,6 +1071,119 @@ def _validate_directory_binding(
             operation="path_resolution",
             details={"path": str(path.parent), "root": str(root)},
         )
+
+
+def _supports_directory_fd_unlink() -> bool:
+    """Return whether Python exposes the required unlinkat-style primitives."""
+    return _DIRECTORY_FD_UNLINK_SUPPORTED
+
+
+def _validate_prune_identity(
+    status: os.stat_result,
+    candidate: ArtifactPruneCandidate,
+    *,
+    root: Path,
+) -> None:
+    """Require one observed body to be the regular file selected at planning."""
+    if (
+        not stat.S_ISREG(status.st_mode)
+        or status.st_size != candidate.size_bytes
+        or status.st_dev != candidate.device_id
+        or status.st_ino != candidate.inode
+    ):
+        raise ArtifactIntegrityError(
+            "Artifact body changed after prune planning",
+            operation="path_resolution",
+            details={"path": str(candidate.path), "root": str(root)},
+        )
+
+
+def _unlink_blob_candidate_at(
+    candidate: ArtifactPruneCandidate,
+    *,
+    root: Path,
+) -> None:
+    """Unlink a planned body relative to its pinned, non-link parent."""
+    path = candidate.path
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    directory_flags |= getattr(os, "O_CLOEXEC", 0)
+    try:
+        directory_fd = os.open(path.parent, directory_flags)
+    except FileNotFoundError:
+        raise
+    except OSError as exc:
+        raise ArtifactIntegrityError(
+            "Artifact digest parent is not a safe local directory",
+            operation="path_resolution",
+            details={"path": str(path.parent), "root": str(root)},
+        ) from exc
+
+    body_fd = -1
+    try:
+        _validate_directory_binding(
+            directory_fd,
+            path,
+            root=root,
+            label="artifact body deletion",
+        )
+        entry = os.stat(path.name, dir_fd=directory_fd, follow_symlinks=False)
+        _validate_prune_identity(entry, candidate, root=root)
+
+        body_flags = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+        body_flags |= getattr(os, "O_NONBLOCK", 0)
+        body_fd = os.open(path.name, body_flags, dir_fd=directory_fd)
+        opened = os.fstat(body_fd)
+        _validate_prune_identity(opened, candidate, root=root)
+        if (opened.st_dev, opened.st_ino) != (entry.st_dev, entry.st_ino):
+            raise ArtifactIntegrityError(
+                "Artifact body changed while it was opened for deletion",
+                operation="path_resolution",
+                details={"path": str(path), "root": str(root)},
+            )
+        os.close(body_fd)
+        body_fd = -1
+
+        _validate_directory_binding(
+            directory_fd,
+            path,
+            root=root,
+            label="artifact body deletion",
+        )
+        current = os.stat(path.name, dir_fd=directory_fd, follow_symlinks=False)
+        _validate_prune_identity(current, candidate, root=root)
+        os.unlink(path.name, dir_fd=directory_fd)
+    except FileNotFoundError:
+        raise
+    except ArtifactIntegrityError:
+        raise
+    except OSError as exc:
+        raise ArtifactIntegrityError(
+            "Artifact body could not be deleted through its pinned parent",
+            operation="path_resolution",
+            details={"path": str(path), "root": str(root)},
+        ) from exc
+    finally:
+        if body_fd >= 0:
+            os.close(body_fd)
+        os.close(directory_fd)
+
+
+def _unlink_blob_candidate_guarded(
+    candidate: ArtifactPruneCandidate,
+    *,
+    root: Path,
+) -> None:
+    """Windows deletion guarded by a no-share-delete parent lease."""
+    path = candidate.path
+    with _windows_directory_lease(path.parent, root=root, label="artifact body deletion"):
+        _validate_publication_path(path, root=root, label="artifact body deletion")
+        with path.open("rb") as handle:
+            opened = os.fstat(handle.fileno())
+            _validate_prune_identity(opened, candidate, root=root)
+        current = path.stat(follow_symlinks=False)
+        _validate_prune_identity(current, candidate, root=root)
+        _validate_publication_path(path, root=root, label="artifact body deletion")
+        path.unlink()
 
 
 def _atomic_write_bytes(
