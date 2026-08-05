@@ -1536,6 +1536,9 @@ class TestSpecVerifier:
             r"aa|()(?(1)Impossible|)",
             r"x|()(?(1)a|)",
             r"(?:(a)|b)(?(1)a|b)",
+            r"(?:()|x)(?(1)a|)",
+            r"(?=()|x)(?(1)a|)",
+            r"()(?(1)()|)(?(2)a|)",
         ],
         ids=[
             "unparticipating-group-runs-the-other-arm",
@@ -1558,6 +1561,9 @@ class TestSpecVerifier:
             "capture-and-conditional-in-the-second-branch",
             "conditional-in-a-branch-beside-a-consuming-one",
             "conditional-after-a-branch-that-captures-either-way",
+            "conditional-after-a-branch-only-one-of-which-can-be-empty",
+            "conditional-after-such-a-branch-inside-a-lookahead",
+            "capture-in-the-arm-the-conditional-selects",
         ],
     )
     def test_a_conditional_is_read_from_whether_its_group_could_have_taken_part(
@@ -1597,7 +1603,14 @@ class TestSpecVerifier:
         stand or fall together. Reading every branch as a path that may have
         been skipped made `()(?(1)Impossible|)` — read correctly on its own —
         unreadable the moment an alternative was written beside it, so the last
-        four are the same conditionals with one added.
+        seven are the same conditionals with one added.
+
+        Nor is it always a choice. On a subject with nothing in it nothing can
+        consume anything, so a branch that cannot match nothing cannot run at
+        all, and when that leaves a single branch standing the alternation
+        decides nothing. The same holds one step further in: once participation
+        settles which arm of a conditional runs, a capture written in that arm
+        is as much on the path as the conditional itself.
         """
         project = self._create_project({"marker.txt": "aa\n"})
         assertion = SpecAssertion(
@@ -1689,8 +1702,16 @@ class TestSpecVerifier:
             r"(?!(a)?(?(1)|c))",
             r"(?!(a)?(?(1)|x)b)",
             "(?!" + "(" * 45 + "x" + ")" * 45 + ")",
+            r"(?!()(?(1)a|))",
+            r"(?!(?!(a?)(?(1)|a)))",
         ],
-        ids=["negated-conditional", "negated-conditional-with-tail", "negated-past-depth-limit"],
+        ids=[
+            "negated-conditional",
+            "negated-conditional-with-tail",
+            "negated-past-depth-limit",
+            "negated-conditional-on-a-capture-beside-it",
+            "twice-negated-conditional-on-a-nullable-capture",
+        ],
     )
     def test_doubt_inside_a_negation_does_not_become_confidence_outside_it(
         self, tier: VerificationTier, pattern: str
@@ -1710,6 +1731,14 @@ class TestSpecVerifier:
         which one runs depends on a capture this does not track, the third
         because nesting past `_MAX_PARSE_DEPTH` guessed yes about the inside.
         The answer is a third value — unknown — that negation leaves unknown.
+
+        The last two are not doubt but the opposite mistake: a *confident* wrong
+        answer about the inside. Declaring the body's captures absent before the
+        body had been read made `(?!()(?(1)a|))` take its empty arm, so the
+        negation of a body that cannot match nothing was read as a pattern that
+        discriminates — and it matches every file. What a failed body leaves
+        behind is `False` to the outside; while it is being attempted, a
+        conditional written beside the capture reads it like any other.
         """
         project = self._create_project({"marker.txt": "hello\n"})
         assertion = SpecAssertion(

@@ -265,11 +265,23 @@ def _can_match_nothing(
             # taken part, so `(a)?(?(1)|b)` certainly runs `b` and certainly is
             # not empty. Only when participation itself is undecidable does the
             # conditional fall back on the arms having to agree.
+            #
+            # Which arm runs is only undecidable while participation is. Once
+            # the group settles it, the selected arm is walked on the path the
+            # conditional itself is on and the other one certainly does not run,
+            # so a capture in the selected arm is as much on the path as the
+            # conditional is — reading both arms as skippable left every such
+            # capture unknown and refused the conditionals reading them.
             reference, yes_arm, no_arm = argument
             took_part = groups[reference].took_part if reference in groups else None
-            arm_path = _skippable(on_path)
-            yes = _can_match_nothing(yes_arm, depth + 1, groups, arm_path)
-            no = True if no_arm is None else _can_match_nothing(no_arm, depth + 1, groups, arm_path)
+            if took_part is True:
+                yes_path, no_path = on_path, False
+            elif took_part is False:
+                yes_path, no_path = False, on_path
+            else:
+                yes_path = no_path = _skippable(on_path)
+            yes = _can_match_nothing(yes_arm, depth + 1, groups, yes_path)
+            no = True if no_arm is None else _can_match_nothing(no_arm, depth + 1, groups, no_path)
             if took_part is True:
                 answers.append(yes)
             elif took_part is False:
@@ -296,13 +308,33 @@ def _can_match_nothing(
             # recorded merges back with participation weakened to "may have gone
             # either way", which is what the alternation makes it for anything
             # reading that capture from outside.
-            branch_answers: list[bool | None] = []
+            #
+            # Except when it is not a choice. On a subject with nothing in it
+            # nothing can consume anything, so a branch that cannot match
+            # nothing cannot run at all, and when that leaves a single branch
+            # standing the alternation decides nothing: its captures took part
+            # exactly as much as the alternation itself did. `(?:()|x)(?(1)a|)`
+            # is that shape, and weakening it refused a pattern that plainly
+            # discriminates.
+            walked: list[tuple[bool | None, dict[int, _Group]]] = []
             for branch in argument[1]:
                 local = dict(groups)
-                branch_answers.append(_can_match_nothing(branch, depth + 1, local, on_path))
+                walked.append((_can_match_nothing(branch, depth + 1, local, on_path), local))
+            branch_answers = [answer for answer, _ in walked]
+            settled = branch_answers.count(True) == 1 and all(
+                answer is not None for answer in branch_answers
+            )
+            for answer, local in walked:
                 for number, group in local.items():
-                    if number not in groups:
-                        groups[number] = _Group(group.empty, _skippable(group.took_part))
+                    if number in groups:
+                        continue
+                    if answer is False:
+                        took = False
+                    elif settled:
+                        took = group.took_part
+                    else:
+                        took = _skippable(group.took_part)
+                    groups[number] = _Group(group.empty, took)
             answers.append(_any_empty(branch_answers))
         elif name == "ASSERT":
             # On a subject with nothing in it there is nothing to either side, so
@@ -321,7 +353,21 @@ def _can_match_nothing(
             # subpattern that fails leaves nothing captured behind it. So this is
             # the one path the match certainly did not walk, and every capture
             # inside it certainly did not take part.
-            inner = _can_match_nothing(argument[1], depth + 1, groups, False)
+            #
+            # From outside. The body is still attempted, and while it is being
+            # attempted its captures are as real as any other — a conditional
+            # written inside the body reads the group beside it exactly as it
+            # would anywhere else. Declaring them absent before the body had
+            # been read made `(?!()(?(1)a|))` take its empty arm, so a pattern
+            # that matches every file was admitted as evidence and published as
+            # a formal PASS, which is the defect this file exists to close. So
+            # the body is walked on the path it inherits, over its own copy of
+            # the table, and only what escapes to the outside is `False`.
+            local_to_body = dict(groups)
+            inner = _can_match_nothing(argument[1], depth + 1, local_to_body, on_path)
+            for number, group in local_to_body.items():
+                if number not in groups:
+                    groups[number] = _Group(group.empty, False)
             answers.append(None if inner is None else not inner)
         else:
             answers.append(None)

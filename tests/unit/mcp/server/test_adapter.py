@@ -892,6 +892,8 @@ Parallel Execution Verification Report
             ("aa\n", "marker.txt MUST contain a doubled letter", r"aa(?!)|aa"),
             ("aa\n", "marker.txt MUST contain a doubled letter", r"()(?(1)Impossible|)|aa"),
             ("aa\n", "marker.txt MUST contain a doubled letter", r"aa|()(?(1)Impossible|)"),
+            ("aa\n", "marker.txt MUST contain a doubled letter", r"(?:()|x)(?(1)a|)"),
+            ("aa\n", "marker.txt MUST contain a doubled letter", r"()(?(1)()|)(?(2)a|)"),
         ],
         ids=[
             "politeness-frame",
@@ -914,6 +916,8 @@ Parallel Execution Verification Report
             "branch-that-can-never-be-taken-after-a-literal",
             "conditional-in-the-first-branch",
             "conditional-in-the-second-branch",
+            "conditional-after-a-branch-only-one-of-which-can-be-empty",
+            "capture-in-the-arm-the-conditional-selects",
         ],
     )
     def test_a_satisfied_criterion_is_not_converted_into_a_formal_failure(
@@ -997,6 +1001,8 @@ Parallel Execution Verification Report
             "(?!" + "(" * 45 + "x" + ")" * 45 + ")",
             r"(?!\b)",
             r"(?<!\b)",
+            r"(?!()(?(1)a|))",
+            r"(?!(?!(a?)(?(1)|a)))",
         ],
         ids=[
             "negated-conditional",
@@ -1004,6 +1010,8 @@ Parallel Execution Verification Report
             "negated-past-depth-limit",
             "negated-boundary",
             "negated-lookbehind-boundary",
+            "negated-conditional-on-a-capture-beside-it",
+            "twice-negated-conditional-on-a-nullable-capture",
         ],
     )
     def test_a_negated_guess_cannot_be_approved_through_the_adapter(
@@ -1018,6 +1026,12 @@ Parallel Execution Verification Report
         confidence that the pattern discriminates. Published here as
         `final_approved=True`, `score=1.0`, `run_verdict="PASS"` for an AC the
         file does not satisfy.
+
+        The last two arrive by a narrower road: the negation was also declaring
+        the captures written inside its own body absent *while that body was
+        still being read*, so a conditional standing beside such a capture took
+        the arm the runtime never takes. The body is an attempt like any other,
+        and what it captured is real to everything inside it.
         """
         (tmp_path / "marker.txt").write_text("hello\n")
         ac_text = "marker.txt MUST declare a CameraProvider"
