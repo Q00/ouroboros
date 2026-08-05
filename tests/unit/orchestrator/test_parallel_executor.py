@@ -36,6 +36,8 @@ from ouroboros.orchestrator.adapter import (
 )
 from ouroboros.orchestrator.adaptive_concurrency import (
     MAX_ADAPTIVE_CONCURRENCY_COOLDOWN_SECONDS,
+    AdaptiveConcurrencyController,
+    observe_provider_messages,
 )
 from ouroboros.orchestrator.coordinator import CoordinatorReview, FileConflict, LevelCoordinator
 from ouroboros.orchestrator.decomposition_limits import MAX_DECOMPOSITION_DEPTH
@@ -6820,22 +6822,33 @@ class TestParallelACExecutor:
         async def fake_execute_single_ac(**kwargs: Any) -> ACExecutionResult:
             nonlocal active_count, max_active_count
             ac_index = int(kwargs["ac_index"])
-            active_count += 1
-            max_active_count = max(max_active_count, active_count)
-            await asyncio.sleep(0)
-            await asyncio.sleep(0)
-            active_count -= 1
+            messages = (
+                AgentMessage(
+                    type="result",
+                    content="done",
+                    data={"subtype": "success"},
+                ),
+            )
+            async with executor._adaptive_concurrency.slot() as permit_epoch:
+                active_count += 1
+                max_active_count = max(max_active_count, active_count)
+                try:
+                    await asyncio.sleep(0)
+                    await asyncio.sleep(0)
+                    await observe_provider_messages(
+                        executor._adaptive_concurrency,
+                        messages,
+                        permit_epoch,
+                        ("sess_adaptive_growth", "exec_adaptive_growth", ac_index),
+                        provider_completed=True,
+                    )
+                finally:
+                    active_count -= 1
             return ACExecutionResult(
                 ac_index=ac_index,
                 ac_content=str(kwargs["ac_content"]),
                 success=True,
-                messages=(
-                    AgentMessage(
-                        type="result",
-                        content="done",
-                        data={"subtype": "success"},
-                    ),
-                ),
+                messages=messages,
                 final_message="done",
             )
 
@@ -6886,7 +6899,18 @@ class TestParallelACExecutor:
             final_message="provider rejected concurrency",
         )
 
-        with patch.object(executor, "_execute_single_ac", AsyncMock(return_value=completed)):
+        async def fake_execute_single_ac(**_kwargs: Any) -> ACExecutionResult:
+            async with executor._adaptive_concurrency.slot() as permit_epoch:
+                await observe_provider_messages(
+                    executor._adaptive_concurrency,
+                    completed.messages,
+                    permit_epoch,
+                    ("sess_hostile_cooldown", "exec_hostile_cooldown", 0),
+                    provider_completed=True,
+                )
+            return completed
+
+        with patch.object(executor, "_execute_single_ac", side_effect=fake_execute_single_ac):
             results = await executor._execute_ac_batch(
                 seed=seed,
                 batch_indices=[0],
@@ -6902,6 +6926,109 @@ class TestParallelACExecutor:
         assert results == [completed]
         cooldown = executor._adaptive_concurrency.snapshot().cooldown_remaining_seconds
         assert 0 < cooldown <= MAX_ADAPTIVE_CONCURRENCY_COOLDOWN_SECONDS
+
+    @pytest.mark.asyncio
+    async def test_decomposed_child_pressure_delays_next_provider_entrance(self) -> None:
+        """A child 429 must reach AIMD before its sequential sibling dispatches."""
+
+        clock = {"now": 100.0}
+        sleeps: list[float] = []
+        provider_entrances: list[float] = []
+
+        async def fake_sleep(seconds: float) -> None:
+            sleeps.append(seconds)
+            clock["now"] += seconds
+
+        class _SequencedRuntime:
+            def __init__(self) -> None:
+                self.calls = 0
+                self._runtime_handle_backend = "opencode"
+                self._cwd = "/tmp/project"
+                self._permission_mode = "acceptEdits"
+
+            @property
+            def runtime_backend(self) -> str:
+                return self._runtime_handle_backend
+
+            @property
+            def working_directory(self) -> str | None:
+                return self._cwd
+
+            @property
+            def permission_mode(self) -> str | None:
+                return self._permission_mode
+
+            async def execute_task(
+                self,
+                prompt: str,
+                tools: list[str] | None = None,
+                system_prompt: str | None = None,
+                resume_handle: RuntimeHandle | None = None,
+                resume_session_id: str | None = None,
+                **_kwargs: Any,
+            ):
+                del prompt, tools, system_prompt, resume_session_id
+                self.calls += 1
+                provider_entrances.append(clock["now"])
+                if self.calls == 1:
+                    yield AgentMessage(
+                        type="result",
+                        content="Too many concurrent requests",
+                        data={
+                            "subtype": "error",
+                            "http_status": 429,
+                            "headers": {"Retry-After": "2"},
+                        },
+                        resume_handle=resume_handle,
+                    )
+                    return
+                yield AgentMessage(
+                    type="result",
+                    content="[TASK_COMPLETE]",
+                    data={"subtype": "success"},
+                    resume_handle=resume_handle,
+                )
+
+        event_store, _appended_events = _make_replaying_event_store()
+        executor = ProcessLocalTestExecutor(
+            adapter=_SequencedRuntime(),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=True,
+            max_concurrent=1,
+            cross_harness_redispatch=False,
+        )
+        # The policy is identical to the constructor-bound authority; only the
+        # deterministic clock/sleep seams differ for this provider-boundary test.
+        executor._adaptive_concurrency = AdaptiveConcurrencyController(
+            initial_limit=1,
+            clock=lambda: clock["now"],
+            sleep=fake_sleep,
+        )
+        executor._emit_subtask_event = AsyncMock()
+        executor._maybe_recover_with_bounce_decomposition = AsyncMock(return_value=(None, None))
+        root = ExecutionNodeIdentity.root(
+            execution_context_id="exec_child_pressure",
+            ac_index=0,
+        )
+        executor._publish_event_owned_decomposition_decision(
+            _trusted_preflight_split(root.node_id, "First child", "Second child")
+        )
+
+        result = await executor._execute_single_ac(
+            ac_index=0,
+            ac_content="Composite AC",
+            session_id="sess_child_pressure",
+            tools=["Read"],
+            tool_catalog=None,
+            system_prompt="system",
+            seed_goal="Respect provider cooldowns",
+            execution_id="exec_child_pressure",
+        )
+
+        assert len(result.sub_results) == 2
+        assert provider_entrances == [100.0, 102.0]
+        assert sleeps == [2.0]
 
     @pytest.mark.asyncio
     async def test_atomic_ac_uses_ac_scoped_runtime_handle(self) -> None:
@@ -12818,6 +12945,73 @@ class TestParallelACExecutor:
         assert result.reasons == ("decomposition_timeout",)
         assert result.trustworthy is False
         assert runtime.cancelled is True
+
+    @pytest.mark.asyncio
+    async def test_decomposition_policy_pressure_delays_next_policy_call(self) -> None:
+        """Policy streams must not discard pressure before another policy entrance."""
+
+        clock = {"now": 50.0}
+        sleeps: list[float] = []
+        provider_entrances: list[float] = []
+
+        async def fake_sleep(seconds: float) -> None:
+            sleeps.append(seconds)
+            clock["now"] += seconds
+
+        class _PolicyRuntime:
+            runtime_backend = "opencode"
+            working_directory = "/tmp/project"
+            permission_mode = "acceptEdits"
+
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def execute_task(self, **_kwargs: Any):
+                self.calls += 1
+                provider_entrances.append(clock["now"])
+                if self.calls == 1:
+                    yield AgentMessage(
+                        type="result",
+                        content="Too many concurrent requests",
+                        data={
+                            "subtype": "error",
+                            "http_status": 429,
+                            "headers": {"Retry-After": "3"},
+                        },
+                    )
+                    return
+                yield AgentMessage(
+                    type="result",
+                    content="ATOMIC",
+                    data={"subtype": "success"},
+                )
+
+        executor = ParallelACExecutor(
+            adapter=_PolicyRuntime(),
+            event_store=AsyncMock(),
+            console=MagicMock(),
+            enable_decomposition=True,
+            max_concurrent=1,
+        )
+        executor._adaptive_concurrency = AdaptiveConcurrencyController(
+            initial_limit=1,
+            clock=lambda: clock["now"],
+            sleep=fake_sleep,
+        )
+
+        first = await executor._dispatch_decomposition_prompt(
+            prompt="classify first",
+            system_prompt="system",
+        )
+        second = await executor._dispatch_decomposition_prompt(
+            prompt="classify second",
+            system_prompt="system",
+        )
+
+        assert first == "Too many concurrent requests"
+        assert second == "ATOMIC"
+        assert provider_entrances == [50.0, 53.0]
+        assert sleeps == [3.0]
 
     @pytest.mark.asyncio
     async def test_decomposed_ac_inlines_sub_ac_dispatch_into_single_ac(self) -> None:

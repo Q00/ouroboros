@@ -505,7 +505,8 @@ def test_v9_inputs_freeze_context_profile_parent_lineage_pause_and_runtime_capab
     assert inputs["schema_version"] == 2
     assert semantics["version"] == 4
     assert semantics["adaptive_concurrency_policy"] == {
-        "algorithm": "aimd/v1",
+        "algorithm": "aimd/v2",
+        "admission_scope": "provider_call",
         "initial_limit": semantics["effective_parallel_workers"],
         "max_limit": semantics["max_parallel_workers"],
         "successes_before_increase": 3,
@@ -697,6 +698,7 @@ def test_resume_fails_closed_for_pre_adaptive_v3_semantics() -> None:
     ("field", "value"),
     [
         ("algorithm", "aimd/v0"),
+        ("admission_scope", "ac_root"),
         ("initial_limit", 99),
         ("max_limit", 99),
         ("successes_before_increase", 4),

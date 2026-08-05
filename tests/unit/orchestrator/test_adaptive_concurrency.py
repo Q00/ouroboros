@@ -328,7 +328,8 @@ def test_static_policy_excludes_live_window_state() -> None:
     controller = AdaptiveConcurrencyController(initial_limit=1, max_limit=4)
 
     assert controller.policy == {
-        "algorithm": "aimd/v1",
+        "algorithm": "aimd/v2",
+        "admission_scope": "provider_call",
         "initial_limit": 1,
         "max_limit": 4,
         "successes_before_increase": 3,

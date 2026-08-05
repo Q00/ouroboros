@@ -70,7 +70,8 @@ _CONCURRENCY_PRESSURE_PATTERN = re.compile(
 
 log = get_logger(__name__)
 
-ADAPTIVE_CONCURRENCY_ALGORITHM = "aimd/v1"
+ADAPTIVE_CONCURRENCY_ALGORITHM = "aimd/v2"
+ADAPTIVE_CONCURRENCY_ADMISSION_SCOPE = "provider_call"
 ADAPTIVE_CONCURRENCY_SUCCESSES_BEFORE_INCREASE = 3
 ADAPTIVE_CONCURRENCY_DECREASE_RATIO = "1/2"
 MAX_ADAPTIVE_CONCURRENCY_COOLDOWN_SECONDS = 24 * 60 * 60
@@ -239,6 +240,7 @@ def adaptive_concurrency_policy(
     """Return the complete static policy that changes provider admission effects."""
     return {
         "algorithm": ADAPTIVE_CONCURRENCY_ALGORITHM,
+        "admission_scope": ADAPTIVE_CONCURRENCY_ADMISSION_SCOPE,
         "initial_limit": initial_limit,
         "max_limit": max_limit,
         "successes_before_increase": successes_before_increase,
@@ -396,17 +398,44 @@ async def observe_ac_result(
 ) -> AdaptiveConcurrencySnapshot:
     """Feed one possibly decomposed AC result into the controller and log changes."""
 
-    session_id, execution_id, ac_index = log_context
-    observation = classify_backend_pressure(
+    return await observe_provider_messages(
+        controller,
         _capacity_feedback_messages(result),
+        permit_epoch,
+        log_context,
         provider_completed=True,
+    )
+
+
+async def observe_provider_messages(
+    controller: AdaptiveConcurrencyController,
+    messages: Iterable[AgentMessage],
+    permit_epoch: int,
+    log_context: tuple[str, str, int] | None,
+    *,
+    provider_completed: bool,
+    on_observation: Callable[[ConcurrencyObservation], None] | None = None,
+) -> AdaptiveConcurrencySnapshot:
+    """Feed one exact provider call into the controller and log changes.
+
+    Admission and feedback belong to provider calls, not composite AC roots.  A
+    decomposed root can issue several sequential calls, and each completed call
+    must update cooldown/window state before its next child is admitted.
+    """
+
+    observation = classify_backend_pressure(
+        messages,
+        provider_completed=provider_completed,
     )
     before = controller.snapshot()
     after = await controller.observe(observation, permit_epoch=permit_epoch)
+    if on_observation is not None:
+        on_observation(observation)
     if before.current_limit != after.current_limit or observation.kind in {
         BackendPressureKind.CONCURRENCY_REJECTION,
         BackendPressureKind.QUOTA_EXHAUSTION,
     }:
+        session_id, execution_id, ac_index = log_context or (None, None, None)
         log.info(
             "parallel_executor.adaptive_concurrency_observed",
             session_id=session_id,
@@ -425,6 +454,7 @@ async def observe_ac_result(
 
 __all__ = [
     "ADAPTIVE_CONCURRENCY_ALGORITHM",
+    "ADAPTIVE_CONCURRENCY_ADMISSION_SCOPE",
     "ADAPTIVE_CONCURRENCY_DECREASE_RATIO",
     "ADAPTIVE_CONCURRENCY_SUCCESSES_BEFORE_INCREASE",
     "AdaptiveConcurrencyController",
@@ -436,4 +466,5 @@ __all__ = [
     "classify_backend_pressure",
     "has_usage_limit_pause",
     "observe_ac_result",
+    "observe_provider_messages",
 ]

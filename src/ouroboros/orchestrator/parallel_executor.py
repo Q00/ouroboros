@@ -30,6 +30,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable, Mapping
 import contextlib
+from contextvars import ContextVar
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -400,6 +401,13 @@ from ouroboros.orchestrator.verifier import (
 
 _PARALLEL_PAUSE_REPLAY_PAGE_SIZE = 64
 _has_usage_limit_pause = adaptive_concurrency.has_usage_limit_pause
+_PROVIDER_OBSERVATION_SINK: ContextVar[
+    Callable[[adaptive_concurrency.ConcurrencyObservation], None] | None
+] = ContextVar("ouroboros_provider_observation_sink", default=None)
+_PROVIDER_ENTRY_SINK: ContextVar[Callable[[], None] | None] = ContextVar(
+    "ouroboros_provider_entry_sink",
+    default=None,
+)
 _PARALLEL_ROUTE_OBSERVATION_KEYS = frozenset(
     {
         "schema_version",
@@ -3783,105 +3791,113 @@ class ParallelACExecutor:
         )
 
         async def _run_ac(idx: int, ac_idx: int) -> None:
+            provider_effect_entered = False
+
+            def _mark_provider_entry() -> None:
+                nonlocal provider_effect_entered
+                provider_effect_entered = True
+
+            def _observe_batch_provider(
+                observation: adaptive_concurrency.ConcurrencyObservation,
+            ) -> None:
+                if (
+                    not cancel_on_recoverable_pause
+                    or observation.kind
+                    is not adaptive_concurrency.BackendPressureKind.QUOTA_EXHAUSTION
+                ):
+                    return
+                # Close waiting sibling entrances before this provider permit
+                # is released.  The result owner remains live long enough to
+                # persist the exact durable pause below.
+                recoverable_pause_detected.set()
+                for sibling_idx, scope in tuple(sibling_cancel_scopes.items()):
+                    if sibling_idx != idx:
+                        scope.cancel()
+
+            observation_sink_token = _PROVIDER_OBSERVATION_SINK.set(
+                _observe_batch_provider if cancel_on_recoverable_pause else None
+            )
+            entry_sink_token = _PROVIDER_ENTRY_SINK.set(_mark_provider_entry)
             with anyio.CancelScope() as sibling_scope:
                 sibling_cancel_scopes[idx] = sibling_scope
-                execution_authority_entered = False
                 try:
                     if cancel_on_recoverable_pause and recoverable_pause_detected.is_set():
                         batch_results[idx] = _BatchInterruptedForRecoverablePause(
                             "batch stopped at a recoverable provider quota boundary"
                         )
                         return
-                    async with self._adaptive_concurrency.slot() as permit_epoch:
-                        # Tasks are created together but may wait behind the
-                        # adaptive provider window. Re-check under the permit so a
-                        # sibling that already found a shared quota window can
-                        # close this provider entrance before its first effect.
-                        if cancel_on_recoverable_pause and recoverable_pause_detected.is_set():
-                            batch_results[idx] = _BatchInterruptedForRecoverablePause(
-                                "batch stopped at a recoverable provider quota boundary"
-                            )
-                            return
-                        ac_criterion = seed.acceptance_criteria[ac_idx]
-                        resume_state = (route_resume_states or {}).get(ac_idx)
-                        expected_route = (
-                            resume_state.expected_route_candidate
+                    # Composite AC roots do not own provider capacity.  Their
+                    # atomic/decomposition provider streams acquire the adaptive
+                    # slot at the actual external-effect boundary below.
+                    ac_criterion = seed.acceptance_criteria[ac_idx]
+                    resume_state = (route_resume_states or {}).get(ac_idx)
+                    expected_route = (
+                        resume_state.expected_route_candidate
+                        if resume_state is not None
+                        else (route_overrides or {}).get(ac_idx)
+                    )
+                    route_id_override = (
+                        resume_state.route_id_override
+                        if resume_state is not None
+                        else expected_route.route_id
+                        if expected_route is not None
+                        else None
+                    )
+                    attempt_siblings = (
+                        list(resume_state.sibling_acs) if resume_state is not None else sibling_acs
+                    )
+                    result = await _invoke_execution_authority_entry(
+                        self,
+                        _FOUNDATION_A_ENTRY_EXECUTE_SINGLE_AC,
+                        ac_index=ac_idx,
+                        ac_content=ac_text(ac_criterion),
+                        session_id=session_id,
+                        tools=tools,
+                        tool_catalog=tool_catalog,
+                        system_prompt=system_prompt,
+                        seed_goal=seed.goal,
+                        depth=0,
+                        execution_id=execution_id,
+                        level_contexts=level_contexts,
+                        sibling_acs=attempt_siblings,
+                        retry_attempt=ac_retry_attempts[ac_idx],
+                        execution_counters=execution_counters,
+                        retry_prompt_extra=(
+                            resume_state.retry_prompt_extra
                             if resume_state is not None
-                            else (route_overrides or {}).get(ac_idx)
-                        )
-                        route_id_override = (
-                            resume_state.route_id_override
-                            if resume_state is not None
-                            else expected_route.route_id
-                            if expected_route is not None
+                            else (retry_prompts or {}).get(ac_idx, "")
+                        ),
+                        route_id_override=route_id_override,
+                        expected_route_candidate=expected_route,
+                        force_legacy_routing=force_legacy_routing,
+                        same_runtime_budget_exhausted=same_runtime_budget_exhausted,
+                        expected_resume_dispatch_id=(
+                            resume_state.dispatch_id if resume_state is not None else None
+                        ),
+                        expected_resume_capsule_fingerprint=(
+                            resume_state.capsule_fingerprint if resume_state is not None else None
+                        ),
+                        expected_resume_runtime_scope_id=(
+                            resume_state.runtime_scope_id if resume_state is not None else None
+                        ),
+                        ac_spec=(
+                            ac_criterion
+                            if isinstance(ac_criterion, AcceptanceCriterionSpec)
                             else None
-                        )
-                        attempt_siblings = (
-                            list(resume_state.sibling_acs)
-                            if resume_state is not None
-                            else sibling_acs
-                        )
-                        execution_authority_entered = True
-                        result = await _invoke_execution_authority_entry(
-                            self,
-                            _FOUNDATION_A_ENTRY_EXECUTE_SINGLE_AC,
-                            ac_index=ac_idx,
-                            ac_content=ac_text(ac_criterion),
-                            session_id=session_id,
-                            tools=tools,
-                            tool_catalog=tool_catalog,
-                            system_prompt=system_prompt,
-                            seed_goal=seed.goal,
-                            depth=0,
-                            execution_id=execution_id,
-                            level_contexts=level_contexts,
-                            sibling_acs=attempt_siblings,
-                            retry_attempt=ac_retry_attempts[ac_idx],
-                            execution_counters=execution_counters,
-                            retry_prompt_extra=(
-                                resume_state.retry_prompt_extra
-                                if resume_state is not None
-                                else (retry_prompts or {}).get(ac_idx, "")
-                            ),
-                            route_id_override=route_id_override,
-                            expected_route_candidate=expected_route,
-                            force_legacy_routing=force_legacy_routing,
-                            same_runtime_budget_exhausted=same_runtime_budget_exhausted,
-                            expected_resume_dispatch_id=(
-                                resume_state.dispatch_id if resume_state is not None else None
-                            ),
-                            expected_resume_capsule_fingerprint=(
-                                resume_state.capsule_fingerprint
-                                if resume_state is not None
-                                else None
-                            ),
-                            expected_resume_runtime_scope_id=(
-                                resume_state.runtime_scope_id if resume_state is not None else None
-                            ),
-                            ac_spec=(
-                                ac_criterion
-                                if isinstance(ac_criterion, AcceptanceCriterionSpec)
-                                else None
-                            ),
-                            investment_spec=(
-                                ac_criterion.investment
-                                if isinstance(ac_criterion, AcceptanceCriterionSpec)
-                                else None
-                            ),
-                        )
-                        await adaptive_concurrency.observe_ac_result(
-                            self._adaptive_concurrency,
-                            result,
-                            permit_epoch,
-                            (session_id, execution_id, ac_idx),
-                        )
-                        batch_results[idx] = result
-                        if cancel_on_recoverable_pause and _has_usage_limit_pause(result):
-                            # Quota belongs to the batch; cancel running/waiting siblings.
-                            recoverable_pause_detected.set()
-                            for sibling_idx, scope in tuple(sibling_cancel_scopes.items()):
-                                if sibling_idx != idx:
-                                    scope.cancel()
+                        ),
+                        investment_spec=(
+                            ac_criterion.investment
+                            if isinstance(ac_criterion, AcceptanceCriterionSpec)
+                            else None
+                        ),
+                    )
+                    batch_results[idx] = result
+                    if cancel_on_recoverable_pause and _has_usage_limit_pause(result):
+                        # Quota belongs to the batch; cancel running/waiting siblings.
+                        recoverable_pause_detected.set()
+                        for sibling_idx, scope in tuple(sibling_cancel_scopes.items()):
+                            if sibling_idx != idx:
+                                scope.cancel()
                 except BaseException as e:
                     if isinstance(e, anyio.get_cancelled_exc_class()):
                         if (
@@ -3891,7 +3907,7 @@ class ParallelACExecutor:
                         ):
                             marker_type = (
                                 _BatchEnteredAtRecoverablePause
-                                if execution_authority_entered
+                                if provider_effect_entered
                                 else _BatchInterruptedForRecoverablePause
                             )
                             batch_results[idx] = marker_type(
@@ -3904,6 +3920,8 @@ class ParallelACExecutor:
                     batch_results[idx] = e
                 finally:
                     sibling_cancel_scopes.pop(idx, None)
+                    _PROVIDER_OBSERVATION_SINK.reset(observation_sink_token)
+                    _PROVIDER_ENTRY_SINK.reset(entry_sink_token)
 
         # Cross-AC concurrency is governed by the LevelCoordinator's
         # file-conflict guard, not by session-level tool catalog presence.
@@ -6224,26 +6242,50 @@ class ParallelACExecutor:
         # Revalidate authority after the rate-budget await.
         _invoke_execution_authority_guard(self)
         response_text = ""
-        async with asyncio.timeout(DECOMPOSITION_TIMEOUT_SECONDS):
-            async for message in tracked_agent_task(
-                self._adapter,
-                role="executor_decomposition_policy",
-                prompt=prompt,
-                tools=[],
-                system_prompt=system_prompt,
-                resume_handle=None if independent_session else self._inherited_runtime_handle,
-            ):
-                if not message.content:
-                    continue
-                if getattr(self._adapter, "runtime_backend", "") == "goose":
-                    if message.type not in {"assistant", "result"}:
-                        continue
-                    if message.is_final:
-                        response_text = message.content
-                    else:
-                        response_text += message.content
-                else:
-                    response_text = message.content
+        feedback_messages: list[AgentMessage] = []
+        async with self._adaptive_concurrency.slot() as permit_epoch:
+            entry_sink = _PROVIDER_ENTRY_SINK.get()
+            if entry_sink is not None:
+                entry_sink()
+            provider_completed = False
+            try:
+                async with asyncio.timeout(DECOMPOSITION_TIMEOUT_SECONDS):
+                    async for message in tracked_agent_task(
+                        self._adapter,
+                        role="executor_decomposition_policy",
+                        prompt=prompt,
+                        tools=[],
+                        system_prompt=system_prompt,
+                        resume_handle=(
+                            None if independent_session else self._inherited_runtime_handle
+                        ),
+                    ):
+                        if message.is_final:
+                            feedback_messages.append(message)
+                            del feedback_messages[:-8]
+                        if not message.content:
+                            continue
+                        if getattr(self._adapter, "runtime_backend", "") == "goose":
+                            if message.type not in {"assistant", "result"}:
+                                continue
+                            if message.is_final:
+                                response_text = message.content
+                            else:
+                                response_text += message.content
+                        else:
+                            response_text = message.content
+                provider_completed = True
+            finally:
+                # Cancellation/timeout must not erase already-observed pressure.
+                with anyio.CancelScope(shield=True):
+                    await adaptive_concurrency.observe_provider_messages(
+                        self._adaptive_concurrency,
+                        feedback_messages,
+                        permit_epoch,
+                        None,
+                        provider_completed=provider_completed,
+                        on_observation=_PROVIDER_OBSERVATION_SINK.get(),
+                    )
         return response_text.strip()
 
     async def _request_bounce_classification(
@@ -8633,6 +8675,55 @@ Respond with either ATOMIC or the structured JSON object only.
             )
             return _route_drift_blocked_result()
 
+        async def _stream_provider_call(
+            *,
+            call_prompt: str,
+            call_tools: list[str],
+            provider_kwargs: dict[str, Any],
+        ) -> None:
+            """Admit and observe one exact runtime provider stream."""
+
+            feedback_start = len(dispatch_state.messages)
+            async with self._adaptive_concurrency.slot() as permit_epoch:
+                entry_sink = _PROVIDER_ENTRY_SINK.get()
+                if entry_sink is not None:
+                    entry_sink()
+                provider_completed = False
+                try:
+                    await self._authority_leaf_dispatcher_stream(
+                        self._authority_leaf_dispatcher,
+                        state=dispatch_state,
+                        prompt=call_prompt,
+                        tools=call_tools,
+                        system_prompt=system_prompt,
+                        execute_effort_kwargs=provider_kwargs,
+                        runtime_identity=runtime_identity,
+                        execution_context_id=execution_context_id,
+                        session_id=session_id,
+                        ac_index=ac_index,
+                        ac_content=ac_content,
+                        is_sub_ac=is_sub_ac,
+                        parent_ac_index=parent_ac_index,
+                        sub_ac_index=sub_ac_index,
+                        node_identity=node_identity,
+                        retry_attempt=retry_attempt,
+                        semantic_ac_key=semantic_ac_key,
+                        label=label,
+                        indent=indent,
+                        execution_counters=execution_counters,
+                    )
+                    provider_completed = True
+                finally:
+                    with anyio.CancelScope(shield=True):
+                        await adaptive_concurrency.observe_provider_messages(
+                            self._adaptive_concurrency,
+                            tuple(dispatch_state.messages[feedback_start:]),
+                            permit_epoch,
+                            (session_id, execution_context_id, ac_index),
+                            provider_completed=provider_completed,
+                            on_observation=_PROVIDER_OBSERVATION_SINK.get(),
+                        )
+
         signal_target: SessionSignalTarget | None = None
         signal_target_registered = False
         try:
@@ -8661,27 +8752,10 @@ Respond with either ATOMIC or the structured JSON object only.
             if provider_kwargs is None:
                 return await _terminalize_route_drift(active_dispatch_id)
             _invoke_execution_authority_guard(self)
-            await self._authority_leaf_dispatcher_stream(
-                self._authority_leaf_dispatcher,
-                state=dispatch_state,
-                prompt=prompt,
-                tools=tools,
-                system_prompt=system_prompt,
-                execute_effort_kwargs=provider_kwargs,
-                runtime_identity=runtime_identity,
-                execution_context_id=execution_context_id,
-                session_id=session_id,
-                ac_index=ac_index,
-                ac_content=ac_content,
-                is_sub_ac=is_sub_ac,
-                parent_ac_index=parent_ac_index,
-                sub_ac_index=sub_ac_index,
-                node_identity=node_identity,
-                retry_attempt=retry_attempt,
-                semantic_ac_key=semantic_ac_key,
-                label=label,
-                indent=indent,
-                execution_counters=execution_counters,
+            await _stream_provider_call(
+                call_prompt=prompt,
+                call_tools=tools,
+                provider_kwargs=provider_kwargs,
             )
             runtime_handle = dispatch_state.runtime_handle
             ac_session_id = dispatch_state.ac_session_id
@@ -8905,27 +8979,10 @@ Respond with either ATOMIC or the structured JSON object only.
                             )
                             return await _terminalize_route_drift(follow_up_dispatch_id)
                         _invoke_execution_authority_guard(self)
-                        await self._authority_leaf_dispatcher_stream(
-                            self._authority_leaf_dispatcher,
-                            state=dispatch_state,
-                            prompt=(follow_up_prompt),
-                            tools=[] if inform_mode else tools,
-                            system_prompt=system_prompt,
-                            execute_effort_kwargs=provider_kwargs,
-                            runtime_identity=runtime_identity,
-                            execution_context_id=execution_context_id,
-                            session_id=session_id,
-                            ac_index=ac_index,
-                            ac_content=ac_content,
-                            is_sub_ac=is_sub_ac,
-                            parent_ac_index=parent_ac_index,
-                            sub_ac_index=sub_ac_index,
-                            node_identity=node_identity,
-                            retry_attempt=retry_attempt,
-                            semantic_ac_key=semantic_ac_key,
-                            label=label,
-                            indent=indent,
-                            execution_counters=execution_counters,
+                        await _stream_provider_call(
+                            call_prompt=follow_up_prompt,
+                            call_tools=[] if inform_mode else tools,
+                            provider_kwargs=provider_kwargs,
                         )
                     except Exception as exc:
                         await self._event_store.append(
