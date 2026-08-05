@@ -51,12 +51,12 @@ _MAX_PARSE_DEPTH = 40
 _CONSUMING = frozenset({"LITERAL", "NOT_LITERAL", "IN", "ANY", "RANGE", "CATEGORY"})
 # Anchors consume nothing, but they still either hold or fail on a subject with
 # nothing in it, and which one it is has to be read off the individual anchor.
-# `^`, `\A`, `$`, `\Z` and `\B` all hold at the sole position of an empty
-# subject; `\b` needs a word character on exactly one side and so can never
-# hold there. Calling `\b` zero-width would be the safe error on its own — a
-# pattern wrongly called nullable is only refused — but `(?!\b)` negates it into
-# the unsafe one, so each anchor is classified by what it actually does.
-_ANCHORS_HOLDING_ON_EMPTY = frozenset(
+# `^`, `\A`, `$` and `\Z` hold at the sole position of an empty subject; `\b`
+# needs a word character on exactly one side and so can never hold there.
+# Calling `\b` zero-width would be the safe error on its own — a pattern wrongly
+# called nullable is only refused — but `(?!\b)` negates it into the unsafe one,
+# so each anchor is classified by what it actually does.
+_ANCHORS_ALWAYS_HOLDING_ON_EMPTY = frozenset(
     {
         "AT_BEGINNING",
         "AT_BEGINNING_STRING",
@@ -64,12 +64,27 @@ _ANCHORS_HOLDING_ON_EMPTY = frozenset(
         "AT_END",
         "AT_END_STRING",
         "AT_END_LINE",
-        "AT_NON_BOUNDARY",
-        "AT_LOC_NON_BOUNDARY",
-        "AT_UNI_NON_BOUNDARY",
     }
 )
-_ANCHORS_FAILING_ON_EMPTY = frozenset({"AT_BOUNDARY", "AT_LOC_BOUNDARY", "AT_UNI_BOUNDARY"})
+_BOUNDARY = frozenset({"AT_BOUNDARY", "AT_LOC_BOUNDARY", "AT_UNI_BOUNDARY"})
+_NON_BOUNDARY = frozenset({"AT_NON_BOUNDARY", "AT_LOC_NON_BOUNDARY", "AT_UNI_NON_BOUNDARY"})
+
+# `\B` is the one anchor whose answer here is not a fact about regular
+# expressions but a fact about this interpreter: before 3.14 it required a
+# position between two characters and so failed on an empty subject; from 3.14
+# the sole position of an empty subject is a non-boundary and it holds. Asking
+# the engine once, with a constant pattern of ours against a constant subject,
+# is both correct on every version this runs on and correct on versions that do
+# not exist yet — which hard-coding a version number is not. Nothing
+# model-supplied is run: the pattern here is two characters and this file's own.
+_NON_BOUNDARY_HOLDS_ON_EMPTY = re.search(r"\B", "") is not None
+
+_ANCHORS_HOLDING_ON_EMPTY = _ANCHORS_ALWAYS_HOLDING_ON_EMPTY | (
+    _NON_BOUNDARY if _NON_BOUNDARY_HOLDS_ON_EMPTY else frozenset()
+)
+_ANCHORS_FAILING_ON_EMPTY = _BOUNDARY | (
+    frozenset() if _NON_BOUNDARY_HOLDS_ON_EMPTY else _NON_BOUNDARY
+)
 _REPEATS = frozenset({"MAX_REPEAT", "MIN_REPEAT", "POSSESSIVE_REPEAT"})
 
 

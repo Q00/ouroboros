@@ -2,6 +2,7 @@
 
 import asyncio
 from datetime import UTC, datetime
+import re
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, patch
@@ -1029,6 +1030,71 @@ Parallel Execution Verification Report
         assert summary.final_approved is False
         assert summary.score == 0.0
         assert summary.run_verdict == "FAIL"
+
+    @pytest.mark.parametrize(
+        "tier",
+        [VerificationTier.T1_CONSTANT, VerificationTier.T2_STRUCTURAL],
+        ids=["T1", "T2"],
+    )
+    @pytest.mark.parametrize(
+        "pattern",
+        [r"\B", r"(?!\B)", r"(?<!\B)", r"(?=\B)"],
+        ids=["non-boundary", "negated", "negated-lookbehind", "asserted"],
+    )
+    def test_a_non_boundary_reaches_the_formal_verdict_this_interpreter_justifies(
+        self, tmp_path: Any, tier: VerificationTier, pattern: str
+    ) -> None:
+        """Whether `\\B` holds on an empty subject changed in CPython 3.14.
+
+        Written into the anchor table as a constant, it was right on the
+        interpreter it was written on and wrong on 3.12, where `(?!\\B)` matches
+        every file: an unrelated `marker.txt` was published here as
+        `final_approved=True`, `score=1.0`, `run_verdict="PASS"` for a
+        `CameraProvider` that does not exist. The table now asks the engine, so
+        the assertion is that the formal verdict follows what this interpreter
+        actually does — a pattern that matches nothing at all is refused and
+        fails, one that discriminates is approved — and it pins every version CI
+        runs without naming one.
+        """
+        matches_nothing = re.search(pattern, "") is not None
+        (tmp_path / "marker.txt").write_text("hello\n")
+        ac_text = "marker.txt MUST declare a CameraProvider"
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text=ac_text,
+            tier=tier,
+            pattern=pattern,
+            file_hint="marker.txt",
+        )
+        verification = SpecVerifier(project_dir=str(tmp_path)).verify_all(
+            (assertion,), agent_results={0: True}
+        )
+        mechanical = EvaluationSummary(
+            final_approved=True,
+            highest_stage_passed=2,
+            task_results=(
+                TaskResult(
+                    task_index=0,
+                    task_content=ac_text,
+                    status="completed",
+                    completed=True,
+                    source_ac_index=0,
+                    execution_method="legacy_parallel_report",
+                ),
+            ),
+            execution_completion_status="completed",
+            approval_status="approved",
+        )
+
+        summary = _evaluation_summary_from_spec_verification(mechanical, verification)
+
+        assert summary is not None
+        assert summary.ac_results[0].passed is not matches_nothing, (
+            f"{pattern!r} matches the empty string here: {matches_nothing}"
+        )
+        assert summary.final_approved is not matches_nothing
+        assert summary.score == (0.0 if matches_nothing else 1.0)
+        assert (summary.run_verdict == "FAIL") is matches_nothing
 
     def test_spec_verification_rejects_partial_ac_coverage(self) -> None:
         """A subset of verifier reports must not approve unverified ACs."""

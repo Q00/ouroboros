@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -1385,13 +1386,8 @@ class TestSpecVerifier:
     @pytest.mark.parametrize("tier", [VerificationTier.T2_STRUCTURAL, VerificationTier.T1_CONSTANT])
     @pytest.mark.parametrize(
         "pattern",
-        [r"(?!\b)", r"(?!\bx)", r"(?<!\b)", r"(?=\B)"],
-        ids=[
-            "negated-boundary",
-            "negated-boundary-with-tail",
-            "negated-lookbehind",
-            "non-boundary",
-        ],
+        [r"(?!\b)", r"(?!\bx)", r"(?<!\b)"],
+        ids=["negated-boundary", "negated-boundary-with-tail", "negated-lookbehind"],
     )
     def test_a_word_boundary_is_not_zero_width_once_something_negates_it(
         self, tier: VerificationTier, pattern: str
@@ -1399,8 +1395,8 @@ class TestSpecVerifier:
         """`\\b` consumes nothing, which is not the same as holding on nothing.
 
         Every anchor was treated alike, as a thing that holds wherever it
-        appears. That is true of `^`, `\\A`, `$`, `\\Z` and `\\B` on a subject
-        with nothing in it, and false of `\\b`, which needs a word character on
+        appears. That is true of `^`, `\\A`, `$` and `\\Z` on a subject with
+        nothing in it, and false of `\\b`, which needs a word character on
         exactly one side and so can never hold there. On its own the error was
         the harmless one — a pattern wrongly called nullable is only refused —
         but `(?!\\b)` reverses it: `\\b` fails on an empty subject, so the
@@ -1426,6 +1422,49 @@ class TestSpecVerifier:
         assert summary.reports[0].verified_pass is False, f"{pattern!r} must not be evidence"
         assert summary.discrepancy_count == 1
         assert summary.override_approval is False
+
+    @pytest.mark.parametrize("tier", [VerificationTier.T2_STRUCTURAL, VerificationTier.T1_CONSTANT])
+    @pytest.mark.parametrize(
+        "pattern",
+        [r"\B", r"(?!\B)", r"(?<!\B)", r"(?=\B)"],
+        ids=["non-boundary", "negated", "negated-lookbehind", "asserted"],
+    )
+    def test_a_non_boundary_is_read_from_the_interpreter_that_will_run_it(
+        self, tier: VerificationTier, pattern: str
+    ) -> None:
+        """`\\B` on an empty subject is a fact about CPython, not about regexes.
+
+        Before 3.14 it required a position between two characters, of which an
+        empty subject has none; from 3.14 the sole position of an empty subject
+        is a non-boundary and `\\B` holds there. Written into the table as a
+        constant, the entry was right on the interpreter it was written on and
+        wrong on 3.12, where `(?!\\B)` matches every file — an unrelated
+        `marker.txt` verified as evidence and published as a formal PASS — and
+        `(?=\\B)` discriminates but was refused.
+
+        So the assertion here is not which way `\\B` falls, but that the guard
+        falls the same way this interpreter does: what matches a subject with
+        nothing in it is refused, and what does not stays evidence. The same
+        test therefore pins 3.12, 3.13 and 3.14 without naming any of them.
+        """
+        matches_nothing = re.search(pattern, "") is not None
+        project = self._create_project({"marker.txt": "hello\n"})
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="marker.txt MUST contain a CameraProvider declaration",
+            tier=tier,
+            pattern=pattern,
+            file_hint="marker.txt",
+        )
+
+        summary = SpecVerifier(project_dir=project).verify_all(
+            (assertion,), agent_results={0: True}
+        )
+
+        assert summary.reports[0].verified_pass is not matches_nothing, (
+            f"{pattern!r} matches the empty string here: {matches_nothing}"
+        )
+        assert summary.discrepancy_count == (1 if matches_nothing else 0)
 
     @pytest.mark.parametrize("tier", [VerificationTier.T2_STRUCTURAL, VerificationTier.T1_CONSTANT])
     @pytest.mark.parametrize(
