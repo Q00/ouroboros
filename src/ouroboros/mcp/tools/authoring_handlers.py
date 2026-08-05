@@ -58,6 +58,12 @@ from ouroboros.interview_adapters import (
     InterviewTurnContext,
 )
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
+from ouroboros.mcp.tools.advisory_dispatch import (
+    append_lateral_review_notice,
+    append_question_advisory_dispatch,
+    echo_carries_dispatch,
+    strip_bridge_notice,
+)
 from ouroboros.mcp.tools.subagent import (
     DELEGATED_TO_SUBAGENT,
     FanoutRegistry,
@@ -67,10 +73,10 @@ from ouroboros.mcp.tools.subagent import (
     build_interview_subagent,
     dispatch_plugin_terminal,
     lateral_persona_panel_metadata_from_capability_definitions,
-    register_question_advisory_fanout,
     resolve_subagent_dispatch,
     should_dispatch_via_plugin,
     stamp_fanout_meta,
+    stamp_question_advisory_fanout,
 )
 from ouroboros.mcp.types import (
     ContentType,
@@ -84,6 +90,9 @@ from ouroboros.orchestrator.capabilities import (
     interview_code_investigation_answer_contract,
     ouroboros_tool_capability_metadata,
     stable_code_investigation_question_identity,
+)
+from ouroboros.orchestrator.capabilities.question_text import (
+    format_question_with_ambiguity as _format_question_with_ambiguity,
 )
 from ouroboros.orchestrator.policy import (
     PolicyContext,
@@ -590,22 +599,6 @@ def _with_lateral_review_dispatch(
     return enriched
 
 
-def _append_lateral_review_notice(
-    response_text: str,
-    lateral_review_meta: dict[str, Any] | None,
-) -> str:
-    """Surface a short user-visible cue without hiding the question first."""
-    if lateral_review_meta is None:
-        return response_text
-    personas = ", ".join(str(p) for p in lateral_review_meta["lateral_review_personas"])
-    milestone = lateral_review_meta["lateral_review_milestone"]
-    return (
-        f"{response_text}\n\nLateral review queued: running "
-        f"{personas} before this interview turn "
-        f"(milestone: {milestone})."
-    )
-
-
 def _compute_transcript_chars(state: InterviewState) -> int:
     """Sum question + user_response length over every round in ``state``.
 
@@ -617,19 +610,6 @@ def _compute_transcript_chars(state: InterviewState) -> int:
         total += len(round_data.question or "")
         total += len(round_data.user_response or "")
     return total
-
-
-def _format_question_with_ambiguity(question: str, score: AmbiguityScore | None) -> str:
-    """Attach the current ambiguity score to a question for display.
-
-    The text format uses ``(ambiguity: <score>)`` without the milestone
-    label to preserve backward compatibility with downstream consumers
-    that parse the score via regex.  Milestone data is available in the
-    structured ``meta.milestone`` field of the MCP response.
-    """
-    if score is None:
-        return question
-    return f"(ambiguity: {score.overall_score:.2f}) {question}"
 
 
 def _build_code_investigation_request(
@@ -710,7 +690,7 @@ def _build_question_advisory_request(
         "advisory_goal": "help_human_answer_interview_question",
         "parallel_preference": advisory["parallel_preference"],
         "sequential_fallback": dict(advisory["sequential_fallback"]),
-        "allowed_capabilities": ["inspect_code", "web_research", "run_lateral_review"],
+        "allowed_capabilities": ["inspect_code", "web_research", "run_lateral_review", "read_data"],
         "lanes": list(advisory["lanes"]),
         "synthesis_contract": dict(advisory["synthesis_contract"]),
         "mcp_tool_capability": mcp_tool_capability,
@@ -748,8 +728,8 @@ def _attach_question_assist_requests(
     lane ids as expected keys, matching the stamped
     ``question_advisory_result_correlation_key`` — and its ``fanout_id`` is
     stamped as ``question_advisory_fanout_id`` so a later
-    ``ouroboros_submit_fanout_results`` submission can be matched. With no
-    registry the emitted meta is byte-identical to the pre-registry contract.
+    ``ouroboros_submit_fanout_results`` submission can be matched. A registry
+    adds that id; the correlation key is stamped without one, on all three.
     """
     code_request = _build_code_investigation_request(
         session_id=session_id,
@@ -803,19 +783,16 @@ def _attach_question_assist_requests(
         payloads=advisory_payloads,
         correlation_key="context.lane_id",
     )
-    if fanout_registry is not None:
-        # Register with the SAME contract this response stamps: the record's
-        # correlation key is ``context.lane_id`` and its expected keys are the
-        # lane ids carried on the emitted advisory payloads, so a host that
-        # follows the stamped ``question_advisory_result_correlation_key``
-        # round-trips through ``ouroboros_submit_fanout_results`` successfully
-        # (#1578 registered a ``code_facts`` code-investigation record here,
-        # which rejected contract-following submissions as a mismatch).
-        meta["question_advisory_fanout_id"] = register_question_advisory_fanout(
-            fanout_registry,
-            session_id=session_id,
-            payloads=advisory_payloads,
-        )
+    # Register from the SAME request this response stamps: correlation key
+    # ``context.lane_id``, expected keys the payload lane ids, so a host
+    # following the stamped key round-trips (#1578). Contracts are not
+    # persisted -- re-entry judges by this build (#1825).
+    stamp_question_advisory_fanout(
+        meta,
+        fanout_registry,
+        session_id=session_id,
+        payloads=advisory_payloads,
+    )
 
 
 def _is_initial_context_length_guard_question(question: str) -> bool:
@@ -2219,6 +2196,8 @@ class InterviewHandler:
             if isinstance(suggested_interview_id_arg, str) and suggested_interview_id_arg
             else None
         )
+        # Taken as given; whether it is a repair or an echo of our own output is
+        # settled where the round is identified.
         last_question = arguments.get("last_question")
 
         # --- Argument validation (before any dispatch) ---
@@ -2403,12 +2382,20 @@ class InterviewHandler:
                 # round persisted question-only, or appending — and settles
                 # provenance where the answer arrives either way.
                 has_pending = bool(state.rounds) and state.rounds[-1].user_response is None
+                # Plugin persists no question-only round, so the second branch
+                # is the live one; the first needs state a subprocess turn left.
                 if has_pending:
-                    question_text = last_question or state.rounds[-1].question
+                    issued = state.rounds[-1].question
+                    question_text = (
+                        issued
+                        if echo_carries_dispatch(last_question)
+                        else (last_question or issued)
+                    )
                 else:
-                    # Fall back to a descriptive placeholder for backward
-                    # compatibility (callers that don't supply last_question).
-                    question_text = last_question if last_question else "(continued from subagent)"
+                    # No record to prefer — cut the bridge's own append instead.
+                    question_text = (
+                        strip_bridge_notice(last_question) or "(continued from subagent)"
+                    )
                 plugin_intent_guard_report = _guard_interview_answer(
                     state=state,
                     question=question_text,
@@ -2846,6 +2833,9 @@ class InterviewHandler:
                 start_response_text = (
                     f"Interview started. Session ID: {state.interview_id}\n\n{display_question}"
                 )
+                start_response_text = append_question_advisory_dispatch(
+                    start_response_text, start_meta
+                )
                 # Q00/ouroboros#831 (diagnostics): capture the shape of every
                 # MCP question-bearing response so future hang reports can be
                 # correlated with response size / transcript pressure.
@@ -3195,7 +3185,13 @@ class InterviewHandler:
             if not state.rounds:
                 pass
             elif state.rounds[-1].user_response is None:
-                pending_question = last_question or state.rounds[-1].question
+                # An echo repairs a question damaged by partial persistence
+                # (79ef2cf5); one carrying our directive is not a repair, and
+                # the stored question of an unanswered round is what we asked.
+                issued = state.rounds[-1].question
+                pending_question = (
+                    issued if echo_carries_dispatch(last_question) else (last_question or issued)
+                )
             else:
                 if not last_question:
                     return Result.err(
@@ -3442,6 +3438,9 @@ class InterviewHandler:
                     advisory_build_duration_ms = None
 
                 resume_response_text = f"Session {session_id}\n\n{display_question}"
+                resume_response_text = append_question_advisory_dispatch(
+                    resume_response_text, resume_meta
+                )
                 # Q00/ouroboros#831 (diagnostics): response-shape event for
                 # the resume-pending branch.  Pure observability.
                 from ouroboros.events.interview import interview_response_emitted
@@ -3743,10 +3742,11 @@ class InterviewHandler:
             answer_meta.update(lateral_review_dispatch_meta)
 
         answer_response_text = f"Session {session_id}\n\n{display_question}"
-        answer_response_text = _append_lateral_review_notice(
+        answer_response_text = append_lateral_review_notice(
             answer_response_text,
             lateral_review_dispatch_meta,
         )
+        answer_response_text = append_question_advisory_dispatch(answer_response_text, answer_meta)
         # Q00/ouroboros#831 (diagnostics): response-shape event for
         # the answer branch.  Pure observability.
         from ouroboros.events.interview import interview_response_emitted

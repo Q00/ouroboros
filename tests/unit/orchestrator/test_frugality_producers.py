@@ -107,8 +107,16 @@ def _claude_router() -> ModelRouter:
     return router
 
 
-def _claude_result(usage: dict | None = None, content: str = "[TASK_COMPLETE]") -> AgentMessage:
-    data: dict = {"subtype": "success"}
+def _claude_result(
+    usage: dict | None = None,
+    content: str = "[TASK_COMPLETE]",
+    *,
+    effective_model: str = "test-model",
+) -> AgentMessage:
+    data: dict = {
+        "subtype": "success",
+        "model_observation": {"effective_model": effective_model},
+    }
     if usage is not None:
         data["usage"] = usage
     return AgentMessage(type="result", content=content, data=data)
@@ -117,7 +125,13 @@ def _claude_result(usage: dict | None = None, content: str = "[TASK_COMPLETE]") 
 def _codex_turn_completed(usage: dict) -> AgentMessage:
     # Mirrors codex_cli_runtime: a ``turn.completed`` system message carrying usage.
     return AgentMessage(
-        type="system", content="", data={"subtype": "turn.completed", "usage": usage}
+        type="system",
+        content="",
+        data={
+            "subtype": "turn.completed",
+            "model_observation": {"effective_model": "test-model"},
+            "usage": usage,
+        },
     )
 
 
@@ -200,7 +214,7 @@ class _EnforcedModelUsageRuntime:
         model: str | None = None,
     ):
         self.received_model = model
-        yield _claude_result(self._usage)
+        yield _claude_result(self._usage, effective_model=model or "test-model")
 
 
 def _token_events(events: list) -> list:
@@ -239,6 +253,29 @@ async def _run_one_ac(
 # -- Producer 1: token attribution (seed AC2) --------------------------------
 class TestTokenAttribution:
     @pytest.mark.asyncio
+    async def test_dispatch_authority_binds_verify_command_policy(self) -> None:
+        """Different provider instructions cannot share frugality authority."""
+        digests: list[str] = []
+        for run_verify_commands in (True, False):
+            store, events = _capturing_event_store()
+            executor = ParallelACExecutor(
+                adapter=_ScriptedRuntime([_claude_result({"total_tokens": 10})]),
+                event_store=store,
+                console=MagicMock(),
+                enable_decomposition=False,
+                run_verify_commands=run_verify_commands,
+            )
+
+            await _run_one_ac(executor)
+
+            dispatch = next(
+                event for event in events if event.type == "execution.ac.attempt.dispatched"
+            )
+            digests.append(dispatch.data["request_authority_digest"])
+
+        assert digests[0] != digests[1]
+
+    @pytest.mark.asyncio
     async def test_summed_spend_from_multi_usage_stream(self) -> None:
         # A Claude result usage plus a Codex turn.completed usage in one stream are
         # summed — a child's full spend is attributed even when reported in pieces.
@@ -258,7 +295,7 @@ class TestTokenAttribution:
                         "output_tokens": 20,
                         "cache_creation_input_tokens": 50,
                         "cache_read_input_tokens": 25,
-                        "total_tokens": 140,
+                        "total_tokens": 195,
                     }
                 ),
             ]
@@ -277,14 +314,14 @@ class TestTokenAttribution:
         data = token[0].data
         # Per-message semantics: Codex cached_input_tokens is already included in
         # input_tokens, while Claude's explicit total wins over its components.
-        assert data["token_spend"] == pytest.approx(30 + 7 + 140)
+        assert data["token_spend"] == pytest.approx(30 + 7 + 195)
         # usage_breakdown carries the summed per-key totals.
         assert data["usage_breakdown"]["input_tokens"] == pytest.approx(130)
         assert data["usage_breakdown"]["output_tokens"] == pytest.approx(27)
         assert data["usage_breakdown"]["cached_input_tokens"] == pytest.approx(12)
         assert data["usage_breakdown"]["cache_creation_input_tokens"] == pytest.approx(50)
         assert data["usage_breakdown"]["cache_read_input_tokens"] == pytest.approx(25)
-        assert data["usage_breakdown"]["total_tokens"] == pytest.approx(140)
+        assert data["usage_breakdown"]["total_tokens"] == pytest.approx(195)
         assert data["token_source"] == "runtime_usage"
 
     @pytest.mark.asyncio
@@ -376,8 +413,25 @@ class TestTokenAttribution:
             {"total_tokens": float("nan"), "input_tokens": 10, "output_tokens": 2},
             {"input_tokens": 10, "output_tokens": -1},
             {"input_tokens": 10, "output_tokens": 10**10_000},
+            {"input_tokens": 100, "output_tokens": 50, "total_tokens": 1},
+            {"input_tokens": 10, "output_tokens": 5, "reasoning_tokens": 200},
+            {"input_tokens": 10.5, "output_tokens": 5},
+            {"input_tokens": 10},
+            {"output_tokens": 5},
+            {"cache_read_input_tokens": 8},
         ],
-        ids=["non-mapping", "invalid-total-no-fallback", "negative", "overflow"],
+        ids=[
+            "non-mapping",
+            "invalid-total-no-fallback",
+            "negative",
+            "overflow",
+            "inconsistent-total",
+            "unknown-token-counter",
+            "fractional-counter",
+            "missing-output-counter",
+            "missing-input-counter",
+            "cache-only-counter",
+        ],
     )
     async def test_any_malformed_usage_shape_emits_no_attribution(self, usage: object) -> None:
         store, events = _capturing_event_store()
@@ -463,11 +517,61 @@ class TestTokenAttribution:
         assert data["is_decomposed_child"] is True
         assert data["model_tier"] == "frugal"
         assert data["model"] == "haiku-x"
+        assert data["effective_model"] == "haiku-x"
         assert data["model_mode"] == "enforced"
         assert data["effort_level"] == "high"  # child inherits parent effort unchanged
         assert data["runtime_backend"] == "claude"
         # ac_id is present so the proof can join token × effort × grounding.
         assert data["ac_id"]
+        dispatch = next(
+            event for event in events if event.type == "execution.ac.attempt.dispatched"
+        )
+        assert data["request_authority_digest"] == dispatch.data["request_authority_digest"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("observation_case", ["missing", "unknown", "conflicting"])
+    async def test_effective_model_observation_is_required_for_primary_attribution(
+        self,
+        observation_case: str,
+    ) -> None:
+        store, events = _capturing_event_store()
+        observations: list[AgentMessage] = []
+        if observation_case == "unknown":
+            observations.append(
+                AgentMessage(
+                    type="system",
+                    content="",
+                    data={"model_observation": {"effective_model": " Unknown "}},
+                )
+            )
+        elif observation_case == "conflicting":
+            observations.extend(
+                [
+                    AgentMessage(
+                        type="system",
+                        content="",
+                        data={"model_observation": {"effective_model": model}},
+                    )
+                    for model in ("model-a", "model-b")
+                ]
+            )
+        observations.append(
+            AgentMessage(
+                type="result",
+                content="done",
+                data={"subtype": "success", "usage": {"total_tokens": 10}},
+            )
+        )
+        executor = ParallelACExecutor(
+            adapter=_ScriptedRuntime(observations),
+            event_store=store,
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+
+        await _run_one_ac(executor)
+
+        assert _token_events(events) == []
 
     @pytest.mark.asyncio
     async def test_failure_path_still_emits_when_usage_present(self) -> None:
@@ -479,7 +583,10 @@ class TestTokenAttribution:
                 AgentMessage(
                     type="assistant",
                     content="",
-                    data={"usage": {"input_tokens": 12, "output_tokens": 3}},
+                    data={
+                        "model_observation": {"effective_model": "test-model"},
+                        "usage": {"input_tokens": 12, "output_tokens": 3},
+                    },
                 )
             ],
             raise_after=True,
@@ -1423,6 +1530,59 @@ class TestFrugalityProofConsumer:
 
 # -- End-to-end honesty check: produced events → contract match --------------
 class TestProducedEventsMatchProofContract:
+    @pytest.mark.asyncio
+    async def test_token_and_deliver_receipts_bind_primary_dispatch_id(self) -> None:
+        executor, events = _deliver_executor()
+        identity = _runtime_identity()
+        dispatch_id = "d" * 32
+        await executor._event_emitter.emit_ac_attempt_dispatched(
+            runtime_identity=identity,
+            dispatch_id=dispatch_id,
+            previous_dispatch_id=None,
+            execution_id="exec_frugal",
+            session_id="sess_frugal",
+            capsule_fingerprint="sha256:" + "a" * 64,
+            request_authority_digest="sha256:" + "f" * 64,
+            session_origin="fresh",
+            runtime_handle=None,
+        )
+        await executor._event_emitter.emit_deliver_verdict(
+            runtime_identity=identity,
+            execution_id="exec_frugal",
+            session_id="sess_frugal",
+            is_sub_ac=True,
+            traceguard_verdict="accepted",
+            unsupported_claim_rate=0.0,
+            rejected_reasons=[],
+            accepted_fact_count=1,
+            grounding_regression=False,
+        )
+        await executor._event_emitter.emit_token_attribution(
+            runtime_identity=identity,
+            execution_id="exec_frugal",
+            session_id="sess_frugal",
+            ac_index=1,
+            is_sub_ac=True,
+            retry_attempt=0,
+            token_spend=10,
+            usage_breakdown={"total_tokens": 10},
+            model="test-model",
+            effective_model="test-model",
+            model_tier="frugal",
+            model_mode="enforced",
+            effort_level=None,
+            runtime_backend="test",
+            request_authority_digest="sha256:" + "f" * 64,
+        )
+
+        proof_receipts = [
+            event
+            for event in events
+            if event.type in {EVENT_DELIVER_VERDICT, EVENT_TOKEN_ATTRIBUTION}
+        ]
+        assert len(proof_receipts) == 2
+        assert {event.data["ac_dispatch_id"] for event in proof_receipts} == {dispatch_id}
+
     @pytest.mark.asyncio
     async def test_live_default_reasoning_none_events_and_final_marker_count(self) -> None:
         """The shipped ``reasoning_effort=None`` path can prove model-tier lowering.

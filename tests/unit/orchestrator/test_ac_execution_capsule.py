@@ -25,6 +25,7 @@ from ouroboros.orchestrator.ac_execution_capsule import (
     UnmaterializableSuccessContractError,
     bind_capsule_to_runtime_handle,
     build_ac_dispatch_authority_scope,
+    build_ac_dispatch_request_digest,
     compile_ac_execution_capsule,
 )
 from ouroboros.orchestrator.ac_runtime_handle_manager import (
@@ -574,6 +575,40 @@ def test_dispatch_authority_scope_distinguishes_absent_and_empty_tool_catalog() 
     assert absent != empty
 
 
+def test_dispatch_request_digest_binds_cross_worktree_provider_authority() -> None:
+    dispatch = {
+        "tools": ["Read"],
+        "tool_catalog": {"present": True, "entries": [{"name": "Read"}]},
+        "system_prompt": "system",
+    }
+    policy = {"reasoning_effort": "high"}
+    original = build_ac_dispatch_request_digest(
+        dispatch_contract=dispatch,
+        execution_policy=policy,
+    )
+    changed_tool = build_ac_dispatch_request_digest(
+        dispatch_contract={**dispatch, "tools": ["Read", "Edit"]},
+        execution_policy=policy,
+    )
+    changed_system = build_ac_dispatch_request_digest(
+        dispatch_contract={**dispatch, "system_prompt": "different"},
+        execution_policy=policy,
+    )
+    changed_policy = build_ac_dispatch_request_digest(
+        dispatch_contract=dispatch,
+        execution_policy={"reasoning_effort": "low"},
+    )
+    repeated = build_ac_dispatch_request_digest(
+        dispatch_contract=dict(reversed(tuple(dispatch.items()))),
+        execution_policy=dict(policy),
+    )
+
+    assert original != changed_tool
+    assert original != changed_system
+    assert original != changed_policy
+    assert original == repeated
+
+
 def test_context_reference_rejects_prompt_control_characters() -> None:
     with pytest.raises(ValueError, match="control characters"):
         ACContextReference(
@@ -729,6 +764,7 @@ async def test_capsule_dispatch_lifecycle_is_durable_and_ordered(tmp_path) -> No
         execution_id="execution-1",
         session_id="session-1",
         capsule_fingerprint=capsule.fingerprint,
+        request_authority_digest="sha256:" + "f" * 64,
         session_origin="fresh",
         runtime_handle=handle,
     )
@@ -1284,6 +1320,7 @@ async def test_session_signal_follow_up_dispatch_links_predecessor(tmp_path) -> 
         execution_id="execution-1",
         session_id="session-1",
         capsule_fingerprint=capsule.fingerprint,
+        request_authority_digest="sha256:" + "f" * 64,
         session_origin="fresh",
         runtime_handle=handle,
     )
@@ -1294,6 +1331,7 @@ async def test_session_signal_follow_up_dispatch_links_predecessor(tmp_path) -> 
         execution_id="execution-1",
         session_id="session-1",
         capsule_fingerprint=capsule.fingerprint,
+        request_authority_digest="sha256:" + "f" * 64,
         session_origin="restored_same_attempt",
         runtime_handle=replace(handle, metadata={**handle.metadata, "ac_dispatch_id": "2" * 32}),
         dispatch_kind="session_signal_followup",

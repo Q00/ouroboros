@@ -1,8 +1,8 @@
 // Bun tests for pure helpers in ouroboros-bridge.ts.
 // Run: bun test  (from this directory)
 //
-// Covers: cfg, rand62, id, fnv, build, parse, readText, stamp, notify, dupe,
-//         base, childOutput.
+// Covers: cfg, rand62, id, fnv, build, parse, readText, stamp, stampBridge,
+//         notify, dupe, base, childOutput.
 // I/O + runtime-orchestration (patch/resolveMid/attempt/run/bridge) are
 // covered by Python installer tests and live integration; untested here
 // because they require a live client.
@@ -29,6 +29,8 @@ import {
   markRalphChild,
   notify,
   num,
+  BRIDGE_NOTICE_OPENING,
+  OUROBOROS_DISPATCH_MARKER,
   OuroborosBridge,
   parse,
   parseMetadata,
@@ -36,6 +38,7 @@ import {
   rand62,
   readText,
   stamp,
+  stampBridge,
   timeoutMessage,
 } from "./ouroboros-bridge.ts"
 import {
@@ -457,6 +460,50 @@ describe("parseMetadata", () => {
       seed_ready: false,
       question_advisory_recommended: true,
     })
+  })
+
+  test("fan-out identity survives into the response shape", () => {
+    // Children run in the background here, so the parent redeems the fan-out
+    // itself once the Task widgets finish. It can only do that if the id and
+    // correlation key reach a response it can see — without them the data
+    // lane's measurement never reaches re-entry.
+    const out = parseMetadata({
+      session_id: "sess-2",
+      question_advisory_fanout_id: "fanout_abc123",
+      question_advisory_result_correlation_key: "context.lane_id",
+      question_advisory_subagents: [
+        { tool_name: "ouroboros_interview", title: "Data", agent: "researcher", prompt: "propose" },
+      ],
+    })
+
+    expect(out.responseShape.question_advisory_fanout_id).toBe("fanout_abc123")
+    expect(out.responseShape.question_advisory_result_correlation_key).toBe("context.lane_id")
+  })
+
+  test("no lane is singled out by its capability any more", () => {
+    // `read_data` used to mark a child proposal-only and strip its permissions.
+    // The lane executes now (#1825), so capability carries no permission
+    // meaning here and the field it was read from is gone. Pinned because a
+    // reintroduced special case would be invisible: the child would simply
+    // return less, and return it in a valid shape.
+    const out = parseMetadata({
+      question_advisory_subagents: [
+        {
+          tool_name: "ouroboros_interview",
+          title: "Data",
+          prompt: "measure",
+          context: { lane_id: "data_context", capability: "read_data" },
+        },
+        {
+          tool_name: "ouroboros_interview",
+          title: "Code",
+          prompt: "inspect",
+          context: { lane_id: "code_context", capability: "inspect_code" },
+        },
+      ],
+    })
+
+    expect(out.subs.map((s) => "proposalOnly" in s)).toEqual([false, false])
   })
 
   test("invalid advisory children are skipped", () => {
@@ -926,6 +973,41 @@ describe("_dispatch — child session lifecycle", () => {
     expect(patchCalls.length).toBeGreaterThanOrEqual(1)
   })
 
+  test("the data lane is created with the same permission as its siblings", async () => {
+    // It used to be created with `*:* deny`, matching a contract that had no
+    // field for a fetched value. The contract changed (#1825): the lane takes
+    // the measurement. A denial left behind would tell the child to measure on
+    // the one transport where every call is refused — and no `no_evidence_reason`
+    // means "I was blocked", so it would have to pick a reason that is false.
+    const createCalls: unknown[] = []
+    const cli = mockCli({
+      create: async (args: unknown) => {
+        createCalls.push(args)
+        return { data: { id: "child_data" } }
+      },
+      prompt: async () => ({ data: { parts: [{ type: "text", text: "measured" }] } }),
+    })
+    const b = mockBase(async () => ({}))
+    const sub = {
+      tool: "ouroboros_interview",
+      title: "Interview advisory: data_context",
+      prompt: "take the measurement",
+      agent: "general",
+    }
+
+    await _dispatch(cli as never, b as never, "pid", "mid", sub as never)
+
+    expect(createCalls).toEqual([
+      {
+        body: {
+          parentID: "pid",
+          title: "Interview advisory: data_context",
+          permission: [{ permission: "*", pattern: "*", action: "allow" }],
+        },
+      },
+    ])
+  })
+
   test("throws when child session create returns no id", async () => {
     const cli = mockCli({ create: async () => ({ data: {} }) })
     const b = mockBase()
@@ -1125,5 +1207,270 @@ describe("OuroborosBridge hook — metadata advisory fanout", () => {
     expect(text.startsWith(originalQuestion)).toBe(true)
     expect(text).toContain("Dispatch failed")
     expect(text).toContain("empty sessionID")
+  })
+})
+
+describe("bridge appends declare themselves", () => {
+  // The bridge is a second producer writing into a question the server
+  // rendered. On PLUGIN_PASSIVE the server appends no directive of its own, so
+  // an undeclared bridge append is text a host cannot tell from the question —
+  // it echoes the whole thing back as `last_question` and the server records
+  // the banner, fan-out id included, as what it asked.
+  //
+  // Three paths append: dispatch, dedupe, and pre-dispatch failure. Only the
+  // first was declared when this was found, which is why the declaration now
+  // lives in `stampBridge` rather than at each call site. These tests pin all
+  // three, so a fourth path that bypasses the helper is a failing test.
+  const DECLARATION = `\n\n${OUROBOROS_DISPATCH_MARKER}\n\n${BRIDGE_NOTICE_OPENING}\n`
+
+  function expectDeclaredAfter(text: string, question: string): void {
+    expect(text.startsWith(question)).toBe(true)
+    expect(text.slice(question.length).startsWith(DECLARATION)).toBe(true)
+  }
+
+  function liveCli() {
+    let created = 0
+    return {
+      session: {
+        _client: { patch: async () => ({}) },
+        create: async () => ({ data: { id: `child_${++created}` } }),
+        prompt: async () => ({ data: { parts: [{ type: "text", text: "done" }] } }),
+        abort: async () => ({}),
+        messages: async () => ({
+          data: [
+            {
+              info: { id: "msg_1", role: "assistant" },
+              parts: [{ type: "tool", callID: "call_declared" }],
+            },
+          ],
+        }),
+      },
+    }
+  }
+
+  function questionOutput(question: string) {
+    return {
+      content: [{ type: "text", text: question }],
+      metadata: {
+        session_id: "sess-1",
+        question_advisory_preserve_content: true,
+        question_advisory_subagents: [
+          {
+            tool_name: "ouroboros_interview",
+            title: "Interview advisory: data_context",
+            agent: "general",
+            prompt: "Measure it.",
+          },
+        ],
+      },
+    }
+  }
+
+  const QUESTION = "Session sess-1\n\nHow do you define completion?"
+
+  test("stampBridge declares, with or without a question in front", () => {
+    const withQuestion = { content: [{ type: "text", text: "x" }] }
+    stampBridge(withQuestion, QUESTION, "banner")
+    expectDeclaredAfter(readText(withQuestion), QUESTION)
+
+    // Content replaced outright is entirely ours; it is declared too, so a host
+    // echoing it back is still recognisable rather than recorded as a question.
+    const replaced = { content: [{ type: "text", text: "x" }] }
+    stampBridge(replaced, undefined, "banner")
+    expect(readText(replaced).startsWith(`${OUROBOROS_DISPATCH_MARKER}\n\n`)).toBe(true)
+  })
+
+  test("the dispatch path declares", async () => {
+    _resetDedupe()
+    const plugin = await OuroborosBridge({ client: liveCli(), directory: "/tmp/ouroboros-test" } as never)
+    const hook = (plugin as Record<string, (...args: unknown[]) => Promise<void>>)["tool.execute.after"]
+    const output = questionOutput(QUESTION)
+
+    await hook({ tool: "ouroboros_interview", sessionID: "parent_1", callID: "call_declared" }, output)
+
+    const text = readText(output)
+    expectDeclaredAfter(text, QUESTION)
+    expect(text).toContain("[Ouroboros] Dispatched 1 subagent.")
+  })
+
+  test("the dedupe path declares", async () => {
+    _resetDedupe()
+    const plugin = await OuroborosBridge({ client: liveCli(), directory: "/tmp/ouroboros-test" } as never)
+    const hook = (plugin as Record<string, (...args: unknown[]) => Promise<void>>)["tool.execute.after"]
+    const args = { tool: "ouroboros_interview", sessionID: "parent_1", callID: "call_declared" }
+
+    await hook(args, questionOutput(QUESTION))
+    const second = questionOutput(QUESTION)
+    await hook(args, second)
+
+    const text = readText(second)
+    expectDeclaredAfter(text, QUESTION)
+    expect(text).toContain("Skipped 1 duplicate")
+  })
+
+  test("the pre-dispatch failure path declares", async () => {
+    _resetDedupe()
+    const plugin = await OuroborosBridge({ client: liveCli(), directory: "/tmp/ouroboros-test" } as never)
+    const hook = (plugin as Record<string, (...args: unknown[]) => Promise<void>>)["tool.execute.after"]
+    const output = questionOutput(QUESTION)
+
+    // No sessionID — rejected before any child is created.
+    await hook({ tool: "ouroboros_interview", callID: "call_declared" }, output)
+
+    const text = readText(output)
+    expectDeclaredAfter(text, QUESTION)
+    expect(text).toContain("Dispatch failed")
+  })
+})
+
+describe("a pre-dispatch failure still carries the fan-out identity", () => {
+  // The identity is what lets the parent declare the lanes `undispatched` when
+  // no child ever ran. It lives in `_meta`, which the host model does not read;
+  // the response shape is the channel it does. A failure that renders only the
+  // failure message therefore does not degrade re-entry, it removes it — and a
+  // required lane with no way to be declared pins the fan-out at `partial`.
+  function questionOutput() {
+    return {
+      content: [{ type: "text", text: "Session sess-1\n\nHow do you define completion?" }],
+      metadata: {
+        session_id: "sess-1",
+        question_advisory_preserve_content: true,
+        question_advisory_fanout_id: "fanout_probe",
+        question_advisory_result_correlation_key: "context.lane_id",
+        question_advisory_subagents: [
+          {
+            tool_name: "ouroboros_interview",
+            title: "Interview advisory: data_context",
+            agent: "general",
+            prompt: "Measure it.",
+          },
+        ],
+      },
+    }
+  }
+
+  async function hookWith(client: unknown) {
+    const plugin = await OuroborosBridge({ client, directory: "/tmp/ouroboros-test" } as never)
+    return (plugin as Record<string, (...args: unknown[]) => Promise<void>>)["tool.execute.after"]
+  }
+
+  const readyCli = {
+    session: {
+      _client: { patch: async () => ({}) },
+      create: async () => ({ data: { id: "child_1" } }),
+      prompt: async () => ({ data: { parts: [] } }),
+      abort: async () => ({}),
+      messages: async () => ({ data: [] }),
+    },
+  }
+
+  test("a rejection before dispatch keeps the id and correlation key visible", async () => {
+    _resetDedupe()
+    const hook = await hookWith(readyCli)
+    const output = questionOutput()
+
+    // No sessionID — rejected before any child is created.
+    await hook({ tool: "ouroboros_interview", callID: "call_fail" }, output)
+
+    const text = readText(output)
+    expect(text).toContain("Dispatch failed")
+    expect(text).toContain("fanout_probe")
+    expect(text).toContain("context.lane_id")
+  })
+
+  test("the same holds when the client is not ready", async () => {
+    _resetDedupe()
+    const hook = await hookWith({ session: {} })
+    const output = questionOutput()
+
+    await hook({ tool: "ouroboros_interview", sessionID: "parent_1", callID: "call_fail2" }, output)
+
+    const text = readText(output)
+    expect(text).toContain("client not ready")
+    expect(text).toContain("fanout_probe")
+    expect(text).toContain("context.lane_id")
+  })
+
+  test("and when the message id cannot be resolved", async () => {
+    _resetDedupe()
+    const hook = await hookWith(readyCli)
+    const output = questionOutput()
+
+    // messages() returns no matching callID, so resolveMid gives up.
+    await hook({ tool: "ouroboros_interview", sessionID: "parent_1", callID: "call_missing" }, output)
+
+    const text = readText(output)
+    expect(text).toContain("Dispatch failed")
+    expect(text).toContain("fanout_probe")
+    expect(text).toContain("context.lane_id")
+  })
+})
+
+describe("malformed message data does not strand the fan-out", () => {
+  // `resolveMid` walks the session's messages. A stale or malformed entry used
+  // to throw out of the hook, whose only handler logs — so the response was
+  // left exactly as it arrived: no failure notice, no fan-out id, no
+  // correlation key. The server has already registered the required lane by
+  // then, so the host cannot declare it undispatched and re-entry is stranded.
+  function questionOutput() {
+    return {
+      content: [{ type: "text", text: "Session sess-1\n\nHow do you define completion?" }],
+      metadata: {
+        session_id: "sess-1",
+        question_advisory_preserve_content: true,
+        question_advisory_fanout_id: "fanout_probe",
+        question_advisory_result_correlation_key: "context.lane_id",
+        question_advisory_subagents: [
+          {
+            tool_name: "ouroboros_interview",
+            title: "Interview advisory: data_context",
+            agent: "general",
+            prompt: "Measure it.",
+          },
+        ],
+      },
+    }
+  }
+
+  async function runWith(messages: () => Promise<unknown>) {
+    _resetDedupe()
+    const cli = {
+      session: {
+        _client: { patch: async () => ({}) },
+        create: async () => ({ data: { id: "child_1" } }),
+        prompt: async () => ({ data: { parts: [] } }),
+        abort: async () => ({}),
+        messages,
+      },
+    }
+    const plugin = await OuroborosBridge({ client: cli, directory: "/tmp/ouroboros-test" } as never)
+    const hook = (plugin as Record<string, (...args: unknown[]) => Promise<void>>)["tool.execute.after"]
+    const output = questionOutput()
+    await hook({ tool: "ouroboros_interview", sessionID: "parent_1", callID: "call_x" }, output)
+    return readText(output)
+  }
+
+  test("an entry with no info or parts is skipped, not thrown on", async () => {
+    const text = await runWith(async () => ({ data: [{}] }))
+    expect(text).toContain("Dispatch failed")
+    expect(text).toContain("fanout_probe")
+    expect(text).toContain("context.lane_id")
+  })
+
+  test("null entries and non-array parts are skipped too", async () => {
+    const text = await runWith(async () => ({
+      data: [null, { info: { role: "assistant" } }, { info: { role: "assistant", id: 7 }, parts: "x" }],
+    }))
+    expect(text).toContain("Dispatch failed")
+    expect(text).toContain("fanout_probe")
+  })
+
+  test("an unexpected throw still renders the identity", async () => {
+    const text = await runWith(async () => {
+      throw new Error("transport exploded")
+    })
+    expect(text).toContain("Dispatch failed")
+    expect(text).toContain("fanout_probe")
+    expect(text).toContain("context.lane_id")
   })
 })

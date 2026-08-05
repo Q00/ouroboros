@@ -5,6 +5,7 @@ protocol using the official Anthropic Python SDK. This is the recommended defaul
 for Ouroboros MCP server — no OpenRouter or LiteLLM dependency required.
 """
 
+from dataclasses import replace
 import json
 import os
 from typing import Any
@@ -21,6 +22,11 @@ from ouroboros.providers.base import (
     Message,
     MessageRole,
     UsageInfo,
+)
+from ouroboros.providers.frugality_attestation import (
+    PreparedFrugalityCompletion,
+    credential_authority_digest,
+    effective_completion_request,
 )
 from ouroboros.providers.profiles import resolve_completion_profile_result
 
@@ -151,6 +157,46 @@ class AnthropicAdapter:
         self._default_model = default_model
         self._client: Any = None
         self._io_recorder = io_recorder
+
+    def frugality_prepare_completion(
+        self,
+        config: CompletionConfig,
+    ) -> Result[PreparedFrugalityCompletion, ProviderError]:
+        """Resolve once, seal dispatch, and attest the non-secret execution envelope."""
+        profile_result = resolve_completion_profile_result(config, backend="anthropic")
+        if profile_result.is_err:
+            return Result.err(profile_result.error)
+        resolved = profile_result.value
+        effective_config = resolved.config
+        # The cached SDK client owns dispatch. Its resolved authority may come
+        # from SDK profile configuration rather than this process environment,
+        # so attest the exact client that ``complete`` will reuse.
+        client = self._get_client()
+        client_base_url = getattr(client, "base_url", None)
+        client_api_key = getattr(client, "api_key", None)
+        contract: dict[str, object] = {
+            "schema_version": 2,
+            "schema_id": "ouroboros.anthropic.v2",
+            "internal_attempt_limit": self._max_retries + 1,
+            "credential_authority": credential_authority_digest(client_api_key),
+            "effective_request": effective_completion_request(
+                resolved,
+                provider_model=self._resolve_model(effective_config.model),
+            ),
+            "settings": {
+                "api_base": str(client_base_url) if client_base_url is not None else None,
+                "timeout": self._timeout,
+                "max_retries": self._max_retries,
+                "default_model": self._default_model,
+                "io_recorder_configured": self._io_recorder is not None,
+            },
+        }
+        return Result.ok(
+            PreparedFrugalityCompletion(
+                config=replace(effective_config, role=None, profile=None),
+                contract=contract,
+            )
+        )
 
     def _get_client(self) -> Any:
         """Lazy-initialize the Anthropic async client.

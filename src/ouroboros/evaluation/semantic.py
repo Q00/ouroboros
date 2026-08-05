@@ -21,6 +21,7 @@ from ouroboros.events.evaluation import (
     create_stage2_completed_event,
     create_stage2_started_event,
 )
+from ouroboros.evolution.provider_usage import tracked_complete
 from ouroboros.providers.base import CompletionConfig, LLMAdapter, Message, MessageRole
 
 # Default model for semantic evaluation (Standard tier)
@@ -366,7 +367,7 @@ class SemanticEvaluator:
             },
         )
 
-        llm_result = await self._llm.complete(messages, completion_config)
+        llm_result = await tracked_complete(self._llm, messages, completion_config)
         if llm_result.is_err:
             return Result.err(llm_result.error)
 

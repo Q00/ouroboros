@@ -347,6 +347,41 @@ Parallel Execution Verification Report
         assert summary.approval_status == "rejected"
         assert summary.run_verdict == "FAIL"
 
+    def test_spec_verification_binds_verdict_to_seed_semantic_identity(self) -> None:
+        semantic_key = "ac_0123456789abcdef"
+        seed = SimpleNamespace(acceptance_criteria=(SimpleNamespace(semantic_ac_key=semantic_key),))
+        mechanical = EvaluationSummary(
+            final_approved=False,
+            highest_stage_passed=1,
+            task_results=(
+                TaskResult(
+                    task_index=0,
+                    task_content="Implement feature",
+                    status="failed",
+                    completed=False,
+                    source_ac_index=0,
+                ),
+            ),
+            execution_completion_status="failed",
+            approval_status="not_evaluated",
+        )
+        verification = SpecVerificationSummary.from_reports(
+            (
+                ACVerificationReport(
+                    ac_index=0,
+                    ac_text="Implement feature",
+                    results=(),
+                    agent_reported_pass=False,
+                ),
+            ),
+            project_dir="/tmp/project",
+        )
+
+        summary = _evaluation_summary_from_spec_verification(mechanical, verification, seed)
+
+        assert summary is not None
+        assert summary.ac_results[0].semantic_ac_key == semantic_key
+
     def test_partial_spec_verification_coverage_does_not_approve_run(self) -> None:
         """Verifier reports must cover every expected AC before run approval."""
         mechanical = EvaluationSummary(
@@ -2469,3 +2504,69 @@ async def test_server_shutdown_stops_before_dependents_when_control_bus_refuses_
 
     release.set()
     await asyncio.wait_for(tasks[0], timeout=0.5)
+
+
+# --------------------------------------------------------------------------- #
+# Fan-out re-entry reachability on the shipped server (#1754)
+# --------------------------------------------------------------------------- #
+
+
+def test_composition_root_registers_fanout_reentry_tool() -> None:
+    """The re-entry tool must exist on the server the CLI actually builds.
+
+    This asserts against ``create_ouroboros_server`` rather than
+    ``get_ouroboros_tools`` deliberately. Both factories build tool sets, only
+    the first one ships, and for a long time only the second one wired the
+    fan-out — so a full unit suite passed while the primary MCP surface had no
+    ``ouroboros_submit_fanout_results`` at all and stamped no ``fanout_id``.
+    A test aimed at the correct factory could never have caught that.
+    """
+    from ouroboros.mcp.server.adapter import create_ouroboros_server
+
+    server = create_ouroboros_server(name="fanout-reentry-probe")
+
+    assert "ouroboros_submit_fanout_results" in {tool.name for tool in server.info.tools}
+
+
+def test_composition_root_shares_one_fanout_registry() -> None:
+    """Producers and the re-entry tool must observe the same registry.
+
+    A fan-out registered by the interview handler is redeemed through the
+    submit handler; separate registry instances would make every submission
+    report ``unknown_fanout_id`` while every individual handler looked fine in
+    isolation.
+    """
+    from ouroboros.mcp.server.adapter import create_ouroboros_server
+    from ouroboros.mcp.tools.authoring_handlers import InterviewHandler
+    from ouroboros.mcp.tools.evaluation_handlers import (
+        LateralThinkHandler,
+        SubmitFanoutResultsHandler,
+    )
+
+    server = create_ouroboros_server(name="fanout-registry-probe")
+    handlers = list(server._tool_handlers.values())
+
+    registries = {
+        id(handler.fanout_registry)
+        for handler in handlers
+        if isinstance(handler, (InterviewHandler, LateralThinkHandler, SubmitFanoutResultsHandler))
+        and handler.fanout_registry is not None
+    }
+    assert len(registries) == 1, "producers and the submit tool must share one registry"
+
+
+def test_composition_root_builds_the_registry_at_its_final_directory(tmp_path) -> None:
+    """No mutable re-root on the path that ships.
+
+    This root resolves the state dir long before it builds the registry, so the
+    registry can be constructed where its records will live. Leaving it default
+    -located and re-rooting later is what let a producer register into one
+    directory and have lookups moved to another.
+    """
+    from ouroboros.mcp.server.adapter import create_ouroboros_server
+
+    server = create_ouroboros_server(name="fanout-dir-probe", state_dir=tmp_path)
+    handler = server._tool_handlers["ouroboros_submit_fanout_results"]
+
+    assert handler.fanout_registry is not None
+    assert handler.fanout_registry.directory == tmp_path / "fanout"

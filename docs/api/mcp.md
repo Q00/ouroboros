@@ -397,6 +397,30 @@ meta.is_terminal = true
 meta.result_available = true
 ```
 
+### Read-only Project Status
+
+`ouroboros_project_status` rebuilds a complete cross-run `ProjectRecord` from
+persisted session events. It accepts an optional `project_dir` (the server's
+captured caller directory is the default), an optional canonical
+project-relative `workspace`, and a positive `limit` (default `100`). The
+result's `structuredContent` is the ProjectRecord JSON also emitted by
+`ouroboros status project --json`.
+
+```text
+ouroboros_project_status(
+  project_dir="/work/project",
+  workspace="packages/app",
+  limit=100
+)
+```
+
+The tool is side-effect free and advertises read-only, non-destructive,
+idempotent capability metadata. It opens an owned EventStore in database-level
+read-only mode and never creates schema. Identity conflicts, storage or
+reconstruction failures, and limits below the complete matching population fail
+the request without returning a partial record. Project status is attribution
+only: it cannot authorize execution, alter evidence, or declare acceptance.
+
 ### `ouroboros_brownfield` Scan Boundaries
 
 The brownfield MCP tool registers existing codebases for PM/interview context.

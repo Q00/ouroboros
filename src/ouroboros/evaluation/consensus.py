@@ -47,6 +47,7 @@ from ouroboros.events.evaluation import (
     create_stage3_completed_event,
     create_stage3_started_event,
 )
+from ouroboros.evolution.provider_usage import tracked_complete
 from ouroboros.providers.base import CompletionConfig, LLMAdapter, Message, MessageRole
 from ouroboros.strategies.devil_advocate import ConsensusContext, DevilAdvocateStrategy
 
@@ -472,7 +473,7 @@ class ConsensusEvaluator:
             response_format={"type": "json_schema", "json_schema": VOTE_SCHEMA},
         )
 
-        llm_result = await self._llm.complete(messages, config)
+        llm_result = await tracked_complete(self._llm, messages, config)
         if llm_result.is_err:
             return Result.err(llm_result.error)
 
@@ -559,7 +560,7 @@ class ConsensusEvaluator:
             response_format={"type": "json_schema", "json_schema": VOTE_SCHEMA},
         )
 
-        llm_result = await self._llm.complete(messages, config)
+        llm_result = await tracked_complete(self._llm, messages, config)
         if llm_result.is_err:
             return Result.err(llm_result.error)
 
@@ -882,7 +883,7 @@ class DeliberativeConsensus:
                 response_format={"type": "json_schema", "json_schema": VOTE_SCHEMA},
             )
 
-            llm_result = await self._llm.complete(messages, config)
+            llm_result = await tracked_complete(self._llm, messages, config)
             if llm_result.is_err:
                 return Result.err(llm_result.error)
 
@@ -1026,7 +1027,7 @@ Based on both positions above, make your final judgment."""
             response_format={"type": "json_schema", "json_schema": JUDGMENT_SCHEMA},
         )
 
-        llm_result = await self._llm.complete(messages, config)
+        llm_result = await tracked_complete(self._llm, messages, config)
         if llm_result.is_err:
             return Result.err(llm_result.error)
 

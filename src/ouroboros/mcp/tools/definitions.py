@@ -8,6 +8,7 @@ the default handler tuple for MCP registration.
 Handler modules:
 - execution_handlers: ExecuteSeedHandler, StartExecuteSeedHandler
 - query_handlers: SessionStatusHandler, QueryEventsHandler, ACDashboardHandler
+- project_status_handler: ProjectStatusHandler
 - projection_handlers: ProjectionQueryHandler
 - authoring_handlers: GenerateSeedHandler, InterviewHandler
 - evaluation_handlers: MeasureDriftHandler, EvaluateHandler, LateralThinkHandler
@@ -53,6 +54,7 @@ from ouroboros.mcp.tools.job_handlers import (
     JobStatusHandler,
     JobWaitHandler,
 )
+from ouroboros.mcp.tools.project_status_handler import ProjectStatusHandler
 from ouroboros.mcp.tools.projection_handlers import ProjectionQueryHandler
 from ouroboros.mcp.tools.qa import QAHandler
 from ouroboros.mcp.tools.query_handlers import (
@@ -189,6 +191,11 @@ def query_events_handler() -> QueryEventsHandler:
 def projection_query_handler() -> ProjectionQueryHandler:
     """Create a ProjectionQueryHandler instance."""
     return ProjectionQueryHandler()
+
+
+def project_status_handler() -> ProjectStatusHandler:
+    """Create a ProjectStatusHandler instance."""
+    return ProjectStatusHandler()
 
 
 def generate_seed_handler(
@@ -414,6 +421,7 @@ OuroborosToolHandlers = tuple[
     | CancelJobHandler
     | QueryEventsHandler
     | ProjectionQueryHandler
+    | ProjectStatusHandler
     | GenerateSeedHandler
     | MeasureDriftHandler
     | InterviewHandler
@@ -534,6 +542,7 @@ def get_ouroboros_tools(
         CancelJobHandler(),
         QueryEventsHandler(),
         ProjectionQueryHandler(),
+        ProjectStatusHandler(),
         generate_seed,
         MeasureDriftHandler(),
         interview,

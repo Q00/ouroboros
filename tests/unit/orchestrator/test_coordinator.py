@@ -554,6 +554,17 @@ class _StubCoordinatorRuntime:
     def permission_mode(self) -> str | None:
         return self._permission_mode
 
+    def frugality_runtime_attestation(self) -> Mapping[str, object]:
+        implementation = f"{type(self).__module__}.{type(self).__qualname__}"
+        return {
+            "schema_version": 1,
+            "schema_id": "test.coordinator_runtime.v1",
+            "implementation": implementation,
+            "runtime_backend": "opencode",
+            "runtime_handle_backend": "opencode",
+            "settings": {"fixture": "coordinator"},
+        }
+
     async def execute_task(
         self,
         prompt: str,
@@ -890,6 +901,58 @@ class TestParseReviewResponse:
 
 class TestRunReview:
     """Tests for LevelCoordinator.run_review()."""
+
+    @pytest.mark.asyncio
+    async def test_review_usage_is_included_in_generation_total(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        from ouroboros.evolution import provider_usage as provider_usage_module
+        from ouroboros.evolution.provider_usage import capture_generation_provider_usage
+
+        runtime_class = (
+            f"{_StubCoordinatorRuntime.__module__}.{_StubCoordinatorRuntime.__qualname__}"
+        )
+        monkeypatch.setitem(
+            provider_usage_module._AGENT_RUNTIME_SCHEMAS,
+            runtime_class,
+            provider_usage_module._AgentRuntimeSchema(
+                schema_id="test.coordinator_runtime.v1",
+                runtime_backend="opencode",
+                runtime_handle_backend="opencode",
+                setting_kinds={"fixture": "text"},
+            ),
+        )
+
+        runtime = _StubCoordinatorRuntime(
+            (
+                AgentMessage(
+                    type="result",
+                    content='{"review_summary":"Reviewed","fixes_applied":[],"warnings_for_next_level":[],"conflicts_resolved":[]}',
+                    data={
+                        "subtype": "success",
+                        "model_observation": {"effective_model": "test-model"},
+                        "usage": {"total_tokens": 80},
+                    },
+                ),
+            )
+        )
+        runtime.llm_backend = "test-provider"
+        runtime._model = "test-model"
+        coordinator = LevelCoordinator(runtime)
+
+        with capture_generation_provider_usage() as capture:
+            await coordinator.run_review(
+                execution_id="exec_measured",
+                conflicts=[FileConflict(file_path="src/app.py", ac_indices=(0, 1))],
+                level_context=LevelContext(level_number=1, completed_acs=()),
+                level_number=1,
+            )
+
+        summary = capture.summary()
+        assert summary.complete is True
+        assert summary.call_count == 1
+        assert summary.token_spend == 80
 
     @pytest.mark.asyncio
     async def test_run_review_announces_param_degradation(self):

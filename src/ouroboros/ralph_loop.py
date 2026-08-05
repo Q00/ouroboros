@@ -150,6 +150,7 @@ class RalphLoopRunner:
         loop_start_monotonic = time.monotonic()
         checkpoint_commits = list(config.checkpoint_commits)
         checkpoint_attempted_ac_ids = list(config.checkpoint_attempted_ac_ids)
+        execute_current = config.execute
 
         for iteration_index in range(1, config.max_generations + 1):
             if (
@@ -185,7 +186,7 @@ class RalphLoopRunner:
 
             arguments: dict[str, Any] = {
                 "lineage_id": config.lineage_id,
-                "execute": config.execute,
+                "execute": execute_current,
                 "parallel": config.parallel,
                 "skip_qa": config.skip_qa,
             }
@@ -314,6 +315,14 @@ class RalphLoopRunner:
                 status = "failed"
                 stop_reason = action
                 break
+            if action == "ontology_stable":
+                if iteration_index >= config.max_generations:
+                    status = "failed"
+                    stop_reason = "max_generations reached"
+                    break
+                execute_current = True
+                seed_content = None
+                continue
 
             if _is_oscillating(iterations, config.oscillation_window):
                 status = "failed"

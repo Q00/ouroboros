@@ -119,3 +119,51 @@ def test_project_dir_git_snapshot_commits_target_repo_changes(tmp_path: Path) ->
         == "ooo/lin_commit/gen_1"
     )
     assert (project_dir / "generated.txt").read_text(encoding="utf-8") == "changed\n"
+
+
+def test_no_execute_ontology_stable_promotes_next_cycle_to_execution(tmp_path: Path) -> None:
+    script_dir = tmp_path / "scripts"
+    calls_file = tmp_path / "calls.json"
+    _copy_wrapper(script_dir)
+    (script_dir / "ralph.py").write_text(
+        "\n".join(
+            (
+                "import json, sys",
+                "from pathlib import Path",
+                f"calls_path = Path({str(calls_file)!r})",
+                "calls = json.loads(calls_path.read_text()) if calls_path.exists() else []",
+                "calls.append(sys.argv[1:])",
+                "calls_path.write_text(json.dumps(calls))",
+                "ontology_only = '--no-execute' in sys.argv[1:]",
+                "action = 'ontology_stable' if ontology_only else 'converged'",
+                "generation = 1 if ontology_only else 2",
+                "print(json.dumps({'action': action, 'generation': generation, 'similarity': 1.0}))",
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(script_dir / "ralph.sh"),
+            "--lineage-id",
+            "lin_ontology_handoff",
+            "--no-execute",
+            "--max-cycles",
+            "2",
+        ],
+        cwd=tmp_path,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+
+    calls = json.loads(calls_file.read_text(encoding="utf-8"))
+    assert "--no-execute" in calls[0]
+    assert "--no-execute" not in calls[1]
+    assert calls[0][calls[0].index("--lineage-id") + 1] == "lin_ontology_handoff"
+    assert calls[1][calls[1].index("--lineage-id") + 1] == "lin_ontology_handoff"
+    assert "ONTOLOGY STABLE" in result.stderr
+    assert '"action": "converged"' in result.stdout

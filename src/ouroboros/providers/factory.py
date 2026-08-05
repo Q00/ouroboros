@@ -92,6 +92,7 @@ class _LLMAdapterRequest:
     max_retries: int
     io_recorder: IOJournalRecorder | None
     strict_mcp_config: bool
+    frugality_proof: bool
 
 
 def resolve_llm_backend(backend: str | None = None) -> str:
@@ -323,6 +324,7 @@ def _create_litellm_adapter(request: _LLMAdapterRequest) -> LLMAdapter:
         timeout=request.timeout,
         max_retries=request.max_retries,
         io_recorder=request.io_recorder,
+        frugality_proof=request.frugality_proof,
     )
 
 
@@ -373,8 +375,14 @@ def create_llm_adapter(
     max_retries: int = 3,
     io_recorder: IOJournalRecorder | None = None,
     strict_mcp_config: bool = False,
+    frugality_proof: bool = False,
 ) -> LLMAdapter:
-    """Create an LLM adapter from config or explicit options."""
+    """Create an LLM adapter from config or explicit options.
+
+    ``frugality_proof`` asks registered completion producers to seal a
+    measurable execution envelope. It is opt-in so ordinary user-facing
+    flows retain their existing retry and timeout policies.
+    """
     resolved_backend = resolve_llm_backend(backend)
     # Backends in ``_BACKENDS_WITH_SOFT_TOOL_ENFORCEMENT`` accept the
     # envelope but enforce it via prompt injection + post-hoc detection
@@ -425,6 +433,7 @@ def create_llm_adapter(
             max_retries=max_retries,
             io_recorder=io_recorder,
             strict_mcp_config=strict_mcp_config,
+            frugality_proof=frugality_proof,
         )
     )
 

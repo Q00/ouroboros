@@ -32,6 +32,14 @@ from ouroboros.mcp.errors import (
     MCPServerError,
     MCPToolError,
 )
+
+# Re-exported: split out in #1754, still imported from here by evaluation tests.
+from ouroboros.mcp.server.project_dir import (  # noqa: F401
+    _PROJECT_ROOT_MARKERS,
+    _looks_like_project_root,
+    _project_dir_from_artifact,
+    _project_dir_from_seed,
+)
 from ouroboros.mcp.server.protocol import PromptHandler, ResourceHandler, ToolHandler
 from ouroboros.mcp.server.security import AuthConfig, AuthMethod, RateLimitConfig, SecurityLayer
 from ouroboros.mcp.types import (
@@ -536,40 +544,6 @@ def _validate_parameter_constraints(
             raise ValueError(f"Invalid items for {parameter.name}: expected {item_type} values")
 
 
-_PROJECT_ROOT_MARKERS = (
-    # VCS (most universal — nearly every project has one)
-    ".git",
-    # Python
-    "pyproject.toml",
-    "setup.py",
-    "setup.cfg",
-    # Node.js
-    "package.json",
-    # Rust
-    "Cargo.toml",
-    # Go
-    "go.mod",
-    # Java / Kotlin
-    "pom.xml",
-    "build.gradle",
-    "build.gradle.kts",
-    # Ruby
-    "Gemfile",
-    # PHP
-    "composer.json",
-)
-
-
-def _looks_like_project_root(path: object) -> bool:
-    """Return True when the given path looks like a project root."""
-    from pathlib import Path
-
-    if not isinstance(path, Path):
-        return False
-
-    return any((path / marker).exists() for marker in _PROJECT_ROOT_MARKERS)
-
-
 def _parse_legacy_execution_task_summary(artifact: str, seed: Any) -> Any | None:
     """Parse legacy parallel execution output into task completion results.
 
@@ -655,7 +629,7 @@ def _agent_results_from_execution_summary(mechanical: Any) -> dict[int, bool]:
     ``source_ac_index`` so skipped/unverifiable assertions do not convert a
     worker-reported failure into formal approval.
     """
-    agent_results = {ac.ac_index: ac.passed for ac in mechanical.ac_results}
+    agent_results = {ac.ac_index: ac.authoritative_pass for ac in mechanical.ac_results}
     for task in mechanical.task_results:
         source_ac_index = task.source_ac_index
         if source_ac_index is None:
@@ -667,18 +641,19 @@ def _agent_results_from_execution_summary(mechanical: Any) -> dict[int, bool]:
 def _evaluation_summary_from_spec_verification(
     mechanical: Any,
     verification_summary: Any,
+    seed: Any | None = None,
 ) -> Any | None:
-    """Promote complete verifier coverage into formal AC verdict results.
-
-    Spec verification may only return reports for ACs that produced extractable
-    assertions. Missing reports and reports with no concrete verification
-    results are not formal approval: they become failed/not-evaluated AC
-    results so a partial verifier pass cannot approve the whole run.
-    """
+    """Promote complete verifier coverage into Seed-bound formal AC verdicts."""
     from ouroboros.core.lineage import ACResult, EvaluationSummary
 
     reports = tuple(getattr(verification_summary, "reports", ()) or ())
     if not reports:
+        return None
+    seed_criteria = tuple(getattr(seed, "acceptance_criteria", ()) or ())
+
+    def semantic_key(ac_index: int) -> str | None:
+        if 0 <= ac_index < len(seed_criteria):
+            return getattr(seed_criteria[ac_index], "semantic_ac_key", None)
         return None
 
     expected_ac_content: dict[int, str] = {
@@ -708,6 +683,7 @@ def _evaluation_summary_from_spec_verification(
                     ac_content=expected_ac_content.get(
                         ac_index, f"Acceptance criterion {ac_index + 1}"
                     ),
+                    semantic_ac_key=semantic_key(ac_index),
                     passed=False,
                     score=0.0,
                     evidence="No spec verification report was produced for this AC.",
@@ -739,6 +715,7 @@ def _evaluation_summary_from_spec_verification(
             ACResult(
                 ac_index=report.ac_index,
                 ac_content=report.ac_text,
+                semantic_ac_key=semantic_key(report.ac_index),
                 passed=passed,
                 score=1.0 if passed else 0.0,
                 evidence=evidence,
@@ -750,7 +727,7 @@ def _evaluation_summary_from_spec_verification(
         )
 
     total = len(ac_results)
-    passed_count = sum(1 for result in ac_results if result.passed)
+    passed_count = sum(1 for result in ac_results if result.authoritative_pass)
     score = passed_count / total if total > 0 else 0.0
     complete_coverage = bool(expected_indices) and expected_indices.issubset(reports_by_index)
     execution_completed = mechanical.execution_completion_status == "completed"
@@ -758,7 +735,7 @@ def _evaluation_summary_from_spec_verification(
 
     failure_reason = None
     if not approved:
-        failed_indices = [result.ac_index + 1 for result in ac_results if not result.passed]
+        failed_indices = [result.ac_index + 1 for result in ac_results if result.unresolved]
         discrepancy_count = getattr(verification_summary, "discrepancy_count", 0)
         reason_parts = []
         if failed_indices:
@@ -799,62 +776,6 @@ def _evaluation_summary_from_spec_verification(
         execution_completion_status=mechanical.execution_completion_status,
         approval_status="approved" if approved else "rejected",
     )
-
-
-def _project_dir_from_seed(seed: Any) -> str | None:
-    """Extract a likely project directory from seed metadata or brownfield context."""
-    if seed is None:
-        return None
-
-    seed_meta = getattr(seed, "metadata", None)
-    if seed_meta:
-        project_dir = getattr(seed_meta, "project_dir", None) or getattr(
-            seed_meta,
-            "working_directory",
-            None,
-        )
-        if project_dir:
-            return str(project_dir)
-
-    brownfield_context = getattr(seed, "brownfield_context", None)
-    context_references = getattr(brownfield_context, "context_references", ()) or ()
-
-    for reference in context_references:
-        path = getattr(reference, "path", None)
-        role = getattr(reference, "role", None)
-        if isinstance(path, str) and path and role == "primary":
-            return path
-
-    for reference in context_references:
-        path = getattr(reference, "path", None)
-        if isinstance(path, str) and path:
-            return path
-
-    return None
-
-
-def _project_dir_from_artifact(artifact: str) -> str | None:
-    """Extract a likely project root from Write/Edit/File tool output."""
-    from pathlib import Path
-    import re
-
-    # Match quoted paths (spaces allowed) and unquoted paths.
-    # Examples:  Write: /foo/bar.py  |  File: "/path with spaces/bar.py"
-    write_matches: list[str] = []
-    for m in re.finditer(r'(?:Write|Edit|File): (?:"([^"]+)"|(.+))', artifact):
-        path_candidate = m.group(1) or m.group(2)
-        if path_candidate:
-            write_matches.append(path_candidate.strip())
-    for path_str in write_matches:
-        candidate = Path(path_str).parent
-        for _ in range(10):
-            if _looks_like_project_root(candidate):
-                return str(candidate)
-            if candidate == candidate.parent:
-                break
-            candidate = candidate.parent
-
-    return None
 
 
 class MCPServerAdapter:
@@ -1729,6 +1650,7 @@ def create_ouroboros_server(
         LineageStatusHandler,
         MeasureDriftHandler,
         ProjectionQueryHandler,
+        ProjectStatusHandler,
         QueryEventsHandler,
         RalphHandler,
         SessionStatusHandler,
@@ -1737,7 +1659,9 @@ def create_ouroboros_server(
         StartEvolveStepHandler,
         StartExecuteSeedHandler,
         StartRalphHandler,
+        SubmitFanoutResultsHandler,
     )
+    from ouroboros.mcp.tools.fanout import FanoutRegistry
     from ouroboros.mcp.tools.pm_handler import PMInterviewHandler
     from ouroboros.mcp.tools.qa import QAHandler
     from ouroboros.mcp.tools.registry import ToolRegistry
@@ -1843,11 +1767,16 @@ def create_ouroboros_server(
 
     llm_adapters: dict[str, Any] = {}
 
-    def create_stage_llm_adapter(backend: str) -> Any:
+    def create_stage_llm_adapter(
+        backend: str,
+        *,
+        frugality_proof: bool = False,
+    ) -> Any:
         return create_llm_adapter(
             backend=backend,
             max_turns=stage_max_turns,
             cwd=effective_cwd,
+            frugality_proof=frugality_proof,
             allowed_tools=(
                 [] if backend_supports_tool_envelope(resolve_llm_backend(backend)) else None
             ),
@@ -1860,7 +1789,14 @@ def create_ouroboros_server(
 
     llm_adapter = shared_stage_llm_adapter(interview_llm_backend)
     evaluation_llm_adapter = shared_stage_llm_adapter(evaluate_llm_backend)
-    reflect_llm_adapter = shared_stage_llm_adapter(reflect_llm_backend)
+    reflect_llm_adapter = create_stage_llm_adapter(
+        reflect_llm_backend,
+        frugality_proof=True,
+    )
+    evolution_evaluation_llm_adapter = create_stage_llm_adapter(
+        evaluate_llm_backend,
+        frugality_proof=True,
+    )
 
     # The shared interview adapter above is catalog-sealed for
     # envelope-capable backends (``allowed_tools=[]`` → ``--tools ""``), so
@@ -1909,13 +1845,9 @@ def create_ouroboros_server(
 
     def fresh_llm_adapter(role: str = "reflect"):
         backend = role_llm_backend(role)
-        return create_llm_adapter(
-            backend=backend,
-            max_turns=stage_max_turns,
-            cwd=effective_cwd,
-            allowed_tools=(
-                [] if backend_supports_tool_envelope(resolve_llm_backend(backend)) else None
-            ),
+        return create_stage_llm_adapter(
+            backend,
+            frugality_proof=True,
         )
 
     def fresh_reflect_stage_llm_adapter():
@@ -1946,7 +1878,7 @@ def create_ouroboros_server(
     # Disabled by default to reduce latency per generation step.
     evolve_stage1 = os.environ.get("OUROBOROS_EVOLVE_STAGE1", "false").lower() == "true"
     evolution_eval_pipeline = EvaluationPipeline(
-        llm_adapter=evaluation_llm_adapter,
+        llm_adapter=evolution_evaluation_llm_adapter,
         config=PipelineConfig(
             stage1_enabled=evolve_stage1,
             stage2_enabled=True,
@@ -2021,7 +1953,7 @@ def create_ouroboros_server(
         return _parse_legacy_execution_task_summary(artifact, seed)
 
     spec_extractor = AssertionExtractor(
-        llm_adapter=evaluation_llm_adapter,
+        llm_adapter=evolution_evaluation_llm_adapter,
         model=get_llm_model_for_role(
             "assertion_extraction",
             backend=role_llm_backend("assertion_extraction"),
@@ -2069,7 +2001,6 @@ def create_ouroboros_server(
         if not seed_id:
             return None
 
-        # Extract assertions from ACs (cached by seed_id)
         extract_result = await spec_extractor.extract(seed_id, ac_texts(seed_acs))
         if extract_result.is_err:
             log.warning("spec_verification.extraction_failed", error=str(extract_result.error))
@@ -2079,10 +2010,8 @@ def create_ouroboros_server(
         if not assertions:
             return None
 
-        # Build agent results map from formal AC results or legacy task completion.
         agent_results = _agent_results_from_execution_summary(mechanical)
 
-        # Run verification
         verifier = SpecVerifier(project_dir=project_dir)
         summary = verifier.verify_all(assertions, agent_results)
 
@@ -2093,7 +2022,7 @@ def create_ouroboros_server(
                 project_dir=project_dir,
             )
 
-        return _evaluation_summary_from_spec_verification(mechanical, summary)
+        return _evaluation_summary_from_spec_verification(mechanical, summary, seed)
 
     async def _evolution_evaluator(seed: Any, execution_output: str | None) -> EvaluationSummary:
         await _ensure_evolution_store_initialized()
@@ -2175,6 +2104,8 @@ def create_ouroboros_server(
         import re
         import subprocess  # noqa: S404  # nosec
 
+        from ouroboros.evolution.validation_result import BUILTIN_COLLECTION_ATTEMPT_LIMIT
+
         project_dir = _extract_project_dir(execution_output or "", seed=seed)
 
         if not project_dir:
@@ -2202,7 +2133,7 @@ def create_ouroboros_server(
                 timeout=60,
             )
 
-        max_attempts = 3
+        max_attempts = BUILTIN_COLLECTION_ATTEMPT_LIMIT
         # Use Sonnet for validation fixes — import error resolution doesn't need Opus
         validation_model = os.environ.get("OUROBOROS_VALIDATION_MODEL") or execution_model
         if validation_model is None and execute_runtime_backend == "claude":
@@ -2257,7 +2188,11 @@ def create_ouroboros_server(
                 project_dir=project_dir,
             )
 
-            fix_result = await validation_adapter.execute_task_to_result(
+            from ouroboros.evolution.provider_usage import tracked_agent_task_to_result
+
+            fix_result = await tracked_agent_task_to_result(
+                validation_adapter,
+                role="evolution_validation_repair",
                 prompt=fix_prompt,
                 tools=["Read", "Edit", "Write", "Bash", "Glob", "Grep"],
             )
@@ -2274,6 +2209,13 @@ def create_ouroboros_server(
             f"Validation: {len(remaining)} errors remain after {max_attempts} attempts. "
             f"Remaining: {', '.join(remaining[:5])}"
         )
+
+    # These callables either use generation-scoped tracked provider helpers for
+    # every possible model call or stay deterministic.  The loop refuses a
+    # frugality PASS for arbitrary opaque evaluator/validator callables.
+    _evolution_evaluator.frugality_provider_tracking = True  # type: ignore[attr-defined]
+    _evolution_validator.frugality_provider_tracking = True  # type: ignore[attr-defined]
+    _evolution_executor.frugality_provider_tracking = True  # type: ignore[attr-defined]
 
     _scoped_reexecution_env = os.environ.get("OUROBOROS_SCOPED_REEXECUTION", "").strip().lower()
     _scoped_reexecution = _scoped_reexecution_env not in ("0", "false")
@@ -2368,6 +2310,22 @@ def create_ouroboros_server(
         agent_runtime_backend=execute_runtime_backend,
         opencode_mode=opencode_mode,
     )
+    # ONE registry, shared by every producer and by the re-entry tool. A fan-out
+    # registered by the interview handler is redeemed through
+    # ``ouroboros_submit_fanout_results``, so both sides must observe the same
+    # directory. Until #1754 this composition root injected no registry and
+    # registered no submit handler, so on the shipped stdio server no
+    # ``fanout_id`` was ever stamped and the re-entry contract in
+    # skills/interview/SKILL.md named a tool that was not there.
+    #
+    # Built at its FINAL directory rather than at the default plus a later
+    # re-root. This root resolved ``state_dir_path`` hundreds of lines above, so
+    # the mutable path never had a reason to exist here — and leaving it mutable
+    # is not free: a producer that registers before the first interview turn (a
+    # lateral panel) would have its record moved out from under an already
+    # issued fan-out id, whose valid submission then returns
+    # ``unknown_fanout_id``.
+    fanout_registry = FanoutRegistry(state_dir_path / "fanout")
     # No shared-adapter injection for interview handlers: the injected stage
     # adapter has no strict MCP isolation, and ``self.llm_adapter or ...``
     # would bypass the handler's own strict factory (#765, #1768). Injection
@@ -2377,6 +2335,7 @@ def create_ouroboros_server(
         llm_backend=interview_llm_backend,
         agent_runtime_backend=interview_runtime_backend,
         opencode_mode=opencode_mode,
+        fanout_registry=fanout_registry,
         suppress_tool_use_prompt_cues=interview_envelope_sealed,
     )
     generate_seed = GenerateSeedHandler(
@@ -2422,9 +2381,7 @@ def create_ouroboros_server(
             mcp_tool_prefix=auto_mcp_prefix,
             ralph_handler_factory=build_ralph_handler,
         ),
-        SessionStatusHandler(
-            event_store=event_store,
-        ),
+        SessionStatusHandler(event_store=event_store),
         RecordConductorDecisionHandler(event_store=event_store),
         SynapseTargetsHandler(session_signal_target_resolver),
         synapse_signal,
@@ -2446,11 +2403,11 @@ def create_ouroboros_server(
             event_store=event_store,
             job_manager=job_manager,
         ),
-        QueryEventsHandler(
+        QueryEventsHandler(event_store=event_store),
+        ProjectionQueryHandler(event_store=event_store),
+        ProjectStatusHandler(
             event_store=event_store,
-        ),
-        ProjectionQueryHandler(
-            event_store=event_store,
+            default_project_dir=effective_cwd,
         ),
         GenerateSeedHandler(
             interview_engine=interview_engine,
@@ -2470,6 +2427,7 @@ def create_ouroboros_server(
             llm_backend=interview_llm_backend,
             agent_runtime_backend=interview_runtime_backend,
             opencode_mode=opencode_mode,
+            fanout_registry=fanout_registry,
             suppress_tool_use_prompt_cues=interview_envelope_sealed,
         ),
         PMInterviewHandler(
@@ -2496,7 +2454,9 @@ def create_ouroboros_server(
         LateralThinkHandler(
             agent_runtime_backend=reflect_runtime_backend,
             opencode_mode=opencode_mode,
+            fanout_registry=fanout_registry,
         ),
+        SubmitFanoutResultsHandler(fanout_registry=fanout_registry),
         evolve_step,
         StartEvolveStepHandler(
             evolve_handler=evolve_step,

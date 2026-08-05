@@ -1571,9 +1571,9 @@ class LateralThinkHandler(BridgeAwareMixin):
                 build_lateral_multi_subagent,
                 build_multi_subagent_result,
                 lateral_persona_panel_metadata_from_capability_definitions,
-                register_lateral_persona_fanout,
                 resolve_subagent_dispatch,
                 stamp_fanout_meta,
+                stamp_lateral_persona_fanout,
             )
 
             if explicit_list:
@@ -1727,12 +1727,12 @@ class LateralThinkHandler(BridgeAwareMixin):
             )
             if not host_driven:
                 dispatch_record["legacy_dispatch_mode"] = "inline_fallback"
-            if self.fanout_registry is not None:
-                dispatch_record["fanout_id"] = register_lateral_persona_fanout(
-                    self.fanout_registry,
-                    session_id=str(arguments.get("session_id") or ""),
-                    payloads=payloads,
-                )
+            stamp_lateral_persona_fanout(
+                dispatch_record,
+                self.fanout_registry,
+                session_id=str(arguments.get("session_id") or ""),
+                payloads=payloads,
+            )
             dispatch_blob = json.dumps(dispatch_record)
             dispatch_b64 = base64.b64encode(dispatch_blob.encode("utf-8")).decode("ascii")
             host_banner = (
@@ -1939,9 +1939,9 @@ class SubmitFanoutResultsHandler:
                 "subagents declared by a prior tool's `meta` (which stamped a "
                 "`fanout_id` and a `result_correlation_key`), call this tool with "
                 "one {key, content} per child output — `key` is the value of the "
-                "correlation field for that child. A complete set returns the "
-                "synthesis to continue with; a partial set returns "
-                "`status=partial` with the missing keys so you can resubmit."
+                "correlation field for that child. A child you could not spawn "
+                "at all is exactly {key, undispatched: true}; never invent output. "
+                "Missing required keys return `status=partial`; retry with EVERY lane."
             ),
             parameters=(
                 MCPToolParameter(
@@ -1969,9 +1969,9 @@ class SubmitFanoutResultsHandler:
                     name="results",
                     type=ToolInputType.ARRAY,
                     description=(
-                        "Correlated child outputs: a list of objects each with a "
-                        "'key' (the correlation value) and a 'content' (the child "
-                        "result, object or text)."
+                        "Correlated child outputs: objects with a 'key' (the "
+                        "correlation value) and a 'content' (the child result), "
+                        "or 'undispatched': true when the child never ran."
                     ),
                     required=True,
                 ),
@@ -2000,7 +2000,7 @@ class SubmitFanoutResultsHandler:
                     tool_name="ouroboros_submit_fanout_results",
                 )
             )
-        results = [item for item in raw_results if isinstance(item, dict)]
+        results = list(raw_results)  # not filtered; the core reports bad entries
 
         outcome = submit_fanout_results(
             self._registry,

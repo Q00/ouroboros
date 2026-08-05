@@ -54,6 +54,7 @@ class TestDirectiveProjection:
                     "generation_number": 1,
                     "phase": "reflecting",
                     "is_terminal": False,
+                    "extra": {"step_action": "ontology_stable"},
                 },
             ),
         ]
@@ -69,6 +70,7 @@ class TestDirectiveProjection:
         assert emission.generation_number == 1
         assert emission.phase == "reflecting"
         assert emission.is_terminal is False
+        assert emission.step_action == "ontology_stable"
 
     def test_directives_preserve_event_order(self) -> None:
         """Multiple directives arrive on the projection in event-replay order."""
@@ -134,6 +136,7 @@ class TestDirectiveProjection:
         assert emission.target_id is None
         assert emission.generation_number is None
         assert emission.phase is None
+        assert emission.step_action is None
         assert emission.parent_directive_id is None
         assert emission.idempotency_key is None
 

@@ -25,7 +25,6 @@ from typing import Any
 from ouroboros.codex.cli_policy import (
     DEFAULT_CODEX_CHILD_SESSION_ENV_KEYS,
     DEFAULT_MAX_OUROBOROS_DEPTH,
-    build_codex_child_env,
     resolve_codex_cli_path,
 )
 from ouroboros.codex.runtime_profile import resolve_codex_profile
@@ -51,6 +50,12 @@ from ouroboros.orchestrator.adapter import (
     TaskResult,
     resolve_worker_cwd,
     worker_cwd_failure_message,
+)
+from ouroboros.orchestrator.frugality_runtime_attestation import (
+    attested_codex_child_environment,
+    build_codex_runtime_child_environment,
+    clear_attested_codex_child_environment,
+    codex_cli_runtime_attestation,
 )
 from ouroboros.orchestrator.skill_tool_mapping import discover_skill_tool_mappings
 from ouroboros.providers.base import CompletionConfig
@@ -251,11 +256,9 @@ class _CodexItemCorrelationScope:
 class CodexCliRuntime:
     """Agent runtime that shells out to the locally installed Codex CLI."""
 
-    _runtime_handle_backend = "codex_cli"
-    _runtime_backend = "codex"
+    _runtime_handle_backend, _runtime_backend = "codex_cli", "codex"
     _requires_memory_gate = True
-    _provider_name = "codex_cli"
-    _runtime_error_type = "CodexCliError"
+    _provider_name, _runtime_error_type = "codex_cli", "CodexCliError"
     _log_namespace = "codex_cli_runtime"
     _display_name = "Codex CLI"
     _default_cli_name = "codex"
@@ -271,6 +274,8 @@ class CodexCliRuntime:
     _child_session_env_keys = DEFAULT_CODEX_CHILD_SESSION_ENV_KEYS
     _use_process_group = os.name == "posix"
     _completed_process_group_shutdown_timeout_seconds = 0.2
+    frugality_runtime_attestation = codex_cli_runtime_attestation
+    frugality_runtime_attestation_complete = clear_attested_codex_child_environment
 
     def __init__(
         self,
@@ -2168,21 +2173,9 @@ class CodexCliRuntime:
         return current_handle.native_session_id
 
     def _build_child_env(self) -> dict[str, str]:
-        """Build an isolated environment for child runtime processes.
-
-        Strips ``OUROBOROS_AGENT_RUNTIME`` and ``OUROBOROS_LLM_BACKEND`` so
-        that a child Codex process does not re-load the Ouroboros MCP server,
-        preventing the recursive startup loop described in #185. Also strips
-        parent Codex thread/session env so nested ``codex exec`` starts a fresh
-        subprocess instead of inheriting the current agent thread.
-        """
-        return build_codex_child_env(
-            max_depth=self._max_ouroboros_depth,
-            child_session_env_keys=self._child_session_env_keys,
-            depth_error_factory=lambda _depth, max_depth: RuntimeError(
-                f"Maximum Ouroboros nesting depth ({max_depth}) exceeded"
-            ),
-        )
+        """Return the proof-sealed child environment, or build a fresh one."""
+        attested = attested_codex_child_environment(self)
+        return attested or build_codex_runtime_child_environment(self)
 
     def _requires_process_stdin(self) -> bool:
         """Return True when the runtime needs a writable stdin pipe."""

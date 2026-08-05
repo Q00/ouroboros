@@ -16,10 +16,18 @@ import pytest
 
 from ouroboros.bigbang.seed_generator import SeedGenerator
 from ouroboros.core.lineage import ACResult, EvaluationSummary, OntologyLineage
-from ouroboros.core.seed import OntologyField, OntologySchema, Seed, SeedMetadata
+from ouroboros.core.seed import (
+    AcceptanceCriterionSpec,
+    InvestmentSpec,
+    OntologyField,
+    OntologySchema,
+    Seed,
+    SeedMetadata,
+)
 from ouroboros.evolution.reflect import (
     ACPatch,
     ReflectEngine,
+    ReflectOutput,
     _apply_satisficing_backstop,
     _derive_legacy_patches,
     _parse_ac_patches,
@@ -30,7 +38,10 @@ from ouroboros.evolution.wonder import GroundedQuestion, WonderOutput
 PARENT_ACS = ("AC zero", "AC one", "AC two")
 
 
-def _seed(acs: tuple[str, ...] = PARENT_ACS) -> Seed:
+def _seed(
+    acs: tuple[str | AcceptanceCriterionSpec, ...] = PARENT_ACS,
+    **extra_fields: object,
+) -> Seed:
     return Seed(
         metadata=SeedMetadata(ambiguity_score=0.1),
         goal="Build a thing",
@@ -41,6 +52,7 @@ def _seed(acs: tuple[str, ...] = PARENT_ACS) -> Seed:
             description="d",
             fields=(OntologyField(name="f", field_type="entity", description="a field"),),
         ),
+        **extra_fields,
     )
 
 
@@ -97,11 +109,50 @@ def _compose(
     passed: dict[int, bool] | None = None,
     challenge: tuple[int, ...] = (),
     regressed: tuple[int, ...] = (),
+    active: tuple[int, ...] | None = None,
 ) -> tuple[tuple[str, ...], tuple[ACPatch, ...], tuple[int, ...]]:
     if passed is None:
         passed = {0: True, 1: True, 2: True}
     return ReflectEngine._compose_acs(
-        data, parent, _summary(passed), _wonder(challenge), _regression(regressed)
+        data,
+        parent,
+        _summary(passed),
+        _wonder(challenge),
+        _regression(regressed),
+        active,
+    )
+
+
+def _parse_explicit(
+    parent: Seed,
+    patches: list[dict[str, object]],
+    *,
+    refined_acs: tuple[str, ...] | None = None,
+) -> ReflectOutput | None:
+    data: dict[str, object] = {
+        "refined_goal": parent.goal,
+        "refined_constraints": list(parent.constraints),
+        "ac_patches": patches,
+        "ontology_mutations": [],
+        "reasoning": "r",
+    }
+    if refined_acs is not None:
+        data["refined_acs"] = list(refined_acs)
+    evaluation = EvaluationSummary(
+        final_approved=False,
+        highest_stage_passed=2,
+        score=0.5,
+        ac_results=tuple(
+            ACResult(ac_index=index, ac_content=criterion.description, passed=False)
+            for index, criterion in enumerate(parent.acceptance_criteria)
+        ),
+    )
+    return ReflectEngine(llm_adapter=_FakeAdapter(""), model="test")._parse_response(
+        json.dumps(data),
+        parent,
+        evaluation,
+        _wonder(),
+        _regression(),
     )
 
 
@@ -173,8 +224,92 @@ class TestComposition:
         assert len(refined) == 3
         assert all(p.op == "keep" for p in patches)
 
+    def test_add_index_is_normalized_before_seed_materialization(self) -> None:
+        refined, patches, _ = _compose(
+            {"ac_patches": [{"op": "add", "index": 99, "content": "brand new"}]}
+        )
+
+        addition = patches[-1]
+        assert refined[-1] == "brand new"
+        assert addition.op == "add"
+        assert addition.index is None
+
+    @pytest.mark.parametrize(
+        "patches",
+        [
+            [
+                {"op": "revise", "index": 0, "content": "AC one"},
+                {"op": "revise", "index": 1, "content": "AC zero"},
+            ],
+            [{"op": "add", "content": "AC one"}],
+        ],
+        ids=["semantic-swap", "add-parent-identity"],
+    )
+    def test_fresh_parent_identity_reuse_is_rejected_for_reflect_retry(
+        self,
+        patches: list[dict[str, object]],
+    ) -> None:
+        with pytest.raises(ValueError, match="reuses another parent identity"):
+            _compose({"ac_patches": patches})
+
+    def test_focused_evolution_drops_new_nodes(self) -> None:
+        refined, patches, _ = _compose(
+            {
+                "ac_patches": [
+                    {"op": "revise", "index": 1, "content": "target fixed"},
+                    {"op": "add", "content": "scope expansion"},
+                ]
+            },
+            passed={0: True, 1: False, 2: False},
+            active=(1,),
+        )
+
+        assert refined == ("AC zero", "target fixed", "AC two")
+        assert all(patch.op != "add" for patch in patches)
+
+    def test_focused_evolution_forces_non_target_failed_node_to_keep(self) -> None:
+        refined, _, _ = _compose(
+            {
+                "ac_patches": [
+                    {"op": "revise", "index": 1, "content": "target fixed"},
+                    {"op": "revise", "index": 2, "content": "not targeted"},
+                ]
+            },
+            passed={0: True, 1: False, 2: False},
+            active=(1,),
+        )
+
+        assert refined == ("AC zero", "target fixed", "AC two")
+
 
 class TestSatisficingBackstop:
+    def test_non_authoritative_pass_is_revisable_and_never_settled(self) -> None:
+        summary = EvaluationSummary(
+            final_approved=True,
+            highest_stage_passed=2,
+            ac_results=(
+                ACResult(
+                    ac_index=0,
+                    ac_content=PARENT_ACS[0],
+                    passed=True,
+                    ac_verdict_state="not_evaluated",
+                ),
+            ),
+        )
+
+        refined, patches, settled = ReflectEngine._compose_acs(
+            {"ac_patches": [{"op": "revise", "index": 0, "content": "verified AC zero"}]},
+            PARENT_ACS,
+            summary,
+            _wonder(),
+            _regression(),
+            (0,),
+        )
+
+        assert refined[0] == "verified AC zero"
+        assert patches[0].op == "revise"
+        assert 0 not in settled
+
     def test_forces_keep_on_protected(self) -> None:
         # AC 0 passed, unchallenged, unregressed → protected. LLM tries to revise.
         patches = [ACPatch(op="revise", index=0, content="sneaky rewrite")]
@@ -193,6 +328,13 @@ class TestSatisficingBackstop:
         )
         assert refined[1] == "challenged fix"
         assert 1 not in settled  # revised, not kept
+
+    def test_challenged_ac_is_not_settled_when_kept(self) -> None:
+        _, _, settled = _compose(
+            {"ac_patches": [{"op": "keep", "index": 1}]},
+            challenge=(1,),
+        )
+        assert 1 not in settled
 
     def test_failed_ac_may_revise(self) -> None:
         refined, _, settled = _compose(
@@ -218,6 +360,24 @@ class TestSatisficingBackstop:
             regressed=(1,),
         )
         assert 1 not in settled
+
+    def test_missing_evaluation_mints_no_protection_or_settlement(self) -> None:
+        refined, _, settled = ReflectEngine._compose_acs(
+            {
+                "ac_patches": [
+                    {"op": "revise", "index": 0, "content": "ontology revision"},
+                    {"op": "keep", "index": 1},
+                    {"op": "keep", "index": 2},
+                ]
+            },
+            PARENT_ACS,
+            None,
+            _wonder(),
+            _regression(),
+        )
+
+        assert refined[0] == "ontology revision"
+        assert settled == ()
 
 
 class TestSettledIndices:
@@ -248,12 +408,15 @@ class TestLegacyFallbackDiff:
         assert ops == ["keep", "revise", "keep", "add"]
         assert set(settled) == {0, 2}  # kept + passed; index 1 revised
 
-    def test_shorter_list_full_rewrite_semantics(self) -> None:
+    def test_shorter_list_is_rejected_as_identity_ambiguous(self) -> None:
         data = {"refined_acs": ["only one"]}
-        refined, patches, settled = _compose(data)
-        assert refined == ("only one",)
-        assert patches == ()
-        assert settled == ()
+        with pytest.raises(ValueError, match="cannot delete or reorder"):
+            _compose(data)
+
+    def test_reordered_list_is_rejected_as_identity_ambiguous(self) -> None:
+        data = {"refined_acs": ["AC one", "AC zero", "AC two"]}
+        with pytest.raises(ValueError, match="cannot delete or reorder"):
+            _compose(data)
 
     def test_derive_legacy_patches_shorter_returns_none(self) -> None:
         assert _derive_legacy_patches(("a",), ("a", "b", "c")) is None
@@ -303,6 +466,43 @@ class TestMalformedPatches:
 
 
 class TestReflectEndToEnd:
+    async def test_ontology_only_reflect_uses_no_synthetic_evaluation_authority(self) -> None:
+        response = json.dumps(
+            {
+                "refined_goal": "Build a thing with explicit ownership",
+                "refined_constraints": ["c1"],
+                "ac_patches": [
+                    {"op": "revise", "index": 0, "content": "AC zero clarified"},
+                    {"op": "keep", "index": 1},
+                    {"op": "keep", "index": 2},
+                ],
+                "ontology_mutations": [
+                    {
+                        "action": "add",
+                        "field_name": "owner",
+                        "field_type": "entity",
+                        "reason": "answer the Wonder question",
+                    }
+                ],
+                "reasoning": "ontology-only exploration",
+            }
+        )
+        adapter = _FakeAdapter(response)
+
+        result = await ReflectEngine(llm_adapter=adapter, model="test").reflect(
+            current_seed=_seed(),
+            execution_output="",
+            evaluation_summary=None,
+            wonder_output=_wonder(),
+            lineage=OntologyLineage(lineage_id="l", goal="Build a thing"),
+        )
+
+        assert result.is_ok
+        assert result.value.refined_acs[0] == "AC zero clarified"
+        assert result.value.settled_ac_indices == ()
+        assert "Not evaluated (ontology-only exploration)" in adapter.messages[1].content
+        assert "No AC has PASS, protection, or settling authority" in adapter.messages[1].content
+
     async def test_whitespace_only_refined_constraints_rejected_before_seed_materialization(
         self,
     ) -> None:
@@ -310,7 +510,11 @@ class TestReflectEndToEnd:
             {
                 "refined_goal": "Build a thing better",
                 "refined_constraints": ["c1", "   "],
-                "ac_patches": [{"op": "keep", "index": 0}],
+                "ac_patches": [
+                    {"op": "keep", "index": 0},
+                    {"op": "keep", "index": 1},
+                    {"op": "keep", "index": 2},
+                ],
                 "ontology_mutations": [],
                 "reasoning": "r",
             }
@@ -334,7 +538,11 @@ class TestReflectEndToEnd:
             {
                 "refined_goal": "Build a thing better",
                 "refined_constraints": ["c1"],
-                "ac_patches": [{"op": "revise", "index": 1, "content": "   "}],
+                "ac_patches": [
+                    {"op": "keep", "index": 0},
+                    {"op": "revise", "index": 1, "content": "   "},
+                    {"op": "keep", "index": 2},
+                ],
                 "ontology_mutations": [],
                 "reasoning": "r",
             }
@@ -392,7 +600,11 @@ class TestReflectEndToEnd:
             {
                 "refined_goal": "Build a thing better",
                 "refined_constraints": ["c1"],
-                "ac_patches": [{"op": "keep", "index": 0}],
+                "ac_patches": [
+                    {"op": "keep", "index": 0},
+                    {"op": "keep", "index": 1},
+                    {"op": "keep", "index": 2},
+                ],
                 "ontology_mutations": [mutation],
                 "reasoning": "r",
             }
@@ -440,9 +652,135 @@ class TestReflectEndToEnd:
         assert result.is_ok
         out = result.value
         assert out.refined_acs == ("AC zero", "fixed AC one", "AC two")
+        assert out.ac_patch_identity_explicit is True
         assert 0 in out.settled_ac_indices
         assert 2 in out.settled_ac_indices
         assert 1 not in out.settled_ac_indices
+
+    @pytest.mark.parametrize(
+        "ac_patches",
+        [
+            [
+                {"op": "keep", "index": 0},
+                {"op": "keep", "index": 2},
+            ],
+            [
+                {"op": "keep", "index": 0},
+                {"op": "revise", "index": 0, "content": "conflict"},
+                {"op": "keep", "index": 1},
+                {"op": "keep", "index": 2},
+            ],
+            [
+                {"op": "keep", "index": 0},
+                {"op": "keep", "index": 1},
+                {"op": "keep", "index": 2},
+                {"op": "keep", "index": 3},
+            ],
+            [
+                {"op": "keep", "index": 0},
+                {"op": "keep", "index": 1},
+                {"op": "remove", "index": 2},
+            ],
+            [
+                {"op": "keep", "index": 0, "content": "replacement"},
+                {"op": "keep", "index": 1},
+                {"op": "keep", "index": 2},
+            ],
+            [
+                {"op": "keep", "index": 0},
+                {"op": "revise", "index": 1},
+                {"op": "keep", "index": 2},
+            ],
+            [
+                {"op": "keep", "index": 0},
+                {"op": "revise", "index": 1, "content": 42},
+                {"op": "keep", "index": 2},
+            ],
+            [
+                {"op": "keep", "index": 0},
+                {"op": "keep", "index": 1},
+                {"op": "keep", "index": 2},
+                {"op": "add"},
+            ],
+            [
+                {"op": "keep", "index": 0},
+                {"op": "keep", "index": 1},
+                {"op": "keep", "index": 2},
+                {"op": "add", "content": 42},
+            ],
+            [
+                {"op": "keep", "index": 0},
+                {"op": "keep", "index": 1},
+                {"op": "keep", "index": 2},
+                {"op": "add", "index": 0, "content": "new criterion"},
+            ],
+        ],
+        ids=(
+            "missing",
+            "duplicate",
+            "out-of-range",
+            "unsupported-op",
+            "keep-content",
+            "revise-missing-content",
+            "revise-non-string-content",
+            "add-missing-content",
+            "add-non-string-content",
+            "add-parent-index",
+        ),
+    )
+    async def test_reflect_rejects_malformed_explicit_patch_identity(
+        self,
+        ac_patches: list[dict[str, object]],
+    ) -> None:
+        response = json.dumps(
+            {
+                "refined_goal": "Build a thing better",
+                "refined_constraints": ["c1"],
+                "ac_patches": ac_patches,
+                "ontology_mutations": [],
+                "reasoning": "r",
+            }
+        )
+
+        result = await ReflectEngine(
+            llm_adapter=_FakeAdapter(response),
+            model="test",
+        ).reflect(
+            current_seed=_seed(),
+            execution_output="out",
+            evaluation_summary=_summary({0: True, 1: True, 2: True}),
+            wonder_output=_wonder(),
+            lineage=OntologyLineage(lineage_id="l", goal="Build a thing"),
+        )
+
+        assert result.is_err
+        assert "failed to parse" in result.error.message.lower()
+
+    async def test_reflect_marks_legacy_full_list_patch_identity_as_inferred(self) -> None:
+        response = json.dumps(
+            {
+                "refined_goal": "Build a thing better",
+                "refined_constraints": ["c1"],
+                "refined_acs": ["AC zero", "fixed AC one", "AC two"],
+                "ontology_mutations": [],
+                "reasoning": "r",
+            }
+        )
+
+        result = await ReflectEngine(
+            llm_adapter=_FakeAdapter(response),
+            model="test",
+        ).reflect(
+            current_seed=_seed(),
+            execution_output="out",
+            evaluation_summary=_summary({0: True, 1: True, 2: True}),
+            wonder_output=_wonder(challenge_indices=(1,)),
+            lineage=OntologyLineage(lineage_id="l", goal="Build a thing"),
+        )
+
+        assert result.is_ok
+        assert result.value.ac_patches
+        assert result.value.ac_patch_identity_explicit is False
 
     async def test_valid_mutations_materialize_downstream_seed(self) -> None:
         parent = _seed_with_ontology(
@@ -455,7 +793,11 @@ class TestReflectEndToEnd:
             {
                 "refined_goal": "Build a thing with materialized ontology",
                 "refined_constraints": ["c1"],
-                "ac_patches": [{"op": "keep", "index": 0}],
+                "ac_patches": [
+                    {"op": "keep", "index": 0},
+                    {"op": "keep", "index": 1},
+                    {"op": "keep", "index": 2},
+                ],
                 "ontology_mutations": [
                     {
                         "action": "add",
@@ -496,16 +838,312 @@ class TestReflectEndToEnd:
         assert fields["f"].description == "a field"
         assert "obsolete" not in fields
 
+    def test_seed_generation_preserves_structured_ac_contracts(self) -> None:
+        parent = _seed(
+            (
+                AcceptanceCriterionSpec(
+                    description="AC zero",
+                    verify_command="pytest -q tests/test_zero.py",
+                    expected_artifacts=("dist/zero.json",),
+                    output_assertion="1 passed",
+                    investment=InvestmentSpec(
+                        difficulty="high",
+                        stakes="medium",
+                        confidence="high",
+                    ),
+                ),
+                "AC one",
+                "AC two",
+            ),
+            plugin_contract={"items": ["one", {"nested": ["two"]}]},
+        )
+        original = parent.acceptance_criteria[0]
+        reflected = ReflectOutput(
+            refined_goal=parent.goal,
+            refined_constraints=parent.constraints,
+            refined_acs=("AC zero revised", "AC one", "AC two"),
+            ac_patches=(
+                ACPatch(op="revise", index=0, content="AC zero revised"),
+                ACPatch(op="keep", index=1),
+                ACPatch(op="keep", index=2),
+            ),
+        )
+
+        result = SeedGenerator(llm_adapter=_FakeAdapter("")).generate_from_reflect(
+            parent,
+            reflected,
+        )
+
+        assert result.is_ok
+        revised = result.value.acceptance_criteria[0]
+        assert revised.description == "AC zero revised"
+        assert revised.verify_command == original.verify_command
+        assert revised.expected_artifacts == original.expected_artifacts
+        assert revised.output_assertion == original.output_assertion
+        assert revised.investment == original.investment
+        assert revised.semantic_ac_key != original.semantic_ac_key
+        assert result.value.to_dict()["plugin_contract"] == {"items": ["one", {"nested": ["two"]}]}
+
+    @pytest.mark.parametrize(
+        ("refined_acs", "expected_reason"),
+        [
+            (("AC one",), "shorter"),
+            (("AC one", "AC zero"), "reorders"),
+        ],
+        ids=("deletion", "reordering"),
+    )
+    def test_seed_generation_rejects_ambiguous_structured_contract_rewrites(
+        self,
+        refined_acs: tuple[str, ...],
+        expected_reason: str,
+    ) -> None:
+        parent = _seed(
+            (
+                AcceptanceCriterionSpec(
+                    description="AC zero",
+                    verify_command="python verify_zero.py",
+                    expected_artifacts=("dist/zero.json",),
+                    output_assertion="zero passed",
+                    investment=InvestmentSpec(difficulty="high", stakes="medium"),
+                ),
+                AcceptanceCriterionSpec(
+                    description="AC one",
+                    verify_command="python verify_one.py",
+                    expected_artifacts=("dist/one.json",),
+                    output_assertion="one passed",
+                    investment=InvestmentSpec(difficulty="medium", stakes="high"),
+                ),
+            )
+        )
+        reflected = ReflectOutput(
+            refined_goal=parent.goal,
+            refined_constraints=parent.constraints,
+            refined_acs=refined_acs,
+        )
+
+        result = SeedGenerator(llm_adapter=_FakeAdapter("")).generate_from_reflect(
+            parent,
+            reflected,
+        )
+
+        assert result.is_err
+        assert expected_reason in str(result.error)
+        assert "structured acceptance contracts" in str(result.error)
+
+    def test_seed_generation_rejects_edited_structured_contract_reordering(self) -> None:
+        parent = _seed(
+            (
+                AcceptanceCriterionSpec(
+                    description="Approve the invoice",
+                    verify_command="python verify_invoice.py",
+                    expected_artifacts=("invoice.json",),
+                ),
+                AcceptanceCriterionSpec(
+                    description="Delete the account",
+                    verify_command="python verify_delete.py",
+                    expected_artifacts=("deleted.json",),
+                ),
+            )
+        )
+        reflected = ReflectOutput(
+            refined_goal=parent.goal,
+            refined_constraints=parent.constraints,
+            refined_acs=(
+                "Delete the account permanently",
+                "Approve the invoice safely",
+            ),
+        )
+
+        result = SeedGenerator(llm_adapter=_FakeAdapter("")).generate_from_reflect(
+            parent,
+            reflected,
+        )
+
+        assert result.is_err
+        assert "explicit stable AC identity" in str(result.error)
+
+    def test_seed_generation_uses_explicit_patch_identity_for_multiple_revisions(self) -> None:
+        parent = _seed(
+            (
+                AcceptanceCriterionSpec(
+                    description="Approve the invoice",
+                    verify_command="python verify_invoice.py",
+                    expected_artifacts=("invoice.json",),
+                ),
+                AcceptanceCriterionSpec(
+                    description="Delete the account",
+                    verify_command="python verify_delete.py",
+                    expected_artifacts=("deleted.json",),
+                ),
+            )
+        )
+        reflected = _parse_explicit(
+            parent,
+            [
+                {"op": "revise", "index": 0, "content": "Approve the invoice safely"},
+                {"op": "revise", "index": 1, "content": "Delete the account permanently"},
+            ],
+        )
+        assert reflected is not None
+
+        result = SeedGenerator(llm_adapter=_FakeAdapter("")).generate_from_reflect(
+            parent,
+            reflected,
+        )
+
+        assert result.is_ok
+        criteria = result.value.acceptance_criteria
+        assert criteria[0].verify_command == "python verify_invoice.py"
+        assert criteria[1].verify_command == "python verify_delete.py"
+
+    def test_seed_generation_rejects_legacy_positional_patches_for_edited_reorder(
+        self,
+    ) -> None:
+        parent = _seed(
+            (
+                AcceptanceCriterionSpec(
+                    description="Approve the invoice",
+                    verify_command="python verify_invoice.py",
+                ),
+                AcceptanceCriterionSpec(
+                    description="Delete the account",
+                    verify_command="python verify_delete.py",
+                ),
+            )
+        )
+        reflected = ReflectOutput(
+            refined_goal=parent.goal,
+            refined_constraints=parent.constraints,
+            refined_acs=("Delete the account permanently", "Approve the invoice safely"),
+            ac_patches=(
+                ACPatch(op="revise", index=0, content="Delete the account permanently"),
+                ACPatch(op="revise", index=1, content="Approve the invoice safely"),
+            ),
+        )
+
+        result = SeedGenerator(llm_adapter=_FakeAdapter("")).generate_from_reflect(
+            parent,
+            reflected,
+        )
+
+        assert result.is_err
+        assert "explicit stable AC identity" in str(result.error)
+
+    def test_seed_generation_rejects_inconsistent_explicit_patch_for_plain_ac(self) -> None:
+        parent = _seed(("original",))
+        reflected = _parse_explicit(
+            parent,
+            [{"op": "keep", "index": 0}],
+            refined_acs=("changed despite keep",),
+        )
+        assert reflected is None
+
+    def test_serialized_or_copied_boolean_cannot_forge_explicit_patch_provenance(
+        self,
+    ) -> None:
+        direct = ReflectOutput(
+            refined_goal="Build a thing",
+            refined_acs=("changed",),
+            ac_patches=(ACPatch(op="revise", index=0, content="changed"),),
+        )
+        serialized = direct.model_dump(mode="json")
+        serialized["ac_patch_identity_explicit"] = True
+
+        assert ReflectOutput.model_validate(serialized).ac_patch_identity_explicit is False
+        assert (
+            direct.model_copy(
+                update={"ac_patch_identity_explicit": True}
+            ).ac_patch_identity_explicit
+            is False
+        )
+
+    def test_explicit_patch_provenance_is_not_serialized(self) -> None:
+        parsed = _parse_explicit(
+            _seed(("original",)),
+            [{"op": "revise", "index": 0, "content": "changed"}],
+        )
+        assert parsed is not None
+        assert parsed.ac_patch_identity_explicit is True
+        assert (
+            ReflectOutput.model_validate(parsed.model_dump(mode="json")).ac_patch_identity_explicit
+            is False
+        )
+
+    def test_model_copy_content_update_invalidates_explicit_patch_provenance(self) -> None:
+        parent = _seed(
+            (
+                AcceptanceCriterionSpec(
+                    description="first",
+                    verify_command="python verify_first.py",
+                ),
+                AcceptanceCriterionSpec(
+                    description="second",
+                    verify_command="python verify_second.py",
+                ),
+            )
+        )
+        parsed = _parse_explicit(
+            parent,
+            [
+                {"op": "revise", "index": 0, "content": "first revised"},
+                {"op": "revise", "index": 1, "content": "second revised"},
+            ],
+        )
+        assert parsed is not None
+        forged = parsed.model_copy(
+            update={
+                "refined_acs": ("second", "first"),
+                "ac_patches": (
+                    ACPatch(op="revise", index=0, content="second"),
+                    ACPatch(op="revise", index=1, content="first"),
+                ),
+            }
+        )
+
+        assert forged.ac_patch_identity_explicit is False
+        result = SeedGenerator(llm_adapter=_FakeAdapter("")).generate_from_reflect(
+            parent,
+            forged,
+        )
+        assert result.is_err
+        assert "explicit stable AC identity" in str(result.error)
+
+    def test_ac_result_rejects_boolean_index(self) -> None:
+        with pytest.raises(ValueError):
+            ACResult(ac_index=True, ac_content="criterion", passed=True)
+
+    @pytest.mark.parametrize(
+        ("refined_acs", "expected_reason"),
+        [
+            (("   ",), "non-empty string"),
+            (("criterion\x00suffix",), "control characters"),
+            ((42,), "contain strings"),
+        ],
+        ids=("whitespace", "control-character", "non-string"),
+    )
+    def test_reflect_output_rejects_invalid_acceptance_criteria(
+        self,
+        refined_acs: tuple[object, ...],
+        expected_reason: str,
+    ) -> None:
+        with pytest.raises((TypeError, ValueError), match=expected_reason):
+            ReflectOutput(
+                refined_goal="Build a thing",
+                refined_acs=refined_acs,  # type: ignore[arg-type]
+            )
+
 
 class _FakeAdapter:
     def __init__(self, content: str) -> None:
         self.content = content
         self._max_turns = 1
+        self.messages = ()
 
     async def complete(self, messages, config):  # type: ignore[no-untyped-def]
         from ouroboros.core.types import Result
         from ouroboros.providers.base import CompletionResponse, UsageInfo
 
+        self.messages = messages
         return Result.ok(
             CompletionResponse(
                 content=self.content,

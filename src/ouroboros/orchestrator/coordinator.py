@@ -33,6 +33,7 @@ import math
 import re
 from typing import TYPE_CHECKING, Any
 
+from ouroboros.evolution.provider_usage import tracked_agent_task
 from ouroboros.observability.logging import get_logger
 from ouroboros.orchestrator.adapter import DEFAULT_TOOLS, RuntimeHandle
 from ouroboros.orchestrator.capabilities import build_capability_graph
@@ -922,7 +923,9 @@ class LevelCoordinator:
                 base_effort=self._reasoning_effort,
                 is_decomposed_child=False,
             )
-            async for message in self._adapter.execute_task(
+            async for message in tracked_agent_task(
+                self._adapter,
+                role="executor_coordinator_review",
                 prompt=prompt,
                 tools=tools,
                 system_prompt=COORDINATOR_SYSTEM_PROMPT,

@@ -191,6 +191,8 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
      `meta.code_investigation_request` when present.
    - `web_context` — browse/search only when current external facts genuinely
      affect the answer.
+   - `data_context` — take the measurements that inform the question.
+     This lane takes the measurement; see "Data measurements" below.
    - `ambiguity_contrarian` — find hidden assumptions, vague terms, missing
      decisions, and risky defaults.
    - `answer_simplifier` — turn the question into 2-3 easy choices or one
@@ -223,17 +225,100 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
    `meta.question_advisory_fanout_id`, or a `fanout_id` in a lateral persona
    panel dispatch), after all advisory/persona subagents return, call
    `ouroboros_submit_fanout_results` with:
+   - `session_id`: the session the fan-out was issued under. Required whenever
+     the producer ran with one — an omitted session is refused rather than
+     waived, because this is what binds a submission to its owner. Contracted
+     lanes assert no session of their own; this argument is the binding.
    - `fanout_id`: the stamped id from that meta,
    - `correlation_key`: the stamped `result_correlation_key`
-     (`context.lane_id`, `context.persona`, or `code_facts`),
+     (`context.lane_id`, `context.persona`, or `code_facts`). Omitting it is
+     refused the same way whenever the fan-out recorded one — send back what the
+     meta stamped rather than leaving it out,
    - `results`: one `{ "key": <correlation value>, "content": <child output> }`
      per subagent, where `key` is that child's correlation value (its lane id,
      persona, or `code_facts`).
+   Every result must be either `{ "key": <lane>, "content": ... }` or exactly
+   `{ "key": <lane>, "undispatched": true }` — the literal `true`, no `content`
+   beside it, and never an entry carrying neither. One entry per lane: a lane
+   reported twice is two statements about it, and nothing here picks between
+   them by list position. Anything else comes back as
+   `status="invalid_result_entry"` with `invalid_keys`, listing every bad entry
+   at once so one resubmission fixes them all.
+
    A complete set returns the correlated synthesis to continue with; a partial
-   set returns `status="partial"` with `missing_keys` so you can resubmit the
-   remaining lanes. Sequential hosts submit after processing payloads
-   one-by-one — same tool, same contract. Continue the interview from the
-   returned synthesis; keep the user-facing question visible throughout.
+   set returns `status="partial"` with `missing_required_keys`. **Retry with
+   every lane you hold, not only the missing ones** — no submitted output is
+   kept between calls, so each call is judged on what it carries. (The record
+   stores only what was *asked*; retaining what children *answered* is durable
+   result state, deferred with its sanitization duties to a later slice.)
+   Sequential hosts submit after processing payloads one-by-one — same tool,
+   same contract, so accumulate the outputs on your side and send the growing
+   set. Continue the interview from the returned synthesis; keep the
+   user-facing question visible throughout.
+
+   Only lanes marked `required: true` in the request block completion. A lane
+   you ran that had nothing to say still submits its output — that is an answer.
+   A lane you could **not spawn at all** (no capability for it, the child died,
+   the user cancelled it) is submitted as
+   `{ "key": <lane id>, "undispatched": true }`. Never invent output for a lane
+   you did not run: a fabricated finding is worse than a missing one, and this
+   is exactly why the declaration exists.
+
+   **Data measurements**:
+   The `data_context` lane discovers what data tools this host exposes, takes
+   the measurement itself, and returns the aggregate it read.
+   You do not confirm anything before it runs and you do not run anything after
+   — it has already happened by the time you read the result. There is nothing
+   to approve because the approval already exists: the user registered these
+   tools, and registering one is the willingness to have it called. That is the
+   standing every other advisory lane runs on, and this lane was the only one
+   asked to hold a line in prose that its siblings did not.
+
+   When its output carries measurements:
+   - Show the numbers **beside** the question as material for the user's
+     judgment. They are never the answer. The user answers in their own words
+     on the ordinary `[from-user]` path; there is no `[from-data]` answer to
+     forward. This is now the whole of the boundary: the lane carries real
+     values, so the only thing standing between a measurement and the Seed is
+     that you put it next to the question instead of into the answer.
+   - Carry the aggregate as the lane reported it, with its `metric` and the
+     decision it informs. Do not re-derive, re-scale, or combine numbers across
+     measurements; you did not run the read and cannot know what would survive
+     the arithmetic.
+   - If the user has already answered the question by the time the measurement
+     arrives, drop it. Do not re-open a decision the user has made, and do not
+     present the numbers as a reason to reconsider — evidence informs a
+     decision, it does not revisit one.
+
+   When `data_needed` is false the lane looked and found nothing to measure.
+   Every reason it can give is a statement about the lane, never about the
+   user's infrastructure — a subagent sees what reached it, not what is
+   connected, so it is not positioned to tell anyone a data path is missing.
+   Read them accordingly:
+   - `not_a_measurement` / `question_too_ambiguous_to_measure` — about the
+     question. Nothing to relay beyond moving on.
+   - `answer_would_not_be_an_aggregate` — about the shape of the answer.
+   - `no_data_store_described` — nothing the lane was shown holds this answer.
+     Worth mentioning only if you know the store exists and the lane was not
+     told about it; otherwise it is ordinary.
+   - `store_described_but_not_callable` — **this one is yours to handle, not
+     the user's to hear.** A store exists and the child could not reach it. You
+     see the environment and it does not: check whether the tool is available to
+     you, take the read yourself, or re-dispatch the lane. Do not surface it as
+     a missing data path. This constant exists because its predecessor was
+     relayed to a user as a fact about their own infrastructure while the store
+     in question sat described in the child's prompt.
+
+   `no_evidence_reason` is one of a fixed set of constants, so say it in your
+   own words rather than pasting the constant.
+
+   What this lane can reach is not classified by anyone. The child names the
+   tool it used; it cannot prove that tool was read-only, and MCP carries no
+   cost or mutation metadata for you to check against. That risk is accepted
+   knowingly and is the same one the sibling advisory lanes already run under.
+   Do not manufacture a disclaimer about it: a warning attached to every
+   measurement is one users learn to click through, and it would be
+   describing a check nothing performed.
 
    **Milestone lateral-review dispatch**:
    If an MCP response includes `meta.lateral_review_recommended=true`, treat it

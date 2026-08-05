@@ -20,9 +20,38 @@ export const DEDUPE_MS = 5_000
 export const MAX_FANOUT = 10
 export const MAX_SEEN = 256
 export const ID_LEN = 26
+// A producer that appends to the visible question announces itself, so the
+// server-side gatekeeper needs one grammar rather than a reverse-engineered
+// catalogue of everyone's prose. These two literals are the Python constants in
+// mcp/tools/advisory_dispatch.py; they cannot be imported across the language
+// boundary, so a test pins them equal instead.
+//
+// Detecting notify()'s own text was the alternative and it does not hold:
+// "[Ouroboros] " leads only the dispatched branch, while the failed- and
+// skipped-only banners start with their own words.
+export const OUROBOROS_DISPATCH_MARKER = "<!-- ouroboros-question-advisory-dispatch-v1 -->"
+export const BRIDGE_NOTICE_OPENING = "> **Bridge dispatch — plugin_subagent:** "
+
 export const BYPASS_PERMISSION_RULESET = [
   { permission: "*", pattern: "*", action: "allow" },
 ] as const
+// The `read_data` child used to be created with `*:* deny`, because its answer
+// contract had no field for a fetched value and a call it made anyway was pure
+// cost before the user had confirmed anything. That reasoning was sound for the
+// contract it defended and the contract changed: the lane executes and carries
+// aggregates now (Q00/ouroboros#1825).
+//
+// So the denial is removed rather than narrowed. Leaving it would recreate the
+// defect it was part of, mirrored — a child told to take the measurement on a
+// transport where every call is refused, which cannot report "I was blocked"
+// because no `no_evidence_reason` means that, so it would have to pick one
+// that is false. Every reason the lane can give is a statement about itself,
+// which is exactly why none of them can carry "this transport refused me".
+//
+// What replaces it is what the sibling lanes already run on: the user
+// registered these tools, and registering one is the willingness to have it
+// called. The boundary that survives is downstream of every transport — a
+// number is material for the user's judgment and never the interview answer.
 export function num(v: string | undefined, d: number): number {
   const n = !v ? d : Number(v)
   return Number.isFinite(n) && n >= 0 ? n : d
@@ -244,6 +273,15 @@ export function parseMetadata(meta: unknown): { subs: Sub[]; responseShape: Reco
     "milestone",
     "seed_ready",
     "question_advisory_recommended",
+    // Dispatch here is fire-and-forget: children run in the background and no
+    // output exists when this hook returns, so this transport has no moment
+    // where the parent holds every lane at once. The parent redeems the
+    // fan-out itself once the Task widgets finish — which it can only do if
+    // the identity survives into the response it can see. Without these two
+    // keys the data lane's measurement never reaches re-entry, because nothing
+    // downstream can name the fan-out it belongs to (#1754, #1825).
+    "question_advisory_fanout_id",
+    "question_advisory_result_correlation_key",
   ]) {
     if (key in record) responseShape[key] = record[key]
   }
@@ -272,6 +310,23 @@ export function stamp(r: Output, msg: string): void {
     r.content = [{ type: "text", text: msg }]
   }
   try { r.output = msg } catch {}
+}
+
+// Write bridge-authored text into a tool response, declaring it as the bridge's.
+//
+// The bridge is a second producer appending to a question the server rendered:
+// on PLUGIN_PASSIVE the server stamps no directive of its own, and whatever we
+// add here is text a host sees and may echo back as `last_question`. Undeclared,
+// that echo is indistinguishable from the question and the server records the
+// banner — fan-out id and all — as what it asked.
+//
+// The declaration is attached HERE rather than at each call site because there
+// are three appends (dispatch, dedupe, pre-dispatch failure) and only the first
+// had it. A rule that every call site must remember is a rule that gets a fourth
+// call site. Passing `original` is what says "a question is in front of this".
+export function stampBridge(r: Output, original: string | undefined, body: string): void {
+  const declared = `${OUROBOROS_DISPATCH_MARKER}\n\n${BRIDGE_NOTICE_OPENING}\n${body}`
+  stamp(r, original === undefined ? declared : `${original}\n\n${declared}`)
 }
 
 export interface OkResult {
@@ -342,9 +397,14 @@ export function buildEnvelope(
   }
 }
 
-function fail(r: Output, label: string, err: unknown, preservePrefix?: string): void {
+// A failure that drops the fan-out identity is worse than a failure: the parent
+// cannot then declare the lanes `undispatched`, and a required lane pins the
+// fan-out at `partial` for good. The identity lives in `_meta`, which the host
+// model does not read — the response shape is the channel it does — so every
+// pre-dispatch rejection carries it too.
+function fail(r: Output, label: string, err: unknown, preservePrefix?: string, shape?: string): void {
   const msg = `[Ouroboros] Dispatch failed for '${label}': ${errMsg(err)}. See ${LOG}.`
-  stamp(r, preservePrefix ? `${preservePrefix}\n\n${msg}` : msg)
+  stampBridge(r, preservePrefix, msg + (shape ?? ""))
 }
 
 const seen = new Map<string, number>()
@@ -461,9 +521,21 @@ async function resolveMid(cli: Cli, pid: string, callID: string): Promise<string
     const msgs = res?.data
     if (Array.isArray(msgs)) {
       for (let j = msgs.length - 1; j >= 0; j--) {
-        const m = msgs[j]
-        if (m.info.role !== "assistant") continue
-        if (m.parts.some((p) => p.type === "tool" && p.callID === callID)) return m.info.id
+        // Shape-checked rather than trusted: a stale or malformed entry used to
+        // throw out of the hook entirely, and the hook's only handler logs. The
+        // response was then left untouched — no failure notice and no fan-out
+        // identity — which strands a registered required lane with no way to be
+        // declared undispatched.
+        const m = msgs[j] as { info?: { role?: unknown; id?: unknown }; parts?: unknown }
+        if (!m || typeof m !== "object") continue
+        if (m.info?.role !== "assistant" || typeof m.info?.id !== "string") continue
+        if (!Array.isArray(m.parts)) continue
+        const hit = m.parts.some(
+          (p) => p && typeof p === "object"
+            && (p as { type?: unknown }).type === "tool"
+            && (p as { callID?: unknown }).callID === callID,
+        )
+        if (hit) return m.info.id
       }
     }
     if (i < RESOLVE_RETRIES - 1) await sleep(BACKOFF_MS)
@@ -599,6 +671,10 @@ export const OuroborosBridge: Plugin = async (ctx) => {
   log(`INIT dir=${ctx.directory ?? "?"} timeout=${CHILD_TIMEOUT_MS}ms`)
   return {
     "tool.execute.after": async (input, output) => {
+      // Enough to render a failure from the catch below. An exception after the
+      // fan-out was registered is the same harm as an explicit rejection, so it
+      // must reach the host as one rather than as silence.
+      let rescue: { out: Output; prefix?: string; shape: string; label: string } | null = null
       try {
         if (!input || typeof input !== "object") return
         if (typeof input.tool !== "string" || !input.tool.startsWith("ouroboros_")) return
@@ -616,11 +692,19 @@ export const OuroborosBridge: Plugin = async (ctx) => {
         const pid = typeof input.sessionID === "string" ? input.sessionID : ""
         const callID = typeof input.callID === "string" ? input.callID : ""
         const failurePrefix = preserveContent ? originalText : undefined
-        if (!pid) { log(`REJECT reason=empty_sessionID tool=${subs[0].tool}`); fail(out, subs[0].tool, new Error("empty sessionID"), failurePrefix); return }
-        if (!callID) { log(`REJECT reason=empty_callID tool=${subs[0].tool}`); fail(out, subs[0].tool, new Error("empty callID"), failurePrefix); return }
+        // Preserve response_shape in text so the LLM can read the contract
+        // fields build_subagent_result() provides — session_id, status, and the
+        // fan-out identity. Computed before the rejections below so a failure
+        // carries it too, and shared by every path that stamps.
+        const shapeSuffix = Object.keys(responseShape).length > 0
+          ? "\n\n```json\n" + JSON.stringify(responseShape, null, 2) + "\n```"
+          : ""
+        rescue = { out, prefix: failurePrefix, shape: shapeSuffix, label: subs[0].tool }
+        if (!pid) { log(`REJECT reason=empty_sessionID tool=${subs[0].tool}`); fail(out, subs[0].tool, new Error("empty sessionID"), failurePrefix, shapeSuffix); return }
+        if (!callID) { log(`REJECT reason=empty_callID tool=${subs[0].tool}`); fail(out, subs[0].tool, new Error("empty callID"), failurePrefix, shapeSuffix); return }
         if (isNestedRalphDispatch(pid, subs)) {
           log(`REJECT reason=nested_ralph pid=${pid} tool=${subs[0].tool}`)
-          fail(out, "ouroboros_ralph", new Error("nested ouroboros_ralph delegation is not allowed"), failurePrefix)
+          fail(out, "ouroboros_ralph", new Error("nested ouroboros_ralph delegation is not allowed"), failurePrefix, shapeSuffix)
           return
         }
 
@@ -628,17 +712,14 @@ export const OuroborosBridge: Plugin = async (ctx) => {
         const b = base(ctx.client)
         if (!cli?.session?.create || !cli.session.prompt || !cli.session.abort || !cli.session.messages || !b) {
           log(`REJECT reason=client_not_ready tool=${subs[0].tool}`)
-          fail(out, subs[0].tool, new Error("client not ready"), failurePrefix)
+          fail(out, subs[0].tool, new Error("client not ready"), failurePrefix, shapeSuffix)
           return
         }
 
         if (dupe(pid, callID)) {
           log(`DEDUPE pid=${pid} callID=${callID} tool=${subs[0].tool} count=${subs.length}`)
-          const dedupeShapeSuffix = Object.keys(responseShape).length > 0
-            ? "\n\n```json\n" + JSON.stringify(responseShape, null, 2) + "\n```"
-            : ""
-          const dedupeBanner = notify([], [], subs) + dedupeShapeSuffix
-          stamp(out, preserveContent ? `${originalText}\n\n${dedupeBanner}` : dedupeBanner)
+          const dedupeBanner = notify([], [], subs) + shapeSuffix
+          stampBridge(out, preserveContent ? originalText : undefined, dedupeBanner)
           const meta = (out.metadata ?? {}) as Record<string, unknown>
           meta.ouroboros_dispatch = buildEnvelope([], [], subs)
           if (Object.keys(responseShape).length > 0) meta.ouroboros_response_shape = responseShape
@@ -649,7 +730,7 @@ export const OuroborosBridge: Plugin = async (ctx) => {
         const mid = await resolveMid(cli, pid, callID)
         if (!mid) {
           log(`REJECT reason=no_message_found pid=${pid} callID=${callID}`)
-          fail(out, subs[0].tool, new Error("could not resolve messageID"), failurePrefix)
+          fail(out, subs[0].tool, new Error("could not resolve messageID"), failurePrefix, shapeSuffix)
           return
         }
 
@@ -672,13 +753,7 @@ export const OuroborosBridge: Plugin = async (ctx) => {
 
         log(`DISPATCH_DONE pid=${pid} ok=${ok.length} failed=${failed.length}`)
         const banner = notify(ok, failed.map((f) => f.sub), [])
-        // Preserve response_shape in text so the LLM can read contract fields
-        // (session_id, job_id, status) that build_subagent_result() provides.
-        // Without this, stamp() replaces the JSON and the LLM loses these values.
-        const shapeSuffix = Object.keys(responseShape).length > 0
-          ? "\n\n```json\n" + JSON.stringify(responseShape, null, 2) + "\n```"
-          : ""
-        stamp(out, preserveContent ? `${originalText}\n\n${banner}${shapeSuffix}` : banner + shapeSuffix)
+        stampBridge(out, preserveContent ? originalText : undefined, banner + shapeSuffix)
 
         const envelope = buildEnvelope(ok, failed, [])
         const meta = (out.metadata ?? {}) as Record<string, unknown>
@@ -690,6 +765,9 @@ export const OuroborosBridge: Plugin = async (ctx) => {
         out.metadata = meta
       } catch (e) {
         log(`HOOK_CRASH err=${e instanceof Error ? e.stack ?? e.message : errMsg(e)}`)
+        if (rescue) {
+          try { fail(rescue.out, rescue.label, e, rescue.prefix, rescue.shape) } catch {}
+        }
       }
     },
   }
