@@ -20,6 +20,7 @@ from ouroboros.core.seed import (
     SeedMetadata,
     derive_semantic_ac_key,
 )
+from ouroboros.core.session_signal import SessionSignal, SessionSignalMode, SessionSignalSource
 from ouroboros.core.types import Result
 from ouroboros.events.base import BaseEvent
 from ouroboros.orchestrator.adapter import (
@@ -63,6 +64,7 @@ from ouroboros.orchestrator.route_escalation import (
     advance_route,
 )
 from ouroboros.orchestrator.route_policy import RouteRequirements
+from ouroboros.orchestrator.synapse import QueuedSessionSignal
 from ouroboros.orchestrator.verifier import RetryAdmission, VerifierVerdict
 from ouroboros.persistence.event_store import EventStore
 
@@ -198,6 +200,7 @@ def _live_executor(
     working_directory: str,
     process_local_resume_nonce: str,
     max_concurrent: int = 3,
+    session_signal_hub: Any | None = None,
 ) -> ParallelACExecutor:
     """Build the production provider boundary against a real event store."""
 
@@ -222,6 +225,7 @@ def _live_executor(
         ac_retry_attempts=99,
         cross_harness_redispatch=False,
         process_local_resume_nonce=process_local_resume_nonce,
+        session_signal_hub=session_signal_hub,
     )
 
 
@@ -2149,6 +2153,232 @@ async def test_live_entered_sibling_becomes_durable_uncertain_handoff(
         assert isinstance(resumed[1], ACExecutionResult)
         assert resumed[1].outcome is ACExecutionOutcome.BLOCKED
         assert [name for name, _handle in calls].count("second") == 1
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_completed_primary_turn_survives_sibling_quota_during_signal_refresh(
+    tmp_path: Any,
+) -> None:
+    """Post-provider bookkeeping is not an uncertain external-effect boundary."""
+
+    store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'completed-primary.db'}")
+    await store.initialize()
+    adapter = _Adapter()
+    primary_post_call = asyncio.Event()
+    quota_provider_completed = asyncio.Event()
+    calls: list[str] = []
+
+    class _RefreshBarrierHub:
+        async def register_replaying(self, _target: Any) -> None:
+            return None
+
+        async def refresh_pending(self, target: Any) -> None:
+            if target.ac_index != 0:
+                return
+            primary_post_call.set()
+            await quota_provider_completed.wait()
+            await asyncio.sleep(0.05)
+
+        def pop_pending(self, _target: Any) -> None:
+            return None
+
+        def unregister(self, _target: Any) -> list[Any]:
+            return []
+
+    async def execute_task(*_args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
+        is_first = "## Your Task (AC 1)\nship first" in kwargs["prompt"]
+        calls.append("first" if is_first else "second")
+        if is_first:
+            yield AgentMessage(
+                type="result",
+                content="first completed",
+                data={"subtype": "success"},
+            )
+            return
+        await primary_post_call.wait()
+        yield AgentMessage(
+            type="result",
+            content="Usage limit reached. Please try again in 5 hours.",
+            data={"subtype": "error", "error_type": "UsageLimitError"},
+            resume_handle=RuntimeHandle(
+                backend="claude",
+                native_session_id="completed-primary-quota-owner",
+                cwd=str(tmp_path),
+                approval_mode="acceptEdits",
+            ),
+        )
+        quota_provider_completed.set()
+
+    adapter.execute_task = execute_task  # type: ignore[attr-defined,method-assign]
+    signal_hub = _RefreshBarrierHub()
+    executor = _live_executor(
+        adapter=adapter,
+        event_store=store,
+        working_directory=str(tmp_path),
+        process_local_resume_nonce="5" * 32,
+        max_concurrent=2,
+        session_signal_hub=signal_hub,
+    )
+    try:
+        results = await executor._run_batch_with_bounded_route_escalation(
+            seed=_multi_seed(),
+            batch_executable=[0, 1],
+            session_id="session-completed-primary",
+            execution_id="execution-completed-primary",
+            tools=[],
+            tool_catalog=None,
+            system_prompt="sys",
+            level_contexts=[],
+            ac_retry_attempts={0: 0, 1: 0},
+            execution_counters=None,
+        )
+        assert isinstance(results[0], ACExecutionResult) and results[0].success, (results, calls)
+        assert results[0].final_message == "first completed"
+        assert isinstance(results[1], ACExecutionResult) and not results[1].success
+        assert calls == ["first", "second"]
+        handoffs = await store.query_execution_related_events(
+            "execution-completed-primary",
+            event_type="execution.ac.uncertain_handoff_required",
+            limit=3,
+        )
+        assert handoffs == []
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_completed_signal_follow_up_survives_sibling_quota(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A fully observed follow-up remains completed during later local persistence."""
+
+    store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'completed-follow-up.db'}")
+    await store.initialize()
+    adapter = _Adapter()
+    follow_up_post_call = asyncio.Event()
+    quota_provider_completed = asyncio.Event()
+    calls: list[str] = []
+    signal = SessionSignal(
+        signal_id="sig_completed_follow_up",
+        target_session_scope_id="scope-completed-follow-up",
+        target_session_attempt_id="attempt-completed-follow-up",
+        expected_execution_id="execution-completed-follow-up",
+        mode=SessionSignalMode.AFTER_TURN,
+        message="Apply the bounded follow-up.",
+        source=SessionSignalSource.USER,
+        reason="Exercise the completed follow-up boundary.",
+        idempotency_key="completed-follow-up-1",
+    )
+
+    class _OneSignalHub:
+        delivered = False
+
+        async def register_replaying(self, _target: Any) -> None:
+            return None
+
+        async def refresh_pending(self, _target: Any) -> None:
+            return None
+
+        def pop_pending(self, target: Any) -> QueuedSessionSignal | None:
+            if target.ac_index != 0 or self.delivered:
+                return None
+            self.delivered = True
+            return QueuedSessionSignal(signal, SessionSignalMode.AFTER_TURN)
+
+        def unregister(self, _target: Any) -> list[Any]:
+            return []
+
+    original_append_batch = store.append_batch
+
+    async def append_batch(events: list[BaseEvent]) -> None:
+        if any(event.type == "control.session.signal.completed" for event in events):
+            follow_up_post_call.set()
+            await quota_provider_completed.wait()
+            await asyncio.sleep(0.05)
+        await original_append_batch(events)
+
+    monkeypatch.setattr(store, "append_batch", append_batch)
+
+    async def execute_task(*_args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
+        prompt = str(kwargs["prompt"])
+        resume_handle = kwargs.get("resume_handle")
+        if "## Your Task (AC 2)\nship second" in prompt:
+            calls.append("second")
+            await follow_up_post_call.wait()
+            yield AgentMessage(
+                type="result",
+                content="Usage limit reached. Please try again in 5 hours.",
+                data={"subtype": "error", "error_type": "UsageLimitError"},
+                resume_handle=RuntimeHandle(
+                    backend="claude",
+                    native_session_id="completed-follow-up-quota-owner",
+                    cwd=str(tmp_path),
+                    approval_mode="acceptEdits",
+                ),
+            )
+            quota_provider_completed.set()
+            return
+
+        handle = RuntimeHandle(
+            backend="claude",
+            kind="agent_runtime",
+            native_session_id="completed-follow-up-provider",
+            cwd=str(tmp_path),
+            metadata=dict(resume_handle.metadata) if resume_handle is not None else {},
+        )
+        if "[Ouroboros Synapse: additive intent]" in prompt:
+            calls.append("first-follow-up")
+            content = "[TASK_COMPLETE] follow-up completed"
+        else:
+            calls.append("first-primary")
+            content = "first primary completed"
+        yield AgentMessage(
+            type="result",
+            content=content,
+            data={"subtype": "success"},
+            resume_handle=handle,
+        )
+
+    adapter.execute_task = execute_task  # type: ignore[attr-defined,method-assign]
+    signal_hub = _OneSignalHub()
+    executor = _live_executor(
+        adapter=adapter,
+        event_store=store,
+        working_directory=str(tmp_path),
+        process_local_resume_nonce="6" * 32,
+        max_concurrent=2,
+        session_signal_hub=signal_hub,
+    )
+    try:
+        results = await executor._run_batch_with_bounded_route_escalation(
+            seed=_multi_seed(),
+            batch_executable=[0, 1],
+            session_id="session-completed-follow-up",
+            execution_id="execution-completed-follow-up",
+            tools=[],
+            tool_catalog=None,
+            system_prompt="sys",
+            level_contexts=[],
+            ac_retry_attempts={0: 0, 1: 0},
+            execution_counters=None,
+        )
+        assert isinstance(results[0], ACExecutionResult) and results[0].success, (results, calls)
+        assert results[0].final_message == "[TASK_COMPLETE] follow-up completed"
+        assert isinstance(results[1], ACExecutionResult) and not results[1].success
+        assert {name: calls.count(name) for name in calls} == {
+            "first-primary": 1,
+            "first-follow-up": 1,
+            "second": 1,
+        }
+        handoffs = await store.query_execution_related_events(
+            "execution-completed-follow-up",
+            event_type="execution.ac.uncertain_handoff_required",
+            limit=3,
+        )
+        assert handoffs == []
     finally:
         await store.close()
 

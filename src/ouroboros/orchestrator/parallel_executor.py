@@ -85,7 +85,7 @@ from ouroboros.harness.deliver_gate import (
 from ouroboros.harness.journal import EvidenceEntry, EvidenceManifest
 from ouroboros.harness.traceguard_validator import validate_evidence_claims
 from ouroboros.observability.logging import get_logger
-from ouroboros.orchestrator import adaptive_concurrency, provider_admission
+from ouroboros.orchestrator import adaptive_concurrency, provider_admission, provider_effect_scope
 from ouroboros.orchestrator.ac_execution_capsule import (
     UnmaterializableSuccessContractError,
     bind_capsule_to_runtime_handle,
@@ -413,10 +413,6 @@ _has_usage_limit_pause = adaptive_concurrency.has_usage_limit_pause
 _PROVIDER_OBSERVATION_SINK: ContextVar[
     Callable[[adaptive_concurrency.ConcurrencyObservation], None] | None
 ] = ContextVar("ouroboros_provider_observation_sink", default=None)
-_PROVIDER_ENTRY_SINK: ContextVar[Callable[[], None] | None] = ContextVar(
-    "ouroboros_provider_entry_sink",
-    default=None,
-)
 _PARALLEL_ROUTE_OBSERVATION_KEYS = frozenset(
     {
         "schema_version",
@@ -3765,6 +3761,11 @@ class ParallelACExecutor:
         recoverable_pause_detected = anyio.Event()
         sibling_cancel_scopes: dict[int, anyio.CancelScope] = {}
         admission_sequence = provider_admission.AdmissionSequence(len(batch_indices))
+        provider_effects = provider_effect_scope.BatchProviderEffects(
+            recoverable_pause_detected,
+            admission_sequence,
+            _BatchInterruptedForRecoverablePause,
+        )
         sibling_indices = batch_sibling_indices or batch_indices
         sibling_acs: list[_SiblingACRef] = (
             [(i, ac_text(seed.acceptance_criteria[i])) for i in sibling_indices]
@@ -3773,13 +3774,6 @@ class ParallelACExecutor:
         )
 
         async def _run_ac(idx: int, ac_idx: int) -> None:
-            provider_effect_entered = False
-
-            def _mark_provider_entry() -> None:
-                nonlocal provider_effect_entered
-                provider_effect_entered = True
-                admission_sequence.entered(idx)
-
             def _observe_batch_provider(
                 observation: adaptive_concurrency.ConcurrencyObservation,
             ) -> None:
@@ -3789,19 +3783,16 @@ class ParallelACExecutor:
                     is not adaptive_concurrency.BackendPressureKind.QUOTA_EXHAUSTION
                 ):
                     return
-                # Close waiting sibling entrances before this provider permit
-                # is released.  The result owner remains live long enough to
-                # persist the exact durable pause below.
                 recoverable_pause_detected.set()
                 for sibling_idx, scope in tuple(sibling_cancel_scopes.items()):
-                    if sibling_idx != idx:
+                    if sibling_idx != idx and provider_effects.should_cancel(sibling_idx):
                         scope.cancel()
 
             admission_token = admission_sequence.bind(idx)
             observation_sink_token = _PROVIDER_OBSERVATION_SINK.set(
                 _observe_batch_provider if cancel_on_recoverable_pause else None
             )
-            entry_sink_token = _PROVIDER_ENTRY_SINK.set(_mark_provider_entry)
+            provider_effect_tokens = provider_effects.bind(idx)
             with anyio.CancelScope() as sibling_scope:
                 sibling_cancel_scopes[idx] = sibling_scope
                 try:
@@ -3810,9 +3801,6 @@ class ParallelACExecutor:
                             "batch stopped at a recoverable provider quota boundary"
                         )
                         return
-                    # Composite AC roots do not own provider capacity.  Their
-                    # atomic/decomposition provider streams acquire the adaptive
-                    # slot at the actual external-effect boundary below.
                     ac_criterion = seed.acceptance_criteria[ac_idx]
                     resume_state = (route_resume_states or {}).get(ac_idx)
                     expected_route = (
@@ -3877,10 +3865,9 @@ class ParallelACExecutor:
                     )
                     batch_results[idx] = result
                     if cancel_on_recoverable_pause and _has_usage_limit_pause(result):
-                        # Quota belongs to the batch; cancel running/waiting siblings.
                         recoverable_pause_detected.set()
                         for sibling_idx, scope in tuple(sibling_cancel_scopes.items()):
-                            if sibling_idx != idx:
+                            if sibling_idx != idx and provider_effects.should_cancel(sibling_idx):
                                 scope.cancel()
                 except BaseException as e:
                     if isinstance(e, anyio.get_cancelled_exc_class()):
@@ -3891,7 +3878,7 @@ class ParallelACExecutor:
                         ):
                             marker_type = (
                                 _BatchEnteredAtRecoverablePause
-                                if provider_effect_entered
+                                if provider_effects.is_active(idx)
                                 else _BatchInterruptedForRecoverablePause
                             )
                             batch_results[idx] = marker_type(
@@ -3906,7 +3893,7 @@ class ParallelACExecutor:
                     admission_sequence.finished(idx, admission_token)
                     sibling_cancel_scopes.pop(idx, None)
                     _PROVIDER_OBSERVATION_SINK.reset(observation_sink_token)
-                    _PROVIDER_ENTRY_SINK.reset(entry_sink_token)
+                    provider_effects.finish(idx, provider_effect_tokens)
 
         # Cross-AC concurrency is governed by the LevelCoordinator's
         # file-conflict guard, not by session-level tool catalog presence.
@@ -4756,9 +4743,7 @@ class ParallelACExecutor:
                             review: CoordinatorReview | None = None
                             async with self._adaptive_concurrency.slot() as permit_epoch:
                                 _invoke_execution_authority_guard(self)
-                                entry_sink = _PROVIDER_ENTRY_SINK.get()
-                                if entry_sink is not None:
-                                    entry_sink()
+                                provider_effect_scope.enter()
                                 try:
                                     review = await self._authority_coordinator_review(
                                         execution_id=execution_id,
@@ -4767,14 +4752,18 @@ class ParallelACExecutor:
                                         level_number=level_num,
                                     )
                                 finally:
-                                    with anyio.CancelScope(shield=True):
-                                        await adaptive_concurrency.observe_provider_messages(
-                                            self._adaptive_concurrency,
-                                            () if review is None else review.messages,
-                                            permit_epoch,
-                                            None,
-                                            provider_completed=review is not None,
-                                        )
+                                    try:
+                                        with anyio.CancelScope(shield=True):
+                                            await adaptive_concurrency.observe_provider_messages(
+                                                self._adaptive_concurrency,
+                                                () if review is None else review.messages,
+                                                permit_epoch,
+                                                None,
+                                                provider_completed=review is not None,
+                                            )
+                                    finally:
+                                        if review is not None:
+                                            provider_effect_scope.complete()
                             if review is None:
                                 raise RuntimeError(
                                     "coordinator provider completed without a review artifact"
@@ -6281,9 +6270,7 @@ class ParallelACExecutor:
         await provider_admission.wait()
         async with self._adaptive_concurrency.slot() as permit_epoch:
             _invoke_execution_authority_guard(self)
-            entry_sink = _PROVIDER_ENTRY_SINK.get()
-            if entry_sink is not None:
-                entry_sink()
+            provider_effect_scope.enter()
             provider_completed = False
             try:
                 async with asyncio.timeout(DECOMPOSITION_TIMEOUT_SECONDS):
@@ -6314,15 +6301,19 @@ class ParallelACExecutor:
                 provider_completed = True
             finally:
                 # Cancellation/timeout must not erase already-observed pressure.
-                with anyio.CancelScope(shield=True):
-                    await adaptive_concurrency.observe_provider_messages(
-                        self._adaptive_concurrency,
-                        feedback_messages,
-                        permit_epoch,
-                        None,
-                        provider_completed=provider_completed,
-                        on_observation=_PROVIDER_OBSERVATION_SINK.get(),
-                    )
+                try:
+                    with anyio.CancelScope(shield=True):
+                        await adaptive_concurrency.observe_provider_messages(
+                            self._adaptive_concurrency,
+                            feedback_messages,
+                            permit_epoch,
+                            None,
+                            provider_completed=provider_completed,
+                            on_observation=_PROVIDER_OBSERVATION_SINK.get(),
+                        )
+                finally:
+                    if provider_completed:
+                        provider_effect_scope.complete()
         return response_text.strip()
 
     async def _request_bounce_classification(
@@ -6362,6 +6353,8 @@ class ParallelACExecutor:
             return cause, remaining
         except (TimeoutError, ValueError, json.JSONDecodeError, TypeError):
             return BounceCause.UNKNOWN, False
+        except _BatchInterruptedForRecoverablePause:
+            raise
         except Exception as exc:
             log.warning(
                 "parallel_executor.bounce_classifier.error",
@@ -8670,7 +8663,7 @@ Respond with either ATOMIC or the structured JSON object only.
         dispatch_state = LeafDispatchState(messages=messages, runtime_handle=runtime_handle)
         active_dispatch_id = dispatch_id
         sealed_dispatch_ids: set[str] = set()
-        provider_effect_entered = False
+        provider_effect_active = False
 
         async def _seal_dispatch(sealed_id: str, *, reason: str, replayable: bool = False) -> None:
             """Seal one provider boundary at most once."""
@@ -8719,7 +8712,7 @@ Respond with either ATOMIC or the structured JSON object only.
         ) -> bool:
             """Return whether an admitted, revalidated provider stream was entered."""
 
-            nonlocal provider_effect_entered
+            nonlocal provider_effect_active
             feedback_start = len(dispatch_state.messages)
             await provider_admission.wait()
             async with self._adaptive_concurrency.slot() as permit_epoch:
@@ -8727,10 +8720,8 @@ Respond with either ATOMIC or the structured JSON object only.
                 if provider_kwargs is None:
                     return False
                 _invoke_execution_authority_guard(self)
-                provider_effect_entered = True
-                entry_sink = _PROVIDER_ENTRY_SINK.get()
-                if entry_sink is not None:
-                    entry_sink()
+                provider_effect_scope.enter()
+                provider_effect_active = True
                 provider_completed = False
                 try:
                     await self._authority_leaf_dispatcher_stream(
@@ -8757,15 +8748,20 @@ Respond with either ATOMIC or the structured JSON object only.
                     )
                     provider_completed = True
                 finally:
-                    with anyio.CancelScope(shield=True):
-                        await adaptive_concurrency.observe_provider_messages(
-                            self._adaptive_concurrency,
-                            tuple(dispatch_state.messages[feedback_start:]),
-                            permit_epoch,
-                            (session_id, execution_context_id, ac_index),
-                            provider_completed=provider_completed,
-                            on_observation=_PROVIDER_OBSERVATION_SINK.get(),
-                        )
+                    try:
+                        with anyio.CancelScope(shield=True):
+                            await adaptive_concurrency.observe_provider_messages(
+                                self._adaptive_concurrency,
+                                tuple(dispatch_state.messages[feedback_start:]),
+                                permit_epoch,
+                                (session_id, execution_context_id, ac_index),
+                                provider_completed=provider_completed,
+                                on_observation=_PROVIDER_OBSERVATION_SINK.get(),
+                            )
+                    finally:
+                        if provider_completed:
+                            provider_effect_active = False
+                            provider_effect_scope.complete()
             return True
 
         signal_target: SessionSignalTarget | None = None
@@ -9382,11 +9378,14 @@ Respond with either ATOMIC or the structured JSON object only.
                 route_candidate=observed_route_candidate,
             )
 
+        except _BatchInterruptedForRecoverablePause:
+            raise
+
         except anyio.get_cancelled_exc_class():
             try:
                 with anyio.CancelScope(shield=True):
                     seal_policy = ACRuntimeHandleManager.cancellation_seal_policy
-                    reason, replayable = seal_policy(provider_effect_entered)
+                    reason, replayable = seal_policy(provider_effect_active)
                     await _seal_dispatch(
                         active_dispatch_id,
                         reason=reason,
@@ -9399,7 +9398,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 raise RuntimeError(
                     "AC dispatch cancellation seal failed; refusing replayable recovery"
                 ) from seal_error
-            clear_cached_runtime_handle = not provider_effect_entered
+            clear_cached_runtime_handle = not provider_effect_active
             self._remember_ac_runtime_handle(
                 ac_index,
                 dispatch_state.runtime_handle,
