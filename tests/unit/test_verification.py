@@ -1430,17 +1430,17 @@ class TestSpecVerifier:
 
     @pytest.mark.parametrize("tier", [VerificationTier.T2_STRUCTURAL, VerificationTier.T1_CONSTANT])
     @pytest.mark.parametrize(
-        ("hint", "ac_text"),
+        ("filename", "hint", "ac_text"),
         [
-            ("marker.txt", "Marker.txt must be empty"),
-            ("marker.txt", "MARKER.TXT must be empty"),
-            ("Marker.txt", "marker.txt must be empty"),
-            ("marker.txt", "Please ensure Marker.txt is empty"),
+            ("marker.txt", "marker.txt", "Marker.txt must be empty"),
+            ("marker.txt", "marker.txt", "MARKER.TXT must be empty"),
+            ("Marker.txt", "Marker.txt", "marker.txt must be empty"),
+            ("marker.txt", "marker.txt", "Please ensure Marker.txt is empty"),
         ],
         ids=["capitalized-mention", "shouted-mention", "capitalized-hint", "capitalized-in-frame"],
     )
     def test_a_capital_letter_in_the_filename_does_not_manufacture_a_failure(
-        self, tier: VerificationTier, hint: str, ac_text: str
+        self, tier: VerificationTier, filename: str, hint: str, ac_text: str
     ) -> None:
         """One normalization, used in both places that read the filename.
 
@@ -1450,7 +1450,7 @@ class TestSpecVerifier:
         token the reading anchors on — an ordinary emptiness requirement on a
         file that satisfies it, failed formally by a capital letter.
         """
-        project = self._create_project({"marker.txt": ""})
+        project = self._create_project({filename: ""})
         assertion = SpecAssertion(
             ac_index=0,
             ac_text=ac_text,
