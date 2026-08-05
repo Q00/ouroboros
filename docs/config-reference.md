@@ -693,9 +693,11 @@ than relying on the agent runtime to throttle itself. Two independent controls g
 - **Adaptive fan-out**: `max_concurrency` is the pre-flight starting estimate (the legacy field
   name is retained for compatibility), while `orchestrator.max_parallel_workers` is the hard
   controller ceiling. Unknown CLI runtimes start at 1. A short/generic 429 or explicit
-  concurrency rejection halves the window; `Retry-After` pauses new provider entrances; three
-  successful completions add one worker. Explicit usage/quota exhaustion stays on the durable
-  PAUSED → resume path and is never converted into a concurrency retry.
+  concurrency rejection halves the window; `Retry-After` pauses new provider entrances and is
+  saturated at 24 hours before clock arithmetic; three successful completions add one worker.
+  The complete AIMD policy is part of the durable execution-semantics fingerprint. Explicit
+  usage/quota exhaustion stays on the durable PAUSED → resume path and is never converted into
+  a concurrency retry.
 - **Rate budget** (`requests_per_minute` / `tokens_per_minute`): a shared sliding-window bucket
   that paces dispatch across all concurrent workers. For non-Claude runtimes it is **dormant
   until you declare a budget**.

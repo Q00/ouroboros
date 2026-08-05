@@ -59,8 +59,10 @@ indistinguishable from genuine exploration *in advance*, so guardrails are emitt
   `orchestrator/backend_limits.py` supplies a conservative initial estimate of
   **1 AC at a time** for any backend whose limits Ouroboros cannot know (every
   CLI runtime, Hermes included). The delivery controller then uses AIMD feedback:
-  halve on 429/concurrency rejection, honor `Retry-After`, and cautiously add one
-  worker after sustained success. [#1372](https://github.com/Q00/ouroboros/pull/1372)
+  halve on 429/concurrency rejection, honor a safely saturated `Retry-After`, and
+  cautiously add one worker after sustained success. The complete static policy is
+  durably fingerprinted so static-semaphore sessions cannot resume under AIMD effects.
+  [#1372](https://github.com/Q00/ouroboros/pull/1372)
   supplies configurable rate-budget pacing for non-Claude delivery. The 14-AC
   stampede from the #1377 incident cannot recur in that form.
 

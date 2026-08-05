@@ -4,10 +4,12 @@ from __future__ import annotations
 
 from typing import Any
 
+import anyio
 import pytest
 
 from ouroboros.orchestrator.adapter import AgentMessage
 from ouroboros.orchestrator.adaptive_concurrency import (
+    MAX_ADAPTIVE_CONCURRENCY_COOLDOWN_SECONDS,
     AdaptiveConcurrencyController,
     BackendPressureKind,
     ConcurrencyObservation,
@@ -96,6 +98,24 @@ def test_nested_retry_after_header_drives_pressure_cooldown() -> None:
     assert observation.retry_after_seconds == 5
 
 
+def test_hostile_retry_after_is_saturated_before_clock_arithmetic() -> None:
+    observation = classify_backend_pressure(
+        [
+            _error_message(
+                "Interface request concurrency exceeded",
+                kind="concurrency_limit",
+                retry_after_seconds=10**1000,
+            )
+        ],
+        provider_completed=True,
+    )
+
+    assert observation == ConcurrencyObservation(
+        BackendPressureKind.CONCURRENCY_REJECTION,
+        retry_after_seconds=MAX_ADAPTIVE_CONCURRENCY_COOLDOWN_SECONDS,
+    )
+
+
 def test_unrelated_provider_failure_is_neutral() -> None:
     observation = classify_backend_pressure(
         [_error_message("Compilation failed", error_type="RuntimeExecutionError")],
@@ -176,6 +196,28 @@ async def test_retry_after_pauses_new_entrances_then_resumes() -> None:
 
 
 @pytest.mark.asyncio
+async def test_cancelled_slot_releases_permit_before_propagating_cancellation() -> None:
+    controller = AdaptiveConcurrencyController(initial_limit=1)
+    entered = anyio.Event()
+
+    async def hold_slot() -> None:
+        async with controller.slot():
+            entered.set()
+            await anyio.sleep_forever()
+
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(hold_slot)
+        await entered.wait()
+        assert controller.snapshot().in_flight == 1
+        task_group.cancel_scope.cancel()
+
+    assert controller.snapshot().in_flight == 0
+    with anyio.fail_after(1):
+        async with controller.slot():
+            pass
+
+
+@pytest.mark.asyncio
 async def test_quota_invalidates_success_epoch_without_shrinking_window() -> None:
     controller = AdaptiveConcurrencyController(initial_limit=3, max_limit=6)
 
@@ -241,4 +283,5 @@ def test_static_policy_excludes_live_window_state() -> None:
         "max_limit": 4,
         "successes_before_increase": 3,
         "decrease_ratio": "1/2",
+        "max_retry_after_seconds": MAX_ADAPTIVE_CONCURRENCY_COOLDOWN_SECONDS,
     }

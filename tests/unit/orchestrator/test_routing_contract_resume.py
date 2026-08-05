@@ -503,7 +503,15 @@ def test_v9_inputs_freeze_context_profile_parent_lineage_pause_and_runtime_capab
     inputs = contract["execution_inputs"]
     semantics = contract["execution_semantics"]
     assert inputs["schema_version"] == 2
-    assert semantics["version"] == 3
+    assert semantics["version"] == 4
+    assert semantics["adaptive_concurrency_policy"] == {
+        "algorithm": "aimd/v1",
+        "initial_limit": semantics["effective_parallel_workers"],
+        "max_limit": semantics["max_parallel_workers"],
+        "successes_before_increase": 3,
+        "decrease_ratio": "1/2",
+        "max_retry_after_seconds": 86400,
+    }
     assert semantics["usage_limit_pause_seconds"] == 18000
     assert semantics["runtime_effect_capabilities"]["version"] == 1
     assert "frozen-app 1.0.0" in inputs["context_pack_fragment"]
@@ -665,6 +673,51 @@ def test_resume_rejects_weaker_current_execution_semantics_before_dispatch() -> 
         )
 
 
+def test_resume_fails_closed_for_pre_adaptive_v3_semantics() -> None:
+    """A static-semaphore session cannot silently resume under AIMD effects."""
+    persisted = copy.deepcopy(_runner()._build_execution_contract(seed=_seed()))
+    semantics = persisted["execution_semantics"]
+    semantics["version"] = 3
+    del semantics["adaptive_concurrency_policy"]
+    persisted["frugality_proof"]["execution_semantics_fingerprint"] = (
+        OrchestratorRunner._execution_semantics_fingerprint(semantics)
+    )
+
+    with pytest.raises(OrchestratorError, match="pre-adaptive") as exc_info:
+        _runner()._restore_execution_contract(
+            {EXECUTION_CONTRACT_PROGRESS_KEY: persisted},
+            seed=_seed(),
+        )
+
+    assert exc_info.value.details["resume_blocked"] == ("adaptive_concurrency_policy_unavailable")
+    assert exc_info.value.details["retryable"] is False
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("algorithm", "aimd/v0"),
+        ("initial_limit", 99),
+        ("max_limit", 99),
+        ("successes_before_increase", 4),
+        ("decrease_ratio", "2/3"),
+        ("max_retry_after_seconds", 10**1000),
+    ],
+)
+def test_resume_rejects_adaptive_policy_drift(field: str, value: object) -> None:
+    persisted = copy.deepcopy(_runner()._build_execution_contract(seed=_seed()))
+    persisted["execution_semantics"]["adaptive_concurrency_policy"][field] = value
+    persisted["frugality_proof"]["execution_semantics_fingerprint"] = (
+        OrchestratorRunner._execution_semantics_fingerprint(persisted["execution_semantics"])
+    )
+
+    with pytest.raises(OrchestratorError, match="invalid execution contract"):
+        _runner()._restore_execution_contract(
+            {EXECUTION_CONTRACT_PROGRESS_KEY: persisted},
+            seed=_seed(),
+        )
+
+
 def test_resume_rejects_context_pack_and_effective_concurrency_drift(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -790,6 +843,7 @@ def test_resume_rejects_runtime_effort_capability_or_vocabulary_drift(
         "max_decomposition_depth",
         "max_parallel_workers",
         "effective_parallel_workers",
+        "adaptive_concurrency_policy",
         "fat_harness_mode",
         "shadow_replay_enabled",
         "checkpoint_store_enabled",

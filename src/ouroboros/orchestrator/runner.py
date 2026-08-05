@@ -83,6 +83,7 @@ from ouroboros.orchestrator.adapter import (
     RuntimeHandle,
     resolve_worker_cwd,
 )
+from ouroboros.orchestrator.adaptive_concurrency import adaptive_concurrency_policy
 from ouroboros.orchestrator.backend_limits import (
     BackendConcurrencyLimits,
     plan_fan_out_concurrency,
@@ -151,6 +152,12 @@ from ouroboros.orchestrator.execution_guidance import (
 from ouroboros.orchestrator.execution_runtime_scope import (
     ExecutionNodeIdentity,
     build_ac_runtime_scope,
+)
+from ouroboros.orchestrator.execution_semantics import (
+    CURRENT_EXECUTION_SEMANTICS_VERSION,
+    pre_adaptive_execution_semantics_rejection,
+    valid_execution_semantics_contract,
+    valid_legacy_preflight_execution_semantics_contract,
 )
 from ouroboros.orchestrator.execution_strategy import ExecutionStrategy, get_strategy
 from ouroboros.orchestrator.failure_taxonomy import FailureClass
@@ -3920,8 +3927,12 @@ class OrchestratorRunner:
     def _execution_semantics_contract(self) -> dict[str, object]:
         """Return every scalar setting that can change resumed AC effects."""
         backend_limits = resolve_backend_limits(self._adapter.runtime_backend)
+        effective_parallel_workers = plan_fan_out_concurrency(
+            self._max_parallel_workers,
+            backend_limits,
+        )
         return {
-            "version": 3,
+            "version": CURRENT_EXECUTION_SEMANTICS_VERSION,
             "run_verify_commands": self._run_verify_commands,
             "verify_command_timeout_seconds": self._verify_command_timeout_seconds,
             "ac_retry_attempts": self._ac_retry_attempts,
@@ -3930,9 +3941,10 @@ class OrchestratorRunner:
             "decomposition_mode": self._decomposition_mode,
             "max_decomposition_depth": self._max_decomposition_depth,
             "max_parallel_workers": self._max_parallel_workers,
-            "effective_parallel_workers": plan_fan_out_concurrency(
-                self._max_parallel_workers,
-                backend_limits,
+            "effective_parallel_workers": effective_parallel_workers,
+            "adaptive_concurrency_policy": adaptive_concurrency_policy(
+                initial_limit=effective_parallel_workers,
+                max_limit=self._max_parallel_workers,
             ),
             "fat_harness_mode": self._fat_harness_mode,
             "shadow_replay_enabled": self._shadow_replay_enabled,
@@ -3950,114 +3962,10 @@ class OrchestratorRunner:
             "runtime_effect_capabilities": runtime_effect_capabilities_contract(self._adapter),
         }
 
-    @staticmethod
-    def _valid_execution_semantics_contract(value: object) -> bool:
-        """Validate the exact current scalar executor schema."""
-        expected_keys = frozenset(
-            {
-                "version",
-                "run_verify_commands",
-                "verify_command_timeout_seconds",
-                "ac_retry_attempts",
-                "cross_harness_redispatch",
-                "enable_decomposition",
-                "decomposition_mode",
-                "max_decomposition_depth",
-                "max_parallel_workers",
-                "effective_parallel_workers",
-                "fat_harness_mode",
-                "shadow_replay_enabled",
-                "checkpoint_store_enabled",
-                "session_signal_hub_enabled",
-                "context_pack_enabled",
-                "backend_limits_backend",
-                "backend_max_concurrency",
-                "backend_requests_per_minute",
-                "backend_tokens_per_minute",
-                "backend_self_governs_rate_limit",
-                "usage_limit_pause_seconds",
-                "runtime_effect_capabilities",
-            }
-        )
-        if not isinstance(value, Mapping) or not _mapping_has_exact_keys(value, expected_keys):
-            return False
-        boolean_keys = (
-            "run_verify_commands",
-            "cross_harness_redispatch",
-            "enable_decomposition",
-            "fat_harness_mode",
-            "shadow_replay_enabled",
-            "checkpoint_store_enabled",
-            "session_signal_hub_enabled",
-            "context_pack_enabled",
-            "backend_self_governs_rate_limit",
-        )
-        if (
-            type(value.get("version")) is not int
-            or value.get("version") != 3
-            or any(type(value.get(key)) is not bool for key in boolean_keys)
-        ):
-            return False
-        timeout = value.get("verify_command_timeout_seconds")
-        retries = value.get("ac_retry_attempts")
-        max_depth = value.get("max_decomposition_depth")
-        max_workers = value.get("max_parallel_workers")
-        effective_workers = value.get("effective_parallel_workers")
-        mode = value.get("decomposition_mode")
-        backend = value.get("backend_limits_backend")
-        backend_max_concurrency = value.get("backend_max_concurrency")
-        backend_limits = (
-            backend_max_concurrency,
-            value.get("backend_requests_per_minute"),
-            value.get("backend_tokens_per_minute"),
-        )
-        usage_limit_pause_seconds = value.get("usage_limit_pause_seconds")
-        expected_effective_workers = (
-            min(max_workers, backend_max_concurrency)
-            if type(max_workers) is int and type(backend_max_concurrency) is int
-            else max_workers
-        )
-        return bool(
-            type(timeout) is int
-            and timeout >= 1
-            and type(retries) is int
-            and retries >= 0
-            and type(max_depth) is int
-            and max_depth >= 0
-            and type(max_workers) is int
-            and max_workers >= 1
-            and type(effective_workers) is int
-            and 1 <= effective_workers <= max_workers
-            and effective_workers == expected_effective_workers
-            and isinstance(mode, str)
-            and mode in {"bounce_only", "off"}
-            and (value.get("enable_decomposition") is True or mode == "off")
-            and isinstance(backend, str)
-            and bool(backend)
-            and all(item is None or (type(item) is int and item >= 1) for item in backend_limits)
-            and type(usage_limit_pause_seconds) is int
-            and 1 <= usage_limit_pause_seconds <= MAX_USAGE_LIMIT_PAUSE_SECONDS
-            and valid_runtime_effect_capabilities_contract(value.get("runtime_effect_capabilities"))
-        )
-
-    @staticmethod
-    def _valid_legacy_preflight_execution_semantics_contract(value: object) -> bool:
-        """Recognize only the retired current-schema preflight snapshot.
-
-        The migration changes one authority bit (``preflight`` to
-        ``bounce_only``); every other effect-bearing field must already satisfy
-        the exact current schema.  This helper never feeds a live constructor.
-        """
-
-        if (
-            not isinstance(value, Mapping)
-            or value.get("decomposition_mode") != "preflight"
-            or value.get("enable_decomposition") is not True
-        ):
-            return False
-        migrated = dict(value)
-        migrated["decomposition_mode"] = "bounce_only"
-        return OrchestratorRunner._valid_execution_semantics_contract(migrated)
+    _valid_execution_semantics_contract = staticmethod(valid_execution_semantics_contract)
+    _valid_legacy_preflight_execution_semantics_contract = staticmethod(
+        valid_legacy_preflight_execution_semantics_contract
+    )
 
     def _execution_semantics_snapshot(
         self,
@@ -6349,6 +6257,17 @@ class OrchestratorRunner:
                 details={
                     "missing": "frugality_proof, model_routing, resume, or foundation_a_authority"
                 },
+            )
+
+        pre_adaptive_rejection = pre_adaptive_execution_semantics_rejection(
+            raw_execution_semantics,
+            raw_proof.get("execution_semantics_fingerprint"),
+            fingerprint=self._execution_semantics_fingerprint,
+        )
+        if pre_adaptive_rejection is not None:
+            raise OrchestratorError(
+                message=pre_adaptive_rejection.message,
+                details=pre_adaptive_rejection.details,
             )
 
         migrate_preflight_contract = self._valid_legacy_preflight_execution_semantics_contract(

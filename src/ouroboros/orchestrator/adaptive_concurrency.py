@@ -70,6 +70,11 @@ _CONCURRENCY_PRESSURE_PATTERN = re.compile(
 
 log = get_logger(__name__)
 
+ADAPTIVE_CONCURRENCY_ALGORITHM = "aimd/v1"
+ADAPTIVE_CONCURRENCY_SUCCESSES_BEFORE_INCREASE = 3
+ADAPTIVE_CONCURRENCY_DECREASE_RATIO = "1/2"
+MAX_ADAPTIVE_CONCURRENCY_COOLDOWN_SECONDS = 24 * 60 * 60
+
 
 class BackendPressureKind(StrEnum):
     """One provider-capacity observation at an AC dispatch boundary."""
@@ -157,32 +162,36 @@ def classify_backend_pressure(
         message for message in bounded_messages if is_usage_limit_pause_message(message)
     )
     if quota_messages:
-        retry_after = max(
-            (
-                retry_duration_seconds_from_message(message, now=_utc_now()) or 0
-                for message in quota_messages
-            ),
-            default=0,
+        retry_after = _bounded_retry_after_seconds(
+            max(
+                (
+                    retry_duration_seconds_from_message(message, now=_utc_now()) or 0
+                    for message in quota_messages
+                ),
+                default=0,
+            )
         )
         return ConcurrencyObservation(
             BackendPressureKind.QUOTA_EXHAUSTION,
-            retry_after_seconds=retry_after or None,
+            retry_after_seconds=retry_after,
         )
 
     pressure_messages = tuple(
         message for message in bounded_messages if _is_concurrency_pressure_message(message)
     )
     if pressure_messages:
-        retry_after = max(
-            (
-                retry_duration_seconds_from_message(message, now=_utc_now()) or 0
-                for message in pressure_messages
-            ),
-            default=0,
+        retry_after = _bounded_retry_after_seconds(
+            max(
+                (
+                    retry_duration_seconds_from_message(message, now=_utc_now()) or 0
+                    for message in pressure_messages
+                ),
+                default=0,
+            )
         )
         return ConcurrencyObservation(
             BackendPressureKind.CONCURRENCY_REJECTION,
-            retry_after_seconds=retry_after or None,
+            retry_after_seconds=retry_after,
         )
 
     successful_final = any(
@@ -214,17 +223,41 @@ def _utc_now() -> datetime:
     return datetime.now(UTC)
 
 
+def _bounded_retry_after_seconds(value: object) -> int | None:
+    """Normalize untrusted provider cooldown metadata to a safe finite bound."""
+    if type(value) is not int or value <= 0:
+        return None
+    return min(value, MAX_ADAPTIVE_CONCURRENCY_COOLDOWN_SECONDS)
+
+
+def adaptive_concurrency_policy(
+    *,
+    initial_limit: int,
+    max_limit: int,
+    successes_before_increase: int = ADAPTIVE_CONCURRENCY_SUCCESSES_BEFORE_INCREASE,
+) -> dict[str, object]:
+    """Return the complete static policy that changes provider admission effects."""
+    return {
+        "algorithm": ADAPTIVE_CONCURRENCY_ALGORITHM,
+        "initial_limit": initial_limit,
+        "max_limit": max_limit,
+        "successes_before_increase": successes_before_increase,
+        "decrease_ratio": ADAPTIVE_CONCURRENCY_DECREASE_RATIO,
+        "max_retry_after_seconds": MAX_ADAPTIVE_CONCURRENCY_COOLDOWN_SECONDS,
+    }
+
+
 class AdaptiveConcurrencyController:
     """Cancellation-safe AIMD window around provider entrances."""
 
-    ALGORITHM = "aimd/v1"
+    ALGORITHM = ADAPTIVE_CONCURRENCY_ALGORITHM
 
     def __init__(
         self,
         *,
         initial_limit: int,
         max_limit: int | None = None,
-        successes_before_increase: int = 3,
+        successes_before_increase: int = ADAPTIVE_CONCURRENCY_SUCCESSES_BEFORE_INCREASE,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], Awaitable[object]] = anyio.sleep,
     ) -> None:
@@ -260,13 +293,11 @@ class AdaptiveConcurrencyController:
     def policy(self) -> dict[str, object]:
         """Return immutable controller semantics without live window state."""
 
-        return {
-            "algorithm": self.ALGORITHM,
-            "initial_limit": self._initial_limit,
-            "max_limit": self._max_limit,
-            "successes_before_increase": self._successes_before_increase,
-            "decrease_ratio": "1/2",
-        }
+        return adaptive_concurrency_policy(
+            initial_limit=self._initial_limit,
+            max_limit=self._max_limit,
+            successes_before_increase=self._successes_before_increase,
+        )
 
     def snapshot(self) -> AdaptiveConcurrencySnapshot:
         """Return a best-effort instantaneous snapshot without blocking dispatch."""
@@ -312,7 +343,11 @@ class AdaptiveConcurrencyController:
         try:
             yield epoch
         finally:
-            await self._release()
+            # The holder is commonly unwound from an already-cancelled sibling
+            # scope. Permit accounting is reusable controller state, so cleanup
+            # must finish before cancellation is allowed to propagate.
+            with anyio.CancelScope(shield=True):
+                await self._release()
 
     async def observe(
         self,
@@ -328,11 +363,11 @@ class AdaptiveConcurrencyController:
                 self._pressure_epoch += 1
                 self._success_streak = 0
                 self._current_limit = max(1, math.floor(self._current_limit / 2))
-                retry_after = observation.retry_after_seconds
-                if type(retry_after) is int and retry_after > 0:
+                retry_after = _bounded_retry_after_seconds(observation.retry_after_seconds)
+                if retry_after is not None:
                     self._cooldown_until = max(
                         self._cooldown_until,
-                        self._clock() + retry_after,
+                        self._clock() + float(retry_after),
                     )
             elif kind is BackendPressureKind.QUOTA_EXHAUSTION:
                 # The runner owns durable pause/resume.  Invalidate successes from
@@ -389,10 +424,15 @@ async def observe_ac_result(
 
 
 __all__ = [
+    "ADAPTIVE_CONCURRENCY_ALGORITHM",
+    "ADAPTIVE_CONCURRENCY_DECREASE_RATIO",
+    "ADAPTIVE_CONCURRENCY_SUCCESSES_BEFORE_INCREASE",
     "AdaptiveConcurrencyController",
     "AdaptiveConcurrencySnapshot",
     "BackendPressureKind",
     "ConcurrencyObservation",
+    "MAX_ADAPTIVE_CONCURRENCY_COOLDOWN_SECONDS",
+    "adaptive_concurrency_policy",
     "classify_backend_pressure",
     "has_usage_limit_pause",
     "observe_ac_result",

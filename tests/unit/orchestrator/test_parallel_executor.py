@@ -34,6 +34,9 @@ from ouroboros.orchestrator.adapter import (
     RuntimeCapabilities,
     RuntimeHandle,
 )
+from ouroboros.orchestrator.adaptive_concurrency import (
+    MAX_ADAPTIVE_CONCURRENCY_COOLDOWN_SECONDS,
+)
 from ouroboros.orchestrator.coordinator import CoordinatorReview, FileConflict, LevelCoordinator
 from ouroboros.orchestrator.decomposition_limits import MAX_DECOMPOSITION_DEPTH
 from ouroboros.orchestrator.decomposition_policy import (
@@ -6852,6 +6855,53 @@ class TestParallelACExecutor:
         assert all(isinstance(result, ACExecutionResult) for result in results)
         assert executor._adaptive_concurrency.snapshot().current_limit == 2
         assert max_active_count == 2
+
+    @pytest.mark.asyncio
+    async def test_batch_preserves_completed_result_with_hostile_retry_after(self) -> None:
+        """Provider metadata cannot replace completed work with float overflow."""
+
+        seed = _make_seed("AC hostile cooldown")
+        executor = ProcessLocalTestExecutor(
+            adapter=MagicMock(),
+            event_store=AsyncMock(),
+            console=MagicMock(),
+            enable_decomposition=False,
+            max_concurrent=1,
+        )
+        completed = ACExecutionResult(
+            ac_index=0,
+            ac_content="AC hostile cooldown",
+            success=False,
+            messages=(
+                AgentMessage(
+                    type="result",
+                    content="Interface request concurrency exceeded",
+                    data={
+                        "subtype": "error",
+                        "kind": "concurrency_limit",
+                        "retry_after_seconds": 10**1000,
+                    },
+                ),
+            ),
+            final_message="provider rejected concurrency",
+        )
+
+        with patch.object(executor, "_execute_single_ac", AsyncMock(return_value=completed)):
+            results = await executor._execute_ac_batch(
+                seed=seed,
+                batch_indices=[0],
+                session_id="sess_hostile_cooldown",
+                execution_id="exec_hostile_cooldown",
+                tools=["Read"],
+                tool_catalog=None,
+                system_prompt="test",
+                level_contexts=[],
+                ac_retry_attempts={0: 0},
+            )
+
+        assert results == [completed]
+        cooldown = executor._adaptive_concurrency.snapshot().cooldown_remaining_seconds
+        assert 0 < cooldown <= MAX_ADAPTIVE_CONCURRENCY_COOLDOWN_SECONDS
 
     @pytest.mark.asyncio
     async def test_atomic_ac_uses_ac_scoped_runtime_handle(self) -> None:
