@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 import math
 import re
 
@@ -17,6 +18,8 @@ from ouroboros.orchestrator.adapter import AgentMessage
 
 _LONG_RETRY_AFTER_SECONDS = 60 * 60
 _MAX_METADATA_MAPS = 32
+_MAX_PLAIN_METADATA_FIELDS = 128
+_MAX_RETRY_TIMESTAMP_CHARS = 128
 _MISSING_METADATA_VALUE = object()
 _METADATA_CHILD_FIELDS = (
     "meta",
@@ -146,6 +149,22 @@ def project_failure_metadata(
                 return tuple(candidates), True
             if raw is not _MISSING_METADATA_VALUE:
                 projected[key] = raw
+        if type(value) is dict:
+            # HTTP field names are case-insensitive.  Plain dictionaries are
+            # safe to inspect directly, but keep the scan bounded and never
+            # iterate an arbitrary provider-owned Mapping implementation.
+            if len(value) > _MAX_PLAIN_METADATA_FIELDS:
+                return tuple(candidates), True
+            retry_after_seen = False
+            for raw_key, raw in value.items():
+                if type(raw_key) is not str or raw_key.casefold() != "retry-after":
+                    continue
+                if retry_after_seen:
+                    # Multiple differently-cased fields are ambiguous rather
+                    # than an authority to pick the shorter cooldown.
+                    return tuple(candidates), True
+                projected["retry-after"] = raw
+                retry_after_seen = True
         candidates.append(projected)
         pending.extend(projected.get(key) for key in _METADATA_CHILD_FIELDS)
     return tuple(candidates), False
@@ -181,16 +200,22 @@ def _duration_text_to_seconds(text: str) -> int | None:
 
 
 def _parse_datetime(value: object) -> datetime | None:
-    """Parse an absolute provider retry boundary defensively."""
+    """Parse an ISO timestamp or standards-compliant HTTP-date defensively."""
 
     if isinstance(value, datetime):
         return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
-    if not isinstance(value, str) or not value.strip():
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    if not stripped or len(stripped) > _MAX_RETRY_TIMESTAMP_CHARS:
         return None
     try:
-        parsed = datetime.fromisoformat(value.strip())
+        parsed = datetime.fromisoformat(stripped)
     except ValueError:
-        return None
+        try:
+            parsed = parsedate_to_datetime(stripped)
+        except (TypeError, ValueError, OverflowError):
+            return None
     return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
 
 

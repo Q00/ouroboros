@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any
 
 import anyio
 import pytest
 
 from ouroboros.orchestrator.adapter import AgentMessage
+import ouroboros.orchestrator.adaptive_concurrency as adaptive_concurrency
 from ouroboros.orchestrator.adaptive_concurrency import (
     MAX_ADAPTIVE_CONCURRENCY_COOLDOWN_SECONDS,
     AdaptiveConcurrencyController,
@@ -96,6 +98,54 @@ def test_nested_retry_after_header_drives_pressure_cooldown() -> None:
     )
 
     assert observation.retry_after_seconds == 5
+
+
+@pytest.mark.parametrize(
+    "headers",
+    (
+        {"rEtRy-AfTeR": "5"},
+        {"RETRY-AFTER": "Wed, 05 Aug 2026 09:00:00 GMT"},
+    ),
+)
+@pytest.mark.asyncio
+async def test_retry_after_header_forms_pause_controller_entrance(
+    monkeypatch: pytest.MonkeyPatch,
+    headers: dict[str, str],
+) -> None:
+    monkeypatch.setattr(
+        adaptive_concurrency,
+        "_utc_now",
+        lambda: datetime(2026, 8, 5, 8, 59, 55, tzinfo=UTC),
+    )
+    observation = classify_backend_pressure(
+        [
+            _error_message(
+                "Too many concurrent requests",
+                http_status=429,
+                headers=headers,
+            )
+        ],
+        provider_completed=True,
+    )
+    clock = {"now": 100.0}
+    sleeps: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        clock["now"] += seconds
+
+    controller = AdaptiveConcurrencyController(
+        initial_limit=1,
+        clock=lambda: clock["now"],
+        sleep=fake_sleep,
+    )
+    async with controller.slot() as epoch:
+        await controller.observe(observation, permit_epoch=epoch)
+    async with controller.slot():
+        pass
+
+    assert observation.retry_after_seconds == 5
+    assert sleeps == [5.0]
 
 
 def test_hostile_retry_after_is_saturated_before_clock_arithmetic() -> None:

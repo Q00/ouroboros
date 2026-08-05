@@ -715,8 +715,8 @@ Each dimension is resolved independently, highest precedence first:
 The config file is loaded lazily, cached by mtime (edits apply without a restart), and is
 fully fault-tolerant: a missing, malformed, or non-regular file is ignored and resolution falls
 back to the registry. Backend keys are canonicalized, so aliases (`anthropic`, `claude_code`)
-map to `claude`. Only positive integers are honored; `0`/negative/blank values are ignored so a
-typo never silently disables a safety limit.
+map to `claude`. Only positive integers are honored; `0`/negative/blank values are ignored so an
+invalid value never silently replaces the serialize-by-default starting estimate.
 
 ### `~/.ouroboros/backend_limits.yaml`
 
