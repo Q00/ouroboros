@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+import copy
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 import hashlib
@@ -57,6 +58,12 @@ class CheckpointData:
             New CheckpointData instance with computed hash.
         """
         timestamp = datetime.now(UTC)
+        # Snapshot the caller's state before hashing: the integrity hash must
+        # bind exactly the payload this checkpoint will carry, so a caller
+        # mutating its dictionary (or anything nested in it) after
+        # construction cannot desync the two (#1829). State is JSON-bound by
+        # the hash below, so every valid state is deep-copyable.
+        state = copy.deepcopy(state)
         # Create temporary instance without hash to compute it
         temp_data = {
             "seed_id": seed_id,
@@ -272,6 +279,23 @@ class CheckpointStore:
             Result.ok(None) on success, Result.err(PersistenceError) on failure.
         """
         try:
+            integrity = checkpoint.validate_integrity()
+            if integrity.is_err:
+                # Never persist a checkpoint load() would immediately reject:
+                # refusing here keeps the committed chain untouched and
+                # surfaces the mismatch to the caller instead (#1829).
+                return Result.err(
+                    PersistenceError(
+                        f"Refusing to save checkpoint with stale integrity hash: {integrity.error}",
+                        operation="write",
+                        details={
+                            "seed_id": checkpoint.seed_id,
+                            "phase": checkpoint.phase,
+                            "integrity_mismatch": True,
+                        },
+                    )
+                )
+
             checkpoint_path = self._get_checkpoint_path(checkpoint.seed_id)
 
             # Use file locking to prevent race conditions
