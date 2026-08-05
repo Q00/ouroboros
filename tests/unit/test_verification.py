@@ -812,6 +812,12 @@ class TestSpecVerifier:
             "Do not permit pkg/config.py to become empty.",
             "Never, under any reading of this spec, allow pkg/config.py to be blank",
             "Do not remove the guard and let pkg/config.py be empty",
+            "Please do not let pkg/config.py be empty",
+            "Please ensure pkg/config.py is not empty",
+            "Please avoid leaving pkg/config.py empty",
+            "It is required that pkg/config.py never be empty",
+            "Make sure pkg/config.py is not empty",
+            "It is forbidden that pkg/config.py be empty",
         ],
         ids=[
             "must-not",
@@ -827,6 +833,12 @@ class TestSpecVerifier:
             "preposed-negation-causative",
             "preposed-negation-past-comma",
             "preposed-negation-past-conjunction",
+            "politeness-then-negation",
+            "politeness-then-negated-copula",
+            "politeness-then-avoidance",
+            "impersonal-then-negation",
+            "periphrasis-then-negation",
+            "impersonal-prohibition",
         ],
     )
     def test_a_criterion_forbidding_emptiness_is_not_satisfied_by_an_empty_file(
@@ -843,6 +855,11 @@ class TestSpecVerifier:
         inside it and called the criterion an emptiness requirement. The distant
         negations are here because a fixed lookback window has a far side, and a
         criterion can always put its `not` past it.
+
+        The politeness and impersonal forms are the other half of admitting
+        `please`, `kindly`, `make sure` and `it is required that` as words that
+        change no claim: each of these opens exactly as an admitted criterion
+        does and then negates it, so widening the lead must not widen this.
         """
         project = self._create_project({"pkg/config.py": ""})
         assertion = SpecAssertion(
@@ -1099,6 +1116,12 @@ class TestSpecVerifier:
             "marker.txt MUST remain empty",
             "`marker.txt` must be empty",
             '"marker.txt" must be empty',
+            "Please ensure marker.txt is empty",
+            "Kindly make sure marker.txt is empty",
+            "It is required that marker.txt be empty",
+            "It is necessary that marker.txt remains empty",
+            "Check that marker.txt is empty",
+            "Please confirm marker.txt is blank",
         ],
         ids=[
             "bare",
@@ -1109,6 +1132,12 @@ class TestSpecVerifier:
             "copula-variant",
             "backticked-name",
             "quoted-name",
+            "politeness-frame",
+            "politeness-and-periphrasis",
+            "impersonal-obligation",
+            "impersonal-necessity",
+            "checking-verb",
+            "politeness-and-blank",
         ],
     )
     def test_the_subject_check_does_not_reject_a_file_it_only_stands_near(
@@ -1122,6 +1151,15 @@ class TestSpecVerifier:
         after them without changing what it claims, so a criterion that opens
         with one still says exactly what it says, and a determiner or a noun for
         the file itself changes nothing either.
+
+        The politeness and impersonal forms are the shapes that were refused —
+        `Please ensure marker.txt is empty` was a formal failure on a project
+        that satisfied it, because `please` names no claim and was not listed as
+        naming none. Every word admitted here answers one question: can it change
+        what is claimed about the file? `please`, `kindly`, `make sure` and `it
+        is required that` cannot, so they are read through. `do not`, `never`,
+        `avoid` and `prevent` can, so they are not — and the paired rejection
+        test pins that.
         """
         project = self._create_project({"marker.txt": ""})
         assertion = SpecAssertion(
@@ -1264,6 +1302,85 @@ class TestSpecVerifier:
         assert summary.verified_count == 1
         assert summary.reports[0].has_discrepancy is False
         assert summary.override_approval is None
+
+    @pytest.mark.parametrize("tier", [VerificationTier.T2_STRUCTURAL, VerificationTier.T1_CONSTANT])
+    @pytest.mark.parametrize(
+        "pattern",
+        [r"(a)?\1", r"(?P<x>a)?(?P=x)", r"(a)\1", r"(a)(b)?\1", r"((a))?\2"],
+        ids=[
+            "optional-group-numbered-backreference",
+            "optional-group-named-backreference",
+            "plain-backreference",
+            "unparticipating-optional-group",
+            "nested-group-backreference",
+        ],
+    )
+    def test_a_backreference_is_read_through_to_the_group_it_names(
+        self, tier: VerificationTier, pattern: str
+    ) -> None:
+        """A backreference is empty only when the group it refers to can be.
+
+        The reading called every `GROUPREF` zero-width, which is true of the
+        *node* and false of what it matches: `(a)?\\1` matches `aa` and cannot
+        match nothing, because a backreference to a group that never
+        participated fails outright and one to a group that did repeats what it
+        captured. Calling these nullable refused a pattern that genuinely
+        discriminates, so a satisfied AC became an authoritative failure — the
+        blocker this PR opened with, running the other way.
+
+        Each pattern here is now judged from its group: the four with a
+        consuming group are evidence, and `(x?)\\1` in the refusal test below
+        still is not.
+        """
+        project = self._create_project({"marker.txt": "aa\n"})
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="marker.txt MUST contain a doubled letter",
+            tier=tier,
+            pattern=pattern,
+            file_hint="marker.txt",
+        )
+
+        summary = SpecVerifier(project_dir=project).verify_all(
+            (assertion,), agent_results={0: True}
+        )
+
+        assert summary.reports[0].verified_pass is True, f"{pattern!r} must stay evidence"
+        assert summary.discrepancy_count == 0
+        assert summary.override_approval is None
+
+    @pytest.mark.parametrize("tier", [VerificationTier.T2_STRUCTURAL, VerificationTier.T1_CONSTANT])
+    @pytest.mark.parametrize(
+        "pattern",
+        [r"(x?)\1", r"(a|)\1", r"(a)?\1{0,3}"],
+        ids=["nullable-group", "empty-branch-group", "optional-backreference"],
+    )
+    def test_a_backreference_to_something_that_can_be_empty_is_still_refused(
+        self, tier: VerificationTier, pattern: str
+    ) -> None:
+        """Reading the group through must not open the hole it was closing.
+
+        Each of these matches a subject with nothing in it, so it verifies any
+        file at all and is not evidence of the criterion — exactly what the
+        earlier blanket treatment of `GROUPREF` let through once a nullable
+        group stood in front of it.
+        """
+        project = self._create_project({"marker.txt": "aa\n"})
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="marker.txt MUST contain a doubled letter",
+            tier=tier,
+            pattern=pattern,
+            file_hint="marker.txt",
+        )
+
+        summary = SpecVerifier(project_dir=project).verify_all(
+            (assertion,), agent_results={0: True}
+        )
+
+        assert summary.reports[0].verified_pass is False, f"{pattern!r} must not be evidence"
+        assert summary.discrepancy_count == 1
+        assert summary.override_approval is False
 
     def test_genuine_constant_match_still_verifies(self) -> None:
         """The same on the T1 path, so the guard is not proven only through T2."""

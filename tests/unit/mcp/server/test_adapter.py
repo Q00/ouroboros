@@ -863,6 +863,86 @@ Parallel Execution Verification Report
         assert summary.approval_status == "rejected"
         assert summary.run_verdict == "FAIL"
 
+    @pytest.mark.parametrize(
+        "tier",
+        [VerificationTier.T1_CONSTANT, VerificationTier.T2_STRUCTURAL],
+        ids=["T1", "T2"],
+    )
+    @pytest.mark.parametrize(
+        ("content", "ac_text", "pattern"),
+        [
+            ("", "Please ensure marker.txt is empty", r"\A\Z"),
+            ("", "Kindly make sure marker.txt is empty", r"\A\Z"),
+            ("", "It is required that marker.txt be empty", r"\A\Z"),
+            ("", "Check that marker.txt is empty", r"\A\Z"),
+            ("aa\n", "marker.txt MUST contain a doubled letter", r"(a)?\1"),
+            ("aa\n", "marker.txt MUST contain a doubled letter", r"(?P<x>a)?(?P=x)"),
+        ],
+        ids=[
+            "politeness-frame",
+            "politeness-and-periphrasis",
+            "impersonal-obligation",
+            "checking-verb",
+            "numbered-backreference",
+            "named-backreference",
+        ],
+    )
+    def test_a_satisfied_criterion_is_not_converted_into_a_formal_failure(
+        self, tmp_path: Any, tier: VerificationTier, content: str, ac_text: str, pattern: str
+    ) -> None:
+        """Over-rejection is the same blocker seen from the other side.
+
+        Each case here is a project that *meets* its criterion, and each was
+        published as `final_approved=False` / `score=0.0` / `run_verdict="FAIL"`
+        — an authoritative failure manufactured by the guard rather than by the
+        code under test.
+
+        The first four were refused because a word that carries no claim at all
+        was absent from the words known to carry none: `Please ensure marker.txt
+        is empty`, with an empty `marker.txt`, failed on `please`. The last two
+        were refused because every backreference was treated as zero-width, so
+        `(a)?\\1` — which cannot match nothing and does match this file — was
+        called unusable. Both directions are driven through the real verifier
+        and the real adapter, because the failure only becomes authoritative at
+        this boundary.
+        """
+        (tmp_path / "marker.txt").write_text(content)
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text=ac_text,
+            tier=tier,
+            pattern=pattern,
+            file_hint="marker.txt",
+        )
+        verification = SpecVerifier(project_dir=str(tmp_path)).verify_all(
+            (assertion,), agent_results={0: True}
+        )
+        mechanical = EvaluationSummary(
+            final_approved=True,
+            highest_stage_passed=2,
+            task_results=(
+                TaskResult(
+                    task_index=0,
+                    task_content=ac_text,
+                    status="completed",
+                    completed=True,
+                    source_ac_index=0,
+                    execution_method="legacy_parallel_report",
+                ),
+            ),
+            execution_completion_status="completed",
+            approval_status="approved",
+        )
+
+        summary = _evaluation_summary_from_spec_verification(mechanical, verification)
+
+        assert summary is not None
+        assert summary.ac_results[0].passed is True, f"{ac_text!r} must not be failed"
+        assert summary.ac_results[0].final_verdict == "pass"
+        assert summary.final_approved is True
+        assert summary.score == 1.0
+        assert summary.run_verdict != "FAIL"
+
     def test_spec_verification_rejects_partial_ac_coverage(self) -> None:
         """A subset of verifier reports must not approve unverified ACs."""
         mechanical = EvaluationSummary(

@@ -51,11 +51,13 @@ _CONSUMING = frozenset({"LITERAL", "NOT_LITERAL", "IN", "ANY", "RANGE", "CATEGOR
 # Matches without consuming: `^`, `\A`, `\Z`, `\b`. `\b` cannot actually hold on
 # an empty subject, but calling it zero-width only ever refuses a pattern, and a
 # bare `\b` is vacuous evidence that deserves refusing.
-_ZERO_WIDTH = frozenset({"AT", "GROUPREF"})
+_ZERO_WIDTH = frozenset({"AT"})
 _REPEATS = frozenset({"MAX_REPEAT", "MIN_REPEAT", "POSSESSIVE_REPEAT"})
 
 
-def _can_match_nothing(sequence: object, depth: int = 0) -> bool:
+def _can_match_nothing(
+    sequence: object, depth: int = 0, groups: dict[int, bool] | None = None
+) -> bool:
     """Whether a parsed regex can match the empty string, read rather than run.
 
     Answers True whenever the answer cannot be worked out — an unknown construct,
@@ -63,7 +65,12 @@ def _can_match_nothing(sequence: object, depth: int = 0) -> bool:
     as evidence, which costs an honest criterion a formal failure; one wrongly
     called discriminating is admitted, and admitting those is the whole defect
     this file exists to close. So the doubt goes to refusal.
+
+    `groups` carries what each capture group, once seen, can itself match, so a
+    backreference can be judged by what it refers to.
     """
+    if groups is None:
+        groups = {}
     if depth > _MAX_PARSE_DEPTH:
         return True
     for opcode, argument in sequence:  # type: ignore[attr-defined]
@@ -74,22 +81,52 @@ def _can_match_nothing(sequence: object, depth: int = 0) -> bool:
             return False
         if name in _REPEATS:
             minimum, _maximum, item = argument
+            # Walked whatever the count, so that groups inside a repeat that may
+            # run zero times are still recorded for a later backreference.
+            item_empty = _can_match_nothing(item, depth + 1, groups)
             # A repeat that may run zero times is skippable; one that must run
             # is empty only if what it repeats is. The count itself is never
             # counted out.
-            if minimum == 0 or _can_match_nothing(item, depth + 1):
+            if minimum == 0 or item_empty:
                 continue
             return False
         if name == "SUBPATTERN":
-            if _can_match_nothing(argument[-1], depth + 1):
+            body_empty = _can_match_nothing(argument[-1], depth + 1, groups)
+            if argument[0] is not None:
+                groups[argument[0]] = body_empty
+            if body_empty:
+                continue
+            return False
+        if name == "GROUPREF":
+            # A backreference repeats whatever its group captured, so it is empty
+            # only when that group can be. If the group never participated the
+            # reference cannot match at all — never empty either. A group not yet
+            # seen (a forward reference) is unknown, and unknown means refuse.
+            if groups.get(argument, True):
+                continue
+            return False
+        if name == "GROUPREF_EXISTS":
+            # `(?(1)yes|no)`: whichever arm runs, it has to be able to be empty.
+            reference, yes_arm, no_arm = argument
+            del reference
+            arms_empty = [_can_match_nothing(yes_arm, depth + 1, groups)]
+            arms_empty.append(
+                True if no_arm is None else _can_match_nothing(no_arm, depth + 1, groups)
+            )
+            if any(arms_empty):
                 continue
             return False
         if name == "ATOMIC_GROUP":
-            if _can_match_nothing(argument, depth + 1):
+            if _can_match_nothing(argument, depth + 1, groups):
                 continue
             return False
         if name == "BRANCH":
-            if any(_can_match_nothing(branch, depth + 1) for branch in argument[1]):
+            # Every branch is walked, not just up to the first empty one, so that
+            # groups defined in a later branch are recorded too.
+            branches_empty = [
+                _can_match_nothing(branch, depth + 1, groups) for branch in argument[1]
+            ]
+            if any(branches_empty):
                 continue
             return False
         if name == "ASSERT":
@@ -97,11 +134,11 @@ def _can_match_nothing(sequence: object, depth: int = 0) -> bool:
             # a lookaround holds exactly when what it looks for can be empty.
             # `(?=.*foo)` cannot, which is why a lookahead-only pattern stays
             # admissible evidence.
-            if _can_match_nothing(argument[1], depth + 1):
+            if _can_match_nothing(argument[1], depth + 1, groups):
                 continue
             return False
         if name == "ASSERT_NOT":
-            if not _can_match_nothing(argument[1], depth + 1):
+            if not _can_match_nothing(argument[1], depth + 1, groups):
                 continue
             return False
         return True
@@ -197,8 +234,16 @@ _PREDICATE_CHAIN = _COPULAS | {
 # be empty"), and a competing noun makes it a modifier of that noun. This is an
 # allow-list for the same reason the forward chain is — no preposed phrasing can
 # outrun a rule that admits only what it names.
+#
+# Each word here belongs to one of four classes, and membership is decided by a
+# single test: can putting this word in front of "marker.txt is empty" change
+# what is being claimed about marker.txt? For a determiner, a name for the file
+# itself, a request to see to it, or a politeness or impersonal frame, it cannot.
+# For anything else — every negation, every governing verb, every preposition,
+# every competing noun — it can, and so it is left out and refuses the criterion.
 _CRITERION_LEAD = frozenset(
     {
+        # Determiners and possessives. A closed class in English, listed whole.
         "the",
         "a",
         "an",
@@ -208,12 +253,15 @@ _CRITERION_LEAD = frozenset(
         "those",
         "each",
         "every",
+        "all",
+        "any",
         "its",
         "their",
         "our",
         "my",
         "your",
         "we",
+        # Nouns that name the file rather than something the file contains.
         "file",
         "files",
         "filename",
@@ -229,14 +277,38 @@ _CRITERION_LEAD = frozenset(
         # criterion, but the negation is itself a word this set does not admit.
         "ensure",
         "ensures",
+        "ensured",
         "verify",
         "verifies",
+        "verified",
         "confirm",
         "confirms",
+        "confirmed",
         "require",
         "requires",
+        "required",
         "expect",
         "expects",
+        "expected",
+        "check",
+        "checks",
+        "assert",
+        "asserts",
+        "validate",
+        "validates",
+        "guarantee",
+        "guarantees",
+        "make",
+        "sure",
+        # Politeness and impersonal frames — "please", "it is necessary that".
+        # These carry no claim of their own at all, which is exactly why leaving
+        # them out cost an honest criterion a formal failure.
+        "please",
+        "kindly",
+        "it",
+        "is",
+        "necessary",
+        "mandatory",
     }
 )
 
@@ -543,9 +615,12 @@ class SpecVerifier:
         if compiled is None:
             return None
         if _matches_the_empty_string(pattern, flags):
-            # A pattern that hits a file with no content in it hits every file:
-            # `.*`, `x?`, `\s*`, `(?:)`, `|` and `^` all compile, and all verified
-            # whatever criterion they were handed. A criterion that is genuinely
+            # A pattern that can match a subject with nothing in it proves nothing
+            # about a subject that has something in it either — `\A\Z` matches only
+            # the empty file, `.*` and `x?` and `\s*` and `(?:)` and `|` and `^`
+            # match anywhere in any file, and all of them verified whatever
+            # criterion they were handed. What the two kinds share is that the
+            # match is not evidence of the criterion. A criterion that is genuinely
             # about a file being empty is answered by `_empty_file_criterion_result`
             # from the file, so nothing honest depends on admitting these here.
             logger.warning(
@@ -644,7 +719,7 @@ class SpecVerifier:
                 assertion=assertion,
                 verified=False,
                 discrepancy=True,
-                detail="Unusable regex pattern: invalid, too long, or matches any input",
+                detail="Unusable regex pattern: invalid, too long, or able to match a file with no content",
             )
 
         for file_path in files:
@@ -720,7 +795,7 @@ class SpecVerifier:
                 assertion=assertion,
                 verified=False,
                 discrepancy=True,
-                detail="Unusable regex pattern: invalid, too long, or matches any input",
+                detail="Unusable regex pattern: invalid, too long, or able to match a file with no content",
             )
 
         for file_path in files:
