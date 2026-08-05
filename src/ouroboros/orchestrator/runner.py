@@ -161,6 +161,10 @@ from ouroboros.orchestrator.execution_semantics import (
 )
 from ouroboros.orchestrator.execution_strategy import ExecutionStrategy, get_strategy
 from ouroboros.orchestrator.failure_taxonomy import FailureClass
+from ouroboros.orchestrator.legacy_identity import (
+    legacy_task_workspace_identity,
+    note_legacy_identity_path,
+)
 from ouroboros.orchestrator.mcp_tools import (
     MCPToolProvider,
     SessionToolCatalog,
@@ -3301,23 +3305,6 @@ class OrchestratorRunner:
                 },
             ) from exc
 
-    @classmethod
-    def _legacy_task_workspace_identity(cls, workspace: TaskWorkspace) -> dict[str, str]:
-        """Reproduce the pre-anchor managed-workspace representation exactly."""
-        project_root = Path(cls._canonical_path(workspace.repo_root))
-        source_workspace = Path(cls._canonical_path(workspace.original_cwd))
-        try:
-            workspace_path = source_workspace.relative_to(project_root).as_posix() or "."
-        except ValueError as exc:
-            raise OrchestratorError(
-                message="Cannot resume from an invalid historical task workspace",
-                details={"invalid": "legacy_task_workspace"},
-            ) from exc
-        return {
-            "project_root": str(project_root),
-            "workspace_path": workspace_path,
-        }
-
     @staticmethod
     def _project_identity_error(exc: ProjectIdentityError) -> OrchestratorError:
         """Normalize resolver failures at the orchestration lifecycle boundary."""
@@ -3367,7 +3354,7 @@ class OrchestratorRunner:
     def _legacy_proof_workspace_identity(self) -> dict[str, str] | None:
         """Reproduce the pre-Project-Map V1 nested workspace representation."""
         if self._task_workspace is not None:
-            return self._legacy_task_workspace_identity(self._task_workspace)
+            return legacy_task_workspace_identity(self._task_workspace, self._canonical_path)
         effective_cwd = self._effective_cwd()
         if not isinstance(effective_cwd, str) or not effective_cwd.strip():
             return None
@@ -6032,6 +6019,7 @@ class OrchestratorRunner:
         the migration checkpoint is written.
         """
 
+        note_legacy_identity_path("resume_identity_validation")
         raw_start_identity = progress.get(SESSION_START_IDENTITY_PROGRESS_KEY)
         if raw_start_identity is not None and not isinstance(raw_start_identity, Mapping):
             raise OrchestratorError(
@@ -6505,6 +6493,13 @@ class OrchestratorRunner:
             # Historical v9 session starts predate the additive project anchor.
             # Preserve their exact direct-cwd representation rather than
             # rewriting durable resume authority under the new resolver.
+            # Transitional (#1799): remove this branch once the criterion in
+            # orchestrator/legacy_identity.py and docs/rfc/project-map-v1.md is
+            # met (90 activation-free days past the retention window).
+            note_legacy_identity_path(
+                "resume_workspace_comparison",
+                prepared_live_execution=prepared_live_execution,
+            )
             active_workspace = (
                 self._proof_workspace_identity()
                 if prepared_live_execution
