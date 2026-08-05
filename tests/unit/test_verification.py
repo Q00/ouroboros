@@ -1469,6 +1469,52 @@ class TestSpecVerifier:
     @pytest.mark.parametrize("tier", [VerificationTier.T2_STRUCTURAL, VerificationTier.T1_CONSTANT])
     @pytest.mark.parametrize(
         "pattern",
+        [r"(?!)|aa", r"(?!(?:))|aa", r"(?!)aa|aa", r"aa(?!)|aa", r"(?!(?!))"],
+        ids=["alternative", "empty-body", "before-the-literal", "after-the-literal", "negated"],
+    )
+    def test_an_assertion_that_can_never_hold_is_read_on_every_supported_parser(
+        self, tier: VerificationTier, pattern: str
+    ) -> None:
+        """Which node the parser hands over is a fact about the interpreter.
+
+        `(?!)` is the idiom for a branch that must never be taken. Through 3.12
+        it parses as a negative assertion with an empty body, which this reading
+        already answers: the body matches nothing, so the negation of it matches
+        nothing. From 3.13 the parser folds the whole thing into a single
+        `FAILURE` opcode, which fell through to "unknown construct" and refused
+        the pattern — so `(?!)|CameraProvider` was evidence on 3.12 and an
+        authoritative failure on 3.13 and 3.14, from the same source.
+
+        The assertion is therefore not which node arrives but that the guard
+        agrees with the interpreter that will run it, which pins all three
+        without naming any of them. It has to hold in both directions, so the
+        last case negates the whole thing: `(?!(?!))` matches every file, empty
+        ones included, and stays refused on every parser.
+        """
+        matches_nothing = re.search(pattern, "") is not None
+        assert re.search(pattern, "aa\n"), f"{pattern!r} must be satisfied by the fixture"
+
+        project = self._create_project({"marker.txt": "aa\n"})
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="marker.txt MUST contain a doubled letter",
+            tier=tier,
+            pattern=pattern,
+            file_hint="marker.txt",
+        )
+
+        summary = SpecVerifier(project_dir=project).verify_all(
+            (assertion,), agent_results={0: True}
+        )
+
+        assert summary.reports[0].verified_pass is not matches_nothing, (
+            f"{pattern!r} matches the empty string here: {matches_nothing}"
+        )
+        assert summary.discrepancy_count == (1 if matches_nothing else 0)
+
+    @pytest.mark.parametrize("tier", [VerificationTier.T2_STRUCTURAL, VerificationTier.T1_CONSTANT])
+    @pytest.mark.parametrize(
+        "pattern",
         [
             r"(a)?(?(1)|a)",
             r"(a)?(?(1)a|a)",

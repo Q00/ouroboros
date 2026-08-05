@@ -214,6 +214,15 @@ def _can_match_nothing(
             # where such a sequence takes part in a match by failing, the answer
             # is that they certainly did not.
             answers.append(False)
+        elif name == "FAILURE":
+            # An assertion that can never hold. From 3.13 the parser folds `(?!)`
+            # and `(?!(?:))` into this single opcode; before that the same source
+            # arrives as an `ASSERT_NOT` with an empty body, which this reading
+            # already answered. Nothing matches it, a subject with nothing in it
+            # included, so the answer is the same False — and reading it as an
+            # unknown construct instead refused `(?!)|CameraProvider` on exactly
+            # the interpreters that do the folding and nowhere else.
+            answers.append(False)
         elif name == "AT":
             anchor = getattr(argument, "name", str(argument))
             if anchor in _ANCHORS_HOLDING_ON_EMPTY:

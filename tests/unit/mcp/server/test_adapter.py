@@ -888,6 +888,8 @@ Parallel Execution Verification Report
             ("aa\n", "marker.txt MUST contain a doubled letter", r"(?!()x)(?(1)|a)"),
             ("aa\n", "marker.txt MUST contain a doubled letter", r"(?!x())(?(1)|a)"),
             ("aa\n", "marker.txt MUST contain a doubled letter", r"(?!x())\1|aa"),
+            ("aa\n", "marker.txt MUST contain a doubled letter", r"(?!)|aa"),
+            ("aa\n", "marker.txt MUST contain a doubled letter", r"aa(?!)|aa"),
         ],
         ids=[
             "politeness-frame",
@@ -906,6 +908,8 @@ Parallel Execution Verification Report
             "conditional-on-a-capture-inside-a-failed-negative-lookahead",
             "conditional-on-a-capture-after-a-consuming-atom",
             "backreference-to-a-capture-that-did-not-take-part",
+            "branch-that-can-never-be-taken",
+            "branch-that-can-never-be-taken-after-a-literal",
         ],
     )
     def test_a_satisfied_criterion_is_not_converted_into_a_formal_failure(
@@ -927,7 +931,11 @@ Parallel Execution Verification Report
         filename, which the mention check ignored and the masking that follows it
         did not. The last two are conditionals whose arms disagree, refused
         because the reading required agreement instead of asking whether the
-        group could have taken part. Both directions are driven through the real verifier
+        group could have taken part. The last two are the same failure made by
+        the interpreter rather than by the reading: from 3.13 the parser folds
+        `(?!)` into a single opcode this walk did not know, so a pattern with an
+        unreachable branch was evidence on 3.12 and an authoritative failure on
+        3.13 and 3.14. Both directions are driven through the real verifier
         and the real adapter, because the failure only becomes authoritative at
         this boundary.
         """
