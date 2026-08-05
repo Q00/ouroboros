@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -10,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from ouroboros.core.disposable_memory import MAX_DISPOSABLE_ARTIFACT_BYTES
+import ouroboros.persistence.artifact_store as artifact_store_module
 from ouroboros.persistence.artifact_store import (
     ArtifactContractConflictError,
     ArtifactIntegrityError,
@@ -348,6 +350,113 @@ def test_prune_revalidates_modeled_windows_junction_before_unlink(
 
     assert external_body.exists()
     assert external_body.read_bytes() == canonical_artifact_bytes({"external": "must survive"})
+
+
+@pytest.mark.parametrize("publication", ["body", "manifest"])
+def test_publication_rejects_parent_swap_before_atomic_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    publication: str,
+) -> None:
+    """The final writer never follows a post-validation directory symlink."""
+
+    store = _store(tmp_path)
+    body = {"external": "must remain empty"}
+    digest = hashlib.sha256(canonical_artifact_bytes(body)).hexdigest()
+    if publication == "manifest":
+        _put(store, "CONTRACT1", body)
+        publication_parent = store.root / "contracts" / "CONTRACT2"
+    else:
+        publication_parent = store.root / digest[:2]
+
+    external = tmp_path / f"external-{publication}"
+    external.mkdir()
+    original_write = artifact_store_module._atomic_write_bytes
+    swapped = False
+    junction_active = False
+    real_is_symlink = Path.is_symlink
+    real_is_junction = getattr(Path, "is_junction", lambda _path: False)
+
+    def modeled_is_symlink(candidate: Path) -> bool:
+        if junction_active and candidate == publication_parent:
+            return False
+        return real_is_symlink(candidate)
+
+    def modeled_is_junction(candidate: Path) -> bool:
+        if junction_active and candidate == publication_parent:
+            return True
+        return real_is_junction(candidate)
+
+    monkeypatch.setattr(Path, "is_symlink", modeled_is_symlink)
+    monkeypatch.setattr(Path, "is_junction", modeled_is_junction, raising=False)
+
+    def swap_parent_then_write(path: Path, payload: bytes, **kwargs: object) -> None:
+        nonlocal junction_active, swapped
+        target = path.parent == publication_parent
+        if target and not swapped:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.parent.rmdir()
+            try:
+                path.parent.symlink_to(external, target_is_directory=True)
+            except OSError:
+                pytest.skip("directory symlinks are not supported in this environment")
+            swapped = True
+            junction_active = True
+        original_write(path, payload, **kwargs)
+
+    monkeypatch.setattr(artifact_store_module, "_atomic_write_bytes", swap_parent_then_write)
+
+    with pytest.raises(ArtifactIntegrityError, match="link|symlink|publication"):
+        _put(store, "CONTRACT2", body)
+
+    assert swapped
+    assert list(external.iterdir()) == []
+
+
+@pytest.mark.parametrize("publication", ["body", "manifest"])
+def test_publication_revalidates_parent_handle_at_replace_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    publication: str,
+) -> None:
+    """A directory moved after temp fsync cannot retain an external publication."""
+
+    if not artifact_store_module._supports_directory_fd_publication():
+        pytest.skip("directory-relative publication is unavailable on this platform")
+    store = _store(tmp_path)
+    body = {"replace_boundary": "must remain empty"}
+    digest = hashlib.sha256(canonical_artifact_bytes(body)).hexdigest()
+    if publication == "manifest":
+        _put(store, "CONTRACT1", body)
+        target_parent = store.root / "contracts" / "CONTRACT2"
+    else:
+        target_parent = store.root / digest[:2]
+
+    external = tmp_path / f"replace-external-{publication}"
+    displaced = tmp_path / f"replace-displaced-{publication}"
+    external.mkdir()
+    original_rename = os.rename
+    swapped = False
+
+    def swap_parent_then_replace(src: object, dst: object, **kwargs: object) -> None:
+        nonlocal swapped
+        if kwargs.get("src_dir_fd") is not None and not swapped:
+            original_rename(target_parent, displaced)
+            try:
+                target_parent.symlink_to(external, target_is_directory=True)
+            except OSError:
+                pytest.skip("directory symlinks are not supported in this environment")
+            swapped = True
+        original_rename(src, dst, **kwargs)
+
+    monkeypatch.setattr(os, "rename", swap_parent_then_replace)
+
+    with pytest.raises(ArtifactIntegrityError, match="link|junction|changed"):
+        _put(store, "CONTRACT2", body)
+
+    assert swapped
+    assert list(external.iterdir()) == []
+    assert list(displaced.iterdir()) == []
 
 
 def test_path_unsafe_contract_id_is_rejected(tmp_path: Path) -> None:

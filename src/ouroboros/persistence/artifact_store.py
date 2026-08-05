@@ -19,6 +19,7 @@ import math
 import os
 from pathlib import Path
 import re
+import stat
 import tempfile
 from typing import Any, Final
 
@@ -38,6 +39,13 @@ DEFAULT_REPLAY_RETENTION = timedelta(days=90)
 _DIGEST_PATTERN: Final[re.Pattern[str]] = re.compile(r"^[0-9a-f]{64}$")
 _MANIFEST_VERSION: Final[int] = 1
 _MANIFEST_FILENAME: Final[str] = "events.json"
+_DIRECTORY_FD_PUBLICATION_SUPPORTED: Final[bool] = bool(
+    os.name != "nt"
+    and os.open in os.supports_dir_fd
+    and os.rename in os.supports_dir_fd
+    and os.stat in os.supports_dir_fd
+    and os.unlink in os.supports_dir_fd
+)
 
 
 class ArtifactStoreError(PersistenceError):
@@ -492,7 +500,12 @@ class ContentAddressedArtifactStore:
                     details={"artifact_ref": f"sha256:{digest}"},
                 )
             return
-        _atomic_write_bytes(path, payload)
+        _atomic_write_bytes(
+            path,
+            payload,
+            root=self.root,
+            label="artifact body",
+        )
 
     def _read_blob_locked(self, artifact_ref: str) -> bytes:
         digest = _digest_from_ref(artifact_ref)
@@ -531,9 +544,9 @@ class ContentAddressedArtifactStore:
         prefix = self.root / digest[:2]
         path = prefix / f"{digest}.json"
         _require_contained(path, root=self.root, label="artifact body")
-        if prefix.is_symlink() or path.is_symlink():
+        if _is_link_like(prefix) or _is_link_like(path):
             raise ArtifactIntegrityError(
-                "Artifact body path must not traverse a symlink",
+                "Artifact body path must not traverse a link or junction",
                 operation="path_resolution",
                 details={"path": str(path)},
             )
@@ -543,9 +556,9 @@ class ContentAddressedArtifactStore:
         self._validate_project_boundary()
         path = self._contracts_root / contract_id / _MANIFEST_FILENAME
         _require_contained(path, root=self._contracts_root, label="artifact manifest")
-        if path.parent.is_symlink() or path.is_symlink():
+        if _is_link_like(path.parent) or _is_link_like(path):
             raise ArtifactIntegrityError(
-                "Artifact manifest path must not traverse a symlink",
+                "Artifact manifest path must not traverse a link or junction",
                 operation="path_resolution",
                 details={"path": str(path)},
             )
@@ -654,7 +667,12 @@ class ContentAddressedArtifactStore:
         path = self._manifest_path(contract_id)
         validated = _validate_manifest(manifest, contract_id=contract_id, path=path)
         payload = (json.dumps(validated, indent=2, sort_keys=True) + "\n").encode("utf-8")
-        _atomic_write_bytes(path, payload)
+        _atomic_write_bytes(
+            path,
+            payload,
+            root=self._contracts_root,
+            label="artifact manifest",
+        )
 
     def _iter_blob_paths_locked(self) -> list[Path]:
         self._validate_project_boundary()
@@ -983,20 +1001,256 @@ def _is_link_like(path: Path) -> bool:
     return bool(callable(is_junction) and is_junction())
 
 
-def _atomic_write_bytes(path: Path, payload: bytes) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
-    temporary = Path(temporary_name)
+def _validate_publication_path(path: Path, *, root: Path, label: str) -> None:
+    """Reject link traversal and resolved escapes at the actual write boundary."""
+    if _is_link_like(root) or _is_link_like(path.parent) or _is_link_like(path):
+        raise ArtifactIntegrityError(
+            f"{label} publication must not traverse a link or junction",
+            operation="path_resolution",
+            details={"path": str(path), "root": str(root)},
+        )
+    _require_contained(path.parent, root=root, label=f"{label} parent")
+    _require_contained(path, root=root, label=label)
+
+
+def _validate_directory_binding(
+    descriptor: int,
+    path: Path,
+    *,
+    root: Path,
+    label: str,
+) -> None:
+    """Prove a held directory handle still names the validated local parent."""
+    _validate_publication_path(path, root=root, label=label)
     try:
-        with os.fdopen(fd, "wb") as handle:
+        opened = os.fstat(descriptor)
+        current = os.stat(path.parent, follow_symlinks=False)
+    except OSError as exc:
+        raise ArtifactIntegrityError(
+            f"{label} publication parent changed during the write",
+            operation="path_resolution",
+            details={"path": str(path.parent), "root": str(root)},
+        ) from exc
+    if (
+        not stat.S_ISDIR(opened.st_mode)
+        or not stat.S_ISDIR(current.st_mode)
+        or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)
+    ):
+        raise ArtifactIntegrityError(
+            f"{label} publication parent changed during the write",
+            operation="path_resolution",
+            details={"path": str(path.parent), "root": str(root)},
+        )
+
+
+def _atomic_write_bytes(
+    path: Path,
+    payload: bytes,
+    *,
+    root: Path,
+    label: str,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _validate_publication_path(path, root=root, label=label)
+    if _supports_directory_fd_publication():
+        _atomic_write_bytes_at(path, payload, root=root, label=label)
+        return
+    if os.name != "nt":
+        raise ArtifactIntegrityError(
+            f"{label} publication requires safe directory-relative filesystem operations",
+            operation="path_resolution",
+            details={"path": str(path), "root": str(root)},
+        )
+    _atomic_write_bytes_guarded(path, payload, root=root, label=label)
+
+
+def _supports_directory_fd_publication() -> bool:
+    """Return whether Python exposes the required openat-style primitives."""
+    return _DIRECTORY_FD_PUBLICATION_SUPPORTED
+
+
+def _atomic_write_bytes_at(
+    path: Path,
+    payload: bytes,
+    *,
+    root: Path,
+    label: str,
+) -> None:
+    """Publish relative to a pinned, non-link parent directory handle."""
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    directory_flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        directory_fd = os.open(path.parent, directory_flags)
+    except OSError as exc:
+        raise ArtifactIntegrityError(
+            f"{label} publication parent is not a safe local directory",
+            operation="path_resolution",
+            details={"path": str(path.parent), "root": str(root)},
+        ) from exc
+
+    temporary_name = f".{path.name}.{os.urandom(16).hex()}.tmp"
+    temporary_fd = -1
+    published = False
+    try:
+        _validate_directory_binding(directory_fd, path, root=root, label=label)
+        file_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        file_flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        temporary_fd = os.open(
+            temporary_name,
+            file_flags,
+            0o600,
+            dir_fd=directory_fd,
+        )
+        with os.fdopen(temporary_fd, "wb") as handle:
+            temporary_fd = -1
             handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary, path)
-        _fsync_directory(path.parent)
+        _validate_directory_binding(directory_fd, path, root=root, label=label)
+        os.rename(
+            temporary_name,
+            path.name,
+            src_dir_fd=directory_fd,
+            dst_dir_fd=directory_fd,
+        )
+        published = True
+        try:
+            _validate_directory_binding(directory_fd, path, root=root, label=label)
+        except BaseException:
+            os.unlink(path.name, dir_fd=directory_fd)
+            raise
+        os.fsync(directory_fd)
     except BaseException:
-        temporary.unlink(missing_ok=True)
+        if not published:
+            try:
+                os.unlink(temporary_name, dir_fd=directory_fd)
+            except FileNotFoundError:
+                pass
         raise
+    finally:
+        if temporary_fd >= 0:
+            os.close(temporary_fd)
+        os.close(directory_fd)
+
+
+def _atomic_write_bytes_guarded(
+    path: Path,
+    payload: bytes,
+    *,
+    root: Path,
+    label: str,
+) -> None:
+    """Windows fallback pinned by a no-share-delete directory handle."""
+    with _windows_directory_lease(path.parent, root=root, label=label):
+        _validate_publication_path(path, root=root, label=label)
+        fd, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
+        temporary = Path(temporary_name)
+        try:
+            _validate_publication_path(temporary, root=root, label=f"{label} temporary")
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            _validate_publication_path(path, root=root, label=label)
+            os.replace(temporary, path)
+            _validate_publication_path(path, root=root, label=label)
+            _fsync_directory(path.parent)
+        except BaseException:
+            temporary.unlink(missing_ok=True)
+            raise
+
+
+@contextmanager
+def _windows_directory_lease(
+    path: Path,
+    *,
+    root: Path,
+    label: str,
+) -> Iterator[None]:
+    """Pin one non-reparse directory so Windows cannot swap it during publish."""
+    if os.name != "nt":  # pragma: no cover - called only by the Windows fallback
+        raise ArtifactIntegrityError(
+            f"{label} publication cannot acquire a safe directory lease",
+            operation="path_resolution",
+            details={"path": str(path), "root": str(root)},
+        )
+
+    import ctypes
+    from ctypes import wintypes
+
+    class _ByHandleFileInformation(ctypes.Structure):
+        _fields_ = [
+            ("dwFileAttributes", wintypes.DWORD),
+            ("ftCreationTime", wintypes.FILETIME),
+            ("ftLastAccessTime", wintypes.FILETIME),
+            ("ftLastWriteTime", wintypes.FILETIME),
+            ("dwVolumeSerialNumber", wintypes.DWORD),
+            ("nFileSizeHigh", wintypes.DWORD),
+            ("nFileSizeLow", wintypes.DWORD),
+            ("nNumberOfLinks", wintypes.DWORD),
+            ("nFileIndexHigh", wintypes.DWORD),
+            ("nFileIndexLow", wintypes.DWORD),
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    ]
+    create_file.restype = wintypes.HANDLE
+    get_information = kernel32.GetFileInformationByHandle
+    get_information.argtypes = [wintypes.HANDLE, ctypes.POINTER(_ByHandleFileInformation)]
+    get_information.restype = wintypes.BOOL
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = [wintypes.HANDLE]
+    close_handle.restype = wintypes.BOOL
+
+    # Deliberately omit FILE_SHARE_DELETE: Windows then rejects any rename,
+    # deletion, or junction replacement until the publication is complete.
+    handle = create_file(
+        str(path),
+        0,
+        0x00000001 | 0x00000002,  # FILE_SHARE_READ | FILE_SHARE_WRITE
+        None,
+        3,  # OPEN_EXISTING
+        0x02000000 | 0x00200000,  # BACKUP_SEMANTICS | OPEN_REPARSE_POINT
+        None,
+    )
+    invalid_handle = ctypes.c_void_p(-1).value
+    if handle in {None, invalid_handle}:
+        raise ArtifactIntegrityError(
+            f"{label} publication parent is not a safe local directory",
+            operation="path_resolution",
+            details={"path": str(path), "root": str(root)},
+        )
+
+    try:
+        information = _ByHandleFileInformation()
+        if (
+            not get_information(handle, ctypes.byref(information))
+            or (
+                information.dwFileAttributes & 0x00000400  # FILE_ATTRIBUTE_REPARSE_POINT
+            )
+            or not (
+                information.dwFileAttributes & 0x00000010  # FILE_ATTRIBUTE_DIRECTORY
+            )
+        ):
+            raise ArtifactIntegrityError(
+                f"{label} publication parent must not be a link or junction",
+                operation="path_resolution",
+                details={"path": str(path), "root": str(root)},
+            )
+        _validate_publication_path(path / "publication", root=root, label=label)
+        yield
+        _validate_publication_path(path / "publication", root=root, label=label)
+    finally:
+        close_handle(handle)
 
 
 def _fsync_directory(path: Path) -> None:
