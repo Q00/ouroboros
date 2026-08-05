@@ -918,6 +918,60 @@ class TestSpecVerifier:
 
     @pytest.mark.parametrize("tier", [VerificationTier.T2_STRUCTURAL, VerificationTier.T1_CONSTANT])
     @pytest.mark.parametrize(
+        "ac_text",
+        [
+            "pkg/marker.txt MUST be != empty",
+            "pkg/marker.txt MUST be ≠ empty",
+            "pkg/marker.txt !must be empty",
+            "pkg/marker.txt must be empty 100%",
+            "pkg/marker.txt must be empty > 0 bytes",
+            "pkg/marker.txt must be empty & committed",
+        ],
+        ids=[
+            "ascii-symbolic-negation",
+            "unicode-symbolic-negation",
+            "symbol-before-modal",
+            "numeric-obligation",
+            "operator-obligation",
+            "symbolic-conjunction",
+        ],
+    )
+    def test_a_character_the_reading_cannot_read_refuses_the_whole_criterion(
+        self, tier: VerificationTier, ac_text: str
+    ) -> None:
+        """Consuming every token is not consuming the criterion, if tokens can be dropped.
+
+        The reading used to gather tokens with `findall`, which silently deletes
+        whatever the pattern does not match — so `!=` and `≠` vanished and the
+        criteria here read as bare emptiness requirements, publishing a pass for
+        the exact claim they negate. That is the same defect as matching a part
+        of the criterion, one layer down: a scan over characters that discards
+        the ones it does not recognise is a scan over a part of the characters.
+
+        So the criterion is now consumed character by character, and a character
+        outside words, `.,;:`, quotes, brackets and whitespace refuses the whole
+        reading rather than disappearing from it. An operator or a digit can be
+        the entire meaning, and there is no way to tell the harmless ones apart
+        without reading English.
+        """
+        project = self._create_project({"pkg/marker.txt": ""})
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text=ac_text,
+            tier=tier,
+            pattern=r"\A\Z",
+            file_hint="pkg/marker.txt",
+        )
+
+        summary = SpecVerifier(project_dir=project).verify_all((assertion,))
+
+        assert summary.reports[0].verified_pass is False, f"{ac_text!r} must not verify"
+        detail = summary.reports[0].results[0].detail
+        assert "empty" not in detail, f"{ac_text!r} must not be answered as an emptiness claim"
+        assert "Unusable regex pattern" in detail
+
+    @pytest.mark.parametrize("tier", [VerificationTier.T2_STRUCTURAL, VerificationTier.T1_CONSTANT])
+    @pytest.mark.parametrize(
         ("filename", "ac_text"),
         [
             ("empty.txt", "empty.txt MUST contain data"),
@@ -987,6 +1041,8 @@ class TestSpecVerifier:
             "Ensure marker.txt is empty",
             "We require marker.txt to be empty",
             "marker.txt MUST remain empty",
+            "`marker.txt` must be empty",
+            '"marker.txt" must be empty',
         ],
         ids=[
             "bare",
@@ -995,6 +1051,8 @@ class TestSpecVerifier:
             "transparent-verb",
             "transparent-verb-with-subject",
             "copula-variant",
+            "backticked-name",
+            "quoted-name",
         ],
     )
     def test_the_subject_check_does_not_reject_a_file_it_only_stands_near(

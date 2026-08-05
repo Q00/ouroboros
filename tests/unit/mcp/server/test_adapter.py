@@ -696,6 +696,10 @@ Parallel Execution Verification Report
                 "marker.txt must be empty, but must also contain generated metadata",
             ),
             ("marker.txt", "", "marker.txt must be deleted, and marker.txt must be empty"),
+            ("marker.txt", "", "marker.txt MUST be != empty"),
+            ("marker.txt", "", "marker.txt MUST be ≠ empty"),
+            ("marker.txt", "", "marker.txt must be empty 100%"),
+            ("marker.txt", "", "marker.txt must be empty > 0 bytes"),
         ],
         ids=[
             "empty-filename",
@@ -711,6 +715,10 @@ Parallel Execution Verification Report
             "compound-modal-obligation",
             "compound-after-comma",
             "obligation-in-preamble",
+            "ascii-symbolic-negation",
+            "unicode-symbolic-negation",
+            "numeric-obligation",
+            "operator-obligation",
         ],
     )
     def test_a_misread_emptiness_word_cannot_be_approved_through_the_adapter(
@@ -723,12 +731,20 @@ Parallel Execution Verification Report
         the file named as the object of a preposition while some field inside it is
         the subject. One is a whitespace-only file against an `empty` criterion,
         which `\\A\\Z` does not match either, and one puts its negation far enough
-        along that a bounded lookback loses it. The last four are compound: the
-        file may well be empty, but the criterion also demands a header, a
-        deletion or some metadata, and nothing verified those — answering the
-        emptiness half alone publishes a pass for a requirement no one checked.
-        Each produced `final_approved=True`, `score=1.0`, `final_verdict="pass"`
-        at the adapter for a criterion the project violates or has not met.
+        along that a bounded lookback loses it. Four are compound: the file may
+        well be empty, but the criterion also demands a header, a deletion or
+        some metadata, and nothing verified those — answering the emptiness half
+        alone publishes a pass for a requirement no one checked.
+
+        The last four carry their extra meaning in characters rather than words.
+        A tokenizer that keeps only what it recognises deletes the rest, so `!=`
+        and `≠` disappeared and their criteria read as the bare requirement they
+        negate; a trailing `100%` or `> 0 bytes` disappeared the same way. These
+        are here at the formal boundary because deletion at the character level
+        is indistinguishable, from the outside, from the criterion never having
+        said it. Each produced `final_approved=True`, `score=1.0`,
+        `final_verdict="pass"` at the adapter for a criterion the project
+        violates or has not met.
         """
         (tmp_path / filename).write_text(content)
         assertion = SpecAssertion(

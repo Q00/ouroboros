@@ -155,6 +155,31 @@ _CRITERION_LEAD = frozenset(
 # never meant. Underscored to keep it out of reach of any English word.
 _FILE_TOKEN = "__the_file__"
 
+# Quotes and brackets wrap a name without changing what is claimed about it, and
+# whitespace separates. Everything else in a criterion has to be a word or one of
+# these marks, because a character this cannot read may be the whole of the
+# meaning: `!=` and `≠` invert the very claim they sit in, and a digit or an
+# operator can carry an obligation of its own. So the criterion is consumed
+# character by character and an unreadable one refuses the whole reading — a scan
+# that silently drops what it does not recognise is matching a *part* again, one
+# layer below the tokens.
+_READABLE = re.compile(r"[a-z_]+|[.,;:]|['’\"`()\[\]]|\s+")
+_MARKUP = frozenset("'’\"`()[]")
+
+
+def _criterion_tokens(text: str) -> list[str] | None:
+    """Every word and mark of `text`, or None if any character is unreadable."""
+    tokens: list[str] = []
+    consumed = 0
+    for match in _READABLE.finditer(text):
+        if match.start() != consumed:
+            return None
+        consumed = match.end()
+        token = match.group()
+        if not token.isspace() and token not in _MARKUP:
+            tokens.append(token)
+    return tokens if consumed == len(text) else None
+
 
 def _mask_file_hint(ac_text: str, file_hint: str) -> str:
     """Replace mentions of the file's own name with `_FILE_TOKEN`.
@@ -182,7 +207,7 @@ def _emptiness_the_criterion_requires(ac_text: str, file_hint: str) -> str | Non
 
         <lead>* <file> <chain>* <copula> (empty | blank) ["."]
 
-    every token consumed. Matching the whole of it is what makes the rescue
+    every character of it consumed. Matching the whole of it is what makes the rescue
     safe to answer, and it is a stronger claim than matching a part: a criterion
     that says more is also *asking* for more — "must be empty and contain a
     header" carries a second obligation, and answering only the emptiness half
@@ -195,13 +220,16 @@ def _emptiness_the_criterion_requires(ac_text: str, file_hint: str) -> str | Non
     Consuming the whole criterion also leaves nowhere to put the words that
     broke every narrower version of this: a negation, a governing verb, a
     competing subject and a trailing obligation are all outside the shape, on
-    either side of the name, at any distance.
+    either side of the name, at any distance — and so is a negation written as a
+    symbol, because the reading is over characters and `!=` is not among the ones
+    it can read.
 
     Reading words rather than substrings is what keeps `nonempty` from being an
     occurrence of `empty`.
     """
-    text = _mask_file_hint(ac_text, file_hint).lower().replace("'", "").replace("’", "")
-    tokens = re.findall(r"[a-z_]+|[.,;:]", text)
+    tokens = _criterion_tokens(_mask_file_hint(ac_text, file_hint).lower())
+    if tokens is None:
+        return None
     if tokens and tokens[-1] == ".":
         tokens.pop()
     step = 0
