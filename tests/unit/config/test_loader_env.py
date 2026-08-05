@@ -150,33 +150,112 @@ def test_denylist_covers_known_execution_routing_keys() -> None:
 # environment variable. Those sources live outside Python's import graph, so
 # nothing else ties them to the denylist: the alias they read (OUROBOROS_CLI)
 # was missed precisely because it lacks the _CLI_PATH suffix every sibling has.
-# This contract test re-derives the key from the bridge sources themselves, so
-# a new bridge — or a rename of the existing one — fails here instead of
-# silently reopening the untrusted-.env execution-redirect hole.
+# Discover dispatch sources from their executable sink instead of maintaining a
+# second bridge roster here. Every discovered source must independently yield
+# at least one inspected key, so one healthy bridge cannot hide parser drift in
+# another bridge.
 _PACKAGE_ROOT = Path(loader.__file__).resolve().parent.parent
-_BRIDGE_ENTRY_SOURCES = (
-    _PACKAGE_ROOT / "gjc_bridge" / "index.ts",
-    # The Pi extension is emitted as an f-string template, hence the `{{`.
-    _PACKAGE_ROOT / "cli" / "commands" / "setup.py",
-)
+_BRIDGE_SOURCE_SUFFIXES = frozenset({".cjs", ".js", ".mjs", ".py", ".ts"})
+_BRIDGE_DISPATCH_SINK_RE = re.compile(r"\bentry\.command\b")
 _BRIDGE_ENTRY_ENV_RE = re.compile(
-    r"process\.env\.([A-Z0-9_]+)\s*\)\s*return\s*\{\{?\s*command",
+    r"process\.env(?:\.([A-Z0-9_]+)|\[\s*['\"]([A-Z0-9_]+)['\"]\s*\])"
+    r"\s*\)\s*return\s*\{\{?\s*command",
 )
+
+
+def _discover_bridge_dispatch_sources(package_root: Path) -> tuple[Path, ...]:
+    """Find packaged sources that dispatch a resolved bridge entry command."""
+    sources: list[Path] = []
+    for source in package_root.rglob("*"):
+        if not source.is_file() or source.suffix not in _BRIDGE_SOURCE_SUFFIXES:
+            continue
+        text = source.read_text(encoding="utf-8")
+        if "process.env" in text and _BRIDGE_DISPATCH_SINK_RE.search(text):
+            sources.append(source)
+    return tuple(sorted(sources))
+
+
+def _bridge_dispatch_entry_env_keys(source_text: str) -> frozenset[str]:
+    """Extract dot- or bracket-style environment keys used as commands."""
+    return frozenset(
+        key
+        for match in _BRIDGE_ENTRY_ENV_RE.finditer(source_text)
+        for key in match.groups()
+        if key is not None
+    )
+
+
+def _validated_bridge_dispatch_env_keys(package_root: Path) -> dict[Path, frozenset[str]]:
+    """Discover every bridge and fail if any source cannot be inspected."""
+    sources = _discover_bridge_dispatch_sources(package_root)
+    assert sources, "no bridge dispatch sources found — discovery contract drifted"
+
+    found_by_source: dict[Path, frozenset[str]] = {}
+    for source in sources:
+        keys = _bridge_dispatch_entry_env_keys(source.read_text(encoding="utf-8"))
+        assert keys, f"bridge dispatch-entry extraction drifted for {source}"
+        found_by_source[source] = keys
+    return found_by_source
 
 
 def test_bridge_dispatch_entry_env_keys_are_denylisted() -> None:
     """Every env var a bridge turns into an exec command must be denylisted."""
-    found: dict[str, Path] = {}
-    for source in _BRIDGE_ENTRY_SOURCES:
-        assert source.is_file(), f"bridge source moved: {source}"
-        for key in _BRIDGE_ENTRY_ENV_RE.findall(source.read_text(encoding="utf-8")):
-            found[key] = source
+    found_by_source = _validated_bridge_dispatch_env_keys(_PACKAGE_ROOT)
 
-    # Guard the regex itself: a silent zero-match would make this test vacuous.
-    assert len(found) >= 1, "no bridge dispatch-entry env key found — regex drifted"
-
-    missing = {key: str(path) for key, path in found.items() if key not in UNTRUSTED_ENV_DENYLIST}
+    missing = {
+        key: str(source)
+        for source, keys in found_by_source.items()
+        for key in keys
+        if key not in UNTRUSTED_ENV_DENYLIST
+    }
     assert not missing, f"bridge exec-command env keys missing from denylist: {missing}"
+
+
+@pytest.mark.parametrize(
+    "access",
+    ("process.env.OUROBOROS_CLI", 'process.env["OUROBOROS_CLI"]'),
+)
+def test_bridge_dispatch_entry_env_key_extraction_covers_supported_access_styles(
+    access: str,
+) -> None:
+    """A bridge changing to bracket-style access remains inspected."""
+    source = f"if ({access}) return {{ command: {access}, args: [] }};"
+
+    assert _bridge_dispatch_entry_env_keys(source) == frozenset({"OUROBOROS_CLI"})
+
+
+def test_bridge_dispatch_source_discovery_covers_new_sources(tmp_path: Path) -> None:
+    """Adding a packaged bridge does not require updating a test-side roster."""
+    source = tmp_path / "future_bridge" / "index.ts"
+    source.parent.mkdir()
+    source.write_text(
+        "if (process.env.NEW_BRIDGE_CLI) "
+        "return { command: process.env.NEW_BRIDGE_CLI, args: [] };\n"
+        "await vendor.exec(entry.command, []);\n",
+        encoding="utf-8",
+    )
+
+    assert _validated_bridge_dispatch_env_keys(tmp_path) == {source: frozenset({"NEW_BRIDGE_CLI"})}
+
+
+def test_bridge_dispatch_validation_is_non_vacuous_per_source(tmp_path: Path) -> None:
+    """One parseable bridge cannot hide extraction drift in another bridge."""
+    good = tmp_path / "good.ts"
+    good.write_text(
+        "if (process.env.GOOD_CLI) return { command: process.env.GOOD_CLI, args: [] };\n"
+        "await vendor.exec(entry.command, []);\n",
+        encoding="utf-8",
+    )
+    drifted = tmp_path / "drifted.ts"
+    drifted.write_text(
+        "const command = process.env.DRIFTED_CLI;\n"
+        "if (command) return { command, args: [] };\n"
+        "await vendor.exec(entry.command, []);\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(AssertionError, match=r"extraction drifted for .*drifted\.ts"):
+        _validated_bridge_dispatch_env_keys(tmp_path)
 
 
 def test_untrusted_env_cannot_set_bridge_cli_alias(tmp_path: Path, monkeypatch) -> None:
