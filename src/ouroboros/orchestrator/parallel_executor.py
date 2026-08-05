@@ -8671,7 +8671,7 @@ Respond with either ATOMIC or the structured JSON object only.
             *,
             call_prompt: str,
             call_tools: list[str],
-            on_provider_entry: Callable[[], Awaitable[None]] | None = None,
+            before_provider_entry: Callable[[], Awaitable[None]] | None = None,
         ) -> bool:
             """Return whether an admitted, revalidated provider stream was entered."""
 
@@ -8683,12 +8683,16 @@ Respond with either ATOMIC or the structured JSON object only.
                 if provider_kwargs is None:
                     return False
                 _invoke_execution_authority_guard(self)
-                provider_effect_scope.enter()
-                provider_effect_active = True
                 provider_completed = False
                 try:
-                    if on_provider_entry is not None:
-                        await on_provider_entry()
+                    if before_provider_entry is not None:
+                        await before_provider_entry()
+                    # Durable SessionSignal bookkeeping is not an external
+                    # provider effect.  Keep the task replayable until that
+                    # bookkeeping completes and the batch gate admits the
+                    # actual adapter boundary.
+                    provider_effect_scope.enter()
+                    provider_effect_active = True
                     await self._authority_leaf_dispatcher_stream(
                         self._authority_leaf_dispatcher,
                         state=dispatch_state,
@@ -8956,24 +8960,22 @@ Respond with either ATOMIC or the structured JSON object only.
                     inform_mode = queued_signal.effective_mode is SessionSignalMode.INFORM
 
                     async def _claim_follow_up_delivery() -> None:
-                        # The batch gate runs synchronously before this callback,
-                        # so a pre-existing sibling pause leaves both the signal
-                        # queue and its completed primary boundary untouched.
+                        # This durable claim is still pre-provider-entry.  The
+                        # completed primary remains active until the follow-up
+                        # provider stream itself has completed.
                         await claim_follow_up_delivery(
                             event_store=self._event_store,
                             signal=queued_signal.signal,
                             effective_mode=queued_signal.effective_mode,
                             runtime_backend=signal_target.runtime_backend,
                             orchestrator_session_id=session_id,
-                            primary_dispatch_id=primary_turn.dispatch_id,
-                            seal_dispatch=_seal_dispatch,
                         )
 
                     try:
                         provider_entered = await _stream_provider_call(
                             call_prompt=follow_up_prompt,
                             call_tools=[] if inform_mode else tools,
-                            on_provider_entry=_claim_follow_up_delivery,
+                            before_provider_entry=_claim_follow_up_delivery,
                         )
                         if not provider_entered:
                             await self._event_store.append(
@@ -8990,11 +8992,18 @@ Respond with either ATOMIC or the structured JSON object only.
                                 )
                             )
                             return await _terminalize_route_drift(follow_up_dispatch_id)
+                        await _seal_dispatch(
+                            primary_turn.dispatch_id,
+                            reason=(
+                                "completed provider turn superseded by a SessionSignal follow-up"
+                            ),
+                        )
                     except _BatchInterruptedForRecoverablePause:
                         # This dispatch exists durably, but the provider gate
-                        # rejected it before signal delivery was claimed. Abort
-                        # only the child boundary and restore the completed
-                        # primary result for the batch's pause owner.
+                        # rejected it before the adapter call.  The claim may
+                        # already be durable; reject it terminally, abort only
+                        # the child boundary, and restore the still-unsealed
+                        # completed primary for the batch's pause owner.
                         active_dispatch_id = await abort_unentered_follow_up(
                             event_store=self._event_store,
                             signal=queued_signal.signal,

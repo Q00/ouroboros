@@ -72,10 +72,8 @@ async def claim_follow_up_delivery(
     effective_mode: SessionSignalMode,
     runtime_backend: str,
     orchestrator_session_id: str,
-    primary_dispatch_id: str,
-    seal_dispatch: Callable[..., Awaitable[None]],
 ) -> None:
-    """Claim signal delivery and retire its primary after provider entry."""
+    """Claim signal delivery while the follow-up remains pre-provider-entry."""
     await event_store.append(
         create_session_signal_delivery_started_event(
             signal,
@@ -83,10 +81,6 @@ async def claim_follow_up_delivery(
             runtime_backend=runtime_backend,
             orchestrator_session_id=orchestrator_session_id,
         )
-    )
-    await seal_dispatch(
-        primary_dispatch_id,
-        reason="completed provider turn superseded by a SessionSignal follow-up",
     )
 
 

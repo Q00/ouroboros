@@ -2397,18 +2397,20 @@ async def test_completed_signal_follow_up_survives_sibling_quota(
 
 
 @pytest.mark.parametrize("signal_mode", [SessionSignalMode.INFORM, SessionSignalMode.AFTER_TURN])
+@pytest.mark.parametrize("pause_checkpoint", ["follow_up_dispatch", "delivery_claim"])
 @pytest.mark.asyncio
 async def test_signal_blocked_before_provider_entry_preserves_primary_across_pause_resume(
     tmp_path: Any,
     monkeypatch: pytest.MonkeyPatch,
     signal_mode: SessionSignalMode,
+    pause_checkpoint: str,
 ) -> None:
     """A sibling quota aborts an unentered follow-up without poisoning its primary."""
 
     store = EventStore(f"sqlite+aiosqlite:///{tmp_path / f'pre-entry-{signal_mode}.db'}")
     await store.initialize()
     adapter = _Adapter()
-    follow_up_dispatched = asyncio.Event()
+    follow_up_checkpoint_reached = asyncio.Event()
     quota_provider_completed = asyncio.Event()
     calls: list[str] = []
     signal = SessionSignal(
@@ -2465,15 +2467,25 @@ async def test_signal_blocked_before_provider_entry_preserves_primary_across_pau
 
     async def append(event: BaseEvent) -> None:
         await original_append(event)
-        if (
+        is_follow_up_dispatch = (
             event.type == "execution.ac.attempt.dispatched"
             and event.data.get("dispatch_kind") == "session_signal_followup"
             and event.data.get("signal_id") == signal.signal_id
+        )
+        is_delivery_claim = (
+            event.type == "control.session.signal.delivering"
+            and event.aggregate_id == signal.signal_id
+        )
+        if (
+            pause_checkpoint == "follow_up_dispatch"
+            and is_follow_up_dispatch
+            or pause_checkpoint == "delivery_claim"
+            and is_delivery_claim
         ):
-            follow_up_dispatched.set()
+            follow_up_checkpoint_reached.set()
             await quota_provider_completed.wait()
-            # Let the quota owner's provider observation publish the shared
-            # pause before this queued follow-up reaches provider_effect_scope.enter().
+            # Let the quota owner's observation publish the shared pause while
+            # the follow-up is still outside provider_effect_scope.enter().
             await asyncio.sleep(0.05)
 
     monkeypatch.setattr(store, "append", append)
@@ -2490,7 +2502,7 @@ async def test_signal_blocked_before_provider_entry_preserves_primary_across_pau
                     data={"subtype": "success"},
                 )
                 return
-            await follow_up_dispatched.wait()
+            await follow_up_checkpoint_reached.wait()
             yield AgentMessage(
                 type="result",
                 content="Usage limit reached. Please try again in 5 hours.",
@@ -2563,6 +2575,8 @@ async def test_signal_blocked_before_provider_entry_preserves_primary_across_pau
         projection = project_session_signal(signal_events)
         assert projection.state is SessionSignalState.REJECTED
         assert signal_events[-1].data["rejection_code"] == "batch_paused_before_delivery"
+        if pause_checkpoint == "delivery_claim":
+            assert any(event.type == "control.session.signal.delivering" for event in signal_events)
         assert not any(
             event.type == "control.session.signal.delivery_uncertain" for event in signal_events
         )
