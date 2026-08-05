@@ -682,9 +682,8 @@ class EventStore:
             parsed = make_url(database_url)
         except Exception:
             return None
-        if parsed.get_backend_name() != "sqlite":
-            return None
-        if str(parsed.query.get("mode", "")).lower() == "memory":
+        is_memory_mode = str(parsed.query.get("mode", "")).lower() == "memory"
+        if parsed.get_backend_name() != "sqlite" or is_memory_mode:
             return None
         database = parsed.database or ""
         if database.startswith("file:"):
