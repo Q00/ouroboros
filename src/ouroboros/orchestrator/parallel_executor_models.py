@@ -279,6 +279,10 @@ class ParallelExecutionResult:
     # owner uses this durable signal to publish PAUSED even when another AC in
     # the same round already persisted a valid next-route decision.
     recoverable_route_pause: bool = False
+    # A coordinator review is also a provider call.  Preserve its explicit
+    # quota boundary separately from AC outcomes so the runner can publish the
+    # same durable PAUSED transition without fabricating an AC failure.
+    recoverable_coordinator_pause: bool = False
 
     @property
     def all_succeeded(self) -> bool:
@@ -288,7 +292,10 @@ class ParallelExecutionResult:
         about non-empty coverage should also check len(self.results).
         """
         has_no_failures = (
-            self.failure_count == 0 and self.blocked_count == 0 and self.invalid_count == 0
+            self.failure_count == 0
+            and self.blocked_count == 0
+            and self.invalid_count == 0
+            and not self.recoverable_coordinator_pause
         )
         # Empty set is trivially successful (no failures); non-empty requires >=1 satisfied
         if not self.results:

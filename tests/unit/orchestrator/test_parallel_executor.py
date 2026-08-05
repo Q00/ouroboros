@@ -15479,6 +15479,175 @@ class TestParallelACExecutor:
         assert result.stages[1].outcome == StageExecutionOutcome.PARTIAL
 
     @pytest.mark.asyncio
+    async def test_coordinator_pressure_delays_next_stage_provider_entrance(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Coordinator Retry-After must close the next stage's provider entrance."""
+
+        clock = {"now": 100.0}
+        sleeps: list[float] = []
+        provider_entrances: list[tuple[int, float]] = []
+
+        async def fake_sleep(seconds: float) -> None:
+            sleeps.append(seconds)
+            clock["now"] += seconds
+
+        pressure = AgentMessage(
+            type="result",
+            content="Too many concurrent requests",
+            data={
+                "subtype": "error",
+                "http_status": 429,
+                "headers": {"Retry-After": "2"},
+            },
+        )
+        conflict = FileConflict(file_path="src/shared.py", ac_indices=(0, 1))
+        monkeypatch.setattr(
+            LevelCoordinator,
+            "run_review",
+            AsyncMock(
+                return_value=CoordinatorReview(
+                    level_number=1,
+                    conflicts_detected=(conflict,),
+                    review_summary=pressure.content,
+                    final_output=pressure.content,
+                    messages=(pressure,),
+                )
+            ),
+        )
+        seed = _make_seed("Write shared A", "Write shared B", "Consume shared output")
+        graph = DependencyGraph(
+            nodes=(
+                ACNode(index=0, content=seed.acceptance_criteria[0], depends_on=()),
+                ACNode(index=1, content=seed.acceptance_criteria[1], depends_on=()),
+                ACNode(index=2, content=seed.acceptance_criteria[2], depends_on=(0, 1)),
+            ),
+            execution_levels=((0, 1), (2,)),
+        )
+        controller = AdaptiveConcurrencyController(
+            initial_limit=2,
+            max_limit=2,
+            clock=lambda: clock["now"],
+            sleep=fake_sleep,
+        )
+        monkeypatch.setattr(
+            "ouroboros.orchestrator.parallel_executor.adaptive_concurrency."
+            "AdaptiveConcurrencyController",
+            lambda **_kwargs: controller,
+        )
+        executor = _make_executor()
+        executor._coordinator.detect_file_conflicts = MagicMock(side_effect=([conflict], []))
+
+        async def execute_ac(**kwargs: Any) -> ACExecutionResult:
+            ac_index = int(kwargs["ac_index"])
+            messages = (AgentMessage(type="result", content="done", data={"subtype": "success"}),)
+            async with executor._adaptive_concurrency.slot() as permit_epoch:
+                provider_entrances.append((ac_index, clock["now"]))
+                await observe_provider_messages(
+                    executor._adaptive_concurrency,
+                    messages,
+                    permit_epoch,
+                    ("session", "execution", ac_index),
+                    provider_completed=True,
+                )
+            return ACExecutionResult(
+                ac_index=ac_index,
+                ac_content=str(kwargs["ac_content"]),
+                success=True,
+                messages=messages,
+                final_message="done",
+            )
+
+        executor._execute_single_ac = execute_ac  # type: ignore[method-assign]
+        result = await executor.execute_parallel(
+            seed=seed,
+            execution_plan=graph.to_execution_plan(),
+            session_id="session-coordinator-pressure",
+            execution_id="execution-coordinator-pressure",
+            tools=["Read", "Edit"],
+            system_prompt="test",
+        )
+
+        assert result.all_succeeded is True
+        assert next(at for index, at in provider_entrances if index == 2) == 102.0
+        assert sleeps == [2.0]
+
+    @pytest.mark.asyncio
+    async def test_coordinator_quota_stops_before_next_stage_provider_effect(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Coordinator quota must become a durable pause input before stage two."""
+
+        quota = AgentMessage(
+            type="result",
+            content="Usage limit reached. Please try again in 5 hours.",
+            data={"subtype": "error", "error_type": "CodexCliError"},
+        )
+        conflict = FileConflict(file_path="src/shared.py", ac_indices=(0, 1))
+        monkeypatch.setattr(
+            LevelCoordinator,
+            "run_review",
+            AsyncMock(
+                return_value=CoordinatorReview(
+                    level_number=1,
+                    conflicts_detected=(conflict,),
+                    review_summary=quota.content,
+                    final_output=quota.content,
+                    messages=(quota,),
+                )
+            ),
+        )
+        seed = _make_seed("Write shared A", "Write shared B", "Consume shared output")
+        graph = DependencyGraph(
+            nodes=(
+                ACNode(index=0, content=seed.acceptance_criteria[0], depends_on=()),
+                ACNode(index=1, content=seed.acceptance_criteria[1], depends_on=()),
+                ACNode(index=2, content=seed.acceptance_criteria[2], depends_on=(0, 1)),
+            ),
+            execution_levels=((0, 1), (2,)),
+        )
+        executor = _make_executor()
+        executor._coordinator.detect_file_conflicts = MagicMock(return_value=[conflict])
+        provider_effects: list[int] = []
+
+        async def execute_ac(**kwargs: Any) -> ACExecutionResult:
+            ac_index = int(kwargs["ac_index"])
+            provider_effects.append(ac_index)
+            return ACExecutionResult(
+                ac_index=ac_index,
+                ac_content=str(kwargs["ac_content"]),
+                success=True,
+                final_message="done",
+            )
+
+        executor._execute_single_ac = execute_ac  # type: ignore[method-assign]
+        result = await executor.execute_parallel(
+            seed=seed,
+            execution_plan=graph.to_execution_plan(),
+            session_id="session-coordinator-quota",
+            execution_id="execution-coordinator-quota",
+            tools=["Read", "Edit"],
+            system_prompt="test",
+        )
+
+        assert provider_effects == [0, 1]
+        assert result.recoverable_coordinator_pause is True
+        assert result.all_succeeded is False
+        assert len(result.stages) == 1
+        assert result.stages[0].coordinator_review is not None
+        coordinator_event_types = [
+            call.args[0].type
+            for call in executor._event_store.append.await_args_list
+            if call.args[0].type.startswith("execution.coordinator.")
+        ]
+        assert coordinator_event_types == [
+            "execution.coordinator.started",
+            "execution.coordinator.completed",
+        ]
+
+    @pytest.mark.asyncio
     async def test_records_coordinator_results_at_level_scope_without_ac_attribution(
         self,
         monkeypatch: pytest.MonkeyPatch,

@@ -7527,6 +7527,35 @@ class OrchestratorRunner:
                 else latest_pause(selected_pause, failure_pause)
             )
 
+        if bool(getattr(parallel_result, "recoverable_coordinator_pause", False)):
+            stages = getattr(parallel_result, "stages", ())
+            if not isinstance(stages, tuple):
+                return None
+            coordinator_pause: RecoverableFailurePause | None = None
+            for stage in stages:
+                review = getattr(stage, "coordinator_review", None)
+                messages = getattr(review, "messages", ())
+                if not isinstance(messages, tuple):
+                    return None
+                for message in reversed(messages):
+                    coordinator_pause = self._recoverable_failure_pause(
+                        message,
+                        now=resolved_now,
+                        default_pause_seconds=default_pause_seconds,
+                    )
+                    if coordinator_pause is not None:
+                        break
+                if coordinator_pause is not None:
+                    break
+            if coordinator_pause is None:
+                return None
+            found_failure = True
+            selected_pause = (
+                coordinator_pause
+                if selected_pause is None
+                else latest_pause(selected_pause, coordinator_pause)
+            )
+
         if not found_failure:
             return None
 
@@ -10468,6 +10497,7 @@ class OrchestratorRunner:
                 now=datetime.now(UTC),
                 require_all_failures_recoverable=not bool(
                     getattr(parallel_result, "recoverable_route_pause", False)
+                    or getattr(parallel_result, "recoverable_coordinator_pause", False)
                 ),
                 default_pause_seconds=execution_semantics["usage_limit_pause_seconds"],
             )

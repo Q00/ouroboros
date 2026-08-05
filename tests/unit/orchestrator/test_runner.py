@@ -38,6 +38,7 @@ from ouroboros.orchestrator.adapter import (
     RuntimeHandle,
 )
 from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime
+from ouroboros.orchestrator.coordinator import CoordinatorReview
 from ouroboros.orchestrator.decomposition_limits import MAX_DECOMPOSITION_DEPTH
 from ouroboros.orchestrator.dependency_analyzer import ACNode, DependencyGraph
 
@@ -47,6 +48,7 @@ from ouroboros.orchestrator.parallel_executor import (
     ACExecutionOutcome,
     ACExecutionResult,
     ParallelExecutionResult,
+    ParallelExecutionStageResult,
 )
 from ouroboros.orchestrator.profile_loader import SuggestedModelTier
 from ouroboros.orchestrator.runner import (
@@ -5618,6 +5620,54 @@ class TestOrchestratorRunner:
         assert pause is not None
         assert pause.pause_kind == "usage_limit"
         assert pause.resume_after == now + timedelta(hours=3)
+
+    def test_parallel_result_detects_coordinator_usage_limit_window(
+        self,
+        runner: OrchestratorRunner,
+    ) -> None:
+        """Coordinator quota evidence must reach the durable runner pause owner."""
+
+        now = datetime(2026, 1, 1, tzinfo=UTC)
+        message = AgentMessage(
+            type="result",
+            content="Usage limit reached. Please try again in 4 hours.",
+            data={"subtype": "error", "error_type": "CodexCliError"},
+        )
+        successful = ACExecutionResult(
+            ac_index=0,
+            ac_content="Patch shared.py",
+            success=True,
+            final_message="done",
+        )
+        parallel_result = ParallelExecutionResult(
+            results=(successful,),
+            success_count=1,
+            failure_count=0,
+            stages=(
+                ParallelExecutionStageResult(
+                    stage_index=0,
+                    ac_indices=(0,),
+                    results=(successful,),
+                    coordinator_review=CoordinatorReview(
+                        level_number=1,
+                        review_summary=message.content,
+                        messages=(message,),
+                    ),
+                ),
+            ),
+            recoverable_coordinator_pause=True,
+        )
+
+        pause = runner._recoverable_failure_pause_from_parallel_result(
+            parallel_result,
+            now=now,
+            default_pause_seconds=18_000,
+        )
+
+        assert parallel_result.all_succeeded is False
+        assert pause is not None
+        assert pause.pause_kind == "usage_limit"
+        assert pause.resume_after == now + timedelta(hours=4)
 
     def test_parallel_result_requires_all_failures_recoverable(
         self,

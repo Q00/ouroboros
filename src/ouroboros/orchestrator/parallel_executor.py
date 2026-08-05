@@ -1926,7 +1926,7 @@ class _BatchInterruptedForRecoverablePause(RuntimeError):
 
 
 class _BatchEnteredAtRecoverablePause(RuntimeError):
-    """Internal marker for an AC cancelled after entering execution authority."""
+    """Internal marker for an AC cancelled after crossing a provider effect."""
 
 
 def _canonical_result_context(
@@ -4005,6 +4005,7 @@ class ParallelACExecutor:
         completed_count = 0
         resume_from_level = 0
         recoverable_route_pause = False
+        recoverable_coordinator_pause = False
 
         # Restore the durable bounce phase before its consuming finalized event.
         # Both precede checkpoints, route projections, and every provider entry.
@@ -4763,11 +4764,34 @@ class ParallelACExecutor:
                                 self._task_cwd or self._adapter.working_directory or os.getcwd()
                             )
                             workspace_before = self._workspace_content_digest(workspace_root)
-                            review = await self._authority_coordinator_review(
-                                execution_id=execution_id,
-                                conflicts=conflicts,
-                                level_context=level_ctx,
-                                level_number=level_num,
+                            review: CoordinatorReview | None = None
+                            async with self._adaptive_concurrency.slot() as permit_epoch:
+                                entry_sink = _PROVIDER_ENTRY_SINK.get()
+                                if entry_sink is not None:
+                                    entry_sink()
+                                try:
+                                    review = await self._authority_coordinator_review(
+                                        execution_id=execution_id,
+                                        conflicts=conflicts,
+                                        level_context=level_ctx,
+                                        level_number=level_num,
+                                    )
+                                finally:
+                                    with anyio.CancelScope(shield=True):
+                                        await adaptive_concurrency.observe_provider_messages(
+                                            self._adaptive_concurrency,
+                                            () if review is None else review.messages,
+                                            permit_epoch,
+                                            None,
+                                            provider_completed=review is not None,
+                                        )
+                            if review is None:
+                                raise RuntimeError(
+                                    "coordinator provider completed without a review artifact"
+                                )
+                            recoverable_coordinator_pause = any(
+                                is_usage_limit_pause_message(message)
+                                for message in reversed(review.messages)
                             )
                             workspace_after = self._workspace_content_digest(workspace_root)
                             workspace_changed = (
@@ -4906,6 +4930,12 @@ class ParallelACExecutor:
                             level=level_num,
                             error=str(e),
                         )
+
+                if recoverable_coordinator_pause:
+                    # The completed coordinator artifact remains the replay
+                    # owner, but no later stage may cross a provider boundary
+                    # until the runner durably publishes and resumes the quota.
+                    break
 
             # All levels done — cancel the background progress emitter
             outer_tg.cancel_scope.cancel()
@@ -5096,6 +5126,7 @@ class ParallelACExecutor:
             total_messages=total_messages,
             total_duration_seconds=total_duration,
             recoverable_route_pause=recoverable_route_pause,
+            recoverable_coordinator_pause=recoverable_coordinator_pause,
         )
 
     @staticmethod
@@ -11231,7 +11262,7 @@ Respond with either ATOMIC or the structured JSON object only.
                         ac_content=ac_text(seed.acceptance_criteria[ac_idx]),
                         success=False,
                         error=(
-                            "A sibling quota cancelled this AC after execution authority entry; "
+                            "A sibling quota cancelled this AC after provider-effect entry; "
                             "the provider-effect boundary is uncertain and human handoff is required."
                         ),
                         retry_attempt=ac_retry_attempts[ac_idx],
@@ -12401,7 +12432,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 raise RuntimeError("parallel uncertain handoff is duplicated")
             uncertain_handoffs.add(root_ac_index)
             terminals[root_ac_index] = (
-                "A sibling quota cancelled this AC after execution authority entry; "
+                "A sibling quota cancelled this AC after provider-effect entry; "
                 "the provider-effect boundary is uncertain and human handoff is required."
             )
 
