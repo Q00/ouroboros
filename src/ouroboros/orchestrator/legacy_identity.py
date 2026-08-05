@@ -8,13 +8,16 @@ and only those — keep the exact pre-anchor representation reproduced here.
 
 This surface is transitional, not permanent:
 
-- **Trigger.** The legacy path is taken only when the persisted start event
-  predates the anchor (``has_project_anchor`` is false).
-- **Observability.** Every activation emits the structured event
-  ``project_map.legacy_identity_path`` with its entry point, so the removal
-  decision can be argued from evidence instead of a guess.
+- **Trigger.** The legacy path is taken only when the persisted start
+  snapshot predates the anchor (``has_project_anchor`` is false).
+- **Observability.** An activation emits the structured event
+  ``project_map.legacy_identity_path`` only when a durable start-identity
+  snapshot is present and still lacks the anchor; current prepared
+  executions restore an intentionally anchorless contract-only snapshot and
+  never count. The removal decision can therefore be argued from evidence
+  instead of a guess.
 - **Removal criterion** (mirrored in ``docs/rfc/project-map-v1.md``):
-  delete this module and the ``has_project_anchor`` legacy branches once no
+  delete this module and the ``has_project_anchor`` legacy branch once no
   ``project_map.legacy_identity_path`` activation has been observed for 90
   consecutive days of production logs — and in no case while any
   pre-2026-07-29 session is still within the operator's retention window.

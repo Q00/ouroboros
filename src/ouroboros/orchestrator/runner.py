@@ -6003,146 +6003,6 @@ class OrchestratorRunner:
             restored[ac_index] = {"reason": reason, "commit": commit}
         return restored
 
-    def _validate_legacy_resume_identity(
-        self,
-        progress: Mapping[str, Any],
-        *,
-        seed: Seed | None,
-    ) -> None:
-        """Validate every recoverable identity field before legacy migration.
-
-        Legacy sessions predate the versioned execution contract, but their
-        authoritative start event already records the seed id/goal and runtime
-        backend. ``SessionRepository`` exposes that snapshot under
-        :data:`SESSION_START_IDENTITY_PROGRESS_KEY`; accepting a mismatched
-        current invocation would permanently bless the wrong seed/backend when
-        the migration checkpoint is written.
-        """
-
-        note_legacy_identity_path("resume_identity_validation")
-        raw_start_identity = progress.get(SESSION_START_IDENTITY_PROGRESS_KEY)
-        if raw_start_identity is not None and not isinstance(raw_start_identity, Mapping):
-            raise OrchestratorError(
-                message="Cannot migrate a legacy session with invalid start identity",
-                details={"invalid": SESSION_START_IDENTITY_PROGRESS_KEY},
-            )
-        start_identity = raw_start_identity if isinstance(raw_start_identity, Mapping) else {}
-
-        if "seed_id" in start_identity:
-            persisted_seed_id = start_identity.get("seed_id")
-            current_seed_id = seed.metadata.seed_id if seed is not None else None
-            if (
-                not isinstance(persisted_seed_id, str)
-                or not persisted_seed_id.strip()
-                or current_seed_id != persisted_seed_id
-            ):
-                raise OrchestratorError(
-                    message="Cannot resume a legacy session with a different Seed identity",
-                    details={
-                        "persisted_seed_id": persisted_seed_id,
-                        "current_seed_id": current_seed_id,
-                        "hint": "Resume with the original Seed, or start a new session.",
-                    },
-                )
-
-        if "seed_goal" in start_identity:
-            persisted_seed_goal = start_identity.get("seed_goal")
-            current_seed_goal = seed.goal if seed is not None else None
-            if (
-                not isinstance(persisted_seed_goal, str)
-                or not persisted_seed_goal.strip()
-                or current_seed_goal != persisted_seed_goal
-            ):
-                raise OrchestratorError(
-                    message="Cannot resume a legacy session with a modified Seed goal",
-                    details={
-                        "persisted_seed_goal": persisted_seed_goal,
-                        "current_seed_goal": current_seed_goal,
-                        "hint": "Resume with the original Seed, or start a new session.",
-                    },
-                )
-
-        persisted_runtime_backend: object | None = None
-        if "runtime_backend" in start_identity:
-            persisted_runtime_backend = start_identity.get("runtime_backend")
-        elif "runtime_backend" in progress:
-            # Older start events may lack the backend while runtime progress
-            # still carries the backend that owns the resumable handle.
-            persisted_runtime_backend = progress.get("runtime_backend")
-        if persisted_runtime_backend is not None:
-            current_runtime_backend = self._runtime_backend_contract()
-            if (
-                not isinstance(persisted_runtime_backend, str)
-                or not persisted_runtime_backend.strip()
-                or current_runtime_backend != persisted_runtime_backend
-            ):
-                raise OrchestratorError(
-                    message="Cannot resume a legacy session with a different runtime backend",
-                    details={
-                        "persisted_runtime_backend": persisted_runtime_backend,
-                        "current_runtime_backend": current_runtime_backend,
-                        "hint": "Resume with the original runtime, or start a new session.",
-                    },
-                )
-
-        if "llm_backend" in start_identity:
-            persisted_llm_backend = start_identity.get("llm_backend")
-            current_llm_backend = getattr(self._adapter, "llm_backend", None)
-            if (
-                not isinstance(persisted_llm_backend, str)
-                or not persisted_llm_backend.strip()
-                or current_llm_backend != persisted_llm_backend
-            ):
-                raise OrchestratorError(
-                    message="Cannot resume a legacy session with a different LLM backend",
-                    details={
-                        "persisted_llm_backend": persisted_llm_backend,
-                        "current_llm_backend": current_llm_backend,
-                        "hint": "Resume with the original backend, or start a new session.",
-                    },
-                )
-
-        if "workspace" in progress:
-            persisted_task_workspace = TaskWorkspace.from_progress_dict(progress.get("workspace"))
-            if persisted_task_workspace is None:
-                raise OrchestratorError(
-                    message="Cannot migrate a legacy session with invalid workspace identity",
-                    details={"invalid": "workspace"},
-                )
-            persisted_workspace = self._task_resume_workspace_identity(persisted_task_workspace)
-            active_workspace = self._resume_workspace_identity()
-            if active_workspace != persisted_workspace:
-                raise OrchestratorError(
-                    message="Cannot resume a legacy session from a different project workspace",
-                    details={
-                        "persisted_workspace": persisted_workspace,
-                        "current_workspace": active_workspace,
-                        "hint": "Resume from the original project/workspace.",
-                    },
-                )
-        else:
-            runtime_progress = progress.get("runtime")
-            if isinstance(runtime_progress, Mapping) and "cwd" in runtime_progress:
-                persisted_cwd = runtime_progress.get("cwd")
-                if persisted_cwd is not None:
-                    current_cwd = self._effective_cwd()
-                    if (
-                        not isinstance(persisted_cwd, str)
-                        or not persisted_cwd.strip()
-                        or not isinstance(current_cwd, str)
-                        or self._canonical_path(current_cwd) != self._canonical_path(persisted_cwd)
-                    ):
-                        raise OrchestratorError(
-                            message=(
-                                "Cannot resume a legacy session from a different project workspace"
-                            ),
-                            details={
-                                "persisted_workspace": persisted_cwd,
-                                "current_workspace": current_cwd,
-                                "hint": "Resume from the original project/workspace.",
-                            },
-                        )
-
     def _restore_execution_contract(
         self,
         progress: Mapping[str, Any],
@@ -6496,10 +6356,16 @@ class OrchestratorRunner:
             # Transitional (#1799): remove this branch once the criterion in
             # orchestrator/legacy_identity.py and docs/rfc/project-map-v1.md is
             # met (90 activation-free days past the retention window).
-            note_legacy_identity_path(
-                "resume_workspace_comparison",
-                prepared_live_execution=prepared_live_execution,
-            )
+            #
+            # Current prepared executions intentionally restore an anchorless
+            # contract-only mapping; only a durable historical start snapshot
+            # that still lacks the anchor counts as a legacy activation.
+            raw_start_snapshot = progress.get(SESSION_START_IDENTITY_PROGRESS_KEY)
+            if isinstance(raw_start_snapshot, Mapping):
+                note_legacy_identity_path(
+                    "resume_workspace_comparison",
+                    prepared_live_execution=prepared_live_execution,
+                )
             active_workspace = (
                 self._proof_workspace_identity()
                 if prepared_live_execution

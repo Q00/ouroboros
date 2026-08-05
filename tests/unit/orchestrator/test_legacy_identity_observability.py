@@ -118,7 +118,7 @@ class TestRunnerDelegation:
 
 
 class TestActivationEvents:
-    """Every legacy entry point emits one attributable activation event."""
+    """Only genuine durable pre-anchor resumes count as legacy activations."""
 
     def test_note_emits_the_structured_event(self) -> None:
         with capture_logs() as logs:
@@ -130,34 +130,46 @@ class TestActivationEvents:
         assert activations[0]["session_id"] == "sess-1"
         assert activations[0]["log_level"] == "info"
 
-    def test_legacy_resume_validation_emits_activation(self) -> None:
-        runner = _runner()
+    def test_durable_preanchor_resume_emits_workspace_comparison(self) -> None:
+        # A durable start-identity snapshot without the additive project anchor
+        # is exactly the historical v9 shape: restoring it must take — and
+        # record — the legacy workspace-comparison branch, then still restore
+        # cleanly.
+        persisted = _runner()._build_execution_contract()
+        resumed = _runner()
+        progress = {
+            EXECUTION_CONTRACT_PROGRESS_KEY: persisted,
+            SESSION_START_IDENTITY_PROGRESS_KEY: {"seed_id": "seed-legacy"},
+        }
 
         with capture_logs() as logs:
-            runner._validate_legacy_resume_identity({}, seed=None)
+            changed = resumed._restore_execution_contract(progress)
 
-        assert [entry["entry_point"] for entry in _activations(logs)] == [
-            "resume_identity_validation"
-        ]
+        assert changed is False
+        activations = _activations(logs)
+        assert [entry["entry_point"] for entry in activations] == ["resume_workspace_comparison"]
+        assert activations[0]["prepared_live_execution"] is False
 
-    def test_activation_is_counted_even_when_validation_rejects(self) -> None:
-        # The event marks that the legacy path was ENTERED; a rejected resume
-        # is still evidence the path is live and must delay removal.
-        runner = _runner()
-        progress = {SESSION_START_IDENTITY_PROGRESS_KEY: "corrupt"}
+    def test_prepared_live_restore_is_not_a_legacy_activation(self) -> None:
+        # The bot-probed false-positive shape: current prepared executions
+        # restore an intentionally anchorless contract-only mapping with
+        # prepared_live_execution=True. That is not a historical resume and
+        # must not pollute the removal metric.
+        persisted = _runner()._build_execution_contract()
+        resumed = _runner()
 
         with capture_logs() as logs:
-            with pytest.raises(OrchestratorError):
-                runner._validate_legacy_resume_identity(progress, seed=None)
+            resumed._restore_execution_contract(
+                {EXECUTION_CONTRACT_PROGRESS_KEY: persisted},
+                prepared_live_execution=True,
+            )
 
-        assert [entry["entry_point"] for entry in _activations(logs)] == [
-            "resume_identity_validation"
-        ]
+        assert _activations(logs) == []
 
-    def test_anchorless_contract_restore_emits_workspace_comparison(self) -> None:
-        # A persisted contract without the additive project anchor is exactly
-        # the historical v9 shape: restoring it must take — and record — the
-        # legacy workspace-comparison branch, then still restore cleanly.
+    def test_contract_only_restore_without_snapshot_does_not_count(self) -> None:
+        # Without a durable start-identity snapshot there is no evidence the
+        # session is historical, so no activation may be recorded even on the
+        # non-prepared path.
         persisted = _runner()._build_execution_contract()
         resumed = _runner()
 
@@ -167,6 +179,4 @@ class TestActivationEvents:
             )
 
         assert changed is False
-        activations = _activations(logs)
-        assert [entry["entry_point"] for entry in activations] == ["resume_workspace_comparison"]
-        assert activations[0]["prepared_live_execution"] is False
+        assert _activations(logs) == []
