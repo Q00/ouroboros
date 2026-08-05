@@ -1481,6 +1481,11 @@ class TestSpecVerifier:
             r"(?=(?=()))(?(1)a|)",
             r"(?!()x)(?(1)|a)",
             r"(?!(a)x)(?(1)|a)",
+            r"(?!x())(?(1)|a)",
+            r"(?!x(a))(?(1)|a)",
+            r"(?!x(a?))(?(1)|a)",
+            r"(?!()x())(?(2)|a)",
+            r"(?!x())\1|aa",
         ],
         ids=[
             "unparticipating-group-runs-the-other-arm",
@@ -1494,6 +1499,11 @@ class TestSpecVerifier:
             "capture-inside-nested-lookaheads",
             "capture-inside-a-failed-negative-lookahead",
             "consuming-capture-inside-a-negative-lookahead",
+            "capture-after-a-consuming-atom",
+            "consuming-capture-after-a-consuming-atom",
+            "nullable-capture-after-a-consuming-atom",
+            "second-capture-after-a-consuming-atom",
+            "backreference-to-a-capture-that-did-not-take-part",
         ],
     )
     def test_a_conditional_is_read_from_whether_its_group_could_have_taken_part(
@@ -1520,6 +1530,13 @@ class TestSpecVerifier:
         capture inside it certainly did not. Reading both as "may have been
         skipped" made every one of these unreadable and refused a criterion the
         source plainly satisfies.
+
+        Knowing that is no use if the walk never reaches the capture. One
+        consuming atom settles whether its own sequence can be empty, but the
+        sequence inside a negative assertion takes part in the match by failing,
+        and a conditional outside still asks what the captures written after that
+        atom did. So the walk records them instead of stopping at the first
+        thing that consumes.
         """
         project = self._create_project({"marker.txt": "aa\n"})
         assertion = SpecAssertion(
@@ -1550,6 +1567,7 @@ class TestSpecVerifier:
             r"(?=(a?))(?(1)|a)",
             r"(?=())?(?(1)a|)",
             r"(?!()x)(?(1)a|)",
+            r"(?!x())(?(1)a|)",
         ],
         ids=[
             "empty-arm-is-the-one-that-runs",
@@ -1560,6 +1578,7 @@ class TestSpecVerifier:
             "nullable-lookahead-capture-empty-arm",
             "lookahead-that-may-be-skipped",
             "failed-negative-lookahead-capture-empty-arm",
+            "capture-after-a-consuming-atom-empty-arm",
         ],
     )
     def test_a_conditional_that_can_run_an_empty_arm_is_still_refused(

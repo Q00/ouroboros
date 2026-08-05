@@ -206,8 +206,15 @@ def _can_match_nothing(
     for opcode, argument in sequence:  # type: ignore[attr-defined]
         name = getattr(opcode, "name", str(opcode))
         if name in _CONSUMING:
-            return False
-        if name == "AT":
+            # Recorded rather than returned. One consuming atom already settles
+            # this sequence — `_all_empty` answers False as soon as it sees one —
+            # but returning here would stop the walk, and captures written after
+            # it would never be recorded. A conditional outside can still ask
+            # what those captures did, and inside a negative assertion, which is
+            # where such a sequence takes part in a match by failing, the answer
+            # is that they certainly did not.
+            answers.append(False)
+        elif name == "AT":
             anchor = getattr(argument, "name", str(argument))
             if anchor in _ANCHORS_HOLDING_ON_EMPTY:
                 continue
@@ -231,11 +238,18 @@ def _can_match_nothing(
             answers.append(body_empty)
         elif name == "GROUPREF":
             # A backreference repeats whatever its group captured, so it is empty
-            # only when that group can be. If the group never participated the
-            # reference cannot match at all — never empty either. A group not yet
-            # seen (a forward reference) is unknown, and stays unknown.
+            # only when that group can be. A reference to a group that certainly
+            # did not take part refers to nothing captured, and this interpreter
+            # fails such a reference rather than matching nothing with it — so
+            # the sequence around it cannot match at all, empty included. A group
+            # not yet seen (a forward reference) is unknown, and stays unknown.
             seen = groups.get(argument)
-            answers.append(None if seen is None else seen.empty)
+            if seen is None:
+                answers.append(None)
+            elif seen.took_part is False:
+                answers.append(False)
+            else:
+                answers.append(seen.empty)
         elif name == "GROUPREF_EXISTS":
             # `(?(1)yes|no)` runs the arm the group's participation selects. On a
             # match that consumed nothing, a group whose body consumes cannot have

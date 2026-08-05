@@ -886,6 +886,8 @@ Parallel Execution Verification Report
             ("aa\n", "marker.txt MUST contain a doubled letter", r"(?=())(?(1)a|)"),
             ("aa\n", "marker.txt MUST contain a doubled letter", r"(?<=())(?(1)a|)"),
             ("aa\n", "marker.txt MUST contain a doubled letter", r"(?!()x)(?(1)|a)"),
+            ("aa\n", "marker.txt MUST contain a doubled letter", r"(?!x())(?(1)|a)"),
+            ("aa\n", "marker.txt MUST contain a doubled letter", r"(?!x())\1|aa"),
         ],
         ids=[
             "politeness-frame",
@@ -902,6 +904,8 @@ Parallel Execution Verification Report
             "conditional-on-a-capture-inside-a-lookahead",
             "conditional-on-a-capture-inside-a-lookbehind",
             "conditional-on-a-capture-inside-a-failed-negative-lookahead",
+            "conditional-on-a-capture-after-a-consuming-atom",
+            "backreference-to-a-capture-that-did-not-take-part",
         ],
     )
     def test_a_satisfied_criterion_is_not_converted_into_a_formal_failure(
