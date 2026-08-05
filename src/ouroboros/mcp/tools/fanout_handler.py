@@ -175,7 +175,10 @@ class SubmitFanoutResultsHandler:
         if not isinstance(prepared, PreparedFanoutSynthesis):
             return prepared
         if self.disposable_memory is None:
-            return synthesize_fanout_results(prepared)
+            return MCPToolError(
+                "terminal fan-out synthesis requires a configured disposable artifact service",
+                tool_name="ouroboros_submit_fanout_results",
+            )
 
         async def synthesize(_handle: AgentProcessHandle) -> dict[str, Any]:
             return synthesize_fanout_results(prepared)

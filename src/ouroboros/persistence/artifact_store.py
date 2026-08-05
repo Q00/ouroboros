@@ -33,6 +33,8 @@ from ouroboros.core.disposable_memory import (
 )
 from ouroboros.core.errors import PersistenceError
 from ouroboros.core.file_lock import file_lock
+from ouroboros.persistence.artifact_io import read_fd_bounded as _read_fd_bounded
+from ouroboros.persistence.artifact_schema import MANIFEST_MAX_BYTES, require_fields
 
 DEFAULT_ARTIFACT_TTL = timedelta(days=90)
 DEFAULT_REPLAY_RETENTION = timedelta(days=90)
@@ -271,7 +273,6 @@ class ContentAddressedArtifactStore:
             duration_ms=duration_ms,
             events_emitted_count=events_emitted_count,
         )
-
         with self._store_lock(exclusive=True):
             manifest = self._load_manifest_locked(contract_id, missing_ok=True)
             existing = _latest_artifact_event(manifest)
@@ -631,7 +632,7 @@ class ContentAddressedArtifactStore:
     ) -> dict[str, Any]:
         path = self._manifest_path(contract_id)
         try:
-            raw = json.loads(path.read_text(encoding="utf-8"))
+            raw = self._read_manifest_json_locked(path)
         except FileNotFoundError:
             if not missing_ok:
                 raise ArtifactNotFoundError(
@@ -647,7 +648,7 @@ class ContentAddressedArtifactStore:
                 "updated_at": None,
                 "events": [],
             }
-        except (OSError, json.JSONDecodeError) as exc:
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise ArtifactManifestError(
                 "Artifact manifest is unreadable; pruning is unsafe",
                 operation="read",
@@ -668,8 +669,8 @@ class ContentAddressedArtifactStore:
                     details={"path": str(path)},
                 )
             try:
-                raw = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError) as exc:
+                raw = self._read_manifest_json_locked(path)
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
                 raise ArtifactManifestError(
                     "Artifact manifest is unreadable; pruning aborted fail-closed",
                     operation="read",
@@ -702,6 +703,16 @@ class ContentAddressedArtifactStore:
                 path=path,
             )
         return manifests
+
+    def _read_manifest_json_locked(self, path: Path) -> Any:
+        payload = _read_bounded_bytes(
+            path,
+            max_bytes=MANIFEST_MAX_BYTES,
+            root=self._contracts_root,
+            anchor=self._directory_anchor,
+            label="artifact manifest",
+        )
+        return json.loads(payload)
 
     def _write_manifest_locked(self, contract_id: str, manifest: dict[str, Any]) -> None:
         path = self._manifest_path(contract_id)
@@ -957,6 +968,14 @@ def _validate_manifest(
             operation="read",
             details={"path": str(path)},
         )
+    try:
+        require_fields(raw)
+    except ValueError as exc:
+        raise ArtifactManifestError(
+            "Artifact manifest fields do not match the exact versioned schema",
+            operation="read",
+            details={"path": str(path), "contract_id": contract_id},
+        ) from exc
     if raw.get("schema_version") != _MANIFEST_VERSION or raw.get("contract_id") != contract_id:
         raise ArtifactManifestError(
             "Artifact manifest identity or schema version is invalid",
@@ -1422,7 +1441,6 @@ def _read_bounded_bytes(
                 file_fd = os.open(path, file_flags)
             else:
                 file_fd = os.open(path.name, file_flags, dir_fd=directory_fd)
-
             opened = os.fstat(file_fd)
             if not stat.S_ISREG(opened.st_mode):
                 raise ArtifactIntegrityError(
@@ -1440,9 +1458,7 @@ def _read_bounded_bytes(
                         "max_artifact_bytes": max_bytes,
                     },
                 )
-
             payload = _read_fd_bounded(file_fd, max_bytes=max_bytes)
-
             finished = os.fstat(file_fd)
             if directory_fd is None:
                 _validate_publication_path(path, root=root, label=label)
@@ -1498,18 +1514,6 @@ def _read_bounded_bytes(
         finally:
             if file_fd >= 0:
                 os.close(file_fd)
-
-
-def _read_fd_bounded(file_fd: int, *, max_bytes: int) -> bytes:
-    """Read at most one byte beyond a fixed limit from an open descriptor."""
-    read_limit = max_bytes + 1
-    payload = bytearray()
-    while len(payload) < read_limit:
-        chunk = os.read(file_fd, min(64 * 1024, read_limit - len(payload)))
-        if not chunk:
-            break
-        payload.extend(chunk)
-    return bytes(payload)
 
 
 def _matching_existing_payload_at(

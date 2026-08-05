@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from ouroboros.core.disposable_memory import MAX_DISPOSABLE_ARTIFACT_BYTES
+from ouroboros.persistence.artifact_schema import MANIFEST_MAX_BYTES
 import ouroboros.persistence.artifact_store as artifact_store_module
 from ouroboros.persistence.artifact_store import (
     ArtifactContractConflictError,
@@ -102,7 +103,8 @@ def test_fetch_and_replay_reject_oversized_stored_body_before_read(
     original_read = os.read
 
     def tracked_read(file_descriptor: int, byte_count: int) -> bytes:
-        read_sizes.append(byte_count)
+        if os.fstat(file_descriptor).st_size > MAX_DISPOSABLE_ARTIFACT_BYTES:
+            read_sizes.append(byte_count)
         return original_read(file_descriptor, byte_count)
 
     monkeypatch.setattr(artifact_store_module.os, "read", tracked_read)
@@ -142,10 +144,13 @@ def test_fetch_bounds_read_when_body_grows_after_size_preflight(
     store = _store(tmp_path)
     envelope = _put(store, "CONTRACT1", {"bounded": True})
     path = _blob_path(store, envelope.artifact_ref)
+    body_inode = path.stat().st_ino
     read_sizes: list[int] = []
     original_read = os.read
 
     def growing_read(file_descriptor: int, byte_count: int) -> bytes:
+        if os.fstat(file_descriptor).st_ino != body_inode:
+            return original_read(file_descriptor, byte_count)
         if not read_sizes:
             path.write_bytes(b"x" * (MAX_DISPOSABLE_ARTIFACT_BYTES + 2))
         read_sizes.append(byte_count)
@@ -309,6 +314,109 @@ def test_malformed_manifest_aborts_prune_fail_closed(tmp_path: Path) -> None:
     with pytest.raises(ArtifactManifestError, match="fail-closed"):
         store.prune(ttl=timedelta(days=90), apply=True, now=NOW)
     assert path.exists()
+
+
+@pytest.mark.parametrize("operation", ["fetch", "prune"])
+def test_oversized_manifest_is_rejected_before_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    store = _store(tmp_path)
+    _put(store, "CONTRACT1", {"safe": True})
+    manifest_path = store.root / "contracts" / "CONTRACT1" / "events.json"
+    manifest_path.write_bytes(b"{" + b" " * MANIFEST_MAX_BYTES)
+    manifest_inode = manifest_path.stat().st_ino
+    manifest_reads: list[int] = []
+    original_read = os.read
+
+    def tracked_read(file_descriptor: int, byte_count: int) -> bytes:
+        if os.fstat(file_descriptor).st_ino == manifest_inode:
+            manifest_reads.append(byte_count)
+        return original_read(file_descriptor, byte_count)
+
+    monkeypatch.setattr(artifact_store_module.os, "read", tracked_read)
+
+    with pytest.raises(ArtifactIntegrityError, match="exceeds the configured"):
+        if operation == "fetch":
+            store.fetch("CONTRACT1")
+        else:
+            store.prune(now=NOW)
+    assert manifest_reads == []
+
+
+@pytest.mark.parametrize("operation", ["retry", "prune"])
+def test_manifest_read_rejects_contract_directory_swap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    store = _store(tmp_path)
+    _put(store, "CONTRACT1", {"real": True})
+    contract_dir = store.root / "contracts" / "CONTRACT1"
+    manifest_path = contract_dir / "events.json"
+    manifest_inode = manifest_path.stat().st_ino
+    displaced = tmp_path / f"manifest-displaced-{operation}"
+    external = tmp_path / f"manifest-external-{operation}"
+    external.mkdir()
+    attack_manifest = _manifest(store, "CONTRACT1")
+    attack_manifest["events"][0]["envelope"]["runtime_id"] = "attacker-runtime"
+    (external / "events.json").write_text(json.dumps(attack_manifest), encoding="utf-8")
+    original_read = os.read
+    swapped = False
+
+    def swap_during_read(file_descriptor: int, byte_count: int) -> bytes:
+        nonlocal swapped
+        if not swapped and os.fstat(file_descriptor).st_ino == manifest_inode:
+            contract_dir.rename(displaced)
+            try:
+                contract_dir.symlink_to(external, target_is_directory=True)
+            except OSError:
+                pytest.skip("directory symlinks are not supported in this environment")
+            swapped = True
+        return original_read(file_descriptor, byte_count)
+
+    monkeypatch.setattr(artifact_store_module.os, "read", swap_during_read)
+
+    with pytest.raises(ArtifactIntegrityError, match="link|changed"):
+        if operation == "retry":
+            store.envelope_if_exists("CONTRACT1")
+        else:
+            store.prune(now=NOW)
+    assert swapped
+
+
+@pytest.mark.parametrize("operation", ["retry", "retention", "prune"])
+@pytest.mark.parametrize("forbidden_field", ["body", "transcript"])
+def test_manifest_rejects_and_preserves_forbidden_fields(
+    tmp_path: Path,
+    operation: str,
+    forbidden_field: str,
+) -> None:
+    store = _store(tmp_path)
+    _put(store, "CONTRACT1", {"safe": True})
+    manifest_path = store.root / "contracts" / "CONTRACT1" / "events.json"
+    manifest = _manifest(store, "CONTRACT1")
+    if forbidden_field == "body":
+        manifest["body"] = {"must": "not persist"}
+    else:
+        manifest["events"][0]["transcript"] = "must not persist"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    tampered = manifest_path.read_bytes()
+
+    with pytest.raises(ArtifactManifestError, match="exact versioned schema"):
+        if operation == "retry":
+            store.envelope_if_exists("CONTRACT1")
+        elif operation == "retention":
+            store.set_contract_retention(
+                "CONTRACT1",
+                active=False,
+                retain_until=NOW + timedelta(days=1),
+                now=NOW,
+            )
+        else:
+            store.prune(now=NOW)
+    assert manifest_path.read_bytes() == tampered
 
 
 def test_manifest_envelope_must_match_contract_and_artifact_ref(tmp_path: Path) -> None:

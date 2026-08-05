@@ -229,4 +229,10 @@ sequenceDiagram
 
 ## Rollback
 
-Docs PR with no runtime impact. Rollback = revert the docs PR. The proposal comment in [#512](https://github.com/Q00/ouroboros/issues/512) remains as the working draft.
+This RFC is implemented by the artifact store, `DisposableMemory` orchestration,
+artifact CLI commands, and MCP fan-out synthesis. A rollback must disable the
+executable fan-out registration before reverting those runtime surfaces; it must
+not restore inline child bodies. Existing `.ouroboros/artifacts` data can remain
+on disk for explicit fetch/replay or be removed later through the dry-run-first
+prune command. The proposal comment in [#512](https://github.com/Q00/ouroboros/issues/512)
+remains the design record.
