@@ -65,34 +65,94 @@ _NEGATIONS = frozenset(
         "neednt",
     }
 )
+# A copula is what puts the emptiness on the subject. Without one the criterion
+# is saying something else about the file — "MUST contain an empty field" asks
+# about a value nested inside a file that is anything but empty.
+_COPULAS = frozenset(
+    {
+        "be",
+        "is",
+        "are",
+        "was",
+        "were",
+        "remain",
+        "remains",
+        "stay",
+        "stays",
+        "become",
+        "becomes",
+    }
+)
+# An article after the copula makes the adjective attributive: "be empty" is a
+# statement about the file, "be an empty JSON object" is a statement about the
+# two bytes it is required to hold.
+_ARTICLES = frozenset({"a", "an", "the"})
+# Where the predicate is allowed to stop. An emptiness word followed by anything
+# else is qualifying that thing rather than the file.
+_CLAUSE_ENDS = frozenset({".", ",", ";", ":", "and", "or", "but", "then", "while", "unless", "so"})
 # Far enough to cross "must not be", "should never be", "cannot ever be";
 # short enough that a negation belonging to a different clause does not reach.
 _NEGATION_LOOKBACK = 4
 
 
-def _positively_requires_emptiness(ac_text: str) -> bool:
-    """True when the criterion asks for the file to be empty, not for it not to be.
+def _mask_file_hint(ac_text: str, file_hint: str) -> str:
+    """Blank out mentions of the file's own name before the wording is read.
 
-    Read off words, not substrings, so `nonempty` is its own word and never an
-    occurrence of `empty` at all. Hyphenated and spaced forms split into two
-    words, which puts `non` in the lookback where the other negations are.
-
-    One un-negated occurrence is enough: "must be empty, and must not be
-    deleted" requires emptiness despite carrying a negation elsewhere. Every
-    occurrence being negated is what makes the criterion the opposite one.
+    `empty.txt MUST contain data` says nothing about emptiness; the word is in
+    the filename. Names are matched as whole tokens for the same reason the
+    mention check is — `a.py` sits inside `data.py`.
     """
-    words = re.findall(r"[a-z]+", ac_text.lower().replace("'", "").replace("’", ""))
-    for position, word in enumerate(words):
+    if not file_hint:
+        return ac_text
+    return re.sub(
+        rf"(\A|[\s'\"`(\[]){re.escape(file_hint)}(?=\Z|[\s'\"`)\],.;:])",
+        r"\1__file__",
+        ac_text,
+    )
+
+
+def _emptiness_the_criterion_requires(ac_text: str, file_hint: str) -> str | None:
+    """The emptiness word the criterion predicates of the file, or None.
+
+    Returns `empty` or `blank` because the two do not mean the same thing to a
+    file holding one tab, and the caller has to answer the question that was
+    actually asked.
+
+    Four conditions, each closing a way the word can appear without the file
+    being what has to be empty. It is read off words rather than substrings, so
+    `nonempty` is its own word and never an occurrence of `empty`. It is not
+    negated within the lookback, which is what separates "must be empty" from
+    "must not be empty". It follows a copula, without which the criterion is
+    predicating emptiness of something other than its subject. And it ends its
+    clause, because `empty JSON object` describes the contents rather than the
+    file.
+
+    One qualifying occurrence is enough: "must be empty, and must not be
+    deleted" requires emptiness despite carrying a negation elsewhere. Anything
+    this cannot place on the file itself returns None and fails closed.
+    """
+    text = _mask_file_hint(ac_text, file_hint).lower().replace("'", "").replace("’", "")
+    tokens = re.findall(r"[a-z_]+|[.,;:]", text)
+    for position, word in enumerate(tokens):
         if word not in _EMPTINESS_WORDS:
             continue
-        lookback = words[max(0, position - _NEGATION_LOOKBACK) : position]
-        if not any(token in _NEGATIONS for token in lookback):
-            return True
-    return False
+        lookback = tokens[max(0, position - _NEGATION_LOOKBACK) : position]
+        if any(token in _NEGATIONS for token in lookback):
+            continue
+        copulas = [index for index, token in enumerate(lookback) if token in _COPULAS]
+        if not copulas:
+            continue
+        if any(token in _ARTICLES for token in lookback[copulas[-1] + 1 :]):
+            continue
+        following = tokens[position + 1] if position + 1 < len(tokens) else None
+        if following is not None and following not in _CLAUSE_ENDS:
+            continue
+        return word
+    return None
 
 
-def _asks_whether_a_named_file_is_empty(assertion: SpecAssertion) -> bool:
-    """True when the criterion itself asks whether the file its hint names is empty.
+def _asks_whether_a_named_file_is_empty(assertion: SpecAssertion) -> str | None:
+    """The emptiness the criterion asks of the file its hint names, or None.
 
     All three halves are load-bearing. The hint must name one file, because
     `\\A\\Z` over `**/*.py` stops at whichever candidate is empty first — in a
@@ -100,29 +160,27 @@ def _asks_whether_a_named_file_is_empty(assertion: SpecAssertion) -> bool:
     criterion must name that same file, because `pkg/__init__.py` is empty in
     most repositories, so an exact hint pointed at it would otherwise "verify" a
     criterion about something else entirely. And the criterion must *require*
-    emptiness rather than forbid it, because an empty file satisfies one reading
-    and violates the other while the pattern looks the same either way.
+    emptiness of that file rather than forbid it, mention it in a filename, or
+    ask it of a value nested inside — an empty file satisfies one reading and
+    violates the others while the pattern looks the same for all of them.
 
     The hint comes from the same model completion as the pattern and licenses
     nothing on its own; `ac_text` is the spec's own wording, which the model
-    selects by index but does not write. Anything this returns False for falls
+    selects by index but does not write. Anything this returns None for falls
     through to the ordinary path, where `_safe_compile` refuses `\\A\\Z` and the
     criterion fails closed.
     """
     hint = assertion.file_hint
     if not hint or any(c in hint for c in "*?["):
-        return False
-    if not _positively_requires_emptiness(assertion.ac_text):
-        return False
+        return None
     # As a whole token, not a substring: `a.py` sits inside `data.py`, and a
     # criterion about the latter must not license a hint pointed at the former.
-    return (
-        re.search(
-            rf"(?:\A|[\s'\"`(\[]){re.escape(hint.lower())}(?=\Z|[\s'\"`)\],.;:])",
-            assertion.ac_text.lower(),
-        )
-        is not None
-    )
+    if not re.search(
+        rf"(?:\A|[\s'\"`(\[]){re.escape(hint.lower())}(?=\Z|[\s'\"`)\],.;:])",
+        assertion.ac_text.lower(),
+    ):
+        return None
+    return _emptiness_the_criterion_requires(assertion.ac_text, hint)
 
 
 def _skip_inline_space(text: str, index: int) -> int:
@@ -321,7 +379,8 @@ class SpecVerifier:
         """
         if assertion.tier not in (VerificationTier.T1_CONSTANT, VerificationTier.T2_STRUCTURAL):
             return None
-        if not _asks_whether_a_named_file_is_empty(assertion):
+        requirement = _asks_whether_a_named_file_is_empty(assertion)
+        if requirement is None:
             return None
 
         # The pattern still decides which way the criterion is being asked. One that
@@ -339,20 +398,24 @@ class SpecVerifier:
         if content is None:
             return None
 
-        # `content.strip()` and not the pattern: a file of one tab is as empty as a
-        # file of zero bytes, and no pattern has to be trusted to agree.
-        empty = not content.strip()
+        # Which word the criterion used decides the test, because they are not the
+        # same test. A file of one tab is blank and is not empty, and `\A\Z` — the
+        # pattern that motivates this whole path — draws exactly that line.
+        # Answering "empty" with the looser reading would formally approve a file
+        # the criterion rejects.
+        remainder = content if requirement == "empty" else content.strip()
+        satisfied = not remainder
         basename = os.path.basename(files[0])
         return SpecVerificationResult(
             assertion=assertion,
-            verified=empty,
+            verified=satisfied,
             file_path=files[0],
-            discrepancy=not empty,
+            discrepancy=not satisfied,
             detail=(
-                f"Criterion asks whether {basename} is empty; it is empty"
-                if empty
-                else f"Criterion asks whether {basename} is empty; it holds "
-                f"{len(content.strip())} characters of content"
+                f"Criterion asks whether {basename} is {requirement}; it is {requirement}"
+                if satisfied
+                else f"Criterion asks whether {basename} is {requirement}; it holds "
+                f"{len(remainder)} characters of content"
             ),
         )
 

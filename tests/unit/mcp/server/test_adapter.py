@@ -676,6 +676,69 @@ Parallel Execution Verification Report
         [VerificationTier.T1_CONSTANT, VerificationTier.T2_STRUCTURAL],
         ids=["T1", "T2"],
     )
+    @pytest.mark.parametrize(
+        ("filename", "content", "ac_text"),
+        [
+            ("empty.txt", "", "empty.txt MUST contain data"),
+            ("marker.txt", "", "marker.txt MUST contain an empty JSON string field"),
+            ("marker.txt", "", "marker.txt MUST be an empty JSON object"),
+            ("marker.txt", "  \t\n", "marker.txt MUST be empty"),
+        ],
+        ids=["empty-filename", "nested-value", "attributive", "whitespace-is-not-empty"],
+    )
+    def test_a_misread_emptiness_word_cannot_be_approved_through_the_adapter(
+        self, tmp_path: Any, tier: VerificationTier, filename: str, content: str, ac_text: str
+    ) -> None:
+        """An emptiness word not predicated of the file must not reach formal approval.
+
+        Three of these require the file to hold content while mentioning emptiness —
+        in the filename, in a nested value, as an adjective on another noun. The
+        fourth is a whitespace-only file against an `empty` criterion, which `\\A\\Z`
+        does not match either. Each produced `final_approved=True`, `score=1.0`,
+        `final_verdict="pass"` at the adapter for a criterion the project violates.
+        """
+        (tmp_path / filename).write_text(content)
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text=ac_text,
+            tier=tier,
+            pattern=r"\A\Z",
+            file_hint=filename,
+        )
+        verification = SpecVerifier(project_dir=str(tmp_path)).verify_all(
+            (assertion,), agent_results={0: True}
+        )
+        mechanical = EvaluationSummary(
+            final_approved=True,
+            highest_stage_passed=2,
+            task_results=(
+                TaskResult(
+                    task_index=0,
+                    task_content=ac_text,
+                    status="completed",
+                    completed=True,
+                    source_ac_index=0,
+                    execution_method="legacy_parallel_report",
+                ),
+            ),
+            execution_completion_status="completed",
+            approval_status="approved",
+        )
+
+        summary = _evaluation_summary_from_spec_verification(mechanical, verification)
+
+        assert summary is not None
+        assert summary.ac_results[0].passed is False, f"{ac_text!r} must not be approved"
+        assert summary.ac_results[0].final_verdict != "pass"
+        assert summary.final_approved is False
+        assert summary.score == 0.0
+        assert summary.run_verdict == "FAIL"
+
+    @pytest.mark.parametrize(
+        "tier",
+        [VerificationTier.T1_CONSTANT, VerificationTier.T2_STRUCTURAL],
+        ids=["T1", "T2"],
+    )
     def test_a_forbidden_empty_file_cannot_be_approved_through_the_adapter(
         self, tmp_path: Any, tier: VerificationTier
     ) -> None:

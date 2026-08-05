@@ -694,32 +694,40 @@ class TestSpecVerifier:
         assert summary.override_approval is False
 
     @pytest.mark.parametrize("tier", [VerificationTier.T2_STRUCTURAL, VerificationTier.T1_CONSTANT])
-    @pytest.mark.parametrize("blank", ["\t", "  ", "\n\n"], ids=["tab", "spaces", "newlines"])
-    def test_a_file_of_whitespace_satisfies_an_emptiness_criterion(
-        self, tier: VerificationTier, blank: str
+    @pytest.mark.parametrize("whitespace", ["\t", "  ", "\n\n"], ids=["tab", "spaces", "newlines"])
+    def test_whitespace_is_blank_but_it_is_not_empty(
+        self, tier: VerificationTier, whitespace: str
     ) -> None:
-        """The answer comes from the file, so `\\A\\Z` not matching a tab is irrelevant.
+        """The two words ask different questions, and `\\A\\Z` draws exactly that line.
 
-        A guard that decided emptiness by trying the pattern against a fixed list of
-        blank strings would have to grow that list once per whitespace character
-        anyone writes. Reading the file has no list to keep up to date.
+        A file of one tab is blank. It is not empty, and the pattern that motivates
+        this whole path says so. Answering an `empty` criterion with the looser
+        reading would hand a formal PASS to a file the criterion rejects, so the
+        word the criterion used has to survive as far as the comparison.
         """
-        project = self._create_project({"pkg/__init__.py": blank})
-        assertion = SpecAssertion(
-            ac_index=0,
-            ac_text="pkg/__init__.py MUST remain empty",
-            tier=tier,
-            pattern=r"\A\Z",
-            file_hint="pkg/__init__.py",
-        )
+        project = self._create_project({"pkg/__init__.py": whitespace})
 
-        summary = SpecVerifier(project_dir=project).verify_all(
-            (assertion,), agent_results={0: True}
-        )
+        def verify(word: str) -> object:
+            assertion = SpecAssertion(
+                ac_index=0,
+                ac_text=f"pkg/__init__.py MUST remain {word}",
+                tier=tier,
+                pattern=r"\A\Z",
+                file_hint="pkg/__init__.py",
+            )
+            return SpecVerifier(project_dir=project).verify_all(
+                (assertion,), agent_results={0: True}
+            )
 
-        assert summary.verified_count == 1
-        assert summary.reports[0].verified_pass is True
-        assert summary.discrepancy_count == 0
+        strict = verify("empty")
+        assert strict.verified_count == 0
+        assert strict.reports[0].verified_pass is False
+        assert strict.discrepancy_count == 1
+
+        loose = verify("blank")
+        assert loose.verified_count == 1
+        assert loose.reports[0].verified_pass is True
+        assert loose.discrepancy_count == 0
 
     @pytest.mark.parametrize("tier", [VerificationTier.T2_STRUCTURAL, VerificationTier.T1_CONSTANT])
     @pytest.mark.parametrize(
@@ -849,6 +857,49 @@ class TestSpecVerifier:
 
         assert summary.reports[0].verified_pass is True
         assert summary.discrepancy_count == 0
+
+    @pytest.mark.parametrize("tier", [VerificationTier.T2_STRUCTURAL, VerificationTier.T1_CONSTANT])
+    @pytest.mark.parametrize(
+        ("filename", "ac_text"),
+        [
+            ("empty.txt", "empty.txt MUST contain data"),
+            ("blank.json", "blank.json MUST hold at least one record"),
+            ("marker.txt", "marker.txt MUST contain an empty JSON string field"),
+            ("marker.txt", "marker.txt MUST be an empty JSON object"),
+            ("marker.txt", "marker.txt MUST list the empty partitions"),
+        ],
+        ids=["empty-filename", "blank-filename", "nested-value", "attributive", "object-of-verb"],
+    )
+    def test_an_emptiness_word_that_is_not_about_the_file_earns_nothing(
+        self, tier: VerificationTier, filename: str, ac_text: str
+    ) -> None:
+        """The word has to be predicated of the file, not merely present in the AC.
+
+        Each of these mentions emptiness while requiring the file to hold content,
+        and each was read as an emptiness requirement: the word sat in the file's own
+        name, or described a value nested inside it, or was the adjective on some
+        other noun. With `\\A\\Z` and an empty file that produced a formal PASS for a
+        criterion the file plainly violates.
+
+        Everything here falls through to the ordinary path, where `\\A\\Z` is refused
+        and the criterion fails closed.
+        """
+        project = self._create_project({filename: ""})
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text=ac_text,
+            tier=tier,
+            pattern=r"\A\Z",
+            file_hint=filename,
+        )
+
+        summary = SpecVerifier(project_dir=project).verify_all(
+            (assertion,), agent_results={0: True}
+        )
+
+        assert summary.reports[0].verified_pass is False, f"{ac_text!r} must not verify"
+        assert summary.discrepancy_count == 1
+        assert summary.override_approval is False
 
     def test_empty_matching_pattern_fails_closed_against_an_agent_pass_claim(self) -> None:
         """Refusing the pattern must raise a discrepancy, not silently skip the AC.
