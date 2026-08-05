@@ -555,7 +555,13 @@ class ContentAddressedArtifactStore:
         digest = _digest_from_ref(artifact_ref)
         path = self._blob_path_from_digest(digest)
         try:
-            payload = path.read_bytes()
+            payload = _read_bounded_bytes(
+                path,
+                max_bytes=self.max_artifact_bytes,
+                root=self.root,
+                anchor=self._directory_anchor,
+                label="artifact body",
+            )
         except FileNotFoundError as exc:
             raise ArtifactNotFoundError(
                 "Referenced artifact body is missing without a tombstone",
@@ -568,16 +574,6 @@ class ContentAddressedArtifactStore:
                 "Artifact body hash does not match its content address",
                 operation="read",
                 details={"artifact_ref": artifact_ref, "actual_sha256": actual},
-            )
-        if len(payload) > self.max_artifact_bytes:
-            raise ArtifactIntegrityError(
-                "Stored artifact exceeds the configured disposable output limit",
-                operation="read",
-                details={
-                    "artifact_ref": artifact_ref,
-                    "size_bytes": len(payload),
-                    "max_artifact_bytes": self.max_artifact_bytes,
-                },
             )
         return payload
 
@@ -1401,6 +1397,121 @@ def _pinned_directory_tree_guarded(
         yield
 
 
+def _read_bounded_bytes(
+    path: Path,
+    *,
+    max_bytes: int,
+    root: Path,
+    anchor: Path,
+    label: str,
+) -> bytes:
+    """Read one regular file without ever materializing more than the hard cap."""
+    with _pinned_directory_tree(
+        path.parent,
+        anchor=anchor,
+        root=root,
+        label=f"{label} read",
+    ) as directory_fd:
+        _validate_publication_path(path, root=root, label=label)
+        file_fd = -1
+        try:
+            file_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+            file_flags |= getattr(os, "O_NOFOLLOW", 0)
+            file_flags |= getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
+            if directory_fd is None:
+                file_fd = os.open(path, file_flags)
+            else:
+                file_fd = os.open(path.name, file_flags, dir_fd=directory_fd)
+
+            opened = os.fstat(file_fd)
+            if not stat.S_ISREG(opened.st_mode):
+                raise ArtifactIntegrityError(
+                    f"{label} must be a regular file",
+                    operation="path_resolution",
+                    details={"path": str(path), "root": str(root)},
+                )
+            if opened.st_size > max_bytes:
+                raise ArtifactIntegrityError(
+                    "Stored artifact exceeds the configured disposable output limit",
+                    operation="read",
+                    details={
+                        "path": str(path),
+                        "size_bytes": opened.st_size,
+                        "max_artifact_bytes": max_bytes,
+                    },
+                )
+
+            payload = _read_fd_bounded(file_fd, max_bytes=max_bytes)
+
+            finished = os.fstat(file_fd)
+            if directory_fd is None:
+                _validate_publication_path(path, root=root, label=label)
+                current = path.stat(follow_symlinks=False)
+            else:
+                _validate_directory_binding(directory_fd, path, root=root, label=label)
+                current = os.stat(path.name, dir_fd=directory_fd, follow_symlinks=False)
+            identities = {
+                (opened.st_dev, opened.st_ino),
+                (finished.st_dev, finished.st_ino),
+                (current.st_dev, current.st_ino),
+            }
+            observed_size = max(
+                opened.st_size,
+                finished.st_size,
+                current.st_size,
+                len(payload),
+            )
+            if observed_size > max_bytes:
+                raise ArtifactIntegrityError(
+                    "Stored artifact exceeds the configured disposable output limit",
+                    operation="read",
+                    details={
+                        "path": str(path),
+                        "size_bytes": observed_size,
+                        "max_artifact_bytes": max_bytes,
+                    },
+                )
+            if (
+                not stat.S_ISREG(finished.st_mode)
+                or not stat.S_ISREG(current.st_mode)
+                or len(identities) != 1
+                or opened.st_size != finished.st_size
+                or finished.st_size != current.st_size
+                or finished.st_size != len(payload)
+            ):
+                raise ArtifactIntegrityError(
+                    f"{label} changed during bounded read",
+                    operation="path_resolution",
+                    details={"path": str(path), "root": str(root)},
+                )
+            return bytes(payload)
+        except FileNotFoundError:
+            raise
+        except ArtifactIntegrityError:
+            raise
+        except OSError as exc:
+            raise ArtifactIntegrityError(
+                f"{label} could not be read through its pinned parent",
+                operation="path_resolution",
+                details={"path": str(path), "root": str(root)},
+            ) from exc
+        finally:
+            if file_fd >= 0:
+                os.close(file_fd)
+
+
+def _read_fd_bounded(file_fd: int, *, max_bytes: int) -> bytes:
+    """Read at most one byte beyond a fixed limit from an open descriptor."""
+    read_limit = max_bytes + 1
+    payload = bytearray()
+    while len(payload) < read_limit:
+        chunk = os.read(file_fd, min(64 * 1024, read_limit - len(payload)))
+        if not chunk:
+            break
+        payload.extend(chunk)
+    return bytes(payload)
+
+
 def _matching_existing_payload_at(
     directory_fd: int,
     path: Path,
@@ -1424,13 +1535,30 @@ def _matching_existing_payload_at(
                 operation="path_resolution",
                 details={"path": str(path), "root": str(root)},
             )
-        with open(file_fd, "rb", closefd=False) as handle:
-            existing = handle.read()
+        if opened.st_size != len(payload):
+            raise ArtifactIntegrityError(
+                "Content-addressed path contains different bytes; refusing overwrite",
+                operation="write",
+                details={"path": str(path)},
+            )
+        existing = _read_fd_bounded(file_fd, max_bytes=len(payload))
+        finished = os.fstat(file_fd)
         current = os.stat(path.name, dir_fd=directory_fd, follow_symlinks=False)
         _validate_directory_binding(directory_fd, path, root=root, label=label)
-        if not stat.S_ISREG(current.st_mode) or (opened.st_dev, opened.st_ino) != (
-            current.st_dev,
-            current.st_ino,
+        if (
+            not stat.S_ISREG(finished.st_mode)
+            or not stat.S_ISREG(current.st_mode)
+            or len(
+                {
+                    (opened.st_dev, opened.st_ino),
+                    (finished.st_dev, finished.st_ino),
+                    (current.st_dev, current.st_ino),
+                }
+            )
+            != 1
+            or opened.st_size != finished.st_size
+            or finished.st_size != current.st_size
+            or finished.st_size != len(existing)
         ):
             raise ArtifactIntegrityError(
                 f"{label} existing destination changed during verification",
@@ -1459,14 +1587,31 @@ def _matching_existing_payload_guarded(
     if not path.exists():
         return False
     _validate_publication_path(path, root=root, label=label)
-    with path.open("rb") as handle:
+    with path.open("rb", buffering=0) as handle:
         opened = os.fstat(handle.fileno())
-        existing = handle.read()
+        if not stat.S_ISREG(opened.st_mode) or opened.st_size != len(payload):
+            raise ArtifactIntegrityError(
+                "Content-addressed path contains different bytes; refusing overwrite",
+                operation="write",
+                details={"path": str(path)},
+            )
+        existing = _read_fd_bounded(handle.fileno(), max_bytes=len(payload))
+        finished = os.fstat(handle.fileno())
     current = path.stat(follow_symlinks=False)
     if (
-        not stat.S_ISREG(opened.st_mode)
+        not stat.S_ISREG(finished.st_mode)
         or not stat.S_ISREG(current.st_mode)
-        or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)
+        or len(
+            {
+                (opened.st_dev, opened.st_ino),
+                (finished.st_dev, finished.st_ino),
+                (current.st_dev, current.st_ino),
+            }
+        )
+        != 1
+        or opened.st_size != finished.st_size
+        or finished.st_size != current.st_size
+        or finished.st_size != len(existing)
     ):
         raise ArtifactIntegrityError(
             f"{label} existing destination changed during verification",

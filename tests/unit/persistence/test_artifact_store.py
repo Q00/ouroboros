@@ -90,6 +90,75 @@ def test_fetch_is_explicit_and_verifies_content_hash(tmp_path: Path) -> None:
         store.fetch("CONTRACT1")
 
 
+def test_fetch_and_replay_reject_oversized_stored_body_before_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _store(tmp_path)
+    envelope = _put(store, "CONTRACT1", {"bounded": True})
+    path = _blob_path(store, envelope.artifact_ref)
+    path.write_bytes(b"x" * (MAX_DISPOSABLE_ARTIFACT_BYTES + 1))
+    read_sizes: list[int] = []
+    original_read = os.read
+
+    def tracked_read(file_descriptor: int, byte_count: int) -> bytes:
+        read_sizes.append(byte_count)
+        return original_read(file_descriptor, byte_count)
+
+    monkeypatch.setattr(artifact_store_module.os, "read", tracked_read)
+
+    for operation in (store.fetch, store.replay):
+        with pytest.raises(ArtifactIntegrityError, match="exceeds the configured"):
+            operation("CONTRACT1")
+    assert read_sizes == []
+
+
+def test_dedup_rejects_oversized_stored_body_before_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _store(tmp_path)
+    envelope = _put(store, "CONTRACT1", {"bounded": True})
+    path = _blob_path(store, envelope.artifact_ref)
+    path.write_bytes(b"x" * (MAX_DISPOSABLE_ARTIFACT_BYTES + 1))
+    read_sizes: list[int] = []
+    original_read = os.read
+
+    def tracked_read(file_descriptor: int, byte_count: int) -> bytes:
+        read_sizes.append(byte_count)
+        return original_read(file_descriptor, byte_count)
+
+    monkeypatch.setattr(artifact_store_module.os, "read", tracked_read)
+
+    with pytest.raises(ArtifactIntegrityError, match="different bytes"):
+        _put(store, "CONTRACT2", {"bounded": True})
+    assert read_sizes == []
+
+
+def test_fetch_bounds_read_when_body_grows_after_size_preflight(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _store(tmp_path)
+    envelope = _put(store, "CONTRACT1", {"bounded": True})
+    path = _blob_path(store, envelope.artifact_ref)
+    read_sizes: list[int] = []
+    original_read = os.read
+
+    def growing_read(file_descriptor: int, byte_count: int) -> bytes:
+        if not read_sizes:
+            path.write_bytes(b"x" * (MAX_DISPOSABLE_ARTIFACT_BYTES + 2))
+        read_sizes.append(byte_count)
+        return original_read(file_descriptor, byte_count)
+
+    monkeypatch.setattr(artifact_store_module.os, "read", growing_read)
+
+    with pytest.raises(ArtifactIntegrityError, match="exceeds the configured"):
+        store.fetch("CONTRACT1")
+    assert sum(read_sizes) == MAX_DISPOSABLE_ARTIFACT_BYTES + 1
+    assert max(read_sizes) <= 64 * 1024
+
+
 def test_json_native_values_round_trip_without_normalization(tmp_path: Path) -> None:
     store = _store(tmp_path)
     body = {
