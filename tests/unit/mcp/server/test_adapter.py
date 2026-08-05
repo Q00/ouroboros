@@ -890,6 +890,8 @@ Parallel Execution Verification Report
             ("aa\n", "marker.txt MUST contain a doubled letter", r"(?!x())\1|aa"),
             ("aa\n", "marker.txt MUST contain a doubled letter", r"(?!)|aa"),
             ("aa\n", "marker.txt MUST contain a doubled letter", r"aa(?!)|aa"),
+            ("aa\n", "marker.txt MUST contain a doubled letter", r"()(?(1)Impossible|)|aa"),
+            ("aa\n", "marker.txt MUST contain a doubled letter", r"aa|()(?(1)Impossible|)"),
         ],
         ids=[
             "politeness-frame",
@@ -910,6 +912,8 @@ Parallel Execution Verification Report
             "backreference-to-a-capture-that-did-not-take-part",
             "branch-that-can-never-be-taken",
             "branch-that-can-never-be-taken-after-a-literal",
+            "conditional-in-the-first-branch",
+            "conditional-in-the-second-branch",
         ],
     )
     def test_a_satisfied_criterion_is_not_converted_into_a_formal_failure(
@@ -935,7 +939,11 @@ Parallel Execution Verification Report
         the interpreter rather than by the reading: from 3.13 the parser folds
         `(?!)` into a single opcode this walk did not know, so a pattern with an
         unreachable branch was evidence on 3.12 and an authoritative failure on
-        3.13 and 3.14. Both directions are driven through the real verifier
+        3.13 and 3.14. The final two were refused for having an alternative at
+        all: every branch was read as a path that may have been skipped, so a
+        capture and the conditional reading it, written side by side in one
+        branch, could no longer see each other. Both directions are driven
+        through the real verifier
         and the real adapter, because the failure only becomes authoritative at
         this boundary.
         """

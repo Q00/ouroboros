@@ -1532,6 +1532,10 @@ class TestSpecVerifier:
             r"(?!x(a?))(?(1)|a)",
             r"(?!()x())(?(2)|a)",
             r"(?!x())\1|aa",
+            r"()(?(1)Impossible|)|aa",
+            r"aa|()(?(1)Impossible|)",
+            r"x|()(?(1)a|)",
+            r"(?:(a)|b)(?(1)a|b)",
         ],
         ids=[
             "unparticipating-group-runs-the-other-arm",
@@ -1550,6 +1554,10 @@ class TestSpecVerifier:
             "nullable-capture-after-a-consuming-atom",
             "second-capture-after-a-consuming-atom",
             "backreference-to-a-capture-that-did-not-take-part",
+            "capture-and-conditional-in-the-first-branch",
+            "capture-and-conditional-in-the-second-branch",
+            "conditional-in-a-branch-beside-a-consuming-one",
+            "conditional-after-a-branch-that-captures-either-way",
         ],
     )
     def test_a_conditional_is_read_from_whether_its_group_could_have_taken_part(
@@ -1583,6 +1591,13 @@ class TestSpecVerifier:
         and a conditional outside still asks what the captures written after that
         atom did. So the walk records them instead of stopping at the first
         thing that consumes.
+
+        Which branch of an alternation runs is undecidable from outside it, but
+        not from inside: a capture and a conditional written in the same branch
+        stand or fall together. Reading every branch as a path that may have
+        been skipped made `()(?(1)Impossible|)` — read correctly on its own —
+        unreadable the moment an alternative was written beside it, so the last
+        four are the same conditionals with one added.
         """
         project = self._create_project({"marker.txt": "aa\n"})
         assertion = SpecAssertion(
@@ -1614,6 +1629,8 @@ class TestSpecVerifier:
             r"(?=())?(?(1)a|)",
             r"(?!()x)(?(1)a|)",
             r"(?!x())(?(1)a|)",
+            r"(a)b|(?(1)x|)",
+            r"()|(?(1)a|b)",
         ],
         ids=[
             "empty-arm-is-the-one-that-runs",
@@ -1625,6 +1642,8 @@ class TestSpecVerifier:
             "lookahead-that-may-be-skipped",
             "failed-negative-lookahead-capture-empty-arm",
             "capture-after-a-consuming-atom-empty-arm",
+            "conditional-alone-in-its-branch",
+            "empty-branch-beside-the-conditional",
         ],
     )
     def test_a_conditional_that_can_run_an_empty_arm_is_still_refused(
@@ -1640,8 +1659,11 @@ class TestSpecVerifier:
         when the empty arm is the one its participation selects, a capture inside
         a failed negative one still runs the other, and an assertion that is
         itself under a `?` is back to being a path that may have been skipped.
-        Every pattern here matches a subject with nothing in it, so none is
-        evidence of anything.
+        Reading a branch on its own path must not leak the other way either:
+        the last two put the conditional and the capture in *different*
+        branches, where the branch that runs is exactly the one that did not
+        record the capture. Every pattern here matches a subject with nothing in
+        it, so none is evidence of anything.
         """
         project = self._create_project({"marker.txt": "aa\n"})
         assertion = SpecAssertion(

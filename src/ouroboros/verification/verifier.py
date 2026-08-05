@@ -280,16 +280,30 @@ def _can_match_nothing(
             answers.append(_can_match_nothing(argument, depth + 1, groups, on_path))
         elif name == "BRANCH":
             # Every branch is walked, not just up to the first empty one, so that
-            # groups defined in a later branch are recorded too. Only one of them
-            # runs, so none of them is a path the match had to take.
-            answers.append(
-                _any_empty(
-                    [
-                        _can_match_nothing(branch, depth + 1, groups, _skippable(on_path))
-                        for branch in argument[1]
-                    ]
-                )
-            )
+            # groups defined in a later branch are recorded too.
+            #
+            # Which branch runs is undecidable from outside, but not from inside:
+            # a capture and a conditional reading it that sit in the same branch
+            # stand or fall together, so within a branch the path is the one the
+            # branch inherits. Handing every branch a skippable path instead made
+            # participation unknown for its own captures, and `()(?(1)x|)` — read
+            # correctly on its own — became unreadable the moment an alternative
+            # was written beside it.
+            #
+            # Each branch therefore reads and records over its own copy of the
+            # table, so one branch cannot answer a question about a capture that
+            # only exists in a sibling it does not run with. What a branch
+            # recorded merges back with participation weakened to "may have gone
+            # either way", which is what the alternation makes it for anything
+            # reading that capture from outside.
+            branch_answers: list[bool | None] = []
+            for branch in argument[1]:
+                local = dict(groups)
+                branch_answers.append(_can_match_nothing(branch, depth + 1, local, on_path))
+                for number, group in local.items():
+                    if number not in groups:
+                        groups[number] = _Group(group.empty, _skippable(group.took_part))
+            answers.append(_any_empty(branch_answers))
         elif name == "ASSERT":
             # On a subject with nothing in it there is nothing to either side, so
             # a lookaround holds exactly when what it looks for can be empty.
