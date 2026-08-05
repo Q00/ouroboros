@@ -681,14 +681,14 @@ class EventStore:
             return None
         path_part = database_url[len(prefix) :]
         if path_part.startswith("file:"):
-            # URI form — drop the ``file:`` scheme and any ``?query``/``#fragment``,
-            # then percent-decode the path back to its filesystem form.
-            rest = path_part[len("file:") :]
-            rest = rest.split("?", 1)[0].split("#", 1)[0]
-            path_part = unquote(rest)
-        if path_part in (":memory:", ""):
-            return None
-        return path_part
+            # URI form. A ``mode=memory`` database is process-local no matter
+            # its name — no file another process can open; otherwise decode
+            # the path back to its filesystem form.
+            rest, _, query = path_part[len("file:") :].partition("?")
+            if "mode=memory" in unquote(query.split("#", 1)[0]):
+                return None
+            path_part = unquote(rest.split("#", 1)[0])
+        return None if path_part in (":memory:", "") else path_part
 
     def sqlite_path(self) -> str | None:
         """Filesystem path of the backing SQLite file, or ``None``.

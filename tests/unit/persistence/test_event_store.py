@@ -3038,3 +3038,10 @@ class TestSqliteOnlyBackendContract:
             "a pathless in-memory store is private to this process"
         )
         assert EventStore("sqlite+aiosqlite:///:memory:").supports_cross_process_workers is False
+        named_memory = EventStore(
+            "sqlite+aiosqlite:///file:namedmem?mode=memory&cache=shared&uri=true"
+        )
+        assert named_memory.supports_cross_process_workers is False, (
+            "a named in-memory database is process-local regardless of its name"
+        )
+        assert named_memory.sqlite_path() is None
