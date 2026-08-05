@@ -156,7 +156,8 @@ def test_denylist_covers_known_execution_routing_keys() -> None:
 # another bridge.
 _PACKAGE_ROOT = Path(loader.__file__).resolve().parent.parent
 _BRIDGE_SOURCE_SUFFIXES = frozenset({".cjs", ".js", ".mjs", ".py", ".ts"})
-_BRIDGE_DISPATCH_SINK_RE = re.compile(r"\bentry\.command\b")
+_JS_IDENTIFIER = r"[A-Za-z_$][A-Za-z0-9_$]*"
+_BRIDGE_DISPATCH_SINK_RE = re.compile(rf"\b{_JS_IDENTIFIER}\.command\b")
 _BRIDGE_ENTRY_ENV_RE = re.compile(
     r"process\.env(?:\.([A-Z0-9_]+)|\[\s*['\"]([A-Z0-9_]+)['\"]\s*\])"
     r"\s*\)\s*return\s*\{\{?\s*command",
@@ -236,6 +237,29 @@ def test_bridge_dispatch_source_discovery_covers_new_sources(tmp_path: Path) -> 
     )
 
     assert _validated_bridge_dispatch_env_keys(tmp_path) == {source: frozenset({"NEW_BRIDGE_CLI"})}
+
+
+def test_bridge_dispatch_source_discovery_is_identifier_independent(tmp_path: Path) -> None:
+    """Renaming one bridge's resolved entry cannot remove it from inspection."""
+    entry_source = tmp_path / "entry.ts"
+    entry_source.write_text(
+        "if (process.env.ENTRY_CLI) "
+        "return { command: process.env.ENTRY_CLI, args: [] };\n"
+        "await vendor.exec(entry.command, []);\n",
+        encoding="utf-8",
+    )
+    resolved_source = tmp_path / "resolved.ts"
+    resolved_source.write_text(
+        "if (process.env.RESOLVED_CLI) "
+        "return { command: process.env.RESOLVED_CLI, args: [] };\n"
+        "await vendor.exec(resolved.command, []);\n",
+        encoding="utf-8",
+    )
+
+    assert _validated_bridge_dispatch_env_keys(tmp_path) == {
+        entry_source: frozenset({"ENTRY_CLI"}),
+        resolved_source: frozenset({"RESOLVED_CLI"}),
+    }
 
 
 def test_bridge_dispatch_validation_is_non_vacuous_per_source(tmp_path: Path) -> None:
