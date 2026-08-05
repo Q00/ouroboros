@@ -757,10 +757,29 @@ Parallel Execution Verification Report
         [VerificationTier.T1_CONSTANT, VerificationTier.T2_STRUCTURAL],
         ids=["T1", "T2"],
     )
+    @pytest.mark.parametrize(
+        "ac_text",
+        [
+            "marker.txt MUST NOT be empty",
+            "Do not let marker.txt be empty",
+            "Never allow marker.txt to remain empty",
+            "Do not permit marker.txt to become empty.",
+            "Never, under any reading of this spec, allow marker.txt to be blank",
+            "Do not remove the guard and let marker.txt be empty",
+        ],
+        ids=[
+            "postposed-negation",
+            "preposed-negation",
+            "preposed-negation-infinitive",
+            "preposed-negation-causative",
+            "preposed-negation-past-comma",
+            "preposed-negation-past-conjunction",
+        ],
+    )
     def test_a_forbidden_empty_file_cannot_be_approved_through_the_adapter(
-        self, tmp_path: Any, tier: VerificationTier
+        self, tmp_path: Any, tier: VerificationTier, ac_text: str
     ) -> None:
-        """A zero-width pattern on an empty file must not approve "MUST NOT be empty".
+        """A zero-width pattern on an empty file must not approve a criterion forbidding it.
 
         This drives the real verifier, not a hand-built report: an extracted
         pattern of ``\\A\\Z`` matches an empty file, so a verifier that took its
@@ -768,12 +787,17 @@ Parallel Execution Verification Report
         adapter a passing report and the adapter dutifully published
         final_approved=True / score=1.0 / final_verdict="pass" for a criterion
         the project violates.
+
+        The negation is carried both after the filename and ahead of it, because
+        a rule that reads only forward from the file — or only back to the
+        adjacent word — treats "do not let marker.txt be empty" as a requirement
+        to be empty and republishes exactly that false approval.
         """
         marker = tmp_path / "marker.txt"
         marker.write_text("")
         assertion = SpecAssertion(
             ac_index=0,
-            ac_text="marker.txt MUST NOT be empty",
+            ac_text=ac_text,
             tier=tier,
             pattern=r"\A\Z",
             file_hint="marker.txt",
@@ -787,7 +811,7 @@ Parallel Execution Verification Report
             task_results=(
                 TaskResult(
                     task_index=0,
-                    task_content="marker.txt MUST NOT be empty",
+                    task_content=ac_text,
                     status="completed",
                     completed=True,
                     source_ac_index=0,

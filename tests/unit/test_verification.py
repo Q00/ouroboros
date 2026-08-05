@@ -804,6 +804,11 @@ class TestSpecVerifier:
             "pkg/config.py must contain a nonempty value",
             "pkg/config.py must not under any circumstances be empty.",
             "pkg/config.py should never, under any reading of this spec, be blank",
+            "Do not let pkg/config.py be empty",
+            "Never allow pkg/config.py to remain empty",
+            "Do not permit pkg/config.py to become empty.",
+            "Never, under any reading of this spec, allow pkg/config.py to be blank",
+            "Do not remove the guard and let pkg/config.py be empty",
         ],
         ids=[
             "must-not",
@@ -814,6 +819,11 @@ class TestSpecVerifier:
             "nonempty-word",
             "distant-negation",
             "very-distant-negation",
+            "preposed-negation",
+            "preposed-negation-infinitive",
+            "preposed-negation-causative",
+            "preposed-negation-past-comma",
+            "preposed-negation-past-conjunction",
         ],
     )
     def test_a_criterion_forbidding_emptiness_is_not_satisfied_by_an_empty_file(
@@ -940,23 +950,29 @@ class TestSpecVerifier:
             "The file marker.txt must be empty",
             "For the release, marker.txt must be empty",
             "Run the generator; marker.txt must be empty",
+            "Ensure marker.txt is empty",
+            "We require marker.txt to be empty",
         ],
         ids=[
             "bare",
             "noun-modifier",
             "preposition-in-earlier-clause",
             "preposition-past-semicolon",
+            "transparent-verb",
+            "transparent-verb-with-subject",
         ],
     )
     def test_the_subject_check_does_not_reject_a_file_it_only_stands_near(
         self, tier: VerificationTier, ac_text: str
     ) -> None:
-        """A preposition has to actually govern the file, not merely precede it.
+        """A word has to actually govern the file, not merely precede it.
 
         The phrase is scanned back to the nearest clause boundary rather than to
         the start of the criterion, because failing closed on any earlier `for` or
         `of` would turn satisfied emptiness ACs into formal failures — the same
-        false-failure this rescue exists to prevent, in a new place.
+        false-failure this rescue exists to prevent, in a new place. `ensure` and
+        `require` ask for the clause after them without changing what it claims,
+        so a criterion that opens with one still says what it says.
         """
         project = self._create_project({"marker.txt": ""})
         assertion = SpecAssertion(

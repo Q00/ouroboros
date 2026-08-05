@@ -98,26 +98,105 @@ _PREDICATE_CHAIN = _COPULAS | {
     "initially",
     "currently",
 }
-# A file named as the object of a preposition is not the subject of the
-# sentence: "the status field in marker.txt must be empty" is a requirement on
-# the field, and the file it lives in is anything but empty.
-_PREPOSITIONS = frozenset(
+# The only words allowed to stand between the start of a clause and the file
+# that heads it. Anything else means the file is not what the clause is about:
+# a preposition makes it the object of something ("the status field in
+# marker.txt"), a verb makes it the object of that verb ("do not let marker.txt
+# be empty"), and a competing noun makes it a modifier of that noun. This is an
+# allow-list for the same reason the forward chain is — no preposed phrasing can
+# outrun a rule that admits only what it names.
+_CLAUSE_LEAD = frozenset(
     {
-        "in",
-        "inside",
-        "within",
-        "of",
-        "from",
-        "at",
-        "for",
-        "on",
-        "under",
-        "into",
-        "by",
-        "with",
-        "across",
-        "through",
-        "throughout",
+        "the",
+        "a",
+        "an",
+        "this",
+        "that",
+        "these",
+        "those",
+        "each",
+        "every",
+        "its",
+        "their",
+        "our",
+        "my",
+        "your",
+        "we",
+        "file",
+        "files",
+        "filename",
+        "path",
+        "artifact",
+        "output",
+        "document",
+        "log",
+        "report",
+        # Verbs that ask for the clause after them without changing what it
+        # claims: "ensure marker.txt is empty" requires exactly what
+        # "marker.txt is empty" does. Negating one of these negates the
+        # criterion, but the negation is itself a word this set does not admit.
+        "ensure",
+        "ensures",
+        "verify",
+        "verifies",
+        "confirm",
+        "confirms",
+        "require",
+        "requires",
+        "expect",
+        "expects",
+    }
+)
+# A negation can also govern the file from an earlier clause: "do not remove the
+# guard and let marker.txt be empty" carries a clause that, read alone, asks for
+# emptiness. Nothing structural tells that adjunct apart from the innocent "for
+# the release,", so this is a screen and not a proof — it can only ever refuse
+# more. The clause-lead rule above is what makes the direct forms unreachable.
+_NEGATIONS = frozenset(
+    {
+        "not",
+        "never",
+        "no",
+        "none",
+        "nor",
+        "cannot",
+        "cant",
+        "dont",
+        "doesnt",
+        "didnt",
+        "wont",
+        "wouldnt",
+        "shouldnt",
+        "mustnt",
+        "isnt",
+        "arent",
+        "wasnt",
+        "werent",
+        "hasnt",
+        "havent",
+        "hadnt",
+        "couldnt",
+        "avoid",
+        "avoids",
+        "prevent",
+        "prevents",
+        "prohibit",
+        "prohibits",
+        "prohibited",
+        "forbid",
+        "forbids",
+        "forbidden",
+        "disallow",
+        "disallows",
+        "disallowed",
+        "deny",
+        "denies",
+        "refuse",
+        "refuses",
+        "without",
+        "unacceptable",
+        "illegal",
+        "banned",
     }
 )
 # Where the predicate is allowed to stop. An emptiness word followed by anything
@@ -161,22 +240,34 @@ def _offers_an_alternative_to_emptiness(tokens: list[str], position: int) -> boo
     return False
 
 
-def _names_the_subject(tokens: list[str], position: int) -> bool:
-    """True when nothing turns this mention into the object of a preposition.
+def _heads_its_clause(tokens: list[str], position: int) -> bool:
+    """True when the file is what its own clause is about.
 
-    Scans the whole phrase back to the nearest clause boundary rather than the
-    adjacent token, because a preposition can stand any number of modifiers away
-    from the name it governs: in "the status field in the generated marker.txt",
-    two words separate `in` from the file it is still the object of. Stopping at
-    the boundary is what keeps a preposition belonging to an earlier clause —
-    "for the release, marker.txt must be empty" — from disqualifying anything.
+    Reads back to the nearest clause boundary and requires every word in
+    between to be one this can place ahead of a subject. Refusing on anything
+    else is what makes the whole class of preposed government — "the status
+    field in marker.txt", "do not let marker.txt be empty", "never allow
+    marker.txt to remain empty" — unreachable at once, rather than one cited
+    phrasing at a time. Stopping at the boundary is what keeps a word belonging
+    to an earlier clause, as in "for the release, marker.txt must be empty",
+    from disqualifying anything.
     """
     for token in reversed(tokens[:position]):
         if token in _CLAUSE_ENDS:
             return True
-        if token in _PREPOSITIONS:
+        if token not in _CLAUSE_LEAD:
             return False
     return True
+
+
+def _a_negation_governs(tokens: list[str], position: int) -> bool:
+    """True when a negation stands earlier in the same sentence."""
+    for token in reversed(tokens[:position]):
+        if token in _SENTENCE_ENDS:
+            return False
+        if token in _NEGATIONS:
+            return True
+    return False
 
 
 def _emptiness_the_criterion_requires(ac_text: str, file_hint: str) -> str | None:
@@ -186,10 +277,10 @@ def _emptiness_the_criterion_requires(ac_text: str, file_hint: str) -> str | Non
     file holding one tab, and the caller has to answer the question that was
     actually asked.
 
-    Walks forward from each mention of the file, and returns a word only when
-    every step of the walk holds: no preposition governs the mention anywhere in
-    the phrase leading up to it, so the file is the subject rather than something
-    the subject lives in; every
+    Walks out from each mention of the file, and returns a word only when every
+    step of the walk holds: the file heads its own clause, so nothing before it
+    governs it and the emptiness is asked of the file rather than of something
+    the file contains; no negation stands earlier in the sentence; every
     word between it and the emptiness word belongs to `_PREDICATE_CHAIN`, which
     no negation and no competing noun does; one of them is a copula, without
     which the emptiness is being predicated of something else; the emptiness word
@@ -207,7 +298,9 @@ def _emptiness_the_criterion_requires(ac_text: str, file_hint: str) -> str | Non
     for position, token in enumerate(tokens):
         if token != _FILE_TOKEN:
             continue
-        if not _names_the_subject(tokens, position):
+        if not _heads_its_clause(tokens, position):
+            continue
+        if _a_negation_governs(tokens, position):
             continue
         saw_copula = False
         step = position + 1
