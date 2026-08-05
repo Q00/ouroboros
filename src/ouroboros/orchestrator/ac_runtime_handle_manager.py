@@ -1012,6 +1012,7 @@ class ACRuntimeHandleManager:
         seal_indices: list[int] = []
         dispatch_ids: set[str] = set()
         dispatch_index_by_id: dict[str, int] = {}
+        dispatch_predecessor_by_id: dict[str, str | None] = {}
         previous_dispatch_id: str | None = None
 
         matching_compiled_exists = any(
@@ -1127,6 +1128,7 @@ class ACRuntimeHandleManager:
                         )
                 dispatch_ids.add(dispatch_id)
                 dispatch_index_by_id[dispatch_id] = index
+                dispatch_predecessor_by_id[dispatch_id] = predecessor
                 previous_dispatch_id = dispatch_id
                 dispatch_indices.append(index)
                 continue
@@ -1150,7 +1152,7 @@ class ACRuntimeHandleManager:
                             "AC dispatch abort is not the active boundary"
                         )
                     dispatch_indices.remove(dispatch_index)
-                    previous_dispatch_id = None
+                    previous_dispatch_id = dispatch_predecessor_by_id[dispatch_id]
                     continue
                 seal_indices.append(index)
 

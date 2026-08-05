@@ -20,9 +20,22 @@ from ouroboros.core.seed import (
     SeedMetadata,
     derive_semantic_ac_key,
 )
-from ouroboros.core.session_signal import SessionSignal, SessionSignalMode, SessionSignalSource
+from ouroboros.core.session_signal import (
+    SessionSignal,
+    SessionSignalCapabilities,
+    SessionSignalMode,
+    SessionSignalSource,
+    SessionSignalState,
+)
+from ouroboros.core.session_signal_projection import project_session_signal
 from ouroboros.core.types import Result
 from ouroboros.events.base import BaseEvent
+from ouroboros.events.session_signal import (
+    create_session_signal_accepted_event,
+    create_session_signal_queued_event,
+    create_session_signal_requested_event,
+)
+from ouroboros.orchestrator.ac_runtime_handle_manager import ACRuntimeHandleManager
 from ouroboros.orchestrator.adapter import (
     AgentMessage,
     ParamSupport,
@@ -2375,6 +2388,244 @@ async def test_completed_signal_follow_up_survives_sibling_quota(
         }
         handoffs = await store.query_execution_related_events(
             "execution-completed-follow-up",
+            event_type="execution.ac.uncertain_handoff_required",
+            limit=3,
+        )
+        assert handoffs == []
+    finally:
+        await store.close()
+
+
+@pytest.mark.parametrize("signal_mode", [SessionSignalMode.INFORM, SessionSignalMode.AFTER_TURN])
+@pytest.mark.asyncio
+async def test_signal_blocked_before_provider_entry_preserves_primary_across_pause_resume(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    signal_mode: SessionSignalMode,
+) -> None:
+    """A sibling quota aborts an unentered follow-up without poisoning its primary."""
+
+    store = EventStore(f"sqlite+aiosqlite:///{tmp_path / f'pre-entry-{signal_mode}.db'}")
+    await store.initialize()
+    adapter = _Adapter()
+    follow_up_dispatched = asyncio.Event()
+    quota_provider_completed = asyncio.Event()
+    calls: list[str] = []
+    signal = SessionSignal(
+        signal_id=f"sig_pre_entry_{signal_mode}",
+        target_session_scope_id=f"scope-pre-entry-{signal_mode}",
+        target_session_attempt_id=f"attempt-pre-entry-{signal_mode}",
+        expected_execution_id=f"execution-pre-entry-{signal_mode}",
+        mode=signal_mode,
+        message="Apply the bounded follow-up if its provider boundary is still open.",
+        source=SessionSignalSource.USER,
+        reason="Exercise the safe pre-entry quota boundary.",
+        idempotency_key=f"pre-entry-{signal_mode}-1",
+    )
+    capabilities = SessionSignalCapabilities(
+        inform_delivery=True,
+        after_turn_delivery=True,
+    )
+    await store.append_batch(
+        [
+            create_session_signal_requested_event(signal),
+            create_session_signal_accepted_event(
+                signal,
+                effective_mode=signal_mode,
+                capabilities=capabilities,
+                runtime_backend="claude",
+            ),
+            create_session_signal_queued_event(
+                signal,
+                effective_mode=signal_mode,
+                runtime_backend="claude",
+            ),
+        ]
+    )
+
+    class _OneSignalHub:
+        delivered = False
+
+        async def register_replaying(self, _target: Any) -> None:
+            return None
+
+        async def refresh_pending(self, _target: Any) -> None:
+            return None
+
+        def pop_pending(self, target: Any) -> QueuedSessionSignal | None:
+            if target.ac_index != 0 or self.delivered:
+                return None
+            self.delivered = True
+            return QueuedSessionSignal(signal, signal_mode)
+
+        def unregister(self, _target: Any) -> list[Any]:
+            return []
+
+    original_append = store.append
+
+    async def append(event: BaseEvent) -> None:
+        await original_append(event)
+        if (
+            event.type == "execution.ac.attempt.dispatched"
+            and event.data.get("dispatch_kind") == "session_signal_followup"
+            and event.data.get("signal_id") == signal.signal_id
+        ):
+            follow_up_dispatched.set()
+            await quota_provider_completed.wait()
+            # Let the quota owner's provider observation publish the shared
+            # pause before this queued follow-up reaches provider_effect_scope.enter().
+            await asyncio.sleep(0.05)
+
+    monkeypatch.setattr(store, "append", append)
+
+    async def execute_task(*_args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
+        prompt = str(kwargs["prompt"])
+        resume_handle = kwargs.get("resume_handle")
+        if "## Your Task (AC 2)\nship second" in prompt:
+            calls.append("second")
+            if resume_handle is not None and resume_handle.resume_session_id is not None:
+                yield AgentMessage(
+                    type="result",
+                    content="quota owner resumed",
+                    data={"subtype": "success"},
+                )
+                return
+            await follow_up_dispatched.wait()
+            yield AgentMessage(
+                type="result",
+                content="Usage limit reached. Please try again in 5 hours.",
+                data={"subtype": "error", "error_type": "UsageLimitError"},
+                resume_handle=RuntimeHandle(
+                    backend="claude",
+                    native_session_id=f"pre-entry-quota-{signal_mode}",
+                    cwd=str(tmp_path),
+                    approval_mode="acceptEdits",
+                ),
+            )
+            quota_provider_completed.set()
+            return
+
+        handle = RuntimeHandle(
+            backend="claude",
+            kind="agent_runtime",
+            native_session_id=f"pre-entry-primary-{signal_mode}",
+            cwd=str(tmp_path),
+            metadata=dict(resume_handle.metadata) if resume_handle is not None else {},
+        )
+        if "[Ouroboros Synapse:" in prompt:
+            calls.append("first-follow-up")
+            content = "[TASK_COMPLETE] follow-up completed"
+        else:
+            calls.append("first-primary")
+            content = "first primary completed"
+        yield AgentMessage(
+            type="result",
+            content=content,
+            data={"subtype": "success"},
+            resume_handle=handle,
+        )
+
+    adapter.execute_task = execute_task  # type: ignore[attr-defined,method-assign]
+    signal_hub = _OneSignalHub()
+    execution_id = f"execution-pre-entry-{signal_mode}"
+    session_id = f"session-pre-entry-{signal_mode}"
+    run_kwargs = {
+        "seed": _multi_seed(),
+        "batch_executable": [0, 1],
+        "session_id": session_id,
+        "execution_id": execution_id,
+        "tools": [],
+        "tool_catalog": None,
+        "system_prompt": "sys",
+        "level_contexts": [],
+        "ac_retry_attempts": {0: 0, 1: 0},
+        "execution_counters": None,
+    }
+    nonce = "7" * 32
+    try:
+        first_executor = _live_executor(
+            adapter=adapter,
+            event_store=store,
+            working_directory=str(tmp_path),
+            process_local_resume_nonce=nonce,
+            max_concurrent=2,
+            session_signal_hub=signal_hub,
+        )
+        first = await first_executor._run_batch_with_bounded_route_escalation(**run_kwargs)
+
+        assert isinstance(first[0], ACExecutionResult) and first[0].success, (first, calls)
+        assert first[0].final_message == "first primary completed"
+        assert isinstance(first[1], ACExecutionResult) and not first[1].success
+        assert calls.count("first-primary") == 1
+        assert calls.count("first-follow-up") == 0
+
+        signal_events = await store.replay("session_signal", signal.signal_id)
+        projection = project_session_signal(signal_events)
+        assert projection.state is SessionSignalState.REJECTED
+        assert signal_events[-1].data["rejection_code"] == "batch_paused_before_delivery"
+        assert not any(
+            event.type == "control.session.signal.delivery_uncertain" for event in signal_events
+        )
+
+        dispatches = await store.query_execution_related_events(
+            execution_id,
+            event_type="execution.ac.attempt.dispatched",
+            limit=10,
+        )
+        primary = next(
+            event
+            for event in dispatches
+            if event.data.get("ac_index") == 0 and event.data.get("dispatch_kind") == "primary"
+        )
+        follow_up = next(
+            event for event in dispatches if event.data.get("signal_id") == signal.signal_id
+        )
+        scope_events = await store.replay(primary.aggregate_type, primary.aggregate_id)
+        runtime_identity = first_executor._ac_runtime_handle_manager._resolve_ac_runtime_identity(
+            0,
+            execution_context_id=execution_id,
+            node_identity=ExecutionNodeIdentity.root(
+                execution_context_id=execution_id,
+                ac_index=0,
+            ),
+            retry_attempt=0,
+        )
+        _compiled, active_dispatches, seals = (
+            ACRuntimeHandleManager._validate_capsule_dispatch_chain(
+                scope_events,
+                runtime_identity=runtime_identity,
+                expected_capsule_fingerprint=primary.data["capsule_fingerprint"],
+            )
+        )
+        assert [scope_events[index].id for index in active_dispatches] == [primary.id]
+        assert seals == []
+        follow_up_seal = next(
+            event
+            for event in scope_events
+            if event.type == "execution.ac.dispatch.sealed"
+            and event.data.get("ac_dispatch_id") == follow_up.data["ac_dispatch_id"]
+        )
+        assert follow_up_seal.data["reason"] == "provider admission cancelled before provider entry"
+
+        resumed_executor = _live_executor(
+            adapter=adapter,
+            event_store=store,
+            working_directory=str(tmp_path),
+            process_local_resume_nonce=nonce,
+            max_concurrent=2,
+            session_signal_hub=signal_hub,
+        )
+        resumed = await resumed_executor._run_batch_with_bounded_route_escalation(**run_kwargs)
+
+        assert all(
+            isinstance(result, ACExecutionResult) and result.success for result in resumed
+        ), (resumed, calls)
+        assert resumed[0].final_message == "first primary completed"
+        assert calls.count("first-primary") == 1
+        assert calls.count("first-follow-up") == 0
+        assert calls.count("second") == 2
+        handoffs = await store.query_execution_related_events(
+            execution_id,
             event_type="execution.ac.uncertain_handoff_required",
             limit=3,
         )

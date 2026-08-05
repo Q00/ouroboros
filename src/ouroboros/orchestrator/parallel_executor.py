@@ -59,12 +59,10 @@ from ouroboros.core.seed import (
 )
 from ouroboros.core.session_signal import (
     SessionSignalMode,
-    bounded_session_signal_reply,
 )
 from ouroboros.events.session_signal import (
     create_session_signal_applied_event,
     create_session_signal_completed_event,
-    create_session_signal_delivery_started_event,
     create_session_signal_delivery_uncertain_event,
     create_session_signal_rejected_event,
 )
@@ -393,6 +391,13 @@ from ouroboros.orchestrator.route_escalation import (
 from ouroboros.orchestrator.route_policy import MAX_ROUTE_ID_CHARS, RouteCandidate
 from ouroboros.orchestrator.runtime_param_negotiation import (
     announce_execution_param_degradations,
+)
+from ouroboros.orchestrator.session_signal_followup import (
+    CompletedProviderTurn,
+    _bounded_session_signal_runtime_reply,
+    _is_session_signal_application_acknowledgement,
+    abort_unentered_follow_up,
+    claim_follow_up_delivery,
 )
 from ouroboros.orchestrator.shadow_replay import isolated_workspace, run_shadow_replay
 from ouroboros.orchestrator.synapse import (
@@ -1299,49 +1304,6 @@ def _make_execution_authority_registry() -> tuple[
     _invoke_execution_authority_guard,
     _invoke_execution_authority_entry,
 ) = _make_execution_authority_registry()
-
-
-def _is_session_signal_application_acknowledgement(message: AgentMessage) -> bool:
-    """Return whether a resumed-turn message proves provider context entry."""
-    subtype = message.data.get("subtype")
-    if message.type == "assistant":
-        return bool(message.content.strip()) and subtype not in {"error", "runtime_error"}
-    return message.type == "result" and subtype == "success"
-
-
-def _bounded_session_signal_runtime_reply(messages: list[AgentMessage]) -> str | None:
-    """Build one bounded provider reply without persisting a raw transcript.
-
-    Some CLIs emit one assistant message while streaming transports such as
-    Goose emit many token chunks.  Prefer an explicit completion payload when
-    present; otherwise concatenate only the acknowledging assistant chunks from
-    this signal turn.  A successful result message is the final fallback.
-    """
-    assistant_messages = [
-        message
-        for message in messages
-        if message.type == "assistant"
-        and _is_session_signal_application_acknowledgement(message)
-        and message.content.strip()
-    ]
-    completion_messages = [
-        message for message in assistant_messages if message.data.get("subtype") == "completion"
-    ]
-    if completion_messages:
-        return bounded_session_signal_reply(completion_messages[-1].content)
-    if assistant_messages:
-        return bounded_session_signal_reply(
-            "".join(message.content for message in assistant_messages)
-        )
-
-    for message in reversed(messages):
-        if message.type != "result":
-            continue
-        if not _is_session_signal_application_acknowledgement(message):
-            continue
-        if message.content.strip():
-            return bounded_session_signal_reply(message.content)
-    return None
 
 
 # -- Frugality-proof producer helpers ----------------------------------------
@@ -8709,6 +8671,7 @@ Respond with either ATOMIC or the structured JSON object only.
             *,
             call_prompt: str,
             call_tools: list[str],
+            on_provider_entry: Callable[[], Awaitable[None]] | None = None,
         ) -> bool:
             """Return whether an admitted, revalidated provider stream was entered."""
 
@@ -8724,6 +8687,8 @@ Respond with either ATOMIC or the structured JSON object only.
                 provider_effect_active = True
                 provider_completed = False
                 try:
+                    if on_provider_entry is not None:
+                        await on_provider_entry()
                     await self._authority_leaf_dispatcher_stream(
                         self._authority_leaf_dispatcher,
                         state=dispatch_state,
@@ -8933,9 +8898,10 @@ Respond with either ATOMIC or the structured JSON object only.
                         )
                         continue
 
-                    await _seal_dispatch(
+                    primary_turn = CompletedProviderTurn.capture(
                         active_dispatch_id,
-                        reason="completed provider turn superseded by a SessionSignal follow-up",
+                        follow_up_runtime_handle,
+                        dispatch_state,
                     )
                     follow_up_dispatch_id = uuid4().hex
                     follow_up_metadata = dict(follow_up_runtime_handle.metadata)
@@ -8947,7 +8913,7 @@ Respond with either ATOMIC or the structured JSON object only.
                     await self._event_emitter.emit_ac_attempt_dispatched(
                         runtime_identity=runtime_identity,
                         dispatch_id=follow_up_dispatch_id,
-                        previous_dispatch_id=active_dispatch_id,
+                        previous_dispatch_id=primary_turn.dispatch_id,
                         execution_id=execution_context_id,
                         session_id=session_id,
                         capsule_fingerprint=capsule.fingerprint,
@@ -8964,7 +8930,7 @@ Respond with either ATOMIC or the structured JSON object only.
                     # Do not expose the candidate handle to the outer failure
                     # path until its dispatch append is durable.  If the
                     # append fails, terminalization must retain the last
-                    # durable predecessor (the sealed primary), never the
+                    # durable predecessor (the completed primary), never the
                     # nonexistent follow-up ID.
                     active_dispatch_id = follow_up_dispatch_id
                     # Keep the same durable-before-cache invariant as the
@@ -8986,22 +8952,28 @@ Respond with either ATOMIC or the structured JSON object only.
                             "SessionSignal follow-up lost its capsule-bound runtime handle"
                         )
                     dispatch_state.runtime_handle = remembered_follow_up_runtime_handle
-                    message_count_before_signal = dispatch_state.message_count
-                    primary_final_message = dispatch_state.final_message
-                    primary_success = dispatch_state.success
-                    await self._event_store.append(
-                        create_session_signal_delivery_started_event(
-                            queued_signal.signal,
+                    message_count_before_signal = primary_turn.message_count
+                    inform_mode = queued_signal.effective_mode is SessionSignalMode.INFORM
+
+                    async def _claim_follow_up_delivery() -> None:
+                        # The batch gate runs synchronously before this callback,
+                        # so a pre-existing sibling pause leaves both the signal
+                        # queue and its completed primary boundary untouched.
+                        await claim_follow_up_delivery(
+                            event_store=self._event_store,
+                            signal=queued_signal.signal,
                             effective_mode=queued_signal.effective_mode,
                             runtime_backend=signal_target.runtime_backend,
                             orchestrator_session_id=session_id,
+                            primary_dispatch_id=primary_turn.dispatch_id,
+                            seal_dispatch=_seal_dispatch,
                         )
-                    )
-                    inform_mode = queued_signal.effective_mode is SessionSignalMode.INFORM
+
                     try:
                         provider_entered = await _stream_provider_call(
                             call_prompt=follow_up_prompt,
                             call_tools=[] if inform_mode else tools,
+                            on_provider_entry=_claim_follow_up_delivery,
                         )
                         if not provider_entered:
                             await self._event_store.append(
@@ -9018,6 +8990,23 @@ Respond with either ATOMIC or the structured JSON object only.
                                 )
                             )
                             return await _terminalize_route_drift(follow_up_dispatch_id)
+                    except _BatchInterruptedForRecoverablePause:
+                        # This dispatch exists durably, but the provider gate
+                        # rejected it before signal delivery was claimed. Abort
+                        # only the child boundary and restore the completed
+                        # primary result for the batch's pause owner.
+                        active_dispatch_id = await abort_unentered_follow_up(
+                            event_store=self._event_store,
+                            signal=queued_signal.signal,
+                            effective_mode=queued_signal.effective_mode,
+                            runtime_backend=signal_target.runtime_backend,
+                            orchestrator_session_id=session_id,
+                            follow_up_dispatch_id=follow_up_dispatch_id,
+                            primary=primary_turn,
+                            state=dispatch_state,
+                            seal_dispatch=_seal_dispatch,
+                        )
+                        break
                     except Exception as exc:
                         await self._event_store.append(
                             create_session_signal_delivery_uncertain_event(
@@ -9036,8 +9025,8 @@ Respond with either ATOMIC or the structured JSON object only.
                             reason="SessionSignal follow-up crossed an uncertain delivery boundary",
                         )
                         if inform_mode:
-                            dispatch_state.success = primary_success
-                            dispatch_state.final_message = primary_final_message
+                            dispatch_state.success = primary_turn.success
+                            dispatch_state.final_message = primary_turn.final_message
                             continue
                         raise
 
@@ -9070,8 +9059,8 @@ Respond with either ATOMIC or the structured JSON object only.
                             reason="SessionSignal follow-up acknowledgement was uncertain",
                         )
                         if inform_mode:
-                            dispatch_state.success = primary_success
-                            dispatch_state.final_message = primary_final_message
+                            dispatch_state.success = primary_turn.success
+                            dispatch_state.final_message = primary_turn.final_message
                             continue
                         dispatch_state.success = False
                         dispatch_state.final_message = (
@@ -9115,8 +9104,8 @@ Respond with either ATOMIC or the structured JSON object only.
                         ]
                     )
                     if inform_mode:
-                        dispatch_state.success = primary_success
-                        dispatch_state.final_message = primary_final_message
+                        dispatch_state.success = primary_turn.success
+                        dispatch_state.final_message = primary_turn.final_message
 
                 self._session_signal_hub.unregister(signal_target)
                 signal_target_registered = False
