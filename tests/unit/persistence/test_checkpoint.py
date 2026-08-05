@@ -509,6 +509,41 @@ class TestCheckpointStateIsolation:
         rollback = checkpoint_store._get_checkpoint_path("tampered", 1)
         assert not rollback.exists(), "a refused save rotated history"
 
+    def test_mutation_between_validation_and_serialization_is_harmless(
+        self, checkpoint_store: CheckpointStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """save() writes the exact snapshot it validated.
+
+        The file lock only serializes store access — it cannot protect the
+        caller-owned object. A mutation landing during lock acquisition must
+        not desync the written payload from its hash: the persisted file is
+        the validated snapshot, and load() accepts it.
+        """
+        from ouroboros.persistence import checkpoint as checkpoint_module
+
+        saved = CheckpointData.create("race-mutation", "execution", {"step": 1})
+        real_lock = checkpoint_module._file_lock
+
+        from contextlib import contextmanager
+
+        @contextmanager
+        def mutating_lock(path, exclusive):
+            # The bot-shaped interleaving: the holder mutates the live
+            # object while save() waits for the lock.
+            saved.state["step"] = 999
+            with real_lock(path, exclusive=exclusive):
+                yield
+
+        monkeypatch.setattr(checkpoint_module, "_file_lock", mutating_lock)
+        result = checkpoint_store.save(saved)
+
+        assert result.is_ok, str(result.error) if result.is_err else ""
+        loaded = checkpoint_store.load("race-mutation")
+        assert loaded.is_ok, "the persisted payload no longer matches its hash"
+        assert loaded.value.state == {"step": 1}, (
+            "save() wrote a different payload than the one it validated"
+        )
+
 
 class TestCheckpointStoreAtomicSave:
     """#1830: a failed save must not disturb the committed checkpoint chain."""
