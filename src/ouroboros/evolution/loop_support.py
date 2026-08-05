@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Iterator, Mapping
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, fields, is_dataclass
 import inspect
 import json
@@ -36,6 +38,20 @@ _PHASE_ORDER = ("wondering", "reflecting", "seeding", "executing", "evaluating")
 
 class LineageWinnerAdvanced(RuntimeError):
     """The caller must recompute its request from the durable winner state."""
+
+
+@dataclass(frozen=True, slots=True)
+class EffectiveEvolutionExecutionPolicy:
+    """Task-local focus policy after applying an explicit benchmark override."""
+
+    focused_evolution: bool
+    scoped_reexecution: bool
+    benchmark_control: bool
+
+
+_ACTIVE_EVOLUTION_EXECUTION_POLICY: ContextVar[EffectiveEvolutionExecutionPolicy | None] = (
+    ContextVar("ouroboros_effective_evolution_execution_policy", default=None)
+)
 
 
 def phase_should_skip(phase: str, resume_after_phase: str | None) -> bool:
@@ -95,13 +111,59 @@ def _execution_policy_value(value: Any) -> Any:
     raise TypeError(f"Unsupported evolution execution-policy value: {type(value).__qualname__}")
 
 
-def evolution_execution_policy(config: Any | None) -> dict[str, Any] | None:
+def effective_evolution_execution_policy(
+    config: Any,
+    benchmark_control: bool = False,
+) -> EffectiveEvolutionExecutionPolicy:
+    """Resolve one immutable policy without mutating the shared loop config."""
+    if not isinstance(benchmark_control, bool):
+        raise TypeError("benchmark_control must be a boolean")
+    return EffectiveEvolutionExecutionPolicy(
+        focused_evolution=(False if benchmark_control else bool(config.focused_evolution)),
+        scoped_reexecution=(False if benchmark_control else bool(config.scoped_reexecution)),
+        benchmark_control=benchmark_control,
+    )
+
+
+@contextmanager
+def evolution_execution_policy_context(
+    config: Any,
+    benchmark_control: bool = False,
+) -> Iterator[EffectiveEvolutionExecutionPolicy]:
+    """Bind one policy to the current async task and every child task it creates."""
+    policy = effective_evolution_execution_policy(
+        config,
+        benchmark_control=benchmark_control,
+    )
+    token = _ACTIVE_EVOLUTION_EXECUTION_POLICY.set(policy)
+    try:
+        yield policy
+    finally:
+        _ACTIVE_EVOLUTION_EXECUTION_POLICY.reset(token)
+
+
+def current_evolution_execution_policy(config: Any) -> EffectiveEvolutionExecutionPolicy:
+    """Return the active task-local policy or the normal configured policy."""
+    return _ACTIVE_EVOLUTION_EXECUTION_POLICY.get() or effective_evolution_execution_policy(config)
+
+
+def evolution_execution_policy(
+    config: Any | None,
+    benchmark_control: bool = False,
+) -> dict[str, Any] | None:
     """Return every declared evolution config field for durable request identity."""
     if config is None:
         return None
     projected = _execution_policy_value(config)
     if not isinstance(projected, dict):
         raise TypeError("Evolution execution policy must project to an object")
+    effective = effective_evolution_execution_policy(
+        config,
+        benchmark_control=benchmark_control,
+    )
+    projected["benchmark_control"] = effective.benchmark_control
+    projected["effective_focused_evolution"] = effective.focused_evolution
+    projected["effective_scoped_reexecution"] = effective.scoped_reexecution
     return projected
 
 

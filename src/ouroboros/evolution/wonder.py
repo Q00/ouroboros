@@ -16,7 +16,7 @@ import json
 import logging
 import math
 import re
-from typing import Literal
+from typing import ClassVar, Literal
 
 from pydantic import BaseModel, Field, ValidationError
 
@@ -27,6 +27,7 @@ from ouroboros.core.lineage import EvaluationSummary, OntologyLineage
 from ouroboros.core.seed import OntologySchema, Seed, ac_texts
 from ouroboros.core.text import truncate_head_tail
 from ouroboros.core.types import Result
+from ouroboros.evolution.provider_usage import tracked_complete
 from ouroboros.evolution.regression import RegressionDetector
 from ouroboros.providers.base import (
     CompletionConfig,
@@ -137,6 +138,8 @@ class WonderEngine:
     Includes degraded mode: if the LLM call fails, falls back to generic
     questions derived from evaluation gaps rather than halting the loop.
     """
+
+    frugality_provider_tracking: ClassVar[bool] = True
 
     llm_adapter: LLMAdapter
     model: str | None = None
@@ -274,7 +277,7 @@ class WonderEngine:
             max_tokens=2048,
         )
 
-        result = await adapter.complete(messages, config)
+        result = await tracked_complete(adapter, messages, config)
 
         if result.is_err:
             logger.warning(

@@ -16,7 +16,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 import json
 import logging
-from typing import Literal
+from typing import ClassVar, Literal
 
 from pydantic import BaseModel, Field, PrivateAttr, ValidationError, field_validator
 
@@ -28,6 +28,7 @@ from ouroboros.core.lineage import EvaluationSummary, MutationAction, OntologyDe
 from ouroboros.core.seed import AcceptanceCriterionSpec, Seed, ac_texts
 from ouroboros.core.text import truncate_head_tail
 from ouroboros.core.types import Result
+from ouroboros.evolution.provider_usage import tracked_complete
 from ouroboros.evolution.regression import RegressionDetector, RegressionReport
 from ouroboros.evolution.wonder import WonderOutput
 from ouroboros.providers.base import (
@@ -451,6 +452,8 @@ class ReflectEngine:
         consumers).
     """
 
+    frugality_provider_tracking: ClassVar[bool] = True
+
     llm_adapter: LLMAdapter
     model: str | None = None
     adapter_factory: Callable[[], LLMAdapter | None] | None = field(default=None)
@@ -600,7 +603,7 @@ class ReflectEngine:
             max_tokens=3000,
         )
 
-        result = await adapter.complete(messages, config)
+        result = await tracked_complete(adapter, messages, config)
 
         if result.is_err:
             logger.error("ReflectEngine LLM call failed: %s", result.error)

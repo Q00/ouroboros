@@ -5,6 +5,7 @@ from dataclasses import fields, replace
 import inspect
 import json
 from pathlib import Path
+import subprocess
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -34,7 +35,7 @@ from ouroboros.core.seed import (
     SeedMetadata,
 )
 from ouroboros.core.types import Result
-from ouroboros.core.worktree import WorktreeError
+from ouroboros.core.worktree import TaskWorkspace, WorktreeError
 from ouroboros.events.lineage import (
     lineage_created,
     lineage_generation_completed,
@@ -237,6 +238,34 @@ async def seed_events_for_gen1(
     )
 
 
+def create_clean_git_project(path: Path) -> Path:
+    """Create one committed project for public benchmark-control tests."""
+    path.mkdir()
+    commands = (
+        ("init",),
+        ("config", "user.email", "tests@example.com"),
+        ("config", "user.name", "Ouroboros Tests"),
+    )
+    for command in commands:
+        subprocess.run(
+            ["git", *command],
+            cwd=path,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    (path / "README.md").write_text("benchmark fixture\n", encoding="utf-8")
+    for command in (("add", "README.md"), ("commit", "-m", "test baseline")):
+        subprocess.run(
+            ["git", *command],
+            cwd=path,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    return path
+
+
 # -- Test Classes --
 
 
@@ -291,7 +320,12 @@ class TestEvolutionaryLoopConfig:
 
         base_policy = loop_support.evolution_execution_policy(base)
         assert base_policy is not None
-        assert set(base_policy) == declared_fields
+        effective_fields = {
+            "benchmark_control",
+            "effective_focused_evolution",
+            "effective_scoped_reexecution",
+        }
+        assert set(base_policy) == declared_fields | effective_fields
         core_key = loop_support.evolve_request_key(
             None,
             execute=True,
@@ -305,6 +339,41 @@ class TestEvolutionaryLoopConfig:
             configured_project_dir=None,
             fallback_cwd=Path.cwd().resolve(),
             execution_policy=base_policy,
+        )
+        control_policy = loop_support.evolution_execution_policy(base, True)
+        assert control_policy is not None
+        assert control_policy["benchmark_control"] is True
+        assert control_policy["effective_focused_evolution"] is False
+        assert control_policy["effective_scoped_reexecution"] is False
+        assert control_policy != base_policy
+        assert (
+            loop_support.evolve_request_key(
+                None,
+                execute=True,
+                parallel=True,
+                conductor_directive=None,
+                generation_number=2,
+                execution_policy=control_policy,
+            )
+            != core_key
+        )
+        assert (
+            _evolve_handler_request_key(
+                {"lineage_id": "lin_policy", "benchmark_control": True},
+                configured_project_dir=None,
+                fallback_cwd=Path.cwd().resolve(),
+                execution_policy=control_policy,
+            )
+            != handler_key
+        )
+        assert (
+            _evolve_handler_request_key(
+                {"lineage_id": "lin_policy", "benchmark_control": False},
+                configured_project_dir=None,
+                fallback_cwd=Path.cwd().resolve(),
+                execution_policy=base_policy,
+            )
+            == handler_key
         )
 
         for field_name, alternative in alternatives.items():
@@ -377,6 +446,28 @@ class TestEvolutionaryLoopConfig:
         config = EvolutionaryLoopConfig(runtime_controls=controls)
 
         assert config.runtime_controls == controls
+
+    @pytest.mark.asyncio
+    async def test_benchmark_execution_policy_is_task_local(self) -> None:
+        config = EvolutionaryLoopConfig(focused_evolution=True, scoped_reexecution=True)
+        barrier = asyncio.Barrier(2)
+
+        async def observe(benchmark_control: bool) -> tuple[bool, bool, bool]:
+            with loop_support.evolution_execution_policy_context(config, benchmark_control):
+                await barrier.wait()
+                policy = loop_support.current_evolution_execution_policy(config)
+                return (
+                    policy.benchmark_control,
+                    policy.focused_evolution,
+                    policy.scoped_reexecution,
+                )
+
+        normal, control = await asyncio.gather(observe(False), observe(True))
+
+        assert normal == (False, True, True)
+        assert control == (True, False, False)
+        assert config.focused_evolution is True
+        assert config.scoped_reexecution is True
 
     def test_explicit_absolute_project_shadows_config_and_cwd_in_handler_identity(
         self,
@@ -2852,6 +2943,44 @@ class TestLineageStatusHandler:
 
         assert result.is_err
 
+    @pytest.mark.asyncio
+    async def test_returns_latest_frugality_proof(self) -> None:
+        """Status exposes proof state without treating node shrinkage as PASS."""
+        from ouroboros.events.base import BaseEvent
+        from ouroboros.evolution.frugality import (
+            PROOF_EVENT,
+            EvolutionFrugalityProof,
+            EvolutionFrugalityStatus,
+        )
+        from ouroboros.mcp.tools.definitions import LineageStatusHandler
+
+        store = await create_event_store()
+        seed = make_seed()
+        await seed_events_for_gen1(store, "lin_status_frugal", seed, make_eval_summary())
+        proof = EvolutionFrugalityProof(
+            status=EvolutionFrugalityStatus.INSUFFICIENT_DATA,
+            comparison_key="sha256:test",
+            treatment_receipt_id="lin_status_frugal:generation:2",
+            reason="matching isolated full-graph/focused receipt not found",
+        )
+        await store.append(
+            BaseEvent(
+                type=PROOF_EVENT,
+                aggregate_type="lineage",
+                aggregate_id="lin_status_frugal",
+                data={"generation_number": 2, "proof": proof.model_dump(mode="json")},
+            )
+        )
+        handler = LineageStatusHandler(event_store=store)
+        handler._event_store = store
+        handler._initialized = True
+
+        result = await handler.handle({"lineage_id": "lin_status_frugal"})
+
+        assert result.is_ok
+        assert "Frugality proof**: insufficient_data" in result.value.text_content
+        assert result.value.meta["frugality"]["status"] == "insufficient_data"
+
 
 class TestEvolveStepHandler:
     """Test EvolveStepHandler MCP tool."""
@@ -2894,6 +3023,171 @@ class TestEvolveStepHandler:
         assert result.value.meta["action"] == "converged"
         assert result.value.meta["converged"] is True
         assert result.value.meta["qa_attempted"] is False
+
+    @pytest.mark.asyncio
+    async def test_public_benchmark_control_isolation_gates_fail_closed(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        from ouroboros.mcp.tools.definitions import EvolveStepHandler
+
+        store = await create_event_store()
+        seed = make_seed(seed_id="seed_benchmark_gates")
+        for lineage_id in ("lin_missing_project", "lin_no_execute", "lin_dirty_project"):
+            await seed_events_for_gen1(store, lineage_id, seed, make_eval_summary(False))
+        clean_project = create_clean_git_project(tmp_path / "clean-project")
+        dirty_project = create_clean_git_project(tmp_path / "dirty-project")
+        (dirty_project / "untracked.txt").write_text("dirty\n", encoding="utf-8")
+        handler = EvolveStepHandler(evolutionary_loop=make_loop(store), event_store=store)
+
+        missing_project = await handler.handle(
+            {"lineage_id": "lin_missing_project", "benchmark_control": True}
+        )
+        no_execute = await handler.handle(
+            {
+                "lineage_id": "lin_no_execute",
+                "benchmark_control": True,
+                "execute": False,
+                "project_dir": str(clean_project),
+            }
+        )
+        gen_one = await handler.handle(
+            {
+                "lineage_id": "lin_gen_one_control",
+                "benchmark_control": True,
+                "project_dir": str(clean_project),
+            }
+        )
+        dirty = await handler.handle(
+            {
+                "lineage_id": "lin_dirty_project",
+                "benchmark_control": True,
+                "project_dir": str(dirty_project),
+            }
+        )
+
+        assert missing_project.is_err
+        assert "explicit project_dir" in str(missing_project.error)
+        assert no_execute.is_err
+        assert "execute=true" in str(no_execute.error)
+        assert gen_one.is_err
+        assert "Gen 2+" in str(gen_one.error)
+        assert dirty.is_err
+        assert "clean Git baseline" in str(dirty.error)
+        await store.close()
+
+    @pytest.mark.asyncio
+    async def test_public_handler_emits_full_graph_benchmark_control_observation(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        from ouroboros.mcp.tools.definitions import EvolveStepHandler
+
+        source = create_clean_git_project(tmp_path / "source")
+        control_worktree = tmp_path / "control-worktree"
+        subprocess.run(
+            ["git", "worktree", "add", "-b", "benchmark-control", str(control_worktree)],
+            cwd=source,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        workspace = TaskWorkspace(
+            durable_id="lin_public_control",
+            repo_root=str(source),
+            repo_name=source.name,
+            original_cwd=str(source),
+            effective_cwd=str(control_worktree),
+            worktree_path=str(control_worktree),
+            branch="benchmark-control",
+            lock_path=str(tmp_path / "control.lock"),
+        )
+        seed = make_seed(seed_id="seed_public_control").model_copy(
+            update={"acceptance_criteria": ("First criterion", "Second criterion")}
+        )
+        previous = EvaluationSummary(
+            final_approved=False,
+            highest_stage_passed=1,
+            score=0.5,
+            ac_results=(
+                ACResult(ac_index=0, ac_content="First criterion", passed=True),
+                ACResult(ac_index=1, ac_content="Second criterion", passed=False),
+            ),
+        )
+        current = EvaluationSummary(
+            final_approved=True,
+            highest_stage_passed=2,
+            score=1.0,
+            ac_results=(
+                ACResult(ac_index=0, ac_content="First criterion", passed=True),
+                ACResult(ac_index=1, ac_content="Second criterion", passed=True),
+            ),
+        )
+        store = await create_event_store()
+        await seed_events_for_gen1(store, "lin_public_control", seed, previous)
+        externally_satisfied: list[object] = []
+
+        async def executor(
+            _seed: Seed,
+            *,
+            parallel: bool,
+            execution_id: str | None = None,
+            externally_satisfied_acs: object = None,
+        ) -> Result[SimpleNamespace, OuroborosError]:
+            del parallel, execution_id
+            externally_satisfied.append(externally_satisfied_acs)
+            return Result.ok(
+                SimpleNamespace(
+                    summary={},
+                    final_message="executed full graph",
+                    duration_seconds=1.0,
+                    messages_processed=1,
+                )
+            )
+
+        async def evaluator(_seed: Seed, _output: str):
+            return Result.ok(current)
+
+        executor.frugality_provider_tracking = True  # type: ignore[attr-defined]
+        evaluator.frugality_provider_tracking = True  # type: ignore[attr-defined]
+        loop = EvolutionaryLoop(
+            event_store=store,
+            config=EvolutionaryLoopConfig(
+                min_generations=2,
+                focused_evolution=True,
+                scoped_reexecution=True,
+            ),
+            executor=executor,
+            evaluator=evaluator,
+        )
+        handler = EvolveStepHandler(evolutionary_loop=loop, event_store=store)
+
+        with (
+            patch(
+                "ouroboros.mcp.tools.evolution_handlers.maybe_restore_task_workspace",
+                return_value=workspace,
+            ),
+            patch("ouroboros.mcp.tools.evolution_handlers.release_lock"),
+        ):
+            result = await handler.handle(
+                {
+                    "lineage_id": "lin_public_control",
+                    "benchmark_control": True,
+                    "execute": True,
+                    "project_dir": str(source),
+                    "skip_qa": True,
+                }
+            )
+
+        assert result.is_ok
+        assert result.value.meta["benchmark_control"] is True
+        assert result.value.meta["active_ac_indices"] == [0, 1]
+        assert result.value.meta["frozen_ac_indices"] == []
+        assert result.value.meta["frugality"]["observation"]["arm"] == "full_graph"
+        assert externally_satisfied == [None]
+        assert loop.config.focused_evolution is True
+        assert loop.config.scoped_reexecution is True
+        await store.close()
 
     @pytest.mark.asyncio
     async def test_handler_uses_configured_project_when_explicit_project_is_absent(

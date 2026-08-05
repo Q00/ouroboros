@@ -16333,6 +16333,71 @@ async def test_try_decompose_ac_replaces_goose_chunks_with_final_result() -> Non
 
 
 @pytest.mark.asyncio
+async def test_decomposition_policy_usage_is_included_in_generation_total(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from ouroboros.evolution import provider_usage as provider_usage_module
+    from ouroboros.evolution.provider_usage import capture_generation_provider_usage
+
+    class _MeasuredRuntime:
+        runtime_backend = "goose"
+        llm_backend = "test-provider"
+        _model = "test-model"
+
+        def frugality_runtime_attestation(self) -> dict[str, object]:
+            implementation = f"{type(self).__module__}.{type(self).__qualname__}"
+            return {
+                "schema_version": 1,
+                "schema_id": "test.decomposition_runtime.v1",
+                "implementation": implementation,
+                "runtime_backend": "goose",
+                "runtime_handle_backend": "goose",
+                "settings": {"fixture": "decomposition"},
+            }
+
+        async def execute_task(self, **kwargs):  # noqa: ANN201, ARG002
+            yield AgentMessage(
+                type="result",
+                content='["Sub-AC 1: inspect", "Sub-AC 2: test"]',
+                data={
+                    "model_observation": {"effective_model": "test-model"},
+                    "usage": {"total_tokens": 150},
+                },
+            )
+
+    runtime_class = f"{_MeasuredRuntime.__module__}.{_MeasuredRuntime.__qualname__}"
+    monkeypatch.setitem(
+        provider_usage_module._AGENT_RUNTIME_SCHEMAS,
+        runtime_class,
+        provider_usage_module._AgentRuntimeSchema(
+            schema_id="test.decomposition_runtime.v1",
+            runtime_backend="goose",
+            runtime_handle_backend="goose",
+            setting_kinds={"fixture": "text"},
+        ),
+    )
+
+    executor = ParallelACExecutor(
+        adapter=_MeasuredRuntime(),
+        event_store=AsyncMock(),
+        console=MagicMock(),
+        enable_decomposition=True,
+    )
+
+    with capture_generation_provider_usage() as capture:
+        response = await executor._dispatch_decomposition_prompt(
+            prompt="Investigate and test sub-AC behavior.",
+            system_prompt="system",
+        )
+
+    assert response == '["Sub-AC 1: inspect", "Sub-AC 2: test"]'
+    summary = capture.summary()
+    assert summary.complete is True
+    assert summary.call_count == 1
+    assert summary.token_spend == 150
+
+
+@pytest.mark.asyncio
 async def test_try_decompose_ac_accumulates_goose_stream_chunks() -> None:
     """Goose stream-json emits token chunks; decomposition must parse accumulated output."""
 

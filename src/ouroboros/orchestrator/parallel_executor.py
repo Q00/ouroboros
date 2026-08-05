@@ -67,6 +67,7 @@ from ouroboros.events.session_signal import (
     create_session_signal_delivery_uncertain_event,
     create_session_signal_rejected_event,
 )
+from ouroboros.evolution.provider_usage import tracked_agent_task
 
 # Import the harness submodules directly, NOT the ``ouroboros.harness`` package
 # aggregate: ``harness.__init__`` pulls in ``deliver_routing`` which imports from
@@ -87,6 +88,7 @@ from ouroboros.orchestrator.ac_execution_capsule import (
     UnmaterializableSuccessContractError,
     bind_capsule_to_runtime_handle,
     build_ac_dispatch_authority_scope,
+    build_ac_dispatch_request_digest,
     compile_ac_execution_capsule,
 )
 from ouroboros.orchestrator.ac_runtime_handle_manager import ACRuntimeHandleManager
@@ -308,6 +310,12 @@ from ouroboros.orchestrator.execution_runtime_scope import (
     ExecutionNodeIdentity,
     build_ac_runtime_identity,
     build_level_coordinator_runtime_scope,
+)
+from ouroboros.orchestrator.frugality_evidence import (
+    harvest_token_spend as _harvest_token_spend,
+)
+from ouroboros.orchestrator.frugality_evidence import (
+    observed_effective_model as _observed_effective_model,
 )
 from ouroboros.orchestrator.leaf_dispatcher import (
     LeafDispatcher,
@@ -1343,113 +1351,6 @@ _STANDARD_DELIVER_EVIDENCE_FIELDS: tuple[str, ...] = (
     "tests_passed",
 )
 _FILE_MUTATION_TOOLS = frozenset({"Edit", "Write", "NotebookEdit", "MultiEdit"})
-_TOKEN_SPEND_FALLBACK_KEYS: tuple[str, ...] = (
-    "input_tokens",
-    "output_tokens",
-    "cache_creation_input_tokens",
-    "cache_read_input_tokens",
-)
-_TOKEN_USAGE_KEYS: tuple[str, ...] = (
-    *_TOKEN_SPEND_FALLBACK_KEYS,
-    "cached_input_tokens",
-    "total_tokens",
-)
-
-
-def _finite_nonneg_number(value: object) -> float | None:
-    """Return ``value`` as a finite, non-negative float, else ``None``.
-
-    Mirrors ``frugality_proof._finite_number`` (rejects ``None``, booleans,
-    non-numerics, NaN/inf) and additionally rejects negatives: a token count is a
-    spend, and a negative spend is malformed telemetry that must be dropped rather
-    than counted (a negative would understate the run's real spend and skew the
-    proof's aggregate reduction).
-    """
-    if value is None or isinstance(value, bool) or not isinstance(value, (int, float)):
-        return None
-    try:
-        number = float(value)
-    except (OverflowError, TypeError, ValueError):
-        return None
-    if not math.isfinite(number) or number < 0:
-        return None
-    return number
-
-
-def _harvest_token_spend(
-    messages: list[AgentMessage],
-) -> tuple[float, dict[str, float]] | None:
-    """Sum runtime-reported token usage across a leaf's message stream.
-
-    Usage semantics are resolved PER MESSAGE before messages are added together:
-
-    * a usable ``total_tokens`` is authoritative for that message;
-    * otherwise spend is ``input_tokens + output_tokens`` plus Anthropic's
-      additive ``cache_creation_input_tokens + cache_read_input_tokens``;
-    * OpenAI's ``cached_input_tokens`` remains in the diagnostic breakdown but is
-      never added separately because it is already a subset of ``input_tokens``.
-
-    Token telemetry is all-or-nothing across the leaf. If a ``usage`` payload is
-    malformed, or any present recognized counter is invalid, the whole attempt
-    returns ``None``. Dropping only the bad component (or falling back when an
-    invalid ``total_tokens`` is present) would undercount spend and can create a
-    false frugality PASS. An absent payload or a valid payload with no spend
-    counter contributes nothing; when no spend is observed the function returns
-    ``None`` rather than fabricating a char-proxy or zero-token spend.
-
-    Multiple usage-bearing messages in one stream (e.g. a Claude result message
-    plus Codex ``turn.completed`` messages) are summed, so a decomposed child's
-    full spend is attributed even when the runtime reports it in pieces.
-
-    Returns:
-        ``(token_spend, usage_breakdown)`` where ``usage_breakdown`` is the summed
-        per-key total for every usable key, or ``None`` when no spend was seen.
-    """
-    breakdown: dict[str, float] = {}
-    token_spend = 0.0
-    observed_spend = False
-    for message in messages:
-        data = getattr(message, "data", None)
-        if not isinstance(data, dict):
-            continue
-        if data.get("usage_invalid") is True:
-            return None
-        if "usage" not in data:
-            continue
-        usage = data["usage"]
-        if not isinstance(usage, Mapping):
-            return None
-        usable_usage: dict[str, float] = {}
-        for key in _TOKEN_USAGE_KEYS:
-            if key not in usage:
-                continue
-            raw_value = usage[key]
-            number = _finite_nonneg_number(raw_value)
-            if number is None:
-                return None
-            usable_usage[key] = number
-            breakdown[key] = breakdown.get(key, 0.0) + number
-
-        total_tokens = usable_usage.get("total_tokens")
-        if total_tokens is not None:
-            token_spend += total_tokens
-            observed_spend = True
-            continue
-
-        spend_components = [
-            usable_usage[key] for key in _TOKEN_SPEND_FALLBACK_KEYS if key in usable_usage
-        ]
-        if spend_components:
-            token_spend += sum(spend_components)
-            observed_spend = True
-
-    if (
-        not observed_spend
-        or not math.isfinite(token_spend)
-        or any(not math.isfinite(value) for value in breakdown.values())
-    ):
-        return None
-    return token_spend, breakdown
 
 
 def _first_nonblank_str(entry: Mapping[str, Any], keys: tuple[str, ...]) -> str | None:
@@ -6312,12 +6213,7 @@ class ParallelACExecutor:
         system_prompt: str,
         independent_session: bool = False,
     ) -> str:
-        """Run one bounded tool-free decomposition-policy request.
-
-        Semantic attestation must not resume the proposer conversation. Passing
-        ``independent_session=True`` starts a fresh runtime session even when the
-        parent executor inherited a resumable handle.
-        """
+        """Run one bounded, tracked, tool-free decomposition-policy request."""
         self._announce_param_degradations(system_prompt=system_prompt, tools=[])
         _invoke_execution_authority_guard(self)
         await _invoke_execution_authority_entry(
@@ -6326,13 +6222,13 @@ class ParallelACExecutor:
             prompt=prompt,
             system_prompt=system_prompt,
         )
-        # Acquiring rate budget can suspend, so validate once more at the
-        # immediate effect boundary rather than assuming the pre-wait snapshot
-        # still applies.
+        # Revalidate authority after the rate-budget await.
         _invoke_execution_authority_guard(self)
         response_text = ""
         async with asyncio.timeout(DECOMPOSITION_TIMEOUT_SECONDS):
-            async for message in self._adapter.execute_task(
+            async for message in tracked_agent_task(
+                self._adapter,
+                role="executor_decomposition_policy",
                 prompt=prompt,
                 tools=[],
                 system_prompt=system_prompt,
@@ -8070,6 +7966,55 @@ Respond with either ATOMIC or the structured JSON object only.
             effort=None,
         )
         try:
+            dispatch_contract: dict[str, object] = {
+                "backend": getattr(self._adapter, "runtime_backend", None),
+                "tools": list(tools),
+                # The allow-list is only a projection of the provider
+                # contract. Fingerprint the complete canonical catalog too,
+                # so schema/source changes cannot reuse a dispatch authority
+                # that merely has the same tool names.
+                "tool_catalog": {
+                    "present": tool_catalog is not None,
+                    "entries": serialize_tool_catalog(tool_catalog or ()),
+                },
+                "system_prompt": system_prompt,
+                "ac_content": ac_content,
+                "seed_goal": seed_goal,
+                "retry_prompt_extra": retry_prompt_extra,
+                "sibling_acs": [
+                    {"ac_index": sibling_index, "content": sibling_content}
+                    for sibling_index, sibling_content in (sibling_acs or [])
+                ],
+                "level_context_prompt": build_context_prompt(level_contexts or []),
+            }
+            execution_policy: dict[str, object] = {
+                "retry_attempt": retry_attempt,
+                "is_sub_ac": is_sub_ac,
+                "decomposition_trustworthy": decomposition_trustworthy,
+                "base_reasoning_effort": self._reasoning_effort,
+                "model_routing": serialize_model_router(model_router_snapshot),
+                "route_compat": serialize_route_compat_contract(durable_route_projection),
+                "route_id_override": route_id_override,
+                "expected_route_candidate": (
+                    expected_route_candidate.to_contract_data()
+                    if expected_route_candidate is not None
+                    else None
+                ),
+                "execution_profile": (
+                    self._execution_profile.model_dump(mode="json")
+                    if self._execution_profile is not None
+                    else None
+                ),
+                "run_verify_commands": self._run_verify_commands,
+                "fat_harness_mode": self._fat_harness_mode,
+                "investment_spec": (
+                    investment_spec.model_dump(mode="json") if investment_spec is not None else None
+                ),
+            }
+            request_authority_digest = build_ac_dispatch_request_digest(
+                dispatch_contract=dispatch_contract,
+                execution_policy=execution_policy,
+            )
             capsule = compile_ac_execution_capsule(
                 runtime_identity=runtime_identity,
                 execution_id=execution_context_id,
@@ -8082,66 +8027,8 @@ Respond with either ATOMIC or the structured JSON object only.
                 authority_scope=(
                     build_ac_dispatch_authority_scope(
                         base_scope=self.execution_authority.fingerprint,
-                        dispatch_contract={
-                            "backend": getattr(self._adapter, "runtime_backend", None),
-                            "tools": list(tools),
-                            # The allow-list is only a projection of the provider
-                            # contract.  Fingerprint the complete canonical catalog
-                            # too, so schema/source changes cannot reuse a dispatch
-                            # authority that merely has the same tool names.
-                            # Preserve presence separately from entries: ``None``
-                            # means the provider received no catalog authority,
-                            # while an explicit empty tuple means an intentionally
-                            # empty capability/control-plane contract.
-                            "tool_catalog": {
-                                "present": tool_catalog is not None,
-                                "entries": serialize_tool_catalog(tool_catalog or ()),
-                            },
-                            "system_prompt": system_prompt,
-                            "ac_content": ac_content,
-                            "seed_goal": seed_goal,
-                            "retry_prompt_extra": retry_prompt_extra,
-                            # These values are projected into the provider prompt
-                            # and therefore are part of the dispatch authority even
-                            # though they are not provider/session continuity.
-                            "sibling_acs": [
-                                {"ac_index": sibling_index, "content": sibling_content}
-                                for sibling_index, sibling_content in (sibling_acs or [])
-                            ],
-                            "level_context_prompt": build_context_prompt(level_contexts or []),
-                        },
-                        execution_policy={
-                            "retry_attempt": retry_attempt,
-                            "is_sub_ac": is_sub_ac,
-                            "decomposition_trustworthy": decomposition_trustworthy,
-                            "base_reasoning_effort": self._reasoning_effort,
-                            "model_routing": serialize_model_router(model_router_snapshot),
-                            "route_compat": serialize_route_compat_contract(
-                                durable_route_projection
-                            ),
-                            "route_id_override": route_id_override,
-                            "expected_route_candidate": (
-                                expected_route_candidate.to_contract_data()
-                                if expected_route_candidate is not None
-                                else None
-                            ),
-                            "execution_profile": (
-                                self._execution_profile.model_dump(mode="json")
-                                if self._execution_profile is not None
-                                else None
-                            ),
-                            "fat_harness_mode": self._fat_harness_mode,
-                            # Investment metadata is authority-bearing: the effort
-                            # router can lower or raise the dispatched tier from it.
-                            # Keep the canonical Seed representation in the capsule
-                            # scope so materially different investment decisions can
-                            # never reuse one durable dispatch identity.
-                            "investment_spec": (
-                                investment_spec.model_dump(mode="json")
-                                if investment_spec is not None
-                                else None
-                            ),
-                        },
+                        dispatch_contract=dispatch_contract,
+                        execution_policy=execution_policy,
                     )
                 ),
                 seed_goal=seed_goal,
@@ -8683,6 +8570,7 @@ Respond with either ATOMIC or the structured JSON object only.
             execution_id=execution_context_id,
             session_id=session_id,
             capsule_fingerprint=capsule.fingerprint,
+            request_authority_digest=request_authority_digest,
             session_origin=session_origin,
             runtime_handle=runtime_handle,
         )
@@ -8953,6 +8841,7 @@ Respond with either ATOMIC or the structured JSON object only.
                         execution_id=execution_context_id,
                         session_id=session_id,
                         capsule_fingerprint=capsule.fingerprint,
+                        request_authority_digest=request_authority_digest,
                         session_origin="restored_same_attempt",
                         runtime_handle=candidate_follow_up_runtime_handle,
                         dispatch_kind="session_signal_followup",
@@ -9516,6 +9405,7 @@ Respond with either ATOMIC or the structured JSON object only.
                     retry_attempt=retry_attempt,
                     model_decision=model_decision,
                     effort_decision=effort_decision,
+                    request_authority_digest=request_authority_digest,
                 )
                 if clear_cached_runtime_handle:
                     await self._terminate_runtime_handle(
@@ -9553,17 +9443,20 @@ Respond with either ATOMIC or the structured JSON object only.
         retry_attempt: int,
         model_decision: Any,
         effort_decision: Any,
+        request_authority_digest: str,
     ) -> None:
         """Harvest and emit this leaf's runtime token spend (frugality-proof AC2).
 
         Emits nothing when the stream carried no runtime usage telemetry — the
         proof treats missing as missing rather than fabricating a spend. Observe-only:
-        any failure degrades to a warning so token attribution never disrupts the
-        leaf's teardown or result.
+        failures degrade to warnings without disrupting leaf teardown or results.
         """
         try:
             harvested = _harvest_token_spend(messages)
             if harvested is None:
+                return
+            effective_model = _observed_effective_model(messages)
+            if effective_model is None:
                 return
             token_spend, usage_breakdown = harvested
             await self._event_emitter.emit_token_attribution(
@@ -9576,10 +9469,17 @@ Respond with either ATOMIC or the structured JSON object only.
                 token_spend=token_spend,
                 usage_breakdown=usage_breakdown,
                 model=getattr(model_decision, "model", None),
+                effective_model=effective_model,
                 model_tier=getattr(model_decision, "tier", None),
                 model_mode=getattr(model_decision, "mode", None),
                 effort_level=getattr(effort_decision, "level", None),
+                effort_mode=getattr(effort_decision, "mode", None),
                 runtime_backend=getattr(self._adapter, "runtime_backend", None),
+                llm_backend=(
+                    getattr(self._adapter, "llm_backend", None) or self._adapter.runtime_backend
+                ),
+                permission_mode=getattr(self._adapter, "permission_mode", None),
+                request_authority_digest=request_authority_digest,
             )
         except Exception as exc:
             log.warning(

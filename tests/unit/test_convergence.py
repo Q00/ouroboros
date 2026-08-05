@@ -490,6 +490,7 @@ class TestConvergenceGating:
                 ACResult(ac_index=0, ac_content="AC zero", passed=True),
                 ACResult(ac_index=1, ac_content="AC one", passed=False),
             ),
+            latest_seed=seed,
         )
 
         signal = ConvergenceCriteria(

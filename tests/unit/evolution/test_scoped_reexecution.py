@@ -29,6 +29,7 @@ from ouroboros.core.seed import (
     SeedMetadata,
 )
 from ouroboros.core.types import Result
+from ouroboros.evolution.frugality import OBSERVATION_EVENT, PROOF_EVENT, EvolutionFrugalityStatus
 from ouroboros.evolution.loop import EvolutionaryLoop, EvolutionaryLoopConfig
 from ouroboros.evolution.reflect import ReflectEngine, ReflectOutput
 from ouroboros.evolution.wonder import WonderOutput
@@ -207,6 +208,36 @@ def _make_loop_for_gen2(
 
 
 class TestScopedForwardingIntegration:
+    async def test_ontology_only_wonder_stop_persists_insufficient_frugality_receipt(self) -> None:
+        store = await _store()
+        seed = _seed()
+        lineage = OntologyLineage(
+            lineage_id="lin_wonder_stop",
+            goal=seed.goal,
+            generations=(_gen(1, seed, _eval({0: True, 1: True})),),
+        )
+        executor = _CaptureExecutor()
+        loop = _make_loop_for_gen2(store, executor, EvolutionaryLoopConfig(), settled=())
+        loop.wonder_engine.wonder = AsyncMock(
+            return_value=Result.ok(
+                WonderOutput(questions=(), grounded_questions=(), should_continue=False)
+            )
+        )
+
+        result = await loop._run_generation(
+            lineage=lineage,
+            generation_number=2,
+            current_seed=seed,
+            execute=False,
+        )
+
+        assert result.is_ok
+        assert executor.called is False
+        observations = await store.query_events(event_type=OBSERVATION_EVENT, limit=10)
+        proofs = await store.query_events(event_type=PROOF_EVENT, limit=10)
+        assert len(observations) == 1
+        assert proofs[0].data["proof"]["status"] == EvolutionFrugalityStatus.INSUFFICIENT_DATA
+
     async def test_conductor_preservation_blocks_executor_before_side_effects(self) -> None:
         store = await _store()
         seed_v1 = _seed()

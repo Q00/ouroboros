@@ -1,14 +1,6 @@
-"""EvolutionaryLoop orchestrator - manages generation-level execution.
+"""EvolutionaryLoop orchestrator for generation-level execution.
 
-Transforms the linear pipeline into a closed evolutionary loop:
-
-    Gen 1: Seed(O₁) → Execute → Validate → Evaluate
-    Gen 2: Wonder(O₁, E₁) → Reflect → Seed(O₂) → Execute → Validate → Evaluate
-    Gen 3: Wonder(O₂, E₂) → Reflect → Seed(O₃) → Execute → Validate → Evaluate
-    ...until convergence or max_generations
-
-The loop accepts a pre-built Seed for Gen 1 (interview is handled externally)
-and autonomously evolves through Wonder → Reflect cycles for Gen 2+.
+Runs Seed → Execute → Evaluate, then Wonder → Reflect feedback until convergence.
 """
 
 from __future__ import annotations
@@ -49,12 +41,13 @@ from ouroboros.events.lineage import (
     lineage_stagnated,
     lineage_wonder_degraded,
 )
-from ouroboros.evolution import focus, loop_support
+from ouroboros.evolution import focus, frugality, loop_support, provider_usage
 from ouroboros.evolution.convergence import ConvergenceCriteria, ConvergenceSignal
 from ouroboros.evolution.directive_mapping import (
     is_terminal_directive,
     watchdog_timeout_to_directive,
 )
+from ouroboros.evolution.drift_recording import record_generation_drift
 from ouroboros.evolution.projector import LineageProjector
 from ouroboros.evolution.reflect import ReflectEngine, ReflectOutput
 from ouroboros.evolution.regression import RegressionDetector, RegressionReport
@@ -69,7 +62,6 @@ from ouroboros.evolution.watchdog import (
     GenerationWatchdogTimeout,
 )
 from ouroboros.evolution.wonder import WonderEngine, WonderOutput
-from ouroboros.observability.drift import DriftMeasuredEvent, DriftMeasurement
 from ouroboros.orchestrator.agent_process import AgentProcess, AgentProcessHandle
 from ouroboros.persistence.event_store import EventStore
 
@@ -121,6 +113,7 @@ class GenerationResult:
     validation_output: str | None = None
     active_ac_indices: tuple[int, ...] = ()
     frozen_ac_indices: tuple[int, ...] = ()
+    frugality_evidence: frugality.EvolutionFrugalityEvidence | None = None
     phase: GenerationPhase = GenerationPhase.COMPLETED
     success: bool = True
 
@@ -582,56 +575,52 @@ class EvolutionaryLoop:
         execute: bool = True,
         parallel: bool = True,
         conductor_directive: ConductorDirective | None = None,
+        benchmark_control: bool = False,
     ) -> Result[StepResult, OuroborosError]:
-        """Advance one lineage exactly once while concurrent retries coalesce.
-
-        The replay that chooses a generation number and the provider-backed work
-        that completes it form one lineage-owned critical section.  A concurrent
-        caller with the same request observes the winner's result; a different
-        request waits and then replays the durable winner. Completed tasks remove
-        their single-flight entry so the registry remains bounded.
-        """
+        """Advance one lineage once while task-local policy and durable claims coalesce retries."""
         from ouroboros.evolution.step_receipt import decode_step_result, encode_step_result
 
-        while True:
-            generation_number = await loop_support.planned_evolve_generation(
-                self.event_store,
-                lineage_id,
-                execute=execute,
-            )
-            request_key = loop_support.evolve_request_key(
-                initial_seed,
-                execute=execute,
-                parallel=parallel,
-                conductor_directive=conductor_directive,
-                project_dir=self.get_project_dir(),
-                generation_number=generation_number,
-                execution_policy=loop_support.evolution_execution_policy(self.config),
-            )
-            try:
-                return await loop_support.run_lineage_single_flight(
+        durable_policy = loop_support.evolution_execution_policy(self.config, benchmark_control)
+        with loop_support.evolution_execution_policy_context(self.config, benchmark_control):
+            while True:
+                generation_number = await loop_support.planned_evolve_generation(
                     self.event_store,
                     lineage_id,
-                    request_key,
-                    lambda: loop_support.run_durable_lineage_single_flight(
+                    execute=execute,
+                )
+                request_key = loop_support.evolve_request_key(
+                    initial_seed,
+                    execute=execute,
+                    parallel=parallel,
+                    conductor_directive=conductor_directive,
+                    project_dir=self.get_project_dir(),
+                    generation_number=generation_number,
+                    execution_policy=durable_policy,
+                )
+                try:
+                    return await loop_support.run_lineage_single_flight(
                         self.event_store,
                         lineage_id,
                         request_key,
-                        lambda: self._evolve_step_once(
+                        lambda: loop_support.run_durable_lineage_single_flight(
+                            self.event_store,
                             lineage_id,
-                            initial_seed=initial_seed,
-                            execute=execute,
-                            parallel=parallel,
-                            conductor_directive=conductor_directive,
+                            request_key,
+                            lambda: self._evolve_step_once(
+                                lineage_id,
+                                initial_seed=initial_seed,
+                                execute=execute,
+                                parallel=parallel,
+                                conductor_directive=conductor_directive,
+                            ),
+                            generation_number=generation_number,
+                            encode=encode_step_result,
+                            decode=lambda payload: decode_step_result(self.event_store, payload),
                         ),
-                        generation_number=generation_number,
-                        encode=encode_step_result,
-                        decode=lambda payload: decode_step_result(self.event_store, payload),
-                    ),
-                    replan_on_different=True,
-                )
-            except loop_support.LineageWinnerAdvanced:
-                continue
+                        replan_on_different=True,
+                    )
+                except loop_support.LineageWinnerAdvanced:
+                    continue
 
     async def _evolve_step_once(
         self,
@@ -1413,6 +1402,7 @@ class EvolutionaryLoop:
             success=False,
         )
 
+    @provider_usage.capture_provider_usage
     async def _run_generation_phases(
         self,
         lineage: OntologyLineage,
@@ -1434,9 +1424,12 @@ class EvolutionaryLoop:
         def _should_skip(phase: str) -> bool:
             return loop_support.phase_should_skip(phase, resume_after_phase)
 
+        execution_policy = loop_support.current_evolution_execution_policy(self.config)
         ontology_delta: OntologyDelta | None = None
         generation_parent_seed = current_seed
         generation_focus = focus.initial_evolution_focus(current_seed)
+        project_baseline = frugality.capture_project_baseline(self.get_project_dir())
+        executor_result: Any | None = None
         prev_gen = (
             next(
                 (g for g in reversed(lineage.generations) if g.phase == GenerationPhase.COMPLETED),
@@ -1478,7 +1471,7 @@ class EvolutionaryLoop:
                 current_seed,
                 prev_gen.evaluation_summary,
                 regression_report=regression_report,
-                enabled=self.config.focused_evolution,
+                enabled=execution_policy.focused_evolution,
             )
 
             await loop_support.emit_generation_started_once(
@@ -1510,11 +1503,17 @@ class EvolutionaryLoop:
                         and not wonder_output.should_continue
                         and not wonder_output.questions
                     ):
-                        # Only early-return if Wonder has NO questions at all.
-                        # If questions exist, we must continue to Reflect even if
-                        # should_continue=false, because the questions represent
-                        # ontological gaps that need to be addressed.
-                        logger.info("evolution.wonder.nothing_to_learn")
+                        # Question-bearing output still requires Reflect; only an empty stop returns.
+                        await frugality.record_wonder_stop(
+                            self,
+                            lineage,
+                            (
+                                generation_number,
+                                current_seed,
+                                generation_focus,
+                                execution_policy,
+                            ),
+                        )
                         return Result.ok(
                             GenerationResult(
                                 generation_number=generation_number,
@@ -1754,7 +1753,7 @@ class EvolutionaryLoop:
                 prev_gen.evaluation_summary,
                 wonder=wonder_output,
                 regression_report=regression_report,
-                enabled=self.config.focused_evolution,
+                enabled=execution_policy.focused_evolution,
             )
             if checkpoint_focus is not None:
                 generation_focus = checkpoint_focus
@@ -1807,8 +1806,8 @@ class EvolutionaryLoop:
             )
         elif execute and self.executor:
             externally_satisfied_acs = focus.select_externally_satisfied_acs(
-                scoped_reexecution=self.config.scoped_reexecution,
-                focused_evolution=self.config.focused_evolution,
+                scoped_reexecution=execution_policy.scoped_reexecution,
+                focused_evolution=execution_policy.focused_evolution,
                 focus=generation_focus,
                 settled_ac_indices=(
                     reflect_output.settled_ac_indices if reflect_output is not None else ()
@@ -1824,6 +1823,7 @@ class EvolutionaryLoop:
                 )
                 if hasattr(exec_result, "is_ok") and exec_result.is_ok:
                     orch_result = exec_result.value
+                    executor_result = orch_result
                     summary = getattr(orch_result, "summary", {})
                     verification_report = (
                         summary.get("verification_report") if isinstance(summary, dict) else None
@@ -1876,7 +1876,7 @@ class EvolutionaryLoop:
             )
         elif execute and execution_output and self.validator:
             try:
-                validation_result = await self.validator(current_seed, execution_output)
+                validation_result = await focus.call(self.validator, current_seed, execution_output)
                 validation_output = normalize_validation_result(validation_result)
                 if validation_output and "skipped" in validation_output.lower():
                     logger.warning(
@@ -1939,7 +1939,7 @@ class EvolutionaryLoop:
             )
         elif execute and self.evaluator:
             try:
-                eval_result = await self.evaluator(current_seed, execution_output)
+                eval_result = await focus.call(self.evaluator, current_seed, execution_output)
                 if hasattr(eval_result, "is_ok") and eval_result.is_ok:
                     evaluation_summary = eval_result.value
                 elif isinstance(eval_result, EvaluationSummary):
@@ -1969,28 +1969,9 @@ class EvolutionaryLoop:
             )
         )
 
-        # Measure drift after evaluation
-        if execution_output:
-            try:
-                drift_measurement = DriftMeasurement()
-                drift_metrics = drift_measurement.measure(
-                    current_output=execution_output,
-                    constraint_violations=[],
-                    current_concepts=[],
-                    seed=current_seed,
-                )
-                drift_event = DriftMeasuredEvent(
-                    execution_id=lineage.lineage_id,
-                    seed_id=current_seed.metadata.seed_id,
-                    iteration=generation_number,
-                    metrics=drift_metrics,
-                )
-                await self.event_store.append(drift_event)
-            except Exception as e:
-                logger.warning(
-                    "evolution.drift.measurement_failed",
-                    extra={"error": str(e), "generation": generation_number},
-                )
+        await record_generation_drift(
+            self.event_store, lineage.lineage_id, generation_number, current_seed, execution_output
+        )
 
         # Check for graceful shutdown after evaluating
         interrupted = await self._check_shutdown(
@@ -2008,6 +1989,22 @@ class EvolutionaryLoop:
         if interrupted:
             return Result.ok(interrupted)
 
+        frugality_evidence = await frugality.record_generation(
+            event_store=self.event_store,
+            lineage_id=lineage.lineage_id,
+            generation_number=generation_number,
+            execution_id=execution_id or lineage.lineage_id,
+            parent_seed=generation_parent_seed,
+            current_seed=current_seed,
+            previous_evaluation=(prev_gen.evaluation_summary if prev_gen is not None else None),
+            current_evaluation=evaluation_summary,
+            focus=generation_focus,
+            baseline=project_baseline,
+            focused_evolution=execution_policy.focused_evolution,
+            scoped_reexecution=execution_policy.scoped_reexecution,
+            executor_result=executor_result,
+        )
+
         return Result.ok(
             GenerationResult(
                 generation_number=generation_number,
@@ -2020,6 +2017,7 @@ class EvolutionaryLoop:
                 validation_output=validation_output,
                 active_ac_indices=generation_focus.active_ac_indices,
                 frozen_ac_indices=generation_focus.frozen_ac_indices,
+                frugality_evidence=frugality_evidence,
                 phase=GenerationPhase.COMPLETED,
                 success=True,
             )

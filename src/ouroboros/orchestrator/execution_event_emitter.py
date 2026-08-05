@@ -56,6 +56,7 @@ class ExecutionEventEmitter:
         self._safe_emit_event = safe_emit_event
         self._last_ac_phase: dict[str, str] = {}
         self._last_discovery_signature: dict[str, tuple[tuple[str, ...], str]] = {}
+        self._primary_dispatch_by_attempt: dict[str, str] = {}
 
     @staticmethod
     def runtime_event_metadata(message: AgentMessage) -> dict[str, Any]:
@@ -154,6 +155,7 @@ class ExecutionEventEmitter:
         execution_id: str,
         session_id: str,
         capsule_fingerprint: str,
+        request_authority_digest: str,
         session_origin: str,
         runtime_handle: Any,
         dispatch_kind: str = "primary",
@@ -186,6 +188,10 @@ class ExecutionEventEmitter:
             r"sha256:[0-9a-f]{64}", capsule_fingerprint
         ):
             raise ValueError("AC dispatch capsule fingerprint is invalid")
+        if not isinstance(request_authority_digest, str) or not re.fullmatch(
+            r"sha256:[0-9a-f]{64}", request_authority_digest
+        ):
+            raise ValueError("AC dispatch request authority digest is invalid")
         if runtime_handle is not None:
             metadata = runtime_handle.metadata
             if metadata.get("ac_dispatch_id") != dispatch_id:
@@ -208,6 +214,7 @@ class ExecutionEventEmitter:
                     "signal_mode": signal_mode,
                     "follow_up_input_digest": follow_up_input_digest,
                     "capsule_fingerprint": capsule_fingerprint,
+                    "request_authority_digest": request_authority_digest,
                     "session_origin": session_origin,
                     "runtime_backend": (
                         runtime_handle.backend if runtime_handle is not None else None
@@ -216,6 +223,10 @@ class ExecutionEventEmitter:
                 },
             )
         )
+        if dispatch_kind == "primary":
+            if len(self._primary_dispatch_by_attempt) >= 4096:
+                self._primary_dispatch_by_attempt.pop(next(iter(self._primary_dispatch_by_attempt)))
+            self._primary_dispatch_by_attempt[runtime_identity.session_attempt_id] = dispatch_id
 
     async def emit_ac_dispatch_sealed(
         self,
@@ -652,10 +663,15 @@ class ExecutionEventEmitter:
         token_spend: float,
         usage_breakdown: dict[str, float],
         model: str | None,
+        effective_model: str | None,
         model_tier: str | None,
         model_mode: str | None,
         effort_level: str | None,
         runtime_backend: str | None,
+        llm_backend: str | None = None,
+        effort_mode: str | None = None,
+        permission_mode: str | None = None,
+        request_authority_digest: str | None = None,
     ) -> None:
         """Persist per-AC runtime-measured token spend (frugality-proof token axis).
 
@@ -684,10 +700,18 @@ class ExecutionEventEmitter:
                     "usage_breakdown": usage_breakdown,
                     "token_source": "runtime_usage",
                     "model": model,
-                    "model_tier": model_tier,
-                    "model_mode": model_mode,
-                    "effort_level": effort_level,
+                    "effective_model": effective_model,
+                    "model_tier": model_tier or "none",
+                    "model_mode": model_mode or "none",
+                    "effort_level": effort_level or "none",
+                    "effort_mode": effort_mode or "none",
                     "runtime_backend": runtime_backend,
+                    "llm_backend": llm_backend,
+                    "permission_mode": permission_mode,
+                    "request_authority_digest": request_authority_digest,
+                    "ac_dispatch_id": self._primary_dispatch_by_attempt.pop(
+                        runtime_identity.session_attempt_id, None
+                    ),
                 },
             )
         )
@@ -733,6 +757,9 @@ class ExecutionEventEmitter:
             "rejected_reasons": rejected_reasons,
             "accepted_fact_count": accepted_fact_count,
             "semantic_ac_key": semantic_ac_key,
+            "ac_dispatch_id": self._primary_dispatch_by_attempt.get(
+                runtime_identity.session_attempt_id
+            ),
         }
         # Strict bool only: a non-bool would be dropped by the proof's
         # ``_strict_bool`` guard anyway, so never smuggle a truthy string here.

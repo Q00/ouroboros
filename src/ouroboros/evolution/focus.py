@@ -20,6 +20,8 @@ from typing import Any
 from ouroboros.core.lineage import EvaluationSummary
 from ouroboros.core.seed import Seed
 from ouroboros.evolution.evaluation_coverage import validate_seed_ac_coverage
+from ouroboros.evolution.provider_usage import call as call
+from ouroboros.evolution.provider_usage import observe_callable
 from ouroboros.evolution.regression import RegressionReport
 from ouroboros.evolution.wonder import WonderOutput
 
@@ -103,7 +105,7 @@ async def call_executor(
         kwargs["execution_id"] = execution_id
     if externally_satisfied_acs and callable_accepts_keyword(executor, "externally_satisfied_acs"):
         kwargs["externally_satisfied_acs"] = externally_satisfied_acs
-    return await executor(seed, **kwargs)
+    return await call(executor, seed, **kwargs)
 
 
 def add_active_focus(
@@ -112,6 +114,7 @@ def add_active_focus(
     focus: EvolutionFocus,
 ) -> None:
     """Pass the active set only to focus-aware Wonder/Reflect implementations."""
+    observe_callable(callable_obj)
     if focus.is_scoped and callable_accepts_keyword(callable_obj, "active_ac_indices"):
         kwargs["active_ac_indices"] = focus.active_ac_indices
 

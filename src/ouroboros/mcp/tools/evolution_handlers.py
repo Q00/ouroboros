@@ -38,6 +38,11 @@ from ouroboros.core.worktree import (
 from ouroboros.evaluation.verification_artifacts import build_verification_artifacts
 from ouroboros.events.conductor import create_conductor_directive_attached_event
 from ouroboros.evolution import loop_support
+from ouroboros.evolution.frugality import (
+    PROOF_EVENT,
+    EvolutionFrugalityProof,
+    capture_project_baseline,
+)
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.job_manager import JobLinks, JobManager
 from ouroboros.mcp.tools.background import start_background_tool_job
@@ -65,6 +70,7 @@ log = structlog.get_logger(__name__)
 _EVOLVE_HANDLER_DEFAULTS: dict[str, object] = {
     "seed_content": None,
     "execute": True,
+    "benchmark_control": False,
     "parallel": True,
     "skip_qa": False,
     "project_dir": None,
@@ -78,6 +84,42 @@ _EVOLVE_HANDLER_DEFAULTS: dict[str, object] = {
     "conductor_directive": None,
     "recover_expired_claim": False,
 }
+
+
+async def _benchmark_control_error(
+    arguments: dict[str, Any],
+    *,
+    event_store: EventStore,
+    lineage_id: str,
+) -> str | None:
+    """Fail closed unless an explicit Gen 2+ control has a clean Git baseline."""
+    requested = arguments.get("benchmark_control", False)
+    if type(requested) is not bool:
+        return "benchmark_control must be a boolean"
+    if not requested:
+        return None
+    if arguments.get("execute", True) is not True:
+        return "benchmark_control requires execute=true"
+    if arguments.get("seed_content") not in (None, ""):
+        return "benchmark_control is Gen 2+ only; omit seed_content"
+    project_dir = arguments.get("project_dir")
+    if not isinstance(project_dir, str) or not project_dir.strip():
+        return "benchmark_control requires an explicit project_dir"
+    await event_store.initialize()
+    events = await event_store.replay_lineage(lineage_id)
+    if not any(
+        event.type == "lineage.generation.completed"
+        and isinstance(event.data.get("generation_number"), int)
+        and event.data["generation_number"] >= 1
+        for event in events
+    ):
+        return "benchmark_control requires an existing completed generation (Gen 2+)"
+    baseline = capture_project_baseline(project_dir)
+    if baseline.git_commit is None or baseline.workspace_path is None:
+        return "benchmark_control requires project_dir to be an explicit Git project/worktree"
+    if not baseline.clean:
+        return "benchmark_control requires a clean Git baseline"
+    return None
 
 
 def _evolve_handler_request_key(
@@ -358,6 +400,17 @@ class EvolveStepHandler(BridgeAwareMixin):
                     default=True,
                 ),
                 MCPToolParameter(
+                    name="benchmark_control",
+                    type=ToolInputType.BOOLEAN,
+                    description=(
+                        "Run a deliberate full-graph frugality control. Default: false. "
+                        "Requires execute=true, Gen 2+, an explicit Git project_dir, "
+                        "and a clean baseline; unavailable through plugin delegation."
+                    ),
+                    required=False,
+                    default=False,
+                ),
+                MCPToolParameter(
                     name="parallel",
                     type=ToolInputType.BOOLEAN,
                     description=(
@@ -459,8 +512,33 @@ class EvolveStepHandler(BridgeAwareMixin):
                 )
             )
         event_store = self.event_store or getattr(self.evolutionary_loop, "event_store", None)
+        benchmark_control = arguments.get("benchmark_control", False)
         if not isinstance(event_store, EventStore):
+            if benchmark_control is not False:
+                return Result.err(
+                    MCPToolError(
+                        "benchmark_control requires a durable EventStore",
+                        tool_name="ouroboros_evolve_step",
+                    )
+                )
             return await self._handle_once(dict(arguments))
+        benchmark_error = await _benchmark_control_error(
+            arguments,
+            event_store=event_store,
+            lineage_id=str(lineage_id),
+        )
+        if benchmark_error is not None:
+            return Result.err(MCPToolError(benchmark_error, tool_name="ouroboros_evolve_step"))
+        if benchmark_control is True and should_dispatch_via_plugin(
+            self.agent_runtime_backend,
+            self.opencode_mode,
+        ):
+            return Result.err(
+                MCPToolError(
+                    "benchmark_control requires the in-process evolve runtime",
+                    tool_name="ouroboros_evolve_step",
+                )
+            )
         configured_project_dir = (
             self.evolutionary_loop.get_project_dir()
             if self.evolutionary_loop is not None
@@ -472,7 +550,8 @@ class EvolveStepHandler(BridgeAwareMixin):
             configured_project_dir=configured_project_dir,
             fallback_cwd=Path.cwd().resolve(),
             execution_policy=loop_support.evolution_execution_policy(
-                getattr(self.evolutionary_loop, "config", None)
+                getattr(self.evolutionary_loop, "config", None),
+                benchmark_control=benchmark_control is True,
             ),
         )
         recovered_generation: int | None = None
@@ -672,6 +751,7 @@ class EvolveStepHandler(BridgeAwareMixin):
 
         execute = arguments.get("execute", True)
         parallel = arguments.get("parallel", True)
+        benchmark_control = arguments.get("benchmark_control", False) is True
         project_dir = arguments.get("project_dir")
         normalized_project_dir = (
             project_dir if isinstance(project_dir, str) and project_dir else None
@@ -701,6 +781,24 @@ class EvolveStepHandler(BridgeAwareMixin):
                     )
                 )
 
+        if benchmark_control:
+            effective_baseline = capture_project_baseline(
+                workspace.effective_cwd if workspace else effective_source_project_dir
+            )
+            if (
+                effective_baseline.git_commit is None
+                or effective_baseline.workspace_path is None
+                or not effective_baseline.clean
+            ):
+                if workspace is not None:
+                    release_lock(workspace.lock_path)
+                return Result.err(
+                    MCPToolError(
+                        "benchmark_control effective worktree must have a clean Git baseline",
+                        tool_name="ouroboros_evolve_step",
+                    )
+                )
+
         project_dir_token = self.evolutionary_loop.set_project_dir(
             workspace.effective_cwd if workspace else effective_source_project_dir
         )
@@ -712,6 +810,8 @@ class EvolveStepHandler(BridgeAwareMixin):
             # (evolve_step calls replay_lineage/append before executor/evaluator)
             await self.evolutionary_loop.event_store.initialize()
             evolve_kwargs: dict[str, Any] = {"execute": execute, "parallel": parallel}
+            if benchmark_control:
+                evolve_kwargs["benchmark_control"] = True
             if conductor_directive is not None:
                 evolve_kwargs["conductor_directive"] = conductor_directive
             result = recovered_evolve_result
@@ -799,6 +899,14 @@ class EvolveStepHandler(BridgeAwareMixin):
                         f"{len(gen.active_ac_indices)} active / "
                         f"{len(gen.frozen_ac_indices)} frozen"
                     ),
+                ]
+            )
+        if gen.frugality_evidence is not None:
+            proof = gen.frugality_evidence.proof
+            text_lines.extend(
+                [
+                    f"**Frugality proof**: {proof.status.value}",
+                    f"**Frugality evidence**: {proof.reason}",
                 ]
             )
         if workspace is not None:
@@ -918,6 +1026,7 @@ class EvolveStepHandler(BridgeAwareMixin):
             "similarity": sig.ontology_similarity,
             "next_generation": step.next_generation,
             "executed": execute,
+            "benchmark_control": benchmark_control,
             "qa_attempted": qa_attempted,
             "has_execution_output": gen.execution_output is not None,
             "active_ac_indices": list(gen.active_ac_indices),
@@ -932,6 +1041,11 @@ class EvolveStepHandler(BridgeAwareMixin):
             meta["worktree_branch"] = workspace.branch
         if qa_meta:
             meta["qa"] = qa_meta
+        if gen.frugality_evidence is not None:
+            meta["frugality"] = {
+                "observation": gen.frugality_evidence.observation.model_dump(mode="json"),
+                "proof": gen.frugality_evidence.proof.model_dump(mode="json"),
+            }
 
         from ouroboros.evolution.loop import StepAction
 
@@ -1320,6 +1434,25 @@ class LineageStatusHandler:
             f"**Generations**: {lineage.current_generation}",
             f"**Created**: {lineage.created_at.isoformat()}",
         ]
+        latest_frugality = next(
+            (event for event in reversed(events) if event.type == PROOF_EVENT),
+            None,
+        )
+        frugality_proof = None
+        if latest_frugality is not None:
+            try:
+                frugality_proof = EvolutionFrugalityProof.model_validate(
+                    latest_frugality.data.get("proof")
+                )
+            except (TypeError, ValueError):
+                frugality_proof = None
+        if frugality_proof is not None:
+            text_lines.extend(
+                [
+                    f"**Frugality proof**: {frugality_proof.status.value}",
+                    f"**Frugality evidence**: {frugality_proof.reason}",
+                ]
+            )
 
         # Ontology summary
         if lineage.current_ontology:
@@ -1379,6 +1512,11 @@ class LineageStatusHandler:
                     "status": lineage.status.value,
                     "generations": lineage.current_generation,
                     "goal": lineage.goal,
+                    "frugality": (
+                        frugality_proof.model_dump(mode="json")
+                        if frugality_proof is not None
+                        else None
+                    ),
                 },
             )
         )
@@ -1422,6 +1560,24 @@ class StartEvolveStepHandler:
             return Result.err(
                 MCPToolError(
                     "lineage_id is required",
+                    tool_name="ouroboros_start_evolve_step",
+                )
+            )
+        benchmark_control = arguments.get("benchmark_control", False)
+        if type(benchmark_control) is not bool:
+            return Result.err(
+                MCPToolError(
+                    "benchmark_control must be a boolean",
+                    tool_name="ouroboros_start_evolve_step",
+                )
+            )
+        if benchmark_control and should_dispatch_via_plugin(
+            self.agent_runtime_backend,
+            self.opencode_mode,
+        ):
+            return Result.err(
+                MCPToolError(
+                    "benchmark_control requires the in-process evolve runtime",
                     tool_name="ouroboros_start_evolve_step",
                 )
             )

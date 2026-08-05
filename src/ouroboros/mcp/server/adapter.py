@@ -1767,11 +1767,16 @@ def create_ouroboros_server(
 
     llm_adapters: dict[str, Any] = {}
 
-    def create_stage_llm_adapter(backend: str) -> Any:
+    def create_stage_llm_adapter(
+        backend: str,
+        *,
+        frugality_proof: bool = False,
+    ) -> Any:
         return create_llm_adapter(
             backend=backend,
             max_turns=stage_max_turns,
             cwd=effective_cwd,
+            frugality_proof=frugality_proof,
             allowed_tools=(
                 [] if backend_supports_tool_envelope(resolve_llm_backend(backend)) else None
             ),
@@ -1784,7 +1789,14 @@ def create_ouroboros_server(
 
     llm_adapter = shared_stage_llm_adapter(interview_llm_backend)
     evaluation_llm_adapter = shared_stage_llm_adapter(evaluate_llm_backend)
-    reflect_llm_adapter = shared_stage_llm_adapter(reflect_llm_backend)
+    reflect_llm_adapter = create_stage_llm_adapter(
+        reflect_llm_backend,
+        frugality_proof=True,
+    )
+    evolution_evaluation_llm_adapter = create_stage_llm_adapter(
+        evaluate_llm_backend,
+        frugality_proof=True,
+    )
 
     # The shared interview adapter above is catalog-sealed for
     # envelope-capable backends (``allowed_tools=[]`` → ``--tools ""``), so
@@ -1833,13 +1845,9 @@ def create_ouroboros_server(
 
     def fresh_llm_adapter(role: str = "reflect"):
         backend = role_llm_backend(role)
-        return create_llm_adapter(
-            backend=backend,
-            max_turns=stage_max_turns,
-            cwd=effective_cwd,
-            allowed_tools=(
-                [] if backend_supports_tool_envelope(resolve_llm_backend(backend)) else None
-            ),
+        return create_stage_llm_adapter(
+            backend,
+            frugality_proof=True,
         )
 
     def fresh_reflect_stage_llm_adapter():
@@ -1870,7 +1878,7 @@ def create_ouroboros_server(
     # Disabled by default to reduce latency per generation step.
     evolve_stage1 = os.environ.get("OUROBOROS_EVOLVE_STAGE1", "false").lower() == "true"
     evolution_eval_pipeline = EvaluationPipeline(
-        llm_adapter=evaluation_llm_adapter,
+        llm_adapter=evolution_evaluation_llm_adapter,
         config=PipelineConfig(
             stage1_enabled=evolve_stage1,
             stage2_enabled=True,
@@ -1945,7 +1953,7 @@ def create_ouroboros_server(
         return _parse_legacy_execution_task_summary(artifact, seed)
 
     spec_extractor = AssertionExtractor(
-        llm_adapter=evaluation_llm_adapter,
+        llm_adapter=evolution_evaluation_llm_adapter,
         model=get_llm_model_for_role(
             "assertion_extraction",
             backend=role_llm_backend("assertion_extraction"),
@@ -2180,7 +2188,11 @@ def create_ouroboros_server(
                 project_dir=project_dir,
             )
 
-            fix_result = await validation_adapter.execute_task_to_result(
+            from ouroboros.evolution.provider_usage import tracked_agent_task_to_result
+
+            fix_result = await tracked_agent_task_to_result(
+                validation_adapter,
+                role="evolution_validation_repair",
                 prompt=fix_prompt,
                 tools=["Read", "Edit", "Write", "Bash", "Glob", "Grep"],
             )
@@ -2197,6 +2209,13 @@ def create_ouroboros_server(
             f"Validation: {len(remaining)} errors remain after {max_attempts} attempts. "
             f"Remaining: {', '.join(remaining[:5])}"
         )
+
+    # These callables either use generation-scoped tracked provider helpers for
+    # every possible model call or stay deterministic.  The loop refuses a
+    # frugality PASS for arbitrary opaque evaluator/validator callables.
+    _evolution_evaluator.frugality_provider_tracking = True  # type: ignore[attr-defined]
+    _evolution_validator.frugality_provider_tracking = True  # type: ignore[attr-defined]
+    _evolution_executor.frugality_provider_tracking = True  # type: ignore[attr-defined]
 
     _scoped_reexecution_env = os.environ.get("OUROBOROS_SCOPED_REEXECUTION", "").strip().lower()
     _scoped_reexecution = _scoped_reexecution_env not in ("0", "false")

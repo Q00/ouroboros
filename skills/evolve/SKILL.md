@@ -35,6 +35,12 @@ ooo evolve "build a task management CLI" --no-execute
 ooo evolve --status <lineage_id>
 ```
 
+### Record an isolated full-graph benchmark control
+Call `ouroboros_evolve_step` for an existing Gen 2+ lineage with
+`benchmark_control: true`, `execute: true`, and an explicit clean Git
+`project_dir`. Use a distinct clean worktree at the treatment commit. Normal
+evolve calls keep `benchmark_control` false and never launch a control arm.
+
 ### Rewind to a previous generation
 ```
 ooo evolve --rewind <lineage_id> <generation_number>
@@ -82,6 +88,8 @@ documented fallback / Path B instead of retrying the failing call.
    - `seed_content`: the generated seed YAML
    - `execute`: `true` (default) for full Execute→Evaluate pipeline,
      `false` for fast ontology-only evolution (no seed execution)
+   - `benchmark_control`: `false` (default). Set `true` only for a deliberate
+     Gen 2+ full-graph control in an explicit clean Git project/worktree.
 6. Check the `action` in the response:
    - `continue` → Inspect `active_ac_indices`, then call `ouroboros_evolve_step`
      again with just `lineage_id`. Only active failed/reopened nodes evolve;
@@ -143,6 +151,43 @@ Then add to your runtime's MCP configuration (e.g., `~/.claude/mcp.json` for Cla
   active node set from failed/regressed verifier results. Only those nodes are
   open to Wonder, Reflect, and execution; PASS nodes are frozen. The active
   output should shrink toward zero rather than feeding the full graph back.
+- **Frugality proof**: A smaller active-node count is a working-set observation,
+  not a savings claim. Gen 2+ records measured total-generation runtime tokens
+  (Wonder, all Reflect attempts, validator/evaluator providers, executor AC
+  attempts, dependency analysis, decomposition policy/attestation/repair,
+  coordinator review, and shadow replay when enabled), wall time, calls, retries,
+  and quality evidence. A PASS requires a paired full-graph control and
+  focused treatment from distinct clean worktrees at the same Git commit, at
+  least 10% fewer total-generation runtime tokens, and no final-gate,
+  evaluation score/stage, drift, reward-hacking, per-AC verdict/score, lineage
+  regression, or TraceGuard degradation. The comparison key covers the complete semantic Seed
+  and previous evaluation. Every expected primary attempt needs exactly one
+  runtime-token receipt and TraceGuard verdict bound to the exact session,
+  primary dispatch, and root identity; every active root must be dispatched;
+  every other generation provider call needs runtime usage; normalized
+  backend/model/tier/mode/effort/permission and provider request configurations
+  must be complete and match
+  the same root AC or auxiliary phase role and preserve per-unit call multiplicity
+  across the paired arms. Shared-unit sequences must be exactly equal; only whole
+  control-only units may be removed. Blank/unknown phase roles are incomplete
+  evidence. Full-graph controls must execute every Seed root; treatment
+  active/frozen sets must exactly partition the Seed. Auxiliary tools,
+  system-prompt identity, request kwargs, and fresh/scoped session mode are
+  configuration-bound. Completion profiles are resolved once into a sealed
+  dispatch config; only registered exact-key, single-attempt, secret-safe adapter
+  attestations whose in-memory endpoint/credential authority reaches the actual
+  call boundary unchanged are proof-eligible. Global or post-attestation mutable
+  routing is ineligible. Malformed attestations invalidate the proof,
+  not evolution. True resumed contexts without semantic identity and
+  unknown/conflicting effective models or unreconciled usage counters are
+  incomplete. Every current
+  Seed AC needs exactly one final verdict against the same final semantic Seed
+  contract. Missing, duplicate, malformed, partial, or opaque evidence is
+  `insufficient_data`. Evidence reads and provider-call capture are capped;
+  oversized or non-finite individual/subtotal/combined usage, cap overflow, and
+  Wonder-only early stops also produce non-PASS durable receipts.
+  Evolve never launches the control automatically because doing so would consume
+  the production savings being measured.
 - **Judge/Gate split**: Evaluation records score and evidence; deterministic
   convergence logic decides accept/continue/stagnate. A passing Gen 1 may end
   immediately—minimum-generation churn is not required after the gate passes.
