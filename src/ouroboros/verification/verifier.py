@@ -39,35 +39,18 @@ MAX_SCALAR_LENGTH = 4096
 _EMPTINESS_WORDS = frozenset({"empty", "blank"})
 
 # A criterion that *forbids* emptiness reads almost identically to one that
-# requires it, and the difference is one short word standing before the noun.
-# Polarity has to be read here, from `ac_text`, because the only other thing in
-# the assertion that could carry it is the extracted pattern — and `\A\Z` is
-# what a model writes for both readings.
-_NEGATIONS = frozenset(
-    {
-        "not",
-        "never",
-        "no",
-        "non",
-        "nor",
-        "without",
-        "cannot",
-        "cant",
-        "isnt",
-        "arent",
-        "wasnt",
-        "werent",
-        "doesnt",
-        "dont",
-        "wont",
-        "shouldnt",
-        "mustnt",
-        "neednt",
-    }
-)
-# A copula is what puts the emptiness on the subject. Without one the criterion
-# is saying something else about the file — "MUST contain an empty field" asks
-# about a value nested inside a file that is anything but empty.
+# requires it, and so does one that asks it of something the file merely
+# contains. Both have to be told apart here, from `ac_text`, because the only
+# other thing in the assertion that could carry the difference is the extracted
+# pattern — and `\A\Z` is what a model writes for every one of these readings.
+#
+# The shape that licenses the rescue is narrow on purpose: the file, then a
+# chain of auxiliaries and adverbs, then a copula, then the emptiness word, then
+# the end of the clause. Everything is decided by what may appear *in* that
+# chain rather than by how near some other word happens to fall, because a
+# window has a far side and a criterion can always put its negation past it.
+
+# A copula is what puts the emptiness on the subject.
 _COPULAS = frozenset(
     {
         "be",
@@ -83,32 +66,99 @@ _COPULAS = frozenset(
         "becomes",
     }
 )
-# An article after the copula makes the adjective attributive: "be empty" is a
-# statement about the file, "be an empty JSON object" is a statement about the
-# two bytes it is required to hold.
-_ARTICLES = frozenset({"a", "an", "the"})
+# The only words allowed to stand between the file and the emptiness word.
+# Negations are absent from this set rather than enumerated in one of their own,
+# so "must not be empty" and "must not under any circumstances be empty" are
+# refused by the same rule and no phrasing can outrun it. So is any noun that
+# would move the subject elsewhere — "marker.txt entries must be empty" is about
+# the entries. An unrecognised word means the sentence is not one this can read,
+# which is a reason to fail closed and not a reason to guess.
+_PREDICATE_CHAIN = _COPULAS | {
+    "must",
+    "shall",
+    "should",
+    "will",
+    "would",
+    "has",
+    "have",
+    "had",
+    "needs",
+    "need",
+    "to",
+    "left",
+    "kept",
+    "always",
+    "still",
+    "already",
+    "completely",
+    "entirely",
+    "totally",
+    "fully",
+    "strictly",
+    "initially",
+    "currently",
+}
+# A file named as the object of a preposition is not the subject of the
+# sentence: "the status field in marker.txt must be empty" is a requirement on
+# the field, and the file it lives in is anything but empty.
+_PREPOSITIONS = frozenset(
+    {
+        "in",
+        "inside",
+        "within",
+        "of",
+        "from",
+        "at",
+        "for",
+        "on",
+        "under",
+        "into",
+        "by",
+        "with",
+        "across",
+        "through",
+        "throughout",
+    }
+)
 # Where the predicate is allowed to stop. An emptiness word followed by anything
 # else is qualifying that thing rather than the file.
-_CLAUSE_ENDS = frozenset({".", ",", ";", ":", "and", "or", "but", "then", "while", "unless", "so"})
-# Far enough to cross "must not be", "should never be", "cannot ever be";
-# short enough that a negation belonging to a different clause does not reach.
-_NEGATION_LOOKBACK = 4
+_CLAUSE_ENDS = frozenset({".", ",", ";", ":", "and", "then"})
+# Emptiness offered as one option among several is not a requirement to be
+# empty, and answering it alone would throw away the evidence the other branch
+# names. The ordinary path can weigh a pattern that spells out both.
+_ALTERNATIVES = frozenset({"or", "unless", "otherwise", "either", "alternatively", "except"})
+_SENTENCE_ENDS = frozenset({".", ";"})
+
+
+# Stands in for the file's own name, so that the walk has one token to start
+# from and `empty.txt MUST contain data` stops carrying an emptiness word it
+# never meant. Underscored to keep it out of reach of any English word.
+_FILE_TOKEN = "__the_file__"
 
 
 def _mask_file_hint(ac_text: str, file_hint: str) -> str:
-    """Blank out mentions of the file's own name before the wording is read.
+    """Replace mentions of the file's own name with `_FILE_TOKEN`.
 
-    `empty.txt MUST contain data` says nothing about emptiness; the word is in
-    the filename. Names are matched as whole tokens for the same reason the
-    mention check is — `a.py` sits inside `data.py`.
+    Names are matched as whole tokens for the same reason the mention check is —
+    `a.py` sits inside `data.py`.
     """
     if not file_hint:
         return ac_text
     return re.sub(
         rf"(\A|[\s'\"`(\[]){re.escape(file_hint)}(?=\Z|[\s'\"`)\],.;:])",
-        r"\1__file__",
+        rf"\1{_FILE_TOKEN}",
         ac_text,
     )
+
+
+def _offers_an_alternative_to_emptiness(tokens: list[str], position: int) -> bool:
+    """True when the rest of the sentence lets something other than emptiness satisfy it."""
+    for token in tokens[position + 1 :]:
+        if token in _SENTENCE_ENDS:
+            return False
+        if token in _ALTERNATIVES:
+            return True
+    return False
 
 
 def _emptiness_the_criterion_requires(ac_text: str, file_hint: str) -> str | None:
@@ -118,36 +168,41 @@ def _emptiness_the_criterion_requires(ac_text: str, file_hint: str) -> str | Non
     file holding one tab, and the caller has to answer the question that was
     actually asked.
 
-    Four conditions, each closing a way the word can appear without the file
-    being what has to be empty. It is read off words rather than substrings, so
-    `nonempty` is its own word and never an occurrence of `empty`. It is not
-    negated within the lookback, which is what separates "must be empty" from
-    "must not be empty". It follows a copula, without which the criterion is
-    predicating emptiness of something other than its subject. And it ends its
-    clause, because `empty JSON object` describes the contents rather than the
-    file.
+    Walks forward from each mention of the file, and returns a word only when
+    every step of the walk holds: the mention is not the object of a preposition,
+    so the file is the subject rather than something the subject lives in; every
+    word between it and the emptiness word belongs to `_PREDICATE_CHAIN`, which
+    no negation and no competing noun does; one of them is a copula, without
+    which the emptiness is being predicated of something else; the emptiness word
+    ends its clause, because `empty JSON object` describes contents rather than a
+    file; and the sentence offers no alternative to being empty.
 
-    One qualifying occurrence is enough: "must be empty, and must not be
-    deleted" requires emptiness despite carrying a negation elsewhere. Anything
-    this cannot place on the file itself returns None and fails closed.
+    Reading words rather than substrings is what keeps `nonempty` from being an
+    occurrence of `empty`. One qualifying mention is enough: "must be empty, and
+    must not be deleted" requires emptiness despite carrying a negation in its
+    other clause. Anything this cannot place on the file itself returns None,
+    and the criterion fails closed on the ordinary path.
     """
     text = _mask_file_hint(ac_text, file_hint).lower().replace("'", "").replace("’", "")
     tokens = re.findall(r"[a-z_]+|[.,;:]", text)
-    for position, word in enumerate(tokens):
-        if word not in _EMPTINESS_WORDS:
+    for position, token in enumerate(tokens):
+        if token != _FILE_TOKEN:
             continue
-        lookback = tokens[max(0, position - _NEGATION_LOOKBACK) : position]
-        if any(token in _NEGATIONS for token in lookback):
+        if position > 0 and tokens[position - 1] in _PREPOSITIONS:
             continue
-        copulas = [index for index, token in enumerate(lookback) if token in _COPULAS]
-        if not copulas:
+        saw_copula = False
+        step = position + 1
+        while step < len(tokens) and tokens[step] in _PREDICATE_CHAIN:
+            saw_copula = saw_copula or tokens[step] in _COPULAS
+            step += 1
+        if not saw_copula or step >= len(tokens) or tokens[step] not in _EMPTINESS_WORDS:
             continue
-        if any(token in _ARTICLES for token in lookback[copulas[-1] + 1 :]):
-            continue
-        following = tokens[position + 1] if position + 1 < len(tokens) else None
+        following = tokens[step + 1] if step + 1 < len(tokens) else None
         if following is not None and following not in _CLAUSE_ENDS:
             continue
-        return word
+        if _offers_an_alternative_to_emptiness(tokens, step):
+            continue
+        return tokens[step]
     return None
 
 

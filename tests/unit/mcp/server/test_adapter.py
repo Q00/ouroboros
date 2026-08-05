@@ -683,19 +683,33 @@ Parallel Execution Verification Report
             ("marker.txt", "", "marker.txt MUST contain an empty JSON string field"),
             ("marker.txt", "", "marker.txt MUST be an empty JSON object"),
             ("marker.txt", "  \t\n", "marker.txt MUST be empty"),
+            ("marker.txt", "", "The status field in marker.txt must be empty."),
+            ("marker.txt", "", "marker.txt entries must be empty"),
+            ("marker.txt", "", "marker.txt must not under any circumstances be empty."),
         ],
-        ids=["empty-filename", "nested-value", "attributive", "whitespace-is-not-empty"],
+        ids=[
+            "empty-filename",
+            "nested-value",
+            "attributive",
+            "whitespace-is-not-empty",
+            "prepositional-subject",
+            "competing-noun-subject",
+            "distant-negation",
+        ],
     )
     def test_a_misread_emptiness_word_cannot_be_approved_through_the_adapter(
         self, tmp_path: Any, tier: VerificationTier, filename: str, content: str, ac_text: str
     ) -> None:
         """An emptiness word not predicated of the file must not reach formal approval.
 
-        Three of these require the file to hold content while mentioning emptiness —
-        in the filename, in a nested value, as an adjective on another noun. The
-        fourth is a whitespace-only file against an `empty` criterion, which `\\A\\Z`
-        does not match either. Each produced `final_approved=True`, `score=1.0`,
-        `final_verdict="pass"` at the adapter for a criterion the project violates.
+        Most of these require the file to hold content while mentioning emptiness —
+        in the filename, in a nested value, as an adjective on another noun, or with
+        the file named as the object of a preposition while some field inside it is
+        the subject. One is a whitespace-only file against an `empty` criterion,
+        which `\\A\\Z` does not match either, and one puts its negation far enough
+        along that a bounded lookback loses it. Each produced `final_approved=True`,
+        `score=1.0`, `final_verdict="pass"` at the adapter for a criterion the
+        project violates.
         """
         (tmp_path / filename).write_text(content)
         assertion = SpecAssertion(

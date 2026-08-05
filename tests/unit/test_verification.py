@@ -802,8 +802,19 @@ class TestSpecVerifier:
             "pkg/config.py must not be blank",
             "pkg/config.py must be non-empty",
             "pkg/config.py must contain a nonempty value",
+            "pkg/config.py must not under any circumstances be empty.",
+            "pkg/config.py should never, under any reading of this spec, be blank",
         ],
-        ids=["must-not", "never", "cannot-blank", "not-blank", "hyphenated", "nonempty-word"],
+        ids=[
+            "must-not",
+            "never",
+            "cannot-blank",
+            "not-blank",
+            "hyphenated",
+            "nonempty-word",
+            "distant-negation",
+            "very-distant-negation",
+        ],
     )
     def test_a_criterion_forbidding_emptiness_is_not_satisfied_by_an_empty_file(
         self, tier: VerificationTier, ac_text: str
@@ -816,7 +827,9 @@ class TestSpecVerifier:
         against an AC that requires content.
 
         `nonempty` is here because reading the word as a substring saw `empty`
-        inside it and called the criterion an emptiness requirement.
+        inside it and called the criterion an emptiness requirement. The distant
+        negations are here because a fixed lookback window has a far side, and a
+        criterion can always put its `not` past it.
         """
         project = self._create_project({"pkg/config.py": ""})
         assertion = SpecAssertion(
@@ -867,8 +880,20 @@ class TestSpecVerifier:
             ("marker.txt", "marker.txt MUST contain an empty JSON string field"),
             ("marker.txt", "marker.txt MUST be an empty JSON object"),
             ("marker.txt", "marker.txt MUST list the empty partitions"),
+            ("marker.txt", "The status field in marker.txt must be empty."),
+            ("marker.txt", "Every record within marker.txt must be blank"),
+            ("marker.txt", "marker.txt entries must be empty"),
         ],
-        ids=["empty-filename", "blank-filename", "nested-value", "attributive", "object-of-verb"],
+        ids=[
+            "empty-filename",
+            "blank-filename",
+            "nested-value",
+            "attributive",
+            "object-of-verb",
+            "prepositional-subject",
+            "prepositional-subject-blank",
+            "competing-noun-subject",
+        ],
     )
     def test_an_emptiness_word_that_is_not_about_the_file_earns_nothing(
         self, tier: VerificationTier, filename: str, ac_text: str
@@ -878,8 +903,9 @@ class TestSpecVerifier:
         Each of these mentions emptiness while requiring the file to hold content,
         and each was read as an emptiness requirement: the word sat in the file's own
         name, or described a value nested inside it, or was the adjective on some
-        other noun. With `\\A\\Z` and an empty file that produced a formal PASS for a
-        criterion the file plainly violates.
+        other noun, or the file was named as the object of a preposition while some
+        field inside it was the actual subject. With `\\A\\Z` and an empty file that
+        produced a formal PASS for a criterion the file plainly violates.
 
         Everything here falls through to the ordinary path, where `\\A\\Z` is refused
         and the criterion fails closed.
@@ -899,6 +925,45 @@ class TestSpecVerifier:
 
         assert summary.reports[0].verified_pass is False, f"{ac_text!r} must not verify"
         assert summary.discrepancy_count == 1
+        assert summary.override_approval is False
+
+    @pytest.mark.parametrize("tier", [VerificationTier.T2_STRUCTURAL, VerificationTier.T1_CONSTANT])
+    @pytest.mark.parametrize(
+        "ac_text",
+        [
+            "marker.txt must be empty or contain # generated",
+            "marker.txt must be empty, or contain # generated",
+            "marker.txt must be empty unless the build is incremental",
+        ],
+        ids=["or", "comma-or", "unless"],
+    )
+    def test_emptiness_offered_as_one_option_is_not_an_emptiness_requirement(
+        self, tier: VerificationTier, ac_text: str
+    ) -> None:
+        """A criterion the file can satisfy another way is not this rescue's to answer.
+
+        Answering the emptiness branch alone would throw away the evidence the
+        other branch names and publish an authoritative "the file is not empty"
+        for a criterion that never required it to be. The refusal has to say what
+        it actually is — a pattern that cannot be trusted — so the failure is
+        legible instead of a confident wrong reason.
+        """
+        project = self._create_project({"marker.txt": "# generated\n"})
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text=ac_text,
+            tier=tier,
+            pattern=r"\A\Z|# generated",
+            file_hint="marker.txt",
+        )
+
+        summary = SpecVerifier(project_dir=project).verify_all(
+            (assertion,), agent_results={0: True}
+        )
+
+        detail = summary.reports[0].results[0].detail
+        assert "empty" not in detail, f"{ac_text!r} must not be answered as an emptiness claim"
+        assert "regex" in detail.lower()
         assert summary.override_approval is False
 
     def test_empty_matching_pattern_fails_closed_against_an_agent_pass_claim(self) -> None:
