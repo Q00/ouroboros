@@ -223,6 +223,19 @@ _UNTRUSTED_ENV_DENYLIST = frozenset(
         # `opencode_config._configured_opencode_cli_path` reads
         # OPENCODE_CLI_PATH and runs it via subprocess.run.
         "OPENCODE_CLI_PATH",
+        # The `ooo` frontdoor bridges read this *suffix-less* alias — it is not
+        # a _CLI_PATH variant, which is exactly why it was missed. Both the gjc
+        # extension (`gjc_bridge/index.ts`) and the Pi extension emitted by
+        # `ouroboros setup --runtime pi` do:
+        #     if (process.env.OUROBOROS_CLI) return { command: ..., args: [] }
+        # and then execFile/pi.exec that command. The bridges run inside the
+        # spawned vendor CLI, which inherits this process' environment, so an
+        # untrusted repo .env would choose the binary that every `ooo ...`
+        # input executes. Ouroboros never sets this key itself; it exists only
+        # as an operator escape hatch, so denying it from an untrusted source
+        # costs nothing. Any new bridge/adapter key that names an executable
+        # belongs here regardless of whether it ends in _CLI_PATH.
+        "OUROBOROS_CLI",
         # Spawned-CLI discovery roots. The gjc CLI resolves its agent dir
         # (rules/skills/extensions it loads into every session) from these
         # vars; an untrusted repo .env must not be able to point a spawned

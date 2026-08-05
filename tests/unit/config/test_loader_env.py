@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 
 import pytest
 
+from ouroboros.config import loader
 from ouroboros.config.loader import (
     _UNTRUSTED_ENV_DENYLIST,
     _is_assignable_env_key,
@@ -105,6 +107,8 @@ def test_denylist_covers_known_execution_routing_keys() -> None:
         "SHLIB_PATH",
         "OUROBOROS_CLI_PATH",
         "OPENCODE_CLI_PATH",
+        # Suffix-less alias read by the `ooo` frontdoor bridges (gjc, Pi).
+        "OUROBOROS_CLI",
         # Spawned-CLI / agent instruction + extension roots.
         "GJC_CODING_AGENT_DIR",
         "GJC_CONFIG_DIR",
@@ -140,6 +144,61 @@ def test_denylist_covers_known_execution_routing_keys() -> None:
     }
     missing = required - _UNTRUSTED_ENV_DENYLIST
     assert not missing, f"denylist regressed, missing: {sorted(missing)}"
+
+
+# The `ooo` frontdoor bridges pick the executable they dispatch to from an
+# environment variable. Those sources live outside Python's import graph, so
+# nothing else ties them to the denylist: the alias they read (OUROBOROS_CLI)
+# was missed precisely because it lacks the _CLI_PATH suffix every sibling has.
+# This contract test re-derives the key from the bridge sources themselves, so
+# a new bridge — or a rename of the existing one — fails here instead of
+# silently reopening the untrusted-.env execution-redirect hole.
+_PACKAGE_ROOT = Path(loader.__file__).resolve().parent.parent
+_BRIDGE_ENTRY_SOURCES = (
+    _PACKAGE_ROOT / "gjc_bridge" / "index.ts",
+    # The Pi extension is emitted as an f-string template, hence the `{{`.
+    _PACKAGE_ROOT / "cli" / "commands" / "setup.py",
+)
+_BRIDGE_ENTRY_ENV_RE = re.compile(
+    r"process\.env\.([A-Z0-9_]+)\s*\)\s*return\s*\{\{?\s*command",
+)
+
+
+def test_bridge_dispatch_entry_env_keys_are_denylisted() -> None:
+    """Every env var a bridge turns into an exec command must be denylisted."""
+    found: dict[str, Path] = {}
+    for source in _BRIDGE_ENTRY_SOURCES:
+        assert source.is_file(), f"bridge source moved: {source}"
+        for key in _BRIDGE_ENTRY_ENV_RE.findall(source.read_text(encoding="utf-8")):
+            found[key] = source
+
+    # Guard the regex itself: a silent zero-match would make this test vacuous.
+    assert len(found) >= 1, "no bridge dispatch-entry env key found — regex drifted"
+
+    missing = {key: str(path) for key, path in found.items() if key not in _UNTRUSTED_ENV_DENYLIST}
+    assert not missing, f"bridge exec-command env keys missing from denylist: {missing}"
+
+
+def test_untrusted_env_cannot_set_bridge_cli_alias(tmp_path: Path, monkeypatch) -> None:
+    """A cloned repo's .env must not choose the binary the `ooo` bridge runs."""
+    env_file = tmp_path / ".env"
+    env_file.write_text("OUROBOROS_CLI=./.tools/helper\n", encoding="utf-8")
+    monkeypatch.delenv("OUROBOROS_CLI", raising=False)
+
+    _load_env_file(env_file, trusted=False)
+
+    assert "OUROBOROS_CLI" not in os.environ
+
+
+def test_trusted_env_may_still_set_bridge_cli_alias(tmp_path: Path, monkeypatch) -> None:
+    """~/.ouroboros/.env keeps the operator's escape hatch for a non-PATH install."""
+    env_file = tmp_path / ".env"
+    env_file.write_text("OUROBOROS_CLI=/opt/ouroboros/bin/ouroboros\n", encoding="utf-8")
+    monkeypatch.delenv("OUROBOROS_CLI", raising=False)
+
+    _load_env_file(env_file, trusted=True)
+
+    assert os.environ["OUROBOROS_CLI"] == "/opt/ouroboros/bin/ouroboros"
 
 
 def test_project_env_cannot_redirect_trusted_home_during_import(tmp_path: Path) -> None:
