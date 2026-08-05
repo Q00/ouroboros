@@ -1069,6 +1069,91 @@ def _supports_directory_fd_publication() -> bool:
     return _DIRECTORY_FD_PUBLICATION_SUPPORTED
 
 
+def _backup_existing_destination_at(
+    directory_fd: int,
+    path: Path,
+    *,
+    root: Path,
+    label: str,
+) -> str | None:
+    """Hard-link an existing regular destination before atomic replacement."""
+    try:
+        destination = os.stat(path.name, dir_fd=directory_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise ArtifactIntegrityError(
+            f"{label} existing destination cannot be inspected safely",
+            operation="path_resolution",
+            details={"path": str(path), "root": str(root)},
+        ) from exc
+    if not stat.S_ISREG(destination.st_mode):
+        raise ArtifactIntegrityError(
+            f"{label} existing destination must be a regular file",
+            operation="path_resolution",
+            details={"path": str(path), "root": str(root)},
+        )
+    if os.link not in os.supports_dir_fd or os.link not in os.supports_follow_symlinks:
+        raise ArtifactIntegrityError(
+            f"{label} replacement requires a no-follow directory-relative backup",
+            operation="path_resolution",
+            details={"path": str(path), "root": str(root)},
+        )
+
+    backup_name = f".{path.name}.{os.urandom(16).hex()}.rollback"
+    try:
+        os.link(
+            path.name,
+            backup_name,
+            src_dir_fd=directory_fd,
+            dst_dir_fd=directory_fd,
+            follow_symlinks=False,
+        )
+        os.fsync(directory_fd)
+    except (NotImplementedError, OSError, TypeError) as exc:
+        try:
+            os.unlink(backup_name, dir_fd=directory_fd)
+        except OSError:
+            pass
+        raise ArtifactIntegrityError(
+            f"{label} existing destination could not be preserved before replacement",
+            operation="path_resolution",
+            details={"path": str(path), "root": str(root)},
+        ) from exc
+    return backup_name
+
+
+def _restore_published_destination_at(
+    directory_fd: int,
+    path: Path,
+    backup_name: str | None,
+    *,
+    root: Path,
+    label: str,
+) -> None:
+    """Rollback a rejected publication through the same pinned directory."""
+    try:
+        if backup_name is None:
+            try:
+                os.unlink(path.name, dir_fd=directory_fd)
+            except FileNotFoundError:
+                pass
+        else:
+            os.rename(
+                backup_name,
+                path.name,
+                src_dir_fd=directory_fd,
+                dst_dir_fd=directory_fd,
+            )
+        os.fsync(directory_fd)
+    except OSError as exc:
+        raise ArtifactIntegrityError(
+            f"{label} rejected publication could not restore its prior destination",
+            operation="path_resolution",
+            details={"path": str(path), "root": str(root)},
+        ) from exc
+
+
 def _atomic_write_bytes_at(
     path: Path,
     payload: bytes,
@@ -1090,6 +1175,7 @@ def _atomic_write_bytes_at(
 
     temporary_name = f".{path.name}.{os.urandom(16).hex()}.tmp"
     temporary_fd = -1
+    backup_name: str | None = None
     published = False
     try:
         _validate_directory_binding(directory_fd, path, root=root, label=label)
@@ -1107,6 +1193,13 @@ def _atomic_write_bytes_at(
             handle.flush()
             os.fsync(handle.fileno())
         _validate_directory_binding(directory_fd, path, root=root, label=label)
+        backup_name = _backup_existing_destination_at(
+            directory_fd,
+            path,
+            root=root,
+            label=label,
+        )
+        _validate_directory_binding(directory_fd, path, root=root, label=label)
         os.rename(
             temporary_name,
             path.name,
@@ -1116,16 +1209,43 @@ def _atomic_write_bytes_at(
         published = True
         try:
             _validate_directory_binding(directory_fd, path, root=root, label=label)
+            os.fsync(directory_fd)
         except BaseException:
-            os.unlink(path.name, dir_fd=directory_fd)
+            _restore_published_destination_at(
+                directory_fd,
+                path,
+                backup_name,
+                root=root,
+                label=label,
+            )
+            backup_name = None
             raise
-        os.fsync(directory_fd)
+        if backup_name is not None:
+            try:
+                os.unlink(backup_name, dir_fd=directory_fd)
+            except FileNotFoundError:
+                pass
+            else:
+                try:
+                    os.fsync(directory_fd)
+                except OSError:
+                    # The new destination was already durably committed. A
+                    # failed cleanup fsync can at worst retain the hidden old
+                    # hard link after a crash; reporting publication failure
+                    # here would incorrectly imply the old state was restored.
+                    pass
+            backup_name = None
     except BaseException:
         if not published:
             try:
                 os.unlink(temporary_name, dir_fd=directory_fd)
             except FileNotFoundError:
                 pass
+            if backup_name is not None:
+                try:
+                    os.unlink(backup_name, dir_fd=directory_fd)
+                except FileNotFoundError:
+                    pass
         raise
     finally:
         if temporary_fd >= 0:

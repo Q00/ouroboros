@@ -459,6 +459,64 @@ def test_publication_revalidates_parent_handle_at_replace_boundary(
     assert list(displaced.iterdir()) == []
 
 
+def test_prune_manifest_update_restores_previous_file_after_parent_swap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A rejected tombstone update keeps the last durable reachability state."""
+
+    if not artifact_store_module._supports_directory_fd_publication():
+        pytest.skip("directory-relative publication is unavailable on this platform")
+    if os.link not in os.supports_dir_fd or os.link not in os.supports_follow_symlinks:
+        pytest.skip("directory-relative no-follow backups are unavailable on this platform")
+
+    store = _store(tmp_path)
+    envelope = _put(
+        store,
+        "CONTRACT1",
+        {"existing_manifest": "must survive"},
+        retain_until=NOW - timedelta(days=1),
+    )
+    body_path = _blob_path(store, envelope.artifact_ref)
+    _age(body_path, days=100)
+    manifest_parent = store.root / "contracts" / "CONTRACT1"
+    manifest_path = manifest_parent / "events.json"
+    previous_manifest = manifest_path.read_bytes()
+
+    external = tmp_path / "manifest-update-external"
+    displaced = tmp_path / "manifest-update-displaced"
+    external.mkdir()
+    original_rename = os.rename
+    swapped = False
+
+    def swap_parent_during_manifest_replace(
+        src: object,
+        dst: object,
+        **kwargs: object,
+    ) -> None:
+        nonlocal swapped
+        if dst == "events.json" and kwargs.get("src_dir_fd") is not None and not swapped:
+            original_rename(manifest_parent, displaced)
+            try:
+                manifest_parent.symlink_to(external, target_is_directory=True)
+            except OSError:
+                pytest.skip("directory symlinks are not supported in this environment")
+            swapped = True
+        original_rename(src, dst, **kwargs)
+
+    monkeypatch.setattr(os, "rename", swap_parent_during_manifest_replace)
+
+    with pytest.raises(ArtifactIntegrityError, match="link|junction|changed"):
+        store.prune(ttl=timedelta(days=90), apply=True, now=NOW)
+
+    assert swapped
+    assert list(external.iterdir()) == []
+    assert body_path.exists()
+    restored_manifest = displaced / "events.json"
+    assert restored_manifest.read_bytes() == previous_manifest
+    assert list(displaced.iterdir()) == [restored_manifest]
+
+
 def test_path_unsafe_contract_id_is_rejected(tmp_path: Path) -> None:
     store = _store(tmp_path)
     with pytest.raises(ValueError, match="path-safe"):
