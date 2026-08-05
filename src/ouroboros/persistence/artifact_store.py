@@ -9,7 +9,7 @@ reference cannot race a prune decision.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -25,7 +25,6 @@ from typing import Any, Final
 
 from ouroboros.core.disposable_memory import (
     ARTIFACT_REF_PATTERN,
-    DISPOSABLE_CONTRACT_ID_PATTERN,
     MAX_DISPOSABLE_ARTIFACT_BYTES,
     DisposableResultEnvelope,
     DisposableResultStatus,
@@ -34,7 +33,17 @@ from ouroboros.core.disposable_memory import (
 from ouroboros.core.errors import PersistenceError
 from ouroboros.core.file_lock import file_lock
 from ouroboros.persistence.artifact_io import read_fd_bounded as _read_fd_bounded
-from ouroboros.persistence.artifact_schema import MANIFEST_MAX_BYTES, require_fields
+from ouroboros.persistence.artifact_schema import (
+    MANIFEST_MAX_BYTES,
+    require_fields,
+)
+from ouroboros.persistence.artifact_schema import as_utc as _as_utc
+from ouroboros.persistence.artifact_schema import (
+    digest_from_ref as _digest_from_ref,
+)
+from ouroboros.persistence.artifact_schema import (
+    validate_contract_id as _validate_contract_id,
+)
 
 DEFAULT_ARTIFACT_TTL = timedelta(days=90)
 DEFAULT_REPLAY_RETENTION = timedelta(days=90)
@@ -243,6 +252,7 @@ class ContentAddressedArtifactStore:
         active: bool = False,
         retain_until: datetime | None = None,
         now: datetime | None = None,
+        precommit_check: Callable[[], None] | None = None,
     ) -> DisposableResultEnvelope:
         """Publish a body, then durably bind its small envelope to a contract.
 
@@ -274,6 +284,8 @@ class ContentAddressedArtifactStore:
             events_emitted_count=events_emitted_count,
         )
         with self._store_lock(exclusive=True):
+            if precommit_check is not None:
+                precommit_check()
             manifest = self._load_manifest_locked(contract_id, missing_ok=True)
             existing = _latest_artifact_event(manifest)
             if existing is not None:
@@ -297,6 +309,8 @@ class ContentAddressedArtifactStore:
                 self._read_blob_locked(artifact_ref)
                 return _envelope_from_event(existing, contract_id=contract_id)
 
+            if precommit_check is not None:
+                precommit_check()
             self._write_blob_locked(digest, payload)
             manifest["active"] = bool(active)
             manifest["retain_until"] = retention.isoformat()
@@ -326,8 +340,10 @@ class ContentAddressedArtifactStore:
 
     def envelope_if_exists(self, contract_id: str) -> DisposableResultEnvelope | None:
         """Read only a contract's bounded envelope, never its artifact body."""
-        self.initialize()
         contract_id = _validate_contract_id(contract_id)
+        if not self._manifest_path(contract_id).exists():
+            return None
+        self.initialize()
         with self._store_lock(exclusive=False):
             manifest = self._load_manifest_locked(contract_id, missing_ok=True)
             event = _latest_artifact_event(manifest)
@@ -348,8 +364,10 @@ class ContentAddressedArtifactStore:
 
     def fetch_if_exists(self, contract_id: str) -> FetchedArtifact | None:
         """Fetch a durable contract, returning ``None`` only when no binding exists."""
-        self.initialize()
         contract_id = _validate_contract_id(contract_id)
+        if not self._manifest_path(contract_id).exists():
+            return None
+        self.initialize()
         with self._store_lock(exclusive=False):
             manifest = self._load_manifest_locked(contract_id, missing_ok=True)
             event = _latest_artifact_event(manifest)
@@ -837,14 +855,6 @@ class ContentAddressedArtifactStore:
             )
 
 
-def _validate_contract_id(contract_id: str) -> str:
-    if not DISPOSABLE_CONTRACT_ID_PATTERN.fullmatch(contract_id):
-        raise ValueError(
-            "contract_id must be 1-128 path-safe ASCII characters beginning with alphanumeric"
-        )
-    return contract_id
-
-
 def _validate_json_native(
     value: Any,
     *,
@@ -896,12 +906,6 @@ def _validate_json_native(
             _validate_json_native(item, path=f"{path}.{key}", ancestors=active)
     finally:
         active.remove(marker)
-
-
-def _digest_from_ref(artifact_ref: str) -> str:
-    if not ARTIFACT_REF_PATTERN.fullmatch(artifact_ref):
-        raise ValueError("invalid artifact_ref")
-    return artifact_ref.removeprefix("sha256:")
 
 
 def _event_artifact_ref(event: dict[str, Any], *, contract_id: str) -> str:
@@ -1048,12 +1052,6 @@ def _parse_datetime(value: Any, *, field: str, path: Path) -> datetime:
             details={"path": str(path)},
         )
     return parsed.astimezone(UTC)
-
-
-def _as_utc(value: datetime) -> datetime:
-    if value.tzinfo is None:
-        raise ValueError("datetime values must include a timezone")
-    return value.astimezone(UTC)
 
 
 def _require_contained(path: Path, *, root: Path, label: str) -> None:

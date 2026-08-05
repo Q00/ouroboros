@@ -6,6 +6,7 @@ import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+import threading
 import time
 from typing import Any
 
@@ -40,8 +41,30 @@ class DisposableMemory:
     ) -> DisposableResultEnvelope:
         """Execute child work and return only a bounded result envelope."""
         resolved_contract_id = contract_id or new_call_id()
-        async with _contract_execution_lock(self.artifact_store, resolved_contract_id):
-            existing = self.artifact_store.envelope_if_exists(resolved_contract_id)
+        async with asyncio.timeout(timeout):
+            return await self._run_within_timeout(
+                intent=intent,
+                runtime_id=runtime_id,
+                work_fn=work_fn,
+                contract_id=resolved_contract_id,
+                events_emitted_count=events_emitted_count,
+            )
+
+    async def _run_within_timeout(
+        self,
+        *,
+        intent: str,
+        runtime_id: str,
+        work_fn: Callable[[AgentProcessHandle], Awaitable[Any]],
+        contract_id: str,
+        events_emitted_count: int,
+    ) -> DisposableResultEnvelope:
+        """Run while the caller-owned timeout covers locks and persistence."""
+        async with _contract_execution_lock(self.artifact_store, contract_id):
+            existing = await asyncio.to_thread(
+                self.artifact_store.envelope_if_exists,
+                contract_id,
+            )
             if existing is not None:
                 await self._append_reference_event(existing)
                 return existing
@@ -57,13 +80,27 @@ class DisposableMemory:
                 if handle.should_cancel():
                     raise asyncio.CancelledError("disposable work cancelled before publication")
                 duration_ms = max(0, round((time.monotonic() - started) * 1000))
-                envelope = self.artifact_store.put_for_contract(
-                    contract_id=resolved_contract_id,
-                    body=body,
-                    runtime_id=runtime_id,
-                    duration_ms=duration_ms,
-                    events_emitted_count=events_emitted_count,
-                )
+                cancelled = threading.Event()
+
+                def ensure_active() -> None:
+                    if cancelled.is_set() or handle.should_cancel():
+                        raise asyncio.CancelledError(
+                            "disposable work cancelled while awaiting artifact persistence"
+                        )
+
+                try:
+                    envelope = await asyncio.to_thread(
+                        self.artifact_store.put_for_contract,
+                        contract_id=contract_id,
+                        body=body,
+                        runtime_id=runtime_id,
+                        duration_ms=duration_ms,
+                        events_emitted_count=events_emitted_count,
+                        precommit_check=ensure_active,
+                    )
+                except asyncio.CancelledError:
+                    cancelled.set()
+                    raise
                 handle.complete_on_return_after_cancel()
                 await self._append_reference_event(envelope)
                 return envelope
@@ -72,10 +109,10 @@ class DisposableMemory:
                 event_store=self.event_store,
                 intent=intent,
                 work_fn=persist_before_completion,
-                timeout=timeout,
+                timeout=None,
                 checkpoint_store=self.checkpoint_store,
-                process_id=resolved_contract_id,
-                cancel_key=resolved_contract_id,
+                process_id=contract_id,
+                cancel_key=contract_id,
             )
 
     def fetch(self, contract_id: str) -> FetchedArtifact:

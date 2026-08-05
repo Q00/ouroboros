@@ -17,6 +17,7 @@ from ouroboros.persistence.artifact_store import (
     ArtifactContractConflictError,
     ArtifactIntegrityError,
     ArtifactManifestError,
+    ArtifactNotFoundError,
     ArtifactStoreError,
     ArtifactTombstonedError,
     ArtifactTooLargeError,
@@ -89,6 +90,17 @@ def test_fetch_is_explicit_and_verifies_content_hash(tmp_path: Path) -> None:
     _blob_path(store, envelope.artifact_ref).write_text('{"tampered":true}', encoding="utf-8")
     with pytest.raises(ArtifactIntegrityError, match="hash does not match"):
         store.fetch("CONTRACT1")
+
+
+def test_missing_contract_reads_do_not_create_store_state(tmp_path: Path) -> None:
+    store = ContentAddressedArtifactStore.for_project(tmp_path)
+
+    assert store.envelope_if_exists("MISSING1") is None
+    assert store.fetch_if_exists("MISSING1") is None
+    with pytest.raises(ArtifactNotFoundError):
+        store.fetch("MISSING1")
+
+    assert not (tmp_path / ".ouroboros").exists()
 
 
 def test_fetch_and_replay_reject_oversized_stored_body_before_read(

@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+from itertools import pairwise
 import json
 import multiprocessing
 import os
 from pathlib import Path
+import threading
 from typing import Any
 
 import pytest
@@ -357,6 +359,65 @@ def test_overlapping_processes_execute_same_contract_child_once(tmp_path: Path) 
     assert not errors, "\n".join(errors)
     assert records[0][1] == records[1][1]
     assert len(counter_path.read_text(encoding="utf-8").splitlines()) == 1
+
+
+@pytest.mark.asyncio
+async def test_store_contention_preserves_event_loop_timeout_and_cancellation(
+    tmp_path: Path,
+) -> None:
+    service, _ = _service(tmp_path)
+    lock_entered = threading.Event()
+    release_lock = threading.Event()
+    holder: threading.Thread | None = None
+    heartbeat: list[float] = []
+    stop_heartbeat = asyncio.Event()
+    child_calls = 0
+
+    async def pulse() -> None:
+        while not stop_heartbeat.is_set():
+            heartbeat.append(asyncio.get_running_loop().time())
+            await asyncio.sleep(0.01)
+
+    async def child_work(_handle: AgentProcessHandle) -> dict[str, bool]:
+        nonlocal child_calls, holder
+        child_calls += 1
+
+        def hold_global_store_lock() -> None:
+            with service.artifact_store._store_lock(exclusive=True):
+                lock_entered.set()
+                release_lock.wait(1.0)
+
+        holder = threading.Thread(target=hold_global_store_lock, daemon=True)
+        holder.start()
+        assert await asyncio.to_thread(lock_entered.wait, 1.0)
+        return {"must_not_publish_after_timeout": True}
+
+    pulse_task = asyncio.create_task(pulse())
+    started = asyncio.get_running_loop().time()
+    try:
+        with pytest.raises(TimeoutError):
+            await service.run(
+                intent="contended-persistence",
+                runtime_id="fixture-runtime",
+                work_fn=child_work,
+                contract_id="01K1DISPOSABLEMEMORY00012",
+                timeout=0.1,
+            )
+        elapsed = asyncio.get_running_loop().time() - started
+    finally:
+        release_lock.set()
+        if holder is not None:
+            await asyncio.to_thread(holder.join, 2.0)
+        await asyncio.sleep(0.1)
+        stop_heartbeat.set()
+        await pulse_task
+
+    assert elapsed < 0.5
+    assert child_calls == 1
+    assert len(heartbeat) >= 5
+    assert max(b - a for a, b in pairwise(heartbeat)) < 0.2
+    with pytest.raises(ArtifactNotFoundError):
+        service.fetch("01K1DISPOSABLEMEMORY00012")
 
 
 @pytest.mark.asyncio

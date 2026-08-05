@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, Final
+
+from ouroboros.core.disposable_memory import (
+    ARTIFACT_REF_PATTERN,
+    DISPOSABLE_CONTRACT_ID_PATTERN,
+)
 
 MANIFEST_MAX_BYTES: Final[int] = 64 * 1024
 _MANIFEST_FIELDS: Final[frozenset[str]] = frozenset(
@@ -53,4 +58,33 @@ def require_fields(raw: dict[str, Any]) -> None:
             raise ValueError(f"manifest {field} must include a timezone")
 
 
-__all__ = ["MANIFEST_MAX_BYTES", "require_fields"]
+def validate_contract_id(contract_id: str) -> str:
+    """Return one path-safe disposable contract identity."""
+    if not DISPOSABLE_CONTRACT_ID_PATTERN.fullmatch(contract_id):
+        raise ValueError(
+            "contract_id must be 1-128 path-safe ASCII characters beginning with alphanumeric"
+        )
+    return contract_id
+
+
+def digest_from_ref(artifact_ref: str) -> str:
+    """Extract a validated lowercase SHA-256 digest."""
+    if not ARTIFACT_REF_PATTERN.fullmatch(artifact_ref):
+        raise ValueError("invalid artifact_ref")
+    return artifact_ref.removeprefix("sha256:")
+
+
+def as_utc(value: datetime) -> datetime:
+    """Normalize one timezone-aware timestamp to UTC."""
+    if value.tzinfo is None:
+        raise ValueError("datetime values must include a timezone")
+    return value.astimezone(UTC)
+
+
+__all__ = [
+    "MANIFEST_MAX_BYTES",
+    "as_utc",
+    "digest_from_ref",
+    "require_fields",
+    "validate_contract_id",
+]
