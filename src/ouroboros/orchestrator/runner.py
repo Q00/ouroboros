@@ -168,6 +168,7 @@ from ouroboros.orchestrator.mcp_tools import (
     enumerate_runtime_builtin_tool_definitions,
     serialize_tool_catalog,
 )
+from ouroboros.orchestrator.parallel_executor_models import CoordinatorQuotaPause
 from ouroboros.orchestrator.policy import (
     PolicyContext,
     PolicyDecision,
@@ -356,6 +357,7 @@ class RecoverableFailurePause:
     resume_hint: str
     pause_seconds: int | None = None
     resume_after: datetime | None = None
+    coordinator_owner: CoordinatorQuotaPause | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -5162,6 +5164,11 @@ class OrchestratorRunner:
                     pause_seconds=pause.pause_seconds,
                     resume_after=pause.resume_after,
                     pause_kind=pause.pause_kind,
+                    pause_owner=(
+                        pause.coordinator_owner.owner_payload()
+                        if pause.coordinator_owner is not None
+                        else None
+                    ),
                 )
                 resolved, pending = await self._resolve_pause_publication(
                     session_id=tracker.session_id,
@@ -7527,28 +7534,19 @@ class OrchestratorRunner:
                 else latest_pause(selected_pause, failure_pause)
             )
 
-        if bool(getattr(parallel_result, "recoverable_coordinator_pause", False)):
-            stages = getattr(parallel_result, "stages", ())
-            if not isinstance(stages, tuple):
+        raw_coordinator_pause = getattr(parallel_result, "recoverable_coordinator_pause", None)
+        if raw_coordinator_pause is not None:
+            if not isinstance(raw_coordinator_pause, CoordinatorQuotaPause):
                 return None
-            coordinator_pause: RecoverableFailurePause | None = None
-            for stage in stages:
-                review = getattr(stage, "coordinator_review", None)
-                messages = getattr(review, "messages", ())
-                if not isinstance(messages, tuple):
-                    return None
-                for message in reversed(messages):
-                    coordinator_pause = self._recoverable_failure_pause(
-                        message,
-                        now=resolved_now,
-                        default_pause_seconds=default_pause_seconds,
-                    )
-                    if coordinator_pause is not None:
-                        break
-                if coordinator_pause is not None:
-                    break
-            if coordinator_pause is None:
-                return None
+            consequence = raw_coordinator_pause.consequence
+            coordinator_pause = RecoverableFailurePause(
+                pause_kind=consequence.pause_kind,
+                reason=consequence.reason,
+                resume_hint=consequence.resume_hint,
+                pause_seconds=consequence.pause_seconds,
+                resume_after=consequence.resume_after,
+                coordinator_owner=raw_coordinator_pause,
+            )
             found_failure = True
             selected_pause = (
                 coordinator_pause
@@ -10398,6 +10396,28 @@ class OrchestratorRunner:
             resolved_backend_limits=resolved_backend_limits,
             resolved_self_governs_rate_limit=execution_semantics["backend_self_governs_rate_limit"],
             expected_runtime_effect_capabilities=execution_semantics["runtime_effect_capabilities"],
+            usage_limit_pause_seconds=execution_semantics["usage_limit_pause_seconds"],
+        )
+
+        raw_published_pause_owner = tracker.progress.get("pause_owner")
+        if (
+            tracker.status is SessionStatus.PAUSED
+            and raw_published_pause_owner is not None
+            and not isinstance(raw_published_pause_owner, Mapping)
+        ):
+            raise OrchestratorError(
+                message="Persisted coordinator pause owner is malformed",
+                details={
+                    "session_id": tracker.session_id,
+                    "execution_id": exec_id,
+                    "resume_blocked": "coordinator_pause_owner_invalid",
+                },
+            )
+        published_coordinator_pause_owner = (
+            dict(raw_published_pause_owner)
+            if tracker.status is SessionStatus.PAUSED
+            and isinstance(raw_published_pause_owner, Mapping)
+            else None
         )
 
         # Check for cancellation before starting parallel execution
@@ -10454,6 +10474,7 @@ class OrchestratorRunner:
                     tool_catalog=tool_catalog.tools,
                     system_prompt=system_prompt,
                     externally_satisfied_acs=externally_satisfied_acs,
+                    published_coordinator_pause_owner=published_coordinator_pause_owner,
                 )
             except ParallelExecutionCancelled as cancelled:
                 return await self._handle_cancellation(
@@ -10577,6 +10598,11 @@ class OrchestratorRunner:
                 pause_seconds=recoverable_failure_pause.pause_seconds,
                 resume_after=recoverable_failure_pause.resume_after,
                 pause_kind=recoverable_failure_pause.pause_kind,
+                pause_owner=(
+                    recoverable_failure_pause.coordinator_owner.owner_payload()
+                    if recoverable_failure_pause.coordinator_owner is not None
+                    else None
+                ),
             )
             pause_status, pause_pending = await self._resolve_pause_publication(
                 session_id=tracker.session_id,

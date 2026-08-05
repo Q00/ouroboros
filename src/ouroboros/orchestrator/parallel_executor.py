@@ -108,12 +108,18 @@ from ouroboros.orchestrator.backend_limits import (
     BackendConcurrencyLimits,
     resolve_backend_limits,
 )
+from ouroboros.orchestrator.backend_outcomes import outcome_weights as _safe_backend_outcome_weights
 from ouroboros.orchestrator.context_governor import SiblingStatus, compose_context
 from ouroboros.orchestrator.coordinator import (
     CoordinatorReview,
     FileConflict,
     LevelCoordinator,
     validate_coordinator_started_payload,
+)
+from ouroboros.orchestrator.coordinator_quota import (
+    normalize_published_coordinator_pause_owner,
+    resolve_replayed_coordinator_quota_pause,
+    resolve_usage_limit_pause_seconds,
 )
 from ouroboros.orchestrator.decomposition_limits import (
     DEFAULT_MAX_DECOMPOSITION_DEPTH,
@@ -344,9 +350,11 @@ from ouroboros.orchestrator.model_routing import (
 from ouroboros.orchestrator.parallel_executor_models import (
     ACExecutionOutcome,
     ACExecutionResult,
+    CoordinatorQuotaPause,
     ParallelExecutionResult,
     ParallelExecutionStageResult,
     StageExecutionOutcome,
+    collect_decomposition_depth_warning_paths,
 )
 from ouroboros.orchestrator.profile_loader import ExecutionProfile, SuggestedModelTier
 from ouroboros.orchestrator.rate_limit import (
@@ -2652,40 +2660,6 @@ def _revalidate_cached_verify_gate_outcome(
     )
 
 
-def _collect_decomposition_depth_warning_paths(
-    result: ACExecutionResult,
-    *,
-    index_path: tuple[int, ...],
-) -> list[str]:
-    """Collect dotted AC paths that hit the soft decomposition depth safety net."""
-    warning_paths: list[str] = []
-    if result.decomposition_depth_warning:
-        warning_paths.append(".".join(str(i) for i in index_path))
-
-    for idx, sub_result in enumerate(result.sub_results, start=1):
-        warning_paths.extend(
-            _collect_decomposition_depth_warning_paths(
-                sub_result,
-                index_path=index_path + (idx,),
-            )
-        )
-    return warning_paths
-
-
-def _safe_backend_outcome_weights() -> dict[str, float]:
-    """Per-backend outcome weights for the picker tie-break (PR-X X4), never raising.
-
-    The flywheel is a read-only SQLite scan; any failure collapses to no weights
-    so a failed AC's cross-harness redispatch is never blocked by it.
-    """
-    try:
-        from ouroboros.orchestrator.backend_outcomes import outcome_weights
-
-        return outcome_weights()
-    except Exception:
-        return {}
-
-
 def render_parallel_verification_report(
     parallel_result: ParallelExecutionResult,
     total_acceptance_criteria: int,
@@ -2708,7 +2682,7 @@ def render_parallel_verification_report(
     warning_paths: list[str] = []
     for user_facing_idx, result in enumerate(parallel_result.results, start=1):
         warning_paths.extend(
-            _collect_decomposition_depth_warning_paths(
+            collect_decomposition_depth_warning_paths(
                 result,
                 index_path=(user_facing_idx,),
             )
@@ -2820,6 +2794,7 @@ class ParallelACExecutor:
         resolved_backend_limits: BackendConcurrencyLimits | None = None,
         resolved_self_governs_rate_limit: bool | None = None,
         expected_runtime_effect_capabilities: Mapping[str, object] | None = None,
+        usage_limit_pause_seconds: int | None = None,
         _foundation_a_roots: _FoundationAClosedRoots = _FOUNDATION_A_CLOSED_ROOTS,
         _foundation_a_internal_entry_roots: _FoundationAInternalEntryRoots | None = None,
         _foundation_a_internal_entry_roots_are_closed: bool = False,
@@ -2889,6 +2864,9 @@ class ParallelACExecutor:
         )
         self._event_store = event_store
         self._console = console or Console()
+        self._usage_limit_pause_seconds = resolve_usage_limit_pause_seconds(
+            usage_limit_pause_seconds
+        )
         if decomposition_mode not in {"bounce_only", "off"}:
             msg = f"Unsupported decomposition_mode: {decomposition_mode!r}"
             raise ValueError(msg)
@@ -3956,6 +3934,7 @@ class ParallelACExecutor:
         execution_plan: StagedExecutionPlan | None = None,
         reconciled_level_contexts: list[LevelContext] | None = None,
         externally_satisfied_acs: dict[int, dict[str, Any]] | None = None,
+        published_coordinator_pause_owner: Mapping[str, object] | None = None,
     ) -> ParallelExecutionResult:
         """Execute ACs according to a staged execution plan.
 
@@ -3982,6 +3961,9 @@ class ParallelACExecutor:
                 msg = "execution_plan is required when dependency_graph is not provided"
                 raise ValueError(msg)
             execution_plan = dependency_graph.to_execution_plan()
+        published_pause_owner = normalize_published_coordinator_pause_owner(
+            published_coordinator_pause_owner
+        )
 
         start_time = datetime.now(UTC)
         all_results: list[ACExecutionResult] = []
@@ -4011,7 +3993,7 @@ class ParallelACExecutor:
         completed_count = 0
         resume_from_level = 0
         recoverable_route_pause = False
-        recoverable_coordinator_pause = False
+        recoverable_coordinator_pause: CoordinatorQuotaPause | None = None
 
         # Restore the durable bounce phase before its consuming finalized event.
         # Both precede checkpoints, route projections, and every provider entry.
@@ -4796,7 +4778,10 @@ class ParallelACExecutor:
                                 raise RuntimeError(
                                     "coordinator provider completed without a review artifact"
                                 )
-                            review = review.with_recoverable_quota_state()
+                            review = review.with_recoverable_quota_state(
+                                now=datetime.now(UTC),
+                                default_pause_seconds=self._usage_limit_pause_seconds,
+                            )
                             workspace_after = self._workspace_content_digest(workspace_root)
                             workspace_changed = (
                                 workspace_before is None
@@ -4828,7 +4813,21 @@ class ParallelACExecutor:
                                 f"  [cyan]Coordinator review restored for level "
                                 f"{level_num}; provider effect not repeated.[/cyan]"
                             )
-                        recoverable_coordinator_pause = review.recoverable_quota_pause
+                        (
+                            recoverable_coordinator_pause,
+                            published_pause_owner,
+                        ) = await resolve_replayed_coordinator_quota_pause(
+                            event_store=self._event_store,
+                            review=review,
+                            execution_id=execution_id,
+                            session_id=session_id,
+                            level_number=level_num,
+                            coordinator_aggregate_id=self._coordinator_aggregate_id(
+                                execution_id, level_num
+                            ),
+                            restored=restored_review is not None,
+                            published_owner=published_pause_owner,
+                        )
                         if coordinator_mutated_workspace:
                             post_coordinator_revalidation_required = True
                             post_coordinator_revalidated = False

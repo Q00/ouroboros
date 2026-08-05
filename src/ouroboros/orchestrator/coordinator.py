@@ -47,7 +47,10 @@ from ouroboros.orchestrator.policy import (
     PolicySessionRole,
     allowed_capability_names,
 )
-from ouroboros.orchestrator.recoverable_failure import is_usage_limit_pause_message
+from ouroboros.orchestrator.recoverable_failure import (
+    UsageLimitPauseConsequence,
+    usage_limit_pause_consequence_from_message,
+)
 from ouroboros.orchestrator.runtime_param_negotiation import (
     announce_execution_param_degradations,
 )
@@ -338,7 +341,7 @@ class CoordinatorReview:
         session_scope_id: Stable identity for persisted reconciliation runtime state.
         session_state_path: Stable state path for persisted reconciliation runtime state.
         final_output: Raw final coordinator output captured for level-scoped artifacts.
-        recoverable_quota_pause: Typed durable consequence of a quota-ending review.
+        recoverable_quota_pause: Complete durable consequence of a quota-ending review.
         messages: Runtime messages retained in memory for normalized audit emission.
     """
 
@@ -352,17 +355,26 @@ class CoordinatorReview:
     session_scope_id: str | None = None
     session_state_path: str | None = None
     final_output: str = ""
-    recoverable_quota_pause: bool = False
+    recoverable_quota_pause: UsageLimitPauseConsequence | None = None
     messages: tuple[AgentMessage, ...] = field(default_factory=tuple)
 
-    def with_recoverable_quota_state(self) -> CoordinatorReview:
-        """Classify the durable quota consequence from this fresh review."""
-        return replace(
-            self,
-            recoverable_quota_pause=any(
-                is_usage_limit_pause_message(message) for message in reversed(self.messages)
-            ),
-        )
+    def with_recoverable_quota_state(
+        self,
+        *,
+        now: datetime,
+        default_pause_seconds: int,
+    ) -> CoordinatorReview:
+        """Freeze the complete quota consequence from this fresh review."""
+
+        for message in reversed(self.messages):
+            consequence = usage_limit_pause_consequence_from_message(
+                message,
+                now=now,
+                default_pause_seconds=default_pause_seconds,
+            )
+            if consequence is not None:
+                return replace(self, recoverable_quota_pause=consequence)
+        return replace(self, recoverable_quota_pause=None)
 
     @property
     def scope(self) -> str:
@@ -445,11 +457,15 @@ class CoordinatorReview:
             max_chars=_MAX_COORDINATOR_ID_CHARS,
         )
         return {
-            "schema_version": 2,
+            "schema_version": 3,
             "execution_id": execution_id,
             "session_id": session_id,
             "coordinator_session_id": self.session_id,
-            "recoverable_quota_pause": self.recoverable_quota_pause,
+            "recoverable_quota_pause": (
+                self.recoverable_quota_pause.to_payload()
+                if self.recoverable_quota_pause is not None
+                else None
+            ),
             **self.to_artifact_payload(),
             "conflicts_detected": [
                 {
@@ -541,14 +557,14 @@ class CoordinatorReview:
             }
         )
         if not _mapping_has_exact_keys(payload, expected_keys):
-            raise ValueError("coordinator artifact fields do not match schema v2")
+            raise ValueError("coordinator artifact fields do not match schema v3")
 
         def require_exact(key: str, expected: object) -> None:
             value = payload.get(key)
             if type(value) is not type(expected) or value != expected:
                 raise ValueError(f"coordinator artifact {key} does not match its owner")
 
-        require_exact("schema_version", 2)
+        require_exact("schema_version", 3)
         require_exact("execution_id", execution_id)
         require_exact("session_id", session_id)
         require_exact("scope", "level")
@@ -561,9 +577,17 @@ class CoordinatorReview:
         require_exact("artifact_owner", "coordinator")
         require_exact("artifact_owner_id", session_scope_id)
         require_exact("artifact_type", "coordinator_review")
-        recoverable_quota_pause = payload.get("recoverable_quota_pause")
-        if type(recoverable_quota_pause) is not bool:
-            raise ValueError("coordinator artifact recoverable quota state is invalid")
+        raw_recoverable_quota_pause = payload.get("recoverable_quota_pause")
+        try:
+            recoverable_quota_pause = (
+                None
+                if raw_recoverable_quota_pause is None
+                else UsageLimitPauseConsequence.from_payload(raw_recoverable_quota_pause)
+            )
+        except ValueError as exc:
+            raise ValueError(
+                "coordinator artifact recoverable quota consequence is invalid"
+            ) from exc
 
         raw_conflicts = payload.get("conflicts_detected")
         if type(raw_conflicts) is not list or len(raw_conflicts) != len(expected_conflicts):
@@ -682,7 +706,10 @@ def _validate_coordinator_review(review: object) -> CoordinatorReview:
         or len(review.review_summary) > _MAX_COORDINATOR_SUMMARY_CHARS
         or type(review.final_output) is not str
         or len(review.final_output) > _MAX_COORDINATOR_ARTIFACT_CHARS
-        or type(review.recoverable_quota_pause) is not bool
+        or (
+            review.recoverable_quota_pause is not None
+            and not isinstance(review.recoverable_quota_pause, UsageLimitPauseConsequence)
+        )
         or any(
             type(item) is not str or len(item) > _MAX_COORDINATOR_ITEM_CHARS
             for item in (*review.fixes_applied, *review.warnings_for_next_level)
@@ -693,6 +720,8 @@ def _validate_coordinator_review(review: object) -> CoordinatorReview:
         or review.duration_seconds < 0
     ):
         raise ValueError("coordinator review exceeds its durable bounds")
+    if review.recoverable_quota_pause is not None:
+        review.recoverable_quota_pause.to_payload()
     for conflict in review.conflicts_detected:
         _validate_file_conflict(conflict)
     _require_bounded_string(

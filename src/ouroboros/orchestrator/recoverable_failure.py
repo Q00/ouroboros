@@ -9,11 +9,13 @@ because it surfaced through a different orchestrator path.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from datetime import UTC, datetime
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
 import math
 import re
 
+from ouroboros.config import MAX_USAGE_LIMIT_PAUSE_SECONDS
 from ouroboros.orchestrator.adapter import AgentMessage
 
 _LONG_RETRY_AFTER_SECONDS = 60 * 60
@@ -21,6 +23,8 @@ _MAX_METADATA_MAPS = 32
 _MAX_PLAIN_METADATA_FIELDS = 128
 _MAX_RETRY_TIMESTAMP_CHARS = 128
 _MISSING_METADATA_VALUE = object()
+_MAX_DURABLE_PAUSE_REASON_CHARS = 16_384
+_MAX_DURABLE_PAUSE_HINT_CHARS = 1_024
 _METADATA_CHILD_FIELDS = (
     "meta",
     "mcp_meta",
@@ -118,6 +122,103 @@ _CONCURRENCY_LIMIT_PATTERN = re.compile(
     r"|concurrent\s+requests?\s+(?:exceeded|rejected))\b",
     re.IGNORECASE,
 )
+
+
+@dataclass(frozen=True, slots=True)
+class UsageLimitPauseConsequence:
+    """Complete bounded consequence of one provider quota-ending effect."""
+
+    reason: str
+    resume_hint: str
+    pause_seconds: int
+    resume_after: datetime
+    pause_kind: str = "usage_limit"
+
+    def to_payload(self) -> dict[str, object]:
+        """Serialize the consequence into its closed durable schema."""
+
+        _validate_usage_limit_pause_consequence(self)
+        return {
+            "schema_version": 1,
+            "pause_kind": self.pause_kind,
+            "reason": self.reason,
+            "resume_hint": self.resume_hint,
+            "pause_seconds": self.pause_seconds,
+            "resume_after": self.resume_after.isoformat(),
+        }
+
+    @classmethod
+    def from_payload(cls, value: object) -> UsageLimitPauseConsequence:
+        """Restore an exact bounded consequence or reject the artifact."""
+
+        expected_keys = frozenset(
+            {
+                "schema_version",
+                "pause_kind",
+                "reason",
+                "resume_hint",
+                "pause_seconds",
+                "resume_after",
+            }
+        )
+        if (
+            not isinstance(value, Mapping)
+            or set(value.keys()) != expected_keys
+            or type(value.get("schema_version")) is not int
+            or value.get("schema_version") != 1
+        ):
+            raise ValueError("usage-limit pause consequence has an invalid schema")
+        raw_resume_after = value.get("resume_after")
+        if not isinstance(raw_resume_after, str) or not raw_resume_after:
+            raise ValueError("usage-limit pause consequence has an invalid resume_after")
+        try:
+            resume_after = datetime.fromisoformat(raw_resume_after)
+        except ValueError as exc:
+            raise ValueError("usage-limit pause consequence has an invalid resume_after") from exc
+        consequence = cls(
+            pause_kind=value.get("pause_kind"),  # type: ignore[arg-type]
+            reason=value.get("reason"),  # type: ignore[arg-type]
+            resume_hint=value.get("resume_hint"),  # type: ignore[arg-type]
+            pause_seconds=value.get("pause_seconds"),  # type: ignore[arg-type]
+            resume_after=resume_after,
+        )
+        _validate_usage_limit_pause_consequence(consequence)
+        if consequence.to_payload() != dict(value):
+            raise ValueError("usage-limit pause consequence is not canonical")
+        return consequence
+
+
+def _validate_usage_limit_pause_consequence(value: object) -> UsageLimitPauseConsequence:
+    if (
+        not isinstance(value, UsageLimitPauseConsequence)
+        or value.pause_kind != "usage_limit"
+        or type(value.reason) is not str
+        or not value.reason
+        or len(value.reason) > _MAX_DURABLE_PAUSE_REASON_CHARS
+        or type(value.resume_hint) is not str
+        or not value.resume_hint
+        or len(value.resume_hint) > _MAX_DURABLE_PAUSE_HINT_CHARS
+        or type(value.pause_seconds) is not int
+        or not 1 <= value.pause_seconds <= MAX_USAGE_LIMIT_PAUSE_SECONDS
+        or not isinstance(value.resume_after, datetime)
+        or value.resume_after.tzinfo is None
+        or value.resume_after.utcoffset() is None
+    ):
+        raise ValueError("usage-limit pause consequence exceeds its durable bounds")
+    return value
+
+
+def _format_pause_duration(seconds: int) -> str:
+    if seconds % (24 * 60 * 60) == 0:
+        days = seconds // (24 * 60 * 60)
+        return f"{days} day{'s' if days != 1 else ''}"
+    if seconds % (60 * 60) == 0:
+        hours = seconds // (60 * 60)
+        return f"{hours} hour{'s' if hours != 1 else ''}"
+    if seconds % 60 == 0:
+        minutes = seconds // 60
+        return f"{minutes} minute{'s' if minutes != 1 else ''}"
+    return f"{seconds} second{'s' if seconds != 1 else ''}"
 
 
 def project_failure_metadata(
@@ -442,9 +543,54 @@ def is_usage_limit_pause_message(
     return _LIMIT_PATTERN.search(normalized_content) is not None
 
 
+def usage_limit_pause_consequence_from_message(
+    message: AgentMessage,
+    *,
+    now: datetime,
+    default_pause_seconds: int,
+) -> UsageLimitPauseConsequence | None:
+    """Freeze one quota message into the complete runner-owned pause decision."""
+
+    if (
+        type(default_pause_seconds) is not int
+        or not 1 <= default_pause_seconds <= MAX_USAGE_LIMIT_PAUSE_SECONDS
+    ):
+        raise ValueError("durable usage-limit pause policy is outside its range")
+    if not isinstance(now, datetime) or now.tzinfo is None or now.utcoffset() is None:
+        raise ValueError("usage-limit pause observation time must be timezone-aware")
+    if not is_usage_limit_pause_message(message, now=now):
+        return None
+
+    parsed_seconds = retry_duration_seconds_from_message(message, now=now)
+    pause_seconds = default_pause_seconds if parsed_seconds is None else parsed_seconds
+    pause_seconds = min(max(1, pause_seconds), MAX_USAGE_LIMIT_PAUSE_SECONDS)
+    try:
+        resume_after = now + timedelta(seconds=pause_seconds)
+    except OverflowError:
+        pause_seconds = default_pause_seconds
+        resume_after = now + timedelta(seconds=pause_seconds)
+    reason = message.content.strip()[:_MAX_DURABLE_PAUSE_REASON_CHARS]
+    if not reason:
+        reason = "Provider usage/quota window reached."
+    duration_display = _format_pause_duration(pause_seconds)
+    consequence = UsageLimitPauseConsequence(
+        reason=reason,
+        pause_seconds=pause_seconds,
+        resume_after=resume_after,
+        resume_hint=(
+            "Provider usage/quota window reached. "
+            f"Resume after {resume_after.isoformat()} "
+            f"(wait at least {duration_display})."
+        ),
+    )
+    return _validate_usage_limit_pause_consequence(consequence)
+
+
 __all__ = [
+    "UsageLimitPauseConsequence",
     "is_usage_limit_pause_message",
     "project_failure_metadata",
     "retry_duration_seconds_from_message",
     "retry_duration_seconds_from_metadata",
+    "usage_limit_pause_consequence_from_message",
 ]

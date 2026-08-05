@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 from dataclasses import replace
 from datetime import UTC, datetime
 import json
@@ -42,6 +43,7 @@ from ouroboros.orchestrator.adaptive_concurrency import (
     observe_provider_messages,
 )
 from ouroboros.orchestrator.coordinator import CoordinatorReview, FileConflict, LevelCoordinator
+from ouroboros.orchestrator.coordinator_quota import consume_published_coordinator_pause
 from ouroboros.orchestrator.decomposition_limits import MAX_DECOMPOSITION_DEPTH
 from ouroboros.orchestrator.decomposition_policy import (
     BounceCause,
@@ -80,6 +82,7 @@ from ouroboros.orchestrator.parallel_executor import (
     STALL_TIMEOUT_SECONDS,
     ACExecutionOutcome,
     ACExecutionResult,
+    CoordinatorQuotaPause,
     ParallelACExecutor,
     ParallelExecutionResult,
     StageExecutionOutcome,
@@ -97,6 +100,7 @@ from ouroboros.orchestrator.parallel_executor import (
     render_parallel_verification_report,
 )
 from ouroboros.orchestrator.profile_loader import EvidenceSchema, load_profile
+from ouroboros.orchestrator.recoverable_failure import UsageLimitPauseConsequence
 from ouroboros.orchestrator.verifier import VerifierVerdict
 from tests.unit.orchestrator.parallel_executor_test_support import ProcessLocalTestExecutor
 
@@ -3028,7 +3032,11 @@ def _make_seed(*acceptance_criteria: str | AcceptanceCriterionSpec) -> Seed:
     )
 
 
-def _make_executor(*, reasoning_effort: str | None = None) -> ParallelACExecutor:
+def _make_executor(
+    *,
+    reasoning_effort: str | None = None,
+    run_verify_commands: bool = True,
+) -> ParallelACExecutor:
     """Create an executor with mocked dependencies and muted event emitters."""
     executor = ProcessLocalTestExecutor(
         adapter=MagicMock(),
@@ -3036,6 +3044,7 @@ def _make_executor(*, reasoning_effort: str | None = None) -> ParallelACExecutor
         console=MagicMock(),
         enable_decomposition=False,
         reasoning_effort=reasoning_effort,
+        run_verify_commands=run_verify_commands,
     )
     executor._coordinator.detect_file_conflicts = MagicMock(return_value=[])
     executor._event_store.query_events = AsyncMock(return_value=[])
@@ -15845,7 +15854,8 @@ class TestParallelACExecutor:
         )
 
         assert provider_effects == [0, 1]
-        assert result.recoverable_coordinator_pause is True
+        assert isinstance(result.recoverable_coordinator_pause, CoordinatorQuotaPause)
+        assert result.recoverable_coordinator_pause.consequence.pause_seconds == 18_000
         assert result.all_succeeded is False
         assert len(result.stages) == 1
         assert result.stages[0].coordinator_review is not None
@@ -15899,6 +15909,8 @@ class TestParallelACExecutor:
         async def run_once(
             executor: ParallelACExecutor,
             provider_effects: list[int],
+            *,
+            published_owner: Mapping[str, object] | None = None,
         ) -> ParallelExecutionResult:
             async def execute_ac(**kwargs: Any) -> ACExecutionResult:
                 ac_index = int(kwargs["ac_index"])
@@ -15911,7 +15923,7 @@ class TestParallelACExecutor:
                     final_message="done",
                 )
 
-            executor._coordinator.detect_file_conflicts = MagicMock(return_value=[conflict])
+            executor._coordinator.detect_file_conflicts = MagicMock(side_effect=([conflict], []))
             executor._execute_single_ac = execute_ac  # type: ignore[method-assign]
             return await executor.execute_parallel(
                 seed=seed,
@@ -15920,9 +15932,10 @@ class TestParallelACExecutor:
                 execution_id=execution_id,
                 tools=["Read", "Edit"],
                 system_prompt="test",
+                published_coordinator_pause_owner=published_owner,
             )
 
-        first = _make_executor()
+        first = _make_executor(run_verify_commands=False)
         first._event_store.query_events = AsyncMock(return_value=[])
         first_effects: list[int] = []
         first_result = await run_once(first, first_effects)
@@ -15950,6 +15963,9 @@ class TestParallelACExecutor:
                 for event in first_events
                 if isinstance(event, BaseEvent) and event.type == event_type
             ]
+            if event_type == "execution.coordinator.quota_pause_consumed":
+                assert matched == []
+                return []
             assert len(matched) == 1
             assert matched[0].type == event_type
             assert matched[0].aggregate_type == "execution"
@@ -15957,17 +15973,125 @@ class TestParallelACExecutor:
             assert isinstance(matched[0].data, dict)
             return matched
 
-        resumed = _make_executor()
+        resumed = _make_executor(run_verify_commands=False)
         resumed._event_store.query_events = AsyncMock(side_effect=replay_query)
         resumed_effects: list[int] = []
         resumed_result = await run_once(resumed, resumed_effects)
 
         assert first_effects == [0, 1]
-        assert first_result.recoverable_coordinator_pause is True
+        assert isinstance(first_result.recoverable_coordinator_pause, CoordinatorQuotaPause)
         assert resumed_effects == [0, 1]
-        assert resumed_result.recoverable_coordinator_pause is True
+        assert isinstance(resumed_result.recoverable_coordinator_pause, CoordinatorQuotaPause)
         assert len(resumed_result.stages) == 1
         assert review_provider.await_count == 1
+
+        published_owner = resumed_result.recoverable_coordinator_pause.owner_payload()
+        published = _make_executor(run_verify_commands=False)
+        published._event_store.query_events = AsyncMock(side_effect=replay_query)
+        published_effects: list[int] = []
+        published_result = await run_once(
+            published,
+            published_effects,
+            published_owner=published_owner,
+        )
+
+        assert published_effects == [0, 1, 2]
+        assert published_result.recoverable_coordinator_pause is None
+        assert len(published_result.stages) == 2
+        consumed_events = [
+            call.args[0]
+            for call in published._event_store.append.await_args_list
+            if call.args[0].type == "execution.coordinator.quota_pause_consumed"
+        ]
+        assert len(consumed_events) == 1
+        assert consumed_events[0].data == published_owner
+
+        replay_events = [*first_events, consumed_events[0]]
+
+        async def consumed_query(*_args: Any, **kwargs: Any) -> list[BaseEvent]:
+            event_type = kwargs.get("event_type")
+            return [event for event in replay_events if event.type == event_type]
+
+        after_consumption_crash = _make_executor(run_verify_commands=False)
+        after_consumption_crash._event_store.query_events = AsyncMock(side_effect=consumed_query)
+        crash_effects: list[int] = []
+        crash_result = await run_once(after_consumption_crash, crash_effects)
+
+        assert crash_effects == [0, 1, 2]
+        assert crash_result.recoverable_coordinator_pause is None
+        assert len(crash_result.stages) == 2
+        assert review_provider.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_coordinator_pause_consumption_rejects_mismatched_owner(self) -> None:
+        """A different PAUSED owner cannot consume the restored coordinator effect."""
+
+        executor = _make_executor(run_verify_commands=False)
+        executor._event_store.query_events = AsyncMock(return_value=[])
+        pause = CoordinatorQuotaPause(
+            execution_id="execution-owner",
+            session_id="session-owner",
+            level_number=1,
+            coordinator_aggregate_id="execution-owner:l0:coord",
+            consequence=UsageLimitPauseConsequence(
+                reason="Usage limit reached",
+                resume_hint="Resume after the provider window reopens.",
+                pause_seconds=60,
+                resume_after=datetime(2026, 1, 1, 0, 1, tzinfo=UTC),
+            ),
+        )
+        mismatched_owner = {
+            **pause.owner_payload(),
+            "coordinator_aggregate_id": "execution-owner:l1:coord",
+        }
+
+        consumed = await consume_published_coordinator_pause(
+            event_store=executor._event_store,
+            pause=pause,
+            published_owner=mismatched_owner,
+        )
+
+        assert consumed is False
+        executor._event_store.append.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_coordinator_pause_consumption_fails_closed_when_ambiguous(self) -> None:
+        """Duplicate consumption records cannot authorize another provider stage."""
+
+        executor = _make_executor(run_verify_commands=False)
+        pause = CoordinatorQuotaPause(
+            execution_id="execution-owner",
+            session_id="session-owner",
+            level_number=1,
+            coordinator_aggregate_id="execution-owner:l0:coord",
+            consequence=UsageLimitPauseConsequence(
+                reason="Usage limit reached",
+                resume_hint="Resume after the provider window reopens.",
+                pause_seconds=60,
+                resume_after=datetime(2026, 1, 1, 0, 1, tzinfo=UTC),
+            ),
+        )
+        consumed_event = BaseEvent(
+            type="execution.coordinator.quota_pause_consumed",
+            aggregate_type="execution",
+            aggregate_id=pause.coordinator_aggregate_id,
+            data=pause.owner_payload(),
+        )
+        executor._event_store.query_events = AsyncMock(
+            return_value=[consumed_event, consumed_event]
+        )
+
+        with pytest.raises(
+            RuntimeError,
+            match="coordinator pause consumption state is ambiguous",
+        ):
+            await consume_published_coordinator_pause(
+                event_store=executor._event_store,
+                pause=pause,
+                published_owner=pause.owner_payload(),
+            )
+
+        executor._event_store.append.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_records_coordinator_results_at_level_scope_without_ac_attribution(
