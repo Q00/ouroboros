@@ -12,10 +12,10 @@ import pytest
 
 from ouroboros.config import loader
 from ouroboros.config.loader import (
-    _UNTRUSTED_ENV_DENYLIST,
     _is_assignable_env_key,
     _load_env_file,
 )
+from ouroboros.config.untrusted_env import UNTRUSTED_ENV_DENYLIST
 
 
 @pytest.fixture(autouse=True)
@@ -88,7 +88,7 @@ def test_load_env_file_skips_template_placeholders(tmp_path: Path, monkeypatch) 
 # Derive directly from the source of truth so this regression suite can never
 # drift out of sync with the denylist again — a previous drift (missing the
 # gjc/PI/config-home roots) is exactly how an incomplete fix slips past CI.
-_DENYLISTED_KEYS = tuple(sorted(_UNTRUSTED_ENV_DENYLIST))
+_DENYLISTED_KEYS = tuple(sorted(UNTRUSTED_ENV_DENYLIST))
 
 
 def test_denylist_covers_known_execution_routing_keys() -> None:
@@ -142,7 +142,7 @@ def test_denylist_covers_known_execution_routing_keys() -> None:
         "OUROBOROS_MODEL_TIER_ROUTING",
         "OUROBOROS_SHADOW_REPLAY",
     }
-    missing = required - _UNTRUSTED_ENV_DENYLIST
+    missing = required - UNTRUSTED_ENV_DENYLIST
     assert not missing, f"denylist regressed, missing: {sorted(missing)}"
 
 
@@ -175,7 +175,7 @@ def test_bridge_dispatch_entry_env_keys_are_denylisted() -> None:
     # Guard the regex itself: a silent zero-match would make this test vacuous.
     assert len(found) >= 1, "no bridge dispatch-entry env key found — regex drifted"
 
-    missing = {key: str(path) for key, path in found.items() if key not in _UNTRUSTED_ENV_DENYLIST}
+    missing = {key: str(path) for key, path in found.items() if key not in UNTRUSTED_ENV_DENYLIST}
     assert not missing, f"bridge exec-command env keys missing from denylist: {missing}"
 
 
@@ -620,7 +620,7 @@ class TestEnvValueGrammar:
         self, tmp_path: Path, monkeypatch
     ) -> None:
         """Delegating the grammar must not delegate the trust policy."""
-        denied = sorted(_UNTRUSTED_ENV_DENYLIST)[0]
+        denied = sorted(UNTRUSTED_ENV_DENYLIST)[0]
         monkeypatch.setenv(denied, "original")
         env_file = tmp_path / ".env"
         env_file.write_text(f"{denied}=hijacked\n", encoding="utf-8")
