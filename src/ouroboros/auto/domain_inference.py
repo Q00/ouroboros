@@ -158,15 +158,21 @@ _WEB_APP_GOAL_SIGNAL_RE = re.compile(rf"\b{_WEB_APP_GOAL_SIGNAL_FRAGMENT}\b")
 # One denial covers every coordinated alternative it lists ("not a browser
 # or web app", "not a browser, web app, or frontend") — the negated span
 # consumes the whole coordination so no alternative survives as a positive
-# signal (#1813 R4).
+# signal (#1813 R4). Each denied alternative may carry ordinary modifiers
+# ("browser-based UI", "browser UI") so descriptive text between
+# alternatives cannot shield a later one (#1813 R6).
+_DENIED_WEB_APP_SIGNAL_FRAGMENT = (
+    rf"{_WEB_APP_GOAL_SIGNAL_FRAGMENT}"
+    r"(?:[\s\-]based)?(?:\s+(?:ui|interface|pages?|apps?))?"
+)
 _COORDINATED_ALTERNATIVE_FRAGMENT = (
     r"(?:\s*,\s*(?:or\s+|and\s+|nor\s+)?|\s+(?:or|and|nor)\s+|\s*/\s*)"
-    rf"(?:an?\s+|the\s+)?{_WEB_APP_GOAL_SIGNAL_FRAGMENT}"
+    rf"(?:an?\s+|the\s+)?{_DENIED_WEB_APP_SIGNAL_FRAGMENT}"
 )
 _NEGATED_WEB_APP_GOAL_RE = re.compile(
     rf"\b(?P<cue>{_NEGATION_CUE_FRAGMENT})"
     r"(?P<path>(?:\s+\S+){0,7}?)"
-    rf"\s+{_WEB_APP_GOAL_SIGNAL_FRAGMENT}"
+    rf"\s+{_DENIED_WEB_APP_SIGNAL_FRAGMENT}"
     rf"(?:{_COORDINATED_ALTERNATIVE_FRAGMENT})*\b"
 )
 _NEGATED_WEB_APP_PREFIX_RE = re.compile(rf"\bnon[\s\-]?{_WEB_APP_GOAL_SIGNAL_FRAGMENT}\b")
@@ -420,22 +426,33 @@ def _matches_refactor_in_place(ledger: SeedDraftLedger) -> bool:
 # "interactive" bound to a rendered artifact, or "client-side validation"
 # bound to user-facing feedback. "screen" stays absent — it is game_2d
 # vocabulary and would dual-fire browser settings screens.
-# The named-widget branch accepts ordinary page/widget nouns ("login
-# page", "filters panel") but rejects two non-product shapes (#1813 R5):
-# documentation-style modifiers in front ("documentation pages") and
-# API-artifact words behind ("signup form helpers", "dashboard
-# templates"), which describe libraries, not a produced UI.
+# UI-composition evidence needs a semantic product anchor (#1813 R6): any
+# single word in front of a widget noun over-accepted API/documentation
+# artifacts ("API reference pages", "example pages"), so the widget branch
+# is allowlist-anchored to product-flow vocabulary on either side
+# (anchor-first "login page" or noun-first "forms for login"), and the
+# artifact tail also rejects compound API descriptions ("signup form
+# validation helpers").
+_UI_WIDGET_NOUN = r"(?:forms?|panels?|buttons?|dashboards?|pages?)"
+_UI_PRODUCT_ANCHOR = (
+    r"(?:login|logout|signup|sign[\s\-]?up|sign[\s\-]?in|settings|search|"
+    r"filters?|checkout|profile|admin|landing|home|account|charts?|metrics|"
+    r"edit|notes?|dashboards?|responsive|navigation|registration|billing|"
+    r"contact|save|cancel|user)"
+)
+_UI_ARTIFACT_TAIL = (
+    r"(?!\s+(?:helpers?|templates?|utils?|utilities|apis?|parsers?|"
+    r"library|libraries|sdks?|packages?|validation|reference|"
+    r"documentation|docs|examples?))"
+)
 _UI_COMPOSITION_RE = re.compile(
     r"\b(?:"
     r"user\s+interface|"
     r"interactive\s+(?:charts?|dashboards?|pages?|forms?|panels?|navigation|ui)|"
     r"client[\s\-]side\s+validation\s+(?:messages?|errors?|feedback)|"
-    r"(?!(?:documentation|docs|manual|wiki|readme)\s)"
-    r"\w+\s+(?:forms?|panels?|buttons?|dashboards?|pages?)"
-    r"(?!\s+(?:helpers?|templates?|utils?|utilities|apis?|parsers?|"
-    r"library|libraries|sdks?|packages?))|"
-    r"(?:forms?|panels?|pages?|buttons?|dashboards?)\s+"
-    r"(?:submit|submission|rendered|shown|displayed|clicked)"
+    rf"{_UI_PRODUCT_ANCHOR}\s+{_UI_WIDGET_NOUN}{_UI_ARTIFACT_TAIL}|"
+    rf"{_UI_WIDGET_NOUN}\s+for\s+{_UI_PRODUCT_ANCHOR}|"
+    rf"{_UI_WIDGET_NOUN}\s+(?:submit|submission|rendered|shown|displayed|clicked)"
     r")\b"
 )
 

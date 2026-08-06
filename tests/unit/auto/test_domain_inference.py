@@ -1021,3 +1021,61 @@ def test_manifest_paths_and_lockfiles_are_not_library_signals(manifest: str) -> 
     result = derive_domain_from_ledger(ledger)
     assert result.is_single
     assert result.single is TaskClass.WEB_APP
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
+        "Build a terminal dashboard, not a browser-based UI or web app",
+        "Build a terminal dashboard with no browser UI, web app, or frontend",
+    ],
+)
+def test_modified_coordinated_denials_keep_cli_single(goal: str) -> None:
+    """R6 probe: denials whose alternatives carry modifiers ("browser-based
+    UI", "browser UI") must strip every coordinated alternative."""
+    ledger = _bare_ledger(goal)
+    _seed_section(
+        ledger,
+        "outputs",
+        value="Interactive dashboard panels and buttons with deterministic stdout",
+    )
+    _seed_section(ledger, "runtime_context", value="Local shell / terminal")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.CLI
+
+
+@pytest.mark.parametrize(
+    "outputs",
+    [
+        "An importable package with API reference pages",
+        "An importable package with documentation and example pages",
+        "An importable package with signup form validation helpers",
+    ],
+)
+def test_compound_api_artifacts_are_not_ui_evidence(outputs: str) -> None:
+    """R6 probe: compound API/documentation artifact descriptions are
+    routine library outputs, not a produced UI."""
+    ledger = _bare_ledger("Build a browser automation library")
+    _seed_section(ledger, "outputs", value=outputs)
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.LIBRARY
+
+
+@pytest.mark.parametrize(
+    "outputs",
+    [
+        "Forms for login and signup with navigation",
+        "Buttons for save and cancel with navigation",
+        "Pages for login, account settings, and reports",
+    ],
+)
+def test_noun_first_ui_outputs_match_web_app(outputs: str) -> None:
+    """R6 probe: noun-first flow descriptions are ordinary affirmative
+    web-app outputs and must not fall through to unmatched."""
+    ledger = _bare_ledger("Build a web app")
+    _seed_section(ledger, "outputs", value=outputs)
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP
