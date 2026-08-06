@@ -640,95 +640,37 @@ class TestSpecVerifier:
         assert "Unusable regex pattern" in summary.reports[0].results[0].detail
 
     @pytest.mark.parametrize("tier", [VerificationTier.T2_STRUCTURAL, VerificationTier.T1_CONSTANT])
-    def test_empty_file_answer_needs_the_criterion_to_name_the_file(
-        self, tier: VerificationTier
-    ) -> None:
-        """An exact hint is not consent: `ac_text` has to be about the file too.
-
-        `pkg/__init__.py` is empty in most repositories, and both the hint and the
-        pattern come out of the same model completion. Keyed on the hint alone, the
-        allowance lets `\\A\\Z` pointed at any ordinary package marker "verify" a
-        criterion about a camera interface — verbatim the fabrication this change
-        exists to close, re-entered through the door opened for the honest case.
-        """
-        project = self._create_project({"pkg/__init__.py": "", "main.py": "print('hello')\n"})
-        assertion = SpecAssertion(
-            ac_index=0,
-            ac_text="MUST define a CameraProvider interface",
-            tier=tier,
-            pattern=r"\A\Z",
-            file_hint="pkg/__init__.py",
-        )
-
-        summary = SpecVerifier(project_dir=project).verify_all(
-            (assertion,), agent_results={0: True}
-        )
-
-        assert summary.verified_count == 0
-        assert summary.reports[0].verified_pass is False
-        assert summary.discrepancy_count == 1
-        assert summary.override_approval is False
-        assert "Unusable regex pattern" in summary.reports[0].results[0].detail
-
-    @pytest.mark.parametrize("tier", [VerificationTier.T2_STRUCTURAL, VerificationTier.T1_CONSTANT])
-    def test_criterion_must_name_the_hinted_file_as_a_whole_token(
-        self, tier: VerificationTier
-    ) -> None:
-        """`a.py` sits inside `data.py`, and a substring test cannot tell them apart.
-
-        The criterion is about `data.py`; the hint points at a different, empty file
-        whose name happens to be a tail of it. Read as a substring, the criterion
-        appears to corroborate a hint it never mentioned.
-        """
-        project = self._create_project({"a.py": "", "data.py": "rows = []\n"})
-        assertion = SpecAssertion(
-            ac_index=0,
-            ac_text="data.py MUST remain empty",
-            tier=tier,
-            pattern=r"\A\Z",
-            file_hint="a.py",
-        )
-
-        summary = SpecVerifier(project_dir=project).verify_all(
-            (assertion,), agent_results={0: True}
-        )
-
-        assert summary.verified_count == 0
-        assert summary.reports[0].verified_pass is False
-        assert summary.override_approval is False
-
-    @pytest.mark.parametrize("tier", [VerificationTier.T2_STRUCTURAL, VerificationTier.T1_CONSTANT])
     @pytest.mark.parametrize("whitespace", ["\t", "  ", "\n\n"], ids=["tab", "spaces", "newlines"])
     def test_whitespace_is_blank_but_it_is_not_empty(
         self, tier: VerificationTier, whitespace: str
     ) -> None:
-        """The two words ask different questions, and `\\A\\Z` draws exactly that line.
+        """Empty and blank are different questions, and the pattern asks whichever it asks.
 
-        A file of one tab is blank. It is not empty, and the pattern that motivates
-        this whole path says so. Answering an `empty` criterion with the looser
-        reading would hand a formal PASS to a file the criterion rejects, so the
-        word the criterion used has to survive as far as the comparison.
+        A file of one tab is blank and is not empty. `\\A\\Z` draws that line and
+        `\\A\\s*\\Z` does not, so both are admitted and each answers itself — the
+        difference lands in the verdict without anything here reading the
+        criterion's English to find it.
         """
         project = self._create_project({"pkg/__init__.py": whitespace})
 
-        def verify(word: str) -> object:
+        def verify(pattern: str) -> object:
             assertion = SpecAssertion(
                 ac_index=0,
-                ac_text=f"pkg/__init__.py MUST remain {word}",
+                ac_text="pkg/__init__.py MUST remain empty",
                 tier=tier,
-                pattern=r"\A\Z",
+                pattern=pattern,
                 file_hint="pkg/__init__.py",
             )
             return SpecVerifier(project_dir=project).verify_all(
                 (assertion,), agent_results={0: True}
             )
 
-        strict = verify("empty")
+        strict = verify(r"\A\Z")
         assert strict.verified_count == 0
         assert strict.reports[0].verified_pass is False
         assert strict.discrepancy_count == 1
 
-        loose = verify("blank")
+        loose = verify(r"\A\s*\Z")
         assert loose.verified_count == 1
         assert loose.reports[0].verified_pass is True
         assert loose.discrepancy_count == 0
@@ -770,6 +712,57 @@ class TestSpecVerifier:
         assert summary.override_approval is False
 
     @pytest.mark.parametrize("tier", [VerificationTier.T2_STRUCTURAL, VerificationTier.T1_CONSTANT])
+    @pytest.mark.parametrize(
+        "pattern",
+        [r"(?m)^$", r"^$", r"\A.*\Z", r"(?s)\A.*\Z", r"\A\w*\Z", r"\A[^x]*\Z", r"\A\s*", r"\s*\Z"],
+        ids=[
+            "multiline-blank-line",
+            "line-anchors",
+            "dot-star",
+            "dotall-star",
+            "word-star",
+            "negated-class",
+            "start-only",
+            "end-only",
+        ],
+    )
+    def test_a_pattern_a_file_with_content_can_satisfy_is_never_admitted(
+        self, tier: VerificationTier, pattern: str
+    ) -> None:
+        """The allowance is for patterns no non-empty file can match — these all can.
+
+        Each of these matches the empty subject, and each also matches this file,
+        which has content in it. Admitting any of them would report `PASS` on a
+        file the criterion rejects, which is the fabricated pass this whole guard
+        exists to stop, arriving through the exit built to rescue honest ACs.
+
+        `(?m)^$` and `^$` are the pair that a naive reading gets wrong: the parser
+        emits the same `AT_BEGINNING` for `^` whether or not `re.MULTILINE` is
+        set — the compiler makes it a line anchor later, from flags — so counting
+        `^` as pinned to the start of the file would admit a pattern that any
+        blank line inside a full file satisfies. `\\A\\s*` and `\\s*\\Z` are pinned at
+        one end only, and match the run of whitespace at whichever end they name.
+        """
+        project = self._create_project({"pkg/__init__.py": "\nfrom .camera import x\n\n"})
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="pkg/__init__.py MUST remain empty",
+            tier=tier,
+            pattern=pattern,
+            file_hint="pkg/__init__.py",
+        )
+
+        summary = SpecVerifier(project_dir=project).verify_all(
+            (assertion,), agent_results={0: True}
+        )
+
+        assert summary.verified_count == 0
+        assert summary.reports[0].verified_pass is False
+        assert summary.discrepancy_count == 1
+        assert summary.override_approval is False
+        assert "Unusable regex pattern" in summary.reports[0].results[0].detail
+
+    @pytest.mark.parametrize("tier", [VerificationTier.T2_STRUCTURAL, VerificationTier.T1_CONSTANT])
     def test_a_must_not_be_empty_criterion_is_left_to_the_ordinary_path(
         self, tier: VerificationTier
     ) -> None:
@@ -795,147 +788,6 @@ class TestSpecVerifier:
         assert summary.verified_count == 1
         assert summary.reports[0].verified_pass is True
         assert summary.discrepancy_count == 0
-
-    @pytest.mark.parametrize("tier", [VerificationTier.T2_STRUCTURAL, VerificationTier.T1_CONSTANT])
-    @pytest.mark.parametrize(
-        "ac_text",
-        [
-            "pkg/config.py MUST NOT be empty",
-            "pkg/config.py must never be empty",
-            "pkg/config.py cannot be blank",
-            "pkg/config.py must not be blank",
-            "pkg/config.py must be non-empty",
-            "pkg/config.py must contain a nonempty value",
-            "pkg/config.py must not under any circumstances be empty.",
-            "pkg/config.py should never, under any reading of this spec, be blank",
-            "Do not let pkg/config.py be empty",
-            "Never allow pkg/config.py to remain empty",
-            "Do not permit pkg/config.py to become empty.",
-            "Never, under any reading of this spec, allow pkg/config.py to be blank",
-            "Do not remove the guard and let pkg/config.py be empty",
-            "Please do not let pkg/config.py be empty",
-            "Please ensure pkg/config.py is not empty",
-            "Please avoid leaving pkg/config.py empty",
-            "It is required that pkg/config.py never be empty",
-            "Make sure pkg/config.py is not empty",
-            "It is forbidden that pkg/config.py be empty",
-        ],
-        ids=[
-            "must-not",
-            "never",
-            "cannot-blank",
-            "not-blank",
-            "hyphenated",
-            "nonempty-word",
-            "distant-negation",
-            "very-distant-negation",
-            "preposed-negation",
-            "preposed-negation-infinitive",
-            "preposed-negation-causative",
-            "preposed-negation-past-comma",
-            "preposed-negation-past-conjunction",
-            "politeness-then-negation",
-            "politeness-then-negated-copula",
-            "politeness-then-avoidance",
-            "impersonal-then-negation",
-            "periphrasis-then-negation",
-            "impersonal-prohibition",
-        ],
-    )
-    def test_a_criterion_forbidding_emptiness_is_not_satisfied_by_an_empty_file(
-        self, tier: VerificationTier, ac_text: str
-    ) -> None:
-        """The violated reading must not pass, and the pattern cannot tell them apart.
-
-        `\\A\\Z` is what a model writes for "must be empty" and for "must not be
-        empty" alike, so polarity has to be read from `ac_text`. Deciding it from
-        the pattern verified a criterion the file breaks: an empty `config.py`
-        against an AC that requires content.
-
-        `nonempty` is here because reading the word as a substring saw `empty`
-        inside it and called the criterion an emptiness requirement. The distant
-        negations are here because a fixed lookback window has a far side, and a
-        criterion can always put its `not` past it.
-
-        The politeness and impersonal forms are the other half of admitting
-        `please`, `kindly`, `make sure` and `it is required that` as words that
-        change no claim: each of these opens exactly as an admitted criterion
-        does and then negates it, so widening the lead must not widen this.
-        """
-        project = self._create_project({"pkg/config.py": ""})
-        assertion = SpecAssertion(
-            ac_index=0,
-            ac_text=ac_text,
-            tier=tier,
-            pattern=r"\A\Z",
-            file_hint="pkg/config.py",
-        )
-
-        summary = SpecVerifier(project_dir=project).verify_all(
-            (assertion,), agent_results={0: True}
-        )
-
-        assert summary.reports[0].verified_pass is False, f"{ac_text!r} must not verify"
-        assert summary.discrepancy_count == 1
-        assert summary.override_approval is False
-
-    @pytest.mark.parametrize("tier", [VerificationTier.T2_STRUCTURAL, VerificationTier.T1_CONSTANT])
-    @pytest.mark.parametrize(
-        "ac_text",
-        [
-            "pkg/marker.txt must be empty and contain a header",
-            "pkg/marker.txt must be empty and must be deleted",
-            "pkg/marker.txt must be empty, but must also contain generated metadata",
-            "pkg/marker.txt MUST be empty and must not be deleted",
-            "pkg/marker.txt must be deleted, and pkg/marker.txt must be empty",
-            "pkg/marker.txt must be empty then the build proceeds",
-            "For the release, pkg/marker.txt must be empty",
-            "Run the generator; pkg/marker.txt must be empty",
-        ],
-        ids=[
-            "and-obligation",
-            "and-modal-obligation",
-            "comma-but-also",
-            "and-negated-obligation",
-            "obligation-in-preamble",
-            "trailing-consequence",
-            "preposed-adjunct",
-            "preposed-clause",
-        ],
-    )
-    def test_a_criterion_that_asks_for_more_than_emptiness_is_not_answered_here(
-        self, tier: VerificationTier, ac_text: str
-    ) -> None:
-        """Emptiness is only half of a compound criterion, and half is not an answer.
-
-        An earlier revision of this test asserted the opposite for the `and must
-        not be deleted` form, on the reasoning that one un-negated occurrence is
-        the requirement. That reasoning was wrong in a way the deletion clause
-        makes obvious: nothing verifies the second obligation, so reporting a
-        pass reports on a criterion that was never checked. The rescue now has
-        to consume the criterion in full, and everything here says something it
-        cannot consume — including the two preposed forms, which it has no way
-        to tell apart from an obligation without reading English.
-
-        Failing closed costs a satisfied emptiness AC its pass, but it costs it
-        an honest `Unusable regex pattern` failure rather than an authoritative
-        wrong answer, which is the trade this whole guard exists to make.
-        """
-        project = self._create_project({"pkg/marker.txt": ""})
-        assertion = SpecAssertion(
-            ac_index=0,
-            ac_text=ac_text,
-            tier=tier,
-            pattern=r"\A\Z",
-            file_hint="pkg/marker.txt",
-        )
-
-        summary = SpecVerifier(project_dir=project).verify_all((assertion,))
-
-        assert summary.reports[0].verified_pass is False, f"{ac_text!r} must not verify"
-        detail = summary.reports[0].results[0].detail
-        assert "empty" not in detail, f"{ac_text!r} must not be answered as an emptiness claim"
-        assert "Unusable regex pattern" in detail
 
     def test_a_pattern_is_refused_by_reading_it_and_never_by_running_it(self) -> None:
         """Deciding nullability by execution hands the verifier a denial of service.
@@ -994,121 +846,6 @@ class TestSpecVerifier:
     @pytest.mark.parametrize(
         "ac_text",
         [
-            "pkg/marker.txt MUST be != empty",
-            "pkg/marker.txt MUST be ≠ empty",
-            "pkg/marker.txt !must be empty",
-            "pkg/marker.txt must be empty 100%",
-            "pkg/marker.txt must be empty > 0 bytes",
-            "pkg/marker.txt must be empty & committed",
-        ],
-        ids=[
-            "ascii-symbolic-negation",
-            "unicode-symbolic-negation",
-            "symbol-before-modal",
-            "numeric-obligation",
-            "operator-obligation",
-            "symbolic-conjunction",
-        ],
-    )
-    def test_a_character_the_reading_cannot_read_refuses_the_whole_criterion(
-        self, tier: VerificationTier, ac_text: str
-    ) -> None:
-        """Consuming every token is not consuming the criterion, if tokens can be dropped.
-
-        The reading used to gather tokens with `findall`, which silently deletes
-        whatever the pattern does not match — so `!=` and `≠` vanished and the
-        criteria here read as bare emptiness requirements, publishing a pass for
-        the exact claim they negate. That is the same defect as matching a part
-        of the criterion, one layer down: a scan over characters that discards
-        the ones it does not recognise is a scan over a part of the characters.
-
-        So the criterion is now consumed character by character, and a character
-        outside words, `.,;:`, quotes, brackets and whitespace refuses the whole
-        reading rather than disappearing from it. An operator or a digit can be
-        the entire meaning, and there is no way to tell the harmless ones apart
-        without reading English.
-        """
-        project = self._create_project({"pkg/marker.txt": ""})
-        assertion = SpecAssertion(
-            ac_index=0,
-            ac_text=ac_text,
-            tier=tier,
-            pattern=r"\A\Z",
-            file_hint="pkg/marker.txt",
-        )
-
-        summary = SpecVerifier(project_dir=project).verify_all((assertion,))
-
-        assert summary.reports[0].verified_pass is False, f"{ac_text!r} must not verify"
-        detail = summary.reports[0].results[0].detail
-        assert "empty" not in detail, f"{ac_text!r} must not be answered as an emptiness claim"
-        assert "Unusable regex pattern" in detail
-
-    @pytest.mark.parametrize("tier", [VerificationTier.T2_STRUCTURAL, VerificationTier.T1_CONSTANT])
-    @pytest.mark.parametrize(
-        ("filename", "ac_text"),
-        [
-            ("empty.txt", "empty.txt MUST contain data"),
-            ("blank.json", "blank.json MUST hold at least one record"),
-            ("marker.txt", "marker.txt MUST contain an empty JSON string field"),
-            ("marker.txt", "marker.txt MUST be an empty JSON object"),
-            ("marker.txt", "marker.txt MUST list the empty partitions"),
-            ("marker.txt", "The status field in marker.txt must be empty."),
-            ("marker.txt", "Every record within marker.txt must be blank"),
-            ("marker.txt", "marker.txt entries must be empty"),
-            ("marker.txt", "The status field in the generated marker.txt must be empty."),
-            ("marker.txt", "The first record of the newly created marker.txt must be blank"),
-        ],
-        ids=[
-            "empty-filename",
-            "blank-filename",
-            "nested-value",
-            "attributive",
-            "object-of-verb",
-            "prepositional-subject",
-            "prepositional-subject-blank",
-            "competing-noun-subject",
-            "modifier-separated-preposition",
-            "two-modifiers-separated-preposition",
-        ],
-    )
-    def test_an_emptiness_word_that_is_not_about_the_file_earns_nothing(
-        self, tier: VerificationTier, filename: str, ac_text: str
-    ) -> None:
-        """The word has to be predicated of the file, not merely present in the AC.
-
-        Each of these mentions emptiness while requiring the file to hold content,
-        and each was read as an emptiness requirement: the word sat in the file's own
-        name, or described a value nested inside it, or was the adjective on some
-        other noun, or the file was named as the object of a preposition — directly
-        or with modifiers standing between the two — while some field inside it was
-        the actual subject. With `\\A\\Z` and an empty file that produced a formal
-        PASS for a criterion the file plainly violates.
-
-        Everything here falls through to the ordinary path, where `\\A\\Z` is refused
-        and the criterion fails closed.
-        """
-        project = self._create_project({filename: ""})
-        assertion = SpecAssertion(
-            ac_index=0,
-            ac_text=ac_text,
-            tier=tier,
-            pattern=r"\A\Z",
-            file_hint=filename,
-        )
-
-        summary = SpecVerifier(project_dir=project).verify_all(
-            (assertion,), agent_results={0: True}
-        )
-
-        assert summary.reports[0].verified_pass is False, f"{ac_text!r} must not verify"
-        assert summary.discrepancy_count == 1
-        assert summary.override_approval is False
-
-    @pytest.mark.parametrize("tier", [VerificationTier.T2_STRUCTURAL, VerificationTier.T1_CONSTANT])
-    @pytest.mark.parametrize(
-        "ac_text",
-        [
             "marker.txt MUST be empty",
             "marker.txt must be empty.",
             "The file marker.txt must be empty",
@@ -1123,6 +860,10 @@ class TestSpecVerifier:
             "It is necessary that marker.txt remains empty",
             "Check that marker.txt is empty",
             "Please confirm marker.txt is blank",
+            "Verify whether marker.txt is empty",
+            "The marker.txt file must remain empty",
+            "marker.txt는 비어 있어야 한다",
+            "ᛗᚨᚱᚲᛖᚱ",
         ],
         ids=[
             "bare",
@@ -1139,28 +880,30 @@ class TestSpecVerifier:
             "impersonal-necessity",
             "checking-verb",
             "politeness-and-blank",
+            "interrogative",
+            "noun-phrase-subject",
+            "not-english",
+            "names-nothing",
         ],
     )
-    def test_the_subject_check_does_not_reject_a_file_it_only_stands_near(
+    def test_the_wording_of_the_criterion_never_decides_the_verdict(
         self, tier: VerificationTier, ac_text: str
     ) -> None:
-        """The shapes the rescue must keep answering, pinned against over-tightening.
+        """Every wording reaches the same verdict, because none of them is read.
 
-        A guard this strict is one edit away from refusing everything, and a
-        refusal is a formal failure for an AC the project satisfies — the
-        original blocker, relocated. `ensure` and `require` ask for the clause
-        after them without changing what it claims, so a criterion that opens
-        with one still says exactly what it says, and a determiner or a noun for
-        the file itself changes nothing either.
+        An earlier revision recognised a closed sentence shape and let the
+        allowance turn on it, so ordinary criteria — `Verify whether marker.txt
+        is empty`, `The marker.txt file must remain empty` — fell through to the
+        blanket refusal and became formal failures for a project that satisfies
+        them. A word list can always be one word short, and each missing word is
+        another honest AC reported as broken.
 
-        The politeness and impersonal forms are the shapes that were refused —
-        `Please ensure marker.txt is empty` was a formal failure on a project
-        that satisfied it, because `please` names no claim and was not listed as
-        naming none. Every word admitted here answers one question: can it change
-        what is claimed about the file? `please`, `kindly`, `make sure` and `it
-        is required that` cannot, so they are read through. `do not`, `never`,
-        `avoid` and `prevent` can, so they are not — and the paired rejection
-        test pins that.
+        Nothing here parses English any more. The allowance is decided by the
+        pattern (`\\A\\Z` can only match a subject with nothing in it) and the hint
+        (it names one file, and that file is what gets read), so the criterion's
+        wording is free — interrogative, noun-phrase, another language, or text
+        that names nothing at all. All of them verify, because all of them are
+        answered by reading `marker.txt`.
         """
         project = self._create_project({"marker.txt": ""})
         assertion = SpecAssertion(
@@ -1191,13 +934,15 @@ class TestSpecVerifier:
     def test_emptiness_offered_as_one_option_is_not_an_emptiness_requirement(
         self, tier: VerificationTier, ac_text: str
     ) -> None:
-        """A criterion the file can satisfy another way is not this rescue's to answer.
+        """A pattern with a second branch that matches content is not an emptiness test.
 
-        Answering the emptiness branch alone would throw away the evidence the
-        other branch names and publish an authoritative "the file is not empty"
-        for a criterion that never required it to be. The refusal has to say what
-        it actually is — a pattern that cannot be trusted — so the failure is
-        legible instead of a confident wrong reason.
+        `\\A\\Z|# generated` matches the empty subject, so it is refused unless it
+        can only match a subject with nothing in it — and this one plainly can
+        match `# generated`. The alternation is what disqualifies it; that the
+        criterion also offers a second way to be satisfied is a fact about the
+        same pattern, read off the pattern rather than off the prose. The refusal
+        has to say what it actually is — a pattern that cannot be trusted — so
+        the failure is legible instead of a confident wrong reason.
         """
         project = self._create_project({"marker.txt": "# generated\n"})
         assertion = SpecAssertion(

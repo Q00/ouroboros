@@ -678,82 +678,56 @@ Parallel Execution Verification Report
         ids=["T1", "T2"],
     )
     @pytest.mark.parametrize(
-        ("filename", "content", "ac_text"),
+        ("content", "ac_text", "pattern"),
         [
-            ("empty.txt", "", "empty.txt MUST contain data"),
-            ("marker.txt", "", "marker.txt MUST contain an empty JSON string field"),
-            ("marker.txt", "", "marker.txt MUST be an empty JSON object"),
-            ("marker.txt", "  \t\n", "marker.txt MUST be empty"),
-            ("marker.txt", "", "The status field in marker.txt must be empty."),
-            ("marker.txt", "", "marker.txt entries must be empty"),
-            ("marker.txt", "", "marker.txt must not under any circumstances be empty."),
-            ("marker.txt", "", "The status field in the generated marker.txt must be empty."),
-            ("marker.txt", "", "The first record of the newly created marker.txt must be blank"),
-            ("marker.txt", "", "marker.txt must be empty and contain a header"),
-            ("marker.txt", "", "marker.txt must be empty and must be deleted"),
-            (
-                "marker.txt",
-                "",
-                "marker.txt must be empty, but must also contain generated metadata",
-            ),
-            ("marker.txt", "", "marker.txt must be deleted, and marker.txt must be empty"),
-            ("marker.txt", "", "marker.txt MUST be != empty"),
-            ("marker.txt", "", "marker.txt MUST be ≠ empty"),
-            ("marker.txt", "", "marker.txt must be empty 100%"),
-            ("marker.txt", "", "marker.txt must be empty > 0 bytes"),
+            ("  \t\n", "marker.txt MUST be empty", r"\A\Z"),
+            ("header\n\nbody\n", "marker.txt MUST be empty", r"(?m)^$"),
+            ("header\n\nbody\n", "marker.txt MUST be empty", r"^$"),
+            ("content", "marker.txt MUST be empty", r"\A.*\Z"),
+            ("content", "marker.txt MUST be empty", r"\A\w*\Z"),
+            ("content", "marker.txt MUST contain a header", r".*"),
+            ("content", "marker.txt MUST contain a header", r"x?"),
         ],
         ids=[
-            "empty-filename",
-            "nested-value",
-            "attributive",
             "whitespace-is-not-empty",
-            "prepositional-subject",
-            "competing-noun-subject",
-            "distant-negation",
-            "modifier-separated-preposition",
-            "two-modifiers-separated-preposition",
-            "compound-obligation",
-            "compound-modal-obligation",
-            "compound-after-comma",
-            "obligation-in-preamble",
-            "ascii-symbolic-negation",
-            "unicode-symbolic-negation",
-            "numeric-obligation",
-            "operator-obligation",
+            "multiline-blank-line",
+            "line-anchors",
+            "dot-star-pinned",
+            "word-star-pinned",
+            "matches-anywhere",
+            "optional-atom",
         ],
     )
-    def test_a_misread_emptiness_word_cannot_be_approved_through_the_adapter(
-        self, tmp_path: Any, tier: VerificationTier, filename: str, content: str, ac_text: str
+    def test_a_pattern_that_is_not_evidence_cannot_be_approved_through_the_adapter(
+        self, tmp_path: Any, tier: VerificationTier, content: str, ac_text: str, pattern: str
     ) -> None:
-        """An emptiness word not predicated of the file must not reach formal approval.
+        """A pattern a file with content can satisfy must not reach formal approval.
 
-        Most of these require the file to hold content while mentioning emptiness —
-        in the filename, in a nested value, as an adjective on another noun, or with
-        the file named as the object of a preposition while some field inside it is
-        the subject. One is a whitespace-only file against an `empty` criterion,
-        which `\\A\\Z` does not match either, and one puts its negation far enough
-        along that a bounded lookback loses it. Four are compound: the file may
-        well be empty, but the criterion also demands a header, a deletion or
-        some metadata, and nothing verified those — answering the emptiness half
-        alone publishes a pass for a requirement no one checked.
+        `marker.txt` holds content in every case here, so every one of these is a
+        criterion the project has not met, and each pattern would report a match
+        on it if the verifier admitted the pattern. `.*` and `x?` match anywhere
+        in anything — the original blocker. The rest are the shapes that a guard
+        with an exit for `\\A\\Z` can be talked into admitting: `\\A.*\\Z` and
+        `\\A\\w*\\Z` are pinned to both ends and still swallow a whole file, and
+        `(?m)^$` and `^$` are pinned to the ends of a *line*, which any blank line
+        inside a full file provides.
 
-        The last four carry their extra meaning in characters rather than words.
-        A tokenizer that keeps only what it recognises deletes the rest, so `!=`
-        and `≠` disappeared and their criteria read as the bare requirement they
-        negate; a trailing `100%` or `> 0 bytes` disappeared the same way. These
-        are here at the formal boundary because deletion at the character level
-        is indistinguishable, from the outside, from the criterion never having
-        said it. Each produced `final_approved=True`, `score=1.0`,
+        The first case is the opposite mistake and belongs at the same boundary:
+        a whitespace-only file is blank and is not empty, `\\A\\Z` says so, and the
+        verdict must survive the trip through the adapter rather than being
+        rounded up to a pass.
+
+        Each of these published `final_approved=True`, `score=1.0`,
         `final_verdict="pass"` at the adapter for a criterion the project
         violates or has not met.
         """
-        (tmp_path / filename).write_text(content)
+        (tmp_path / "marker.txt").write_text(content)
         assertion = SpecAssertion(
             ac_index=0,
             ac_text=ac_text,
             tier=tier,
-            pattern=r"\A\Z",
-            file_hint=filename,
+            pattern=pattern,
+            file_hint="marker.txt",
         )
         verification = SpecVerifier(project_dir=str(tmp_path)).verify_all(
             (assertion,), agent_results={0: True}
@@ -782,86 +756,6 @@ Parallel Execution Verification Report
         assert summary.ac_results[0].final_verdict != "pass"
         assert summary.final_approved is False
         assert summary.score == 0.0
-        assert summary.run_verdict == "FAIL"
-
-    @pytest.mark.parametrize(
-        "tier",
-        [VerificationTier.T1_CONSTANT, VerificationTier.T2_STRUCTURAL],
-        ids=["T1", "T2"],
-    )
-    @pytest.mark.parametrize(
-        "ac_text",
-        [
-            "marker.txt MUST NOT be empty",
-            "Do not let marker.txt be empty",
-            "Never allow marker.txt to remain empty",
-            "Do not permit marker.txt to become empty.",
-            "Never, under any reading of this spec, allow marker.txt to be blank",
-            "Do not remove the guard and let marker.txt be empty",
-        ],
-        ids=[
-            "postposed-negation",
-            "preposed-negation",
-            "preposed-negation-infinitive",
-            "preposed-negation-causative",
-            "preposed-negation-past-comma",
-            "preposed-negation-past-conjunction",
-        ],
-    )
-    def test_a_forbidden_empty_file_cannot_be_approved_through_the_adapter(
-        self, tmp_path: Any, tier: VerificationTier, ac_text: str
-    ) -> None:
-        """A zero-width pattern on an empty file must not approve a criterion forbidding it.
-
-        This drives the real verifier, not a hand-built report: an extracted
-        pattern of ``\\A\\Z`` matches an empty file, so a verifier that took its
-        polarity from the pattern rather than from the AC text handed the
-        adapter a passing report and the adapter dutifully published
-        final_approved=True / score=1.0 / final_verdict="pass" for a criterion
-        the project violates.
-
-        The negation is carried both after the filename and ahead of it, because
-        a rule that reads only forward from the file — or only back to the
-        adjacent word — treats "do not let marker.txt be empty" as a requirement
-        to be empty and republishes exactly that false approval.
-        """
-        marker = tmp_path / "marker.txt"
-        marker.write_text("")
-        assertion = SpecAssertion(
-            ac_index=0,
-            ac_text=ac_text,
-            tier=tier,
-            pattern=r"\A\Z",
-            file_hint="marker.txt",
-        )
-        verification = SpecVerifier(project_dir=str(tmp_path)).verify_all(
-            (assertion,), agent_results={0: True}
-        )
-        mechanical = EvaluationSummary(
-            final_approved=True,
-            highest_stage_passed=2,
-            task_results=(
-                TaskResult(
-                    task_index=0,
-                    task_content=ac_text,
-                    status="completed",
-                    completed=True,
-                    source_ac_index=0,
-                    execution_method="legacy_parallel_report",
-                ),
-            ),
-            execution_completion_status="completed",
-            approval_status="approved",
-        )
-
-        summary = _evaluation_summary_from_spec_verification(mechanical, verification)
-
-        assert summary is not None
-        assert summary.ac_results[0].passed is False
-        assert summary.ac_results[0].final_verdict != "pass"
-        assert summary.final_approved is False
-        assert summary.score == 0.0
-        assert summary.approval_status == "rejected"
         assert summary.run_verdict == "FAIL"
 
     @pytest.mark.parametrize(

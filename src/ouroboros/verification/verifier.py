@@ -87,6 +87,20 @@ _ANCHORS_FAILING_ON_EMPTY = _BOUNDARY | (
 )
 _REPEATS = frozenset({"MAX_REPEAT", "MIN_REPEAT", "POSSESSIVE_REPEAT"})
 
+# The two ends of the *subject* a match can be pinned to. Withholding one of
+# them asks a different question of the same pattern: not "can this match
+# nothing" but "can it match at all without that end of the subject".
+#
+# Only `\A` and `\Z` are here, and `^` and `$` are not. The parser emits the
+# same `AT_BEGINNING` for `^` whether or not `re.MULTILINE` is on — it is the
+# compiler, working from flags, that turns it into a line anchor — so a reading
+# that counted `^` as pinned to the file would admit `(?m)^$`, which is
+# satisfied by a blank line inside a file full of content. `^` is therefore
+# read as pinning to nothing at all here, which costs a pattern written that
+# way the same formal failure it already gets today.
+_START_ANCHORS = frozenset({"AT_BEGINNING_STRING"})
+_END_ANCHORS = frozenset({"AT_END_STRING"})
+
 
 class _Group(NamedTuple):
     """What a capture group did on a match that consumed nothing."""
@@ -171,6 +185,8 @@ def _can_match_nothing(
     depth: int = 0,
     groups: dict[int, _Group] | None = None,
     on_path: bool | None = True,
+    withheld: frozenset[str] = frozenset(),
+    porous: bool = False,
 ) -> bool | None:
     """Whether a parsed regex can match the empty string, read rather than run.
 
@@ -197,6 +213,14 @@ def _can_match_nothing(
     three-valued: True for a path the match certainly took, False for one it
     certainly did not — the inside of a negative assertion, which succeeds only
     by failing — and None where it may have gone either way.
+
+    `withheld` names anchors to read as ones that cannot hold, and `porous`
+    reads a consuming atom as something a match can cross rather than something
+    that ends the question. Together they turn this walk into a second question
+    asked of the same tree — "can this match somewhere that is not the start of
+    the subject" — whose answer is what tells a pattern pinned to both ends of
+    the file apart from one that matches anywhere in it. Defaults leave the
+    first question exactly as it was.
     """
     if groups is None:
         groups = {}
@@ -213,7 +237,13 @@ def _can_match_nothing(
             # what those captures did, and inside a negative assertion, which is
             # where such a sequence takes part in a match by failing, the answer
             # is that they certainly did not.
-            answers.append(False)
+            #
+            # Unless the walk was asked to be porous, where a consuming atom is
+            # something the match crosses rather than something that settles it:
+            # the second question is about *where* a match can be, not about how
+            # long it is, and a subject free to hold whatever the atom wants is
+            # a subject the atom does not rule out.
+            answers.append(porous)
         elif name == "FAILURE":
             # An assertion that can never hold. From 3.13 the parser folds `(?!)`
             # and `(?!(?:))` into this single opcode; before that the same source
@@ -225,22 +255,43 @@ def _can_match_nothing(
             answers.append(False)
         elif name == "AT":
             anchor = getattr(argument, "name", str(argument))
-            if anchor in _ANCHORS_HOLDING_ON_EMPTY:
+            # A withheld anchor is read as one that cannot hold. That is not a
+            # claim about the anchor — it is how the second and third walks ask
+            # their narrower question: with the start of the subject withheld,
+            # a `True` answer would mean the pattern can match nothing without
+            # ever pinning to the start, and a `False` means every empty match
+            # it has needs that end.
+            if anchor in withheld:
+                answers.append(False)
+            elif anchor in _ANCHORS_HOLDING_ON_EMPTY:
                 continue
-            answers.append(False if anchor in _ANCHORS_FAILING_ON_EMPTY else None)
+            elif porous:
+                # A word boundary says something about the characters on either
+                # side, and a subject free to hold whatever it likes is free to
+                # hold those. It rules out no position on the porous reading.
+                answers.append(True)
+            else:
+                answers.append(False if anchor in _ANCHORS_FAILING_ON_EMPTY else None)
         elif name in _REPEATS:
             minimum, _maximum, item = argument
             # Walked whatever the count, so that groups inside a repeat that may
             # run zero times are still recorded for a later backreference.
             item_empty = _can_match_nothing(
-                item, depth + 1, groups, _skippable(on_path) if minimum == 0 else on_path
+                item,
+                depth + 1,
+                groups,
+                _skippable(on_path) if minimum == 0 else on_path,
+                withheld,
+                porous,
             )
             # A repeat that may run zero times is skippable; one that must run
             # is empty only if what it repeats is. The count itself is never
             # counted out.
             answers.append(True if minimum == 0 else item_empty)
         elif name == "SUBPATTERN":
-            body_empty = _can_match_nothing(argument[-1], depth + 1, groups, on_path)
+            body_empty = _can_match_nothing(
+                argument[-1], depth + 1, groups, on_path, withheld, porous
+            )
             number = argument[0]
             if number is not None:
                 groups[number] = _Group(body_empty, _participation(body_empty, on_path))
@@ -251,12 +302,17 @@ def _can_match_nothing(
             # did not take part refers to nothing captured, and this interpreter
             # fails such a reference rather than matching nothing with it — so
             # the sequence around it cannot match at all, empty included. A group
-            # not yet seen (a forward reference) is unknown, and stays unknown.
+            # the walk has not reached is one the match has not reached either,
+            # so it has certainly captured nothing here and the reference fails
+            # the same way.
             seen = groups.get(argument)
-            if seen is None:
-                answers.append(None)
-            elif seen.took_part is False:
+            if seen is None or seen.took_part is False:
                 answers.append(False)
+            elif porous:
+                # A reference that resolves repeats text the subject is free to
+                # repeat, so on the porous reading it is crossed like any other
+                # consuming atom rather than being empty.
+                answers.append(True)
             else:
                 answers.append(seen.empty)
         elif name == "GROUPREF_EXISTS":
@@ -272,16 +328,31 @@ def _can_match_nothing(
             # so a capture in the selected arm is as much on the path as the
             # conditional is — reading both arms as skippable left every such
             # capture unknown and refused the conditionals reading them.
+            #
+            # Nor is a group the walk has not reached an open question. A
+            # conditional written before the group it names runs at a point the
+            # match has not yet carried the group into, so nothing can have been
+            # captured in it and the interpreter takes the `no` arm — every
+            # time, on every version. Repetition does not reopen it: a repeat
+            # matches nothing only if each of its runs does, and its first run
+            # always meets the group unreached. Reading a forward reference as
+            # unknown made the arms have to agree, and `(?(1)|a)(a?)` — which
+            # plainly discriminates — was refused as evidence.
             reference, yes_arm, no_arm = argument
-            took_part = groups[reference].took_part if reference in groups else None
+            seen_by_conditional = groups.get(reference)
+            took_part = False if seen_by_conditional is None else seen_by_conditional.took_part
             if took_part is True:
                 yes_path, no_path = on_path, False
             elif took_part is False:
                 yes_path, no_path = False, on_path
             else:
                 yes_path = no_path = _skippable(on_path)
-            yes = _can_match_nothing(yes_arm, depth + 1, groups, yes_path)
-            no = True if no_arm is None else _can_match_nothing(no_arm, depth + 1, groups, no_path)
+            yes = _can_match_nothing(yes_arm, depth + 1, groups, yes_path, withheld, porous)
+            no = (
+                True
+                if no_arm is None
+                else _can_match_nothing(no_arm, depth + 1, groups, no_path, withheld, porous)
+            )
             if took_part is True:
                 answers.append(yes)
             elif took_part is False:
@@ -289,7 +360,9 @@ def _can_match_nothing(
             else:
                 answers.append(_agreed([yes, no]))
         elif name == "ATOMIC_GROUP":
-            answers.append(_can_match_nothing(argument, depth + 1, groups, on_path))
+            answers.append(
+                _can_match_nothing(argument, depth + 1, groups, on_path, withheld, porous)
+            )
         elif name == "BRANCH":
             # Every branch is walked, not just up to the first empty one, so that
             # groups defined in a later branch are recorded too.
@@ -319,7 +392,9 @@ def _can_match_nothing(
             walked: list[tuple[bool | None, dict[int, _Group]]] = []
             for branch in argument[1]:
                 local = dict(groups)
-                walked.append((_can_match_nothing(branch, depth + 1, local, on_path), local))
+                walked.append(
+                    (_can_match_nothing(branch, depth + 1, local, on_path, withheld, porous), local)
+                )
             branch_answers = [answer for answer, _ in walked]
             settled = branch_answers.count(True) == 1 and all(
                 answer is not None for answer in branch_answers
@@ -347,7 +422,9 @@ def _can_match_nothing(
             # capture inside it took part exactly as much as the same capture
             # written outside it would have. Calling it optional here is what
             # made `(?=())(?(1)x|)` unreadable and refused it as evidence.
-            answers.append(_can_match_nothing(argument[1], depth + 1, groups, on_path))
+            answers.append(
+                _can_match_nothing(argument[1], depth + 1, groups, on_path, withheld, porous)
+            )
         elif name == "ASSERT_NOT":
             # A negative assertion succeeds only where its body fails, and a
             # subpattern that fails leaves nothing captured behind it. So this is
@@ -364,11 +441,21 @@ def _can_match_nothing(
             # the body is walked on the path it inherits, over its own copy of
             # the table, and only what escapes to the outside is `False`.
             local_to_body = dict(groups)
-            inner = _can_match_nothing(argument[1], depth + 1, local_to_body, on_path)
+            inner = _can_match_nothing(
+                argument[1], depth + 1, local_to_body, on_path, withheld, porous
+            )
             for number, group in local_to_body.items():
                 if number not in groups:
                     groups[number] = _Group(group.empty, False)
-            answers.append(None if inner is None else not inner)
+            if porous:
+                # The porous reading asks whether the body can match *somewhere*,
+                # and the negation of "somewhere" is not "nowhere" — `(?!x)` holds
+                # at every position that is not followed by an `x`, however freely
+                # an `x` can appear elsewhere. So only a body that can match
+                # nowhere at all lets this assertion be read with certainty.
+                answers.append(True if inner is False else None)
+            else:
+                answers.append(None if inner is None else not inner)
         else:
             answers.append(None)
     return _all_empty(answers)
@@ -386,299 +473,151 @@ def _matches_the_empty_string(pattern: str, flags: int = 0) -> bool:
     return _can_match_nothing(parsed) is not False
 
 
-# Words that make an acceptance criterion a claim about a file holding nothing.
-# Such a criterion has no content for a regex to find, so every honest way to
-# write it — `\A\Z` and its blank-file variants — is refused by the empty-string
-# rule in `_safe_compile`, and an honest criterion fails formally.
-#
-# `_empty_file_criterion_result` answers that one criterion from the file itself.
-# Emptiness is a property of the file, and reading it is ground truth; asking a
-# regex what it *could* match is inference, and inference run against a fixed
-# list of sample strings only ever rejects what the list literally contains.
-_EMPTINESS_WORDS = frozenset({"empty", "blank"})
+# Whitespace is the one thing a file can hold that no acceptance criterion is
+# about, so it is the one thing a pattern may consume and still be read as a
+# claim that the file holds nothing. `\s` is exactly this class; a literal space,
+# tab or newline is a member of it.
+_BLANK_CATEGORIES = frozenset({"CATEGORY_SPACE"})
 
-# A criterion that *forbids* emptiness reads almost identically to one that
-# requires it, and so does one that asks it of something the file merely
-# contains. Both have to be told apart here, from `ac_text`, because the only
-# other thing in the assertion that could carry the difference is the extracted
-# pattern — and `\A\Z` is what a model writes for every one of these readings.
-#
-# The shape that licenses the rescue is narrow on purpose, and it is matched
-# against the criterion in full: words that may precede a subject, the file, a
-# chain of auxiliaries and adverbs, a copula, the emptiness word, and then
-# nothing at all. Everything is decided by what may appear *in* that shape
-# rather than by how near some other word happens to fall, because a window has
-# a far side and a criterion can always put a negation, a governing verb or a
-# second obligation past it.
-
-# A copula is what puts the emptiness on the subject.
-_COPULAS = frozenset(
-    {
-        "be",
-        "is",
-        "are",
-        "was",
-        "were",
-        "remain",
-        "remains",
-        "stay",
-        "stays",
-        "become",
-        "becomes",
-    }
-)
-# The only words allowed to stand between the file and the emptiness word.
-# Negations are absent from this set rather than enumerated in one of their own,
-# so "must not be empty" and "must not under any circumstances be empty" are
-# refused by the same rule and no phrasing can outrun it. So is any noun that
-# would move the subject elsewhere — "marker.txt entries must be empty" is about
-# the entries. An unrecognised word means the sentence is not one this can read,
-# which is a reason to fail closed and not a reason to guess.
-_PREDICATE_CHAIN = _COPULAS | {
-    "must",
-    "shall",
-    "should",
-    "will",
-    "would",
-    "has",
-    "have",
-    "had",
-    "needs",
-    "need",
-    "to",
-    "left",
-    "kept",
-    "always",
-    "still",
-    "already",
-    "completely",
-    "entirely",
-    "totally",
-    "fully",
-    "strictly",
-    "initially",
-    "currently",
-}
-# The only words allowed to stand between the start of the criterion and the
-# file. Anything else means the file is not what the criterion is about: a
-# preposition makes it the object of something ("the status field in
-# marker.txt"), a verb makes it the object of that verb ("do not let marker.txt
-# be empty"), and a competing noun makes it a modifier of that noun. This is an
-# allow-list for the same reason the forward chain is — no preposed phrasing can
-# outrun a rule that admits only what it names.
-#
-# Each word here belongs to one of four classes, and membership is decided by a
-# single test: can putting this word in front of "marker.txt is empty" change
-# what is being claimed about marker.txt? For a determiner, a name for the file
-# itself, a request to see to it, or a politeness or impersonal frame, it cannot.
-# For anything else — every negation, every governing verb, every preposition,
-# every competing noun — it can, and so it is left out and refuses the criterion.
-_CRITERION_LEAD = frozenset(
-    {
-        # Determiners and possessives. A closed class in English, listed whole.
-        "the",
-        "a",
-        "an",
-        "this",
-        "that",
-        "these",
-        "those",
-        "each",
-        "every",
-        "all",
-        "any",
-        "its",
-        "their",
-        "our",
-        "my",
-        "your",
-        "we",
-        # Nouns that name the file rather than something the file contains.
-        "file",
-        "files",
-        "filename",
-        "path",
-        "artifact",
-        "output",
-        "document",
-        "log",
-        "report",
-        # Verbs that ask for the clause after them without changing what it
-        # claims: "ensure marker.txt is empty" requires exactly what
-        # "marker.txt is empty" does. Negating one of these negates the
-        # criterion, but the negation is itself a word this set does not admit.
-        "ensure",
-        "ensures",
-        "ensured",
-        "verify",
-        "verifies",
-        "verified",
-        "confirm",
-        "confirms",
-        "confirmed",
-        "require",
-        "requires",
-        "required",
-        "expect",
-        "expects",
-        "expected",
-        "check",
-        "checks",
-        "assert",
-        "asserts",
-        "validate",
-        "validates",
-        "guarantee",
-        "guarantees",
-        "make",
-        "sure",
-        # Politeness and impersonal frames — "please", "it is necessary that".
-        # These carry no claim of their own at all, which is exactly why leaving
-        # them out cost an honest criterion a formal failure.
-        "please",
-        "kindly",
-        "it",
-        "is",
-        "necessary",
-        "mandatory",
-    }
-)
-
-# Stands in for the file's own name, so that the match has one token to anchor
-# on and `empty.txt MUST contain data` stops carrying an emptiness word it
-# never meant. Underscored to keep it out of reach of any English word.
-_FILE_TOKEN = "__the_file__"
-
-# Quotes and brackets wrap a name without changing what is claimed about it, and
-# whitespace separates. Everything else in a criterion has to be a word or one of
-# these marks, because a character this cannot read may be the whole of the
-# meaning: `!=` and `≠` invert the very claim they sit in, and a digit or an
-# operator can carry an obligation of its own. So the criterion is consumed
-# character by character and an unreadable one refuses the whole reading — a scan
-# that silently drops what it does not recognise is matching a *part* again, one
-# layer below the tokens.
-_READABLE = re.compile(r"[a-z_]+|[.,;:]|['’\"`()\[\]]|\s+")
-_MARKUP = frozenset("'’\"`()[]")
+# Character ranges are read, not enumerated, past this width. Every run of
+# whitespace codepoints is a handful long — `\t` through `\r` is five — so a
+# wide range is not a blank class that this failed to recognise, it is a class
+# with content in it.
+_MAX_BLANK_RANGE = 64
 
 
-def _criterion_tokens(text: str) -> list[str] | None:
-    """Every word and mark of `text`, or None if any character is unreadable."""
-    tokens: list[str] = []
-    consumed = 0
-    for match in _READABLE.finditer(text):
-        if match.start() != consumed:
-            return None
-        consumed = match.end()
-        token = match.group()
-        if not token.isspace() and token not in _MARKUP:
-            tokens.append(token)
-    return tokens if consumed == len(text) else None
+def _is_blank_codepoint(value: object) -> bool:
+    return isinstance(value, int) and 0 <= value <= 0x10FFFF and chr(value).isspace()
 
 
-def _mask_file_hint(ac_text: str, file_hint: str) -> str:
-    """Replace mentions of the file's own name with `_FILE_TOKEN`.
+def _is_blank_range(bounds: object) -> bool:
+    if not isinstance(bounds, tuple) or len(bounds) != 2:
+        return False
+    low, high = bounds
+    if not isinstance(low, int) or not isinstance(high, int):
+        return False
+    if high - low > _MAX_BLANK_RANGE:
+        return False
+    return all(_is_blank_codepoint(code) for code in range(low, high + 1))
 
-    Names are matched as whole tokens for the same reason the mention check is —
-    `a.py` sits inside `data.py`.
 
-    And case-insensitively for the same reason too. The mention check already
-    ignores case, so `Marker.txt must be empty` against a hint of `marker.txt`
-    reached this function, went unmasked because the substitution did not, and
-    lost the one token the reading anchors on — an ordinary criterion on a file
-    that satisfies it, turned into an authoritative failure by a capital letter.
-    Both places normalize the same way now.
+def _is_blank_class(items: object) -> bool:
+    """Whether a `[...]` class can only ever match whitespace.
+
+    A negated class is not one of them whatever it lists: `[^ ]` is every
+    character that is not a space, which is what content is made of.
     """
-    if not file_hint:
-        return ac_text
-    return re.sub(
-        rf"(\A|[\s'\"`(\[]){re.escape(file_hint)}(?=\Z|[\s'\"`)\],.;:])",
-        rf"\1{_FILE_TOKEN}",
-        ac_text,
-        flags=re.IGNORECASE,
-    )
+    try:
+        members = list(items)  # type: ignore[call-overload]
+    except TypeError:  # pragma: no cover - the parser always hands back a list
+        return False
+    for opcode, argument in members:
+        name = getattr(opcode, "name", str(opcode))
+        if name == "LITERAL":
+            if not _is_blank_codepoint(argument):
+                return False
+        elif name == "RANGE":
+            if not _is_blank_range(argument):
+                return False
+        elif name == "CATEGORY":
+            if getattr(argument, "name", str(argument)) not in _BLANK_CATEGORIES:
+                return False
+        else:
+            return False
+    return True
 
 
-def _emptiness_the_criterion_requires(ac_text: str, file_hint: str) -> str | None:
-    """The emptiness word the criterion predicates of the file, or None.
+def _consumes_only_blank(sequence: object, depth: int = 0) -> bool:
+    """Whether nothing this can consume is content.
 
-    Returns `empty` or `blank` because the two do not mean the same thing to a
-    file holding one tab, and the caller has to answer the question that was
-    actually asked.
+    What a lookaround looks at is not consumed and so is never part of what
+    matched; it is skipped here for that reason. A backreference is not, because
+    it repeats whatever its group captured, and a group inside a lookaround can
+    have captured anything at all.
 
-    The criterion has to be this shape and nothing besides::
-
-        <lead>* <file> <chain>* <copula> (empty | blank) ["."]
-
-    every character of it consumed. Matching the whole of it is what makes the rescue
-    safe to answer, and it is a stronger claim than matching a part: a criterion
-    that says more is also *asking* for more — "must be empty and contain a
-    header" carries a second obligation, and answering only the emptiness half
-    would publish a pass for a requirement nothing checked. Distinguishing a
-    second obligation from a harmless aside means reading English, which is the
-    guessing this exists to avoid. So anything it cannot consume in full returns
-    None and fails closed on the ordinary path, which says plainly that the
-    pattern is unusable rather than authoritatively answering the wrong question.
-
-    Consuming the whole criterion also leaves nowhere to put the words that
-    broke every narrower version of this: a negation, a governing verb, a
-    competing subject and a trailing obligation are all outside the shape, on
-    either side of the name, at any distance — and so is a negation written as a
-    symbol, because the reading is over characters and `!=` is not among the ones
-    it can read.
-
-    Reading words rather than substrings is what keeps `nonempty` from being an
-    occurrence of `empty`.
+    False for anything this cannot read, so an unrecognised construct narrows
+    nothing.
     """
-    tokens = _criterion_tokens(_mask_file_hint(ac_text, file_hint).lower())
-    if tokens is None:
-        return None
-    if tokens and tokens[-1] == ".":
-        tokens.pop()
-    step = 0
-    while step < len(tokens) and tokens[step] in _CRITERION_LEAD:
-        step += 1
-    if step >= len(tokens) or tokens[step] != _FILE_TOKEN:
-        return None
-    step += 1
-    saw_copula = False
-    while step < len(tokens) and tokens[step] in _PREDICATE_CHAIN:
-        saw_copula = saw_copula or tokens[step] in _COPULAS
-        step += 1
-    if not saw_copula or step != len(tokens) - 1:
-        return None
-    return tokens[step] if tokens[step] in _EMPTINESS_WORDS else None
+    if depth > _MAX_PARSE_DEPTH:
+        return False
+    try:
+        items = list(sequence)  # type: ignore[call-overload]
+    except TypeError:  # pragma: no cover - the parser always hands back a sequence
+        return False
+    for opcode, argument in items:
+        name = getattr(opcode, "name", str(opcode))
+        if name in ("AT", "ASSERT", "ASSERT_NOT", "FAILURE"):
+            continue
+        if name == "LITERAL":
+            if not _is_blank_codepoint(argument):
+                return False
+        elif name == "IN":
+            if not _is_blank_class(argument):
+                return False
+        elif name == "RANGE":
+            if not _is_blank_range(argument):
+                return False
+        elif name == "CATEGORY":
+            if getattr(argument, "name", str(argument)) not in _BLANK_CATEGORIES:
+                return False
+        elif name in _REPEATS or name == "SUBPATTERN":
+            # Both carry the thing they wrap last: a repeat cannot consume what
+            # its body does not, and a group consumes exactly its body.
+            if not _consumes_only_blank(argument[-1], depth + 1):
+                return False
+        elif name == "ATOMIC_GROUP":
+            if not _consumes_only_blank(argument, depth + 1):
+                return False
+        elif name == "BRANCH":
+            if not all(_consumes_only_blank(branch, depth + 1) for branch in argument[1]):
+                return False
+        elif name == "GROUPREF_EXISTS":
+            _reference, yes_arm, no_arm = argument
+            if not _consumes_only_blank(yes_arm, depth + 1):
+                return False
+            if no_arm is not None and not _consumes_only_blank(no_arm, depth + 1):
+                return False
+        else:
+            return False
+    return True
 
 
-def _asks_whether_a_named_file_is_empty(assertion: SpecAssertion) -> str | None:
-    """The emptiness the criterion asks of the file its hint names, or None.
+def _matches_only_a_blank_subject(pattern: str, flags: int = 0) -> bool:
+    r"""Whether the only file this can match is one with nothing in it.
 
-    All three halves are load-bearing. The hint must name one file, because
-    `\\A\\Z` over `**/*.py` stops at whichever candidate is empty first — in a
-    Python project some package marker no criterion ever mentioned. The
-    criterion must name that same file, because `pkg/__init__.py` is empty in
-    most repositories, so an exact hint pointed at it would otherwise "verify" a
-    criterion about something else entirely. And the criterion must *require*
-    emptiness of that file rather than forbid it, mention it in a filename, or
-    ask it of a value nested inside — an empty file satisfies one reading and
-    violates the others while the pattern looks the same for all of them.
+    `\A\Z` and `\A\s*\Z` match a subject with nothing in it, and the empty-string
+    rule refuses them for it. But the reason that rule exists does not reach
+    them. A pattern that can match nothing *somewhere in the middle* matches
+    every file there is, so its match is evidence of nothing; these match one
+    file and no other, which makes them not the weakest evidence available but
+    the sharpest. Refusing them failed the one criterion they are the right
+    answer to — that a file be left empty — and left it needing a rescue that
+    read the criterion's English instead, which is guesswork this file should
+    not be doing.
 
-    The hint comes from the same model completion as the pattern and licenses
-    nothing on its own; `ac_text` is the spec's own wording, which the model
-    selects by index but does not write. Anything this returns None for falls
-    through to the ordinary path, where `_safe_compile` refuses `\\A\\Z` and the
-    criterion fails closed.
+    Three readings, none of which runs the pattern. Nothing it consumes may be
+    content, or the file it matched had something in it. No match may begin
+    anywhere but the start of the subject, and none may end anywhere but the
+    end, or what matched was a blank stretch inside a file rather than the whole
+    of one — asked by walking the same tree twice more with one end of the
+    subject withheld, which forces every match to justify itself without that
+    end. Both walks answering "cannot" is what says both ends were required.
+
+    Only `\A` and `\Z` count as the ends of the subject, so `\A$` and `(?m)^$`
+    are refused rather than admitted — see `_START_ANCHORS`. That costs a
+    criterion written with `$` the failure it already gets today, and it is the
+    only reading that stays sound without inspecting flags the parser has not
+    applied.
     """
-    hint = assertion.file_hint
-    if not hint or any(c in hint for c in "*?["):
-        return None
-    # As a whole token, not a substring: `a.py` sits inside `data.py`, and a
-    # criterion about the latter must not license a hint pointed at the former.
-    if not re.search(
-        rf"(?:\A|[\s'\"`(\[]){re.escape(hint.lower())}(?=\Z|[\s'\"`)\],.;:])",
-        assertion.ac_text.lower(),
-    ):
-        return None
-    return _emptiness_the_criterion_requires(assertion.ac_text, hint)
+    try:
+        parsed = regex_parser.parse(pattern, flags)
+    except Exception:  # pragma: no cover - re.compile has already accepted this
+        return False
+    if not _consumes_only_blank(parsed):
+        return False
+    unpinned_at_start = _can_match_nothing(parsed, withheld=_START_ANCHORS, porous=True)
+    unpinned_at_end = _can_match_nothing(parsed, withheld=_END_ANCHORS, porous=True)
+    return unpinned_at_start is False and unpinned_at_end is False
 
 
 def _skip_inline_space(text: str, index: int) -> int:
@@ -849,83 +788,50 @@ class SpecVerifier:
             logger.warning("Invalid regex pattern: %s", e)
             return None
 
-    def _safe_compile(self, pattern: str, flags: int = 0) -> re.Pattern | None:
+    def _searches_one_named_file(self, file_hint: str | None, candidates: list[str] | None) -> bool:
+        """Whether this search is about one file the hint named outright.
+
+        A glob is not that, however few files it happens to match today. `\\A\\Z`
+        over `**/*.py` asks whether the project contains *any* empty file, and in
+        a Python project it does — some package marker no criterion mentioned. A
+        hint that names one path asks about that path.
+        """
+        if not file_hint or any(char in file_hint for char in "*?["):
+            return False
+        return candidates is not None and len(candidates) == 1
+
+    def _safe_compile(
+        self,
+        pattern: str,
+        flags: int = 0,
+        file_hint: str | None = None,
+        candidates: list[str] | None = None,
+    ) -> re.Pattern | None:
         """Compile a model-supplied regex, refusing one that cannot be evidence."""
         compiled = self._compile_or_none(pattern, flags)
         if compiled is None:
             return None
         if _matches_the_empty_string(pattern, flags):
-            # A pattern that can match a subject with nothing in it proves nothing
-            # about a subject that has something in it either — `\A\Z` matches only
-            # the empty file, `.*` and `x?` and `\s*` and `(?:)` and `|` and `^`
-            # match anywhere in any file, and all of them verified whatever
-            # criterion they were handed. What the two kinds share is that the
-            # match is not evidence of the criterion. A criterion that is genuinely
-            # about a file being empty is answered by `_empty_file_criterion_result`
-            # from the file, so nothing honest depends on admitting these here.
+            # `.*` and `x?` and `(?:)` and `|` and `^` match anywhere in any file,
+            # so they verified whatever criterion they were handed — the match is
+            # not evidence of the criterion. `\A\Z` shares the empty match and
+            # nothing else: pinned to both ends of the subject and consuming no
+            # content, it holds for a file with nothing in it and fails for every
+            # other, which is discrimination rather than the absence of it. So it
+            # is admitted where it is being asked about one named file, and the
+            # search below answers the criterion from that file directly.
+            if self._searches_one_named_file(file_hint, candidates) and (
+                _matches_only_a_blank_subject(pattern, flags)
+            ):
+                return compiled
             logger.warning(
                 "Regex pattern can match without criterion content, skipping: %r", pattern
             )
             return None
         return compiled
 
-    def _empty_file_criterion_result(
-        self, assertion: SpecAssertion
-    ) -> SpecVerificationResult | None:
-        """Answer an "X MUST remain empty" criterion from the file, not from the pattern.
-
-        Returns None whenever this is not that criterion, leaving the assertion to
-        the ordinary path. Deliberately one gate ahead of the tier split: a verdict
-        that differs between T1 and T2 is a hole, and here that cannot be written.
-        """
-        if assertion.tier not in (VerificationTier.T1_CONSTANT, VerificationTier.T2_STRUCTURAL):
-            return None
-        requirement = _asks_whether_a_named_file_is_empty(assertion)
-        if requirement is None:
-            return None
-
-        # The pattern still decides which way the criterion is being asked. One that
-        # needs content — `\S` for "MUST NOT be empty" — is answered by the ordinary
-        # path, which can see the content it needs; only one that survives on a file
-        # with nothing in it lands here, and that is the pattern this rescue is for.
-        compiled = self._compile_or_none(assertion.pattern)
-        if compiled is None or not _matches_the_empty_string(assertion.pattern):
-            return None
-
-        files = self._find_files(assertion.file_hint)
-        if len(files) != 1:
-            return None
-        content = self._read_file(files[0])
-        if content is None:
-            return None
-
-        # Which word the criterion used decides the test, because they are not the
-        # same test. A file of one tab is blank and is not empty, and `\A\Z` — the
-        # pattern that motivates this whole path — draws exactly that line.
-        # Answering "empty" with the looser reading would formally approve a file
-        # the criterion rejects.
-        remainder = content if requirement == "empty" else content.strip()
-        satisfied = not remainder
-        basename = os.path.basename(files[0])
-        return SpecVerificationResult(
-            assertion=assertion,
-            verified=satisfied,
-            file_path=files[0],
-            discrepancy=not satisfied,
-            detail=(
-                f"Criterion asks whether {basename} is {requirement}; it is {requirement}"
-                if satisfied
-                else f"Criterion asks whether {basename} is {requirement}; it holds "
-                f"{len(remainder)} characters of content"
-            ),
-        )
-
     def _verify_one(self, assertion: SpecAssertion) -> SpecVerificationResult | None:
         """Verify a single assertion. Returns None for skipped tiers."""
-        empty_file = self._empty_file_criterion_result(assertion)
-        if empty_file is not None:
-            return empty_file
-
         if assertion.tier == VerificationTier.T1_CONSTANT:
             return self._verify_constant(assertion)
         elif assertion.tier == VerificationTier.T2_STRUCTURAL:
@@ -953,7 +859,9 @@ class SpecVerifier:
                 detail=f"No files matched hint: {assertion.file_hint}",
             )
 
-        pattern = self._safe_compile(assertion.pattern)
+        pattern = self._safe_compile(
+            assertion.pattern, file_hint=assertion.file_hint, candidates=files
+        )
         if pattern is None:
             return SpecVerificationResult(
                 assertion=assertion,
@@ -1029,7 +937,9 @@ class SpecVerifier:
                     )
 
         # Second check: search file contents for class/function/interface
-        content_pattern = self._safe_compile(assertion.pattern)
+        content_pattern = self._safe_compile(
+            assertion.pattern, file_hint=assertion.file_hint, candidates=files
+        )
         if content_pattern is None:
             return SpecVerificationResult(
                 assertion=assertion,
