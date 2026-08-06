@@ -1419,6 +1419,26 @@ def get_opencode_mode() -> str | None:
         return None
 
 
+def get_telemetry_enabled() -> bool:
+    """Whether anonymous usage telemetry may send events.
+
+    Priority:
+        1. DO_NOT_TRACK environment variable (any truthy value disables)
+        2. OUROBOROS_TELEMETRY environment variable (1/0, true/false, on/off)
+        3. config.yaml telemetry.enabled
+        4. True (default: on, with first-run notice and TELEMETRY.md contract)
+    """
+    if os.environ.get("DO_NOT_TRACK", "").strip().lower() in ("1", "true", "on", "yes"):
+        return False
+    env = _env_flag("OUROBOROS_TELEMETRY")
+    if env is not None:
+        return env
+    try:
+        return load_config().telemetry.enabled
+    except ConfigError:
+        return True
+
+
 def get_gemini_cli_path() -> str | None:
     """Get Gemini CLI path from environment variable or config file.
 

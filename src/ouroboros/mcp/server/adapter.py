@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Any
 from pydantic import Field
 import structlog
 
+from ouroboros import telemetry as usage_telemetry
 from ouroboros.config._model_defaults import DEFAULT_SONNET_MODEL
 from ouroboros.config.loader import get_execution_model
 from ouroboros.core.seed import ac_text, ac_texts
@@ -1022,11 +1023,26 @@ class MCPServerAdapter:
                 ok=result.is_ok,
                 error_type=type(result.error).__name__ if result.is_err else None,
             )
+            usage_telemetry.capture_tool_call(
+                name,
+                ok=result.is_ok,
+                duration_ms=_duration_ms(started_at),
+                error_type=type(result.error).__name__ if result.is_err else None,
+            )
             return result
         except MCPServerError as exc:
+            usage_telemetry.capture_tool_call(
+                name,
+                ok=False,
+                duration_ms=_duration_ms(started_at),
+                error_type=type(exc).__name__,
+            )
             return Result.err(exc)
         except TimeoutError:
             duration_ms = _duration_ms(started_at)
+            usage_telemetry.capture_tool_call(
+                name, ok=False, duration_ms=duration_ms, error_type="TimeoutError"
+            )
             log.error("mcp.server.tool_timeout", tool=name, duration_ms=duration_ms)
             log.error(
                 "mcp.server.call_tool.error",
@@ -1046,6 +1062,9 @@ class MCPServerAdapter:
             )
         except Exception as e:
             duration_ms = _duration_ms(started_at)
+            usage_telemetry.capture_tool_call(
+                name, ok=False, duration_ms=duration_ms, error_type=type(e).__name__
+            )
             log.error(
                 "mcp.server.tool_error",
                 tool=name,
@@ -1732,6 +1751,15 @@ def create_ouroboros_server(
     interview_llm_backend = role_llm_backend("interview")
     evaluate_llm_backend = role_llm_backend("semantic_evaluation")
     reflect_llm_backend = role_llm_backend("reflect")
+
+    # Stamp resolved backends onto anonymous usage telemetry so every
+    # command_run event carries provider context (see TELEMETRY.md).
+    usage_telemetry.set_context(
+        runtime_backend=resolved_runtime_backend,
+        execute_runtime_backend=execute_runtime_backend,
+        interview_llm_backend=interview_llm_backend,
+        evaluate_llm_backend=evaluate_llm_backend,
+    )
 
     # Resolve opencode_mode from config file if caller did not pass one.
     # Controls _subagent envelope dispatch gate in every handler.

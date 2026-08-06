@@ -90,6 +90,59 @@ _prompt() {
   printf '%b' "${BOLD}$1${RESET}"
 }
 
+# --- Anonymous install telemetry (PostHog) ---------------------------------
+# Same privacy contract as the CLI (see TELEMETRY.md): random UUID, no PII,
+# no code/paths. Disable with DO_NOT_TRACK=1 or OUROBOROS_TELEMETRY=0.
+# The API key is a public write-only PostHog project key.
+PH_API_KEY="${OUROBOROS_POSTHOG_API_KEY:-phc_mSoetD4ExLDDCi3vNua635NhwRTgHfRaCG9WYNKmrvv5}"
+PH_HOST="${OUROBOROS_POSTHOG_HOST:-https://us.i.posthog.com}"
+
+_telemetry_enabled() {
+  [ -n "$PH_API_KEY" ] || return 1
+  case "${DO_NOT_TRACK:-}" in 1|true|TRUE|True|on|yes) return 1 ;; esac
+  case "${OUROBOROS_TELEMETRY:-}" in 0|false|FALSE|False|off|no) return 1 ;; esac
+  command -v curl &>/dev/null || return 1
+  return 0
+}
+
+_telemetry_distinct_id() {
+  local f="$HOME/.ouroboros/telemetry.json" id=""
+  if [ -f "$f" ]; then
+    id=$(sed -n 's/.*"distinct_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$f" | head -1)
+  fi
+  if [ -z "$id" ]; then
+    if command -v uuidgen &>/dev/null; then
+      id=$(uuidgen | tr '[:upper:]' '[:lower:]')
+    elif command -v python3 &>/dev/null; then
+      id=$(python3 -c "import uuid; print(uuid.uuid4())" 2>/dev/null || true)
+    fi
+    [ -n "$id" ] || return 1
+    mkdir -p "$HOME/.ouroboros" 2>/dev/null || return 1
+    printf '{"distinct_id": "%s", "created_at": "%s", "notice_shown": false}\n' \
+      "$id" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$f" 2>/dev/null || true
+  fi
+  printf '%s' "$id"
+}
+
+# _telemetry_ping <event> [key=value ...] — fire-and-forget, never fails.
+_telemetry_ping() {
+  _telemetry_enabled || return 0
+  local event="$1" id props kv k v
+  shift
+  id=$(_telemetry_distinct_id) || return 0
+  props='"source":"install_sh","os":"'"$(uname -s | tr '[:upper:]' '[:lower:]')"'","arch":"'"$(uname -m)"'"'
+  for kv in "$@"; do
+    k="${kv%%=*}"
+    v="${kv#*=}"
+    props="$props,\"$k\":\"$v\""
+  done
+  curl -fsS -m 4 -X POST "$PH_HOST/capture/" -H 'Content-Type: application/json' \
+    -d '{"api_key":"'"$PH_API_KEY"'","event":"'"$event"'","distinct_id":"'"$id"'","properties":{'"$props"'}}' \
+    >/dev/null 2>&1 &
+  return 0
+}
+# ---------------------------------------------------------------------------
+
 # Parse simple flags: --reconfigure, --runtime <name>
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -134,6 +187,8 @@ if [ "$IS_LOCAL" = false ] && command -v curl &>/dev/null; then
 fi
 
 _banner
+
+_telemetry_ping install_started "is_local=$IS_LOCAL" "pre=${PRE_FLAG:-no}" "version=${LATEST:-unknown}"
 
 # 1. Detect installer: uv > pipx > pip (determines Python requirement)
 HAS_UV=false
@@ -639,8 +694,14 @@ if command -v claude &>/dev/null; then
   fi
 fi
 
+_telemetry_ping install_completed "method=${INSTALL_METHOD:-unknown}" "runtime=${RUNTIME:-none}" \
+  "detected_runtimes=${RUNTIME_COUNT:-0}" "version=${LATEST:-unknown}"
+
 _blank
 _say "${GREEN}${BOLD}Done! Ouroboros is ready.${RESET}"
+_blank
+_say "${BOLD}Anonymous usage stats help improve Ouroboros (no code or prompts collected).${RESET}"
+_info "Opt out: export OUROBOROS_TELEMETRY=0  |  details: TELEMETRY.md in the repo"
 _blank
 _say "${BOLD}Get started${RESET}"
 _info 'Open your AI coding agent and run: > ooo interview "your idea here"'
@@ -697,3 +758,7 @@ if [ -t 0 ] && [ -z "${OUROBOROS_INSTALL_SKIP_CONFIG_GUI:-}" ]; then
       ;;
   esac
 fi
+
+_blank
+_say "${BOLD}Like Ouroboros?${RESET}"
+_info "Give the repo a star on GitHub: https://github.com/Q00/ouroboros"
