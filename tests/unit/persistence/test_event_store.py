@@ -3014,3 +3014,33 @@ class TestCancellationSettlement:
         stored = await store.replay("test", "settle-batch")
         assert len(stored) == 2
         await store.close()
+
+
+class TestCountEvents:
+    """Direct contract for EventStore.count_events (#1813)."""
+
+    @pytest.mark.asyncio
+    async def test_counts_zero_then_appended_events(self, tmp_path: Path) -> None:
+        store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'count.db'}")
+        await store.initialize()
+        try:
+            assert await store.count_events() == 0
+            for index in range(3):
+                await store.append(
+                    BaseEvent(
+                        type="execution.started",
+                        timestamp=datetime.now(UTC),
+                        aggregate_type="execution",
+                        aggregate_id=f"exec_count_{index}",
+                        data={},
+                    )
+                )
+            assert await store.count_events() == 3
+        finally:
+            await store.close()
+
+    @pytest.mark.asyncio
+    async def test_uninitialized_store_raises(self) -> None:
+        store = EventStore("sqlite+aiosqlite:///:memory:")
+        with pytest.raises(PersistenceError, match="not initialized"):
+            await store.count_events()

@@ -148,8 +148,11 @@ def _goal_has_unnegated_cli_signal(goal_text: str) -> bool:
 # cue/path/affirmative-flip pipeline applied to web-app vocabulary (#1813
 # R1). Only goal prose carries natural-language denials; ledger
 # outputs/runtime_context entries are standardized evidence and skip this.
+# "single page" alone is document vocabulary ("a single page PDF report");
+# only the full single-page-application phrase denotes browser context.
 _WEB_APP_GOAL_SIGNAL_FRAGMENT = (
-    r"(?:browser|web\s?app(?:lication)?|frontend|front[\s\-]end|single[\s\-]page)"
+    r"(?:browser|web\s?app(?:lication)?|frontend|front[\s\-]end|"
+    r"single[\s\-]page\s+app(?:lication)?)"
 )
 _WEB_APP_GOAL_SIGNAL_RE = re.compile(rf"\b{_WEB_APP_GOAL_SIGNAL_FRAGMENT}\b")
 _NEGATED_WEB_APP_GOAL_RE = re.compile(
@@ -388,13 +391,20 @@ def _matches_refactor_in_place(ledger: SeedDraftLedger) -> bool:
     )
 
 
-# Token-bounded UI-composition vocabulary (#1813 R1): raw substring matching
-# fabricated the signal from "form" ⊂ "performance" and "validation" ⊂
-# "invalidation". "screen" is intentionally absent — it is game_2d
-# vocabulary and would make every browser "settings screen" dual-fire with
-# games.
+# UI-composition evidence must denote a rendered/interactable UI (#1813 R1
+# + R3): raw substrings fabricated the signal ("form" ⊂ "performance"),
+# and even token-bounded bare nouns misread library outputs ("validation
+# helpers", "documentation pages"). A noun therefore counts only as a
+# named widget ("signup form", "filters panel") or in an explicit UI verb
+# phrase ("pages rendered"); "user interface", "interactive", and
+# "client-side validation" denote a UI on their own. "screen" stays absent
+# — it is game_2d vocabulary and would dual-fire browser settings screens.
 _UI_COMPOSITION_RE = re.compile(
-    r"\b(?:forms?|panels?|validation|user\s+interface|buttons?|pages?)\b"
+    r"\b(?:"
+    r"user\s+interface|interactive|client[\s\-]side\s+validation|"
+    r"\w+\s+(?:forms?|panels?|buttons?)|"
+    r"(?:forms?|panels?|pages?|buttons?)\s+(?:submit|submission|rendered|shown|displayed|clicked)"
+    r")\b"
 )
 
 
@@ -421,7 +431,8 @@ def _matches_web_app(ledger: SeedDraftLedger) -> bool:
             "web application",
             "frontend",
             "front-end",
-            "single-page",
+            "single-page app",
+            "single page app",
         ),
     ) or _goal_has_unnegated_web_app_signal(goal)
     ui_signal = bool(_UI_COMPOSITION_RE.search(outputs))

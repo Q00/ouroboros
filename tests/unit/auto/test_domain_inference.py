@@ -866,3 +866,47 @@ def test_goal_domain_vocabulary_is_not_ui_evidence() -> None:
     result = derive_domain_from_ledger(ledger)
     assert result.is_single
     assert result.single is TaskClass.LIBRARY
+
+
+def test_single_page_document_goal_is_not_browser_context() -> None:
+    """R3 probe: "single page PDF report" is a document, not an SPA."""
+    ledger = _bare_ledger("Generate a single page PDF report")
+    _seed_section(ledger, "outputs", value="A PDF page containing the monthly totals")
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes
+
+
+def test_single_page_application_phrase_is_browser_context() -> None:
+    ledger = _bare_ledger("Build a single-page application for notes")
+    _seed_section(ledger, "outputs", value="A notes form with an edit panel")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP
+
+
+def test_validation_helpers_output_is_not_ui_evidence() -> None:
+    """R3 probe: bare "validation" in a library's outputs is not a UI."""
+    ledger = _bare_ledger("Build a browser protocol library")
+    _seed_section(ledger, "outputs", value="An importable package with validation helpers")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.LIBRARY
+
+
+def test_documentation_pages_output_is_not_ui_evidence() -> None:
+    """R3 probe: "documentation pages" are prose artifacts, not a UI."""
+    ledger = _bare_ledger("Build a browser automation library")
+    _seed_section(ledger, "outputs", value="An importable package plus documentation pages")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.LIBRARY
+
+
+def test_web_application_dashboard_matches_web_app() -> None:
+    """R3 follow-up: an explicit web-application goal with interactive
+    outputs must not fall through to unmatched."""
+    ledger = _bare_ledger("Build a web application dashboard")
+    _seed_section(ledger, "outputs", value="Interactive charts and navigation")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP
