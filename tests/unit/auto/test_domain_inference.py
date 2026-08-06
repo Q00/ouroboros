@@ -1206,3 +1206,44 @@ def test_rendered_ui_clause_variants_do_not_fire_game() -> None:
     result = derive_domain_from_ledger(ledger)
     assert result.is_single
     assert result.single is TaskClass.WEB_APP
+
+
+@pytest.mark.parametrize(
+    "outputs",
+    [
+        "Rendered sprites with player movement and collisions",
+        "The screen renders sprites with player movement",
+    ],
+)
+def test_browser_hosted_games_keep_game_evidence(outputs: str) -> None:
+    """R10 probe: browser deployment does not make game rendering UI
+    evidence — game-domain vocabulary keeps render/screen ownership."""
+    ledger = _bare_ledger("Build a browser game")
+    _seed_section(ledger, "outputs", value=outputs)
+    _seed_section(ledger, "runtime_context", value="Runs in a browser")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.GAME_2D
+
+
+@pytest.mark.parametrize(
+    ("goal", "outputs"),
+    [
+        (
+            "Build a browser automation library",
+            "Reusable test pages for login flows and browser fixtures",
+        ),
+        (
+            "Build a frontend component library",
+            "Reusable modal dialogs and buttons for applications",
+        ),
+    ],
+)
+def test_reusable_browser_tooling_stays_library(goal: str, outputs: str) -> None:
+    """R10 probe: outputs declaring artifact intent (reusable/importable
+    components) describe what the library ships, not a produced app."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value=outputs)
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.LIBRARY

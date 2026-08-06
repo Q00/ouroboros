@@ -386,6 +386,14 @@ def _matches_data_pipeline(ledger: SeedDraftLedger) -> bool:
 # the unshared game vocabulary (frame/canvas/scene/...) always counts.
 _GAME_RENDER_OR_SCREEN_RE = re.compile(r"\brender(?:s|ing|ed)?\b|\bscreens?\b")
 
+# Game-domain vocabulary marks game ownership of the shared render/screen
+# words even under browser deployment ("Build a browser game"), and
+# symmetrically makes the web_app matcher cede — browser hosting does not
+# turn game rendering into UI evidence (#1813 R10).
+_GAME_DOMAIN_RE = re.compile(
+    r"\b(?:games?|sprites?|players?|collisions?|arcade|platformers?|shooters?)\b"
+)
+
 
 def _matches_game_2d(ledger: SeedDraftLedger) -> bool:
     outputs = _section_text(ledger, "outputs")
@@ -395,9 +403,11 @@ def _matches_game_2d(ledger: SeedDraftLedger) -> bool:
     text = outputs + " " + goal
     if _any_of(text, ("frame", "canvas", "game loop", "playable", "2d game", "scene")):
         return True
-    if _ledger_has_browser_context(ledger):
+    if not _GAME_RENDER_OR_SCREEN_RE.search(text):
         return False
-    return bool(_GAME_RENDER_OR_SCREEN_RE.search(text))
+    if _GAME_DOMAIN_RE.search(text):
+        return True
+    return not _ledger_has_browser_context(ledger)
 
 
 def _matches_refactor_in_place(ledger: SeedDraftLedger) -> bool:
@@ -499,11 +509,26 @@ def _ledger_has_browser_context(ledger: SeedDraftLedger) -> bool:
     ) or _goal_has_unnegated_web_app_signal(_goal_text(ledger))
 
 
+# Artifact-intent vocabulary in standardized outputs: the library ships
+# these widgets as reusable artifacts rather than running them (#1813 R10).
+_LIBRARY_INTENT_RE = re.compile(
+    r"\b(?:reusable|importable|librar(?:y|ies)|sdks?|api\s+surface|public\s+api)\b"
+)
+
+
 def _matches_web_app(ledger: SeedDraftLedger) -> bool:
     outputs = _section_text(ledger, "outputs")
     runtime = _section_text(ledger, "runtime_context")
     if not (outputs or runtime):
         # Same ledger-evidence gate as cli: goal text alone cannot classify.
+        return False
+    # Outputs that declare artifact intent describe what a library ships
+    # ("Reusable modal dialogs and buttons"), not a produced app, and
+    # game-domain ledgers own their shared render/screen vocabulary — the
+    # mirror of _matches_game_2d's ceding rule (#1813 R10).
+    if _LIBRARY_INTENT_RE.search(outputs):
+        return False
+    if _GAME_DOMAIN_RE.search(outputs + " " + _goal_text(ledger)):
         return False
     # Two-signal AND (the webhook shape): browser context plus UI
     # composition. Goal-side browser mentions route through the negation
