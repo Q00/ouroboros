@@ -965,3 +965,59 @@ def test_dashboard_outputs_are_ui_evidence(outputs: str) -> None:
     result = derive_domain_from_ledger(ledger)
     assert result.is_single
     assert result.single is TaskClass.WEB_APP
+
+
+def test_ordinary_login_page_output_matches_web_app() -> None:
+    """R5 probe: a plain named page with navigation is an ordinary web-app
+    description and must not fall through to unmatched."""
+    ledger = _bare_ledger("Build a web app")
+    _seed_section(ledger, "outputs", value="A responsive login page with navigation")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP
+
+
+def test_rendered_page_does_not_dual_fire_game_2d() -> None:
+    """R5 probe: "rendered" is normal UI wording; the game predicate must
+    not claim the passive participle."""
+    ledger = _bare_ledger("Build a web app")
+    _seed_section(ledger, "outputs", value="A login page rendered in the browser")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP
+
+
+@pytest.mark.parametrize(
+    "outputs",
+    [
+        "An importable package with signup form helpers",
+        "An importable package with settings panel helpers",
+        "An importable package of dashboard templates",
+    ],
+)
+def test_widget_named_library_artifacts_are_not_ui_evidence(outputs: str) -> None:
+    """R5 probe: a widget word modifying helpers/templates describes an
+    API artifact, not a produced UI."""
+    ledger = _bare_ledger("Build a browser automation library")
+    _seed_section(ledger, "outputs", value=outputs)
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.LIBRARY
+
+
+@pytest.mark.parametrize(
+    "manifest",
+    ["packages/web/package.json", "package-lock.json"],
+)
+def test_manifest_paths_and_lockfiles_are_not_library_signals(manifest: str) -> None:
+    """R5 probe: monorepo manifest paths and lockfiles must be masked
+    whole, and the directory word "packages" is not the library word."""
+    ledger = _bare_ledger("Build a signup page that runs in the browser")
+    _seed_section(
+        ledger,
+        "outputs",
+        value=f"Signup form with a settings panel shown in the browser; {manifest}",
+    )
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP

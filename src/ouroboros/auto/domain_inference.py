@@ -369,14 +369,22 @@ def _matches_data_pipeline(ledger: SeedDraftLedger) -> bool:
     return input_signal and output_signal
 
 
+# Active render forms only (#1813 R5): the passive participle "rendered"
+# is ordinary UI wording ("a login page rendered in the browser") and let
+# every rendered-page description dual-fire the game classifier through
+# the bare "render" substring.
+_GAME_RENDER_RE = re.compile(r"\brender(?:s|ing)?\b")
+
+
 def _matches_game_2d(ledger: SeedDraftLedger) -> bool:
     outputs = _section_text(ledger, "outputs")
     goal = _goal_text(ledger)
     if not (outputs or goal):
         return False
-    return _any_of(
-        outputs + " " + goal,
-        ("render", "frame", "canvas", "screen", "game loop", "playable", "2d game", "scene"),
+    text = outputs + " " + goal
+    return bool(_GAME_RENDER_RE.search(text)) or _any_of(
+        text,
+        ("frame", "canvas", "screen", "game loop", "playable", "2d game", "scene"),
     )
 
 
@@ -412,16 +420,30 @@ def _matches_refactor_in_place(ledger: SeedDraftLedger) -> bool:
 # "interactive" bound to a rendered artifact, or "client-side validation"
 # bound to user-facing feedback. "screen" stays absent — it is game_2d
 # vocabulary and would dual-fire browser settings screens.
+# The named-widget branch accepts ordinary page/widget nouns ("login
+# page", "filters panel") but rejects two non-product shapes (#1813 R5):
+# documentation-style modifiers in front ("documentation pages") and
+# API-artifact words behind ("signup form helpers", "dashboard
+# templates"), which describe libraries, not a produced UI.
 _UI_COMPOSITION_RE = re.compile(
     r"\b(?:"
     r"user\s+interface|"
     r"interactive\s+(?:charts?|dashboards?|pages?|forms?|panels?|navigation|ui)|"
     r"client[\s\-]side\s+validation\s+(?:messages?|errors?|feedback)|"
-    r"\w+\s+(?:forms?|panels?|buttons?|dashboards?)|"
+    r"(?!(?:documentation|docs|manual|wiki|readme)\s)"
+    r"\w+\s+(?:forms?|panels?|buttons?|dashboards?|pages?)"
+    r"(?!\s+(?:helpers?|templates?|utils?|utilities|apis?|parsers?|"
+    r"library|libraries|sdks?|packages?))|"
     r"(?:forms?|panels?|pages?|buttons?|dashboards?)\s+"
     r"(?:submit|submission|rendered|shown|displayed|clicked)"
     r")\b"
 )
+
+
+# Whole manifest/lockfile path tokens ("packages/web/package.json",
+# "package-lock.json") and the token-bounded library word (#1813 R5).
+_MANIFEST_TOKEN_RE = re.compile(r"\S*package(?:-lock)?\.json\S*")
+_LIBRARY_PACKAGE_WORD_RE = re.compile(r"\bpackage\b")
 
 
 def _matches_web_app(ledger: SeedDraftLedger) -> bool:
@@ -466,16 +488,17 @@ def _matches_library(ledger: SeedDraftLedger) -> bool:
     # under ledger_only closures. The remaining keywords are
     # library-distinctive surface terms. See #1170 R2 evidence.
     #
-    # The literal manifest filename `package.json` is masked before keyword
-    # matching (#1813): every browser project ships one, and its "package"
-    # substring dragged browser UI ledgers to library. The word "package"
-    # itself keeps its library meaning.
-    text = (outputs + " " + goal).replace("package.json", " ")
-    return _any_of(
+    # Manifest and lockfile tokens are masked whole before keyword matching
+    # (#1813 R5): every browser project ships them, and a monorepo path like
+    # `packages/web/package.json` would otherwise leave a "package"
+    # substring behind. The library word itself is token-bounded so the
+    # directory word "packages" is not mistaken for it, while the singular
+    # "package" keeps its library meaning.
+    text = _MANIFEST_TOKEN_RE.sub(" ", outputs + " " + goal)
+    return bool(_LIBRARY_PACKAGE_WORD_RE.search(text)) or _any_of(
         text,
         (
             "library",
-            "package",
             "api surface",
             "importable",
             "public api",
