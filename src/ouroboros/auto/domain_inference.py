@@ -144,6 +144,38 @@ def _goal_has_unnegated_cli_signal(goal_text: str) -> bool:
     return bool(_CLI_GOAL_TOKEN_RE.search(stripped)) or bool(_CLI_GOAL_PHRASE_RE.search(stripped))
 
 
+# Browser-context negation mirrors the CLI machinery above — the same
+# cue/path/affirmative-flip pipeline applied to web-app vocabulary (#1813
+# R1). Only goal prose carries natural-language denials; ledger
+# outputs/runtime_context entries are standardized evidence and skip this.
+_WEB_APP_GOAL_SIGNAL_FRAGMENT = (
+    r"(?:browser|web\s?app(?:lication)?|frontend|front[\s\-]end|single[\s\-]page)"
+)
+_WEB_APP_GOAL_SIGNAL_RE = re.compile(rf"\b{_WEB_APP_GOAL_SIGNAL_FRAGMENT}\b")
+_NEGATED_WEB_APP_GOAL_RE = re.compile(
+    rf"\b(?P<cue>{_NEGATION_CUE_FRAGMENT})"
+    r"(?P<path>(?:\s+\S+){0,7}?)"
+    rf"\s+{_WEB_APP_GOAL_SIGNAL_FRAGMENT}\b"
+)
+_NEGATED_WEB_APP_PREFIX_RE = re.compile(rf"\bnon[\s\-]?{_WEB_APP_GOAL_SIGNAL_FRAGMENT}\b")
+
+
+def _goal_has_unnegated_web_app_signal(goal_text: str) -> bool:
+    """Web-app twin of :func:`_goal_has_unnegated_cli_signal`."""
+    if not _WEB_APP_GOAL_SIGNAL_RE.search(goal_text):
+        return False
+
+    def _strip_if_not_affirmative(match: re.Match[str]) -> str:
+        path = match.group("path") or ""
+        if _AFFIRMATIVE_FLIP_RE.search(path):
+            return match.group(0)
+        return " "
+
+    stripped = _NEGATED_WEB_APP_GOAL_RE.sub(_strip_if_not_affirmative, goal_text)
+    stripped = _NEGATED_WEB_APP_PREFIX_RE.sub(" ", stripped)
+    return bool(_WEB_APP_GOAL_SIGNAL_RE.search(stripped))
+
+
 __all__ = [
     "DomainInference",
     "derive_domain_from_ledger",
@@ -356,6 +388,16 @@ def _matches_refactor_in_place(ledger: SeedDraftLedger) -> bool:
     )
 
 
+# Token-bounded UI-composition vocabulary (#1813 R1): raw substring matching
+# fabricated the signal from "form" ⊂ "performance" and "validation" ⊂
+# "invalidation". "screen" is intentionally absent — it is game_2d
+# vocabulary and would make every browser "settings screen" dual-fire with
+# games.
+_UI_COMPOSITION_RE = re.compile(
+    r"\b(?:forms?|panels?|validation|user\s+interface|buttons?|pages?)\b"
+)
+
+
 def _matches_web_app(ledger: SeedDraftLedger) -> bool:
     outputs = _section_text(ledger, "outputs")
     runtime = _section_text(ledger, "runtime_context")
@@ -363,11 +405,11 @@ def _matches_web_app(ledger: SeedDraftLedger) -> bool:
     if not (outputs or runtime):
         # Same ledger-evidence gate as cli: goal text alone cannot classify.
         return False
-    # Two-signal AND (the webhook shape): a browser-context signal keeps the
-    # generic UI vocabulary ("form" ⊂ "performance", "validation" ⊂
-    # "invalidation") from classifying non-UI goals on substring accidents.
+    # Two-signal AND (the webhook shape): browser context plus UI
+    # composition. Goal-side browser mentions route through the negation
+    # strip so "not a browser page" is not positive evidence.
     browser_signal = _any_of(
-        " ".join((outputs, runtime, goal)),
+        outputs + " " + runtime,
         (
             "browser",
             "web app",
@@ -377,13 +419,8 @@ def _matches_web_app(ledger: SeedDraftLedger) -> bool:
             "front-end",
             "single-page",
         ),
-    )
-    # "screen" is intentionally absent — it is game_2d vocabulary and would
-    # make every browser "settings screen" dual-fire with games.
-    ui_signal = _any_of(
-        outputs + " " + goal,
-        ("form", "panel", "validation", "user interface", "button", "page"),
-    )
+    ) or _goal_has_unnegated_web_app_signal(goal)
+    ui_signal = bool(_UI_COMPOSITION_RE.search(outputs + " " + goal))
     return browser_signal and ui_signal
 
 

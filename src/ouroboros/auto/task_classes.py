@@ -14,9 +14,10 @@ result-envelope surface (L1-e).
 
 Design constraints honored:
 
-- **Plain strings, no LLM, no eval set.** The 7-class enum is frozen at
-  this PR; growth happens via PR-per-class (~10 LoC + a unit test),
-  not via re-curating a training corpus.
+- **Plain strings, no LLM, no eval set.** The original 7-class enum was
+  frozen at L1-a; growth happens via PR-per-class (~10 LoC + a unit
+  test), not via re-curating a training corpus. ``web_app`` (#1813) is
+  the first class added through that path, bringing the catalog to 8.
 - **Decoupled from `domain_profile.DomainProfile`.** The existing
   `DomainProfile` is a *meta-domain* concept (coding / research /
   design) and carries cross-domain machinery (`repo_context_extractor`,

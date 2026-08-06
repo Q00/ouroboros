@@ -17,6 +17,8 @@ Adding a new task class requires adding a positive test here; the
 
 from __future__ import annotations
 
+import pytest
+
 from ouroboros.auto.domain_inference import (
     _PATTERN_REGISTRY,
     DomainInference,
@@ -785,3 +787,61 @@ def test_ambiguous_browser_ui_with_rest_backend() -> None:
     assert result.is_ambiguous
     assert TaskClass.WEB_APP in result.classes
     assert TaskClass.WEB_SERVICE in result.classes
+
+
+def test_browser_performance_vocabulary_is_not_ui_evidence() -> None:
+    """R1 probe: "form" inside "performance" must not count as UI composition."""
+    ledger = _bare_ledger("Build browser performance benchmarking tools")
+    _seed_section(ledger, "outputs", value="Performance report with timing metrics")
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes
+
+
+def test_browser_cache_invalidation_is_not_ui_evidence() -> None:
+    """R1 probe: "validation" inside "invalidation" must not count either."""
+    ledger = _bare_ledger("Implement browser cache invalidation")
+    _seed_section(ledger, "outputs", value="Invalidation events are logged")
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes
+
+
+def test_negated_browser_goal_keeps_cli_single() -> None:
+    """ "Build a CLI, not a browser page" is CLI evidence, not web_app evidence."""
+    ledger = _bare_ledger("Build a CLI, not a browser page")
+    _seed_section(ledger, "outputs", value="Deterministic stdout and exit code 0")
+    _seed_section(ledger, "runtime_context", value="Local shell / terminal")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.CLI
+
+
+def test_negated_browser_goal_keeps_library_single() -> None:
+    ledger = _bare_ledger("Publish a reusable helper, not a browser page")
+    _seed_section(ledger, "outputs", value="A reusable package published to PyPI")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.LIBRARY
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
+        "Build a log summarizer, not a browser page",
+        "Build a log summarizer that is not intended to be a browser page",
+        "Build a log summarizer instead of a browser page",
+        "Build a non-browser page viewer for logs",
+    ],
+)
+def test_web_app_negation_forms_are_rejected(goal: str) -> None:
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value="Plain text summary written to a file")
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes
+
+
+def test_affirmative_expansion_keeps_web_app_signal() -> None:
+    """ "not just a browser page" asserts the page — the signal must survive."""
+    ledger = _bare_ledger("Build a dashboard that is not just a browser page")
+    _seed_section(ledger, "outputs", value="Charts refreshed from a data feed")
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP in result.classes
