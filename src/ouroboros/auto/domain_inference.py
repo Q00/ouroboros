@@ -155,10 +155,19 @@ _WEB_APP_GOAL_SIGNAL_FRAGMENT = (
     r"single[\s\-]page\s+app(?:lication)?)"
 )
 _WEB_APP_GOAL_SIGNAL_RE = re.compile(rf"\b{_WEB_APP_GOAL_SIGNAL_FRAGMENT}\b")
+# One denial covers every coordinated alternative it lists ("not a browser
+# or web app", "not a browser, web app, or frontend") — the negated span
+# consumes the whole coordination so no alternative survives as a positive
+# signal (#1813 R4).
+_COORDINATED_ALTERNATIVE_FRAGMENT = (
+    r"(?:\s*,\s*(?:or\s+|and\s+|nor\s+)?|\s+(?:or|and|nor)\s+|\s*/\s*)"
+    rf"(?:an?\s+|the\s+)?{_WEB_APP_GOAL_SIGNAL_FRAGMENT}"
+)
 _NEGATED_WEB_APP_GOAL_RE = re.compile(
     rf"\b(?P<cue>{_NEGATION_CUE_FRAGMENT})"
     r"(?P<path>(?:\s+\S+){0,7}?)"
-    rf"\s+{_WEB_APP_GOAL_SIGNAL_FRAGMENT}\b"
+    rf"\s+{_WEB_APP_GOAL_SIGNAL_FRAGMENT}"
+    rf"(?:{_COORDINATED_ALTERNATIVE_FRAGMENT})*\b"
 )
 _NEGATED_WEB_APP_PREFIX_RE = re.compile(rf"\bnon[\s\-]?{_WEB_APP_GOAL_SIGNAL_FRAGMENT}\b")
 
@@ -391,19 +400,26 @@ def _matches_refactor_in_place(ledger: SeedDraftLedger) -> bool:
     )
 
 
-# UI-composition evidence must denote a rendered/interactable UI (#1813 R1
-# + R3): raw substrings fabricated the signal ("form" ⊂ "performance"),
-# and even token-bounded bare nouns misread library outputs ("validation
-# helpers", "documentation pages"). A noun therefore counts only as a
-# named widget ("signup form", "filters panel") or in an explicit UI verb
-# phrase ("pages rendered"); "user interface", "interactive", and
-# "client-side validation" denote a UI on their own. "screen" stays absent
-# — it is game_2d vocabulary and would dual-fire browser settings screens.
+# UI-composition evidence must denote a rendered/interactable UI product
+# (#1813 R1/R3/R4): raw substrings fabricated the signal ("form" ⊂
+# "performance"); token-bounded bare nouns misread library outputs
+# ("validation helpers", "documentation pages"); and unconditional
+# "interactive"/"client-side validation" misread docs and API-domain
+# outputs ("interactive API documentation", "client-side validation
+# helpers"). A term therefore counts only anchored to a product: a named
+# widget ("signup form", "filters panel", "responsive dashboard"), an
+# explicit UI verb phrase ("pages rendered", "form submit"),
+# "interactive" bound to a rendered artifact, or "client-side validation"
+# bound to user-facing feedback. "screen" stays absent — it is game_2d
+# vocabulary and would dual-fire browser settings screens.
 _UI_COMPOSITION_RE = re.compile(
     r"\b(?:"
-    r"user\s+interface|interactive|client[\s\-]side\s+validation|"
-    r"\w+\s+(?:forms?|panels?|buttons?)|"
-    r"(?:forms?|panels?|pages?|buttons?)\s+(?:submit|submission|rendered|shown|displayed|clicked)"
+    r"user\s+interface|"
+    r"interactive\s+(?:charts?|dashboards?|pages?|forms?|panels?|navigation|ui)|"
+    r"client[\s\-]side\s+validation\s+(?:messages?|errors?|feedback)|"
+    r"\w+\s+(?:forms?|panels?|buttons?|dashboards?)|"
+    r"(?:forms?|panels?|pages?|buttons?|dashboards?)\s+"
+    r"(?:submit|submission|rendered|shown|displayed|clicked)"
     r")\b"
 )
 

@@ -910,3 +910,58 @@ def test_web_application_dashboard_matches_web_app() -> None:
     result = derive_domain_from_ledger(ledger)
     assert result.is_single
     assert result.single is TaskClass.WEB_APP
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
+        "Build a CLI, not a browser or web app",
+        "Build a CLI that is not a browser, web app, or frontend",
+    ],
+)
+def test_coordinated_negation_strips_all_browser_alternatives(goal: str) -> None:
+    """R4 probe: one denial covers every coordinated browser alternative."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value="Interactive terminal output with deterministic stdout")
+    _seed_section(ledger, "runtime_context", value="Local shell / terminal")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.CLI
+
+
+def test_client_side_validation_helpers_are_not_ui_evidence() -> None:
+    """R4 probe: the phrase inside a library's outputs names an API domain."""
+    ledger = _bare_ledger("Build a browser library for client-side validation")
+    _seed_section(
+        ledger, "outputs", value="An importable package providing client-side validation helpers"
+    )
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.LIBRARY
+
+
+def test_interactive_documentation_is_not_ui_evidence() -> None:
+    """R4 probe: interactive API documentation is a docs artifact, not a UI."""
+    ledger = _bare_ledger("Build a browser automation library")
+    _seed_section(
+        ledger, "outputs", value="An importable package with interactive API documentation"
+    )
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.LIBRARY
+
+
+@pytest.mark.parametrize(
+    "outputs",
+    [
+        "A dashboard page with charts and navigation",
+        "A responsive dashboard with charts and navigation",
+    ],
+)
+def test_dashboard_outputs_are_ui_evidence(outputs: str) -> None:
+    """R4 probe: ordinary rendered-dashboard descriptions must match."""
+    ledger = _bare_ledger("Build a web application dashboard")
+    _seed_section(ledger, "outputs", value=outputs)
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP
