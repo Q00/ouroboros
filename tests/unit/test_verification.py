@@ -646,6 +646,86 @@ class TestAssertionExtractor:
         extractor.llm_adapter.complete.assert_called_once()
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "unreadable",
+        [
+            "Sorry, I cannot help with that.",
+            "[{",
+            '{"assertions": []}',
+            "",
+        ],
+        ids=["prose", "malformed-json", "object-instead-of-array", "nothing-at-all"],
+    )
+    async def test_an_unreadable_response_is_not_remembered_as_an_extraction(
+        self, unreadable: str
+    ) -> None:
+        """A reply nobody could read must not answer every later generation.
+
+        The cache exists so a seed is extracted once. But the empty tuple a
+        failed parse returns is indistinguishable, to the caller, from "nothing
+        here needs verifying" — it makes `_verify_spec_compliance` return None
+        and the evaluator fall back to the agent's own self-report. Cached, that
+        single unreadable reply silently disables spec verification for every
+        later generation of the seed, and the log even calls it a cache hit.
+
+        The transport-failure path above is already retried on the next
+        generation. Only this path was permanent.
+        """
+        good = json.dumps(
+            [
+                {
+                    "ac_index": 0,
+                    "tier": "t2_structural",
+                    "pattern": "class Foo",
+                    "expected_value": "",
+                    "file_hint": "*.py",
+                    "description": "",
+                }
+            ]
+        )
+        mock_adapter = AsyncMock()
+        mock_adapter.complete = AsyncMock(
+            side_effect=[
+                Result.ok(
+                    CompletionResponse(
+                        content=content, model="test", usage={"input": 0, "output": 0}
+                    )
+                )
+                for content in (unreadable, good, good)
+            ]
+        )
+        extractor = AssertionExtractor(llm_adapter=mock_adapter)
+
+        first = await extractor.extract("seed_unreadable", ("Has class Foo",))
+        assert first.is_ok
+        assert first.value == ()
+
+        second = await extractor.extract("seed_unreadable", ("Has class Foo",))
+        assert second.is_ok
+        assert len(second.value) == 1, "the next generation must be allowed to ask again"
+
+        third = await extractor.extract("seed_unreadable", ("Has class Foo",))
+        assert third.value is second.value, "the reply that was read is remembered"
+        assert mock_adapter.complete.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_a_readable_empty_extraction_is_still_remembered(self) -> None:
+        """An empty array is an answer — the model read the ACs and found nothing.
+
+        This is the boundary of the rule above: only a response that could not
+        be read is retried. Otherwise a seed whose criteria are genuinely not
+        machine-verifiable would pay for an extraction on every generation.
+        """
+        extractor = self._make_extractor([])
+
+        first = await extractor.extract("seed_nothing_verifiable", ("Looks nice",))
+        second = await extractor.extract("seed_nothing_verifiable", ("Looks nice",))
+
+        assert first.is_ok and second.is_ok
+        assert first.value == () and second.value == ()
+        extractor.llm_adapter.complete.assert_called_once()
+
+    @pytest.mark.asyncio
     async def test_llm_failure_returns_error(self) -> None:
         """LLM failure → Result.err."""
         mock_adapter = AsyncMock()
