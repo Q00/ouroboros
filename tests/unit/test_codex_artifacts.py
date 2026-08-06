@@ -32,6 +32,27 @@ class TestInstallCodexRules:
         rule_path.write_text(content, encoding="utf-8")
         return rule_path
 
+    def test_windows_rename_does_not_load_posix_process_library(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The Windows rename path must not call ``ctypes.CDLL(None)`` first."""
+        source_path = tmp_path / "source.txt"
+        target_path = tmp_path / "target.txt"
+        source_path.write_text("managed content", encoding="utf-8")
+
+        def _unexpected_cdll(*_args: object, **_kwargs: object) -> None:
+            pytest.fail("Windows rename attempted to load a POSIX process library")
+
+        monkeypatch.setattr(codex_artifacts.os, "name", "nt")
+        monkeypatch.setattr(codex_artifacts.ctypes, "CDLL", _unexpected_cdll)
+
+        codex_artifacts._rename_noreplace(source_path, target_path)
+
+        assert not source_path.exists()
+        assert target_path.read_text(encoding="utf-8") == "managed content"
+
     def test_installs_packaged_rules_into_default_codex_rules_dir(
         self,
         tmp_path: Path,

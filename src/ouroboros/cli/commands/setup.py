@@ -4240,8 +4240,9 @@ def _atomic_write_text(
         dir=str(write_path.parent),
     )
     try:
-        os.fchmod(fd, mode)
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
+        if hasattr(os, "fchmod"):
+            os.fchmod(fd, mode)
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
             f.write(content)
         if expected_current is not None:
             _require_path_snapshot(path, expected_current)
@@ -4250,7 +4251,8 @@ def _atomic_write_text(
             os.chmod(write_path, mode)
         except OSError:
             pass  # e.g. Windows FAT — not fatal
-        return _PathSnapshot(kind="file", mode=mode, contents=content.encode("utf-8"))
+        actual_mode = stat.S_IMODE(write_path.lstat().st_mode)
+        return _PathSnapshot(kind="file", mode=actual_mode, contents=content.encode("utf-8"))
     except OSError:
         try:
             os.close(fd)
