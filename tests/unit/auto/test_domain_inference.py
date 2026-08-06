@@ -1371,3 +1371,34 @@ def test_iframe_is_not_game_frame_evidence() -> None:
     result = derive_domain_from_ledger(ledger)
     assert result.is_single
     assert result.single is TaskClass.WEB_APP
+
+
+def test_denied_artifact_type_overrides_browser_domain_mentions() -> None:
+    """R14 probe: browser-auditing tooling denies the web-app artifact
+    type; the domain word "browser" and the inspected pages in its report
+    are not evidence that it IS one."""
+    ledger = _bare_ledger("Build a CLI that audits browser pages, not a web app")
+    _seed_section(
+        ledger,
+        "outputs",
+        value="Accessibility report for login pages and settings panels, printed to stdout",
+    )
+    _seed_section(ledger, "runtime_context", value="Local shell / terminal")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.CLI
+
+
+def test_web_application_firewall_denial_is_not_web_app() -> None:
+    """R14 probe: "web application firewall, not a browser UI" denies the
+    artifact type despite the affirmative-looking domain phrase."""
+    ledger = _bare_ledger("Build a web application firewall, not a browser UI")
+    _seed_section(
+        ledger,
+        "outputs",
+        value="Filter rules for login forms and settings panels, printed to stdout",
+    )
+    _seed_section(ledger, "runtime_context", value="Local shell / terminal")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.CLI

@@ -194,11 +194,18 @@ _WEB_APP_GOAL_SIGNAL_RE = re.compile(rf"\b{_WEB_APP_GOAL_SIGNAL_FRAGMENT}\b")
 
 def _goal_has_unnegated_web_app_signal(goal_text: str) -> bool:
     """Web-app twin of :func:`_goal_has_unnegated_cli_signal`, built on the
-    shared negation primitive."""
+    shared negation primitive.
+
+    An explicit artifact-type denial dominates (#1813 R14): once the goal
+    denies being a web app ("audits browser pages, not a web app"), other
+    browser-domain mentions in the same goal describe the tool's domain,
+    not its artifact type. Affirmative-flip spans ("not just a browser
+    page") are preserved by the strip and so do not count as denials.
+    """
     if not _WEB_APP_GOAL_SIGNAL_RE.search(goal_text):
         return False
     stripped = _strip_negated_signals(goal_text, _WEB_APP_GOAL_SIGNAL_FRAGMENT)
-    return bool(_WEB_APP_GOAL_SIGNAL_RE.search(stripped))
+    return stripped == goal_text
 
 
 __all__ = [
