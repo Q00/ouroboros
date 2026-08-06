@@ -41,6 +41,7 @@ import os
 from pathlib import Path
 import re
 import shlex
+import subprocess
 import time
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 from uuid import uuid4
@@ -5137,22 +5138,45 @@ class ParallelACExecutor:
                     for declared in declared_paths
                 )
 
+            tracked_paths: set[Path] | None = None
+            try:
+                tracked = subprocess.run(
+                    ["git", "ls-files", "--cached", "-z"],
+                    cwd=root,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                    check=False,
+                )
+                if tracked.returncode == 0:
+                    tracked_paths = {Path(value) for value in tracked.stdout.split("\0") if value}
+            except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+                pass
+
+            def is_untracked_generated_evidence_path(relative: Path) -> bool:
+                return bool(
+                    tracked_paths is not None
+                    and relative.parts[0] == "evidence"
+                    and not any(
+                        relative == tracked
+                        or relative in tracked.parents
+                        or tracked in relative.parents
+                        for tracked in tracked_paths
+                    )
+                )
+
             digest = hashlib.sha256()
             paths = sorted(root.rglob("*"), key=lambda path: path.as_posix())
             for path in paths:
                 relative = path.relative_to(root)
                 declared_contract_path = is_declared_contract_path(relative)
-                generated_evidence_path = relative.parts[0] == "evidence"
                 if (
-                    (
-                        generated_evidence_path
-                        or any(
-                            part in _WORKSPACE_FINGERPRINT_IGNORED_DIRECTORIES
-                            for part in relative.parts
-                        )
+                    is_untracked_generated_evidence_path(relative)
+                    or any(
+                        part in _WORKSPACE_FINGERPRINT_IGNORED_DIRECTORIES
+                        for part in relative.parts
                     )
-                    and not declared_contract_path
-                ):
+                ) and not declared_contract_path:
                     continue
                 try:
                     stat = path.lstat()

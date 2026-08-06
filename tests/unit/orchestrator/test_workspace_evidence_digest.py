@@ -1,15 +1,28 @@
 from __future__ import annotations
 
 from pathlib import Path
+import subprocess
 
 from ouroboros.orchestrator.parallel_executor import ParallelACExecutor
+
+
+def _git(repo: Path, *args: str) -> None:
+    subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True, text=True)
+
+
+def _init_repo(path: Path) -> None:
+    _git(path, "init", "-b", "main")
+    _git(path, "config", "user.email", "test@example.com")
+    _git(path, "config", "user.name", "Test User")
+    (path / "product.py").write_text("VALUE = 1\n", encoding="utf-8")
+    _git(path, "add", "product.py")
+    _git(path, "commit", "-m", "initial")
 
 
 def test_undeclared_evidence_output_does_not_invalidate_prior_workspace_digest(
     tmp_path: Path,
 ) -> None:
-    product = tmp_path / "product.py"
-    product.write_text("VALUE = 1\n", encoding="utf-8")
+    _init_repo(tmp_path)
     before = ParallelACExecutor._workspace_content_digest(str(tmp_path))
 
     evidence = tmp_path / "evidence"
@@ -18,6 +31,22 @@ def test_undeclared_evidence_output_does_not_invalidate_prior_workspace_digest(
     after = ParallelACExecutor._workspace_content_digest(str(tmp_path))
 
     assert before == after
+
+
+def test_tracked_evidence_output_remains_workspace_visible(tmp_path: Path) -> None:
+    _init_repo(tmp_path)
+    evidence = tmp_path / "evidence"
+    evidence.mkdir()
+    contract = evidence / "contract.py"
+    contract.write_text("ALLOW = False\n", encoding="utf-8")
+    _git(tmp_path, "add", "evidence/contract.py")
+    _git(tmp_path, "commit", "-m", "track contract")
+    before = ParallelACExecutor._workspace_content_digest(str(tmp_path))
+
+    contract.write_text("ALLOW = True\n", encoding="utf-8")
+    after = ParallelACExecutor._workspace_content_digest(str(tmp_path))
+
+    assert before != after
 
 
 def test_declared_evidence_output_remains_acceptance_visible(tmp_path: Path) -> None:

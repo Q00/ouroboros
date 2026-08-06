@@ -200,9 +200,20 @@ def _ensure_clean_checkout(repo_root: Path) -> None:
         )
 
 
-def _ensure_no_tracked_changes(repo_root: Path) -> None:
+def _ensure_only_untracked_evidence(repo_root: Path) -> None:
     status = _run_git(["status", "--porcelain", "--untracked-files=no"], repo_root)
     if status:
+        raise WorktreeError(
+            "Cannot start task worktree from a dirty checkout",
+            details={"repo_root": str(repo_root)},
+        )
+    untracked = _run_git(["ls-files", "--others", "--exclude-standard", "-z"], repo_root)
+    if any(
+        not path.parts or path.parts[0] != "evidence"
+        for value in untracked.split("\0")
+        if value
+        for path in (Path(value),)
+    ):
         raise WorktreeError(
             "Cannot start task worktree from a dirty checkout",
             details={"repo_root": str(repo_root)},
@@ -601,13 +612,13 @@ def prepare_task_workspace(
     durable_id: str,
     *,
     allow_dirty: bool = False,
-    allow_untracked: bool = False,
+    allow_untracked_evidence: bool = False,
 ) -> TaskWorkspace:
     """Create or reuse a task worktree and acquire its active lock."""
     source_path = Path(source_cwd).expanduser().resolve()
     repo_root = _resolve_repo_root(source_path)
-    if allow_untracked and not allow_dirty:
-        _ensure_no_tracked_changes(repo_root)
+    if allow_untracked_evidence and not allow_dirty:
+        _ensure_only_untracked_evidence(repo_root)
     elif not allow_dirty:
         _ensure_clean_checkout(repo_root)
 
@@ -647,7 +658,7 @@ def restore_task_workspace(
     *,
     fallback_source_cwd: str | Path | None = None,
     allow_dirty: bool = False,
-    allow_untracked: bool = False,
+    allow_untracked_evidence: bool = False,
 ) -> TaskWorkspace:
     """Restore an existing task worktree or bootstrap it from fallback cwd."""
     if persisted is not None:
@@ -727,12 +738,12 @@ def restore_task_workspace(
             lock_owner=owner,
         )
 
-    if allow_untracked:
+    if allow_untracked_evidence:
         return prepare_task_workspace(
             fallback_source_cwd,
             durable_id,
             allow_dirty=allow_dirty,
-            allow_untracked=True,
+            allow_untracked_evidence=True,
         )
     return prepare_task_workspace(fallback_source_cwd, durable_id, allow_dirty=allow_dirty)
 
@@ -742,7 +753,7 @@ def maybe_prepare_task_workspace(
     durable_id: str,
     *,
     allow_dirty: bool = False,
-    allow_untracked: bool = False,
+    allow_untracked_evidence: bool = False,
 ) -> TaskWorkspace | None:
     """Provision a task workspace only when worktrees are enabled."""
     if not _worktrees_enabled():
@@ -750,12 +761,12 @@ def maybe_prepare_task_workspace(
     repo_root = _try_resolve_repo_root(source_cwd)
     if repo_root is None:
         return None
-    if allow_untracked:
+    if allow_untracked_evidence:
         return prepare_task_workspace(
             source_cwd,
             durable_id,
             allow_dirty=allow_dirty,
-            allow_untracked=True,
+            allow_untracked_evidence=True,
         )
     return prepare_task_workspace(source_cwd, durable_id, allow_dirty=allow_dirty)
 
@@ -766,7 +777,7 @@ def maybe_restore_task_workspace(
     *,
     fallback_source_cwd: str | Path | None = None,
     allow_dirty: bool = False,
-    allow_untracked: bool = False,
+    allow_untracked_evidence: bool = False,
 ) -> TaskWorkspace | None:
     """Restore or bootstrap a task workspace when worktrees are enabled."""
     if persisted is None and not _worktrees_enabled():
@@ -776,13 +787,13 @@ def maybe_restore_task_workspace(
             return None
         if _try_resolve_repo_root(fallback_source_cwd) is None:
             return None
-    if allow_untracked:
+    if allow_untracked_evidence:
         return restore_task_workspace(
             durable_id,
             persisted,
             fallback_source_cwd=fallback_source_cwd,
             allow_dirty=allow_dirty,
-            allow_untracked=True,
+            allow_untracked_evidence=True,
         )
     return restore_task_workspace(
         durable_id,

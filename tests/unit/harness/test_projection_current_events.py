@@ -92,6 +92,8 @@ def test_current_execution_events_project_steps_artifacts_and_ac_verdicts() -> N
     assert result.verdicts[0].scope == "ac"
     assert result.verdicts[0].ac_id == "ac_0"
     assert result.verdicts[0].outcome is VerdictOutcome.PASS
+    assert "args_preview" not in tool_step.metadata
+    assert "result_preview" not in tool_step.metadata
 
 
 def test_legacy_and_current_tool_events_with_same_call_id_do_not_double_count() -> None:
@@ -124,3 +126,33 @@ def test_legacy_and_current_tool_events_with_same_call_id_do_not_double_count() 
         "evt_current_start",
         "evt_current_complete",
     )
+
+
+def test_current_acceptance_preserves_terminal_outcome_semantics() -> None:
+    started = datetime(2026, 8, 6, tzinfo=UTC)
+    cases = (
+        ("cancelled", "cancelled", VerdictOutcome.CANCELLED),
+        ("blocked", "failed", VerdictOutcome.FAIL),
+        ("invalid", "failed", VerdictOutcome.FAIL),
+        ("failed", "failed", VerdictOutcome.FAIL),
+    )
+
+    for index, (disposition, terminal_status, expected) in enumerate(cases):
+        event = _event(
+            f"evt_{disposition}",
+            "execution.ac.acceptance_finalized",
+            started + timedelta(seconds=index),
+            {
+                "execution_id": "exec_current",
+                "root_ac_index": index,
+                "accepted": False,
+                "disposition": disposition,
+                "outcome": disposition,
+                "terminal_status": terminal_status,
+            },
+        )
+
+        result = build_projection((event,), seed_id="seed_current")
+
+        assert len(result.verdicts) == 1
+        assert result.verdicts[0].outcome is expected

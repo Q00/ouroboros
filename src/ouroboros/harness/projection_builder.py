@@ -620,13 +620,11 @@ def _tool_step_metadata(
 ) -> dict[str, Any]:
     metadata: dict[str, Any] = {}
     if start_event is not None and isinstance(start_event.data, dict):
-        preview = start_event.data.get("args_preview", start_event.data.get("tool_detail"))
+        preview = start_event.data.get("args_preview")
         if isinstance(preview, str) and preview:
             metadata["args_preview"] = preview
     if isinstance(returned_event.data, dict):
-        result_preview = returned_event.data.get(
-            "result_preview", returned_event.data.get("tool_result_text")
-        )
+        result_preview = returned_event.data.get("result_preview")
         if isinstance(result_preview, str) and result_preview:
             metadata["result_preview"] = result_preview
         duration = returned_event.data.get("duration_ms")
@@ -927,7 +925,9 @@ def _acceptance_outcome(data: dict[str, Any]) -> VerdictOutcome | None:
     if accepted is True:
         return VerdictOutcome.PASS
     disposition = _optional_str(data.get("disposition"))
-    if disposition in {"failed", "rejected"}:
+    if disposition == "cancelled":
+        return VerdictOutcome.CANCELLED
+    if disposition in {"failed", "rejected", "blocked", "invalid"}:
         return VerdictOutcome.FAIL
     if accepted is False:
         return VerdictOutcome.UNKNOWN

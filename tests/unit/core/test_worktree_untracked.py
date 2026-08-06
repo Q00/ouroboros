@@ -32,7 +32,7 @@ def test_prepare_task_workspace_allows_only_untracked_source_artifacts(tmp_path:
     (evidence / "readback.md").write_text("verified\n", encoding="utf-8")
 
     with patch("ouroboros.core.worktree._worktree_root", return_value=tmp_path / "worktrees"):
-        workspace = prepare_task_workspace(repo, "orch_test", allow_untracked=True)
+        workspace = prepare_task_workspace(repo, "orch_test", allow_untracked_evidence=True)
 
     try:
         assert (evidence / "readback.md").read_text(encoding="utf-8") == "verified\n"
@@ -52,4 +52,18 @@ def test_prepare_task_workspace_rejects_tracked_changes_when_untracked_allowed(
         patch("ouroboros.core.worktree._worktree_root", return_value=tmp_path / "worktrees"),
         pytest.raises(WorktreeError, match="dirty checkout"),
     ):
-        prepare_task_workspace(repo, "orch_test", allow_untracked=True)
+        prepare_task_workspace(repo, "orch_test", allow_untracked_evidence=True)
+
+
+def test_prepare_task_workspace_rejects_untracked_files_outside_evidence(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    (repo / "unrelated.txt").write_text("not evidence\n", encoding="utf-8")
+
+    with (
+        patch("ouroboros.core.worktree._worktree_root", return_value=tmp_path / "worktrees"),
+        pytest.raises(WorktreeError, match="dirty checkout"),
+    ):
+        prepare_task_workspace(repo, "orch_test", allow_untracked_evidence=True)
