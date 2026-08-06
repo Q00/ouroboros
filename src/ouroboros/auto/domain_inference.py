@@ -412,6 +412,11 @@ _GAME_GOAL_SIGNAL_FRAGMENT = (
 )
 
 
+_GAME_FAST_PATH_RE = re.compile(
+    r"\b(?:frames?|canvas(?:es)?|game\s+loops?|playable|2d\s+games?|scenes?)\b"
+)
+
+
 def _game_visible_text(ledger: SeedDraftLedger) -> str:
     """Outputs plus the goal with negated game signals stripped."""
     goal = _strip_negated_signals(_goal_text(ledger), _GAME_GOAL_SIGNAL_FRAGMENT)
@@ -424,7 +429,9 @@ def _matches_game_2d(ledger: SeedDraftLedger) -> bool:
     if not (outputs or goal):
         return False
     visible = _game_visible_text(ledger)
-    if _any_of(visible, ("frame", "canvas", "game loop", "playable", "2d game", "scene")):
+    # Token-bounded (#1813 R13): substring matching made "iframe" satisfy
+    # "frame" and would accept similar embeddings for the other terms.
+    if _GAME_FAST_PATH_RE.search(visible):
         return True
     if not _GAME_RENDER_OR_SCREEN_RE.search(outputs + " " + goal):
         return False
@@ -472,7 +479,7 @@ def _matches_refactor_in_place(ledger: SeedDraftLedger) -> bool:
 # (anchor-first "login page" or noun-first "forms for login"), and the
 # artifact tail also rejects compound API descriptions ("signup form
 # validation helpers").
-_UI_WIDGET_NOUN = r"(?:forms?|panels?|buttons?|dashboards?|pages?|screens?|dialogs?|modals?)"
+_UI_WIDGET_NOUN = r"(?:forms?|panels?|buttons?|dashboards?|pages?|screens?|dialogs?|modals?|menus?|toolbars?|sidebars?)"
 _UI_PRODUCT_ANCHOR = (
     r"(?:login|logout|signup|sign[\s\-]?up|sign[\s\-]?in|settings|search|"
     r"filters?|checkout|profile|admin|landing|home|account|charts?|metrics|"
@@ -500,7 +507,8 @@ _UI_COMPOSITION_RE = re.compile(
     rf"{_UI_WIDGET_NOUN}\s+(?:submit|submission|rendered|shown|displayed|clicked)|"
     r"users?\s+can\s+(?:add|edit|delete|create|update|remove|drag|click|"
     r"filter|search|browse|submit|save|cancel|manage|view)|"
-    r"drag[\s\-]and[\s\-]drop"
+    r"drag[\s\-]and[\s\-]drop|"
+    r"navigation\s+bars?|data\s+tables?"
     r")\b"
 )
 
@@ -537,7 +545,7 @@ def _ledger_has_browser_context(ledger: SeedDraftLedger) -> bool:
 # are stripped before either matcher consults the goal ("not a library"
 # is not intent).
 _LIBRARY_INTENT_RE = re.compile(
-    r"\b(?:importable|librar(?:y|ies)|sdks?|api\s+surface|public\s+api)\b"
+    r"\b(?:importable|librar(?:y|ies)|sdks?|api\s+surface|public\s+api|package)\b"
 )
 _LIBRARY_INTENT_FRAGMENT = (
     r"(?:librar(?:y|ies)|sdks?|packages?|api\s+surface|public\s+api|importable)"
@@ -559,7 +567,8 @@ def _matches_web_app(ledger: SeedDraftLedger) -> bool:
     # goal ("Build a frontend SDK") alike (#1813 R10/R11) — and
     # game-domain ledgers own their shared render/screen vocabulary, the
     # mirror of _matches_game_2d's ceding rule.
-    if _LIBRARY_INTENT_RE.search(outputs + " " + _library_visible_goal(ledger)):
+    intent_text = _MANIFEST_TOKEN_RE.sub(" ", outputs + " " + _library_visible_goal(ledger))
+    if _LIBRARY_INTENT_RE.search(intent_text):
         return False
     if _GAME_DOMAIN_RE.search(_game_visible_text(ledger)):
         return False

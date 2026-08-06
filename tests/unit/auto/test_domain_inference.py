@@ -1336,3 +1336,38 @@ def test_reusable_alone_is_not_library_intent(goal: str, outputs: str) -> None:
     result = derive_domain_from_ledger(ledger)
     assert result.is_single
     assert result.single is TaskClass.WEB_APP
+
+
+def test_package_goal_intent_stays_library() -> None:
+    """R13 probe: the guard must carry the complete _matches_library
+    signal set — including the singular package word."""
+    ledger = _bare_ledger("Build a frontend Python package")
+    _seed_section(ledger, "outputs", value="Login forms and settings panels")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.LIBRARY
+
+
+@pytest.mark.parametrize(
+    "outputs",
+    [
+        "Responsive navigation bar and an account menu",
+        "A toolbar, sidebar, and data table",
+    ],
+)
+def test_layout_and_navigation_vocabulary_is_ui_composition(outputs: str) -> None:
+    """R13 probe: routine composed browser UIs must not fall through."""
+    ledger = _bare_ledger("Build a web application dashboard")
+    _seed_section(ledger, "outputs", value=outputs)
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP
+
+
+def test_iframe_is_not_game_frame_evidence() -> None:
+    """R13 probe: "iframe" must not satisfy the game fast path's "frame"."""
+    ledger = _bare_ledger("Build a browser dashboard")
+    _seed_section(ledger, "outputs", value="An embedded iframe and a settings panel")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP
