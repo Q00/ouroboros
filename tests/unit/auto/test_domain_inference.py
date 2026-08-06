@@ -1079,3 +1079,57 @@ def test_noun_first_ui_outputs_match_web_app(outputs: str) -> None:
     result = derive_domain_from_ledger(ledger)
     assert result.is_single
     assert result.single is TaskClass.WEB_APP
+
+
+def test_descriptive_modifier_in_denial_strips_whole_coordination() -> None:
+    """R7 probe: arbitrary descriptive modifiers inside a denied
+    alternative ("browser-based graphical UI") must not shield the next
+    coordinated signal."""
+    ledger = _bare_ledger("Build a terminal dashboard, not a browser-based graphical UI or web app")
+    _seed_section(
+        ledger,
+        "outputs",
+        value="Interactive dashboard panels and buttons with deterministic stdout",
+    )
+    _seed_section(ledger, "runtime_context", value="Local shell / terminal")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.CLI
+
+
+def test_page_objects_are_not_ui_evidence() -> None:
+    """R7 probe: Page Object artifacts are testing-library outputs."""
+    ledger = _bare_ledger("Build a browser automation library")
+    _seed_section(
+        ledger, "outputs", value="An importable package with login page objects and test fixtures"
+    )
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.LIBRARY
+
+
+@pytest.mark.parametrize(
+    "outputs",
+    [
+        "A todo list where users can add, edit, and delete tasks",
+        "A browser calendar with event creation and drag-and-drop",
+    ],
+)
+def test_user_action_outputs_match_web_app(outputs: str) -> None:
+    """R7 probe: explicit web-app intent plus clearly interactive outputs
+    must not fall through to unmatched."""
+    ledger = _bare_ledger("Build a web app")
+    _seed_section(ledger, "outputs", value=outputs)
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP
+
+
+def test_passive_rendered_game_output_still_matches_game_2d() -> None:
+    """R7 probe: bounding the render signal must stay context-sensitive —
+    passive "rendered sprites" is still a game description."""
+    ledger = _bare_ledger("Build a platformer")
+    _seed_section(ledger, "outputs", value="Rendered sprites with player movement and collisions")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.GAME_2D

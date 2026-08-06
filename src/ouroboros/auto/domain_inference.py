@@ -158,12 +158,13 @@ _WEB_APP_GOAL_SIGNAL_RE = re.compile(rf"\b{_WEB_APP_GOAL_SIGNAL_FRAGMENT}\b")
 # One denial covers every coordinated alternative it lists ("not a browser
 # or web app", "not a browser, web app, or frontend") — the negated span
 # consumes the whole coordination so no alternative survives as a positive
-# signal (#1813 R4). Each denied alternative may carry ordinary modifiers
-# ("browser-based UI", "browser UI") so descriptive text between
-# alternatives cannot shield a later one (#1813 R6).
+# signal (#1813 R4). Each denied alternative may trail a few arbitrary
+# descriptive words ("browser-based graphical UI") — greedily, but never
+# across a connector, so modifiers cannot shield a later alternative from
+# the strip while "not a browser but a web app" keeps its affirmative
+# half (#1813 R6/R7).
 _DENIED_WEB_APP_SIGNAL_FRAGMENT = (
-    rf"{_WEB_APP_GOAL_SIGNAL_FRAGMENT}"
-    r"(?:[\s\-]based)?(?:\s+(?:ui|interface|pages?|apps?))?"
+    rf"{_WEB_APP_GOAL_SIGNAL_FRAGMENT}(?:[\s\-](?!(?:or|and|nor|but)\b)\w+){{0,3}}"
 )
 _COORDINATED_ALTERNATIVE_FRAGMENT = (
     r"(?:\s*,\s*(?:or\s+|and\s+|nor\s+)?|\s+(?:or|and|nor)\s+|\s*/\s*)"
@@ -375,11 +376,16 @@ def _matches_data_pipeline(ledger: SeedDraftLedger) -> bool:
     return input_signal and output_signal
 
 
-# Active render forms only (#1813 R5): the passive participle "rendered"
-# is ordinary UI wording ("a login page rendered in the browser") and let
-# every rendered-page description dual-fire the game classifier through
-# the bare "render" substring.
-_GAME_RENDER_RE = re.compile(r"\brender(?:s|ing)?\b")
+# The render signal is context-sensitive (#1813 R5/R7): passive "rendered"
+# still counts for games ("Rendered sprites with player movement"), but
+# not when it renders a UI widget ("a login page rendered in the
+# browser") — those phrases belong to the web_app verb branch and used to
+# dual-fire this classifier through the bare "render" substring.
+_GAME_RENDER_RE = re.compile(
+    r"(?<!\bpage )(?<!pages )(?<!\bform )(?<!forms )(?<!panel )(?<!panels )"
+    r"(?<!button )(?<!\bui )(?<!dashboard )"
+    r"\brender(?:s|ing|ed)?\b(?!\s+in\s+the\s+browser)"
+)
 
 
 def _matches_game_2d(ledger: SeedDraftLedger) -> bool:
@@ -443,7 +449,7 @@ _UI_PRODUCT_ANCHOR = (
 _UI_ARTIFACT_TAIL = (
     r"(?!\s+(?:helpers?|templates?|utils?|utilities|apis?|parsers?|"
     r"library|libraries|sdks?|packages?|validation|reference|"
-    r"documentation|docs|examples?))"
+    r"documentation|docs|examples?|objects?|fixtures?|locators?|models?))"
 )
 _UI_COMPOSITION_RE = re.compile(
     r"\b(?:"
@@ -452,7 +458,10 @@ _UI_COMPOSITION_RE = re.compile(
     r"client[\s\-]side\s+validation\s+(?:messages?|errors?|feedback)|"
     rf"{_UI_PRODUCT_ANCHOR}\s+{_UI_WIDGET_NOUN}{_UI_ARTIFACT_TAIL}|"
     rf"{_UI_WIDGET_NOUN}\s+for\s+{_UI_PRODUCT_ANCHOR}|"
-    rf"{_UI_WIDGET_NOUN}\s+(?:submit|submission|rendered|shown|displayed|clicked)"
+    rf"{_UI_WIDGET_NOUN}\s+(?:submit|submission|rendered|shown|displayed|clicked)|"
+    r"users?\s+can\s+(?:add|edit|delete|create|update|remove|drag|click|"
+    r"filter|search|browse|submit|save|cancel|manage|view)|"
+    r"drag[\s\-]and[\s\-]drop"
     r")\b"
 )
 
