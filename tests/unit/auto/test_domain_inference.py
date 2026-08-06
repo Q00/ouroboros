@@ -1247,3 +1247,43 @@ def test_reusable_browser_tooling_stays_library(goal: str, outputs: str) -> None
     result = derive_domain_from_ledger(ledger)
     assert result.is_single
     assert result.single is TaskClass.LIBRARY
+
+
+@pytest.mark.parametrize(
+    ("goal", "outputs"),
+    [
+        (
+            "Build a browser app, not a game",
+            "A login screen displayed with save and cancel buttons",
+        ),
+        (
+            "Build a browser-based video player",
+            "A player screen with playback buttons and navigation",
+        ),
+    ],
+)
+def test_negated_or_polysemous_game_words_do_not_own_ui(goal: str, outputs: str) -> None:
+    """R11 probe: a negated game mention and the media sense of "player"
+    are not affirmative game evidence."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value=outputs)
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP
+
+
+@pytest.mark.parametrize(
+    ("goal", "outputs"),
+    [
+        ("Build a browser UI component library", "Modal dialogs and login forms"),
+        ("Build a frontend SDK", "Settings panels and account forms"),
+    ],
+)
+def test_goal_side_artifact_intent_stays_library(goal: str, outputs: str) -> None:
+    """R11 probe: explicit library/SDK intent in the goal is authoritative
+    for _matches_library and must void app UI evidence the same way."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value=outputs)
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.LIBRARY

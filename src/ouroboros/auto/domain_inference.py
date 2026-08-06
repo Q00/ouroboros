@@ -389,10 +389,37 @@ _GAME_RENDER_OR_SCREEN_RE = re.compile(r"\brender(?:s|ing|ed)?\b|\bscreens?\b")
 # Game-domain vocabulary marks game ownership of the shared render/screen
 # words even under browser deployment ("Build a browser game"), and
 # symmetrically makes the web_app matcher cede — browser hosting does not
-# turn game rendering into UI evidence (#1813 R10).
+# turn game rendering into UI evidence (#1813 R10). The evidence must be
+# affirmative and sense-specific (#1813 R11): "player" counts only in its
+# game sense ("player movement"), never as a media player, and a negated
+# goal mention ("not a game") is stripped before the check.
 _GAME_DOMAIN_RE = re.compile(
-    r"\b(?:games?|sprites?|players?|collisions?|arcade|platformers?|shooters?)\b"
+    r"\b(?:games?|sprites?|collisions?|arcade|platformers?|shooters?|"
+    r"players?\s+(?:movement|position|input|controls?|characters?))\b"
 )
+_DENIED_GAME_SIGNAL_FRAGMENT = r"games?(?:[\s\-](?!(?:or|and|nor|but|rather|instead)\b)\w+)*"
+_NEGATED_GAME_GOAL_RE = re.compile(
+    rf"\b(?P<cue>{_NEGATION_CUE_FRAGMENT})"
+    r"(?P<path>(?:\s+\S+){0,7}?)"
+    rf"\s+{_DENIED_GAME_SIGNAL_FRAGMENT}\b"
+)
+_NEGATED_GAME_PREFIX_RE = re.compile(r"\bnon[\s\-]?games?\b")
+
+
+def _game_domain_visible_text(ledger: SeedDraftLedger) -> str:
+    """Outputs plus the goal with negated game mentions stripped, using the
+    same cue/path/affirmative-flip discipline as the CLI and web-app
+    negation pipelines."""
+
+    def _strip_if_not_affirmative(match: re.Match[str]) -> str:
+        path = match.group("path") or ""
+        if _AFFIRMATIVE_FLIP_RE.search(path):
+            return match.group(0)
+        return " "
+
+    goal = _NEGATED_GAME_GOAL_RE.sub(_strip_if_not_affirmative, _goal_text(ledger))
+    goal = _NEGATED_GAME_PREFIX_RE.sub(" ", goal)
+    return _section_text(ledger, "outputs") + " " + goal
 
 
 def _matches_game_2d(ledger: SeedDraftLedger) -> bool:
@@ -405,7 +432,7 @@ def _matches_game_2d(ledger: SeedDraftLedger) -> bool:
         return True
     if not _GAME_RENDER_OR_SCREEN_RE.search(text):
         return False
-    if _GAME_DOMAIN_RE.search(text):
+    if _GAME_DOMAIN_RE.search(_game_domain_visible_text(ledger)):
         return True
     return not _ledger_has_browser_context(ledger)
 
@@ -522,13 +549,14 @@ def _matches_web_app(ledger: SeedDraftLedger) -> bool:
     if not (outputs or runtime):
         # Same ledger-evidence gate as cli: goal text alone cannot classify.
         return False
-    # Outputs that declare artifact intent describe what a library ships
-    # ("Reusable modal dialogs and buttons"), not a produced app, and
-    # game-domain ledgers own their shared render/screen vocabulary — the
-    # mirror of _matches_game_2d's ceding rule (#1813 R10).
-    if _LIBRARY_INTENT_RE.search(outputs):
+    # Artifact intent voids app UI evidence wherever _matches_library
+    # treats it as authoritative — outputs ("Reusable modal dialogs") and
+    # goal ("Build a frontend SDK") alike (#1813 R10/R11) — and
+    # game-domain ledgers own their shared render/screen vocabulary, the
+    # mirror of _matches_game_2d's ceding rule.
+    if _LIBRARY_INTENT_RE.search(outputs + " " + _goal_text(ledger)):
         return False
-    if _GAME_DOMAIN_RE.search(outputs + " " + _goal_text(ledger)):
+    if _GAME_DOMAIN_RE.search(_game_domain_visible_text(ledger)):
         return False
     # Two-signal AND (the webhook shape): browser context plus UI
     # composition. Goal-side browser mentions route through the negation
