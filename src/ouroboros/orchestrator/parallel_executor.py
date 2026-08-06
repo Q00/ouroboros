@@ -5142,10 +5142,14 @@ class ParallelACExecutor:
             for path in paths:
                 relative = path.relative_to(root)
                 declared_contract_path = is_declared_contract_path(relative)
+                generated_evidence_path = relative.parts[0] == "evidence"
                 if (
-                    any(
-                        part in _WORKSPACE_FINGERPRINT_IGNORED_DIRECTORIES
-                        for part in relative.parts
+                    (
+                        generated_evidence_path
+                        or any(
+                            part in _WORKSPACE_FINGERPRINT_IGNORED_DIRECTORIES
+                            for part in relative.parts
+                        )
                     )
                     and not declared_contract_path
                 ):

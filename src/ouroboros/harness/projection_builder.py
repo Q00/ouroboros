@@ -36,7 +36,7 @@ from collections import OrderedDict
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal
 from uuid import NAMESPACE_URL, uuid5
 
 from ouroboros.events.base import BaseEvent
@@ -52,10 +52,12 @@ from ouroboros.harness.projection import (
     VerdictRecord,
 )
 
-_TOOL_STARTED = "tool.call.started"
-_TOOL_RETURNED = "tool.call.returned"
+_TOOL_STARTED_TYPES = frozenset({"tool.call.started", "execution.tool.started"})
+_TOOL_RETURNED_TYPES = frozenset({"tool.call.returned", "execution.tool.completed"})
 _LLM_REQUESTED = "llm.call.requested"
 _LLM_RETURNED = "llm.call.returned"
+_TYPED_EVIDENCE_OBSERVED = "execution.ac.typed_evidence.observed"
+_ACCEPTANCE_FINALIZED = "execution.ac.acceptance_finalized"
 _ARTIFACT_RECORDED_TYPES = frozenset(
     {"artifact.created", "harness.artifact.recorded", "evaluation.artifact.recorded"}
 )
@@ -152,7 +154,7 @@ class ProjectionBuilder:
         self._update_timestamps(event)
         self._identity_events.append(event)
 
-        if event.type == _TOOL_STARTED:
+        if event.type in _TOOL_STARTED_TYPES:
             call_id = _extract_call_id(event)
             if call_id is not None:
                 self._tool_started[call_id] = event
@@ -167,7 +169,7 @@ class ProjectionBuilder:
                 )
             return self
 
-        if event.type == _TOOL_RETURNED:
+        if event.type in _TOOL_RETURNED_TYPES:
             self._handle_tool_returned(event)
             return self
 
@@ -190,11 +192,15 @@ class ProjectionBuilder:
             self._handle_llm_returned(event)
             return self
 
+        if event.type == _TYPED_EVIDENCE_OBSERVED:
+            self._handle_typed_evidence(event)
+            return self
+
         if event.type in _ARTIFACT_RECORDED_TYPES:
             self._artifact_events.append(event)
             return self
 
-        if event.type in _VERDICT_RECORDED_TYPES:
+        if event.type in _VERDICT_RECORDED_TYPES or event.type == _ACCEPTANCE_FINALIZED:
             self._verdict_events.append(event)
             return self
 
@@ -341,6 +347,30 @@ class ProjectionBuilder:
         )
         self._steps[key] = step
 
+    def _handle_typed_evidence(self, event: BaseEvent) -> None:
+        ac_id = _extract_ac_id(event)
+        if ac_id is None:
+            return
+        call_id = ac_id
+        key = _slot_key("evidence", call_id)
+        passed = _safe_bool(event.data.get("verifier_passed"))
+        if passed is None:
+            passed = _safe_bool(event.data.get("typed_evidence_valid"))
+        self._steps[key] = StepRecord(
+            step_id="step_placeholder",
+            run_id="run_placeholder",
+            stage_id="stage_placeholder",
+            kind=StepKind.EVIDENCE_SUBMISSION,
+            name="typed evidence",
+            ac_id=ac_id,
+            started_at=event.timestamp,
+            ended_at=event.timestamp,
+            ok=passed,
+            source_event_ids=(event.id,),
+            metadata={"verifier_status": event.data.get("verifier_status")},
+        )
+        self._artifact_events.append(event)
+
     def _handle_llm_returned(self, returned_event: BaseEvent) -> None:
         call_id = _extract_call_id(returned_event)
         if call_id is None:
@@ -403,7 +433,7 @@ def build_projection(
 def _extract_call_id(event: BaseEvent) -> str | None:
     if not isinstance(event.data, dict):
         return None
-    value = event.data.get("call_id")
+    value = event.data.get("call_id", event.data.get("tool_call_id"))
     if isinstance(value, str) and value.strip():
         return value.strip()
     return None
@@ -590,11 +620,13 @@ def _tool_step_metadata(
 ) -> dict[str, Any]:
     metadata: dict[str, Any] = {}
     if start_event is not None and isinstance(start_event.data, dict):
-        preview = start_event.data.get("args_preview")
+        preview = start_event.data.get("args_preview", start_event.data.get("tool_detail"))
         if isinstance(preview, str) and preview:
             metadata["args_preview"] = preview
     if isinstance(returned_event.data, dict):
-        result_preview = returned_event.data.get("result_preview")
+        result_preview = returned_event.data.get(
+            "result_preview", returned_event.data.get("tool_result_text")
+        )
         if isinstance(result_preview, str) and result_preview:
             metadata["result_preview"] = result_preview
         duration = returned_event.data.get("duration_ms")
@@ -675,15 +707,27 @@ def _artifact_from_event(
 ) -> ArtifactRecord | None:
     if not isinstance(event.data, dict):
         return None
-    call_id = _extract_call_id(event) or _optional_str(event.data.get("step_call_id"))
+    typed_evidence = event.type == _TYPED_EVIDENCE_OBSERVED
+    call_id = (
+        _extract_ac_id(event)
+        if typed_evidence
+        else _extract_call_id(event) or _optional_str(event.data.get("step_call_id"))
+    )
     if call_id is None:
         return None
-    family = _optional_str(event.data.get("step_family")) or "tool"
+    family = (
+        "evidence" if typed_evidence else _optional_str(event.data.get("step_family")) or "tool"
+    )
     step_id = stable_step_id(source_key, family, call_id)
     artifact_id = _optional_str(event.data.get("artifact_id")) or _stable_artifact_id(
         source_key, event.id
     )
     kind = _optional_str(event.data.get("kind")) or "evidence"
+    summary = (
+        _optional_str(event.data.get("verifier_status")) or "typed evidence"
+        if typed_evidence
+        else _optional_str(event.data.get("summary")) or ""
+    )
     return ArtifactRecord(
         artifact_id=artifact_id,
         step_id=step_id,
@@ -692,7 +736,7 @@ def _artifact_from_event(
         media_type=_optional_str(event.data.get("media_type")),
         size_bytes=_optional_int(event.data.get("size_bytes")),
         digest=_optional_str(event.data.get("digest")),
-        summary=_optional_str(event.data.get("summary")) or "",
+        summary=summary,
         metadata={
             "source_event_id": event.id,
             "event_type": event.type,
@@ -710,13 +754,28 @@ def _verdict_from_event(
 ) -> VerdictRecord | None:
     if not isinstance(event.data, dict):
         return None
-    outcome = _verdict_outcome(event.data)
+    acceptance = event.type == _ACCEPTANCE_FINALIZED
+    outcome = _acceptance_outcome(event.data) if acceptance else _verdict_outcome(event.data)
     if outcome is None:
         return None
-    scope = _optional_str(event.data.get("scope")) or "run"
-    if scope not in {"run", "ac"}:
-        return None
-    ac_id = _optional_str(event.data.get("ac_id")) if scope == "ac" else None
+    scope: Literal["run", "ac"]
+    if acceptance:
+        scope = "ac"
+    else:
+        match _optional_str(event.data.get("scope")):
+            case None | "run":
+                scope = "run"
+            case "ac":
+                scope = "ac"
+            case _:
+                return None
+    ac_id = (
+        _acceptance_ac_id(event.data)
+        if acceptance
+        else _optional_str(event.data.get("ac_id"))
+        if scope == "ac"
+        else None
+    )
     if scope == "ac" and ac_id is None:
         return None
     recorded_artifact_ids = _string_tuple(event.data.get("evidence_artifact_ids"))
@@ -742,7 +801,11 @@ def _verdict_from_event(
         scope=scope,
         ac_id=ac_id,
         outcome=outcome,
-        rationale=_optional_str(event.data.get("rationale")) or "",
+        rationale=(
+            _optional_str(event.data.get("disposition")) or ""
+            if acceptance
+            else _optional_str(event.data.get("rationale")) or ""
+        ),
         evidence_event_ids=(event.id, *_string_tuple(event.data.get("evidence_event_ids"))),
         evidence_artifact_ids=linked_artifact_ids,
         recorded_at=event.timestamp,
@@ -846,6 +909,28 @@ def _verdict_outcome(data: dict[str, Any]) -> VerdictOutcome | None:
     approved = data.get("approved")
     if isinstance(approved, bool):
         return VerdictOutcome.PASS if approved else VerdictOutcome.FAIL
+    return None
+
+
+def _acceptance_ac_id(data: dict[str, Any]) -> str | None:
+    ac_id = _optional_str(data.get("ac_id"))
+    if ac_id is not None:
+        return ac_id
+    root_ac_index = data.get("root_ac_index")
+    if isinstance(root_ac_index, int) and root_ac_index >= 0:
+        return f"ac_{root_ac_index}"
+    return None
+
+
+def _acceptance_outcome(data: dict[str, Any]) -> VerdictOutcome | None:
+    accepted = data.get("accepted")
+    if accepted is True:
+        return VerdictOutcome.PASS
+    disposition = _optional_str(data.get("disposition"))
+    if disposition in {"failed", "rejected"}:
+        return VerdictOutcome.FAIL
+    if accepted is False:
+        return VerdictOutcome.UNKNOWN
     return None
 
 
