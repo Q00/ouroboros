@@ -1133,3 +1133,48 @@ def test_passive_rendered_game_output_still_matches_game_2d() -> None:
     result = derive_domain_from_ledger(ledger)
     assert result.is_single
     assert result.single is TaskClass.GAME_2D
+
+
+@pytest.mark.parametrize(
+    "outputs",
+    [
+        "A settings screen with buttons for save and cancel",
+        "A login screen displayed in the browser",
+    ],
+)
+def test_browser_ui_screens_match_web_app_not_game(outputs: str) -> None:
+    """R8 probe: product-anchored screens are browser UI, not game scenes."""
+    ledger = _bare_ledger("Build a web app")
+    _seed_section(ledger, "outputs", value=outputs)
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP
+
+
+def test_game_screens_still_match_game_2d() -> None:
+    """Bounding "screen" must stay context-sensitive: unanchored screens
+    are still game evidence."""
+    ledger = _bare_ledger("Build an arcade shooter")
+    _seed_section(
+        ledger, "outputs", value="A title screen and a game-over screen with the final score"
+    )
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.GAME_2D
+
+
+def test_long_denied_alternative_strips_completely() -> None:
+    """R8 probe: a denied alternative longer than three modifier words
+    must still strip up to the coordination boundary."""
+    ledger = _bare_ledger(
+        "Build a terminal UI, not a browser-based graphical user interface or web app"
+    )
+    _seed_section(
+        ledger,
+        "outputs",
+        value="Interactive dashboard panels and buttons with deterministic stdout",
+    )
+    _seed_section(ledger, "runtime_context", value="Local shell / terminal")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.CLI

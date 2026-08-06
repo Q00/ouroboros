@@ -164,7 +164,8 @@ _WEB_APP_GOAL_SIGNAL_RE = re.compile(rf"\b{_WEB_APP_GOAL_SIGNAL_FRAGMENT}\b")
 # the strip while "not a browser but a web app" keeps its affirmative
 # half (#1813 R6/R7).
 _DENIED_WEB_APP_SIGNAL_FRAGMENT = (
-    rf"{_WEB_APP_GOAL_SIGNAL_FRAGMENT}(?:[\s\-](?!(?:or|and|nor|but)\b)\w+){{0,3}}"
+    rf"{_WEB_APP_GOAL_SIGNAL_FRAGMENT}"
+    r"(?:[\s\-](?!(?:or|and|nor|but|rather|instead)\b)\w+)*"
 )
 _COORDINATED_ALTERNATIVE_FRAGMENT = (
     r"(?:\s*,\s*(?:or\s+|and\s+|nor\s+)?|\s+(?:or|and|nor)\s+|\s*/\s*)"
@@ -381,6 +382,15 @@ def _matches_data_pipeline(ledger: SeedDraftLedger) -> bool:
 # not when it renders a UI widget ("a login page rendered in the
 # browser") — those phrases belong to the web_app verb branch and used to
 # dual-fire this classifier through the bare "render" substring.
+# "screen" is likewise context-sensitive (#1813 R8): product-anchored
+# browser screens ("settings screen", "login screen displayed in the
+# browser") belong to the web_app widget branch, while unanchored screens
+# ("title screen", "game-over screen") stay game evidence.
+_GAME_SCREEN_RE = re.compile(
+    r"(?<!login )(?<!signup )(?<!settings )(?<!search )(?<!checkout )"
+    r"(?<!profile )(?<!admin )(?<!account )(?<!home )(?<!landing )"
+    r"\bscreens?\b(?!\s+(?:displayed|shown|rendered))"
+)
 _GAME_RENDER_RE = re.compile(
     r"(?<!\bpage )(?<!pages )(?<!\bform )(?<!forms )(?<!panel )(?<!panels )"
     r"(?<!button )(?<!\bui )(?<!dashboard )"
@@ -394,9 +404,13 @@ def _matches_game_2d(ledger: SeedDraftLedger) -> bool:
     if not (outputs or goal):
         return False
     text = outputs + " " + goal
-    return bool(_GAME_RENDER_RE.search(text)) or _any_of(
-        text,
-        ("frame", "canvas", "screen", "game loop", "playable", "2d game", "scene"),
+    return (
+        bool(_GAME_RENDER_RE.search(text))
+        or bool(_GAME_SCREEN_RE.search(text))
+        or _any_of(
+            text,
+            ("frame", "canvas", "game loop", "playable", "2d game", "scene"),
+        )
     )
 
 
@@ -430,8 +444,8 @@ def _matches_refactor_in_place(ledger: SeedDraftLedger) -> bool:
 # widget ("signup form", "filters panel", "responsive dashboard"), an
 # explicit UI verb phrase ("pages rendered", "form submit"),
 # "interactive" bound to a rendered artifact, or "client-side validation"
-# bound to user-facing feedback. "screen" stays absent — it is game_2d
-# vocabulary and would dual-fire browser settings screens.
+# bound to user-facing feedback. Product-anchored "screen"s belong here
+# (#1813 R8); the game predicate cedes them via _GAME_SCREEN_RE.
 # UI-composition evidence needs a semantic product anchor (#1813 R6): any
 # single word in front of a widget noun over-accepted API/documentation
 # artifacts ("API reference pages", "example pages"), so the widget branch
@@ -439,7 +453,7 @@ def _matches_refactor_in_place(ledger: SeedDraftLedger) -> bool:
 # (anchor-first "login page" or noun-first "forms for login"), and the
 # artifact tail also rejects compound API descriptions ("signup form
 # validation helpers").
-_UI_WIDGET_NOUN = r"(?:forms?|panels?|buttons?|dashboards?|pages?)"
+_UI_WIDGET_NOUN = r"(?:forms?|panels?|buttons?|dashboards?|pages?|screens?)"
 _UI_PRODUCT_ANCHOR = (
     r"(?:login|logout|signup|sign[\s\-]?up|sign[\s\-]?in|settings|search|"
     r"filters?|checkout|profile|admin|landing|home|account|charts?|metrics|"
