@@ -1402,3 +1402,36 @@ def test_web_application_firewall_denial_is_not_web_app() -> None:
     result = derive_domain_from_ledger(ledger)
     assert result.is_single
     assert result.single is TaskClass.CLI
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
+        "Build a web app, not a browser extension",
+        "Build a web app but not a browser game",
+    ],
+)
+def test_denial_of_other_artifacts_keeps_affirmative_web_app(goal: str) -> None:
+    """R15 probe: denying a browser extension or a browser game does not
+    deny the independently asserted web app."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value="Login forms and settings panels")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP
+
+
+def test_artifact_denial_covers_browser_wording_in_outputs() -> None:
+    """R15 probe: an artifact-type denial in the goal governs the whole
+    ledger — a report naturally described as a browser report cannot
+    revive the denied web-app classification."""
+    ledger = _bare_ledger("Build a CLI that audits browser pages, not a web app")
+    _seed_section(
+        ledger,
+        "outputs",
+        value="Browser accessibility report for login pages and settings panels, printed to stdout",
+    )
+    _seed_section(ledger, "runtime_context", value="Local shell / terminal")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.CLI

@@ -17,9 +17,15 @@ The matcher returns one of three outcomes:
   ``domain_unmatched`` telemetry signal so maintainers can grow the
   catalog.
 
-Adding a new task class = adding a ``_matches_<name>`` function +
-registering it in ``_PATTERN_REGISTRY`` + a unit test. ~10 LoC PR per
-class, not an ML eval-set re-curation.
+Adding a new task class starts with a ``_matches_<name>`` function, a
+``_PATTERN_REGISTRY`` entry, and a unit test — but the real obligation
+is auditing the classes the new vocabulary overlaps (#1813 landed
+``web_app`` against games, libraries, and CLI tooling): shared words
+need an explicit ownership rule, goal-side denials must route through
+the shared negation primitive, and outcomes must be checked against the
+durable consumers, since ``active_task_class`` persistence and
+default-AC injection accept only a single match while ambiguity and
+unmatched fall back silently.
 """
 
 from __future__ import annotations
@@ -192,20 +198,43 @@ _WEB_APP_GOAL_SIGNAL_FRAGMENT = (
 _WEB_APP_GOAL_SIGNAL_RE = re.compile(rf"\b{_WEB_APP_GOAL_SIGNAL_FRAGMENT}\b")
 
 
+# Nouns that make a denied browser-family span a denial of the produced
+# app/UI artifact itself ("not a web app", "not a browser UI") rather than
+# of some other browser-family thing ("not a browser extension", "not a
+# browser game") — only the former dominates the goal (#1813 R15).
+_WEB_APP_ARTIFACT_NOUN_RE = re.compile(
+    r"\b(?:web\s?app(?:lication)?s?|webapps?|apps?|applications?|uis?|"
+    r"interfaces?|pages?|frontends?|front[\s\-]ends?|sites?|websites?)\b"
+)
+
+
+def _goal_denies_web_app_artifact(goal_text: str) -> bool:
+    """True when a non-flip denial span rejects the app/UI artifact type."""
+    negated, _prefix = _negation_res_for(_WEB_APP_GOAL_SIGNAL_FRAGMENT)
+    return any(
+        _WEB_APP_ARTIFACT_NOUN_RE.search(match.group(0))
+        for match in negated.finditer(goal_text)
+        if not _AFFIRMATIVE_FLIP_RE.search(match.group("path") or "")
+    )
+
+
 def _goal_has_unnegated_web_app_signal(goal_text: str) -> bool:
     """Web-app twin of :func:`_goal_has_unnegated_cli_signal`, built on the
     shared negation primitive.
 
-    An explicit artifact-type denial dominates (#1813 R14): once the goal
-    denies being a web app ("audits browser pages, not a web app"), other
-    browser-domain mentions in the same goal describe the tool's domain,
-    not its artifact type. Affirmative-flip spans ("not just a browser
-    page") are preserved by the strip and so do not count as denials.
+    An explicit artifact-type denial dominates (#1813 R14/R15): once the
+    goal denies producing a web app or UI, remaining browser-domain
+    mentions describe the tool's domain, not its artifact type. Denials of
+    other browser-family artifacts ("not a browser extension") leave an
+    independent affirmative web-app statement intact, and affirmative-flip
+    spans ("not just a browser page") are preserved by the strip.
     """
     if not _WEB_APP_GOAL_SIGNAL_RE.search(goal_text):
         return False
+    if _goal_denies_web_app_artifact(goal_text):
+        return False
     stripped = _strip_negated_signals(goal_text, _WEB_APP_GOAL_SIGNAL_FRAGMENT)
-    return stripped == goal_text
+    return bool(_WEB_APP_GOAL_SIGNAL_RE.search(stripped))
 
 
 __all__ = [
@@ -574,6 +603,11 @@ def _matches_web_app(ledger: SeedDraftLedger) -> bool:
     # goal ("Build a frontend SDK") alike (#1813 R10/R11) — and
     # game-domain ledgers own their shared render/screen vocabulary, the
     # mirror of _matches_game_2d's ceding rule.
+    # An artifact-type denial in the goal governs the whole ledger (#1813
+    # R15): outputs naturally described with browser wording ("Browser
+    # accessibility report") cannot revive the denied classification.
+    if _goal_denies_web_app_artifact(_goal_text(ledger)):
+        return False
     intent_text = _MANIFEST_TOKEN_RE.sub(" ", outputs + " " + _library_visible_goal(ledger))
     if _LIBRARY_INTENT_RE.search(intent_text):
         return False
