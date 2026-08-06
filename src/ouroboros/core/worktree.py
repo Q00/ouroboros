@@ -147,6 +147,29 @@ def _run_git(args: list[str], cwd: Path) -> str:
     return result.stdout.strip()
 
 
+def _run_git_bytes(args: list[str], cwd: Path) -> bytes:
+    try:
+        result = subprocess.run(
+            ["git", *args],
+            cwd=cwd,
+            capture_output=True,
+            text=False,
+            timeout=30,
+            check=False,
+        )
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired) as exc:
+        raise WorktreeError(f"Git command failed: {' '.join(args)}", details={"error": str(exc)})
+    if result.returncode != 0:
+        raise WorktreeError(
+            f"Git command failed: {' '.join(args)}",
+            details={
+                "stdout": os.fsdecode(result.stdout).strip(),
+                "stderr": os.fsdecode(result.stderr).strip(),
+            },
+        )
+    return result.stdout
+
+
 def _resolve_repo_root(start_path: Path) -> Path:
     path = start_path.expanduser().resolve()
     probe = path if path.is_dir() else path.parent
@@ -207,12 +230,12 @@ def _ensure_only_untracked_evidence(repo_root: Path) -> None:
             "Cannot start task worktree from a dirty checkout",
             details={"repo_root": str(repo_root)},
         )
-    untracked = _run_git(["ls-files", "--others", "--exclude-standard", "-z"], repo_root)
+    untracked = _run_git_bytes(["ls-files", "--others", "--exclude-standard", "-z"], repo_root)
     if any(
         not path.parts or path.parts[0] != "evidence"
-        for value in untracked.split("\0")
+        for value in untracked.split(b"\0")
         if value
-        for path in (Path(value),)
+        for path in (Path(os.fsdecode(value)),)
     ):
         raise WorktreeError(
             "Cannot start task worktree from a dirty checkout",

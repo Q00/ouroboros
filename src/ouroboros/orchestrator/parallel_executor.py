@@ -5144,12 +5144,14 @@ class ParallelACExecutor:
                     ["git", "ls-files", "--cached", "-z"],
                     cwd=root,
                     capture_output=True,
-                    text=True,
+                    text=False,
                     timeout=30,
                     check=False,
                 )
                 if tracked.returncode == 0:
-                    tracked_paths = {Path(value) for value in tracked.stdout.split("\0") if value}
+                    tracked_paths = {
+                        Path(os.fsdecode(value)) for value in tracked.stdout.split(b"\0") if value
+                    }
             except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
                 pass
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import subprocess
+from unittest.mock import patch
 
 from ouroboros.orchestrator.parallel_executor import ParallelACExecutor
 
@@ -47,6 +48,21 @@ def test_tracked_evidence_output_remains_workspace_visible(tmp_path: Path) -> No
     after = ParallelACExecutor._workspace_content_digest(str(tmp_path))
 
     assert before != after
+
+
+def test_non_utf8_tracked_evidence_remains_workspace_visible(tmp_path: Path) -> None:
+    _init_repo(tmp_path)
+    result = subprocess.CompletedProcess(
+        args=["git"],
+        returncode=0,
+        stdout=b"evidence/contract-\xff.py\0",
+        stderr=b"",
+    )
+
+    with patch("ouroboros.orchestrator.parallel_executor.subprocess.run", return_value=result):
+        digest = ParallelACExecutor._workspace_content_digest(str(tmp_path))
+
+    assert digest is not None
 
 
 def test_declared_evidence_output_remains_acceptance_visible(tmp_path: Path) -> None:
