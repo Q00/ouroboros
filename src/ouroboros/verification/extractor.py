@@ -160,11 +160,15 @@ class AssertionExtractor:
     ) -> tuple[SpecAssertion, ...] | None:
         """Parse LLM response into SpecAssertions.
 
-        Returns ``None`` when the response could not be read as an extraction
-        at all — no JSON payload, malformed JSON, or a payload that is not the
-        expected array. That is distinct from an empty tuple, which is a
-        response that *was* read and offered nothing verifiable, and which the
-        caller is right to remember.
+        Returns ``None`` when the response could not be read as an extraction:
+        no JSON payload, malformed JSON, a payload that is not the expected
+        array, or an array that offered assertions and had every one of them
+        rejected. In none of those cases did the model answer in the schema
+        this asks for.
+
+        An empty tuple means the opposite — the array was read and was empty,
+        the model saying there is nothing here to verify. That is an answer,
+        and the caller is right to remember it.
         """
         try:
             # Extract the JSON payload, tolerating markdown fences and prose
@@ -260,6 +264,14 @@ class AssertionExtractor:
                 except ValidationError as e:
                     logger.warning("Ignoring invalid assertion object: %s", e)
                     continue
+
+            if data and not assertions:
+                # The model offered assertions and every one was thrown out, so
+                # nothing it said arrived in the schema this asks for. Read as
+                # "nothing to verify" that would be indistinguishable from a
+                # criterion set with nothing mechanical in it.
+                logger.warning("Every assertion in the extraction response was rejected")
+                return None
 
             return tuple(assertions)
 
