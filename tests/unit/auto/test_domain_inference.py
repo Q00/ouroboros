@@ -1178,3 +1178,31 @@ def test_long_denied_alternative_strips_completely() -> None:
     result = derive_domain_from_ledger(ledger)
     assert result.is_single
     assert result.single is TaskClass.CLI
+
+
+@pytest.mark.parametrize(
+    ("goal", "outputs"),
+    [
+        ("Build a web app", "A password reset screen with an email field and confirmation message"),
+        ("Build a web app", "A shopping cart page lists products and totals"),
+        ("Build a frontend", "A modal dialog lets users confirm deletion"),
+    ],
+)
+def test_non_allowlisted_product_widgets_match_web_app(goal: str, outputs: str) -> None:
+    """R9 probe: ordinary user-facing screens/pages/dialogs must classify
+    without being enumerated in a finite anchor list."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value=outputs)
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP
+
+
+def test_rendered_ui_clause_variants_do_not_fire_game() -> None:
+    """R9 probe: "is rendered on initial load" is a UI clause; grammatical
+    variants must not leak into the game classifier."""
+    ledger = _bare_ledger("Build a web app")
+    _seed_section(ledger, "outputs", value="A login page is rendered on initial load")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP

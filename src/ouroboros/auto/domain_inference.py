@@ -377,25 +377,14 @@ def _matches_data_pipeline(ledger: SeedDraftLedger) -> bool:
     return input_signal and output_signal
 
 
-# The render signal is context-sensitive (#1813 R5/R7): passive "rendered"
-# still counts for games ("Rendered sprites with player movement"), but
-# not when it renders a UI widget ("a login page rendered in the
-# browser") — those phrases belong to the web_app verb branch and used to
-# dual-fire this classifier through the bare "render" substring.
-# "screen" is likewise context-sensitive (#1813 R8): product-anchored
-# browser screens ("settings screen", "login screen displayed in the
-# browser") belong to the web_app widget branch, while unanchored screens
-# ("title screen", "game-over screen") stay game evidence.
-_GAME_SCREEN_RE = re.compile(
-    r"(?<!login )(?<!signup )(?<!settings )(?<!search )(?<!checkout )"
-    r"(?<!profile )(?<!admin )(?<!account )(?<!home )(?<!landing )"
-    r"\bscreens?\b(?!\s+(?:displayed|shown|rendered))"
-)
-_GAME_RENDER_RE = re.compile(
-    r"(?<!\bpage )(?<!pages )(?<!\bform )(?<!forms )(?<!panel )(?<!panels )"
-    r"(?<!button )(?<!\bui )(?<!dashboard )"
-    r"\brender(?:s|ing|ed)?\b(?!\s+in\s+the\s+browser)"
-)
+# "render" and "screen" are vocabulary shared between games and browser
+# UIs ("Rendered sprites" vs "a login page is rendered on initial load";
+# "game-over screen" vs "password reset screen"). Per-phrase lookbehinds
+# cannot track grammatical variants (#1813 R5-R9), so ownership is decided
+# by ledger context instead: in a ledger that carries browser context the
+# shared words describe the UI and the game classifier cedes them, while
+# the unshared game vocabulary (frame/canvas/scene/...) always counts.
+_GAME_RENDER_OR_SCREEN_RE = re.compile(r"\brender(?:s|ing|ed)?\b|\bscreens?\b")
 
 
 def _matches_game_2d(ledger: SeedDraftLedger) -> bool:
@@ -404,14 +393,11 @@ def _matches_game_2d(ledger: SeedDraftLedger) -> bool:
     if not (outputs or goal):
         return False
     text = outputs + " " + goal
-    return (
-        bool(_GAME_RENDER_RE.search(text))
-        or bool(_GAME_SCREEN_RE.search(text))
-        or _any_of(
-            text,
-            ("frame", "canvas", "game loop", "playable", "2d game", "scene"),
-        )
-    )
+    if _any_of(text, ("frame", "canvas", "game loop", "playable", "2d game", "scene")):
+        return True
+    if _ledger_has_browser_context(ledger):
+        return False
+    return bool(_GAME_RENDER_OR_SCREEN_RE.search(text))
 
 
 def _matches_refactor_in_place(ledger: SeedDraftLedger) -> bool:
@@ -453,7 +439,7 @@ def _matches_refactor_in_place(ledger: SeedDraftLedger) -> bool:
 # (anchor-first "login page" or noun-first "forms for login"), and the
 # artifact tail also rejects compound API descriptions ("signup form
 # validation helpers").
-_UI_WIDGET_NOUN = r"(?:forms?|panels?|buttons?|dashboards?|pages?|screens?)"
+_UI_WIDGET_NOUN = r"(?:forms?|panels?|buttons?|dashboards?|pages?|screens?|dialogs?|modals?)"
 _UI_PRODUCT_ANCHOR = (
     r"(?:login|logout|signup|sign[\s\-]?up|sign[\s\-]?in|settings|search|"
     r"filters?|checkout|profile|admin|landing|home|account|charts?|metrics|"
@@ -465,12 +451,18 @@ _UI_ARTIFACT_TAIL = (
     r"library|libraries|sdks?|packages?|validation|reference|"
     r"documentation|docs|examples?|objects?|fixtures?|locators?|models?))"
 )
+# The front position is a denylist, not an allowlist (#1813 R9): a finite
+# anchor list rejected ordinary product widgets ("password reset screen",
+# "shopping cart page", "modal dialog"). Any modifier word is accepted
+# except documentation/API-artifact vocabulary, which carries the
+# documented library false positives.
+_UI_DOC_MODIFIER = r"(?:documentation|docs|manual|wiki|readme|reference|examples?|api|help)"
 _UI_COMPOSITION_RE = re.compile(
     r"\b(?:"
     r"user\s+interface|"
     r"interactive\s+(?:charts?|dashboards?|pages?|forms?|panels?|navigation|ui)|"
     r"client[\s\-]side\s+validation\s+(?:messages?|errors?|feedback)|"
-    rf"{_UI_PRODUCT_ANCHOR}\s+{_UI_WIDGET_NOUN}{_UI_ARTIFACT_TAIL}|"
+    rf"(?!{_UI_DOC_MODIFIER}\s)\w+\s+{_UI_WIDGET_NOUN}{_UI_ARTIFACT_TAIL}|"
     rf"{_UI_WIDGET_NOUN}\s+for\s+{_UI_PRODUCT_ANCHOR}|"
     rf"{_UI_WIDGET_NOUN}\s+(?:submit|submission|rendered|shown|displayed|clicked)|"
     r"users?\s+can\s+(?:add|edit|delete|create|update|remove|drag|click|"
@@ -486,21 +478,13 @@ _MANIFEST_TOKEN_RE = re.compile(r"\S*package(?:-lock)?\.json\S*")
 _LIBRARY_PACKAGE_WORD_RE = re.compile(r"\bpackage\b")
 
 
-def _matches_web_app(ledger: SeedDraftLedger) -> bool:
+def _ledger_has_browser_context(ledger: SeedDraftLedger) -> bool:
+    """Affirmative browser context: standardized outputs/runtime keywords,
+    or an unnegated goal-side web-app signal. Shared by the web_app
+    matcher and by game_2d's ceding rule for render/screen vocabulary."""
     outputs = _section_text(ledger, "outputs")
     runtime = _section_text(ledger, "runtime_context")
-    goal = _goal_text(ledger)
-    if not (outputs or runtime):
-        # Same ledger-evidence gate as cli: goal text alone cannot classify.
-        return False
-    # Two-signal AND (the webhook shape): browser context plus UI
-    # composition. Goal-side browser mentions route through the negation
-    # strip so "not a browser page" is not positive evidence. UI
-    # composition is required from standardized ledger outputs ONLY (#1813
-    # R2): goal prose mentions UI vocabulary in denials ("without forms or
-    # pages") and domain references ("browser form parsing"), neither of
-    # which asserts that the artifact HAS a UI.
-    browser_signal = _any_of(
+    return _any_of(
         outputs + " " + runtime,
         (
             "browser",
@@ -512,9 +496,23 @@ def _matches_web_app(ledger: SeedDraftLedger) -> bool:
             "single-page app",
             "single page app",
         ),
-    ) or _goal_has_unnegated_web_app_signal(goal)
-    ui_signal = bool(_UI_COMPOSITION_RE.search(outputs))
-    return browser_signal and ui_signal
+    ) or _goal_has_unnegated_web_app_signal(_goal_text(ledger))
+
+
+def _matches_web_app(ledger: SeedDraftLedger) -> bool:
+    outputs = _section_text(ledger, "outputs")
+    runtime = _section_text(ledger, "runtime_context")
+    if not (outputs or runtime):
+        # Same ledger-evidence gate as cli: goal text alone cannot classify.
+        return False
+    # Two-signal AND (the webhook shape): browser context plus UI
+    # composition. Goal-side browser mentions route through the negation
+    # strip so "not a browser page" is not positive evidence. UI
+    # composition is required from standardized ledger outputs ONLY (#1813
+    # R2): goal prose mentions UI vocabulary in denials ("without forms or
+    # pages") and domain references ("browser form parsing"), neither of
+    # which asserts that the artifact HAS a UI.
+    return _ledger_has_browser_context(ledger) and bool(_UI_COMPOSITION_RE.search(outputs))
 
 
 def _matches_library(ledger: SeedDraftLedger) -> bool:
