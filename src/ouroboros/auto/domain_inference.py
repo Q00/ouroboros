@@ -407,7 +407,11 @@ def _matches_web_app(ledger: SeedDraftLedger) -> bool:
         return False
     # Two-signal AND (the webhook shape): browser context plus UI
     # composition. Goal-side browser mentions route through the negation
-    # strip so "not a browser page" is not positive evidence.
+    # strip so "not a browser page" is not positive evidence. UI
+    # composition is required from standardized ledger outputs ONLY (#1813
+    # R2): goal prose mentions UI vocabulary in denials ("without forms or
+    # pages") and domain references ("browser form parsing"), neither of
+    # which asserts that the artifact HAS a UI.
     browser_signal = _any_of(
         outputs + " " + runtime,
         (
@@ -420,7 +424,7 @@ def _matches_web_app(ledger: SeedDraftLedger) -> bool:
             "single-page",
         ),
     ) or _goal_has_unnegated_web_app_signal(goal)
-    ui_signal = bool(_UI_COMPOSITION_RE.search(outputs + " " + goal))
+    ui_signal = bool(_UI_COMPOSITION_RE.search(outputs))
     return browser_signal and ui_signal
 
 

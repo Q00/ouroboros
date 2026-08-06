@@ -842,6 +842,27 @@ def test_web_app_negation_forms_are_rejected(goal: str) -> None:
 def test_affirmative_expansion_keeps_web_app_signal() -> None:
     """ "not just a browser page" asserts the page — the signal must survive."""
     ledger = _bare_ledger("Build a dashboard that is not just a browser page")
-    _seed_section(ledger, "outputs", value="Charts refreshed from a data feed")
+    # UI composition must come from standardized outputs (R2); the goal
+    # contributes only the surviving affirmative browser signal.
+    _seed_section(ledger, "outputs", value="A charts panel refreshed from a data feed")
     result = derive_domain_from_ledger(ledger)
     assert TaskClass.WEB_APP in result.classes
+
+
+def test_negated_ui_vocabulary_in_goal_is_not_ui_evidence() -> None:
+    """R2 probe: "without forms or pages" is a denial, not UI composition."""
+    ledger = _bare_ledger("Build a browser benchmark without forms or pages")
+    _seed_section(ledger, "outputs", value="A performance report with timing metrics")
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes
+
+
+def test_goal_domain_vocabulary_is_not_ui_evidence() -> None:
+    """R2 probe: "browser form parsing" names the data domain, not a UI —
+    with no user interface requested, the library classification must not
+    be dragged into ambiguity."""
+    ledger = _bare_ledger("Build a library for browser form parsing without a user interface")
+    _seed_section(ledger, "outputs", value="An importable parsing package with a public api")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.LIBRARY
