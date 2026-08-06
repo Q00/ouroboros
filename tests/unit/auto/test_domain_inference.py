@@ -1287,3 +1287,52 @@ def test_goal_side_artifact_intent_stays_library(goal: str, outputs: str) -> Non
     result = derive_domain_from_ledger(ledger)
     assert result.is_single
     assert result.single is TaskClass.LIBRARY
+
+
+@pytest.mark.parametrize(
+    ("goal", "outputs"),
+    [
+        ("Build a browser app, not a platformer", "A login screen with account settings"),
+        ("Build a browser app without a canvas or game loop", "A settings page with account forms"),
+    ],
+)
+def test_negated_game_vocabulary_covers_all_signals(goal: str, outputs: str) -> None:
+    """R12 probe: every goal-side game signal — domain words and fast-path
+    keywords alike — shares the negation treatment."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value=outputs)
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP
+
+
+@pytest.mark.parametrize(
+    "goal",
+    ["Build a web app, not a library", "Build a web app, not an SDK"],
+)
+def test_negated_library_intent_does_not_suppress_web_app(goal: str) -> None:
+    """R12 probe: a denied artifact class is not library intent — neither
+    for the web_app guard nor for _matches_library itself."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value="Login forms and settings panels")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP
+
+
+@pytest.mark.parametrize(
+    ("goal", "outputs"),
+    [
+        ("Build a frontend dashboard", "Reusable modal dialogs and settings panels"),
+        ("Build a browser app", "Reusable login forms for account access"),
+    ],
+)
+def test_reusable_alone_is_not_library_intent(goal: str, outputs: str) -> None:
+    """R12 probe: "reusable" is not a _matches_library signal; without
+    genuine library evidence it must not suppress an explicit browser
+    application."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value=outputs)
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP

@@ -26,6 +26,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
+from functools import cache
 import re
 
 from ouroboros.auto.ledger import LedgerSection, LedgerStatus, SeedDraftLedger
@@ -144,6 +145,40 @@ def _goal_has_unnegated_cli_signal(goal_text: str) -> bool:
     return bool(_CLI_GOAL_TOKEN_RE.search(stripped)) or bool(_CLI_GOAL_PHRASE_RE.search(stripped))
 
 
+@cache
+def _negation_res_for(signal_fragment: str) -> tuple[re.Pattern[str], re.Pattern[str]]:
+    """Compile (negated-span, non-prefix) patterns for one signal family.
+
+    The negated span is <cue> <path> <denied signal> with coordinated
+    alternatives ("not an X or Y") and trailing descriptive words consumed
+    up to a guarded connector/punctuation boundary — the discipline built
+    up for the web-app family across #1813 R1-R8, shared so per-class
+    denial semantics cannot drift (#1813 R12).
+    """
+    denied = rf"{signal_fragment}(?:[\s\-](?!(?:or|and|nor|but|rather|instead)\b)\w+)*"
+    negated = re.compile(
+        rf"\b(?P<cue>{_NEGATION_CUE_FRAGMENT})"
+        r"(?P<path>(?:\s+\S+){0,7}?)"
+        rf"\s+{denied}"
+        rf"(?:(?:\s*,\s*(?:or\s+|and\s+|nor\s+)?|\s+(?:or|and|nor)\s+|\s*/\s*)"
+        rf"(?:an?\s+|the\s+)?{denied})*\b"
+    )
+    prefix = re.compile(rf"\bnon[\s\-]?{signal_fragment}\b")
+    return negated, prefix
+
+
+def _strip_negated_signals(text: str, signal_fragment: str) -> str:
+    """Remove recognized denials of *signal_fragment* from *text*, keeping
+    affirmative-flip expansions ("not just a browser page") intact."""
+    negated, prefix = _negation_res_for(signal_fragment)
+
+    def _keep_if_affirmative(match: re.Match[str]) -> str:
+        path = match.group("path") or ""
+        return match.group(0) if _AFFIRMATIVE_FLIP_RE.search(path) else " "
+
+    return prefix.sub(" ", negated.sub(_keep_if_affirmative, text))
+
+
 # Browser-context negation mirrors the CLI machinery above — the same
 # cue/path/affirmative-flip pipeline applied to web-app vocabulary (#1813
 # R1). Only goal prose carries natural-language denials; ledger
@@ -155,44 +190,14 @@ _WEB_APP_GOAL_SIGNAL_FRAGMENT = (
     r"single[\s\-]page\s+app(?:lication)?)"
 )
 _WEB_APP_GOAL_SIGNAL_RE = re.compile(rf"\b{_WEB_APP_GOAL_SIGNAL_FRAGMENT}\b")
-# One denial covers every coordinated alternative it lists ("not a browser
-# or web app", "not a browser, web app, or frontend") — the negated span
-# consumes the whole coordination so no alternative survives as a positive
-# signal (#1813 R4). Each denied alternative may trail a few arbitrary
-# descriptive words ("browser-based graphical UI") — greedily, but never
-# across a connector, so modifiers cannot shield a later alternative from
-# the strip while "not a browser but a web app" keeps its affirmative
-# half (#1813 R6/R7).
-_DENIED_WEB_APP_SIGNAL_FRAGMENT = (
-    rf"{_WEB_APP_GOAL_SIGNAL_FRAGMENT}"
-    r"(?:[\s\-](?!(?:or|and|nor|but|rather|instead)\b)\w+)*"
-)
-_COORDINATED_ALTERNATIVE_FRAGMENT = (
-    r"(?:\s*,\s*(?:or\s+|and\s+|nor\s+)?|\s+(?:or|and|nor)\s+|\s*/\s*)"
-    rf"(?:an?\s+|the\s+)?{_DENIED_WEB_APP_SIGNAL_FRAGMENT}"
-)
-_NEGATED_WEB_APP_GOAL_RE = re.compile(
-    rf"\b(?P<cue>{_NEGATION_CUE_FRAGMENT})"
-    r"(?P<path>(?:\s+\S+){0,7}?)"
-    rf"\s+{_DENIED_WEB_APP_SIGNAL_FRAGMENT}"
-    rf"(?:{_COORDINATED_ALTERNATIVE_FRAGMENT})*\b"
-)
-_NEGATED_WEB_APP_PREFIX_RE = re.compile(rf"\bnon[\s\-]?{_WEB_APP_GOAL_SIGNAL_FRAGMENT}\b")
 
 
 def _goal_has_unnegated_web_app_signal(goal_text: str) -> bool:
-    """Web-app twin of :func:`_goal_has_unnegated_cli_signal`."""
+    """Web-app twin of :func:`_goal_has_unnegated_cli_signal`, built on the
+    shared negation primitive."""
     if not _WEB_APP_GOAL_SIGNAL_RE.search(goal_text):
         return False
-
-    def _strip_if_not_affirmative(match: re.Match[str]) -> str:
-        path = match.group("path") or ""
-        if _AFFIRMATIVE_FLIP_RE.search(path):
-            return match.group(0)
-        return " "
-
-    stripped = _NEGATED_WEB_APP_GOAL_RE.sub(_strip_if_not_affirmative, goal_text)
-    stripped = _NEGATED_WEB_APP_PREFIX_RE.sub(" ", stripped)
+    stripped = _strip_negated_signals(goal_text, _WEB_APP_GOAL_SIGNAL_FRAGMENT)
     return bool(_WEB_APP_GOAL_SIGNAL_RE.search(stripped))
 
 
@@ -397,28 +402,19 @@ _GAME_DOMAIN_RE = re.compile(
     r"\b(?:games?|sprites?|collisions?|arcade|platformers?|shooters?|"
     r"players?\s+(?:movement|position|input|controls?|characters?))\b"
 )
-_DENIED_GAME_SIGNAL_FRAGMENT = r"games?(?:[\s\-](?!(?:or|and|nor|but|rather|instead)\b)\w+)*"
-_NEGATED_GAME_GOAL_RE = re.compile(
-    rf"\b(?P<cue>{_NEGATION_CUE_FRAGMENT})"
-    r"(?P<path>(?:\s+\S+){0,7}?)"
-    rf"\s+{_DENIED_GAME_SIGNAL_FRAGMENT}\b"
+# Every goal-side game signal — the domain vocabulary above and the
+# fast-path keywords alike — shares the negation treatment (#1813 R12):
+# "not a platformer" and "without a canvas or game loop" are denials, not
+# evidence. Outputs stay direct, as standardized evidence.
+_GAME_GOAL_SIGNAL_FRAGMENT = (
+    r"(?:game\s+loop|2d\s+games?|games?|sprites?|collisions?|arcade|"
+    r"platformers?|shooters?|players?|canvas(?:es)?|frames?|scenes?|playable)"
 )
-_NEGATED_GAME_PREFIX_RE = re.compile(r"\bnon[\s\-]?games?\b")
 
 
-def _game_domain_visible_text(ledger: SeedDraftLedger) -> str:
-    """Outputs plus the goal with negated game mentions stripped, using the
-    same cue/path/affirmative-flip discipline as the CLI and web-app
-    negation pipelines."""
-
-    def _strip_if_not_affirmative(match: re.Match[str]) -> str:
-        path = match.group("path") or ""
-        if _AFFIRMATIVE_FLIP_RE.search(path):
-            return match.group(0)
-        return " "
-
-    goal = _NEGATED_GAME_GOAL_RE.sub(_strip_if_not_affirmative, _goal_text(ledger))
-    goal = _NEGATED_GAME_PREFIX_RE.sub(" ", goal)
+def _game_visible_text(ledger: SeedDraftLedger) -> str:
+    """Outputs plus the goal with negated game signals stripped."""
+    goal = _strip_negated_signals(_goal_text(ledger), _GAME_GOAL_SIGNAL_FRAGMENT)
     return _section_text(ledger, "outputs") + " " + goal
 
 
@@ -427,12 +423,12 @@ def _matches_game_2d(ledger: SeedDraftLedger) -> bool:
     goal = _goal_text(ledger)
     if not (outputs or goal):
         return False
-    text = outputs + " " + goal
-    if _any_of(text, ("frame", "canvas", "game loop", "playable", "2d game", "scene")):
+    visible = _game_visible_text(ledger)
+    if _any_of(visible, ("frame", "canvas", "game loop", "playable", "2d game", "scene")):
         return True
-    if not _GAME_RENDER_OR_SCREEN_RE.search(text):
+    if not _GAME_RENDER_OR_SCREEN_RE.search(outputs + " " + goal):
         return False
-    if _GAME_DOMAIN_RE.search(_game_domain_visible_text(ledger)):
+    if _GAME_DOMAIN_RE.search(visible):
         return True
     return not _ledger_has_browser_context(ledger)
 
@@ -536,11 +532,20 @@ def _ledger_has_browser_context(ledger: SeedDraftLedger) -> bool:
     ) or _goal_has_unnegated_web_app_signal(_goal_text(ledger))
 
 
-# Artifact-intent vocabulary in standardized outputs: the library ships
-# these widgets as reusable artifacts rather than running them (#1813 R10).
+# Artifact-intent vocabulary — exactly the signals _matches_library treats
+# as authoritative ("reusable" alone is not one, #1813 R12), and denials
+# are stripped before either matcher consults the goal ("not a library"
+# is not intent).
 _LIBRARY_INTENT_RE = re.compile(
-    r"\b(?:reusable|importable|librar(?:y|ies)|sdks?|api\s+surface|public\s+api)\b"
+    r"\b(?:importable|librar(?:y|ies)|sdks?|api\s+surface|public\s+api)\b"
 )
+_LIBRARY_INTENT_FRAGMENT = (
+    r"(?:librar(?:y|ies)|sdks?|packages?|api\s+surface|public\s+api|importable)"
+)
+
+
+def _library_visible_goal(ledger: SeedDraftLedger) -> str:
+    return _strip_negated_signals(_goal_text(ledger), _LIBRARY_INTENT_FRAGMENT)
 
 
 def _matches_web_app(ledger: SeedDraftLedger) -> bool:
@@ -554,9 +559,9 @@ def _matches_web_app(ledger: SeedDraftLedger) -> bool:
     # goal ("Build a frontend SDK") alike (#1813 R10/R11) — and
     # game-domain ledgers own their shared render/screen vocabulary, the
     # mirror of _matches_game_2d's ceding rule.
-    if _LIBRARY_INTENT_RE.search(outputs + " " + _goal_text(ledger)):
+    if _LIBRARY_INTENT_RE.search(outputs + " " + _library_visible_goal(ledger)):
         return False
-    if _GAME_DOMAIN_RE.search(_game_domain_visible_text(ledger)):
+    if _GAME_DOMAIN_RE.search(_game_visible_text(ledger)):
         return False
     # Two-signal AND (the webhook shape): browser context plus UI
     # composition. Goal-side browser mentions route through the negation
@@ -585,7 +590,7 @@ def _matches_library(ledger: SeedDraftLedger) -> bool:
     # substring behind. The library word itself is token-bounded so the
     # directory word "packages" is not mistaken for it, while the singular
     # "package" keeps its library meaning.
-    text = _MANIFEST_TOKEN_RE.sub(" ", outputs + " " + goal)
+    text = _MANIFEST_TOKEN_RE.sub(" ", outputs + " " + _library_visible_goal(ledger))
     return bool(_LIBRARY_PACKAGE_WORD_RE.search(text)) or _any_of(
         text,
         (
