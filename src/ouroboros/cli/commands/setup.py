@@ -4217,12 +4217,10 @@ def _atomic_write_text(
     mode: int | None = None,
     expected_current: _PathSnapshot | None = None,
 ) -> _PathSnapshot:
-    """Write *content* to *path* atomically — temp file + ``os.replace``.
+    """Write *content* atomically through a temp file and ``os.replace``.
 
-    Readers always see either the pre-existing file or the final content —
-    never a truncated partial.  Caller is expected to have created
-    ``path.parent`` already.  Raises :class:`OSError` on failure; callers
-    decide how to surface that.
+    Readers see either the previous file or the final content, never partial
+    bytes. Raises :class:`OSError` on failure for callers to surface.
     """
     import os
     import tempfile
