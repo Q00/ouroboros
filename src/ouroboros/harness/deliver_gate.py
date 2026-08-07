@@ -707,6 +707,12 @@ def _event_has_explicit_tool_success(
     data = event.data
     if not isinstance(data, Mapping):
         return False
+    verdict_containers: list[Mapping[str, Any]] = [data]
+    data_meta = data.get("meta")
+    if data_meta is not None:
+        if not isinstance(data_meta, Mapping):
+            return False
+        verdict_containers.append(data_meta)
     if data.get("is_error_invalid") is True:
         return False
     if "is_error" in data and not isinstance(data["is_error"], bool):
@@ -717,47 +723,20 @@ def _event_has_explicit_tool_success(
     if tool_result is not None and not isinstance(tool_result, Mapping):
         return False
     if isinstance(tool_result, Mapping):
+        verdict_containers.append(tool_result)
         if tool_result.get("is_error_invalid") is True:
             return False
         if "is_error" in tool_result and not isinstance(tool_result["is_error"], bool):
             return False
         if tool_result.get("is_error") is True:
             return False
-    for key in ("subtype", "status", "runtime_status", "runtime_signal", "runtime_event_type"):
-        if key not in data:
-            continue
-        value = data[key]
-        if not isinstance(value, str) or not value.strip():
-            return False
-        normalized_failure = value.strip().lower()
-        if normalized_failure in {
-            "error",
-            "failed",
-            "failure",
-            "cancelled",
-            "canceled",
-            "timeout",
-            "timed_out",
-            "aborted",
-        } or normalized_failure.endswith(
-            (
-                ".error",
-                ".failed",
-                ".cancelled",
-                ".canceled",
-                ".timeout",
-                ".timed_out",
-                ".aborted",
-                "_error",
-                "_failed",
-                "_cancelled",
-                "_canceled",
-                "_timeout",
-                "_timed_out",
-                "_aborted",
-            )
-        ):
-            return False
+        meta = tool_result.get("meta")
+        if meta is not None:
+            if not isinstance(meta, Mapping):
+                return False
+            verdict_containers.append(meta)
+    if any(_mapping_has_failure_verdict(container) for container in verdict_containers):
+        return False
     is_completion_event = event.type == "execution.tool.completed"
     command_success_signal = is_completion_event and (
         data.get("is_error") is False
@@ -801,6 +780,71 @@ def _event_has_explicit_tool_success(
         if normalized.endswith((".completed", ".succeeded")):
             success_signal = True
     return command_success_signal if require_command_verdict else success_signal
+
+
+def _mapping_has_failure_verdict(value: Mapping[str, Any]) -> bool:
+    """Treat explicit failure flags, contradictions, and malformed verdicts as vetoes."""
+    if "success" in value:
+        success = value["success"]
+        if not isinstance(success, bool) or not success:
+            return True
+    for key in (
+        "is_error",
+        "error",
+        "failed",
+        "cancelled",
+        "canceled",
+        "timeout",
+        "timed_out",
+        "aborted",
+    ):
+        if key not in value:
+            continue
+        flag = value[key]
+        if not isinstance(flag, bool) or flag:
+            return True
+    for key in ("exit_code", "exit_status"):
+        if key not in value:
+            continue
+        exit_value = value[key]
+        if isinstance(exit_value, bool) or not isinstance(exit_value, int) or exit_value != 0:
+            return True
+    for key in ("subtype", "status", "runtime_status", "runtime_signal", "runtime_event_type"):
+        if key not in value:
+            continue
+        status = value[key]
+        if not isinstance(status, str) or not status.strip():
+            return True
+        normalized = status.strip().lower()
+        if normalized in {
+            "error",
+            "failed",
+            "failure",
+            "cancelled",
+            "canceled",
+            "timeout",
+            "timed_out",
+            "aborted",
+        } or normalized.endswith(
+            (
+                ".error",
+                ".failed",
+                ".cancelled",
+                ".canceled",
+                ".timeout",
+                ".timed_out",
+                ".aborted",
+                "_error",
+                "_failed",
+                "_cancelled",
+                "_canceled",
+                "_timeout",
+                "_timed_out",
+                "_aborted",
+            )
+        ):
+            return True
+    return False
 
 
 def _event_matches_accepted_attempt(

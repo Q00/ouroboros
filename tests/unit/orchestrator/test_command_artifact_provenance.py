@@ -887,6 +887,46 @@ async def test_contradictory_failure_signal_vetoes_success_bits(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("location", "field", "failure"),
+    (
+        ("tool_result_meta", "status", "failed"),
+        ("tool_result_meta", "success", False),
+        ("top_level", "cancelled", True),
+        ("top_level", "timed_out", True),
+        ("top_level", "aborted", True),
+        ("tool_result_meta", "success", "false"),
+        ("top_level", "cancelled", "yes"),
+    ),
+)
+async def test_nested_and_boolean_failure_verdicts_veto_journal_authority(
+    tmp_path: Path,
+    location: str,
+    field: str,
+    failure: object,
+) -> None:
+    artifact = tmp_path / "claimed.txt"
+    artifact.write_text("failed", encoding="utf-8")
+    events = _command_events(
+        call_id="nested-contradiction",
+        effects=[_effect(artifact, relative_path=artifact.name)],
+    )
+    completion_data = dict(events[1].data)
+    if location == "top_level":
+        completion_data[field] = failure
+    else:
+        tool_result = dict(completion_data["tool_result"])
+        tool_result["meta"] = {**tool_result["meta"], field: failure}
+        completion_data["tool_result"] = tool_result
+    events[1] = events[1].model_copy(update={"data": completion_data})
+
+    manifest, fact = await _artifact_fact(events, task_cwd=tmp_path)
+
+    assert manifest.entries == ()
+    assert fact.evidence_handle == "missing:files_touched:0"
+
+
+@pytest.mark.asyncio
 async def test_pre_start_completion_poisons_later_valid_completion(tmp_path: Path) -> None:
     artifact = tmp_path / "claimed.txt"
     artifact.write_text("captured", encoding="utf-8")
