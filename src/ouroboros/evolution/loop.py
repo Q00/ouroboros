@@ -711,9 +711,7 @@ class EvolutionaryLoop:
             interrupted_at_phase = None
 
         else:
-            prepared = prepare_existing_step(
-                events, initial_seed=initial_seed, execute=execute
-            )
+            prepared = prepare_existing_step(events, initial_seed=initial_seed, execute=execute)
             if prepared.is_err:
                 return Result.err(prepared.error)
             (
