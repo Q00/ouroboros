@@ -35,7 +35,7 @@ _configure_utf8_stdio()
 # an MCP disconnect, so the no-MCP path is exactly when the user needs it.
 SETUP_BYPASS_SKILLS = [
     "/ouroboros:setup",
-    "/ouroboros:help",
+    "/ouroboros:ouroboros-help",
     "/ouroboros:qa",
     "/ouroboros:resume-session",
 ]
@@ -47,16 +47,22 @@ KEYWORD_MAP = [
     {"patterns": ["ooo auto"], "skill": "/ouroboros:auto"},
     {"patterns": ["ooo interview", "ooo socratic"], "skill": "/ouroboros:interview"},
     {"patterns": ["ooo seed", "ooo crystallize"], "skill": "/ouroboros:seed"},
-    {"patterns": ["ooo run", "ooo execute"], "skill": "/ouroboros:run"},
+    {
+        "patterns": ["ooo run", "ooo execute"],
+        "skill": "/ouroboros:ouroboros-run",
+    },
     {"patterns": ["ooo eval", "ooo evaluate"], "skill": "/ouroboros:evaluate"},
     {"patterns": ["ooo evolve"], "skill": "/ouroboros:evolve"},
     {"patterns": ["ooo stuck", "ooo unstuck", "ooo lateral"], "skill": "/ouroboros:unstuck"},
-    {"patterns": ["ooo status", "ooo drift"], "skill": "/ouroboros:status"},
+    {
+        "patterns": ["ooo status", "ooo drift"],
+        "skill": "/ouroboros:ouroboros-status",
+    },
     {"patterns": ["ooo ralph"], "skill": "/ouroboros:ralph"},
     {"patterns": ["ooo tutorial"], "skill": "/ouroboros:tutorial"},
     {"patterns": ["ooo welcome"], "skill": "/ouroboros:welcome"},
     {"patterns": ["ooo setup"], "skill": "/ouroboros:setup"},
-    {"patterns": ["ooo help"], "skill": "/ouroboros:help"},
+    {"patterns": ["ooo help"], "skill": "/ouroboros:ouroboros-help"},
     {"patterns": ["ooo pm", "ooo prd"], "skill": "/ouroboros:pm"},
     {"patterns": ["ooo qa", "qa check", "quality check"], "skill": "/ouroboros:qa"},
     {"patterns": ["ooo cancel", "ooo abort"], "skill": "/ouroboros:cancel"},
@@ -95,7 +101,7 @@ KEYWORD_MAP = [
     },
     {
         "patterns": ["ouroboros run", "execute seed", "run seed", "run workflow"],
-        "skill": "/ouroboros:run",
+        "skill": "/ouroboros:ouroboros-run",
     },
     {
         "patterns": ["evaluate this", "3-stage check", "three-stage", "verify execution"],
@@ -124,14 +130,14 @@ KEYWORD_MAP = [
             "check drift",
             "goal deviation",
         ],
-        "skill": "/ouroboros:status",
+        "skill": "/ouroboros:ouroboros-status",
     },
     {
         "patterns": ["ralph", "don't stop", "must complete", "until it works", "keep going"],
         "skill": "/ouroboros:ralph",
     },
     {"patterns": ["ouroboros setup", "setup ouroboros"], "skill": "/ouroboros:setup"},
-    {"patterns": ["ouroboros help"], "skill": "/ouroboros:help"},
+    {"patterns": ["ouroboros help"], "skill": "/ouroboros:ouroboros-help"},
     {
         "patterns": ["update ouroboros", "upgrade ouroboros"],
         "skill": "/ouroboros:update",

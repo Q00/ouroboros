@@ -288,7 +288,10 @@ the main conversation remains available for user interaction and explicit
 on-demand status checks. Hosts without child sessions use the contract's
 `fallback` fields and keep the bounded polling loop in the main session.
 OpenCode plugin delegation returns `job_id=None` and does not emit a local job
-observer because the plugin child already owns the execution lifecycle.
+observer because the plugin child already owns the execution lifecycle. The
+exception is `ouroboros_start_evaluate` with `auto_evolve=true`: that operation
+stays parent-owned and pollable so the server can observe a rejected verdict,
+seed generation 1, and start the configured Ralph successor.
 
 The contract's `relay` section turns job changes into bounded parent-session
 events (`phase_changed`, `progress_advanced`, `attention_required`, `terminal`)

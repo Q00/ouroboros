@@ -69,8 +69,9 @@ async def resolve_dashboard_run_url(
 async def resolve_dashboard_base_url(store: EventStore | None) -> str | None:
     """Best-effort daemon base URL (no run pinned), scoped to ``store``'s DB.
 
-    Used by ``auto``, whose execution id only appears after interview+seed: the
-    page auto-selects the latest active run, so the bare base URL is the link.
+    Used by ``auto``, whose execution id only appears after interview+seed. The
+    bare base URL opens the multi-run picker; selecting a row navigates to the
+    same daemon with ``?run=<execution_id>`` for the live detail board.
     """
     suppress, db_path = _daemon_db_target(store)
     if suppress:

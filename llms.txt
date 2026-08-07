@@ -39,13 +39,14 @@ Ouroboros transforms vague ideas into verified, working codebases by replacing a
 - setup: Guided onboarding wizard. Configures runtime backend and project settings.
 - interview (aliases: socratic): Socratic interview to crystallize vague requirements into a seed spec. Auto-generates the seed on completion.
 - seed (aliases: crystallize): Generate validated seed specifications from interview results. Automatically invoked by interview in the happy path — most users never call this directly. Manual seed authoring is an advanced workflow.
-- run (aliases: execute): Execute a seed specification through the workflow engine. Decomposes ACs into tasks and runs them via the configured backend.
+- ouroboros-run (invoked as `ooo run`, alias: execute): Execute a seed specification through the workflow engine. Decomposes ACs into tasks and runs them via the configured backend.
 - evaluate (aliases: eval): Three-stage verification pipeline. Runs mechanical checks, LLM review, and consensus gating against acceptance criteria.
 - evolve: Start or monitor an evolutionary development loop. Iterates on evaluation findings.
-- status (aliases: drift): Check session status and measure goal drift against the seed spec.
+- ouroboros-status (invoked as `ooo status`, alias: drift): Check session status and measure goal drift against the seed spec.
 - unstuck (aliases: stuck, lateral): Break through stagnation with lateral thinking personas.
 - cancel (aliases: kill, abort): Cancel stuck or orphaned executions.
-- help: Show available commands and usage.
+- ouroboros-config (invoked as `ooo config`): Open the Ouroboros settings UI.
+- ouroboros-help (invoked as `ooo help`): Show available commands and usage.
 - welcome: First-run welcome message and orientation.
 - tutorial: Interactive tutorial walkthrough.
 

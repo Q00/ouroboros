@@ -12,6 +12,7 @@ Tests cover:
 from __future__ import annotations
 
 from collections.abc import Iterator, Mapping
+from datetime import UTC, datetime
 
 import pytest
 
@@ -38,6 +39,7 @@ from ouroboros.orchestrator.level_context import (
     build_context_prompt,
 )
 from ouroboros.orchestrator.parallel_executor import ACExecutionResult
+from ouroboros.orchestrator.recoverable_failure import UsageLimitPauseConsequence
 
 # =============================================================================
 # Data Model Tests
@@ -169,6 +171,15 @@ class TestCoordinatorReview:
             session_scope_id="exec:l0:coord",
             session_state_path="execution/exec/level-0/coordinator.json",
             final_output="coordinator final output",
+            recoverable_quota_pause=UsageLimitPauseConsequence(
+                reason="Usage limit reached. Please try again in 5 hours.",
+                resume_hint=(
+                    "Provider usage/quota window reached. Resume after "
+                    "2026-01-01T05:00:00+00:00 (wait at least 5 hours)."
+                ),
+                pause_seconds=18_000,
+                resume_after=datetime(2026, 1, 1, 5, tzinfo=UTC),
+            ),
         )
         return (
             review.to_completed_event_payload(
@@ -193,6 +204,50 @@ class TestCoordinatorReview:
 
         assert restored.review_summary == "Reconciled shared.py"
         assert restored.conflicts_detected == (conflict,)
+        assert restored.recoverable_quota_pause == UsageLimitPauseConsequence(
+            reason="Usage limit reached. Please try again in 5 hours.",
+            resume_hint=(
+                "Provider usage/quota window reached. Resume after "
+                "2026-01-01T05:00:00+00:00 (wait at least 5 hours)."
+            ),
+            pause_seconds=18_000,
+            resume_after=datetime(2026, 1, 1, 5, tzinfo=UTC),
+        )
+
+    @pytest.mark.parametrize("invalid", (0, 1, "true", {}, {"schema_version": 1}))
+    def test_completed_artifact_rejects_invalid_quota_pause_consequence(
+        self,
+        invalid: object,
+    ) -> None:
+        payload, conflict = self._completed_payload()
+        payload["recoverable_quota_pause"] = invalid
+
+        with pytest.raises(ValueError, match="recoverable quota consequence"):
+            CoordinatorReview.from_artifact_payload(
+                payload,
+                level_number=1,
+                expected_conflicts=(conflict,),
+                execution_id="exec",
+                session_id="session",
+                session_scope_id="exec:l0:coord",
+                session_state_path="execution/exec/level-0/coordinator.json",
+            )
+
+    def test_completed_artifact_rejects_legacy_schema_without_quota_state(self) -> None:
+        payload, conflict = self._completed_payload()
+        payload["schema_version"] = 1
+        del payload["recoverable_quota_pause"]
+
+        with pytest.raises(ValueError, match="schema v3"):
+            CoordinatorReview.from_artifact_payload(
+                payload,
+                level_number=1,
+                expected_conflicts=(conflict,),
+                execution_id="exec",
+                session_id="session",
+                session_scope_id="exec:l0:coord",
+                session_state_path="execution/exec/level-0/coordinator.json",
+            )
 
     @pytest.mark.parametrize(
         ("field", "oversized"),

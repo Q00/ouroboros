@@ -681,7 +681,11 @@ def test_registry_skill_lookup_empty_directory_returns_empty_mapping_and_not_fou
     assert registry.targets == ()
     assert registry.mapping == {}
 
-    for identifier in ("run", "ooo run seed.yaml", "/ouroboros:run seed.yaml"):
+    for identifier in (
+        "run",
+        "ooo run seed.yaml",
+        "/ouroboros:run seed.yaml",
+    ):
         result = registry.resolve(identifier)
         assert isinstance(result, NotHandled)
         assert result.reason == "skill not found"

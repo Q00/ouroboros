@@ -23,7 +23,7 @@ def _write_dispatchable_skill(skills_dir: Path, skill_name: str) -> Path:
     skill_md_path = skill_dir / "SKILL.md"
     skill_md_path.write_text(
         """---
-name: run
+name: ouroboros-run
 mcp_tool: " ouroboros_execute_seed "
 mcp_args:
   seed_path: "$1"
@@ -133,8 +133,8 @@ def _assert_resolved_payload(result: object, expected: Resolved) -> None:
             id="ooo-prefix-normalized",
         ),
         pytest.param(
-            ' \t/OUROBOROS:Run   "seed file.yaml" --max-iterations 2',
-            "/ouroboros:run",
+            ' \t/OUROBOROS:Ouroboros-Run   "seed file.yaml" --max-iterations 2',
+            "/ouroboros:ouroboros-run",
             id="slash-prefix-normalized",
         ),
     ],
@@ -694,7 +694,7 @@ def test_valid_dispatch_preserves_multiline_inline_seed_payload(
     skill_md_path = _write_dispatchable_skill(skills_dir, "run")
     runtime_cwd = tmp_path / "workspace"
     seed_content = "goal: test\nconstraints:\n  - keep it simple\nacceptance_criteria:\n  - works"
-    prompt = f"/ouroboros:run\n{seed_content}"
+    prompt = f"/ouroboros:ouroboros-run\n{seed_content}"
 
     result = resolve_skill_dispatch(
         ResolveRequest(
@@ -720,7 +720,7 @@ def test_valid_dispatch_preserves_multiline_inline_seed_payload(
         result,
         Resolved(
             skill_name="run",
-            command_prefix="/ouroboros:run",
+            command_prefix="/ouroboros:ouroboros-run",
             prompt=prompt,
             skill_path=skill_md_path,
             mcp_tool="ouroboros_execute_seed",
@@ -737,7 +737,7 @@ def test_valid_dispatch_preserves_multiline_inline_seed_leading_whitespace(
     skills_dir = tmp_path / "skills"
     _write_dispatchable_skill(skills_dir, "run")
     seed_content = "  goal: test\n  constraints:\n    - keep it simple"
-    prompt = f"/ouroboros:run\n{seed_content}"
+    prompt = f"/ouroboros:ouroboros-run\n{seed_content}"
 
     result = resolve_skill_dispatch(
         ResolveRequest(
@@ -759,15 +759,15 @@ def test_valid_parsed_dispatch_reconstructs_multiline_prompt_with_newline_separa
     _write_dispatchable_skill(skills_dir, "run")
     seed_content = "goal: test\nconstraints:\n  - keep it simple"
     parsed = ParsedOooCommand(
-        skill_name="run",
-        command_prefix="/ouroboros:run",
+        skill_name="ouroboros-run",
+        command_prefix="/ouroboros:ouroboros-run",
         remainder=seed_content,
     )
 
     result = resolve_skill_dispatch(parsed, cwd=tmp_path, skills_dir=skills_dir)
 
     assert isinstance(result, Resolved)
-    assert result.prompt == f"/ouroboros:run\n{seed_content}"
+    assert result.prompt == f"/ouroboros:ouroboros-run\n{seed_content}"
     assert result.first_argument == seed_content
     assert result.mcp_args["seed_path"] == seed_content
 

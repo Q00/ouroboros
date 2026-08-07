@@ -1087,11 +1087,30 @@ def get_max_parallel_workers() -> int:
 
 
 def get_auto_evaluate_enabled() -> bool:
-    """Return whether successful execute_seed runs should enqueue formal evaluation."""
+    """Return whether execute_seed runs should enqueue formal evaluation."""
     try:
         return load_config().execution.auto_evaluate
     except ConfigError:
         return True
+
+
+def get_auto_evolve_enabled() -> bool:
+    """Return whether rejected formal evaluations should enqueue Ralph."""
+
+    try:
+        return load_config().execution.auto_evolve
+    except ConfigError:
+        return True
+
+
+def get_auto_evolve_max_generations() -> int:
+    """Return the bounded generation budget for automatic Ralph chaining."""
+
+    try:
+        value = load_config().execution.auto_evolve_max_generations
+    except ConfigError:
+        return 3
+    return max(1, min(10, value))
 
 
 def get_runtime_profile() -> str | None:

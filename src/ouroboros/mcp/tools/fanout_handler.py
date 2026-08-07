@@ -204,4 +204,21 @@ class SubmitFanoutResultsHandler:
         return envelope.model_dump(mode="json")
 
 
-__all__ = ["SubmitFanoutResultsHandler"]
+def create_fanout_handler(
+    fanout_registry: FanoutRegistry,
+    project_dir: Any,
+    event_store: Any,
+) -> SubmitFanoutResultsHandler:
+    """Build the production fan-out boundary for a resolved workspace."""
+    from ouroboros.persistence.artifact_store import ContentAddressedArtifactStore
+
+    return SubmitFanoutResultsHandler(
+        fanout_registry=fanout_registry,
+        disposable_memory=DisposableMemory(
+            artifact_store=ContentAddressedArtifactStore.for_project(project_dir),
+            event_store=event_store,
+        ),
+    )
+
+
+__all__ = ["SubmitFanoutResultsHandler", "create_fanout_handler"]

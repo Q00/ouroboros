@@ -136,6 +136,17 @@ class AssertionExtractor:
             return Result.err(f"Extraction failed: {result.error}")
 
         assertions = self._parse_response(result.value.content, acceptance_texts)
+        if assertions is None:
+            # The response could not be read at all, which is not an answer
+            # about this seed — it is the absence of one. Remembering it would
+            # answer every later generation from a reply nobody understood, and
+            # the caller cannot tell that empty apart from "nothing here needs
+            # verifying", so spec verification would stay skipped for the life
+            # of the seed. The transport-failure path above already retries;
+            # this one now does too.
+            logger.warning("AssertionExtractor response unreadable, not caching: %s", seed_id)
+            return Result.ok(())
+
         self._cache[seed_id] = assertions
         # LRU eviction: remove oldest entry if cache exceeds max size
         while len(self._cache) > self.max_cache_size:
@@ -146,8 +157,19 @@ class AssertionExtractor:
         self,
         content: str,
         acceptance_criteria: tuple[str, ...],
-    ) -> tuple[SpecAssertion, ...]:
-        """Parse LLM response into SpecAssertions."""
+    ) -> tuple[SpecAssertion, ...] | None:
+        """Parse LLM response into SpecAssertions.
+
+        Returns ``None`` when the response could not be read as an extraction:
+        no JSON payload, malformed JSON, a payload that is not the expected
+        array, or an array that offered assertions and had every one of them
+        rejected. In none of those cases did the model answer in the schema
+        this asks for.
+
+        An empty tuple means the opposite — the array was read and was empty,
+        the model saying there is nothing here to verify. That is an answer,
+        and the caller is right to remember it.
+        """
         try:
             # Extract the JSON payload, tolerating markdown fences and prose
             # that surround it (e.g. Gemini-style ``Here is ...`` prefixes).
@@ -157,7 +179,7 @@ class AssertionExtractor:
             data = json.loads(json_str)
             if not isinstance(data, list):
                 logger.warning("Expected JSON array, got: %s", type(data))
-                return ()
+                return None
 
             assertions: list[SpecAssertion] = []
             for item in data:
@@ -243,11 +265,19 @@ class AssertionExtractor:
                     logger.warning("Ignoring invalid assertion object: %s", e)
                     continue
 
+            if data and not assertions:
+                # The model offered assertions and every one was thrown out, so
+                # nothing it said arrived in the schema this asks for. Read as
+                # "nothing to verify" that would be indistinguishable from a
+                # criterion set with nothing mechanical in it.
+                logger.warning("Every assertion in the extraction response was rejected")
+                return None
+
             return tuple(assertions)
 
         except (ValueError, KeyError, TypeError, ValidationError) as e:
             logger.warning("Failed to parse extraction response: %s", e)
-            return ()
+            return None
 
 
 def _is_usable_regex_pattern(pattern: str) -> bool:
