@@ -1822,3 +1822,25 @@ def test_widget_failure_data_is_not_ui() -> None:
     _seed_section(ledger, "outputs", value="Signup form failures listed in JSON")
     result = derive_domain_from_ledger(ledger)
     assert TaskClass.WEB_APP not in result.classes
+
+
+def test_goal_side_consumed_sdk_is_not_library_ownership() -> None:
+    """R25 probe: an SDK the app is built WITH is a dependency — the
+    consumed-dependency rule applies to goal ownership too."""
+    ledger = _bare_ledger("Build a web app using the Stripe SDK")
+    _seed_section(ledger, "outputs", value="A login form with an account settings panel")
+    _seed_section(ledger, "runtime_context", value="Browser")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP
+
+
+def test_coordinated_report_data_is_not_ui_composition() -> None:
+    """R25 probe: report data separated from its verb by a conjunction is
+    still report data."""
+    ledger = _bare_ledger("Build a browser audit CLI")
+    _seed_section(ledger, "outputs", value="Audited pages and URLs printed to stdout")
+    _seed_section(ledger, "runtime_context", value="Local shell / terminal")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.CLI

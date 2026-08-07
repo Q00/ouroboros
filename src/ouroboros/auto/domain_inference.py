@@ -612,14 +612,16 @@ _UI_ARTIFACT_TAIL = (
     r"library|libraries|sdks?|packages?|validation|reference|"
     r"documentation|docs|examples?|objects?|fixtures?|locators?|models?|"
     r"errors?|failures?|warnings?|issues?|bugs?|urls?|findings?|counts?|"
-    r"listed|returned|printed|logged|reported|exported|emitted|dumped))"
+    r"listed|returned|printed|logged|reported|exported|emitted|dumped|"
+    r"and\s+(?:[\w\-]+\s+){0,3}?"
+    r"(?:listed|returned|printed|logged|reported|exported|emitted|dumped)))"
 )
 # The front position is a denylist, not an allowlist (#1813 R9): a finite
 # anchor list rejected ordinary product widgets ("password reset screen",
 # "shopping cart page", "modal dialog"). Any modifier word is accepted
 # except documentation/API-artifact vocabulary, which carries the
 # documented library false positives.
-_UI_DOC_MODIFIER = r"(?:documentation|docs|manual|wiki|readme|reference|examples?|api|help|errors?|exceptions?|crash|diagnostics?)"
+_UI_DOC_MODIFIER = r"(?:documentation|docs|manual|wiki|readme|reference|examples?|api|help|errors?|exceptions?|crash|diagnostics?|audited|scanned|crawled|inspected)"
 _UI_COMPOSITION_RE = re.compile(
     r"\b(?:"
     r"user\s+interface|"
@@ -660,7 +662,7 @@ def _goal_artifact_head_is_web_app(goal_text: str) -> bool:
     position, since English modifiers precede their head."""
     if _goal_denies_web_app_artifact(goal_text):
         return False
-    core = _SUBJECT_CLAUSE_RE.sub(" ", goal_text)
+    core = _CONSUMED_DEPENDENCY_RE.sub(" ", _SUBJECT_CLAUSE_RE.sub(" ", goal_text))
     web_matches = list(_WEB_APP_ARTIFACT_PHRASE_RE.finditer(core))
     if not web_matches:
         return False
@@ -710,8 +712,10 @@ _LIBRARY_INTENT_FRAGMENT = (
 def _library_visible_goal(ledger: SeedDraftLedger) -> str:
     """Goal text for the library matcher's own evidence: content-verb
     clauses are subject matter (#1813 R18/R19), denials are stripped
-    (#1813 R12), and artifact-defining clauses survive."""
+    (#1813 R12), consumed dependencies are not produced shape (#1813
+    R25), and artifact-defining clauses survive."""
     goal = _LIBRARY_SUBJECT_CLAUSE_RE.sub(" ", _goal_text(ledger))
+    goal = _CONSUMED_DEPENDENCY_RE.sub(" ", goal)
     return _strip_negated_signals(goal, _LIBRARY_INTENT_FRAGMENT)
 
 
@@ -748,7 +752,7 @@ def _matches_web_app(ledger: SeedDraftLedger) -> bool:
     # explicitly requests a web app in its own conjunct ("... and a
     # separate admin web app") keeps independent web ownership, and the
     # overlap becomes an honest ambiguity instead of a veto.
-    guard_goal = _SUBJECT_CLAUSE_RE.sub(" ", _goal_text(ledger))
+    guard_goal = _CONSUMED_DEPENDENCY_RE.sub(" ", _SUBJECT_CLAUSE_RE.sub(" ", _goal_text(ledger)))
     intent_text = _MANIFEST_TOKEN_RE.sub(
         " ", _strip_negated_signals(guard_goal, _LIBRARY_INTENT_FRAGMENT)
     )
