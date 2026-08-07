@@ -1601,3 +1601,60 @@ def test_prefix_denial_head_noun_dominates_subject_mentions() -> None:
     _seed_section(ledger, "outputs", value="Login dashboard with account pages")
     result = derive_domain_from_ledger(ledger)
     assert TaskClass.WEB_APP not in result.classes
+
+
+def test_co_requested_sdk_keeps_web_app_in_honest_ambiguity() -> None:
+    """R20 probe: a goal requesting both artifacts must not let library
+    evidence veto the web app — independent ownership, honest ambiguity."""
+    ledger = _bare_ledger("Build a web app and a companion SDK")
+    _seed_section(ledger, "outputs", value="Browser dashboard with login forms and a companion SDK")
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP in result.classes
+
+
+def test_co_requested_game_and_admin_app_is_ambiguous() -> None:
+    """R20 probe: an explicit multi-product goal keeps both classes."""
+    ledger = _bare_ledger("Build a browser game and a separate admin web app")
+    _seed_section(
+        ledger,
+        "outputs",
+        value="Playable game loop on a canvas plus an admin dashboard with login forms",
+    )
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP in result.classes
+    assert TaskClass.GAME_2D in result.classes
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
+        "Build a tool for use as an SDK",
+        "Build a tool intended for import as a library",
+    ],
+)
+def test_artifact_defining_for_clauses_keep_library(goal: str) -> None:
+    """R20 probe: a for-clause can define the artifact, not its subject."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value="A well-documented module")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.LIBRARY
+
+
+def test_error_pages_in_service_output_are_not_ui_composition() -> None:
+    """R20 probe: "error pages returned in a JSON response" is service
+    data, not a produced UI."""
+    ledger = _bare_ledger("Build a web service for browser error analysis")
+    _seed_section(ledger, "outputs", value="Browser error pages returned in a JSON response")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_SERVICE
+
+
+def test_error_pages_in_cli_output_are_not_ui_composition() -> None:
+    ledger = _bare_ledger("Build a CLI for browser error diagnostics")
+    _seed_section(ledger, "outputs", value="Browser error pages listed with deterministic stdout")
+    _seed_section(ledger, "runtime_context", value="Local shell / terminal")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.CLI

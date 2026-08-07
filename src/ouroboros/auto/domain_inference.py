@@ -234,7 +234,7 @@ _SUBJECT_CLAUSE_RE = re.compile(r"\b(?:for|with|about)\s+[^,.;]*|\b(?:that|which
 # ("which exposes an SDK", "with an importable public API", "that is
 # importable") keep their library shape.
 _LIBRARY_SUBJECT_CLAUSE_RE = re.compile(
-    r"\b(?:for|about)\s+[^,.;]*"
+    r"\b(?:for|about)\s+(?![^,.;]*\b(?:sdks?|librar|importable|import|packages?)\w*)[^,.;]*"
     r"|\b(?:that|which)\s+"
     r"(?:displays?|shows?|renders?|tracks?|manages?|lists?|visualizes?|monitors?|documents?)"
     r"\b[^,.;]*"
@@ -594,7 +594,7 @@ _UI_ARTIFACT_TAIL = (
 # "shopping cart page", "modal dialog"). Any modifier word is accepted
 # except documentation/API-artifact vocabulary, which carries the
 # documented library false positives.
-_UI_DOC_MODIFIER = r"(?:documentation|docs|manual|wiki|readme|reference|examples?|api|help)"
+_UI_DOC_MODIFIER = r"(?:documentation|docs|manual|wiki|readme|reference|examples?|api|help|errors?|exceptions?|crash|diagnostics?)"
 _UI_COMPOSITION_RE = re.compile(
     r"\b(?:"
     r"user\s+interface|"
@@ -615,6 +615,20 @@ _UI_COMPOSITION_RE = re.compile(
 # "package-lock.json") and the token-bounded library word (#1813 R5).
 _MANIFEST_TOKEN_RE = re.compile(r"\S*package(?:-lock)?\.json\S*")
 _LIBRARY_PACKAGE_WORD_RE = re.compile(r"\bpackage\b(?!-)")
+
+
+_GOAL_CONJUNCT_SPLIT_RE = re.compile(r"\s*(?:\band\b|\bplus\b|[,;])\s*")
+_GAME_CONJUNCT_VOCAB_RE = re.compile(rf"\b{_GAME_GOAL_SIGNAL_FRAGMENT}\b")
+
+
+def _goal_has_web_only_conjunct(goal_text: str, other_evidence_re: re.Pattern[str]) -> bool:
+    """True when some goal conjunct affirmatively requests a web app
+    without carrying the other class's evidence (#1813 R20)."""
+    return any(
+        _WEB_APP_GOAL_SIGNAL_RE.search(conjunct) and not other_evidence_re.search(conjunct)
+        for conjunct in _GOAL_CONJUNCT_SPLIT_RE.split(goal_text)
+        if _goal_has_unnegated_web_app_signal(conjunct)
+    )
 
 
 def _ledger_has_browser_context(ledger: SeedDraftLedger) -> bool:
@@ -681,16 +695,24 @@ def _matches_web_app(ledger: SeedDraftLedger) -> bool:
     # outputs enumerate every deliverable, so an API/SDK co-produced next
     # to an affirmative browser UI stays an honest multi-class question
     # for _matches_library rather than a web_app veto.
+    # Cross-class vetoes are conjunct-aware (#1813 R20): a goal that
+    # explicitly requests a web app in its own conjunct ("... and a
+    # separate admin web app") keeps independent web ownership, and the
+    # overlap becomes an honest ambiguity instead of a veto.
     guard_goal = _SUBJECT_CLAUSE_RE.sub(" ", _goal_text(ledger))
     intent_text = _MANIFEST_TOKEN_RE.sub(
         " ", _strip_negated_signals(guard_goal, _LIBRARY_INTENT_FRAGMENT)
     )
-    if _LIBRARY_INTENT_RE.search(intent_text):
+    if _LIBRARY_INTENT_RE.search(intent_text) and not _goal_has_web_only_conjunct(
+        guard_goal, _LIBRARY_INTENT_RE
+    ):
         return False
     # Game vocabulary suppresses web_app only when the game predicate has
     # artifact-shape evidence of its own (#1813 R17) — subject words like
     # "game leaderboard" in outputs are not a rendered game.
-    if _matches_game_2d(ledger):
+    if _matches_game_2d(ledger) and not _goal_has_web_only_conjunct(
+        _goal_text(ledger), _GAME_CONJUNCT_VOCAB_RE
+    ):
         return False
     # Two-signal AND (the webhook shape): browser context plus UI
     # composition. Goal-side browser mentions route through the negation
