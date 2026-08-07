@@ -19,6 +19,7 @@ from ouroboros.cli.commands.update import (
     _fallback_version_key,
     _is_prerelease,
     _latest_pypi_version,
+    _refresh_claude_plugin,
     _resolve_environment_console,
     _resolve_runtime,
     _upgrade_command,
@@ -152,6 +153,7 @@ def _identity(manager: str, tmp_path: Path) -> InstallationIdentity:
     manager_home = environment.parent.parent if manager == "pipx" else environment.parent
     return InstallationIdentity(
         manager=manager,  # type: ignore[arg-type]
+        tool_name=environment.name,
         environment=environment,
         profile="ouroboros-ai[mcp,tui]",
         console_path=console,
@@ -164,6 +166,7 @@ def _mock_identity(manager: str = "uv") -> InstallationIdentity:
     environment = Path(f"/managed/{manager}/venvs/ouroboros-ai")
     return InstallationIdentity(
         manager=manager,  # type: ignore[arg-type]
+        tool_name=environment.name,
         environment=environment,
         profile="ouroboros-ai[tui]",
         console_path=environment / "bin" / "ouroboros",
@@ -332,9 +335,30 @@ entrypoints = [
             identity = _detect_installation_identity(environment)
 
         assert identity.manager == "pipx"
+        assert identity.tool_name == "ouroboros-ai"
         assert identity.console_path == console.resolve()
         assert identity.profile == "ouroboros-ai[claude,tui]"
         assert identity.manager_home == (tmp_path / "custom-pipx-home").resolve()
+
+    def test_pipx_suffixed_environment_preserves_exact_tool_target(self, tmp_path: Path) -> None:
+        environment = tmp_path / "pipx" / "venvs" / "ouroboros-ai-dev"
+        _write_console(environment)
+        (environment / "pipx_metadata.json").write_text(
+            json.dumps(
+                {
+                    "main_package": {
+                        "package": "ouroboros-ai",
+                        "package_or_url": "ouroboros-ai[tui]",
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        with patch("ouroboros.cli.commands.update.shutil.which", return_value="/opt/bin/pipx"):
+            identity = _detect_installation_identity(environment)
+
+        assert identity.tool_name == "ouroboros-ai-dev"
+        assert _upgrade_command(identity, prerelease=False)[-1] == "ouroboros-ai-dev"
 
     def test_pipx_receipt_preserves_injected_requirements(self, tmp_path: Path) -> None:
         environment = tmp_path / "pipx" / "venvs" / "ouroboros-ai"
@@ -433,7 +457,7 @@ class TestUpgradeCommand:
             "upgrade",
             "--include-injected",
             "--pip-args=--pre",
-            PACKAGE_NAME,
+            "ouroboros-ai",
         ]
         assert _upgrade_environment(identity) == {"PIPX_HOME": str(identity.manager_home)}
 
@@ -462,6 +486,37 @@ class TestResolveRuntime:
     def test_auto_with_no_runtime_is_none(self) -> None:
         with patch("ouroboros.cli.commands.update.shutil.which", return_value=None):
             assert _resolve_runtime("auto") == "none"
+
+
+class TestClaudePluginRefresh:
+    def test_existing_plugin_is_explicitly_updated_after_install(self) -> None:
+        with (
+            patch("ouroboros.cli.commands.update.shutil.which", return_value="/usr/bin/claude"),
+            patch(
+                "ouroboros.cli.commands.update._run_step",
+                side_effect=[False, True, True],
+            ) as run,
+        ):
+            assert _refresh_claude_plugin(dry_run=False) is True
+
+        commands = [call.args[0] for call in run.call_args_list]
+        assert commands == [
+            ["claude", "plugin", "marketplace", "update", "ouroboros"],
+            ["claude", "plugin", "install", "ouroboros@ouroboros"],
+            ["claude", "plugin", "update", "ouroboros@ouroboros"],
+        ]
+
+    def test_failed_install_does_not_attempt_plugin_update(self) -> None:
+        with (
+            patch("ouroboros.cli.commands.update.shutil.which", return_value="/usr/bin/claude"),
+            patch(
+                "ouroboros.cli.commands.update._run_step",
+                side_effect=[True, False],
+            ) as run,
+        ):
+            assert _refresh_claude_plugin(dry_run=False) is False
+
+        assert run.call_count == 2
 
 
 # ── CLI flows ────────────────────────────────────────────────────
@@ -559,6 +614,7 @@ class TestUpdateFlow:
         output = _plain(result.output)
         assert "uv tool upgrade" in output
         assert "claude plugin install" in output
+        assert "claude plugin update" in output
         assert "setup --runtime claude --non-interactive" in output
         assert "Dry run" in output
         run.assert_not_called()
@@ -675,3 +731,65 @@ class TestUpdateFlow:
         assert "package upgrade did not complete" in result.output
         # Only the upgrade step ran — no plugin/setup calls after the abort.
         assert run.call_count == 1
+
+    @pytest.mark.parametrize(
+        "version_probe",
+        [
+            MagicMock(returncode=1, stdout="Ouroboros version 99.0.0\n"),
+            MagicMock(returncode=0, stdout="version unavailable\n"),
+        ],
+        ids=["probe-exits-nonzero", "probe-has-no-version"],
+    )
+    def test_unverifiable_post_upgrade_version_aborts_before_runtime_refresh(
+        self,
+        version_probe: MagicMock,
+    ) -> None:
+        upgrade = MagicMock(returncode=0)
+        with (
+            patch("ouroboros.cli.commands.update.__version__", "0.1.0"),
+            patch(
+                "ouroboros.cli.commands.update._latest_pypi_version",
+                return_value="99.0.0",
+            ),
+            patch(
+                "ouroboros.cli.commands.update._detect_installation_identity",
+                return_value=_mock_identity("uv"),
+            ),
+            patch(
+                "ouroboros.cli.commands.update.subprocess.run",
+                side_effect=[upgrade, version_probe],
+            ) as run,
+        ):
+            result = runner.invoke(app, ["--yes", "--runtime", "codex"])
+
+        assert result.exit_code == 1
+        output = _plain(result.output)
+        assert "version could not be verified" in output
+        assert "Runtime integration was not refreshed" in output
+        assert run.call_count == 2
+
+    def test_stale_post_upgrade_version_aborts_before_runtime_refresh(self) -> None:
+        upgrade = MagicMock(returncode=0)
+        stale_version = MagicMock(returncode=0, stdout="Ouroboros version 0.1.0\n")
+        with (
+            patch("ouroboros.cli.commands.update.__version__", "0.1.0"),
+            patch(
+                "ouroboros.cli.commands.update._latest_pypi_version",
+                return_value="99.0.0",
+            ),
+            patch(
+                "ouroboros.cli.commands.update._detect_installation_identity",
+                return_value=_mock_identity("pipx"),
+            ),
+            patch(
+                "ouroboros.cli.commands.update.subprocess.run",
+                side_effect=[upgrade, stale_version],
+            ) as run,
+        ):
+            result = runner.invoke(app, ["--yes", "--runtime", "codex"])
+
+        assert result.exit_code == 1
+        output = _plain(result.output)
+        assert "v0.1.0 (expected at least v99.0.0)" in output
+        assert "Runtime integration was not refreshed" in output
+        assert run.call_count == 2

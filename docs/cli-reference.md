@@ -851,8 +851,11 @@ ouroboros update --runtime none -y
 2. Reads the running environment's local `uv` or `pipx` receipt and replays it
    through that manager, preserving the exact environment and recorded
    extras/additional requirements
-3. Refreshes the Claude Code plugin (`claude plugin marketplace update` + `claude plugin install`) when the `claude` CLI is available
-4. Re-runs `ouroboros setup --runtime <rt> --non-interactive` for the selected runtime
+3. Verifies that the same environment's console reports at least the target
+   version before changing any runtime integration
+4. Refreshes the Claude Code plugin (`marketplace update` + `plugin install` +
+   `plugin update`) when the `claude` CLI is available
+5. Re-runs `ouroboros setup --runtime <rt> --non-interactive` for the selected runtime
 
 With `--runtime auto` (the default), the runtime is picked by probing for the `claude` CLI first, then `codex`; when neither is found the runtime refresh is skipped with a notice — the package upgrade still completes. Runtime setup and the post-update version check always use the console script inside the same proven environment, including `.exe`/`PATHEXT` launcher resolution on native Windows.
 

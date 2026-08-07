@@ -151,6 +151,7 @@ class InstallationIdentity:
     """Receipt-backed identity of the running Ouroboros installation."""
 
     manager: Literal["uv", "pipx"]
+    tool_name: str
     environment: Path
     profile: str
     console_path: Path
@@ -348,6 +349,7 @@ def _detect_installation_identity(prefix: Path | None = None) -> InstallationIde
             )
         return InstallationIdentity(
             manager="uv",
+            tool_name=environment.name,
             environment=environment,
             profile=_uv_profile(uv_receipt),
             console_path=console_path,
@@ -366,6 +368,7 @@ def _detect_installation_identity(prefix: Path | None = None) -> InstallationIde
             )
         return InstallationIdentity(
             manager="pipx",
+            tool_name=environment.name,
             environment=environment,
             profile=_pipx_profile(pipx_receipt),
             console_path=console_path,
@@ -384,11 +387,11 @@ def _upgrade_command(identity: InstallationIdentity, prerelease: bool) -> list[s
         command = [identity.manager_binary, "tool", "upgrade"]
         if prerelease:
             command.extend(["--prerelease", "allow"])
-        return [*command, PACKAGE_NAME]
+        return [*command, identity.tool_name]
     command = [identity.manager_binary, "upgrade", "--include-injected"]
     if prerelease:
         command.append("--pip-args=--pre")
-    return [*command, PACKAGE_NAME]
+    return [*command, identity.tool_name]
 
 
 def _upgrade_environment(identity: InstallationIdentity) -> dict[str, str]:
@@ -442,9 +445,19 @@ def _refresh_claude_plugin(dry_run: bool) -> bool | None:
         description="Refreshed ouroboros marketplace",
         dry_run=dry_run,
     )
-    return _run_step(
+    installed = _run_step(
         ["claude", "plugin", "install", "ouroboros@ouroboros"],
-        description="Reinstalled Claude Code plugin",
+        description="Installed Claude Code plugin",
+        dry_run=dry_run,
+    )
+    if not installed:
+        return False
+    # `install` is a no-op for an already-installed plugin. The explicit
+    # update is what advances an existing installation to the marketplace's
+    # refreshed version.
+    return _run_step(
+        ["claude", "plugin", "update", "ouroboros@ouroboros"],
+        description="Updated Claude Code plugin",
         dry_run=dry_run,
     )
 
@@ -476,6 +489,8 @@ def _installed_version(identity: InstallationIdentity) -> str | None:
             [str(identity.console_path), "--version"], capture_output=True, text=True, timeout=30
         )
     except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
         return None
     match = re.search(r"\d+\.\d+\.\d+[0-9a-zA-Z.+-]*", result.stdout)
     return match.group(0) if match else None
@@ -588,6 +603,24 @@ def update(
         )
         raise typer.Exit(1)
 
+    installed: str | None = None
+    if not dry_run:
+        installed = _installed_version(identity)
+        if installed is None:
+            print_warning(
+                "Package upgrade returned success, but the refreshed installation "
+                "version could not be verified."
+            )
+            console.print("[bold yellow]Runtime integration was not refreshed.[/bold yellow]\n")
+            raise typer.Exit(1)
+        if _compare_versions(installed, latest) < 0:
+            print_warning(
+                f"Package upgrade returned success, but the refreshed installation is "
+                f"v{installed} (expected at least v{latest})."
+            )
+            console.print("[bold yellow]Runtime integration was not refreshed.[/bold yellow]\n")
+            raise typer.Exit(1)
+
     failed: list[str] = []
     resolved_runtime = _resolve_runtime(runtime)
     if resolved_runtime == "none":
@@ -617,7 +650,7 @@ def update(
         console.print("[yellow]Dry run — no changes made.[/yellow]\n")
         raise typer.Exit()
 
-    installed = _installed_version(identity)
+    assert installed is not None  # Verified before any runtime integration mutation.
     if failed:
         console.print("[bold yellow]Ouroboros partially updated.[/bold yellow]")
         console.print("[yellow]Could not complete:[/yellow]")
@@ -625,7 +658,7 @@ def update(
             console.print(f"  [yellow]![/yellow] {step}")
         console.print()
     else:
-        console.print(f"[bold green]Updated to v{installed or latest}.[/bold green]")
+        console.print(f"[bold green]Updated to v{installed}.[/bold green]")
     if resolved_runtime == "claude":
         console.print("[dim]Restart your Claude Code session to apply the update.[/dim]")
         console.print("[dim]If the CLAUDE.md block content changed, regenerate it: ooo setup[/dim]")
