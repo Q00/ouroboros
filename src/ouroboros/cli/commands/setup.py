@@ -56,6 +56,15 @@ from ouroboros.cli.opencode_config import (
 from ouroboros.cli.opencode_config import (
     is_bridge_plugin_entry as _is_bridge_plugin_entry,
 )
+from ouroboros.cli.setup_model_config import (
+    has_explicit_codex_model_override as _has_explicit_codex_model_override,
+)
+from ouroboros.cli.setup_model_config import (
+    is_shipped_default_roster as _is_shipped_default_roster,
+)
+from ouroboros.cli.setup_model_config import (
+    neutralize_fresh_codex_model_defaults as _neutralize_fresh_codex_model_defaults,
+)
 from ouroboros.codex.cli_policy import resolve_codex_cli_path
 from ouroboros.codex.home import resolve_codex_home
 from ouroboros.config._model_defaults import (
@@ -476,37 +485,6 @@ _CODEX_DEFAULT_LLM_ROLE_PROFILES: dict[str, str] = {
     "agent_runtime_interview": "deep",
     "agent_runtime_coordinator": "standard",
     "agent_runtime_evaluation": "deep",
-}
-
-_DEFAULT_CONSENSUS_MODELS = (
-    "openrouter/openai/gpt-4o",
-    DEFAULT_CONSENSUS_OPUS_MODEL,
-    "openrouter/google/gemini-2.5-pro",
-)
-
-_MISSING = object()
-
-_CODEX_ROLE_MODEL_OVERRIDE_DEFAULTS: dict[str, tuple[tuple[tuple[str, ...], object], ...]] = {
-    "ambiguity": ((("clarification", "default_model"), DEFAULT_OPUS_MODEL),),
-    "assertion_extraction": ((("evaluation", "assertion_extraction_model"), DEFAULT_SONNET_MODEL),),
-    "brownfield_explore": ((("clarification", "default_model"), DEFAULT_OPUS_MODEL),),
-    "clarification": ((("clarification", "default_model"), DEFAULT_OPUS_MODEL),),
-    "consensus_advocate": ((("consensus", "advocate_model"), DEFAULT_CONSENSUS_OPUS_MODEL),),
-    "consensus_judge": ((("consensus", "judge_model"), "openrouter/google/gemini-2.5-pro"),),
-    "consensus_vote": ((("consensus", "models"), _DEFAULT_CONSENSUS_MODELS),),
-    "context_compression": ((("llm", "context_compression_model"), "gpt-4"),),
-    "dependency_analysis": ((("llm", "dependency_analysis_model"), DEFAULT_SONNET_MODEL),),
-    "mechanical_detection": ((("evaluation", "assertion_extraction_model"), DEFAULT_SONNET_MODEL),),
-    "ontology_analysis": (
-        (("llm", "ontology_analysis_model"), DEFAULT_SONNET_MODEL),
-        (("consensus", "devil_model"), "openrouter/openai/gpt-4o"),
-    ),
-    "pm_interview": ((("clarification", "default_model"), DEFAULT_OPUS_MODEL),),
-    "qa": ((("llm", "qa_model"), DEFAULT_SONNET_MODEL),),
-    "reflect": ((("resilience", "reflect_model"), DEFAULT_OPUS_MODEL),),
-    "seed_generation": ((("clarification", "default_model"), DEFAULT_OPUS_MODEL),),
-    "semantic_evaluation": ((("evaluation", "semantic_model"), DEFAULT_OPUS_MODEL),),
-    "wonder": ((("resilience", "wonder_model"), DEFAULT_OPUS_MODEL),),
 }
 
 
@@ -2107,83 +2085,6 @@ def _ensure_codex_profile_provider_mapping(profile: dict) -> dict:
     return provider_config
 
 
-def _get_nested_value(config_dict: dict, path: tuple[str, ...]) -> object:
-    """Read a nested config value, returning _MISSING when absent."""
-    current: object = config_dict
-    for part in path:
-        if not isinstance(current, dict) or part not in current:
-            return _MISSING
-        current = current[part]
-    return current
-
-
-def _has_explicit_codex_model_override(config_dict: dict, role: str) -> bool:
-    """Return True only when an existing legacy setting is a real user pin.
-
-    Default configs serialize their legacy model fields, including values from
-    prior shipped releases.  Field presence is consequently not provenance:
-    match the loader's shipped-default classification before deciding a field
-    should suppress the role's Codex effort profile.
-    """
-    for path, default in _CODEX_ROLE_MODEL_OVERRIDE_DEFAULTS.get(role, ()):
-        value = _get_nested_value(config_dict, path)
-        if value is _MISSING:
-            continue
-        if isinstance(default, str) and value in recognized_shipped_defaults(default):
-            continue
-        if (
-            isinstance(default, tuple)
-            and isinstance(value, (list, tuple))
-            and _is_shipped_default_roster(value, default)
-        ):
-            continue
-        if value != default:
-            return True
-    return False
-
-
-def _neutralize_fresh_codex_model_defaults(config_dict: dict) -> None:
-    """Omit setup-owned model literals from a newly generated Codex config.
-
-    The default Pydantic model contains provider-specific literals so other
-    backends have useful defaults.  A fresh Codex setup knows those values are
-    setup-owned rather than user pins, so persisting them would make the shared
-    config claim that Claude/OpenRouter models are effective Codex choices.
-
-    Existing config never calls this helper: without provenance, current and
-    legacy shipped literals must remain reversible when users switch backends.
-    The backend-aware loader and Codex role profiles already classify those
-    recognized shipped values as implicit defaults.
-    """
-    visited: set[tuple[str, ...]] = set()
-    for overrides in _CODEX_ROLE_MODEL_OVERRIDE_DEFAULTS.values():
-        for path, shipped_default in overrides:
-            if path in visited:
-                continue
-            visited.add(path)
-
-            current: object = config_dict
-            for part in path[:-1]:
-                if not isinstance(current, dict):
-                    current = _MISSING
-                    break
-                current = current.get(part, _MISSING)
-            if not isinstance(current, dict):
-                continue
-
-            key = path[-1]
-            value = current.get(key, _MISSING)
-            if isinstance(shipped_default, str):
-                if isinstance(value, str) and value in recognized_shipped_defaults(shipped_default):
-                    current.pop(key, None)
-            elif (
-                isinstance(shipped_default, tuple)
-                and isinstance(value, (list, tuple))
-                and _is_shipped_default_roster(value, shipped_default)
-            ):
-                current.pop(key, None)
-
-
 def _install_codex_default_llm_profiles(
     config_dict: dict,
     *,
@@ -3431,25 +3332,6 @@ def _apply_copilot_default_model(
             and _is_shipped_default_roster(current, shipped_default)
         ):
             section[key] = list(model_roster)
-
-
-def _is_shipped_default_roster(
-    current: list | tuple,
-    shipped_roster: tuple[str, ...],
-) -> bool:
-    """True when ``current`` is a shipped default roster (current or legacy).
-
-    Element-wise match against ``recognized_shipped_defaults`` so a roster
-    persisted before a pin bump (e.g. the old OpenRouter Opus slug in the
-    consensus slot) is still recognized as an untouched shipped default.
-    """
-    current_tuple = tuple(current)
-    if len(current_tuple) != len(shipped_roster):
-        return False
-    return all(
-        str(candidate) in recognized_shipped_defaults(default)
-        for candidate, default in zip(current_tuple, shipped_roster, strict=True)
-    )
 
 
 def _setup_copilot(copilot_path: str, *, non_interactive: bool = False) -> bool:
