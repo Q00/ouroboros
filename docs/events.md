@@ -119,6 +119,27 @@ Fail-closed marker for a provider boundary whose effects may have occurred but
 whose terminal result is not yet durable. Recovery must not redispatch a sealed
 attempt; a later terminal lifecycle event supersedes the seal.
 
+### mcp.job.created
+
+Emitted when a background MCP job is created. Its owner fields let a later
+process determine whether recovery is authorized.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `owner_pid` | `integer` | Owning process ID; must agree with `owner_identity.pid` when the versioned identity is present |
+| `owner_start_time` | `number?` | Legacy epoch process start time used for liveness on non-Linux platforms |
+| `owner_identity` | `object?` | Versioned Linux owner identity; absent from historical events, non-Linux events, or when the Linux kernel identity cannot be read |
+| `owner_identity.version` | `integer` | Identity schema version; currently `1` |
+| `owner_identity.platform` | `string` | Always `"linux"` for version `1` |
+| `owner_identity.pid` | `integer` | Positive process ID matching `owner_pid` |
+| `owner_identity.boot_id` | `string` | Canonical UUID-shaped Linux kernel boot ID |
+| `owner_identity.start_ticks` | `integer` | Non-negative raw `/proc/<pid>/stat` process start ticks |
+
+`owner_identity` is additive within event version 1. Linux recovery readers
+must treat a missing, malformed, or unsupported identity as unknown and must
+not fall back to the legacy epoch field to prove owner death. Non-Linux readers
+retain the legacy `owner_pid` plus `owner_start_time` behavior.
+
 ### mcp.job.cancelled
 
 Emitted when a background MCP job is cancelled.
