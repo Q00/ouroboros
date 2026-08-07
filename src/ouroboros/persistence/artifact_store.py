@@ -192,7 +192,7 @@ class ContentAddressedArtifactStore:
         self._validate_project_boundary()
 
     @contextmanager
-    def _store_lock(self, *, exclusive: bool) -> Iterator[None]:
+    def _store_lock(self, *, exclusive: bool, blocking: bool = True) -> Iterator[None]:
         """Hold the store directory authority together with its lockfile."""
         with _pinned_directory_tree(
             self.root,
@@ -203,6 +203,7 @@ class ContentAddressedArtifactStore:
             with file_lock(
                 self._lock_target,
                 exclusive=exclusive,
+                blocking=blocking,
                 parent_fd=directory_fd,
             ):
                 self._validate_project_boundary()

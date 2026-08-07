@@ -41,13 +41,21 @@ def file_lock(
     if parent_fd is None:
         lock_path.parent.mkdir(parents=True, exist_ok=True)
 
-    with _open_lockfile(lock_path, parent_fd=parent_fd) as handle:
-        _ensure_lockfile_content(handle)
-        _acquire_lock(handle, exclusive=exclusive, blocking=blocking)
-        try:
-            yield
-        finally:
-            _release_lock(handle)
+    with _lock_parent_authority(
+        lock_path,
+        exclusive=exclusive,
+        blocking=blocking,
+        parent_fd=parent_fd,
+    ) as authority_fd:
+        with _open_lockfile(lock_path, parent_fd=parent_fd) as handle:
+            _ensure_lockfile_content(handle)
+            _acquire_lock(handle, exclusive=exclusive, blocking=blocking)
+            try:
+                _validate_active_lockfile(handle, lock_path, directory_fd=authority_fd)
+                yield
+                _validate_active_lockfile(handle, lock_path, directory_fd=authority_fd)
+            finally:
+                _release_lock(handle)
 
 
 @contextmanager
@@ -99,6 +107,84 @@ def _validate_lock_parent_binding(directory_fd: int, parent: Path) -> None:
             getattr(errno, "ESTALE", errno.EIO),
             "lockfile parent changed during open",
             str(parent),
+        )
+
+
+@contextmanager
+def _lock_parent_authority(
+    lock_path: Path,
+    *,
+    exclusive: bool,
+    blocking: bool,
+    parent_fd: int | None,
+) -> Iterator[int | None]:
+    """Keep POSIX lock authority on the parent inode, not a replaceable entry."""
+    if os.name == "nt":  # pragma: no cover - Windows handles deny deletion
+        yield None
+        return
+    if not _supports_directory_fd_lock_open():
+        raise OSError(
+            getattr(errno, "ENOTSUP", errno.EPERM),
+            "stable directory lock authority is unavailable",
+            str(lock_path.parent),
+        )
+
+    if parent_fd is None:
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        flags |= getattr(os, "O_CLOEXEC", 0)
+        directory_fd = os.open(lock_path.parent, flags)
+    else:
+        directory_fd = os.dup(parent_fd)
+
+    try:
+        _validate_lock_parent_binding(directory_fd, lock_path.parent)
+        _acquire_posix_lock(
+            directory_fd,
+            exclusive=exclusive,
+            blocking=blocking,
+        )
+        try:
+            _validate_lock_parent_binding(directory_fd, lock_path.parent)
+            yield directory_fd
+            _validate_lock_parent_binding(directory_fd, lock_path.parent)
+        finally:
+            _release_posix_lock(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
+def _validate_active_lockfile(
+    handle: TextIO,
+    lock_path: Path,
+    *,
+    directory_fd: int | None,
+) -> None:
+    """Fail closed if a held lockfile name no longer identifies its inode."""
+    try:
+        opened = os.fstat(handle.fileno())
+        if directory_fd is None:
+            current = lock_path.stat(follow_symlinks=False)
+        else:
+            current = os.stat(
+                lock_path.name,
+                dir_fd=directory_fd,
+                follow_symlinks=False,
+            )
+    except OSError as exc:
+        raise OSError(
+            getattr(errno, "ESTALE", errno.EIO),
+            "lockfile changed while locked",
+            str(lock_path),
+        ) from exc
+    if (
+        not stat.S_ISREG(opened.st_mode)
+        or not stat.S_ISREG(current.st_mode)
+        or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)
+    ):
+        raise OSError(
+            getattr(errno, "ESTALE", errno.EIO),
+            "lockfile changed while locked",
+            str(lock_path),
         )
 
 
@@ -372,15 +458,30 @@ def _acquire_lock(
             raise
         return
 
+    _acquire_posix_lock(handle.fileno(), exclusive=exclusive, blocking=blocking)
+
+
+def _acquire_posix_lock(
+    file_descriptor: int,
+    *,
+    exclusive: bool,
+    blocking: bool,
+) -> None:
+    """Acquire one POSIX flock and normalize fail-fast contention errors."""
     mode = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
     if not blocking:
         mode |= fcntl.LOCK_NB
     try:
-        fcntl.flock(handle.fileno(), mode)
+        fcntl.flock(file_descriptor, mode)
     except OSError as exc:
         if not blocking and exc.errno in _LOCK_BUSY_ERRNOS:
             raise BlockingIOError(exc.errno, "file lock is already held") from exc
         raise
+
+
+def _release_posix_lock(file_descriptor: int) -> None:
+    """Release one POSIX flock."""
+    fcntl.flock(file_descriptor, fcntl.LOCK_UN)
 
 
 def _release_lock(handle: TextIO) -> None:
@@ -389,4 +490,4 @@ def _release_lock(handle: TextIO) -> None:
         msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
         return
 
-    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    _release_posix_lock(handle.fileno())

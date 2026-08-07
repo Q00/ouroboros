@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 import hashlib
 import json
+import multiprocessing
 import os
 from pathlib import Path
 from typing import Any
@@ -66,6 +67,80 @@ def _age(path: Path, *, days: int) -> None:
 def _manifest(store: ContentAddressedArtifactStore, contract_id: str) -> dict:
     path = store.root / "contracts" / contract_id / "events.json"
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _try_replaced_artifact_lock(
+    artifact_root: str,
+    contract_id: str | None,
+    result: Any,
+) -> None:
+    """Attempt a nonblocking replacement-inode acquisition in a child process."""
+    store = ContentAddressedArtifactStore(Path(artifact_root))
+    try:
+        if contract_id is None:
+            lock = store._store_lock(exclusive=True, blocking=False)
+        else:
+            lock = store.contract_execution_lock(contract_id, blocking=False)
+        with lock:
+            result.put("acquired")
+    except BlockingIOError:
+        result.put("blocked")
+    except BaseException as exc:  # pragma: no cover - diagnostic transport
+        result.put(f"error:{type(exc).__name__}:{exc}")
+
+
+def _assert_replaced_lock_authority_stays_held(
+    store: ContentAddressedArtifactStore,
+    lock: Any,
+    lock_path: Path,
+    contract_id: str | None,
+) -> None:
+    context = multiprocessing.get_context("spawn")
+    result = context.Queue()
+    process = context.Process(
+        target=_try_replaced_artifact_lock,
+        args=(str(store.root), contract_id, result),
+    )
+
+    try:
+        with pytest.raises(OSError, match="lockfile changed while locked"):
+            with lock:
+                lock_path.unlink()
+                process.start()
+                process.join(20)
+                assert process.exitcode == 0
+                assert result.get(timeout=5) == "blocked"
+    finally:
+        if process.is_alive():
+            process.terminate()
+        process.join(5)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX unlink semantics only")
+def test_store_lock_replacement_cannot_split_serialization(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    store.initialize()
+
+    _assert_replaced_lock_authority_stays_held(
+        store,
+        store._store_lock(exclusive=True),
+        store.root / ".artifact-store.lock",
+        None,
+    )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX unlink semantics only")
+def test_contract_lock_replacement_cannot_duplicate_dispatch(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    contract_id = "CONTRACTLOCK"
+    store.initialize()
+
+    _assert_replaced_lock_authority_stays_held(
+        store,
+        store.contract_execution_lock(contract_id),
+        store.root / "contracts" / contract_id / ".execution.lock",
+        contract_id,
+    )
 
 
 def test_put_uses_content_addressed_layout_and_deduplicates(tmp_path: Path) -> None:
