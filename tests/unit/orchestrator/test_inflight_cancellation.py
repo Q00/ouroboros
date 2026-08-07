@@ -126,7 +126,9 @@ def _attach_live_process_local_contract(
     if not isinstance(getattr(runner._adapter, "_model", None), str):
         runner._adapter._model = "test-model"
     generation = runner._begin_process_local_authority_generation()
-    contract = runner._build_execution_contract(seed=seed, authority_generation=generation)
+    contract = runner._build_execution_contract(
+        project_identity=runner._project_identity(), seed=seed, authority_generation=generation
+    )
     runner._register_process_local_authority(
         session_id=tracker.session_id,
         execution_id=tracker.execution_id,

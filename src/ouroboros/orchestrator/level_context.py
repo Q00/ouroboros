@@ -373,12 +373,125 @@ def extract_level_context(
 def serialize_level_contexts(contexts: list[LevelContext]) -> list[dict[str, Any]]:
     """Serialize level contexts for checkpoint storage.
 
-    Uses dataclasses.asdict() for complete, field-addition-safe serialization.
-    All nested types (ACContextSummary, CoordinatorReview, FileConflict) are
-    frozen dataclasses composed of primitives and tuples, so asdict() produces
-    a fully JSON-serializable dict tree (tuples become lists).
+    Coordinator runtime messages are transient audit input, not checkpoint
+    authority. Persist only the bounded review projection and serialize its
+    typed quota consequence through the closed durable payload schema.
     """
-    return [asdict(ctx) for ctx in contexts]
+
+    serialized: list[dict[str, Any]] = []
+    for context in contexts:
+        review = context.coordinator_review
+        review_payload: dict[str, Any] | None = None
+        if review is not None:
+            if type(context.level_number) is not int or context.level_number != review.level_number:
+                raise ValueError("coordinator checkpoint level does not match its context")
+            review.to_artifact_payload()  # Validate every bounded durable field.
+            review_payload = {
+                "schema_version": 1,
+                "level_number": review.level_number,
+                "conflicts_detected": [
+                    {
+                        "file_path": conflict.file_path,
+                        "ac_indices": list(conflict.ac_indices),
+                        "resolved": conflict.resolved,
+                        "resolution_description": conflict.resolution_description,
+                    }
+                    for conflict in review.conflicts_detected
+                ],
+                "review_summary": review.review_summary,
+                "fixes_applied": list(review.fixes_applied),
+                "warnings_for_next_level": list(review.warnings_for_next_level),
+                "duration_seconds": float(review.duration_seconds),
+                "session_id": review.session_id,
+                "session_scope_id": review.artifact_owner_id,
+                "session_state_path": review.artifact_state_path,
+                "final_output": review.final_output,
+                "recoverable_quota_pause": (
+                    review.recoverable_quota_pause.to_payload()
+                    if review.recoverable_quota_pause is not None
+                    else None
+                ),
+            }
+        serialized.append(
+            {
+                "level_number": context.level_number,
+                "completed_acs": [asdict(summary) for summary in context.completed_acs],
+                "coordinator_review": review_payload,
+            }
+        )
+    return serialized
+
+
+def _deserialize_checkpoint_coordinator_review(value: object) -> CoordinatorReview:
+    """Restore the exact bounded coordinator projection or fail closed."""
+
+    from ouroboros.orchestrator.coordinator import CoordinatorReview, FileConflict
+    from ouroboros.orchestrator.recoverable_failure import UsageLimitPauseConsequence
+
+    expected_keys = {
+        "schema_version",
+        "level_number",
+        "conflicts_detected",
+        "review_summary",
+        "fixes_applied",
+        "warnings_for_next_level",
+        "duration_seconds",
+        "session_id",
+        "session_scope_id",
+        "session_state_path",
+        "final_output",
+        "recoverable_quota_pause",
+    }
+    if (
+        type(value) is not dict
+        or set(value) != expected_keys
+        or type(value.get("schema_version")) is not int
+        or value.get("schema_version") != 1
+    ):
+        raise RuntimeError("coordinator checkpoint review has an invalid schema")
+    try:
+        raw_conflicts = value["conflicts_detected"]
+        if type(raw_conflicts) is not list:
+            raise ValueError("coordinator checkpoint conflicts are invalid")
+        conflicts = tuple(
+            FileConflict(
+                file_path=raw["file_path"],
+                ac_indices=tuple(raw["ac_indices"]),
+                resolved=raw["resolved"],
+                resolution_description=raw["resolution_description"],
+            )
+            for raw in raw_conflicts
+            if type(raw) is dict
+            and set(raw) == {"file_path", "ac_indices", "resolved", "resolution_description"}
+        )
+        if len(conflicts) != len(raw_conflicts):
+            raise ValueError("coordinator checkpoint conflicts are invalid")
+        raw_consequence = value["recoverable_quota_pause"]
+        review = CoordinatorReview(
+            level_number=value["level_number"],
+            conflicts_detected=conflicts,
+            review_summary=value["review_summary"],
+            fixes_applied=tuple(value["fixes_applied"]),
+            warnings_for_next_level=tuple(value["warnings_for_next_level"]),
+            duration_seconds=value["duration_seconds"],
+            session_id=value["session_id"],
+            session_scope_id=value["session_scope_id"],
+            session_state_path=value["session_state_path"],
+            final_output=value["final_output"],
+            recoverable_quota_pause=(
+                None
+                if raw_consequence is None
+                else UsageLimitPauseConsequence.from_payload(raw_consequence)
+            ),
+        )
+        canonical = serialize_level_contexts(
+            [LevelContext(level_number=review.level_number, coordinator_review=review)]
+        )[0]["coordinator_review"]
+        if canonical != value:
+            raise ValueError("coordinator checkpoint review is not canonical")
+        return review
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RuntimeError("coordinator checkpoint review is invalid") from exc
 
 
 def deserialize_level_contexts(data: list[dict[str, Any]]) -> list[LevelContext]:
@@ -396,31 +509,34 @@ def deserialize_level_contexts(data: list[dict[str, Any]]) -> list[LevelContext]
         review = None
         if d.get("coordinator_review"):
             rd = d["coordinator_review"]
-            try:
-                conflicts = tuple(
-                    FileConflict(
-                        file_path=fc.get("file_path", ""),
-                        ac_indices=tuple(fc.get("ac_indices", ())),
-                        resolved=fc.get("resolved", False),
-                        resolution_description=fc.get("resolution_description", ""),
+            if isinstance(rd, dict) and "schema_version" in rd:
+                review = _deserialize_checkpoint_coordinator_review(rd)
+            else:
+                try:
+                    conflicts = tuple(
+                        FileConflict(
+                            file_path=fc.get("file_path", ""),
+                            ac_indices=tuple(fc.get("ac_indices", ())),
+                            resolved=fc.get("resolved", False),
+                            resolution_description=fc.get("resolution_description", ""),
+                        )
+                        for fc in rd.get("conflicts_detected", ())
                     )
-                    for fc in rd.get("conflicts_detected", ())
-                )
-                review = CoordinatorReview(
-                    level_number=rd.get("level_number", 0),
-                    conflicts_detected=conflicts,
-                    review_summary=rd.get("review_summary", ""),
-                    fixes_applied=tuple(rd.get("fixes_applied", ())),
-                    warnings_for_next_level=tuple(rd.get("warnings_for_next_level", ())),
-                    duration_seconds=rd.get("duration_seconds", 0.0),
-                    session_id=rd.get("session_id"),
-                )
-            except Exception as e:
-                log.warning(
-                    "level_context.deserialize.review_skipped",
-                    error=str(e),
-                )
-                review = None
+                    review = CoordinatorReview(
+                        level_number=rd.get("level_number", 0),
+                        conflicts_detected=conflicts,
+                        review_summary=rd.get("review_summary", ""),
+                        fixes_applied=tuple(rd.get("fixes_applied", ())),
+                        warnings_for_next_level=tuple(rd.get("warnings_for_next_level", ())),
+                        duration_seconds=rd.get("duration_seconds", 0.0),
+                        session_id=rd.get("session_id"),
+                    )
+                except Exception as e:
+                    log.warning(
+                        "level_context.deserialize.review_skipped",
+                        error=str(e),
+                    )
+                    review = None
 
         completed_acs: list[ACContextSummary] = []
         for ac in d.get("completed_acs", ()):

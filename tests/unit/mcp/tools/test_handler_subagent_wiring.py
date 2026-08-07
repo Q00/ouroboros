@@ -309,6 +309,37 @@ class TestEvaluateHandlerSubagentDispatch:
         assert ctx["seed_content"] == "goal: test"
         assert ctx["trigger_consensus"] is True
 
+    async def test_plugin_payload_hides_harness_contract(self, handler) -> None:
+        result = await handler.handle(
+            {
+                "session_id": "sess-hidden",
+                "artifact": "partial artifact HIDDEN_SENTINEL",
+                "seed_content": (
+                    "goal: Judge the artifact\n"
+                    "acceptance_criteria:\n"
+                    "  - description: Produce output.json without HIDDEN_SENTINEL\n"
+                    "    expected_artifacts: [output.json]\n"
+                    "    verify_command: python secret_check.py --token TOP_SECRET\n"
+                    "    output_assertion: HIDDEN_SENTINEL\n"
+                    "ontology_schema:\n"
+                    "  name: HiddenContractArtifact\n"
+                    "  description: Artifact with parent-owned verification\n"
+                    "metadata:\n"
+                    "  ambiguity_score: 0.0\n"
+                ),
+            }
+        )
+
+        assert result.is_ok
+        payload = result.value.meta["_subagent"]
+        visible = payload["prompt"] + str(payload["context"])
+        assert "Produce output.json" in visible
+        assert "output.json" in visible
+        assert "TOP_SECRET" not in visible
+        assert "HIDDEN_SENTINEL" not in visible
+        assert "verify_command" not in visible
+        assert "output_assertion" not in visible
+
 
 # ---------------------------------------------------------------------------
 # ExecuteSeedHandler
@@ -386,6 +417,53 @@ class TestExecuteSeedHandlerSubagentDispatch:
         assert "ouroboros_start_evaluate" in prompt
         assert "formal 3-stage evaluation" in prompt
 
+    async def test_direct_plugin_payload_hides_seed_path_and_preserves_chain_contract(
+        self, tmp_path: Path
+    ) -> None:
+        from ouroboros.mcp.tools.execution_handlers import ExecuteSeedHandler
+        from ouroboros.mcp.tools.seed_handoff import SeedHandoffRegistry
+
+        seed_path = tmp_path / "seed_with_hidden_contract.yaml"
+        seed_path.write_text(
+            """goal: Build the artifact
+acceptance_criteria:
+  - description: Produce output.json
+    artifacts: [output.json]
+    verify_command: python secret_check.py --token TOP_SECRET
+    output_assertion:
+      contains: HIDDEN_SENTINEL
+""",
+            encoding="utf-8",
+        )
+        registry = SeedHandoffRegistry()
+        direct_handler = ExecuteSeedHandler(
+            agent_runtime_backend="opencode",
+            opencode_mode="plugin",
+            seed_handoff_registry=registry,
+        )
+
+        result = await direct_handler.handle(
+            {
+                "seed_path": str(seed_path),
+                "cwd": str(tmp_path),
+                "auto_evolve": False,
+            }
+        )
+
+        assert result.is_ok
+        payload = result.value.meta["_subagent"]
+        visible = payload["prompt"] + str(payload["context"])
+        assert str(seed_path) not in visible
+        assert "TOP_SECRET" not in visible
+        assert "HIDDEN_SENTINEL" not in visible
+        assert "verify_command" not in visible
+        assert "output_assertion" not in visible
+        assert payload["context"]["seed_path"] is None
+        assert payload["context"]["auto_evolve"] is False
+        handoff_id = payload["context"]["seed_handoff_id"]
+        assert handoff_id.startswith("seed_handoff_")
+        assert registry.resolve(handoff_id, session_id=result.value.meta["session_id"]) is not None
+
     async def test_plugin_path_surfaces_worker_cap_config_error(self, handler) -> None:
         """Plugin dispatch must fail clearly on invalid worker-cap config (#489)."""
         from unittest.mock import patch
@@ -416,6 +494,7 @@ class TestStartExecuteSeedHandlerSubagentDispatch:
     async def handler(self):
         from ouroboros.mcp.job_manager import JobManager
         from ouroboros.mcp.tools.execution_handlers import StartExecuteSeedHandler
+        from ouroboros.mcp.tools.seed_handoff import SeedHandoffRegistry
         from ouroboros.persistence.event_store import EventStore
 
         store = EventStore("sqlite+aiosqlite:///:memory:")
@@ -427,6 +506,7 @@ class TestStartExecuteSeedHandlerSubagentDispatch:
             job_manager=jm,
             agent_runtime_backend="opencode",
             opencode_mode="plugin",
+            seed_handoff_registry=SeedHandoffRegistry(),
         )
         yield handler
         await store.close()
@@ -472,6 +552,39 @@ class TestStartExecuteSeedHandlerSubagentDispatch:
         )
         assert result.value.meta["manual_retry_next_step"].startswith("ooo evaluate orch_")
         assert result.value.meta["_subagent"]["context"]["auto_evaluate"] is True
+
+    async def test_plugin_payload_hides_harness_contract_and_preserves_opt_out(
+        self, handler
+    ) -> None:
+        seed = """goal: Build the artifact
+constraints:
+  - Never print python secret_check.py --token TOP_SECRET
+  - Never print HIDDEN_SENTINEL
+acceptance_criteria:
+  - description: Produce output.json
+    expected_artifacts: [output.json]
+    verify_command: python secret_check.py --token TOP_SECRET
+    output_assertion: HIDDEN_SENTINEL
+ontology_schema:
+  name: HiddenContractArtifact
+  description: Artifact with parent-owned verification
+metadata:
+  ambiguity_score: 0.0
+"""
+        result = await handler.handle({"seed_content": seed, "auto_evolve": False})
+
+        payload = result.value.meta["_subagent"]
+        visible = payload["prompt"] + str(payload["context"])
+        assert "TOP_SECRET" not in visible
+        assert "HIDDEN_SENTINEL" not in visible
+        assert "verify_command" not in visible
+        assert "output_assertion" not in visible
+        assert "Produce output.json" in visible
+        assert "output.json" in visible
+        assert payload["context"]["auto_evolve"] is False
+        assert payload["context"]["seed_handoff_id"].startswith("seed_handoff_")
+        assert "auto_evolve: false" in payload["prompt"]
+        assert "including unsuccessful AC execution" in payload["prompt"]
 
     async def test_plugin_mode_auto_evaluate_false_keeps_legacy_manual_path(self, handler) -> None:
         result = await handler.handle({"seed_content": "goal: test", "auto_evaluate": False})

@@ -4217,12 +4217,10 @@ def _atomic_write_text(
     mode: int | None = None,
     expected_current: _PathSnapshot | None = None,
 ) -> _PathSnapshot:
-    """Write *content* to *path* atomically — temp file + ``os.replace``.
+    """Write *content* atomically through a temp file and ``os.replace``.
 
-    Readers always see either the pre-existing file or the final content —
-    never a truncated partial.  Caller is expected to have created
-    ``path.parent`` already.  Raises :class:`OSError` on failure; callers
-    decide how to surface that.
+    Readers see either the previous file or the final content, never partial
+    bytes. Raises :class:`OSError` on failure for callers to surface.
     """
     import os
     import tempfile
@@ -4240,17 +4238,19 @@ def _atomic_write_text(
         dir=str(write_path.parent),
     )
     try:
-        os.fchmod(fd, mode)
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
+        if hasattr(os, "fchmod"):
+            os.fchmod(fd, mode)
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
             f.write(content)
+        try:
+            os.chmod(tmp_name, mode)
+        except OSError:
+            pass  # e.g. Windows FAT — not fatal
+        actual_mode = stat.S_IMODE(Path(tmp_name).lstat().st_mode)
         if expected_current is not None:
             _require_path_snapshot(path, expected_current)
         os.replace(tmp_name, write_path)
-        try:
-            os.chmod(write_path, mode)
-        except OSError:
-            pass  # e.g. Windows FAT — not fatal
-        return _PathSnapshot(kind="file", mode=mode, contents=content.encode("utf-8"))
+        return _PathSnapshot(kind="file", mode=actual_mode, contents=content.encode("utf-8"))
     except OSError:
         try:
             os.close(fd)

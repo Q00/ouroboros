@@ -1,5 +1,5 @@
 ---
-name: run
+name: ouroboros-run
 description: "Execute a Seed specification through the workflow engine"
 aliases: [execute]
 mcp_tool: ouroboros_execute_seed
@@ -8,14 +8,14 @@ mcp_args:
   cwd: "$CWD"
 ---
 
-# /ouroboros:run
+# /ouroboros:ouroboros-run
 
 Execute a Seed specification through the Ouroboros workflow engine.
 
 ## Usage
 
 ```
-/ouroboros:run [seed_file_or_content]
+/ouroboros:ouroboros-run [seed_file_or_content]
 ```
 
 **Trigger keywords:** "ouroboros run", "execute seed"
@@ -358,7 +358,7 @@ Without MCP, you can still:
 ## Example
 
 ```
-User: /ouroboros:run seed.yaml
+User: /ouroboros:ouroboros-run seed.yaml
 
 [Reads seed.yaml, validates, starts background execution]
 

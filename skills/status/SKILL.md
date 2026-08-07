@@ -1,5 +1,5 @@
 ---
-name: status
+name: ouroboros-status
 description: "Check session status and measure goal drift"
 aliases: [drift]
 mcp_tool: ouroboros_session_status
@@ -7,14 +7,14 @@ mcp_args:
   session_id: "$1"
 ---
 
-# /ouroboros:status
+# /ouroboros:ouroboros-status
 
 Check session status and measure goal drift.
 
 ## Usage
 
 ```
-/ouroboros:status [session_id]
+/ouroboros:ouroboros-status [session_id]
 ```
 
 **Trigger keywords:** "am I drifting?", "session status", "drift check"

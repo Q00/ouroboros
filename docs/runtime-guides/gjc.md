@@ -119,7 +119,7 @@ When Ouroboros is already in control and `runtime_backend: gjc` is selected,
 
 The GJC runtime calls the shared `SkillInterceptor` at the top of task
 execution. If the prompt is an Ouroboros skill shortcut such as `ooo interview`
-or `/ouroboros:run`, the interceptor resolves the skill and invokes the matching
+or `/ouroboros:ouroboros-run`, the interceptor resolves the skill and invokes the matching
 Ouroboros MCP handler. GJC does not receive that prompt as ordinary chat input.
 
 This means:

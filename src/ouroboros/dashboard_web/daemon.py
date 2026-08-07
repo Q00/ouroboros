@@ -27,6 +27,7 @@ import socket
 import subprocess
 import sys
 import time
+from urllib.parse import quote
 
 from ouroboros.dashboard_web.reader import default_db_path
 
@@ -54,7 +55,7 @@ class DashboardInfo:
     reused: bool
 
     def run_url(self, run_id: str) -> str:
-        return f"{self.url}/?run={run_id}"
+        return f"{self.url}/?run={quote(run_id, safe='')}"
 
 
 def _free_port(host: str = "127.0.0.1") -> int:

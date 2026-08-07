@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pytest
 
-from ouroboros.orchestrator.adapter import AgentMessage
+from ouroboros.orchestrator.adapter import AgentMessage, RuntimeHandle
 from ouroboros.orchestrator.coordinator import CoordinatorReview, FileConflict
 from ouroboros.orchestrator.level_context import (
     _MAX_FILE_SIZE_BYTES,
@@ -18,6 +20,8 @@ from ouroboros.orchestrator.level_context import (
     extract_level_context,
     serialize_level_contexts,
 )
+from ouroboros.orchestrator.recoverable_failure import UsageLimitPauseConsequence
+from ouroboros.persistence.checkpoint import CheckpointData
 
 
 class TestACContextSummary:
@@ -393,6 +397,60 @@ class TestLevelContextSerialization:
         assert fc.ac_indices == (0, 2)
         assert fc.resolved is True
         assert fc.resolution_description == "Merged imports"
+
+    def test_quota_review_crosses_real_checkpoint_json_boundary(self) -> None:
+        """A typed quota consequence is checkpoint-safe without runtime messages."""
+
+        consequence = UsageLimitPauseConsequence(
+            reason="Usage limit reached",
+            resume_hint="Resume after the provider window reopens.",
+            pause_seconds=300,
+            resume_after=datetime(2026, 1, 1, 0, 5, tzinfo=UTC),
+        )
+        review = CoordinatorReview(
+            level_number=1,
+            review_summary=consequence.reason,
+            session_scope_id="execution_level_1_coordinator",
+            session_state_path="execution.levels.level_1.coordinator",
+            final_output=consequence.reason,
+            recoverable_quota_pause=consequence,
+            messages=(
+                AgentMessage(
+                    type="result",
+                    content=consequence.reason,
+                    data={"subtype": "error"},
+                    resume_handle=RuntimeHandle(
+                        backend="claude",
+                        native_session_id="provider-session",
+                    ),
+                ),
+            ),
+        )
+        serialized = serialize_level_contexts(
+            [LevelContext(level_number=1, coordinator_review=review)]
+        )
+
+        checkpoint = CheckpointData.create(
+            "seed-quota",
+            "parallel_execution",
+            {"level_contexts": serialized},
+        )
+        restored = deserialize_level_contexts(checkpoint.state["level_contexts"])
+        restored_review = restored[0].coordinator_review
+
+        assert checkpoint.validate_integrity().is_ok
+        assert "messages" not in serialized[0]["coordinator_review"]
+        assert restored_review is not None
+        assert restored_review.recoverable_quota_pause == consequence
+        assert restored_review.session_scope_id == "execution_level_1_coordinator"
+        assert restored_review.session_state_path == "execution.levels.level_1.coordinator"
+        assert restored_review.messages == ()
+
+    def test_checkpoint_review_rejects_mismatched_level_owner(self) -> None:
+        review = CoordinatorReview(level_number=1)
+
+        with pytest.raises(ValueError, match="level does not match"):
+            serialize_level_contexts([LevelContext(level_number=2, coordinator_review=review)])
 
     def test_round_trip_empty(self) -> None:
         """Test serialization of empty context list."""

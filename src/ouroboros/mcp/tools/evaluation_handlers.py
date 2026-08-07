@@ -11,14 +11,18 @@ import base64
 from dataclasses import dataclass, field
 import json
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import ValidationError as PydanticValidationError
 import structlog
 import yaml
 
 from ouroboros.backends import build_runtime_subagent_orchestration_contract
-from ouroboros.config import get_llm_backend_for_role, get_llm_model_for_role
+from ouroboros.config import (
+    get_auto_evolve_enabled,
+    get_llm_backend_for_role,
+    get_llm_model_for_role,
+)
 from ouroboros.core.errors import ValidationError
 from ouroboros.core.project_paths import resolve_path_against_base, resolve_seed_project_path
 from ouroboros.core.seed import AcceptanceCriterionSpec, Seed, ac_text
@@ -29,7 +33,6 @@ from ouroboros.mcp.tools.background import start_background_tool_job
 from ouroboros.mcp.tools.bridge_mixin import BridgeAwareMixin
 from ouroboros.mcp.tools.job_observer import build_job_observer_contract
 from ouroboros.mcp.tools.subagent import (
-    DELEGATED_TO_PLUGIN,
     DELEGATED_TO_SUBAGENT,
     FanoutRegistry,
     build_evaluate_subagent,
@@ -60,6 +63,10 @@ from ouroboros.persistence.event_store import EventStore
 from ouroboros.providers import create_llm_adapter
 
 log = structlog.get_logger(__name__)
+
+if TYPE_CHECKING:
+    from ouroboros.mcp.tools.ralph_handlers import StartRalphHandler
+    from ouroboros.mcp.tools.seed_handoff import SeedHandoffRegistry
 
 
 def _seed_acceptance_criteria(seed: Seed) -> tuple[str, ...]:
@@ -586,7 +593,6 @@ class EvaluateHandler:
 
         working_dir = await _resolve_evaluate_working_dir(arguments.get("working_dir"), seed)
 
-        # --- Subagent dispatch: gate on runtime + opencode_mode ---
         if len(acceptance_criteria) > 1:
             ac_for_payload: str | None = "\n".join(
                 f"{i + 1}. {ac}" for i, ac in enumerate(acceptance_criteria)
@@ -595,16 +601,22 @@ class EvaluateHandler:
             ac_for_payload = acceptance_criteria[0]
         else:
             ac_for_payload = None
+        from ouroboros.mcp.tools.evaluation_job import worker_safe_evaluation_inputs
+
+        worker_inputs = worker_safe_evaluation_inputs(seed_content, ac_for_payload, artifact)
         payload = build_evaluate_subagent(
             session_id=session_id,
-            artifact=artifact,
+            artifact=worker_inputs.artifact,
             artifact_type=artifact_type,
-            seed_content=seed_content,
-            acceptance_criterion=ac_for_payload,
+            seed_content=worker_inputs.seed_content,
+            acceptance_criterion=worker_inputs.acceptance_criterion,
             working_dir=str(working_dir),
             trigger_consensus=trigger_consensus,
         )
-        if should_dispatch_via_plugin(self.agent_runtime_backend, self.opencode_mode):
+        if (
+            should_dispatch_via_plugin(self.agent_runtime_backend, self.opencode_mode)
+            and arguments.get("_force_in_process") is not True
+        ):
             # Preserve public response shape (#442): session_id + status are
             # part of the documented contract for ouroboros_evaluate.
             return await dispatch_plugin_terminal(
@@ -883,7 +895,6 @@ class EvaluateHandler:
 
         Single-AC callers never reach this path — see ``handle()``.
         """
-        import asyncio
 
         from ouroboros.evaluation import EvaluationContext
         from ouroboros.evaluation.checklist import (
@@ -986,6 +997,11 @@ class EvaluateHandler:
         eval_results = tuple(entry.value for entry in gathered)  # type: ignore[union-attr]
         checklist = aggregate_results(acceptance_criteria, eval_results)
         feedback = build_run_feedback(checklist)
+        # The checklist is one aggregate evaluation, so its trustworthy stage
+        # is the highest stage completed by every AC pipeline, not an invented
+        # constant or the best stage reached by only one AC. EvaluationSummary
+        # uses this value as a quality axis in frugality comparisons.
+        highest_stage = min(max(1, result.highest_stage_completed) for result in eval_results)
 
         code_changes: bool | None = None
         if any(r.stage1_result and not r.stage1_result.passed for r in eval_results):
@@ -999,6 +1015,7 @@ class EvaluateHandler:
         meta = {
             "session_id": session_id,
             "final_approved": checklist.all_passed,
+            "highest_stage": highest_stage,
             "multi_ac": True,
             "ac_count": checklist.total,
             "passed_count": checklist.passed_count,
@@ -2044,10 +2061,11 @@ class StartEvaluateHandler:
     via ``ouroboros_job_status`` / ``ouroboros_job_wait`` /
     ``ouroboros_job_result``.
 
-    Plugin mode (OpenCode subagent dispatch) is terminal here, mirroring
-    :class:`StartExecuteSeedHandler` and :class:`StartEvolveStepHandler`:
-    the envelope is emitted directly and no background job is enqueued, so
-    polling never targets a non-existent job.
+    Plugin mode (OpenCode subagent dispatch) is terminal when automatic
+    evolution is disabled, mirroring :class:`StartExecuteSeedHandler` and
+    :class:`StartEvolveStepHandler`: the envelope is emitted directly and no
+    background job is enqueued. With automatic evolution enabled the parent
+    must observe the verdict, so evaluation stays parent-owned and pollable.
     """
 
     evaluate_handler: EvaluateHandler | None = field(default=None, repr=False)
@@ -2056,6 +2074,8 @@ class StartEvaluateHandler:
     llm_backend: str | None = field(default=None, repr=False)
     agent_runtime_backend: str | None = field(default=None, repr=False)
     opencode_mode: str | None = field(default=None, repr=False)
+    start_ralph_handler: "StartRalphHandler | None" = field(default=None, repr=False)
+    seed_handoff_registry: "SeedHandoffRegistry | None" = field(default=None, repr=False)
     deadline_seconds: float = 1800.0
 
     def __post_init__(self) -> None:
@@ -2068,6 +2088,25 @@ class StartEvaluateHandler:
             opencode_mode=self.opencode_mode,
         )
 
+    async def _enqueue_chained_ralph(
+        self,
+        evaluation_result: MCPToolResult,
+        *,
+        session_id: str,
+        arguments: dict[str, Any],
+    ) -> MCPToolResult:
+        """Compatibility seam for direct chain tests and embedders."""
+        from ouroboros.mcp.tools.evaluate_ralph_chain import enqueue_chained_ralph
+
+        return await enqueue_chained_ralph(
+            evaluation_result,
+            session_id=session_id,
+            arguments=arguments,
+            event_store=self._event_store,
+            job_manager=self._job_manager,
+            start_ralph_handler=self.start_ralph_handler,
+        )
+
     @property
     def definition(self) -> MCPToolDefinition:
         return MCPToolDefinition(
@@ -2078,11 +2117,29 @@ class StartEvaluateHandler:
                 "(mechanical + semantic + optional consensus) is expected to exceed the "
                 "MCP client tool-call timeout. Poll with ouroboros_job_status / "
                 "ouroboros_job_wait and read the verdict via ouroboros_job_result. "
-                "In plugin mode, evaluation is delegated to an OpenCode Task pane and "
-                "job_id is None — results appear in the Task pane instead of being "
-                "pollable via job_status/job_result."
+                "In plugin mode with auto_evolve disabled, evaluation is delegated "
+                "to an OpenCode Task pane and job_id is None. With auto_evolve enabled, "
+                "the parent keeps evaluation pollable so a rejection can start Ralph."
             ),
-            parameters=EvaluateHandler().definition.parameters,
+            parameters=(
+                *EvaluateHandler().definition.parameters,
+                MCPToolParameter(
+                    name="auto_evolve",
+                    type=ToolInputType.BOOLEAN,
+                    description=(
+                        "Override execution.auto_evolve for this background call. "
+                        "When true, an explicitly rejected formal evaluation starts "
+                        "a bounded Ralph continuation loop."
+                    ),
+                    required=False,
+                ),
+                MCPToolParameter(
+                    name="seed_handoff_id",
+                    type=ToolInputType.STRING,
+                    description="Opaque parent-owned Seed handle for plugin evaluation",
+                    required=False,
+                ),
+            ),
         )
 
     async def handle(
@@ -2106,79 +2163,39 @@ class StartEvaluateHandler:
                 )
             )
 
-        # --- Subagent dispatch: gate on runtime + opencode_mode ---
-        # Plugin mode is terminal — return the delegation envelope without
-        # enqueuing a background job, matching StartExecuteSeedHandler /
-        # StartEvolveStepHandler. Polling a fake job_id would break the
-        # ouroboros_job_status contract.
-        if should_dispatch_via_plugin(self.agent_runtime_backend, self.opencode_mode):
-            # Mirror EvaluateHandler.handle's AC normalization so plugin
-            # dispatch does not silently drop multi-AC checklist input
-            # (PR #882 review feedback): the parameter surface advertises
-            # both `acceptance_criterion` (singular) and
-            # `acceptance_criteria` (plural list), so both must be honoured
-            # here exactly as the non-plugin path honours them via the inner
-            # handler. ``build_evaluate_subagent`` only accepts the singular
-            # field, so a multi-item list is rendered as a numbered checklist
-            # before being forwarded.
-            acceptance_criteria_raw = arguments.get("acceptance_criteria")
-            acceptance_criteria: tuple[str, ...] = ()
-            if isinstance(acceptance_criteria_raw, list):
-                acceptance_criteria = tuple(
-                    str(item).strip()
-                    for item in acceptance_criteria_raw
-                    if isinstance(item, (str, int, float)) and str(item).strip()
-                )
-            ac_singular_raw = arguments.get("acceptance_criterion")
-            if not acceptance_criteria and ac_singular_raw and str(ac_singular_raw).strip():
-                acceptance_criteria = (str(ac_singular_raw).strip(),)
+        from ouroboros.mcp.tools.evaluation_job import restore_seed_handoff
 
-            seed: Seed | None = None
-            seed_content = arguments.get("seed_content")
-            if seed_content:
-                try:
-                    seed_dict = yaml.safe_load(seed_content)
-                    seed = Seed.from_dict(seed_dict)
-                    if not acceptance_criteria:
-                        acceptance_criteria = _seed_acceptance_criteria(seed)
-                except (yaml.YAMLError, ValidationError, PydanticValidationError) as e:
-                    log.warning("mcp.tool.start_evaluate.seed_parse_warning", error=str(e))
-
-            if len(acceptance_criteria) > 1:
-                ac_for_payload: str | None = "\n".join(
-                    f"{i + 1}. {ac}" for i, ac in enumerate(acceptance_criteria)
-                )
-            elif acceptance_criteria:
-                ac_for_payload = acceptance_criteria[0]
-            else:
-                ac_for_payload = None
-
-            working_dir = await _resolve_evaluate_working_dir(
-                arguments.get("working_dir"),
-                seed,
+        try:
+            arguments = restore_seed_handoff(
+                arguments, session_id=session_id, registry=self.seed_handoff_registry
             )
+        except ValueError as exc:
+            return Result.err(MCPToolError(str(exc), tool_name="ouroboros_start_evaluate"))
 
-            payload = build_evaluate_subagent(
+        from ouroboros.mcp.tools.evaluation_job import resolve_auto_evolve_policy
+
+        try:
+            arguments, auto_evolve_enabled = resolve_auto_evolve_policy(
+                arguments, configured_enabled=get_auto_evolve_enabled()
+            )
+        except ValueError as exc:
+            return Result.err(MCPToolError(str(exc), tool_name="ouroboros_start_evaluate"))
+
+        # --- Subagent dispatch: gate on runtime + opencode_mode ---
+        # Plugin mode is terminal only when no convergence successor is needed:
+        # return the delegation envelope without enqueuing a background job,
+        # matching StartExecuteSeedHandler / StartEvolveStepHandler. Polling a
+        # fake job_id would break the ouroboros_job_status contract.
+        plugin_dispatch = should_dispatch_via_plugin(self.agent_runtime_backend, self.opencode_mode)
+        if plugin_dispatch and not auto_evolve_enabled:
+            from ouroboros.mcp.tools.evaluation_job import dispatch_plugin_evaluation
+
+            return await dispatch_plugin_evaluation(
+                arguments=arguments,
                 session_id=session_id,
                 artifact=artifact,
-                artifact_type=arguments.get("artifact_type", "code"),
-                seed_content=seed_content,
-                acceptance_criterion=ac_for_payload,
-                working_dir=str(working_dir),
-                trigger_consensus=arguments.get("trigger_consensus", False),
-            )
-            return await dispatch_plugin_terminal(
-                self._event_store,
-                session_id=session_id,
-                payload=payload,
-                response_shape={
-                    "job_id": None,
-                    "session_id": session_id,
-                    "status": DELEGATED_TO_PLUGIN,
-                    "dispatch_mode": "plugin",
-                    "artifact_type": arguments.get("artifact_type", "code"),
-                    "trigger_consensus": arguments.get("trigger_consensus", False),
-                },
+                event_store=self._event_store,
+                resolve_working_dir=_resolve_evaluate_working_dir,
             )
 
         # Fall-through: real background job path.
@@ -2191,37 +2208,19 @@ class StartEvaluateHandler:
         # ``JobManager.cancel_job`` was never observable by the evaluate
         # agent process — a restart-visible cancel was silently dropped.
         async def _runner(_handle) -> MCPToolResult:
-            try:
-                if self.deadline_seconds > 0:
-                    result = await asyncio.wait_for(
-                        self._evaluate_handler.handle(arguments),
-                        timeout=self.deadline_seconds,
-                    )
-                else:
-                    result = await self._evaluate_handler.handle(arguments)
-            except TimeoutError:
-                retry_step = f"ooo evaluate {session_id}"
-                return MCPToolResult(
-                    content=(
-                        MCPContentItem(
-                            type=ContentType.TEXT,
-                            text=(
-                                "Evaluation timed out before the formal verdict completed.\n"
-                                f"Retry: {retry_step}"
-                            ),
-                        ),
-                    ),
-                    is_error=True,
-                    meta={
-                        "session_id": session_id,
-                        "status": "timed_out",
-                        "evaluation_status": "timed_out",
-                        "next_step": retry_step,
-                    },
-                )
-            if result.is_err:
-                raise RuntimeError(str(result.error))
-            return result.value
+            from ouroboros.mcp.tools.evaluation_job import run_evaluation_job
+
+            return await run_evaluation_job(
+                evaluate_handler=self._evaluate_handler,
+                arguments=arguments,
+                session_id=session_id,
+                deadline_seconds=self.deadline_seconds,
+                force_in_process=auto_evolve_enabled and plugin_dispatch,
+                auto_evolve=auto_evolve_enabled,
+                event_store=self._event_store,
+                job_manager=self._job_manager,
+                start_ralph_handler=self.start_ralph_handler,
+            )
 
         snapshot = await start_background_tool_job(
             job_manager=self._job_manager,
@@ -2256,6 +2255,7 @@ class StartEvaluateHandler:
                 job_id=snapshot.job_id,
                 cursor=snapshot.cursor,
                 session_id=session_id,
+                follow_result_job_keys=("chained_ralph_job_id",),
             ),
         }
         return Result.ok(

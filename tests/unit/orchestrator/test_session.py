@@ -939,6 +939,14 @@ class TestSessionRepository:
     ) -> None:
         """Usage-limit pauses persist resume timing metadata."""
         resume_after = datetime(2026, 1, 1, 5, tzinfo=UTC)
+        pause_owner = {
+            "schema_version": 1,
+            "kind": "coordinator_quota",
+            "execution_id": "exec_123",
+            "session_id": "sess_123",
+            "level_number": 1,
+            "coordinator_aggregate_id": "exec_123:l0:coord",
+        }
 
         result = await repository.mark_paused(
             session_id="sess_123",
@@ -947,6 +955,7 @@ class TestSessionRepository:
             pause_seconds=18000,
             resume_after=resume_after,
             pause_kind="usage_limit",
+            pause_owner=pause_owner,
         )
 
         assert result.is_ok
@@ -955,6 +964,7 @@ class TestSessionRepository:
         assert event.data["pause_seconds"] == 18000
         assert event.data["resume_after"] == resume_after.isoformat()
         assert event.data["pause_kind"] == "usage_limit"
+        assert event.data["pause_owner"] == pause_owner
 
     @pytest.mark.asyncio
     async def test_mark_cancelled(
@@ -2594,6 +2604,14 @@ class TestStaleRuntimeMetadataCleansing:
                         "pause_kind": "usage_limit",
                         "pause_seconds": 18000,
                         "resume_after": "2026-01-01T05:00:00+00:00",
+                        "pause_owner": {
+                            "schema_version": 1,
+                            "kind": "coordinator_quota",
+                            "execution_id": "exec-4",
+                            "session_id": "sess-resumed",
+                            "level_number": 1,
+                            "coordinator_aggregate_id": "exec-4:l0:coord",
+                        },
                     },
                 ),
                 BaseEvent(
@@ -2615,6 +2633,50 @@ class TestStaleRuntimeMetadataCleansing:
         assert tracker.progress.get("runtime_status") == "running"
         assert "pause_kind" not in tracker.progress
         assert "resume_after" not in tracker.progress
+        assert "pause_owner" not in tracker.progress
+
+    @pytest.mark.asyncio
+    async def test_reconstruct_session_rejects_malformed_pause_owner(self) -> None:
+        """Effect-bearing resume authority must be validated again on replay."""
+
+        from ouroboros.events.base import BaseEvent
+
+        mock_event_store = AsyncMock()
+        mock_event_store.replay = AsyncMock(
+            return_value=[
+                BaseEvent(
+                    type="orchestrator.session.started",
+                    aggregate_type="session",
+                    aggregate_id="sess-malformed-pause-owner",
+                    data={"execution_id": "exec-4", "seed_id": "seed-4"},
+                ),
+                BaseEvent(
+                    type="orchestrator.session.paused",
+                    aggregate_type="session",
+                    aggregate_id="sess-malformed-pause-owner",
+                    data={
+                        "reason": "Usage limit reached",
+                        "pause_kind": "usage_limit",
+                        "pause_owner": {
+                            "schema_version": 1,
+                            "kind": "coordinator_quota",
+                            "execution_id": "exec-4",
+                            "session_id": "sess-malformed-pause-owner",
+                            "level_number": True,
+                            "coordinator_aggregate_id": "exec-4:l0:coord",
+                        },
+                    },
+                ),
+            ]
+        )
+        mock_event_store.query_session_related_events = None
+
+        result = await SessionRepository(mock_event_store).reconstruct_session(
+            "sess-malformed-pause-owner"
+        )
+
+        assert result.is_err
+        assert "pause owner exceeds its durable bounds" in str(result.error)
 
 
 class TestEventStreamMerging:
