@@ -616,7 +616,7 @@ _UI_ARTIFACT_TAIL = (
     r"library|libraries|sdks?|packages?|validation|reference|"
     r"documentation|docs|examples?|objects?|fixtures?|locators?|models?|"
     r"errors?|failures?|warnings?|issues?|bugs?|urls?|findings?|counts?|"
-    r"screenshots?|snapshots?|"
+    r"results?|outcomes?|screenshots?|snapshots?|"
     r"listed|returned|printed|logged|reported|exported|emitted|dumped|"
     r"and\s+(?:[\w\-]+\s+){0,3}?"
     r"(?:listed|returned|printed|logged|reported|exported|emitted|dumped)))"
@@ -694,6 +694,21 @@ def _goal_artifact_head_is_web_app(goal_text: str) -> bool:
     return web_matches[-1].end() > intent_matches[-1].end()
 
 
+def _goal_has_web_co_product_conjunct(goal_text: str) -> bool:
+    """True only for genuinely coordinated goals where a SEPARATE conjunct
+    requests a web product by artifact phrase (#1813 R30) — a lone goal
+    mentioning the web is not a co-product declaration."""
+    pieces = _GOAL_CONJUNCT_SPLIT_RE.split(goal_text)
+    if len(pieces) < 2:
+        return False
+    return any(
+        _WEB_APP_ARTIFACT_PHRASE_RE.search(piece)
+        and not _LIBRARY_INTENT_RE.search(piece)
+        and _goal_has_unnegated_web_app_signal(piece)
+        for piece in pieces
+    )
+
+
 def _goal_has_web_only_conjunct(goal_text: str, other_evidence_re: re.Pattern[str]) -> bool:
     """True when some goal conjunct affirmatively requests a web app
     without carrying the other class's evidence (#1813 R20)."""
@@ -741,6 +756,12 @@ def _library_visible_goal(ledger: SeedDraftLedger) -> str:
     return _strip_negated_signals(goal, _LIBRARY_INTENT_FRAGMENT)
 
 
+_INSPECTION_TOOL_GOAL_RE = re.compile(
+    r"\b(?:automation|test(?:ing)?\s+suites?|crawlers?|scrapers?|scanners?|"
+    r"auditors?|audit\s+tools?)\b"
+)
+
+
 _MANIPULATED_TARGET_RE = re.compile(
     r"\b(?:opens?|opening|submits?|submitting|clicks?|clicking|fills?|filling|"
     r"screenshots?|captures?|capturing|crawls?|crawling|scrapes?|scraping|"
@@ -780,6 +801,11 @@ def _matches_web_app(ledger: SeedDraftLedger) -> bool:
     # catalog is required. Non-web-product goals (extensions, crawlers,
     # test suites, CLIs) still need genuine UI-composition evidence.
     if _goal_artifact_head_is_web_app(_goal_text(ledger)):
+        return True
+    # An explicitly co-produced web app ("a Python library with an admin
+    # web app") retains web ownership regardless of incidental output
+    # wording (#1813 R30) — the overlap stays an honest ambiguity.
+    if _goal_has_web_co_product_conjunct(_goal_text(ledger)):
         return True
     # Subject/secondary clauses in the goal ("for game leaderboards",
     # "with a public API") name what the app is about or co-produces, not
@@ -821,6 +847,11 @@ def _matches_web_app(ledger: SeedDraftLedger) -> bool:
     # inspected or manipulated TARGET ("submits login forms",
     # "screenshots login pages", "aggregated login page metadata") are
     # not UI the artifact produces (#1813 R26).
+    # A goal declaring an inspection/automation artifact marks output
+    # widgets as its targets (#1813 R30) — clause-level ownership, not
+    # another noun list.
+    if _INSPECTION_TOOL_GOAL_RE.search(_goal_text(ledger)):
+        return False
     ui_text = _strip_negated_signals(outputs, _UI_SIGNAL_STRIP_FRAGMENT)
     ui_text = _MANIPULATED_TARGET_RE.sub(" ", ui_text)
     return _ledger_has_browser_context(ledger) and bool(_UI_COMPOSITION_RE.search(ui_text))
@@ -830,7 +861,10 @@ _CONSUMED_DEPENDENCY_RE = re.compile(
     r"\b(?:to|from|against|via|using|through|consumes?|consuming|calls?|calling|"
     r"powered\s+by|backed\s+by|built\s+on|driven\s+by|served\s+by|"
     r"integrat\w*\s+with|invokes?|invoking|fetch\w*\s+(?:data\s+)?from)\s+"
-    r"(?!be\b)(?:an?\s+|the\s+)?(?:[\w\-'’]+\s+){0,2}?"
+    r"(?!(?:be|expose|exposing|provide|providing|offer|offering|serve|serving|"
+    r"publish|publishing|host|hosting|implement|implementing|build|building|"
+    r"create|creating|deliver|delivering)\b)"
+    r"(?:an?\s+|the\s+)?(?:[\w\-'’]+\s+){0,2}?"
     r"(?:public\s+api|rest\s+apis?|apis?|sdks?|clis?|command[\s\-]line|web\s+services?)\b"
 )
 

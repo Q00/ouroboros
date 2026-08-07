@@ -2048,3 +2048,35 @@ def test_participial_consumer_web_apps_are_not_the_product(goal: str) -> None:
     result = derive_domain_from_ledger(ledger)
     assert result.is_single
     assert result.single is TaskClass.LIBRARY
+
+
+@pytest.mark.parametrize(
+    "goal",
+    ["Build a backend to expose a REST API", "Build a backend to provide a REST API"],
+)
+def test_production_purpose_clauses_are_not_consumed_dependencies(goal: str) -> None:
+    """R30 probe: "to expose/provide a REST API" produces the API."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value="JSON responses for clients")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_SERVICE
+
+
+def test_with_joined_web_co_product_owns_web_regardless_of_wording() -> None:
+    """R30 probe: an explicit web co-product retains web ownership even
+    when outputs use no fixed widget vocabulary."""
+    ledger = _bare_ledger("Build a Python library with an admin web app")
+    _seed_section(ledger, "outputs", value="An importable package and an admin portal")
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP in result.classes
+    assert TaskClass.LIBRARY in result.classes
+
+
+def test_inspection_tool_goal_voids_target_widget_outputs() -> None:
+    """R30 probe: an automation suite's checkout-form results are
+    inspected content, not a produced web app."""
+    ledger = _bare_ledger("Build a browser automation suite that tests checkout forms")
+    _seed_section(ledger, "outputs", value="Checkout form results and screenshots")
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes
