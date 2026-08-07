@@ -156,6 +156,158 @@ def test_list_recent_executions_preserves_cancelled_terminal_status(tmp_path) ->
     assert runs[0]["failed_count"] == 1
 
 
+def test_list_recent_executions_preserves_paused_status_and_pause_row(tmp_path) -> None:
+    db = tmp_path / "paused.db"
+    _make_events_db(
+        db,
+        [
+            (
+                "orch_paused",
+                "orchestrator.session.started",
+                {"execution_id": "exec_paused", "seed_goal": "Resume later"},
+            ),
+            (
+                "orch_paused",
+                "workflow.progress.updated",
+                {
+                    "execution_id": "exec_paused",
+                    "acceptance_criteria": [
+                        {"node_id": "ac_done", "status": "completed"},
+                    ],
+                },
+            ),
+            (
+                "orch_paused",
+                "orchestrator.session.paused",
+                {"execution_id": "exec_paused", "pause_reason": "quota"},
+            ),
+        ],
+    )
+
+    runs = list_recent_executions(db)
+
+    assert len(runs) == 1
+    assert runs[0]["status"] == "paused"
+    assert runs[0]["last_row"] == 3
+
+
+def test_list_recent_executions_running_checkpoint_resumes_paused_run(tmp_path) -> None:
+    db = tmp_path / "resumed.db"
+    _make_events_db(
+        db,
+        [
+            (
+                "orch_resumed",
+                "orchestrator.session.started",
+                {"execution_id": "exec_resumed", "seed_goal": "Continue"},
+            ),
+            (
+                "orch_resumed",
+                "workflow.progress.updated",
+                {
+                    "execution_id": "exec_resumed",
+                    "runtime_status": "paused",
+                    "acceptance_criteria": [
+                        {"node_id": "ac_done", "status": "completed"},
+                    ],
+                },
+            ),
+            (
+                "orch_resumed",
+                "orchestrator.session.paused",
+                {"execution_id": "exec_resumed"},
+            ),
+            (
+                "orch_resumed",
+                "orchestrator.progress.updated",
+                {
+                    "execution_id": "exec_resumed",
+                    "progress": {"runtime_status": "running"},
+                },
+            ),
+        ],
+    )
+
+    runs = list_recent_executions(db)
+
+    assert len(runs) == 1
+    assert runs[0]["status"] == "running"
+    assert runs[0]["last_row"] == 4
+
+
+def test_list_recent_executions_true_terminal_absorbs_later_resume_noise(tmp_path) -> None:
+    db = tmp_path / "terminal-absorbs.db"
+    _make_events_db(
+        db,
+        [
+            (
+                "orch_absorbed",
+                "orchestrator.session.started",
+                {"execution_id": "exec_absorbed", "seed_goal": "Finish"},
+            ),
+            (
+                "orch_absorbed",
+                "orchestrator.session.completed",
+                {"execution_id": "exec_absorbed"},
+            ),
+            (
+                "orch_absorbed",
+                "orchestrator.session.paused",
+                {"execution_id": "exec_absorbed"},
+            ),
+            (
+                "orch_absorbed",
+                "workflow.progress.updated",
+                {"execution_id": "exec_absorbed", "runtime_status": "running"},
+            ),
+        ],
+    )
+
+    runs = list_recent_executions(db)
+
+    assert len(runs) == 1
+    assert runs[0]["status"] == "completed"
+    assert runs[0]["last_row"] == 4
+
+
+def test_list_recent_executions_legacy_runtime_status_follows_event_order(tmp_path) -> None:
+    db = tmp_path / "legacy-runtime.db"
+    _make_events_db(
+        db,
+        [
+            (
+                "orch_legacy",
+                "orchestrator.session.started",
+                {"execution_id": "exec_legacy", "seed_goal": "Legacy"},
+            ),
+            (
+                "orch_legacy",
+                "orchestrator.progress.updated",
+                {"execution_id": "exec_legacy", "runtime_status": "paused"},
+            ),
+            (
+                "orch_legacy",
+                "workflow.progress.updated",
+                {"execution_id": "exec_legacy", "runtime_status": "running"},
+            ),
+            (
+                "orch_legacy",
+                "orchestrator.progress.updated",
+                {
+                    "execution_id": "exec_legacy",
+                    "progress": {"runtime_status": "failed"},
+                },
+            ),
+        ],
+    )
+
+    runs = list_recent_executions(db)
+
+    assert len(runs) == 1
+    assert runs[0]["status"] == "failed"
+    assert runs[0]["last_row"] == 4
+
+
 def test_list_recent_executions_failed_ac_wins_over_completed_recovery(tmp_path) -> None:
     db = tmp_path / "mixed.db"
     _make_events_db(

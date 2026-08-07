@@ -32,10 +32,12 @@ _RELEVANT_EVENT_TYPES: tuple[str, ...] = (
     "execution.tool.started",
     "execution.coordinator.tool.started",
     "orchestrator.tool.called",
+    "orchestrator.progress.updated",
     "workflow.progress.updated",
     "execution.session.completed",
     "orchestrator.session.completed",
     "orchestrator.session.failed",
+    "orchestrator.session.paused",
     "orchestrator.session.cancelled",
     # Carries the run-level runtime_backend (provider) — lets the board tag the
     # provider on SIMPLE runs that emit no per-worker execution.session.started.
@@ -66,30 +68,85 @@ def _connect_readonly(db_path: str | Path) -> sqlite3.Connection:
     return conn
 
 
+_EXPLICIT_TERMINAL_PRECEDENCE = {
+    "completed": 1,
+    "cancelled": 2,
+    "failed": 3,
+}
+_RUNTIME_STATUSES = frozenset({"running", "paused", "completed", "failed", "cancelled"})
+
+
+def _runtime_status(event: dict[str, Any]) -> str | None:
+    """Return the session status carried by one ordered durable event."""
+    event_type = event["event_type"]
+    explicit = {
+        "orchestrator.session.completed": "completed",
+        "orchestrator.session.failed": "failed",
+        "orchestrator.session.paused": "paused",
+        "orchestrator.session.cancelled": "cancelled",
+    }.get(event_type)
+    if explicit is not None:
+        return explicit
+    if event_type not in {"orchestrator.progress.updated", "workflow.progress.updated"}:
+        return None
+
+    payload = event.get("payload")
+    if not isinstance(payload, dict):
+        return None
+    progress = payload.get("progress")
+    value = progress.get("runtime_status") if isinstance(progress, dict) else None
+    if not value:
+        value = payload.get("runtime_status")
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().lower()
+    return normalized if normalized in _RUNTIME_STATUSES else None
+
+
 def _summary_status(
     events: list[dict[str, Any]],
     counts: dict[str, int],
 ) -> str:
     """Project one truthful run status from durable terminal and AC evidence.
 
-    Explicit failure wins over every successful-looking recovery signal.
-    Cancellation remains its own terminal state. Without a terminal event, AC
-    counts become authoritative only after no work remains in flight; a mixed
-    completed/failed recovery must never be presented as completed.
+    Explicit failure wins over every successful-looking recovery signal, and
+    cancellation remains its own terminal state. Pauses are resumable: a later
+    running progress checkpoint replaces them, while a true session terminal is
+    absorbing. Without lifecycle evidence, AC counts become authoritative only
+    after no work remains in flight; mixed recovery must never look successful.
     """
-    terminal_types = {event["event_type"] for event in events}
-    if "orchestrator.session.failed" in terminal_types:
-        return "failed"
-    if "orchestrator.session.cancelled" in terminal_types:
-        return "cancelled"
+    explicit_terminal: str | None = None
+    resumable_status: str | None = None
+    for event in events:
+        event_type = event["event_type"]
+        status = _runtime_status(event)
+        if event_type in {
+            "orchestrator.session.completed",
+            "orchestrator.session.failed",
+            "orchestrator.session.cancelled",
+        }:
+            assert status is not None
+            if (
+                explicit_terminal is None
+                or _EXPLICIT_TERMINAL_PRECEDENCE[status]
+                > _EXPLICIT_TERMINAL_PRECEDENCE[explicit_terminal]
+            ):
+                explicit_terminal = status
+            continue
+        if explicit_terminal is None and status is not None:
+            resumable_status = status
+
+    if explicit_terminal in {"failed", "cancelled"}:
+        return explicit_terminal
 
     no_work_in_flight = counts["executing"] == 0 and counts["pending"] == 0
+    projected_status = explicit_terminal or resumable_status
     if counts["failed"] and (
-        "orchestrator.session.completed" in terminal_types or no_work_in_flight
+        projected_status == "completed" or not projected_status and no_work_in_flight
     ):
         return "failed"
-    if "orchestrator.session.completed" in terminal_types:
-        return "completed"
+    if projected_status is not None:
+        return projected_status
     if no_work_in_flight and counts["completed"]:
         return "completed"
     return "running"
@@ -213,7 +270,9 @@ def list_recent_executions(db_path: str | Path, *, limit: int = 10) -> list[dict
         "orchestrator.session.started",
         "orchestrator.session.completed",
         "orchestrator.session.failed",
+        "orchestrator.session.paused",
         "orchestrator.session.cancelled",
+        "orchestrator.progress.updated",
         "execution.node.created",
         "execution.node.updated",
         "execution.subtask.updated",
