@@ -1459,7 +1459,10 @@ def get_telemetry_enabled() -> bool:
     if env is not None:
         return env
     config_path = get_config_dir() / "config.yaml"
-    if not config_path.exists():
+    # ``Path.exists()`` is false for a dangling symlink. Treat that as invalid
+    # persisted configuration rather than the genuinely-absent default-on
+    # case; ``load_config`` below will reject the unreadable target.
+    if not config_path.exists() and not config_path.is_symlink():
         return True
     try:
         return load_config(config_path).telemetry.enabled

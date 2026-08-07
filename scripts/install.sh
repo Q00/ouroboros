@@ -101,7 +101,9 @@ PH_HOST="${OUROBOROS_POSTHOG_HOST:-https://us.i.posthog.com}"
 _telemetry_config_allows() {
   local f="$HOME/.ouroboros/config.yaml" script_dir source_root=""
   local python_candidate ouroboros_cmd shebang status
-  [ -e "$f" ] || return 0
+  # `-e` is false for a dangling symlink. That is invalid persisted state,
+  # not a genuinely absent config, so keep it on the fail-closed path.
+  [ -e "$f" ] || [ -L "$f" ] || return 0
   [ -r "$f" ] || return 1
 
   # Match the application resolver: parse the complete YAML document and

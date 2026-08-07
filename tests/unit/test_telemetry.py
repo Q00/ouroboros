@@ -12,6 +12,7 @@ from typing import Any
 import pytest
 
 from ouroboros import telemetry
+from ouroboros.config.loader import get_telemetry_enabled
 
 
 @pytest.fixture(autouse=True)
@@ -79,6 +80,21 @@ class TestOptOut:
         config_path.parent.mkdir(parents=True)
         config_path.write_text(config, encoding="utf-8")
 
+        assert telemetry.is_enabled() is False
+
+    def test_dangling_config_symlink_fails_closed(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        monkeypatch.setenv("OUROBOROS_POSTHOG_API_KEY", "phc_test")
+        config_path = tmp_path / ".ouroboros" / "config.yaml"
+        config_path.parent.mkdir(parents=True)
+        config_path.symlink_to(config_path.parent / "missing-config.yaml")
+
+        assert config_path.is_symlink()
+        assert not config_path.exists()
+        assert get_telemetry_enabled() is False
         assert telemetry.is_enabled() is False
 
     def test_project_env_cannot_override_privacy_or_destination(self, tmp_path: Path) -> None:

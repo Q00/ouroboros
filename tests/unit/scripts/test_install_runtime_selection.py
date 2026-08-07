@@ -141,6 +141,10 @@ def test_install_script_syntax_is_valid() -> None:
 def _telemetry_probe_curl(tmp_path: Path) -> str:
     captures = tmp_path / "telemetry.log"
     return f'''#!/bin/sh
+case "$*" in
+  *"/capture/"*) ;;
+  *) printf '{{"info":{{"version":"0.50.0"}}}}\n'; exit 0 ;;
+esac
 state="$HOME/.ouroboros/telemetry.json"
 if ! grep -q '"notice_shown"[[:space:]]*:[[:space:]]*true' "$state" 2>/dev/null; then
   printf 'capture-before-notice\\n' >> "{captures!s}"
@@ -155,10 +159,7 @@ def _telemetry_fake_commands(tmp_path: Path) -> dict[str, str]:
     """Use the test environment's schema while recording installer captures."""
     return {
         "curl": _telemetry_probe_curl(tmp_path),
-        "python3": (
-            "#!/bin/sh\n"
-            f"exec {shlex.quote(sys.executable)} \"$@\"\n"
-        ),
+        "python3": (f'#!/bin/sh\nexec {shlex.quote(sys.executable)} "$@"\n'),
     }
 
 
@@ -178,6 +179,7 @@ def _wait_for_telemetry(tmp_path: Path) -> str:
 def test_installer_absent_config_retains_disclosed_default_on(tmp_path: Path) -> None:
     result = _run_installer(
         tmp_path,
+        local_repo=False,
         env={"OUROBOROS_TELEMETRY": ""},
         fake_commands=_telemetry_fake_commands(tmp_path),
     )
@@ -188,6 +190,26 @@ def test_installer_absent_config_retains_disclosed_default_on(tmp_path: Path) ->
     assert '"event":"install_started"' in captures
     assert '"event":"install_completed"' in captures
     assert result.stdout.count("Anonymous usage stats help improve Ouroboros") == 1
+
+
+def test_copied_installer_dangling_config_symlink_fails_closed(tmp_path: Path) -> None:
+    config = tmp_path / "home" / ".ouroboros" / "config.yaml"
+    config.parent.mkdir(parents=True)
+    config.symlink_to(config.parent / "missing-config.yaml")
+
+    result = _run_installer(
+        tmp_path,
+        local_repo=False,
+        env={"OUROBOROS_TELEMETRY": ""},
+        fake_commands={"curl": _telemetry_probe_curl(tmp_path)},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert config.is_symlink()
+    assert not config.exists()
+    assert not (tmp_path / "telemetry.log").exists()
+    assert not (tmp_path / "home" / ".ouroboros" / "telemetry.json").exists()
+    assert "Anonymous usage stats help improve Ouroboros" not in result.stdout
 
 
 def test_installer_persisted_opt_out_suppresses_all_collection(tmp_path: Path) -> None:
