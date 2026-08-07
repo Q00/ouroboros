@@ -101,6 +101,16 @@ class TestFirstTimePrefs:
 
 
 class TestDetectKeywords:
+    def test_ooo_run_routes_to_non_reserved_claude_skill_name(self):
+        result = detect_keywords("ooo run seed.yaml")
+        assert result["detected"] is True
+        assert result["suggested_skill"] == "/ouroboros:ouroboros-run"
+
+    def test_ooo_execute_alias_routes_to_non_reserved_claude_skill_name(self):
+        result = detect_keywords("ooo execute seed.yaml")
+        assert result["detected"] is True
+        assert result["suggested_skill"] == "/ouroboros:ouroboros-run"
+
     def test_ooo_qa_detected(self):
         result = detect_keywords("ooo qa src/main.py")
         assert result["detected"] is True
@@ -234,7 +244,7 @@ class TestSetupBypass:
 
     def test_setup_and_help_in_bypass_list(self):
         assert "/ouroboros:setup" in SETUP_BYPASS_SKILLS
-        assert "/ouroboros:help" in SETUP_BYPASS_SKILLS
+        assert "/ouroboros:ouroboros-help" in SETUP_BYPASS_SKILLS
 
     def test_resume_session_in_bypass_list(self):
         # resume-session reads the EventStore directly and is meant to be used
@@ -371,7 +381,7 @@ class TestHookProtocol:
                 "hookEventName": "UserPromptSubmit",
                 "additionalContext": (
                     "<skill-suggestion>\n🎯 MATCHED SKILLS:\n"
-                    '- /ouroboros:status - Detected "ooo status"\n'
+                    '- /ouroboros:ouroboros-status - Detected "ooo status"\n'
                     "</skill-suggestion>"
                 ),
             }
@@ -391,7 +401,7 @@ class TestHookProtocol:
 
         context = json.loads(capsys.readouterr().out)["hookSpecificOutput"]["additionalContext"]
         assert "/ouroboros:setup" in context
-        assert "/ouroboros:status" not in context
+        assert "/ouroboros:ouroboros-status" not in context
 
     @patch.object(_mod, "is_mcp_configured", return_value=False)
     @patch.object(_mod, "is_first_time", return_value=False)
@@ -412,7 +422,7 @@ class TestHookProtocol:
             main()
 
         context = json.loads(capsys.readouterr().out)["hookSpecificOutput"]["additionalContext"]
-        assert "/ouroboros:status" in context
+        assert "/ouroboros:ouroboros-status" in context
 
     @patch.object(_mod, "is_mcp_configured", return_value=True)
     @patch.object(_mod, "is_first_time", return_value=False)
@@ -429,7 +439,7 @@ class TestHookProtocol:
             main()
 
         context = json.loads(capsys.readouterr().out)["hookSpecificOutput"]["additionalContext"]
-        assert "/ouroboros:status" in context
+        assert "/ouroboros:ouroboros-status" in context
 
     @patch.object(_mod, "is_first_time", return_value=False)
     def test_recursive_json_failure_falls_back_without_crashing(self, _first, capsys):

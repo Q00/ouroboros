@@ -79,7 +79,7 @@ If the configured runtime EventStore does not exist:
 
 ```
 No Ouroboros database found at the configured runtime path.
-Run an execution first with: /ouroboros:run
+Run an execution first with: /ouroboros:ouroboros-run
 ```
 
 ## Example
