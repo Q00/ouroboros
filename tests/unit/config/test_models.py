@@ -309,6 +309,8 @@ class TestExecutionConfig:
             retrospective_interval=5,
             tui_autolaunch=True,
             auto_evaluate=False,
+            auto_evolve=False,
+            auto_evolve_max_generations=7,
             decomposition_mode="bounce_only",
             context_pack=False,
         )
@@ -316,6 +318,8 @@ class TestExecutionConfig:
         assert config.retrospective_interval == 5
         assert config.tui_autolaunch is True
         assert config.auto_evaluate is False
+        assert config.auto_evolve is False
+        assert config.auto_evolve_max_generations == 7
         assert config.default_model is None
         assert config.decomposition_mode == "bounce_only"
         assert config.context_pack is False
@@ -327,9 +331,17 @@ class TestExecutionConfig:
         assert config.retrospective_interval == 3
         assert config.tui_autolaunch is False
         assert config.auto_evaluate is True
+        assert config.auto_evolve is True
+        assert config.auto_evolve_max_generations == 3
         assert config.default_model is None
         assert config.decomposition_mode == "bounce_only"
         assert config.context_pack is True
+
+    @pytest.mark.parametrize(("raw", "expected"), [(0, 1), (11, 10), (4, 4)])
+    def test_auto_evolve_generation_budget_is_clamped(self, raw: int, expected: int) -> None:
+        assert (
+            ExecutionConfig(auto_evolve_max_generations=raw).auto_evolve_max_generations == expected
+        )
 
     def test_execution_config_migrates_legacy_preflight_to_bounce_only(self) -> None:
         """Stored preflight settings cannot re-enable pre-execution splitting."""

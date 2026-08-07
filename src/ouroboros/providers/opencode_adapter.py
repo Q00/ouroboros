@@ -426,18 +426,29 @@ class OpenCodeLLMAdapter:
         Returns:
             Error message string, or ``None`` if no terminal error.
         """
+        saw_error_event = False
         for event in events:
             # Top-level error events are always terminal
-            if event.get("type") == "error":
-                error = event.get("error", {})
-                if isinstance(error, dict):
-                    name = error.get("name", "")
-                    data = error.get("data", {})
-                    msg = data.get("message", "") if isinstance(data, dict) else ""
-                    return msg or name or "Unknown error"
-                return str(error) if error else None
+            if event.get("type") != "error":
+                continue
+            saw_error_event = True
+            error = event.get("error", {})
+            if isinstance(error, dict):
+                name = error.get("name", "")
+                data = error.get("data", {})
+                msg = data.get("message", "") if isinstance(data, dict) else ""
+                if msg or name:
+                    return msg or name
+            elif error:
+                return str(error)
+            # This frame declares a failure but withholds the reason. Keep
+            # reading — a later frame may name it — but do not let the missing
+            # reason be read as a missing failure.
 
-        return None
+        # An error frame with nothing in it is still an error frame. Reporting
+        # `None` here handed the caller a run that failed as one that succeeded,
+        # carrying whatever partial text had been emitted before the failure.
+        return "Unknown error" if saw_error_event else None
 
     async def complete(
         self,

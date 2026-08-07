@@ -264,6 +264,11 @@ class HandlerRunStarter:
             "cwd": self.cwd,
             "use_worktree": self.use_worktree,
             "efficiency_mode": self.efficiency_mode,
+            # Auto owns its own RALPH_HANDOFF and final-evaluation path. Keep
+            # the run handoff from adding a second evaluation owner or a
+            # competing run-session Ralph lineage.
+            "auto_evaluate": False,
+            "auto_evolve": False,
         }
         if self.frugality_assurance_explicit:
             arguments["frugality_assurance"] = self.frugality_assurance
@@ -320,7 +325,15 @@ class HandlerSynchronousRunStarter:
         }
         task = asyncio.create_task(
             self.handler.handle(
-                {"seed_content": seed_yaml, "cwd": self.cwd, "skip_qa": self.skip_qa},
+                {
+                    "seed_content": seed_yaml,
+                    "cwd": self.cwd,
+                    "skip_qa": self.skip_qa,
+                    # Complete-product Auto owns Ralph and the final formal
+                    # evaluation after the run artifact is available.
+                    "auto_evaluate": False,
+                    "auto_evolve": False,
+                },
                 execution_id=execution_id,
                 session_id_override=session_id,
                 synchronous=True,

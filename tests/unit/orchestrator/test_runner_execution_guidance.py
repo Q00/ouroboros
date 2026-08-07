@@ -110,7 +110,9 @@ def test_execution_contract_persists_declared_guidance(tmp_path: Path) -> None:
     _write_guidance(tmp_path, "team", "Use the project conventions.\n")
     runner, _store = _runner(tmp_path, ("team",))
 
-    contract = runner._build_execution_contract(seed=_seed())
+    contract = runner._build_execution_contract(
+        project_identity=runner._project_identity(), seed=_seed()
+    )
 
     guidance = contract["guidance"]
     assert guidance["mode"] == "declared"
@@ -124,7 +126,9 @@ def test_execution_contract_persists_declared_guidance(tmp_path: Path) -> None:
 def test_resume_uses_persisted_ids_not_current_config(tmp_path: Path) -> None:
     _write_guidance(tmp_path, "team", "Use the project conventions.\n")
     original, _store = _runner(tmp_path, ("team",))
-    persisted = original._build_execution_contract(seed=_seed())
+    persisted = original._build_execution_contract(
+        project_identity=original._project_identity(), seed=_seed()
+    )
 
     resumed, _store = _runner(tmp_path, ())
     changed = resumed._restore_execution_contract(
@@ -140,7 +144,9 @@ def test_resume_uses_persisted_ids_not_current_config(tmp_path: Path) -> None:
 def test_resume_rejects_changed_guidance_content(tmp_path: Path) -> None:
     path = _write_guidance(tmp_path, "team", "Use the project conventions.\n")
     original, _store = _runner(tmp_path, ("team",))
-    persisted = original._build_execution_contract(seed=_seed())
+    persisted = original._build_execution_contract(
+        project_identity=original._project_identity(), seed=_seed()
+    )
     path.write_text("Changed conventions.\n", encoding="utf-8")
 
     resumed, _store = _runner(tmp_path, ())
@@ -159,13 +165,17 @@ def test_process_local_contract_never_forms_a_guidance_proof_cohort(tmp_path: Pa
     guided_identity = guided._proof_cohort_identity(
         {
             "seed_id": _seed().metadata.seed_id,
-            EXECUTION_CONTRACT_PROGRESS_KEY: guided._build_execution_contract(seed=_seed()),
+            EXECUTION_CONTRACT_PROGRESS_KEY: guided._build_execution_contract(
+                project_identity=guided._project_identity(), seed=_seed()
+            ),
         }
     )
     unguided_identity = unguided._proof_cohort_identity(
         {
             "seed_id": _seed().metadata.seed_id,
-            EXECUTION_CONTRACT_PROGRESS_KEY: unguided._build_execution_contract(seed=_seed()),
+            EXECUTION_CONTRACT_PROGRESS_KEY: unguided._build_execution_contract(
+                project_identity=unguided._project_identity(), seed=_seed()
+            ),
         }
     )
 
@@ -235,7 +245,7 @@ def test_legacy_contract_cannot_reconstruct_guidance_or_effect_inputs(tmp_path: 
 async def test_records_bounded_guidance_injection_event(tmp_path: Path) -> None:
     _write_guidance(tmp_path, "team", "Use the project conventions.\n")
     runner, event_store = _runner(tmp_path, ("team",))
-    runner._build_execution_contract(seed=_seed())
+    runner._build_execution_contract(project_identity=runner._project_identity(), seed=_seed())
 
     await runner._record_execution_guidance_injection(
         session_id="sess-guidance",
@@ -254,7 +264,7 @@ async def test_records_bounded_guidance_injection_event(tmp_path: Path) -> None:
 async def test_guidance_injection_replay_deduplicates_same_attempt(tmp_path: Path) -> None:
     _write_guidance(tmp_path, "team", "Use the project conventions.\n")
     runner, event_store = _runner(tmp_path, ("team",))
-    runner._build_execution_contract(seed=_seed())
+    runner._build_execution_contract(project_identity=runner._project_identity(), seed=_seed())
 
     await runner._record_execution_guidance_injection(
         session_id="sess-guidance",
@@ -278,7 +288,7 @@ async def test_guidance_injection_replay_deduplicates_same_attempt(tmp_path: Pat
 async def test_guidance_provenance_persistence_is_fail_closed(tmp_path: Path) -> None:
     _write_guidance(tmp_path, "team", "Use the project conventions.\n")
     runner, event_store = _runner(tmp_path, ("team",))
-    runner._build_execution_contract(seed=_seed())
+    runner._build_execution_contract(project_identity=runner._project_identity(), seed=_seed())
     event_store.append.side_effect = RuntimeError("store unavailable")
 
     with pytest.raises(OrchestratorError, match="persist.*guidance provenance"):
@@ -391,7 +401,9 @@ async def test_parallel_execution_receives_declared_guidance(tmp_path: Path) -> 
         session_id="sess-guidance-parallel",
     )
     generation = runner._begin_process_local_authority_generation()
-    contract = runner._build_execution_contract(seed=seed, authority_generation=generation)
+    contract = runner._build_execution_contract(
+        project_identity=runner._project_identity(), seed=seed, authority_generation=generation
+    )
     runner._register_process_local_authority(
         session_id=tracker.session_id,
         execution_id=tracker.execution_id,
@@ -498,6 +510,7 @@ async def test_same_process_resume_delivers_persisted_guidance_to_adapter_system
     seed = _seed()
     generation = original._begin_process_local_authority_generation()
     persisted_contract = original._build_execution_contract(
+        project_identity=original._project_identity(),
         seed=seed,
         authority_generation=generation,
     )
@@ -585,6 +598,7 @@ async def test_guided_resume_rejects_missing_guidance_before_provider_call(
     seed = _seed()
     generation = runner._begin_process_local_authority_generation()
     malformed_contract = runner._build_execution_contract(
+        project_identity=runner._project_identity(),
         seed=seed,
         authority_generation=generation,
     )

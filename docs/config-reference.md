@@ -183,7 +183,7 @@ orchestrator:
 | `runtime_backend` | `"claude"` \| `"codex"` \| `"opencode"` \| `"hermes"` \| `"gemini"` \| `"kiro"` \| `"copilot"` \| `"pi"` \| `"gjc"` \| `"antigravity"` \| `"grok"` \| `"zcode"` | `"claude"` | The agent runtime backend used for workflow execution. Overridable via `OUROBOROS_AGENT_RUNTIME`. See [runtime capability matrix](runtime-capability-matrix.md). |
 | `permission_mode` | `"default"` \| `"acceptEdits"` \| `"bypassPermissions"` | `"acceptEdits"` | Stored permission preference. Runner-driven seed execution forces the native `bypassPermissions` equivalent for both fresh and resumed dispatches wherever the backend exposes an approval surface; persisted handles cannot downgrade it. Pi and GJC expose no separate approval flag and run headlessly without an approval dialogue. |
 | `opencode_permission_mode` | `"default"` \| `"acceptEdits"` \| `"bypassPermissions"` | `"bypassPermissions"` | Permission mode when using the OpenCode runtime. Overridable via `OUROBOROS_OPENCODE_PERMISSION_MODE`. |
-| `max_parallel_workers` | `int >= 1` | `3` | Requested maximum concurrent Acceptance Criteria workers for parallel execution. Overridable via `OUROBOROS_MAX_PARALLEL_WORKERS`. Invalid explicit values fail instead of falling back to the default. **Note:** the effective fan-out is additionally capped to the connected backend's known concurrency limit — the native Claude backend is governed by its RPM/TPM rate bucket, while CLI runtimes whose underlying LLM limits are unknown (`hermes`, `codex`, `gemini`, `opencode`, ...) are **serialized to 1 by default** to avoid stampeding the provider's rate/quota window. Raise that cap with `OUROBOROS_MAX_CONCURRENCY`. |
+| `max_parallel_workers` | `int >= 1` | `3` | Maximum Acceptance Criteria workers the adaptive dispatch window may reach. Overridable via `OUROBOROS_MAX_PARALLEL_WORKERS`. Invalid explicit values fail instead of falling back to the default. The native Claude backend starts at this value and is paced by its RPM/TPM bucket. CLI runtimes whose underlying LLM limits are unknown (`hermes`, `codex`, `gemini`, `opencode`, ...) start at 1, halve the window on 429 pressure, honor `Retry-After`, and add one worker after sustained success until this ceiling. |
 | `cli_path` | `string \| null` | `null` | Absolute path to the Claude CLI binary (`~` is expanded). When `null`, the SDK-bundled CLI is used. Overridable via `OUROBOROS_CLI_PATH`. |
 | `codex_cli_path` | `string \| null` | `null` | Absolute path to the Codex CLI binary (`~` is expanded). When `null`, resolved from `PATH` at runtime. Overridable via `OUROBOROS_CODEX_CLI_PATH`. |
 | `opencode_cli_path` | `string \| null` | `null` | Absolute path to the OpenCode CLI binary (`~` is expanded). When `null`, resolved from `PATH` at runtime. Overridable via `OUROBOROS_OPENCODE_CLI_PATH`. |
@@ -357,6 +357,9 @@ Controls Phase 2 — the Double Diamond execution loop.
 execution:
   max_iterations_per_ac: 10   # Maximum execution iterations per acceptance criterion
   retrospective_interval: 3   # Iterations between automatic retrospectives
+  auto_evaluate: true          # Evaluate completed runs, including failed runs with artifacts
+  auto_evolve: true            # Continue rejected evaluations through bounded Ralph
+  auto_evolve_max_generations: 3  # Automatic Ralph budget, clamped to 1..10
   default_model: null         # null/default/current = let the selected runtime choose
   project_guidance:            # Explicit project-local execution guidance allowlist
     - team
@@ -366,6 +369,9 @@ execution:
 |--------|------|---------|-------------|
 | `max_iterations_per_ac` | `int >= 1` | `10` | Maximum number of execution iterations for a single acceptance criterion before the system escalates or declares failure. |
 | `retrospective_interval` | `int >= 1` | `3` | Number of iterations between automatic retrospective evaluations. |
+| `auto_evaluate` | `bool` | `true` | Enqueue formal 3-stage evaluation after a completed background run has a session and artifact. This includes unsuccessful AC execution; handler-level failures without an evaluable run are excluded. |
+| `auto_evolve` | `bool` | `true` | When formal evaluation returns an explicit rejection, seed a generation-1 lineage snapshot and enqueue a bounded Ralph continuation. Per-call `auto_evolve` overrides this setting. |
+| `auto_evolve_max_generations` | `int` | `3` | Maximum generations for automatically chained Ralph work. Values are clamped to Ralph's supported `1..10` range. |
 | `default_model` | `string \| null` | `null` | Optional Execute-stage model pin. `null`, an empty value, `"default"`, or `"current"` means Ouroboros does not pass a concrete `--model`; the selected runtime keeps its own current/default model. `OUROBOROS_EXECUTION_MODEL` has highest precedence, and a present empty env var explicitly clears the saved pin for that process. |
 | `project_guidance` | `list[string]` | `[]` | Guidance IDs loaded from `<project-root>/.ouroboros/guidance/<id>/GUIDANCE.md` and appended to execution system prompts. This option is config-only and has no environment-variable override. |
 
@@ -614,8 +620,8 @@ All environment variables have higher priority than the corresponding `config.ya
 | `OUROBOROS_MODEL_TIER_ROUTING` | _(routing kill switch)_ | Model-tier routing is enabled by default. Set to `0`, `off`, or `false` (case- and whitespace-insensitive) to disable routing and emit no routing events. |
 | `OUROBOROS_SHADOW_REPLAY` | _(experiment arm)_ | Default OFF. Only `1`, `true`, or `on` arms the opt-in shadow-baseline harness. Current live decompositions lack deterministic MECE attestation and are skipped before baseline model dispatch; bundled runtimes also lack the complete filesystem/external-effect isolation attestation, so production emits no shadow baseline today. |
 | `OUROBOROS_MAX_PARALLEL_WORKERS` | `orchestrator.max_parallel_workers` | Requested maximum concurrent Acceptance Criteria workers for parallel execution. Must be a positive integer. |
-| `OUROBOROS_MAX_CONCURRENCY` | _(fan-out cap)_ | Caps the effective delivery fan-out for the connected backend, overriding Ouroboros' backend-aware default. Use it to raise CLI runtimes (`hermes`, `codex`, ...) above their serialized-by-default ceiling of 1. Must be a positive integer; blank/invalid values are ignored so the safety cap is never silently disabled. |
-| `OUROBOROS_<BACKEND>_RPM` | _(rate budget)_ | Per-backend requests-per-minute ceiling for the shared dispatch rate bucket. `<BACKEND>` is the runtime name (the same value you set for `runtime_backend` / `OUROBOROS_AGENT_RUNTIME`) upper-cased with non-alphanumerics collapsed to `_` (e.g. `OUROBOROS_HERMES_RPM`, `OUROBOROS_CODEX_RPM`, `OUROBOROS_OPENCODE_RPM`). Internal `*_cli` adapter handles (`hermes_cli`, `codex_cli`, `gemini_cli`, `copilot_cli`) canonicalize to these names, so the user-facing key always applies. Dormant unless set — declaring it is how you safely raise `OUROBOROS_MAX_CONCURRENCY` on a CLI runtime. Must be a positive integer; blank/invalid values are ignored. |
+| `OUROBOROS_MAX_CONCURRENCY` | _(initial fan-out estimate)_ | Overrides the backend-aware starting window. The legacy name is retained for compatibility; the value is no longer a permanent cap in runner-owned execution. Live 429/success feedback may shrink or grow the window, never above `OUROBOROS_MAX_PARALLEL_WORKERS`. Must be a positive integer; blank/invalid values are ignored. |
+| `OUROBOROS_<BACKEND>_RPM` | _(rate budget)_ | Per-backend requests-per-minute ceiling for the shared dispatch rate bucket. `<BACKEND>` is the runtime name (the same value you set for `runtime_backend` / `OUROBOROS_AGENT_RUNTIME`) upper-cased with non-alphanumerics collapsed to `_` (e.g. `OUROBOROS_HERMES_RPM`, `OUROBOROS_CODEX_RPM`, `OUROBOROS_OPENCODE_RPM`). Internal `*_cli` adapter handles (`hermes_cli`, `codex_cli`, `gemini_cli`, `copilot_cli`) canonicalize to these names, so the user-facing key always applies. Dormant unless set. Must be a positive integer; blank/invalid values are ignored. |
 | `OUROBOROS_<BACKEND>_TPM` | _(rate budget)_ | Per-backend tokens-per-minute ceiling for the shared dispatch rate bucket (same naming as `_RPM`). Dormant unless set. Must be a positive integer; blank/invalid values are ignored. |
 | `OUROBOROS_BACKEND_LIMITS` | _(config path)_ | Path to the backend-limits YAML file (default `~/.ouroboros/backend_limits.yaml`). See [Backend concurrency & rate limits](#backend-concurrency--rate-limits). |
 | `OUROBOROS_CLI_PATH` | `orchestrator.cli_path` | Path to the Claude CLI binary. |
@@ -686,32 +692,37 @@ All environment variables have higher priority than the corresponding `config.ya
 ## Backend concurrency & rate limits
 
 Ouroboros plans delivery fan-out — the parallel execution of acceptance criteria — and is
-responsible for keeping it within the connected LLM backend's concurrency and rate limits
-rather than relying on the agent runtime to throttle itself. Two independent levers govern this,
-and **every value is configurable without source-level changes**:
+responsible for adapting it to the connected LLM backend's concurrency and rate limits rather
+than relying on the agent runtime to throttle itself. Two independent controls govern this, and
+**every pre-flight value is configurable without source-level changes**:
 
-- **Fan-out concurrency** (`max_concurrency`): how many acceptance criteria dispatch in
-  parallel. The native Claude backend is uncapped here (it is paced by its own RPM/TPM bucket);
-  every CLI runtime whose underlying LLM limits are unknown is **serialized to 1 by default**.
+- **Adaptive fan-out**: `max_concurrency` is the pre-flight starting estimate (the legacy field
+  name is retained for compatibility), while `orchestrator.max_parallel_workers` is the hard
+  controller ceiling. Unknown CLI runtimes start at 1. A short/generic 429 or explicit
+  concurrency rejection halves the window; `Retry-After` pauses new provider entrances and is
+  saturated at 24 hours before clock arithmetic; three successful completions add one worker.
+  The complete AIMD policy is part of the durable execution-semantics fingerprint. Explicit
+  usage/quota exhaustion stays on the durable PAUSED → resume path and is never converted into
+  a concurrency retry.
 - **Rate budget** (`requests_per_minute` / `tokens_per_minute`): a shared sliding-window bucket
   that paces dispatch across all concurrent workers. For non-Claude runtimes it is **dormant
-  until you declare a budget** — declaring one is what makes raising the fan-out cap safe.
+  until you declare a budget**.
 
 ### Resolution precedence
 
 Each dimension is resolved independently, highest precedence first:
 
-1. **Environment variables** — `OUROBOROS_MAX_CONCURRENCY` (cap, any backend) and per-backend
-   `OUROBOROS_<BACKEND>_RPM` / `OUROBOROS_<BACKEND>_TPM`.
+1. **Environment variables** — `OUROBOROS_MAX_CONCURRENCY` (initial estimate, any backend) and
+   per-backend `OUROBOROS_<BACKEND>_RPM` / `OUROBOROS_<BACKEND>_TPM`.
 2. **Config file** — `~/.ouroboros/backend_limits.yaml` (path overridable via
    `OUROBOROS_BACKEND_LIMITS`).
-3. **Built-in registry** — Claude's ceilings; otherwise the serialize-by-default cap of 1.
+3. **Built-in registry** — Claude's ceilings; otherwise the serialize-by-default initial value 1.
 
 The config file is loaded lazily, cached by mtime (edits apply without a restart), and is
 fully fault-tolerant: a missing, malformed, or non-regular file is ignored and resolution falls
 back to the registry. Backend keys are canonicalized, so aliases (`anthropic`, `claude_code`)
-map to `claude`. Only positive integers are honored; `0`/negative/blank values are ignored so a
-typo never silently disables a safety limit.
+map to `claude`. Only positive integers are honored; `0`/negative/blank values are ignored so an
+invalid value never silently replaces the serialize-by-default starting estimate.
 
 ### `~/.ouroboros/backend_limits.yaml`
 
@@ -726,8 +737,8 @@ backends:
     requests_per_minute: 40
     tokens_per_minute: 32000
 
-  # Declare a safe budget for a CLI runtime, then raise its fan-out cap
-  # (via OUROBOROS_MAX_CONCURRENCY) knowing dispatch will be paced.
+  # Declare a CLI runtime's starting fan-out estimate and rate budget.
+  # Live feedback still controls the window within max_parallel_workers.
   # Use the runtime name you select with `runtime_backend` (hermes, codex,
   # gemini, copilot, opencode, goose, pi, kiro, gjc) — the `*_cli` adapter handles
   # canonicalize to these, so either form resolves to the same entry.

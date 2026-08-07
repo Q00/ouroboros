@@ -21,7 +21,7 @@ import yaml
 
 @dataclass(frozen=True, slots=True)
 class SkillToolMapping:
-    """Frontmatter-backed mapping from one packaged skill to one MCP tool."""
+    """Mapping from one canonical packaged skill identity to one MCP tool."""
 
     skill_name: str
     mcp_tool: str
@@ -323,9 +323,9 @@ def discover_skill_tool_mappings(
     mappings: list[SkillToolMapping] = []
     for skill_path in sorted(root.glob("*/SKILL.md")):
         frontmatter = _read_frontmatter(skill_path)
-        skill_name = frontmatter.get("name")
+        display_name = frontmatter.get("name")
         mcp_tool = frontmatter.get("mcp_tool")
-        if not isinstance(skill_name, str) or not skill_name.strip():
+        if not isinstance(display_name, str) or not display_name.strip():
             continue
         if not isinstance(mcp_tool, str) or not mcp_tool.strip():
             continue
@@ -333,7 +333,10 @@ def discover_skill_tool_mappings(
         mcp_args = dict(raw_mcp_args) if isinstance(raw_mcp_args, Mapping) else {}
         mappings.append(
             SkillToolMapping(
-                skill_name=skill_name.strip(),
+                # The directory is the runtime-neutral command identity. The
+                # frontmatter name is a host-facing registration name and may
+                # need a prefix to avoid reserved host commands.
+                skill_name=skill_path.parent.name,
                 mcp_tool=mcp_tool.strip(),
                 skill_path=str(skill_path.relative_to(root.parent)),
                 mcp_args=mcp_args,

@@ -705,6 +705,7 @@ class HermesCliRuntime(AgentRuntime):
                 for handler in get_ouroboros_tools(
                     runtime_backend=self._runtime_backend,
                     llm_backend=self._llm_backend,
+                    runtime_adapter=self,
                 )
             }
         return self._builtin_mcp_handlers

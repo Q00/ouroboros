@@ -16,6 +16,7 @@ from ouroboros.evolution.focus import select_evolution_focus
 from ouroboros.evolution.projector import LineageProjector
 from ouroboros.evolution.regression import RegressionReport
 from ouroboros.evolution.wonder import GroundedQuestion, WonderOutput
+from ouroboros.mcp.tools.evaluate_ralph_chain import evaluation_summary_from_eval_meta
 
 
 def _seed(*acs: str | AcceptanceCriterionSpec) -> Seed:
@@ -62,6 +63,26 @@ def test_only_failed_node_stays_active() -> None:
     assert focus.active_ac_indices == (1,)
     assert focus.frozen_ac_indices == (0, 2)
     assert set(focus.externally_satisfied_acs()) == {0, 2}
+
+
+def test_formal_checklist_summary_freezes_pass_and_keeps_failure_active() -> None:
+    seed = _seed("passed", "failed")
+    summary = evaluation_summary_from_eval_meta(
+        seed,
+        {
+            "final_approved": False,
+            "pass_rate": 0.5,
+            "checklist": [
+                {"ac_text": "failed", "passed": False, "failure_reason": "missing"},
+                {"ac_text": "passed", "passed": True, "evidence": ["present"]},
+            ],
+        },
+    )
+
+    focus = select_evolution_focus(seed, seed, summary)
+
+    assert focus.active_ac_indices == (1,)
+    assert focus.frozen_ac_indices == (0,)
 
 
 def test_not_evaluated_pass_is_active_not_frozen() -> None:

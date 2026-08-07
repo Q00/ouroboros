@@ -2045,7 +2045,10 @@ class TestAsyncJobHandlers:
         assert observer["relay"]["mode"] == "event_driven"
         assert observer["parent_session"]["availability"] == "available_after_handoff"
         assert observer["host_lifecycle"]["codex_parent_relay"]["wait_tool"] == "wait_agent"
-        assert observer["follow_result_job_keys"] == ["chained_evaluate_job_id"]
+        assert observer["follow_result_job_keys"] == [
+            "chained_evaluate_job_id",
+            "chained_ralph_job_id",
+        ]
         assert "Verification Status: executed_unverified" in result.value.text_content
         assert "Formal Evaluation: NOT evaluated" in result.value.text_content
         assert "Next: ooo evaluate orch_" in result.value.text_content
