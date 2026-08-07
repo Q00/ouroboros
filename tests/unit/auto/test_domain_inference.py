@@ -1658,3 +1658,42 @@ def test_error_pages_in_cli_output_are_not_ui_composition() -> None:
     result = derive_domain_from_ledger(ledger)
     assert result.is_single
     assert result.single is TaskClass.CLI
+
+
+def test_pages_listed_in_report_are_not_ui_composition() -> None:
+    """R21 probe: a report enumerating audited pages is data, not a UI."""
+    ledger = _bare_ledger("Build a CLI for browser page audits")
+    _seed_section(ledger, "outputs", value="Login pages listed with deterministic stdout")
+    _seed_section(ledger, "runtime_context", value="Local shell / terminal")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.CLI
+
+
+def test_negated_output_ui_description_is_not_ui_composition() -> None:
+    """R21 probe: "No user interface" is an explicit output-side denial."""
+    ledger = _bare_ledger("Build a browser automation CLI")
+    _seed_section(ledger, "outputs", value="No user interface; deterministic stdout and exit codes")
+    _seed_section(ledger, "runtime_context", value="Local shell / terminal")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.CLI
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
+        "Build a package delivery tracking web app",
+        "Build an SDK documentation web app",
+        "Build a web app for SDK documentation",
+    ],
+)
+def test_library_subject_modifiers_do_not_erase_web_app_head(goal: str) -> None:
+    """R21 probe: ownership follows the goal's artifact head — package/SDK
+    subject vocabulary modifying an explicit web app is not library
+    ownership."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value="Browser dashboard with search and a navigation bar")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP

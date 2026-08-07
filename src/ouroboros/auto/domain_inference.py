@@ -587,7 +587,8 @@ _UI_PRODUCT_ANCHOR = (
 _UI_ARTIFACT_TAIL = (
     r"(?!\s+(?:helpers?|templates?|utils?|utilities|apis?|parsers?|"
     r"library|libraries|sdks?|packages?|validation|reference|"
-    r"documentation|docs|examples?|objects?|fixtures?|locators?|models?))"
+    r"documentation|docs|examples?|objects?|fixtures?|locators?|models?|"
+    r"listed|returned|printed|logged|reported|exported|emitted|dumped))"
 )
 # The front position is a denylist, not an allowlist (#1813 R9): a finite
 # anchor list rejected ordinary product widgets ("password reset screen",
@@ -619,6 +620,30 @@ _LIBRARY_PACKAGE_WORD_RE = re.compile(r"\bpackage\b(?!-)")
 
 _GOAL_CONJUNCT_SPLIT_RE = re.compile(r"\s*(?:\band\b|\bplus\b|[,;])\s*")
 _GAME_CONJUNCT_VOCAB_RE = re.compile(rf"\b{_GAME_GOAL_SIGNAL_FRAGMENT}\b")
+
+
+_WEB_APP_ARTIFACT_PHRASE_RE = re.compile(
+    r"\b(?:web[\s\-]?app(?:lication)?s?|webapps?|frontends?|front[\s\-]ends?|"
+    r"single[\s\-]page\s+app(?:lication)?s?)\b"
+)
+
+
+def _goal_artifact_head_is_web_app(goal_text: str) -> bool:
+    """Ownership follows the goal's artifact head (#1813 R21): in
+    "package delivery tracking web app" or "SDK documentation web app"
+    the library tokens are attributive subject modifiers of the web-app
+    head, so they carry no library ownership. Heads are compared by last
+    position, since English modifiers precede their head."""
+    if _goal_denies_web_app_artifact(goal_text):
+        return False
+    core = _SUBJECT_CLAUSE_RE.sub(" ", goal_text)
+    web_matches = list(_WEB_APP_ARTIFACT_PHRASE_RE.finditer(core))
+    if not web_matches:
+        return False
+    intent_matches = list(_LIBRARY_INTENT_RE.finditer(core))
+    if not intent_matches:
+        return True
+    return web_matches[-1].end() > intent_matches[-1].end()
 
 
 def _goal_has_web_only_conjunct(goal_text: str, other_evidence_re: re.Pattern[str]) -> bool:
@@ -672,6 +697,12 @@ def _library_visible_goal(ledger: SeedDraftLedger) -> str:
     return _strip_negated_signals(goal, _LIBRARY_INTENT_FRAGMENT)
 
 
+_UI_SIGNAL_STRIP_FRAGMENT = (
+    r"(?:user\s+interface|forms?|panels?|buttons?|dashboards?|pages?|"
+    r"screens?|dialogs?|modals?|menus?|toolbars?|sidebars?)"
+)
+
+
 def _matches_web_app(ledger: SeedDraftLedger) -> bool:
     outputs = _section_text(ledger, "outputs")
     runtime = _section_text(ledger, "runtime_context")
@@ -703,8 +734,10 @@ def _matches_web_app(ledger: SeedDraftLedger) -> bool:
     intent_text = _MANIFEST_TOKEN_RE.sub(
         " ", _strip_negated_signals(guard_goal, _LIBRARY_INTENT_FRAGMENT)
     )
-    if _LIBRARY_INTENT_RE.search(intent_text) and not _goal_has_web_only_conjunct(
-        guard_goal, _LIBRARY_INTENT_RE
+    if (
+        _LIBRARY_INTENT_RE.search(intent_text)
+        and not _goal_has_web_only_conjunct(guard_goal, _LIBRARY_INTENT_RE)
+        and not _goal_artifact_head_is_web_app(_goal_text(ledger))
     ):
         return False
     # Game vocabulary suppresses web_app only when the game predicate has
@@ -721,7 +754,10 @@ def _matches_web_app(ledger: SeedDraftLedger) -> bool:
     # R2): goal prose mentions UI vocabulary in denials ("without forms or
     # pages") and domain references ("browser form parsing"), neither of
     # which asserts that the artifact HAS a UI.
-    return _ledger_has_browser_context(ledger) and bool(_UI_COMPOSITION_RE.search(outputs))
+    # Output-side UI denials count too (#1813 R21): "No user interface"
+    # is an explicit statement that the artifact has none.
+    ui_text = _strip_negated_signals(outputs, _UI_SIGNAL_STRIP_FRAGMENT)
+    return _ledger_has_browser_context(ledger) and bool(_UI_COMPOSITION_RE.search(ui_text))
 
 
 def _matches_library(ledger: SeedDraftLedger) -> bool:
@@ -741,7 +777,10 @@ def _matches_library(ledger: SeedDraftLedger) -> bool:
     # substring behind. The library word itself is token-bounded so the
     # directory word "packages" is not mistaken for it, while the singular
     # "package" keeps its library meaning.
-    text = _MANIFEST_TOKEN_RE.sub(" ", outputs + " " + _library_visible_goal(ledger))
+    # Goal tokens contribute no library ownership when the goal's artifact
+    # head is a web app (#1813 R21) — they are attributive subject words.
+    goal_evidence = "" if _goal_artifact_head_is_web_app(goal) else _library_visible_goal(ledger)
+    text = _MANIFEST_TOKEN_RE.sub(" ", outputs + " " + goal_evidence)
     return bool(_LIBRARY_PACKAGE_WORD_RE.search(text)) or _any_of(
         text,
         (
