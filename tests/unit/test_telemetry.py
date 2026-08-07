@@ -211,12 +211,16 @@ class TestCapture:
         assert sent[0]["properties"]["sample_rate"] == telemetry._POLL_SAMPLE_RATE
 
     @pytest.mark.parametrize(
-        ("job_type", "terminal_status", "meta", "verified"),
+        ("job_type", "terminal_status", "meta", "verified", "reported_approval"),
         (
-            ("execute_seed", "completed", {}, False),
-            ("evaluate", "completed", {"final_approved": True}, True),
-            ("evaluate", "completed", {"final_approved": False}, False),
-            ("execute_seed", "failed", {}, False),
+            ("evaluate", "completed", {"final_approved": True}, True, True),
+            ("evaluate", "failed", {"final_approved": True}, False, True),
+            ("evaluate", "cancelled", {"final_approved": True}, False, True),
+            ("evaluate", "interrupted", {"final_approved": True}, False, True),
+            ("execute_seed", "completed", {"final_approved": True}, False, True),
+            ("evaluate", "completed", {}, False, None),
+            ("evaluate", "completed", {"final_approved": False}, False, False),
+            ("evaluate", "completed", {"final_approved": "true"}, False, None),
         ),
     )
     def test_durable_job_outcome_distinguishes_verified_success(
@@ -226,6 +230,7 @@ class TestCapture:
         terminal_status: str,
         meta: dict[str, Any],
         verified: bool,
+        reported_approval: bool | None,
     ) -> None:
         telemetry.capture_job_outcome(
             "job_private_id",
@@ -238,6 +243,7 @@ class TestCapture:
         assert event["event"] == "workflow_outcome"
         assert event["properties"]["phase"] == "terminal"
         assert event["properties"]["verified"] is verified
+        assert event["properties"].get("final_approved") is reported_approval
         assert "job_private_id" not in json.dumps(event)
 
     def test_funnel_mapping_covers_all_stages(self) -> None:

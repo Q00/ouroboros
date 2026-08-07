@@ -99,45 +99,89 @@ PH_API_KEY="${OUROBOROS_POSTHOG_API_KEY:-phc_mSoetD4ExLDDCi3vNua635NhwRTgHfRaCG9
 PH_HOST="${OUROBOROS_POSTHOG_HOST:-https://us.i.posthog.com}"
 
 _telemetry_config_allows() {
-  local f="$HOME/.ouroboros/config.yaml"
+  local f="$HOME/.ouroboros/config.yaml" script_dir source_root=""
+  local python_candidate ouroboros_cmd shebang status
   [ -e "$f" ] || return 0
   [ -r "$f" ] || return 1
 
-  # The installer runs before the package (and PyYAML) is guaranteed to
-  # exist. Accept only an unambiguous explicit telemetry.enabled: true from
-  # an existing config; missing, duplicate, malformed, or false state fails
-  # closed. Fresh installs without a config retain the documented default-on
-  # behavior after the notice below.
-  awk '
-    BEGIN { in_telemetry=0; telemetry_blocks=0; enabled_values=0; enabled_true=0 }
-    /^[[:space:]]*#/ || /^[[:space:]]*$/ { next }
-    /^[^[:space:]][^:]*:/ {
-      in_telemetry=0
-      if ($0 ~ /^telemetry[[:space:]]*:/) {
-        telemetry_blocks++
-        in_telemetry=1
-        inline=$0
-        sub(/^[^:]*:[[:space:]]*/, "", inline)
-        lower=tolower(inline)
-        if (lower ~ /^\{[[:space:]]*enabled[[:space:]]*:[[:space:]]*(true|"true"|'"'"'true'"'"')[[:space:]]*\}[[:space:]]*(#.*)?$/) {
-          enabled_values++
-          enabled_true++
-        } else if (inline !~ /^[[:space:]]*(#.*)?$/) {
-          enabled_values++
-        }
-      }
-      next
-    }
-    in_telemetry && /^[[:space:]]+enabled[[:space:]]*:/ {
-      value=$0
-      sub(/^[[:space:]]*enabled[[:space:]]*:[[:space:]]*/, "", value)
-      sub(/[[:space:]]*#.*$/, "", value)
-      gsub(/^[[:space:]"'"'"']+|[[:space:]"'"'"']+$/, "", value)
-      enabled_values++
-      if (tolower(value) == "true") enabled_true++
-    }
-    END { exit !(telemetry_blocks == 1 && enabled_values == 1 && enabled_true == 1) }
-  ' "$f"
+  # Match the application resolver: parse the complete YAML document and
+  # validate every known field before trusting telemetry.enabled. A partial
+  # text parser can accept telemetry.enabled=true while overlooking malformed
+  # YAML or an invalid unrelated field. Existing configuration therefore
+  # requires a Python environment with Ouroboros' real schema available;
+  # otherwise collection fails closed. A genuinely absent config retains the
+  # documented default-on behavior after the notice below.
+  script_dir=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" 2>/dev/null && pwd) || true
+  if [ -n "$script_dir" ] && [ -f "$script_dir/../src/ouroboros/config/models.py" ]; then
+    source_root=$(CDPATH='' cd -- "$script_dir/../src" 2>/dev/null && pwd) || true
+  fi
+
+  _telemetry_validate_config_with_python() {
+    local interpreter="$1"
+    "$interpreter" -I - "$f" "$source_root" <<'PY'
+import sys
+
+config_path, source_root = sys.argv[1:]
+if source_root:
+    sys.path.insert(0, source_root)
+
+try:
+    import yaml
+    from ouroboros.config.models import OuroborosConfig
+except Exception:
+    raise SystemExit(2)
+
+try:
+    with open(config_path, encoding="utf-8") as config_file:
+        raw = yaml.safe_load(config_file)
+    config = OuroborosConfig.model_validate({} if raw is None else raw)
+except Exception:
+    raise SystemExit(1)
+
+raise SystemExit(0 if config.telemetry.enabled is True else 1)
+PY
+  }
+
+  for python_candidate in python3 python; do
+    python_candidate=$(command -v "$python_candidate" 2>/dev/null || true)
+    [ -n "$python_candidate" ] || continue
+    if _telemetry_validate_config_with_python "$python_candidate"; then
+      unset -f _telemetry_validate_config_with_python
+      return 0
+    else
+      status=$?
+      if [ "$status" -ne 2 ]; then
+        unset -f _telemetry_validate_config_with_python
+        return 1
+      fi
+    fi
+  done
+
+  # uv/pipx entry points carry their environment's Python interpreter in the
+  # shebang. It may have the schema when the system Python does not.
+  ouroboros_cmd=$(command -v ouroboros 2>/dev/null || true)
+  if [ -n "$ouroboros_cmd" ] && [ -r "$ouroboros_cmd" ]; then
+    shebang=$(head -n 1 "$ouroboros_cmd" 2>/dev/null || true)
+    case "$shebang" in
+      '#!'/*)
+        python_candidate=${shebang#'#!'}
+        case "$python_candidate" in
+          *' '*) ;;
+          *)
+            if [ -x "$python_candidate" ]; then
+              if _telemetry_validate_config_with_python "$python_candidate"; then
+                unset -f _telemetry_validate_config_with_python
+                return 0
+              fi
+            fi
+            ;;
+        esac
+        ;;
+    esac
+  fi
+
+  unset -f _telemetry_validate_config_with_python
+  return 1
 }
 
 _telemetry_enabled() {

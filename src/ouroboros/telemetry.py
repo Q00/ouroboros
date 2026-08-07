@@ -358,7 +358,11 @@ def capture_job_outcome(
         normalized_status = terminal_status.strip().lower()
         meta = result_meta if isinstance(result_meta, dict) else {}
         final_approved = meta.get("final_approved")
-        verified = job_type == "evaluate" and final_approved is True
+        verified = (
+            normalized_status == "completed"
+            and job_type == "evaluate"
+            and final_approved is True
+        )
         capture(
             "workflow_outcome",
             {
