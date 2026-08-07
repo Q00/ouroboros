@@ -337,6 +337,87 @@ def test_list_recent_executions_newer_ac_state_supersedes_older_running(tmp_path
     assert runs[0]["last_row"] == 3
 
 
+@pytest.mark.parametrize(
+    "acceptance_criteria",
+    [
+        [{"node_id": "ac_failed", "status": "failed"}],
+        [
+            {"node_id": "ac_done", "status": "completed"},
+            {"node_id": "ac_failed", "status": "failed"},
+        ],
+    ],
+)
+def test_list_recent_executions_newer_failed_ac_state_supersedes_older_running(
+    tmp_path,
+    acceptance_criteria: list[dict[str, str]],
+) -> None:
+    db = tmp_path / "running-before-failed.db"
+    _make_events_db(
+        db,
+        [
+            ("orch_failed", "orchestrator.session.started", {"execution_id": "exec_failed"}),
+            (
+                "orch_failed",
+                "orchestrator.progress.updated",
+                {
+                    "execution_id": "exec_failed",
+                    "progress": {"runtime_status": "running"},
+                },
+            ),
+            (
+                "orch_failed",
+                "workflow.progress.updated",
+                {
+                    "execution_id": "exec_failed",
+                    "acceptance_criteria": acceptance_criteria,
+                },
+            ),
+        ],
+    )
+
+    runs = list_recent_executions(db)
+
+    assert len(runs) == 1
+    assert runs[0]["status"] == "failed"
+    assert runs[0]["failed_count"] == 1
+    assert runs[0]["last_row"] == 3
+
+
+def test_list_recent_executions_newer_running_supersedes_settled_failure(tmp_path) -> None:
+    db = tmp_path / "running-after-failed.db"
+    _make_events_db(
+        db,
+        [
+            ("orch_retry", "orchestrator.session.started", {"execution_id": "exec_retry"}),
+            (
+                "orch_retry",
+                "orchestrator.progress.updated",
+                {"execution_id": "exec_retry", "progress": {"runtime_status": "running"}},
+            ),
+            (
+                "orch_retry",
+                "workflow.progress.updated",
+                {
+                    "execution_id": "exec_retry",
+                    "acceptance_criteria": [{"node_id": "ac_failed", "status": "failed"}],
+                },
+            ),
+            (
+                "orch_retry",
+                "orchestrator.progress.updated",
+                {"execution_id": "exec_retry", "progress": {"runtime_status": "running"}},
+            ),
+        ],
+    )
+
+    runs = list_recent_executions(db)
+
+    assert len(runs) == 1
+    assert runs[0]["status"] == "running"
+    assert runs[0]["failed_count"] == 1
+    assert runs[0]["last_row"] == 4
+
+
 def test_list_recent_executions_keeps_running_evidence_before_newer_turn_completion(
     tmp_path,
 ) -> None:
@@ -665,6 +746,54 @@ def test_malformed_unrelated_json_is_ignored_by_picker_and_tail(tmp_path) -> Non
     assert tail.fetch_new() == []
 
 
+def test_picker_limit_applies_after_malformed_start_rows_are_skipped(tmp_path) -> None:
+    db = tmp_path / "malformed-starts.db"
+    conn = sqlite3.connect(db)
+    try:
+        conn.execute("CREATE TABLE events (aggregate_id TEXT, event_type TEXT, payload TEXT)")
+        conn.execute(
+            "INSERT INTO events (aggregate_id, event_type, payload) VALUES (?, ?, ?)",
+            (
+                "orch_visible",
+                "orchestrator.session.started",
+                json.dumps({"execution_id": "exec_visible", "seed_goal": "Still listed"}),
+            ),
+        )
+        conn.executemany(
+            "INSERT INTO events (aggregate_id, event_type, payload) VALUES (?, ?, ?)",
+            [
+                (f"orch_malformed_{index}", "orchestrator.session.started", "{not-json")
+                for index in range(10)
+            ],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    runs = list_recent_executions(db, limit=1)
+
+    assert [(run["execution_id"], run["goal"]) for run in runs] == [
+        ("exec_visible", "Still listed")
+    ]
+
+
+def test_picker_limit_counts_distinct_valid_execution_ids(tmp_path) -> None:
+    db = tmp_path / "duplicate-starts.db"
+    _make_events_db(
+        db,
+        [
+            ("orch_old", "orchestrator.session.started", {"execution_id": "exec_old"}),
+            ("orch_new_1", "orchestrator.session.started", {"execution_id": "exec_new"}),
+            ("orch_new_2", "orchestrator.session.started", {"execution_id": "exec_new"}),
+            ("orch_new_3", "orchestrator.session.started", {"execution_id": "exec_new"}),
+        ],
+    )
+
+    runs = list_recent_executions(db, limit=2)
+
+    assert [run["execution_id"] for run in runs] == ["exec_new", "exec_old"]
+
+
 def test_picker_progress_queries_are_aggregate_bounded_at_scale(
     tmp_path,
     monkeypatch,
@@ -760,3 +889,104 @@ def test_picker_progress_queries_are_aggregate_bounded_at_scale(
     assert any("ix_events_aggregate_id" in str(row[3]) for row in direct_tail_plan)
     assert any("ix_events_event_type" in str(row[3]) for row in linked_tail_plan)
     assert all("TEMP B-TREE" not in str(row[3]) for row in direct_tail_plan + linked_tail_plan)
+
+
+def test_workflow_progress_queries_are_aggregate_bounded_at_scale(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    db = tmp_path / "workflow-progress-scale.db"
+    conn = sqlite3.connect(db)
+    try:
+        conn.execute("CREATE TABLE events (aggregate_id TEXT, event_type TEXT, payload TEXT)")
+        conn.execute("CREATE INDEX ix_events_aggregate_id ON events (aggregate_id)")
+        conn.execute("CREATE INDEX ix_events_event_type ON events (event_type)")
+        foreign_payload = json.dumps(
+            {
+                "execution_id": "exec_foreign",
+                "acceptance_criteria": [{"node_id": "foreign", "status": "executing"}],
+            }
+        )
+        conn.executemany(
+            "INSERT INTO events (aggregate_id, event_type, payload) VALUES (?, ?, ?)",
+            (
+                (f"orch_foreign_{index % 100}", "workflow.progress.updated", foreign_payload)
+                for index in range(100_000)
+            ),
+        )
+        conn.executemany(
+            "INSERT INTO events (aggregate_id, event_type, payload) VALUES (?, ?, ?)",
+            [
+                (
+                    "orch_target",
+                    "orchestrator.session.started",
+                    json.dumps({"execution_id": "exec_target"}),
+                ),
+                (
+                    "exec_target",
+                    "workflow.progress.updated",
+                    json.dumps(
+                        {
+                            "execution_id": "exec_target",
+                            "acceptance_criteria": [{"node_id": "target", "status": "completed"}],
+                        }
+                    ),
+                ),
+            ],
+        )
+        conn.commit()
+        conn.execute("ANALYZE")
+    finally:
+        conn.close()
+
+    statements: list[str] = []
+    original_connect = reader_module._connect_readonly
+
+    def traced_connect(db_path):
+        traced = original_connect(db_path)
+        traced.set_trace_callback(statements.append)
+        return traced
+
+    monkeypatch.setattr(reader_module, "_connect_readonly", traced_connect)
+    started = time.perf_counter()
+    runs = list_recent_executions(db, limit=1)
+    picker_elapsed = time.perf_counter() - started
+    picker_statements = list(statements)
+
+    statements.clear()
+    started = time.perf_counter()
+    tail_events = EventTail(db, "exec_target").fetch_new()
+    tail_elapsed = time.perf_counter() - started
+    tail_statements = list(statements)
+
+    picker_workflow_queries = [
+        statement for statement in picker_statements if "'workflow.progress.updated'" in statement
+    ]
+    tail_workflow_queries = [
+        statement for statement in tail_statements if "'workflow.progress.updated'" in statement
+    ]
+    workflow_queries = picker_workflow_queries + tail_workflow_queries
+    conn = sqlite3.connect(db)
+    try:
+        workflow_plans = [
+            conn.execute("EXPLAIN QUERY PLAN " + statement).fetchall()
+            for statement in workflow_queries
+        ]
+    finally:
+        conn.close()
+
+    assert [(run["execution_id"], run["status"]) for run in runs] == [("exec_target", "completed")]
+    assert [event["event_type"] for event in tail_events] == [
+        "orchestrator.session.started",
+        "workflow.progress.updated",
+    ]
+    assert picker_elapsed < 0.5
+    assert tail_elapsed < 0.5
+    assert len(picker_workflow_queries) == 2
+    assert len(tail_workflow_queries) == 2
+    assert all("aggregate_id =" in statement for statement in workflow_queries)
+    assert all("json_extract" not in statement for statement in workflow_queries)
+    assert all(
+        any("ix_events_aggregate_id" in str(row[3]) for row in plan) for plan in workflow_plans
+    )
+    assert all("TEMP B-TREE" not in str(row[3]) for plan in workflow_plans for row in plan)

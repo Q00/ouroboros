@@ -312,3 +312,40 @@ class TestPendingRun:
             assert server.idle_seconds() < 1.0
         finally:
             server.shutdown()
+
+    def test_runs_api_skips_malformed_starts_before_applying_limit(self, tmp_path) -> None:
+        from ouroboros.dashboard_web.server import serve_background
+
+        db = tmp_path / "malformed-starts.db"
+        conn = sqlite3.connect(db)
+        try:
+            conn.execute("CREATE TABLE events (aggregate_id TEXT, event_type TEXT, payload TEXT)")
+            conn.execute(
+                "INSERT INTO events (aggregate_id, event_type, payload) VALUES (?, ?, ?)",
+                (
+                    "orch_visible",
+                    "orchestrator.session.started",
+                    json.dumps({"execution_id": "exec_visible", "seed_goal": "Visible"}),
+                ),
+            )
+            conn.executemany(
+                "INSERT INTO events (aggregate_id, event_type, payload) VALUES (?, ?, ?)",
+                [
+                    (f"orch_bad_{index}", "orchestrator.session.started", "{not-json")
+                    for index in range(10)
+                ],
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        server, _thread = serve_background(
+            db_path=str(db), host="127.0.0.1", port=daemon._free_port("127.0.0.1")
+        )
+        try:
+            status, body = self._get(server.server_address[1], "/api/runs")
+
+            assert status == 200
+            assert [run["execution_id"] for run in json.loads(body)["runs"]] == ["exec_visible"]
+        finally:
+            server.shutdown()

@@ -51,10 +51,11 @@ _RELEVANT_EVENT_TYPES: tuple[str, ...] = (
     "execution.frugality_retrospective.reported",
 )
 
-# Session lifecycle/progress rows are canonically stored under the orchestrator
-# aggregate.  Do not include them in the JSON-linked fallback query: progress is
-# the highest-volume event family and scanning every run's progress history to
-# find a different execution made the picker O(global history * visible runs).
+# Session lifecycle/progress rows are canonically stored under one of the run's
+# selected orchestrator/execution aggregates.  Do not include them in the
+# JSON-linked fallback query: progress is the highest-volume event family and
+# scanning every run's progress history to find a different execution made the
+# picker O(global history * visible runs).
 _SESSION_SCOPED_EVENT_TYPES = frozenset(
     {
         "orchestrator.session.started",
@@ -63,6 +64,7 @@ _SESSION_SCOPED_EVENT_TYPES = frozenset(
         "orchestrator.session.paused",
         "orchestrator.session.cancelled",
         "orchestrator.progress.updated",
+        "workflow.progress.updated",
     }
 )
 _PAYLOAD_LINKED_EVENT_TYPES: tuple[str, ...] = tuple(
@@ -238,14 +240,14 @@ def _summary_status(
 
     no_work_in_flight = counts["executing"] == 0 and counts["pending"] == 0
     projected_status = explicit_terminal or active_status
-    if counts["failed"] and (
-        projected_status == "completed" or not projected_status and no_work_in_flight
-    ):
+    if counts["failed"] and projected_status == "completed":
         return "failed"
     if projected_status == "paused" or explicit_terminal is not None:
         return projected_status
     if projected_status == "running" and active_status_row >= latest_ac_state_row:
         return "running"
+    if no_work_in_flight and counts["failed"]:
+        return "failed"
     if no_work_in_flight and counts["completed"]:
         return "completed"
     return "running"
@@ -454,13 +456,14 @@ def list_recent_executions(db_path: str | Path, *, limit: int = 10) -> list[dict
     start_sql = (
         "SELECT rowid, aggregate_id, payload "
         "FROM events WHERE event_type = 'orchestrator.session.started' "
-        "ORDER BY rowid DESC LIMIT ?"
+        "ORDER BY rowid DESC"
     )
     conn = _connect_readonly(path)
     try:
-        starts = conn.execute(start_sql, [max(1, limit)]).fetchall()
+        starts = conn.execute(start_sql)
         run_specs: list[tuple[sqlite3.Row, dict[str, Any], str, str]] = []
         seen_execution_ids: set[str] = set()
+        target_count = max(1, limit)
         for start in starts:
             start_payload = _decode_payload(start["payload"])
             if not isinstance(start_payload, dict):
@@ -474,6 +477,8 @@ def list_recent_executions(db_path: str | Path, *, limit: int = 10) -> list[dict
             raw_session_id = start["aggregate_id"] or start_payload.get("session_id")
             session_id = raw_session_id if isinstance(raw_session_id, str) else ""
             run_specs.append((start, start_payload, execution_id, session_id))
+            if len(run_specs) >= target_count:
+                break
 
         all_ids = sorted(
             {
