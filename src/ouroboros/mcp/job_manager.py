@@ -26,10 +26,12 @@ from ouroboros.orchestrator.execution_authority import (
     request_process_local_cancellation,
 )
 from ouroboros.orchestrator.heartbeat import (
-    current_process_identity,
     is_holder_alive,
     is_owned_by_current_process,
-    is_process_identity_alive,
+)
+from ouroboros.orchestrator.persisted_process_identity import (
+    current_persisted_process_owner,
+    persisted_process_owner_alive,
 )
 from ouroboros.orchestrator.runner import clear_cancellation, request_cancellation
 from ouroboros.orchestrator.session import (
@@ -184,24 +186,6 @@ def _drain_interrupted_data() -> dict[str, Any]:
 
 logger = logging.getLogger(__name__)
 log = structlog.get_logger(__name__)
-
-
-def _read_owner_identity(created_data: dict[str, Any]) -> tuple[int | None, float | None]:
-    """Extract the recorded owning-process identity from a job-created event.
-
-    Returns ``(None, None)`` for jobs created before owner identity was
-    recorded, which the reconciler treats conservatively (never reconciled on
-    liveness grounds — we cannot prove the owner is dead).
-    """
-    pid_raw = created_data.get("owner_pid")
-    start_raw = created_data.get("owner_start_time")
-    pid = pid_raw if isinstance(pid_raw, int) and not isinstance(pid_raw, bool) else None
-    start = (
-        float(start_raw)
-        if isinstance(start_raw, (int, float)) and not isinstance(start_raw, bool)
-        else None
-    )
-    return pid, start
 
 
 def _consume_task_result(task: asyncio.Task[Any]) -> None:
@@ -580,7 +564,6 @@ class JobManager:
         self._reserved_job_ids.discard(job_id)
         job_links = links or JobLinks()
 
-        owner_pid, owner_start_time = current_process_identity()
         await self._append_event(
             "mcp.job.created",
             job_id,
@@ -594,11 +577,8 @@ class JobManager:
                     "lineage_id": job_links.lineage_id,
                     "preserve_runner_result": job_links.preserve_runner_result,
                 },
-                # Owning-process identity for authoritative zombie reconciliation:
-                # if this process dies before writing a terminal event, a later
-                # reader can prove the job can no longer make progress.
-                "owner_pid": owner_pid,
-                "owner_start_time": owner_start_time,
+                # Stable Linux identity plus legacy non-Linux fields (#1699).
+                **current_persisted_process_owner(),
             },
         )
 
@@ -2050,16 +2030,14 @@ class JobManager:
             result_payload=result_payload,
             error=error,
         )
-        owner_pid, owner_start_time = _read_owner_identity(created.data)
-        owner_is_dead = self._job_owner_is_dead(owner_pid, owner_start_time)
+        owner_is_dead = self._job_owner_is_dead(created.data)
         snapshot = await self._recover_linked_execution_terminal_snapshot(
             snapshot,
             owner_is_dead=owner_is_dead,
         )
         snapshot = await self._reconcile_orphaned_job_snapshot(
             snapshot,
-            owner_pid=owner_pid,
-            owner_start_time=owner_start_time,
+            owner_data=created.data,
         )
         return await self._reconcile_stranded_started_job_snapshot(snapshot)
 
@@ -2169,26 +2147,22 @@ class JobManager:
 
     def _job_owner_is_dead(
         self,
-        owner_pid: int | None,
-        owner_start_time: float | None,
+        owner_data: Mapping[str, object],
     ) -> bool:
         """Return True only when the recorded owning process is provably gone.
 
         Conservative by design: a missing owner identity (legacy jobs) or a
         still-running owner — including a different live process — returns
         False, so a job is never reconciled away while it might still progress.
-        PID recycling is guarded by the recorded process start time.
+        PID reuse is fenced by versioned Linux identity or legacy epoch time.
         """
-        if owner_pid is None:
-            return False
-        return not is_process_identity_alive(owner_pid, owner_start_time)
+        return persisted_process_owner_alive(owner_data) is False
 
     async def _reconcile_orphaned_job_snapshot(
         self,
         snapshot: JobSnapshot,
         *,
-        owner_pid: int | None,
-        owner_start_time: float | None,
+        owner_data: Mapping[str, object],
     ) -> JobSnapshot:
         """Reconcile a non-terminal job whose owning process is gone.
 
@@ -2208,7 +2182,7 @@ class JobManager:
             or snapshot.job_id in self._runner_tasks
         ):
             return snapshot
-        if not self._job_owner_is_dead(owner_pid, owner_start_time):
+        if not self._job_owner_is_dead(owner_data):
             return snapshot
         # A linked runtime (execute/auto/evaluate) runs in its own session
         # process with a heartbeat lock. If that holder is still alive it — not

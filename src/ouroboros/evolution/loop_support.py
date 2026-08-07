@@ -40,6 +40,10 @@ class LineageWinnerAdvanced(RuntimeError):
     """The caller must recompute its request from the durable winner state."""
 
 
+class LineageFlightConflict(RuntimeError):
+    """A different same-lineage request already owns the local flight."""
+
+
 @dataclass(frozen=True, slots=True)
 class EffectiveEvolutionExecutionPolicy:
     """Task-local focus policy after applying an explicit benchmark override."""
@@ -612,6 +616,7 @@ async def run_lineage_single_flight[T](
     *,
     scope: str = "evolve-core",
     replan_on_different: bool = False,
+    reject_different: bool = False,
 ) -> T:
     """Run one process-local writer per lineage and coalesce identical calls.
 
@@ -638,6 +643,11 @@ async def run_lineage_single_flight[T](
 
         if current.request_key == request_key:
             return await _await_lineage_flight(current)
+
+        if reject_different:
+            raise LineageFlightConflict(
+                f"lineage {lineage_id} is owned by a concurrent evolve_step request"
+            )
 
         try:
             await asyncio.shield(current.task)
