@@ -327,6 +327,14 @@ def serialize_runtime_message_metadata(
     if tool_result is not None:
         metadata["tool_result"] = tool_result
 
+    # This field is reserved for LeafDispatcher's locally measured dirfd lease
+    # effects.  The dispatcher strips adapter-supplied values before projection;
+    # preserve the measured completion payload so the journal verifier can reuse
+    # that existing authority instead of reconstructing provenance from prose.
+    filesystem_effects = message.data.get("filesystem_effects")
+    if isinstance(filesystem_effects, (list, tuple)):
+        metadata["filesystem_effects"] = _clone_metadata_value(filesystem_effects)
+
     tool_call_id = message.data.get("tool_call_id")
     if isinstance(tool_call_id, str) and tool_call_id.strip():
         metadata["tool_call_id"] = tool_call_id.strip()

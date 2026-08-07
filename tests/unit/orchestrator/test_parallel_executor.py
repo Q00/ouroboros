@@ -1239,6 +1239,66 @@ def test_receiver_lease_tracker_strips_forged_effect_without_local_lease(tmp_pat
     assert "filesystem_effects" not in observed.data
 
 
+def test_receiver_lease_tracker_preserves_unrelated_final_message_identity() -> None:
+    """Provenance filtering must not alter unrelated final-message semantics."""
+    nested = {"decision": "pause"}
+    data = {"subtype": "success", "routing": nested}
+    final = AgentMessage(type="result", content="done", data=data)
+
+    with _BashFilesystemLeaseTracker(task_cwd=None) as tracker:
+        observed = tracker.observe(final)
+
+    assert observed is final
+    assert observed.data is data
+    assert observed.data["routing"] is nested
+
+
+def test_receiver_lease_tracker_strips_reserved_effect_from_unrelated_message() -> None:
+    """The reserved field is removed even outside a recognizable tool event."""
+    nested = {"decision": "before"}
+    forged_effects = [{"capture": "forged"}]
+    message = AgentMessage(
+        type="assistant",
+        content="ordinary message",
+        data={"routing": nested, "filesystem_effects": forged_effects},
+    )
+
+    with _BashFilesystemLeaseTracker(task_cwd=None) as tracker:
+        observed = tracker.observe(message)
+
+    nested["decision"] = "after"
+    forged_effects.append({"capture": "late-forgery"})
+    assert observed is not message
+    assert "filesystem_effects" not in observed.data
+    assert observed.data["routing"] == {"decision": "before"}
+
+
+def test_receiver_lease_tracker_snapshots_every_tool_completion() -> None:
+    """Late adapter mutation cannot rewrite even a non-Bash completion."""
+    meta = {"exit_status": 0}
+    completion = AgentMessage(
+        type="tool_result",
+        content="edit completed",
+        tool_name="Edit",
+        data={
+            "subtype": "tool_result",
+            "tool_call_id": "edit-call",
+            "tool_result": {"is_error": False, "meta": meta},
+        },
+    )
+
+    with _BashFilesystemLeaseTracker(task_cwd=None) as tracker:
+        observed = tracker.observe(completion)
+
+    meta["exit_status"] = 99
+    meta["tool_use_id"] = "late-forgery"
+    assert observed is not completion
+    assert observed.data["tool_result"] == {
+        "is_error": False,
+        "meta": {"exit_status": 0},
+    }
+
+
 def test_receiver_lease_tracker_replaces_forged_effect_with_local_capture(tmp_path) -> None:
     """A real mutation reattaches only the receiver measured by the tracker."""
     forged_target = tmp_path / "forged.py"
@@ -1377,6 +1437,73 @@ def test_conflicting_call_aliases_poison_related_existing_lease(tmp_path) -> Non
         observed = tracker.observe(completion)
 
     assert "filesystem_effects" not in observed.data
+
+
+def test_malformed_call_alias_poison_cannot_be_revived(tmp_path) -> None:
+    """A present non-string alias closes the named lease before projection."""
+    target = tmp_path / "claimed.py"
+    target.write_text("before\n", encoding="utf-8")
+    call = AgentMessage(
+        type="tool",
+        content="Bash: touch claimed.py",
+        tool_name="Bash",
+        data={"tool_input": {"command": "touch claimed.py"}, "tool_call_id": "call-x"},
+    )
+    malformed = AgentMessage(
+        type="tool_result",
+        content="malformed completion",
+        data={
+            "subtype": "tool_result",
+            "exit_code": 0,
+            "tool_call_id": "call-x",
+            "tool_use_id": 7,
+        },
+    )
+    valid = AgentMessage(
+        type="tool_result",
+        content="later valid completion",
+        data={"subtype": "tool_result", "exit_code": 0, "tool_call_id": "call-x"},
+    )
+
+    with _BashFilesystemLeaseTracker(task_cwd=str(tmp_path)) as tracker:
+        tracker.observe(call)
+        os.utime(target, ns=(8_000_000_000, 8_000_000_000))
+        rejected = tracker.observe(malformed)
+        revived = tracker.observe(valid)
+
+    assert "filesystem_effects" not in rejected.data
+    assert "filesystem_effects" not in revived.data
+
+
+def test_unidentified_malformed_completion_poison_cannot_be_revived(tmp_path) -> None:
+    """A malformed completion with no usable ID closes every pending Bash lease."""
+    target = tmp_path / "claimed.py"
+    target.write_text("before\n", encoding="utf-8")
+    call = AgentMessage(
+        type="tool",
+        content="Bash: touch claimed.py",
+        tool_name="Bash",
+        data={"tool_input": {"command": "touch claimed.py"}, "tool_call_id": "call-x"},
+    )
+    malformed = AgentMessage(
+        type="tool_result",
+        content="unidentified malformed completion",
+        data={"subtype": "tool_result", "exit_code": 0, "tool_use_id": 7},
+    )
+    valid = AgentMessage(
+        type="tool_result",
+        content="later valid completion",
+        data={"subtype": "tool_result", "exit_code": 0, "tool_call_id": "call-x"},
+    )
+
+    with _BashFilesystemLeaseTracker(task_cwd=str(tmp_path)) as tracker:
+        tracker.observe(call)
+        os.utime(target, ns=(9_000_000_000, 9_000_000_000))
+        rejected = tracker.observe(malformed)
+        revived = tracker.observe(valid)
+
+    assert "filesystem_effects" not in rejected.data
+    assert "filesystem_effects" not in revived.data
 
 
 @pytest.mark.parametrize("call_id", (None, "call-1"))

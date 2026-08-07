@@ -18,6 +18,7 @@ partial message list must remain visible for teardown.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 import os
 from pathlib import Path
@@ -41,7 +42,10 @@ from ouroboros.orchestrator.evidence.runtime_metadata import (
     HEARTBEAT_INTERVAL_SECONDS,
     STALL_TIMEOUT_SECONDS,
 )
-from ouroboros.orchestrator.runtime_message_projection import project_runtime_message
+from ouroboros.orchestrator.runtime_message_projection import (
+    message_tool_name,
+    project_runtime_message,
+)
 
 if TYPE_CHECKING:
     from ouroboros.orchestrator.execution_runtime_scope import (
@@ -77,7 +81,11 @@ class _PendingBashTarget:
     parent_fd: int | None
     leaf_name: str
     reported_path: str
+    workspace_relative_path: str
     pre_fingerprint: tuple[int, int, int, int, int, int] | None
+
+
+_MAX_BASH_FILESYSTEM_EFFECTS = 128
 
 
 def _pending_bash_filesystem_targets(
@@ -101,6 +109,11 @@ def _pending_bash_filesystem_targets(
             )
             if pending is not None:
                 targets.append(pending)
+                if len(targets) > _MAX_BASH_FILESYSTEM_EFFECTS or len(
+                    {item.workspace_relative_path for item in targets}
+                ) != len(targets):
+                    _close_pending_targets(tuple(targets))
+                    return ()
     return tuple(targets)
 
 
@@ -151,6 +164,7 @@ def _lease_bash_target(
             parent_fd=leased_fd,
             leaf_name=relative.name,
             reported_path=target,
+            workspace_relative_path=relative.as_posix(),
             pre_fingerprint=pre_fingerprint,
         )
     except (OSError, RuntimeError, ValueError):
@@ -210,9 +224,13 @@ def _attach_bash_filesystem_effects(
                 {
                     "capture": "ouroboros.leaf-dispatch.v1",
                     "path": target.reported_path,
+                    "workspace_relative_path": target.workspace_relative_path,
                     "st_dev": identity.st_dev,
                     "st_ino": identity.st_ino,
                     "st_mode": identity.st_mode,
+                    "st_size": identity.st_size,
+                    "st_mtime_ns": identity.st_mtime_ns,
+                    "st_ctime_ns": identity.st_ctime_ns,
                 }
             )
         finally:
@@ -225,13 +243,62 @@ def _attach_bash_filesystem_effects(
     )
 
 
-def _strip_internal_filesystem_effects(message: AgentMessage) -> AgentMessage:
-    """Remove adapter-supplied provenance reserved for local lease capture."""
-    if "filesystem_effects" not in message.data:
+def _strip_internal_filesystem_effects(
+    message: AgentMessage,
+    *,
+    force_snapshot: bool = False,
+) -> AgentMessage:
+    """Sever adapter data ownership and remove its reserved provenance field."""
+    if (
+        not force_snapshot
+        and message_tool_name(message) != "Bash"
+        and not _runtime_message_is_tool_completion(message)
+        and "filesystem_effects" not in message.data
+    ):
         return message
-    sanitized = dict(message.data)
-    sanitized.pop("filesystem_effects", None)
+    sanitized = {
+        key: _snapshot_adapter_value(value)
+        for key, value in message.data.items()
+        if key != "filesystem_effects"
+    }
     return replace(message, data=sanitized)
+
+
+def _snapshot_adapter_value(value: object) -> object:
+    """Recursively copy plain containers used by provenance-sensitive metadata."""
+    if isinstance(value, Mapping):
+        return {key: _snapshot_adapter_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_snapshot_adapter_value(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_snapshot_adapter_value(item) for item in value)
+    if isinstance(value, set):
+        return {_snapshot_adapter_value(item) for item in value}
+    if isinstance(value, frozenset):
+        return frozenset(_snapshot_adapter_value(item) for item in value)
+    if isinstance(value, bytearray):
+        return bytes(value)
+    return value
+
+
+def _runtime_message_has_malformed_tool_call_aliases(message: AgentMessage) -> bool:
+    """Reject present correlation aliases that are not non-blank strings."""
+    containers: list[Mapping[str, object]] = [message.data]
+    message_meta = message.data.get("meta")
+    if isinstance(message_meta, Mapping):
+        containers.append(message_meta)
+    tool_result = message.data.get("tool_result")
+    if isinstance(tool_result, Mapping):
+        containers.append(tool_result)
+        result_meta = tool_result.get("meta")
+        if isinstance(result_meta, Mapping):
+            containers.append(result_meta)
+    return any(
+        key in container
+        and (not isinstance(container[key], str) or not str(container[key]).strip())
+        for container in containers
+        for key in ("tool_call_id", "tool_use_id", "call_id")
+    )
 
 
 def _close_pending_target(target: _PendingBashTarget) -> None:
@@ -257,8 +324,10 @@ class _BashFilesystemLeaseTracker:
         self._task_cwd = task_cwd
         self._pending_by_id: dict[str, tuple[_PendingBashTarget, ...]] = {}
         self._seen_call_ids: set[str] = set()
+        self._pending_bash_call_ids: set[str] = set()
         self._idless: tuple[_PendingBashTarget, ...] | None = None
         self._idless_active = False
+        self._idless_bash_active = False
 
     def __enter__(self) -> _BashFilesystemLeaseTracker:
         return self
@@ -268,8 +337,12 @@ class _BashFilesystemLeaseTracker:
 
     def observe(self, message: AgentMessage) -> AgentMessage:
         """Lease calls, attach completion effects, and reject ambiguous pairing."""
-        message = _strip_internal_filesystem_effects(message)
-        if _runtime_message_has_conflicting_tool_call_ids(message):
+        message = _strip_internal_filesystem_effects(
+            message,
+            force_snapshot=bool(self._pending_bash_call_ids) or self._idless_bash_active,
+        )
+        malformed_alias = _runtime_message_has_malformed_tool_call_aliases(message)
+        if malformed_alias or _runtime_message_has_conflicting_tool_call_ids(message):
             # Every alias named by an ambiguous message is poisoned. Close any
             # prior lease it could otherwise consume, and retain an empty
             # sentinel so a later call/result cannot revive or donate one.
@@ -277,12 +350,29 @@ class _BashFilesystemLeaseTracker:
                 _close_pending_targets(self._pending_by_id.pop(conflicting_id, ()))
                 self._seen_call_ids.add(conflicting_id)
                 self._pending_by_id[conflicting_id] = ()
+                self._pending_bash_call_ids.discard(conflicting_id)
+            if malformed_alias and not _runtime_message_tool_call_ids(message):
+                is_bash_candidate = (
+                    _runtime_message_is_tool_completion(message)
+                    or message_tool_name(message) == "Bash"
+                )
+                if is_bash_candidate:
+                    for pending_id in tuple(self._pending_bash_call_ids):
+                        _close_pending_targets(self._pending_by_id.pop(pending_id, ()))
+                        self._seen_call_ids.add(pending_id)
+                        self._pending_by_id[pending_id] = ()
+                    self._pending_bash_call_ids.clear()
+                    _close_pending_targets(self._idless or ())
+                    self._idless = ()
+                    self._idless_active = True
+                    self._idless_bash_active = False
             return message
         call_id = _runtime_message_tool_call_id(message)
-        if message.tool_name is not None and not _runtime_message_is_tool_completion(message):
+        tool_name = message_tool_name(message)
+        if tool_name is not None and not _runtime_message_is_tool_completion(message):
             targets = (
                 _pending_bash_filesystem_targets(message, task_cwd=self._task_cwd)
-                if message.tool_name == "Bash"
+                if tool_name == "Bash"
                 else ()
             )
             if call_id is not None:
@@ -290,26 +380,33 @@ class _BashFilesystemLeaseTracker:
                     _close_pending_targets(self._pending_by_id.get(call_id, ()))
                     _close_pending_targets(targets)
                     self._pending_by_id[call_id] = ()
+                    self._pending_bash_call_ids.discard(call_id)
                 else:
                     self._seen_call_ids.add(call_id)
                     self._pending_by_id[call_id] = targets
+                    if tool_name == "Bash":
+                        self._pending_bash_call_ids.add(call_id)
             elif not self._idless_active:
                 self._idless_active = True
                 self._idless = targets
+                self._idless_bash_active = tool_name == "Bash"
             else:
                 _close_pending_targets(self._idless or ())
                 _close_pending_targets(targets)
                 self._idless = ()
+                self._idless_bash_active = False
             return message
         if not _runtime_message_is_tool_completion(message):
             return message
         if call_id is not None:
             targets = self._pending_by_id.pop(call_id, ())
+            self._pending_bash_call_ids.discard(call_id)
         else:
             targets = self._idless or ()
             self._idless = None
             self._idless_active = False
-        if message.tool_name not in {None, "Bash"}:
+            self._idless_bash_active = False
+        if tool_name not in {None, "Bash"}:
             _close_pending_targets(targets)
             return message
         return _attach_bash_filesystem_effects(message, targets) if targets else message
@@ -320,10 +417,12 @@ class _BashFilesystemLeaseTracker:
             _close_pending_targets(targets)
         self._pending_by_id.clear()
         self._seen_call_ids.clear()
+        self._pending_bash_call_ids.clear()
         if self._idless is not None:
             _close_pending_targets(self._idless)
             self._idless = None
         self._idless_active = False
+        self._idless_bash_active = False
 
 
 def _correlated_tool_result_name(
