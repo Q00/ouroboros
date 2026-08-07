@@ -8699,7 +8699,6 @@ Respond with either ATOMIC or the structured JSON object only.
                 try:
                     if before_provider_entry is not None:
                         await before_provider_entry()
-                    # Bookkeeping stays replayable until the admitted provider boundary.
                     provider_effect_scope.enter()
                     provider_effect_active = True
                     await self._authority_leaf_dispatcher_stream(
@@ -9395,17 +9394,18 @@ Respond with either ATOMIC or the structured JSON object only.
                         reason=reason,
                         replayable=replayable,
                     )
-                    await self._emit_ac_runtime_event(
-                        event_type="execution.session.failed",
-                        runtime_identity=runtime_identity,
-                        ac_content=ac_content,
-                        runtime_handle=dispatch_state.runtime_handle,
-                        execution_id=execution_context_id,
-                        session_id=dispatch_state.ac_session_id,
-                        orchestrator_session_id=session_id,
-                        success=False,
-                        error="Runtime attempt cancelled or interrupted.",
-                    )
+                    if dispatch_state.lifecycle_event_count:
+                        await self._emit_ac_runtime_event(
+                            event_type="execution.session.failed",
+                            runtime_identity=runtime_identity,
+                            ac_content=ac_content,
+                            runtime_handle=dispatch_state.runtime_handle,
+                            execution_id=execution_context_id,
+                            session_id=dispatch_state.ac_session_id,
+                            orchestrator_session_id=session_id,
+                            success=False,
+                            error="Runtime attempt cancelled or interrupted.",
+                        )
             except Exception as seal_error:
                 # A cancellation seal is the last durable protection against
                 # replay.  Hiding its failure would leave an entered provider
