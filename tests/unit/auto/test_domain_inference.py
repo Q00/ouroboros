@@ -2170,3 +2170,211 @@ def test_coordinated_target_phrases_are_not_co_products(goal: str) -> None:
     result = derive_domain_from_ledger(ledger)
     assert result.is_single
     assert result.single is TaskClass.LIBRARY
+
+
+# ---------------------------------------------------------------------------
+# Adversarial pre-probe pins (#1813 W1): confirmed violations found by
+# bot-style probing ahead of review, fixed proactively.
+# ---------------------------------------------------------------------------
+
+
+def test_feature_denial_cannot_cross_a_comma() -> None:
+    ledger = _bare_ledger(
+        "Build a recipe website with no signup, plus a browser UI for browsing recipes"
+    )
+    _seed_section(
+        ledger, "outputs", value="Homepage with responsive layout and recipe detail pages"
+    )
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP
+
+
+def test_prefix_denial_inside_content_clause_is_scoped() -> None:
+    ledger = _bare_ledger("Build a website that lists non-browser apps for offline work")
+    _seed_section(ledger, "outputs", value="Homepage with responsive layout and app detail pages")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP
+
+
+def test_trailing_adverb_does_not_defeat_denial() -> None:
+    ledger = _bare_ledger(
+        "Turn the reporting web app into a CLI; the deliverable is not a web app anymore"
+    )
+    _seed_section(ledger, "outputs", value="Report tables printed to stdout with exit codes")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.CLI
+
+
+def test_adjective_led_denial_alternatives_are_consumed() -> None:
+    ledger = _bare_ledger(
+        "Build a terminal report tool, not a browser-based graphical dashboard, "
+        "interactive web app, or responsive frontend"
+    )
+    _seed_section(ledger, "outputs", value="Usage tables printed to stdout")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.CLI
+
+
+@pytest.mark.parametrize(
+    ("goal", "outputs", "runtime", "expected"),
+    [
+        (
+            "Build a web app built around the Stripe SDK",
+            "Login form with an account settings panel",
+            "Browser",
+            TaskClass.WEB_APP,
+        ),
+        (
+            "Build a backend serving predictions via a REST API",
+            "JSON responses for clients",
+            None,
+            TaskClass.WEB_SERVICE,
+        ),
+        (
+            "Build a CLI wrapping the GitHub REST API",
+            "Deterministic stdout and exit code 0",
+            "Local shell / terminal",
+            TaskClass.CLI,
+        ),
+        (
+            "Build a Python client library wrapping the GitHub REST API",
+            "An importable package with a public API",
+            None,
+            TaskClass.LIBRARY,
+        ),
+        (
+            "Build a REST API compatible with the existing deploy CLI",
+            "Multiple REST endpoints returning JSON body responses",
+            None,
+            TaskClass.WEB_SERVICE,
+        ),
+    ],
+)
+def test_wrapping_and_platform_relations_stay_consumed(goal, outputs, runtime, expected) -> None:
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value=outputs)
+    if runtime:
+        _seed_section(ledger, "runtime_context", value=runtime)
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is expected
+
+
+@pytest.mark.parametrize(
+    ("goal", "outputs", "runtime"),
+    [
+        (
+            "Build an uptime monitor for our marketing website",
+            "Status page checks recorded hourly; broken pages flagged in the summary",
+            "Scheduled cron job on a Linux host",
+        ),
+        (
+            "Build a web spider that indexes marketing websites",
+            "Landing pages catalogued per domain with word counts",
+            None,
+        ),
+        (
+            "Write end-to-end browser tests for the checkout flow",
+            "Checkout form regressions detected nightly",
+            "CI pipeline running headless Chromium",
+        ),
+        (
+            "Build a desktop tool with a web-app-style interface",
+            "Native desktop window listing local files",
+            "Native desktop runtime",
+        ),
+    ],
+)
+def test_monitoring_and_desktop_tools_never_become_web_apps(goal, outputs, runtime) -> None:
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value=outputs)
+    if runtime:
+        _seed_section(ledger, "runtime_context", value=runtime)
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes
+
+
+@pytest.mark.parametrize(
+    ("goal", "outputs", "expected"),
+    [
+        (
+            "Build an accessibility checker for corporate websites",
+            "WCAG violations summarized per landing page in an HTML report",
+            TaskClass.CLI,
+        ),
+        (
+            "Build a packaging CLI and upload the docs to our website",
+            "Deterministic stdout and exit code 0",
+            TaskClass.CLI,
+        ),
+        (
+            "Build a CLI to scaffold and deploy a web app",
+            "Deterministic stdout and exit code 0",
+            TaskClass.CLI,
+        ),
+        (
+            "Build a link checker CLI that scans docs and reports broken website links",
+            "Deterministic stdout and exit code 0",
+            TaskClass.CLI,
+        ),
+        (
+            "Build a frontend deployment CLI",
+            "Deployment status printed to stdout and exit code 0",
+            TaskClass.CLI,
+        ),
+        (
+            "Build a website generator CLI",
+            "Generated HTML files written to disk; build summary printed to stdout",
+            TaskClass.CLI,
+        ),
+        (
+            "Build a website uptime monitoring CLI",
+            "Uptime results printed to stdout with exit code 0",
+            TaskClass.CLI,
+        ),
+        (
+            "Build a web app scaffolding CLI",
+            "Generated project files and a summary printed to stdout",
+            TaskClass.CLI,
+        ),
+        (
+            "Build a single-page application audit tool",
+            "Accessibility findings listed per route",
+            TaskClass.CLI,
+        ),
+    ],
+)
+def test_web_modifiers_of_cli_heads_stay_cli(goal, outputs, expected) -> None:
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value=outputs)
+    _seed_section(ledger, "runtime_context", value="Local shell / terminal")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is expected
+
+
+@pytest.mark.parametrize(
+    ("goal", "outputs", "expected"),
+    [
+        (
+            "Refactor the frontend authentication code into smaller modules, preserving behavior",
+            "Same public behavior; modules extracted under src/auth",
+            TaskClass.REFACTOR_IN_PLACE,
+        ),
+        (
+            "Build a 2D platformer game hosted on my website",
+            "Playable game loop with sprites and collision detection",
+            TaskClass.GAME_2D,
+        ),
+    ],
+)
+def test_adjacent_classes_keep_ownership_over_web_modifiers(goal, outputs, expected) -> None:
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value=outputs)
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is expected

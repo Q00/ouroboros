@@ -164,12 +164,16 @@ def _negation_res_for(signal_fragment: str) -> tuple[re.Pattern[str], re.Pattern
     denied = rf"{signal_fragment}(?:[\s\-](?!(?:or|and|nor|but|rather|instead)\b)\w+)*"
     negated = re.compile(
         rf"\b(?P<cue>{_NEGATION_CUE_FRAGMENT})"
-        # Path tokens cannot carry sentence punctuation (#1813 R26): a
-        # denial in one clause must not consume the next clause's artifact.
-        r"(?P<path>(?:\s+[^\s.;!?]+){0,7}?)"
+        # Path tokens cannot carry punctuation (#1813 R26/W1): a denial in
+        # one clause must not consume the next clause's artifact — commas
+        # included, since a feature denial ("with no signup, plus a
+        # browser UI") must not reach the next conjunct.
+        r"(?P<path>(?:\s+[^\s.;!?,]+){0,7}?)"
         rf"\s+{denied}"
+        # Coordinated alternatives may lead with a couple of modifier
+        # words ("not X, interactive web app, or responsive frontend").
         rf"(?:(?:\s*,\s*(?:or\s+|and\s+|nor\s+)?|\s+(?:or|and|nor)\s+|\s*/\s*)"
-        rf"(?:an?\s+|the\s+)?{denied})*\b"
+        rf"(?:an?\s+|the\s+)?(?:[\w\-]+\s+){{0,2}}?{denied})*\b"
     )
     prefix = re.compile(rf"\bnon[\s\-]?{signal_fragment}\b")
     return negated, prefix
@@ -264,6 +268,9 @@ _WEB_APP_PREFIX_DENIAL_RE = re.compile(
 _WEB_SUBTYPE_RE = re.compile(r"single[\s\-]page")
 
 
+_TRAILING_ADVERBS = frozenset(
+    {"anymore", "anyway", "either", "though", "whatsoever", "now", "yet", "all", "at"}
+)
 _CONTENT_CLAUSE_RE = re.compile(r"\b(?:that|which|for|about)\s+[^,.;]*")
 
 
@@ -298,8 +305,16 @@ def _goal_denies_web_app_artifact(goal_text: str) -> bool:
     # A prefix denial is analyzed both bare ("non-web-app" denies an app)
     # and extended through trailing words ("non-browser user interface"
     # denies an interface) — either head noun dominates (#1813 R19).
-    spans.extend(match.group(0) for match in prefix.finditer(goal_text))
-    spans.extend(match.group(0) for match in _WEB_APP_PREFIX_DENIAL_RE.finditer(goal_text))
+    spans.extend(
+        match.group(0)
+        for match in prefix.finditer(goal_text)
+        if not any(start <= match.start() < end for start, end in content_regions)
+    )
+    spans.extend(
+        match.group(0)
+        for match in _WEB_APP_PREFIX_DENIAL_RE.finditer(goal_text)
+        if not any(start <= match.start() < end for start, end in content_regions)
+    )
     for span in spans:
         core = _DENIED_PP_TAIL_RE.sub(" ", span)
         for piece in _DENIED_PIECE_SPLIT_RE.split(core):
@@ -309,6 +324,10 @@ def _goal_denies_web_app_artifact(goal_text: str) -> bool:
             if _WEB_SUBTYPE_RE.search(piece):
                 continue
             words = re.findall(r"[a-z]+", piece)
+            # Trailing adverbs ("not a web app anymore") do not change
+            # what is denied (#1813 W1).
+            while words and words[-1] in _TRAILING_ADVERBS:
+                words.pop()
             if words and words[-1] in _ARTIFACT_HEAD_NOUNS:
                 return True
     return False
@@ -479,6 +498,11 @@ def _matches_webhook(ledger: SeedDraftLedger) -> bool:
     return has_webhook_in and has_side_effect
 
 
+_PRODUCED_SERVICE_RE = re.compile(
+    r"\b(?:serv\w+|expos\w+|provid\w+|offer\w+|host\w+|publish\w+|"
+    r"implement\w+|deliver\w+)\b[^,.;]*\b"
+    r"(?:rest\s+apis?|apis?|endpoints?|web\s+services?|https?\s+servers?)"
+)
 _WEB_SERVICE_SIGNAL_FRAGMENT = (
     r"(?:rest\s+apis?|rest\s+endpoints?|web\s+services?|web\s+servers?|"
     r"https?\s+servers?|apis?|endpoints?)"
@@ -493,6 +517,10 @@ def _matches_web_service(ledger: SeedDraftLedger) -> bool:
     # Denied service vocabulary is not evidence (#1813 R32): the goal
     # routes through the shared negation strip before keyword matching.
     service_goal = _strip_negated_signals(goal, _WEB_SERVICE_SIGNAL_FRAGMENT)
+    # A production verb governing the API ("serving predictions via a
+    # REST API") keeps it produced even through via/through (#1813 W1).
+    if _PRODUCED_SERVICE_RE.search(service_goal):
+        return True
     api_signal = _any_of(
         _CONSUMED_DEPENDENCY_RE.sub(" ", outputs + " " + service_goal),
         (
@@ -638,6 +666,7 @@ _UI_ARTIFACT_TAIL = (
     r"errors?|failures?|warnings?|issues?|bugs?|urls?|findings?|counts?|"
     r"results?|outcomes?|screenshots?|snapshots?|"
     r"listed|returned|printed|logged|reported|exported|emitted|dumped|"
+    r"catalogu?ed|indexed|recorded|detected|summarized|flagged|"
     r"and\s+(?:[\w\-]+\s+){0,3}?"
     r"(?:listed|returned|printed|logged|reported|exported|emitted|dumped)))"
 )
@@ -685,7 +714,8 @@ _RELATIONAL_TARGET_RE = re.compile(
     r"\b(?:targeting|supporting|serving|powering|backing|aimed\s+at|"
     r"used\s+by|consumed\s+by|embedded\s+in|integrat\w*\s+with|"
     r"compatible\s+with|used\s+with|works?\s+with|interopera\w*\s+with|"
-    r"paired\s+with)\s+"
+    r"paired\s+with|hosted\s+on|deployed\s+(?:on|to)|running\s+on|"
+    r"served\s+(?:from|on)|published\s+(?:on|to))\s+"
     r"(?:an?\s+|the\s+)?(?:[\w\-'’]+\s+){0,2}?"
     r"(?:web[\s\-]?app(?:lication)?s?|webapps?|websites?|web\s+uis?|frontends?|"
     r"front[\s\-]ends?|single[\s\-]page\s+app(?:lication)?s?)\b"
@@ -714,6 +744,11 @@ def _goal_artifact_head_is_web_app(goal_text: str) -> bool:
     web_matches = list(_WEB_APP_ARTIFACT_PHRASE_RE.finditer(core))
     if not web_matches:
         return False
+    # A head is final: trailing words after the last web phrase ("web app
+    # scaffolding CLI", "website generator CLI") mean the web phrase
+    # modifies another artifact (#1813 W1).
+    if re.search(r"\w", core[web_matches[-1].end() :]):
+        return False
     intent_matches = list(_LIBRARY_INTENT_RE.finditer(core))
     if not intent_matches:
         return True
@@ -732,6 +767,10 @@ def _goal_has_web_co_product_conjunct(goal_text: str) -> bool:
     # as co-product conjuncts.
     goal_text = _RELATIONAL_TARGET_RE.sub(" ", goal_text)
     goal_text = _strip_negated_signals(goal_text, _WEB_APP_GOAL_SIGNAL_FRAGMENT)
+    # Infinitive/PP action targets ("and upload the docs to our website",
+    # "to scaffold and deploy a web app") are not product declarations
+    # (#1813 W1).
+    goal_text = _INFINITIVE_TARGET_RE.sub(" ", goal_text)
     pieces = _GOAL_CONJUNCT_SPLIT_RE.split(goal_text)
     if len(pieces) < 2:
         return False
@@ -739,12 +778,19 @@ def _goal_has_web_co_product_conjunct(goal_text: str) -> bool:
     # that is the target of documentation/plugins/adapters ("with
     # documentation for web apps") is not a co-produced app.
     piece_cores = [_CONTENT_CLAUSE_RE.sub(" ", piece) for piece in pieces]
-    return any(
-        _WEB_APP_ARTIFACT_PHRASE_RE.search(core)
-        and not _LIBRARY_INTENT_RE.search(core)
-        and _goal_has_unnegated_web_app_signal(core)
-        for core in piece_cores
-    )
+
+    def _piece_declares_web_product(core: str) -> bool:
+        matches = list(_WEB_APP_ARTIFACT_PHRASE_RE.finditer(core))
+        if not matches or _LIBRARY_INTENT_RE.search(core):
+            return False
+        # The web phrase must be the piece's own head ("an admin web
+        # app"), not a modifier of something else ("broken website
+        # links") — same finality rule as the goal head (#1813 W1).
+        if re.search(r"\w", core[matches[-1].end() :]):
+            return False
+        return _goal_has_unnegated_web_app_signal(core)
+
+    return any(_piece_declares_web_product(core) for core in piece_cores)
 
 
 def _goal_has_web_only_conjunct(goal_text: str, other_evidence_re: re.Pattern[str]) -> bool:
@@ -795,8 +841,10 @@ def _library_visible_goal(ledger: SeedDraftLedger) -> str:
 
 
 _INSPECTION_TOOL_GOAL_RE = re.compile(
-    r"\b(?:automation|test(?:ing)?\s+suites?|crawlers?|scrapers?|scanners?|"
-    r"auditors?|audit\s+tools?)\b"
+    r"\b(?:automation|test(?:ing)?\s+suites?|tests?|crawlers?|scrapers?|"
+    r"scanners?|spiders?|auditors?|audits?|audit\s+tools?|monitor(?:s|ing)?|"
+    r"checkers?|linters?|analyzers?|validators?|profilers?|"
+    r"end[\s\-]to[\s\-]end|e2e)\b"
 )
 
 
@@ -898,12 +946,14 @@ def _matches_web_app(ledger: SeedDraftLedger) -> bool:
 _CONSUMED_DEPENDENCY_RE = re.compile(
     r"\b(?:to|from|against|via|using|through|consumes?|consuming|calls?|calling|"
     r"powered\s+by|backed\s+by|built\s+on|driven\s+by|served\s+by|"
-    r"integrat\w*\s+with|invokes?|invoking|fetch\w*\s+(?:data\s+)?from)\s+"
+    r"integrat\w*\s+with|invokes?|invoking|fetch\w*\s+(?:data\s+)?from|"
+    r"wrapp?\w*|built\s+around|compatible\s+with|works?\s+with|"
+    r"interopera\w*\s+with|paired\s+with)\s+"
     r"(?!(?:be|expose|exposing|provide|providing|offer|offering|serve|serving|"
     r"publish|publishing|host|hosting|implement|implementing|build|building|"
     r"create|creating|deliver|delivering)\b)"
     r"(?:an?\s+|the\s+)?(?:[\w\-'’]+\s+){0,2}?"
-    r"(?:public\s+api|rest\s+apis?|apis?|sdks?|clis?|command[\s\-]line|web\s+services?)\b"
+    r"(?:public\s+api|rest\s+apis?|apis?|sdks?|clis?|command[\s\-]line(?:\s+(?!(?:or|and|nor|but)\b)[\w\-'’]+){0,2}|web\s+services?)\b"
 )
 
 
