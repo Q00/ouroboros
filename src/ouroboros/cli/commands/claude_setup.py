@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+from rich.markup import escape
 import typer
 import yaml
 
@@ -38,16 +39,18 @@ def _write_claude_runtime_config(claude_path: str, *, runtime_backend: str) -> P
 def setup_claude(claude_path: str) -> None:
     """Configure the default isolated Claude Agent SDK package profile."""
     if has_unsupported_claude_sdk_mcp_mix():
-        print_error(UNSUPPORTED_CLAUDE_SDK_MCP_MESSAGE)
+        print_error(escape(UNSUPPORTED_CLAUDE_SDK_MCP_MESSAGE))
         raise typer.Exit(1)
 
     config_path = _write_claude_runtime_config(claude_path, runtime_backend="claude")
     print_warning(
-        "Claude SDK uses MCP 1.x in this environment. The Ouroboros MCP 2 server "
-        "must run through its isolated ouroboros-ai[mcp] launcher."
+        escape(
+            "Claude SDK uses MCP 1.x in this environment. The Ouroboros MCP 2 server "
+            "must run through its isolated ouroboros-ai[mcp] launcher."
+        )
     )
     print_success(f"Configured Claude SDK runtime (CLI: {claude_path})")
-    print_info("Package profile: ouroboros-ai[claude] (SDK/MCP 1.x)")
+    print_info(escape("Package profile: ouroboros-ai[claude] (SDK/MCP 1.x)"))
     print_info(f"Config saved to: {config_path}")
 
 
@@ -60,7 +63,7 @@ def setup_claude_cli(claude_path: str) -> None:
     """Configure the dependency-free CLI worker used with an MCP 2 server."""
     config_path = _write_claude_runtime_config(claude_path, runtime_backend="claude_mcp")
     print_success(f"Configured Claude CLI runtime (CLI: {claude_path})")
-    print_info("Package profile: ouroboros-ai[claude-cli] (MCP 2 compatible)")
+    print_info(escape("Package profile: ouroboros-ai[claude-cli] (MCP 2 compatible)"))
     print_info(f"Config saved to: {config_path}")
 
 

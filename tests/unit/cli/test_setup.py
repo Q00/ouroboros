@@ -4275,7 +4275,13 @@ class TestClaudeSetup:
             result = CliRunner().invoke(setup_cmd.app, ["--runtime", "codex"])
 
         assert result.exit_code == 1
-        assert "Unsupported package profiles" in result.output
+        for profile in (
+            "ouroboros-ai[mcp]",
+            "ouroboros-ai[claude]",
+            "[claude-sdk]",
+            "[claude-cli]",
+        ):
+            assert profile in result.output
         assert config_path.read_text(encoding="utf-8") == original
 
     def test_setup_claude_cli_selects_dependency_free_worker(self, tmp_path: Path) -> None:

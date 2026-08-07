@@ -29,6 +29,7 @@ from ouroboros.cli.commands.mcp_doctor import (
     check_platform,
     check_python_version,
 )
+from ouroboros.package_profiles import UNSUPPORTED_CLAUDE_SDK_MCP_MESSAGE
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -692,6 +693,30 @@ class TestDoctorCommand:
         ):
             result = runner.invoke(app, [])
         assert "pip install mcp" in result.output
+
+    def test_human_output_preserves_literal_package_profiles(self):
+        app = _make_app()
+        check_result = CheckResult(
+            name="claude_agent_sdk_import",
+            status="fail",
+            message=UNSUPPORTED_CLAUDE_SDK_MCP_MESSAGE,
+            remediation="Use ouroboros-ai[mcp,claude-cli] in the MCP 2 process.",
+        )
+        with patch(
+            "ouroboros.cli.commands.mcp_doctor._ALL_CHECKS",
+            [lambda: check_result],
+        ):
+            result = runner.invoke(app, [])
+
+        assert result.exit_code == 1
+        for profile in (
+            "ouroboros-ai[mcp]",
+            "ouroboros-ai[claude]",
+            "[claude-sdk]",
+            "[claude-cli]",
+            "ouroboros-ai[mcp,claude-cli]",
+        ):
+            assert profile in result.output
 
     def test_json_fail_still_exits_1(self):
         app = _make_app()

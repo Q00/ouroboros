@@ -30,6 +30,7 @@ import sys
 import tomllib
 from typing import Annotated, Literal
 
+from rich.markup import escape
 from rich.prompt import Prompt
 from rich.table import Table
 import typer
@@ -191,8 +192,10 @@ def _ensure_claude_mcp_entry() -> None:
     isolated process. Never mutate user-owned Claude MCP configuration here.
     """
     print_warning(
-        "Claude SDK stays on MCP 1.x. Launch the Ouroboros MCP 2 server from "
-        "the separate ouroboros-ai[mcp] profile with --runtime claude-cli."
+        escape(
+            "Claude SDK stays on MCP 1.x. Launch the Ouroboros MCP 2 server from "
+            "the separate ouroboros-ai[mcp] profile with --runtime claude-cli."
+        )
     )
 
 
@@ -4748,7 +4751,7 @@ def setup(
     if ctx.invoked_subcommand is not None:
         return
     if has_unsupported_claude_sdk_mcp_mix():
-        print_error(UNSUPPORTED_CLAUDE_SDK_MCP_MESSAGE)
+        print_error(escape(UNSUPPORTED_CLAUDE_SDK_MCP_MESSAGE))
         raise typer.Exit(1)
 
     console.print("\n[bold cyan]Ouroboros Setup[/bold cyan]\n")

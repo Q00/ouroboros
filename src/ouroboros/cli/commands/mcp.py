@@ -18,6 +18,7 @@ import time
 from typing import Annotated, Any
 
 from rich.console import Console
+from rich.text import Text
 import structlog
 import typer
 
@@ -988,7 +989,7 @@ def serve(
     # explicit SDK runtime request: this command is the MCP 2 server boundary,
     # so Claude execution here must use the out-of-process CLI worker.
     if has_unsupported_claude_sdk_mcp_mix() or (runtime is not None and runtime.value == "claude"):
-        _stderr_console.print(f"[red]{UNSUPPORTED_CLAUDE_SDK_MCP_MESSAGE}[/red]")
+        _stderr_console.print(Text(UNSUPPORTED_CLAUDE_SDK_MCP_MESSAGE, style="red"))
         raise typer.Exit(1)
 
     # Guard: prevent recursive MCP server spawning.

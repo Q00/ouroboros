@@ -22,6 +22,7 @@ import sys
 from typing import Annotated, Literal
 
 from rich.console import Console
+from rich.markup import escape
 import typer
 
 from ouroboros.config.models import resolve_event_store_path
@@ -567,9 +568,11 @@ def register_doctor_command(app: typer.Typer) -> None:
             console.print()
             for result in results:
                 symbol = _SYMBOLS[result.status]
-                console.print(f"  {symbol}  [bold]{result.name}[/bold]: {result.message}")
+                console.print(
+                    f"  {symbol}  [bold]{escape(result.name)}[/bold]: {escape(result.message)}"
+                )
                 if result.remediation:
-                    console.print(f"      [dim]hint: {result.remediation}[/dim]")
+                    console.print(f"      [dim]hint: {escape(result.remediation)}[/dim]")
             console.print()
 
         has_failure = any(r.status == "fail" for r in results)
