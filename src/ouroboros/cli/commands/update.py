@@ -2,7 +2,7 @@
 
 Native CLI counterpart of the `ooo update` skill (skills/update/SKILL.md):
   1. Version check     (installed vs latest on PyPI, pre-release aware)
-  2. Package upgrade   (same installer that performed the install: uv tool > pipx > pip)
+  2. Package upgrade   (same manager receipt and environment as the running CLI)
   3. Runtime refresh   (Claude Code plugin + `ouroboros setup --non-interactive`)
 
 Never combines the [claude] and [mcp] extras: the Claude Agent SDK embeds
@@ -12,6 +12,8 @@ launch their own isolated `ouroboros-ai[mcp]` process via uvx/pipx run.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
@@ -20,7 +22,8 @@ import shutil
 import ssl
 import subprocess
 import sys
-from typing import Annotated
+import tomllib
+from typing import Annotated, Literal
 import urllib.request
 
 import typer
@@ -39,7 +42,7 @@ app = typer.Typer(
 )
 
 PYPI_JSON_URL = "https://pypi.org/pypi/ouroboros-ai/json"
-PACKAGE_SPEC = "ouroboros-ai[claude]"
+PACKAGE_NAME = "ouroboros-ai"
 
 
 # ── Version helpers ──────────────────────────────────────────────
@@ -139,66 +142,237 @@ def _latest_pypi_version(include_prereleases: bool, timeout: float = 10.0) -> st
 # ── Installer detection and upgrade ──────────────────────────────
 
 
-def _manager_env_root(command: list[str]) -> Path | None:
-    """Ask a tool manager where it keeps its environments; None if unavailable."""
-    if shutil.which(command[0]) is None:
+class InstallationIdentityError(RuntimeError):
+    """Raised when the running installation cannot be updated safely."""
+
+
+@dataclass(frozen=True)
+class InstallationIdentity:
+    """Receipt-backed identity of the running Ouroboros installation."""
+
+    manager: Literal["uv", "pipx"]
+    environment: Path
+    profile: str
+    console_path: Path
+    manager_binary: str
+    manager_home: Path
+
+
+def _normalise_distribution_name(name: str) -> str:
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def _resolve_environment_console(
+    prefix: Path,
+    *,
+    windows: bool | None = None,
+    pathext: str | None = None,
+) -> Path | None:
+    """Resolve only a console script owned by *prefix*, including Windows launchers."""
+    environment = prefix.resolve()
+    is_windows = os.name == "nt" if windows is None else windows
+    script_dir = environment / ("Scripts" if is_windows else "bin")
+    suffixes = [""]
+    if is_windows:
+        raw_extensions = pathext if pathext is not None else os.environ.get("PATHEXT", "")
+        raw_extensions = raw_extensions or ".COM;.EXE;.BAT;.CMD"
+        extensions: list[str] = []
+        for extension in raw_extensions.split(";"):
+            extension = extension.strip()
+            if not extension:
+                continue
+            if not extension.startswith("."):
+                extension = f".{extension}"
+            for variant in (extension.lower(), extension, extension.upper()):
+                if variant not in extensions:
+                    extensions.append(variant)
+        suffixes = [*extensions, ""]
+    for name in ("ouroboros", "ooo"):
+        for suffix in suffixes:
+            candidate = script_dir / f"{name}{suffix}"
+            if candidate.is_file():
+                resolved = candidate.resolve()
+                if resolved.is_relative_to(environment):
+                    return resolved
+    return None
+
+
+def _format_uv_requirement(requirement: object) -> str | None:
+    if not isinstance(requirement, dict):
         return None
+    name = requirement.get("name")
+    if not isinstance(name, str) or not name.strip():
+        return None
+    extras = requirement.get("extras", [])
+    if not isinstance(extras, list) or not all(isinstance(extra, str) for extra in extras):
+        return None
+    label = name.strip()
+    if extras:
+        label += f"[{','.join(sorted(extras))}]"
+    specifier = requirement.get("specifier")
+    if specifier is not None:
+        if not isinstance(specifier, str):
+            return None
+        label += specifier
+    return label
+
+
+def _uv_profile(receipt_path: Path) -> str:
     try:
-        result = subprocess.run(command, capture_output=True, text=True, timeout=30)
-    except (OSError, subprocess.SubprocessError):
-        return None
-    if result.returncode != 0:
-        return None
-    lines = result.stdout.strip().splitlines()
-    if not lines:
-        return None
-    root = Path(lines[0].strip())
-    if not root.is_absolute():
-        return None
-    return root.resolve()
+        with receipt_path.open("rb") as receipt_file:
+            data = tomllib.load(receipt_file)
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        raise InstallationIdentityError(f"cannot read uv receipt {receipt_path}: {exc}") from exc
+    requirements = data.get("tool", {}).get("requirements")
+    if not isinstance(requirements, list):
+        raise InstallationIdentityError(f"uv receipt {receipt_path} has no requirements list")
+    rendered: list[tuple[dict[object, object], str]] = []
+    for requirement in requirements:
+        label = _format_uv_requirement(requirement)
+        if not isinstance(requirement, dict) or label is None:
+            raise InstallationIdentityError(
+                f"uv receipt {receipt_path} has an unsupported requirement"
+            )
+        rendered.append((requirement, label))
+    main = [
+        label
+        for requirement, label in rendered
+        if _normalise_distribution_name(str(requirement.get("name", ""))) == PACKAGE_NAME
+    ]
+    if len(main) != 1:
+        raise InstallationIdentityError(
+            f"uv receipt {receipt_path} does not identify exactly one {PACKAGE_NAME} requirement"
+        )
+    additions = [label for _, label in rendered if label != main[0]]
+    return main[0] if not additions else f"{main[0]} (with {', '.join(additions)})"
 
 
-def _detect_installer(prefix: Path | None = None) -> str:
-    """Return the installer that owns the *running* install: 'uv', 'pipx', or 'pip'.
+_PYPI_OUROBOROS_SPEC = re.compile(
+    r"^ouroboros[-_.]ai(?:\[[A-Za-z0-9_.-]+(?:,[A-Za-z0-9_.-]+)*\])?"
+    r"(?:\s*(?:===|==|~=|!=|<=|>=|<|>).+)?$",
+    re.IGNORECASE,
+)
 
-    Ownership is anchored to the running interpreter's environment
-    (sys.prefix), not to global tool listings — a stale uv or pipx
-    installation elsewhere must not hijack the upgrade target. Falls back
-    to pip against the running interpreter when no manager owns this env.
+
+def _pipx_profile(receipt_path: Path) -> str:
+    try:
+        data = json.loads(receipt_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise InstallationIdentityError(f"cannot read pipx receipt {receipt_path}: {exc}") from exc
+    main = data.get("main_package")
+    if not isinstance(main, dict):
+        raise InstallationIdentityError(f"pipx receipt {receipt_path} has no main package")
+    package = main.get("package")
+    package_or_url = main.get("package_or_url")
+    if (
+        not isinstance(package, str)
+        or _normalise_distribution_name(package) != PACKAGE_NAME
+        or not isinstance(package_or_url, str)
+        or _PYPI_OUROBOROS_SPEC.fullmatch(package_or_url.strip()) is None
+    ):
+        raise InstallationIdentityError(
+            f"pipx receipt {receipt_path} does not identify a PyPI {PACKAGE_NAME} profile"
+        )
+    injected = data.get("injected_packages", {})
+    if not isinstance(injected, dict):
+        raise InstallationIdentityError(
+            f"pipx receipt {receipt_path} has an invalid injected-packages record"
+        )
+    injected_specs: list[str] = []
+    for details in injected.values():
+        if not isinstance(details, dict):
+            raise InstallationIdentityError(
+                f"pipx receipt {receipt_path} has an invalid injected package"
+            )
+        spec = details.get("package_or_url")
+        if not isinstance(spec, str) or not spec.strip() or "\n" in spec or "\r" in spec:
+            raise InstallationIdentityError(
+                f"pipx receipt {receipt_path} has an invalid injected package spec"
+            )
+        injected_specs.append(spec.strip())
+    profile = package_or_url.strip()
+    if injected_specs:
+        profile += f" (with injected {', '.join(sorted(injected_specs))})"
+    return profile
+
+
+def _detect_installation_identity(prefix: Path | None = None) -> InstallationIdentity:
+    """Prove manager, environment, profile, and console from local receipts.
+
+    No global manager listing or directory-name heuristic is accepted. A
+    direct pip installation cannot prove which extras were requested, so it
+    fails closed instead of silently replacing the profile with another.
     """
-    env = (prefix or Path(sys.prefix)).resolve()
-    uv_root = _manager_env_root(["uv", "tool", "dir"])
-    if uv_root is not None and env.is_relative_to(uv_root):
-        return "uv"
-    pipx_root = _manager_env_root(["pipx", "environment", "--value", "PIPX_LOCAL_VENVS"])
-    if pipx_root is not None and env.is_relative_to(pipx_root):
-        return "pipx"
-    # Heuristic fallback for managers that cannot report their roots.
-    parts = [part.lower() for part in env.parts]
-    if "pipx" in parts and "venvs" in parts:
-        return "pipx"
-    if "uv" in parts and "tools" in parts:
-        return "uv"
-    return "pip"
+    environment = (prefix or Path(sys.prefix)).resolve()
+    console_path = _resolve_environment_console(environment)
+    if console_path is None:
+        raise InstallationIdentityError(
+            f"no Ouroboros console script exists inside the running environment {environment}"
+        )
+
+    uv_receipt = environment / "uv-receipt.toml"
+    pipx_receipt = environment / "pipx_metadata.json"
+    receipts = [path for path in (uv_receipt, pipx_receipt) if path.is_file()]
+    if len(receipts) > 1:
+        raise InstallationIdentityError(
+            f"both uv and pipx receipts exist in {environment}; ownership is ambiguous"
+        )
+    if uv_receipt.is_file():
+        binary = shutil.which("uv")
+        if binary is None:
+            raise InstallationIdentityError(
+                "uv owns this environment but the uv executable is unavailable"
+            )
+        return InstallationIdentity(
+            manager="uv",
+            environment=environment,
+            profile=_uv_profile(uv_receipt),
+            console_path=console_path,
+            manager_binary=binary,
+            manager_home=environment.parent,
+        )
+    if pipx_receipt.is_file():
+        binary = shutil.which("pipx")
+        if binary is None:
+            raise InstallationIdentityError(
+                "pipx owns this environment but the pipx executable is unavailable"
+            )
+        if environment.parent.name != "venvs":
+            raise InstallationIdentityError(
+                f"cannot derive PIPX_HOME safely from non-standard environment {environment}"
+            )
+        return InstallationIdentity(
+            manager="pipx",
+            environment=environment,
+            profile=_pipx_profile(pipx_receipt),
+            console_path=console_path,
+            manager_binary=binary,
+            manager_home=environment.parent.parent,
+        )
+    raise InstallationIdentityError(
+        "the running environment has no uv or pipx receipt; direct pip installs do not "
+        "record requested extras, so the installed profile cannot be preserved automatically"
+    )
 
 
-def _upgrade_command(installer: str, prerelease: bool) -> list[str]:
-    """Build the upgrade command for the detected installer."""
-    if installer == "uv":
-        command = ["uv", "tool", "install", "--upgrade"]
+def _upgrade_command(identity: InstallationIdentity, prerelease: bool) -> list[str]:
+    """Build a receipt-replaying upgrade command for *identity*."""
+    if identity.manager == "uv":
+        command = [identity.manager_binary, "tool", "upgrade"]
         if prerelease:
-            command.append("--prerelease=allow")
-        return [*command, PACKAGE_SPEC]
-    if installer == "pipx":
-        # `pipx upgrade` cannot add extras to an existing venv — reinstall.
-        command = ["pipx", "install", "--force"]
-        if prerelease:
-            command.append("--pip-args=--pre")
-        return [*command, PACKAGE_SPEC]
-    command = [sys.executable, "-m", "pip", "install", "--upgrade"]
+            command.extend(["--prerelease", "allow"])
+        return [*command, PACKAGE_NAME]
+    command = [identity.manager_binary, "upgrade", "--include-injected"]
     if prerelease:
-        command.append("--pre")
-    return [*command, PACKAGE_SPEC]
+        command.append("--pip-args=--pre")
+    return [*command, PACKAGE_NAME]
+
+
+def _upgrade_environment(identity: InstallationIdentity) -> dict[str, str]:
+    """Pin the manager invocation to the identity's proven environment root."""
+    if identity.manager == "uv":
+        return {"UV_TOOL_DIR": str(identity.manager_home)}
+    return {"PIPX_HOME": str(identity.manager_home)}
 
 
 def _run_step(
@@ -207,13 +381,20 @@ def _run_step(
     description: str,
     dry_run: bool,
     timeout: float = 600.0,
+    env_overrides: Mapping[str, str] | None = None,
 ) -> bool:
     """Run one update step, streaming its output. Returns True on success."""
     if dry_run:
-        print_info(f"[dry-run] Would run: {' '.join(command)}")
+        prefix = ""
+        if env_overrides:
+            prefix = " ".join(f"{key}={value}" for key, value in env_overrides.items()) + " "
+        print_info(f"[dry-run] Would run: {prefix}{' '.join(command)}")
         return True
     try:
-        result = subprocess.run(command, timeout=timeout)
+        command_env = None
+        if env_overrides:
+            command_env = {**os.environ, **env_overrides}
+        result = subprocess.run(command, timeout=timeout, env=command_env)
     except (OSError, subprocess.SubprocessError):
         print_warning(f"{description} failed — could not run {command[0]!r}.")
         return False
@@ -245,35 +426,10 @@ def _refresh_claude_plugin(dry_run: bool) -> bool | None:
     )
 
 
-def _resolve_cli_binary() -> str | None:
-    """Locate the console script to run post-upgrade steps through.
-
-    Prefers the running environment's own script over PATH lookup so a
-    stale binary earlier on PATH cannot serve the refreshed steps.
-    """
-    script_dir = Path(sys.prefix) / ("Scripts" if os.name == "nt" else "bin")
-    for name in ("ouroboros", "ooo"):
-        candidate = script_dir / name
-        if candidate.exists():
-            return str(candidate)
-    for name in ("ouroboros", "ooo"):
-        found = shutil.which(name)
-        if found is not None:
-            return found
-    return None
-
-
-def _refresh_runtime_config(runtime: str, dry_run: bool) -> bool:
-    """Re-run setup through the (freshly upgraded) console script."""
-    binary = _resolve_cli_binary()
-    if binary is None:
-        print_warning(
-            "ouroboros binary not found — run "
-            f"`ouroboros setup --runtime {runtime} --non-interactive` manually."
-        )
-        return False
+def _refresh_runtime_config(runtime: str, dry_run: bool, identity: InstallationIdentity) -> bool:
+    """Re-run setup through the proven installation's refreshed console script."""
     return _run_step(
-        [binary, "setup", "--runtime", runtime, "--non-interactive"],
+        [str(identity.console_path), "setup", "--runtime", runtime, "--non-interactive"],
         description=f"Refreshed {runtime} runtime config",
         dry_run=dry_run,
     )
@@ -290,13 +446,12 @@ def _resolve_runtime(runtime: str) -> str:
     return "none"
 
 
-def _installed_version() -> str | None:
+def _installed_version(identity: InstallationIdentity) -> str | None:
     """Read the version from the refreshed binary (post-upgrade, fresh process)."""
-    binary = _resolve_cli_binary()
-    if binary is None:
-        return None
     try:
-        result = subprocess.run([binary, "--version"], capture_output=True, text=True, timeout=30)
+        result = subprocess.run(
+            [str(identity.console_path), "--version"], capture_output=True, text=True, timeout=30
+        )
     except (OSError, subprocess.SubprocessError):
         return None
     match = re.search(r"\d+\.\d+\.\d+[0-9a-zA-Z.+-]*", result.stdout)
@@ -349,10 +504,9 @@ def update(
 ) -> None:
     """Update Ouroboros to the latest version.
 
-    Upgrades the PyPI package with the same installer that installed it
-    (uv tool > pipx > pip), refreshes the Claude Code plugin when the
-    claude CLI is available, and re-runs `ouroboros setup` for the
-    selected runtime.
+    Replays the running uv/pipx installation's own receipt, preserving its
+    environment and optional-dependency profile. Then refreshes the selected
+    runtime through that same environment's console script.
 
     [dim]Examples:[/dim]
     [dim]    ouroboros update              # interactive[/dim]
@@ -382,8 +536,18 @@ def update(
     if check:
         raise typer.Exit()
 
-    installer = _detect_installer()
-    console.print(f"Installer: [cyan]{installer}[/cyan]\n")
+    try:
+        identity = _detect_installation_identity()
+    except InstallationIdentityError as exc:
+        print_warning(f"Cannot update safely: {exc}.")
+        console.print(
+            "[dim]No changes were made. Reinstall with your original manager and exact "
+            "ouroboros-ai[...] profile, then use `ouroboros update` for future updates.[/dim]\n"
+        )
+        raise typer.Exit(1) from exc
+    console.print(f"Installer:   [cyan]{identity.manager}[/cyan]")
+    console.print(f"Environment: [cyan]{identity.environment}[/cyan]")
+    console.print(f"Profile:     [cyan]{identity.profile}[/cyan]\n")
 
     if not yes and not dry_run:
         if not typer.confirm(f"Update to v{latest}?", default=True):
@@ -391,9 +555,10 @@ def update(
             raise typer.Exit()
 
     if not _run_step(
-        _upgrade_command(installer, include_prereleases),
-        description=f"Upgraded {PACKAGE_SPEC} via {installer}",
+        _upgrade_command(identity, include_prereleases),
+        description=f"Upgraded {identity.profile} via {identity.manager}",
         dry_run=dry_run,
+        env_overrides=_upgrade_environment(identity),
     ):
         console.print(
             "\n[bold yellow]Update failed — package upgrade did not complete.[/bold yellow]\n"
@@ -416,12 +581,12 @@ def update(
         else:
             if plugin_refreshed is False:
                 failed.append("Claude Code plugin refresh")
-            if not _refresh_runtime_config("claude", dry_run):
+            if not _refresh_runtime_config("claude", dry_run, identity):
                 failed.append("claude runtime config refresh")
     else:
         # Codex and the other setup-supported runtimes: setup re-installs
         # the packaged rules/skills, so no separate plugin step is needed.
-        if not _refresh_runtime_config(resolved_runtime, dry_run):
+        if not _refresh_runtime_config(resolved_runtime, dry_run, identity):
             failed.append(f"{resolved_runtime} runtime config refresh")
 
     console.print()
@@ -429,7 +594,7 @@ def update(
         console.print("[yellow]Dry run — no changes made.[/yellow]\n")
         raise typer.Exit()
 
-    installed = _installed_version()
+    installed = _installed_version(identity)
     if failed:
         console.print("[bold yellow]Ouroboros partially updated.[/bold yellow]")
         console.print("[yellow]Could not complete:[/yellow]")

@@ -848,13 +848,21 @@ ouroboros update --runtime none -y
 **What it does:**
 
 1. Compares the installed version against the latest on PyPI (pre-release aware)
-2. Upgrades `ouroboros-ai[claude]` with the same installer that installed it (`uv tool` > `pipx` > `pip`)
+2. Reads the running environment's local `uv` or `pipx` receipt and replays it
+   through that manager, preserving the exact environment and recorded
+   extras/additional requirements
 3. Refreshes the Claude Code plugin (`claude plugin marketplace update` + `claude plugin install`) when the `claude` CLI is available
 4. Re-runs `ouroboros setup --runtime <rt> --non-interactive` for the selected runtime
 
-With `--runtime auto` (the default), the runtime is picked by probing for the `claude` CLI first, then `codex`; when neither is found the runtime refresh is skipped with a notice — the package upgrade still completes.
+With `--runtime auto` (the default), the runtime is picked by probing for the `claude` CLI first, then `codex`; when neither is found the runtime refresh is skipped with a notice — the package upgrade still completes. Runtime setup and the post-update version check always use the console script inside the same proven environment, including `.exe`/`PATHEXT` launcher resolution on native Windows.
 
-> **Note**: The `[claude]` extra is never combined with `[mcp]` — the Claude Agent SDK embeds MCP 1.x while the protocol server requires MCP 2. MCP hosts launch their own isolated `ouroboros-ai[mcp]` process via `uvx`/`pipx run`.
+> **Installation identity:** the updater does not guess from global tool lists,
+> PATH order, directory names, or the selected runtime. If the receipt is
+> missing or ambiguous, the owning manager is unavailable, or a direct `pip`
+> install cannot prove its requested extras, it exits without changing
+> anything and asks you to reinstall with the exact original profile.
+>
+> The `[claude]` extra is never combined with or substituted for `[mcp]` — the Claude Agent SDK embeds MCP 1.x while the protocol server requires MCP 2. MCP hosts launch their own isolated `ouroboros-ai[mcp]` process via `uvx`/`pipx run`.
 
 ---
 
