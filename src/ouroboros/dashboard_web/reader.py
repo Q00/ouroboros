@@ -66,6 +66,35 @@ def _connect_readonly(db_path: str | Path) -> sqlite3.Connection:
     return conn
 
 
+def _summary_status(
+    events: list[dict[str, Any]],
+    counts: dict[str, int],
+) -> str:
+    """Project one truthful run status from durable terminal and AC evidence.
+
+    Explicit failure wins over every successful-looking recovery signal.
+    Cancellation remains its own terminal state. Without a terminal event, AC
+    counts become authoritative only after no work remains in flight; a mixed
+    completed/failed recovery must never be presented as completed.
+    """
+    terminal_types = {event["event_type"] for event in events}
+    if "orchestrator.session.failed" in terminal_types:
+        return "failed"
+    if "orchestrator.session.cancelled" in terminal_types:
+        return "cancelled"
+
+    no_work_in_flight = counts["executing"] == 0 and counts["pending"] == 0
+    if counts["failed"] and (
+        "orchestrator.session.completed" in terminal_types or no_work_in_flight
+    ):
+        return "failed"
+    if "orchestrator.session.completed" in terminal_types:
+        return "completed"
+    if no_work_in_flight and counts["completed"]:
+        return "completed"
+    return "running"
+
+
 class EventTail:
     """Cursor-based read-only tail of one run's events.
 
@@ -236,21 +265,7 @@ def list_recent_executions(db_path: str | Path, *, limit: int = 10) -> list[dict
                 key: len(columns.get(key, []))
                 for key in ("pending", "executing", "completed", "failed")
             }
-            status = "running"
-            for event in events:
-                event_type = event["event_type"]
-                if event_type == "orchestrator.session.completed":
-                    status = "completed"
-                elif event_type in {
-                    "orchestrator.session.failed",
-                    "orchestrator.session.cancelled",
-                }:
-                    status = "failed"
-            if status == "running" and counts["executing"] == 0 and counts["pending"] == 0:
-                if counts["completed"]:
-                    status = "completed"
-                elif counts["failed"]:
-                    status = "failed"
+            status = _summary_status(events, counts)
             meta = board["meta"]
             goal = start_payload.get("seed_goal")
             if not isinstance(goal, str):

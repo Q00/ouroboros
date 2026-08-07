@@ -231,3 +231,29 @@ class TestPendingRun:
             assert "no active run" not in page
         finally:
             server.shutdown()
+
+    def test_successful_runs_poll_refreshes_idle_watchdog(self, tmp_path) -> None:
+        from ouroboros.dashboard_web.server import serve_background
+
+        empty_db = tmp_path / "empty.db"
+        conn = sqlite3.connect(empty_db)
+        try:
+            conn.execute("CREATE TABLE events (aggregate_id TEXT, event_type TEXT, payload TEXT)")
+            conn.commit()
+        finally:
+            conn.close()
+
+        server, _thread = serve_background(
+            db_path=str(empty_db), host="127.0.0.1", port=daemon._free_port("127.0.0.1")
+        )
+        try:
+            server.last_activity = time.monotonic() - daemon.DEFAULT_IDLE_SHUTDOWN_SEC - 1
+            assert server.idle_seconds() > daemon.DEFAULT_IDLE_SHUTDOWN_SEC
+
+            status, body = self._get(server.server_address[1], "/api/runs")
+
+            assert status == 200
+            assert json.loads(body) == {"runs": []}
+            assert server.idle_seconds() < 1.0
+        finally:
+            server.shutdown()

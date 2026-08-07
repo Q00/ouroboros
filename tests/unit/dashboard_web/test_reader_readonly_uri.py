@@ -23,6 +23,22 @@ def _make_db(path) -> None:
         conn.close()
 
 
+def _make_events_db(path, rows: list[tuple[str, str, dict]]) -> None:
+    conn = sqlite3.connect(path)
+    try:
+        conn.execute("CREATE TABLE events (aggregate_id TEXT, event_type TEXT, payload TEXT)")
+        conn.executemany(
+            "INSERT INTO events (aggregate_id, event_type, payload) VALUES (?, ?, ?)",
+            [
+                (aggregate_id, event_type, json.dumps(payload))
+                for aggregate_id, event_type, payload in rows
+            ],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def test_readonly_connect_handles_question_mark_in_path(tmp_path) -> None:
     # A directory whose name contains ``?`` — the raw path would truncate the URI
     # at the ``?`` and open the wrong (or a new empty) DB.
@@ -60,10 +76,9 @@ def test_reader_includes_execution_frugality_retrospective() -> None:
 
 def test_list_recent_executions_preserves_goal_and_reports_concurrent_runs(tmp_path) -> None:
     db = tmp_path / "runs.db"
-    conn = sqlite3.connect(db)
-    try:
-        conn.execute("CREATE TABLE events (aggregate_id TEXT, event_type TEXT, payload TEXT)")
-        rows = [
+    _make_events_db(
+        db,
+        [
             (
                 "orch_two",
                 "orchestrator.session.started",
@@ -92,17 +107,8 @@ def test_list_recent_executions_preserves_goal_and_reports_concurrent_runs(tmp_p
                 "orchestrator.session.started",
                 {"execution_id": "exec_one", "seed_goal": "Second goal"},
             ),
-        ]
-        conn.executemany(
-            "INSERT INTO events (aggregate_id, event_type, payload) VALUES (?, ?, ?)",
-            [
-                (aggregate_id, event_type, json.dumps(payload))
-                for aggregate_id, event_type, payload in rows
-            ],
-        )
-        conn.commit()
-    finally:
-        conn.close()
+        ],
+    )
 
     runs = list_recent_executions(db, limit=10)
 
@@ -113,3 +119,129 @@ def test_list_recent_executions_preserves_goal_and_reports_concurrent_runs(tmp_p
     assert two["completed_count"] == 1
     assert two["total_count"] == 2
     assert two["executing_count"] == 1
+
+
+def test_list_recent_executions_preserves_cancelled_terminal_status(tmp_path) -> None:
+    db = tmp_path / "cancelled.db"
+    _make_events_db(
+        db,
+        [
+            (
+                "orch_cancelled",
+                "orchestrator.session.started",
+                {"execution_id": "exec_cancelled", "seed_goal": "Stop"},
+            ),
+            (
+                "orch_cancelled",
+                "workflow.progress.updated",
+                {
+                    "execution_id": "exec_cancelled",
+                    "acceptance_criteria": [
+                        {"node_id": "ac_cancelled", "status": "failed"},
+                    ],
+                },
+            ),
+            (
+                "orch_cancelled",
+                "orchestrator.session.cancelled",
+                {"execution_id": "exec_cancelled", "reason": "user"},
+            ),
+        ],
+    )
+
+    runs = list_recent_executions(db)
+
+    assert len(runs) == 1
+    assert runs[0]["status"] == "cancelled"
+    assert runs[0]["failed_count"] == 1
+
+
+def test_list_recent_executions_failed_ac_wins_over_completed_recovery(tmp_path) -> None:
+    db = tmp_path / "mixed.db"
+    _make_events_db(
+        db,
+        [
+            (
+                "orch_mixed",
+                "orchestrator.session.started",
+                {"execution_id": "exec_mixed", "seed_goal": "Mixed"},
+            ),
+            (
+                "orch_mixed",
+                "workflow.progress.updated",
+                {
+                    "execution_id": "exec_mixed",
+                    "acceptance_criteria": [
+                        {"node_id": "ac_done", "status": "completed"},
+                        {"node_id": "ac_failed", "status": "failed"},
+                    ],
+                },
+            ),
+        ],
+    )
+
+    runs = list_recent_executions(db)
+
+    assert len(runs) == 1
+    assert runs[0]["status"] == "failed"
+    assert runs[0]["completed_count"] == 1
+    assert runs[0]["failed_count"] == 1
+
+
+def test_list_recent_executions_failed_terminal_wins_over_completion(tmp_path) -> None:
+    db = tmp_path / "terminal-conflict.db"
+    _make_events_db(
+        db,
+        [
+            (
+                "orch_terminal",
+                "orchestrator.session.started",
+                {"execution_id": "exec_terminal", "seed_goal": "Recover"},
+            ),
+            (
+                "orch_terminal",
+                "orchestrator.session.failed",
+                {"execution_id": "exec_terminal", "error": "boom"},
+            ),
+            (
+                "orch_terminal",
+                "orchestrator.session.completed",
+                {"execution_id": "exec_terminal"},
+            ),
+        ],
+    )
+
+    runs = list_recent_executions(db)
+
+    assert len(runs) == 1
+    assert runs[0]["status"] == "failed"
+
+
+def test_list_recent_executions_unknown_ac_status_stays_running(tmp_path) -> None:
+    db = tmp_path / "unknown.db"
+    _make_events_db(
+        db,
+        [
+            (
+                "orch_unknown",
+                "orchestrator.session.started",
+                {"execution_id": "exec_unknown", "seed_goal": "Unknown"},
+            ),
+            (
+                "orch_unknown",
+                "workflow.progress.updated",
+                {
+                    "execution_id": "exec_unknown",
+                    "acceptance_criteria": [
+                        {"node_id": "ac_unknown", "status": "future-status"},
+                    ],
+                },
+            ),
+        ],
+    )
+
+    runs = list_recent_executions(db)
+
+    assert len(runs) == 1
+    assert runs[0]["status"] == "running"
+    assert runs[0]["completed_count"] == 0

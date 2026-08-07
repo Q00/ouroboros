@@ -38,7 +38,7 @@ class _DashboardServer(ThreadingHTTPServer):
         super().__init__(addr, _Handler)
         self.db_path = db_path
         # Liveness signal for the daemon's idle-shutdown watchdog: monotonic time
-        # of the last SSE client activity, and the current open-stream count.
+        # of the last successful browser activity, and the current open-stream count.
         self.last_activity: float = time.monotonic()
         self.open_streams: int = 0
         self._lock = threading.Lock()
@@ -80,6 +80,9 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_bytes(b"ok", "text/plain")
         elif path == "/api/runs":
             self._send_json({"runs": list_recent_executions(self.server.db_path)})
+            # The picker is a real dashboard client even though it polls instead
+            # of holding an SSE stream. Refresh only after a successful response.
+            self.server.touch()
         elif path == "/snapshot":
             self._send_snapshot((query.get("run") or [""])[0])
         elif path == "/events":
@@ -172,9 +175,9 @@ def serve_blocking(
 ) -> None:
     """Run the server in the current thread until interrupted or idle.
 
-    When ``idle_shutdown_sec`` is set, a watchdog stops the server once no SSE
-    client has been connected for that long — so the daemon never lingers as a
-    zombie after the runs it was watching finish.
+    When ``idle_shutdown_sec`` is set, a watchdog stops the server once neither
+    a successful picker poll nor an SSE client has been active for that long —
+    so the daemon never lingers as a zombie after its viewers leave.
     """
     server = make_server(db_path=db_path, host=host, port=port)
     stop = threading.Event()
