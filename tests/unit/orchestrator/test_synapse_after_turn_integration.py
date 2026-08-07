@@ -507,7 +507,14 @@ async def test_stalled_runtime_terminalizes_cross_process_signal(
 
 
 @pytest.mark.asyncio
-async def test_resume_cancellation_terminalizes_persisted_active_target(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "active_event_type",
+    ["execution.session.started", "execution.session.recovered"],
+)
+async def test_resume_cancellation_terminalizes_persisted_active_target(
+    tmp_path: Path,
+    active_event_type: str,
+) -> None:
     database_url = f"sqlite+aiosqlite:///{tmp_path / 'resume-cancel-signal.db'}"
     runtime_store = EventStore(database_url)
     mailbox_store = EventStore(database_url)
@@ -520,7 +527,7 @@ async def test_resume_cancellation_terminalizes_persisted_active_target(tmp_path
     await append_runtime_lifecycle(
         runtime_store,
         BaseEvent(
-            type="execution.session.started",
+            type=active_event_type,
             aggregate_type="execution",
             aggregate_id=scope_id,
             data={
