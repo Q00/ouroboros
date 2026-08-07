@@ -2080,3 +2080,56 @@ def test_inspection_tool_goal_voids_target_widget_outputs() -> None:
     _seed_section(ledger, "outputs", value="Checkout form results and screenshots")
     result = derive_domain_from_ledger(ledger)
     assert TaskClass.WEB_APP not in result.classes
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
+        "Build a CLI, not web apps",
+        "Build a CLI without web applications",
+        "Build a CLI rather than web apps",
+    ],
+)
+def test_plural_web_app_denials_are_recognized(goal: str) -> None:
+    """R31 probe: plural denials share the signal/negation family."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value="Deterministic stdout and exit code 0")
+    _seed_section(ledger, "runtime_context", value="Local shell / terminal")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.CLI
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
+        "Build a web app that catalogs sites which are not a web application",
+        "Build a web app for detecting pages that are not a web application",
+    ],
+)
+def test_denials_inside_content_clauses_do_not_govern_the_product(goal: str) -> None:
+    """R31 probe: a denial describing the cataloged/detected content is
+    scoped to that clause, not to the produced artifact."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value="Dashboard with search form and results pages")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
+        "Build a Python library integrating with a web app",
+        "Build an SDK compatible with a web app",
+        "Build a package used with a web app",
+    ],
+)
+def test_integration_consumers_are_not_co_products(goal: str) -> None:
+    """R31 probe: compatibility/integration relations name a consumer,
+    not a co-produced web artifact."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value="An importable package with a public API")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.LIBRARY

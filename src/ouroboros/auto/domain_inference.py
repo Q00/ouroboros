@@ -204,8 +204,8 @@ def _strip_negated_signals(text: str, signal_fragment: str) -> str:
 # "single page" alone is document vocabulary ("a single page PDF report");
 # only the full single-page-application phrase denotes browser context.
 _WEB_APP_GOAL_SIGNAL_FRAGMENT = (
-    r"(?:browser|web[\s\-]?app(?:lication)?|websites?|web\s+uis?|frontend|"
-    r"front[\s\-]end|single[\s\-]page\s+app(?:lication)?)"
+    r"(?:browsers?|web[\s\-]?app(?:lication)?s?|websites?|web\s+uis?|frontends?|"
+    r"front[\s\-]ends?|single[\s\-]page\s+app(?:lication)?s?)"
 )
 _WEB_APP_GOAL_SIGNAL_RE = re.compile(rf"\b{_WEB_APP_GOAL_SIGNAL_FRAGMENT}\b")
 
@@ -264,6 +264,9 @@ _WEB_APP_PREFIX_DENIAL_RE = re.compile(
 _WEB_SUBTYPE_RE = re.compile(r"single[\s\-]page")
 
 
+_CONTENT_CLAUSE_RE = re.compile(r"\b(?:that|which|for|about)\s+[^,.;]*")
+
+
 def _goal_denies_web_app_artifact(goal_text: str) -> bool:
     """True when a denial rejects the app/UI artifact type itself.
 
@@ -273,6 +276,13 @@ def _goal_denies_web_app_artifact(goal_text: str) -> bool:
     login pages" denies an extension — the modifier "frontend" and the
     PP object "pages" are not what is being denied.
     """
+    # Denials inside content clauses ("catalogs sites which are not a web
+    # application") describe that clause's subject, not the produced
+    # artifact (#1813 R31): a span STARTING inside a that/which/for/about
+    # region is content-scoped. Position-based scoping — rather than
+    # pre-stripping the clause — keeps coordinated denials whose
+    # alternatives extend past a comma intact.
+    content_regions = [match.span() for match in _CONTENT_CLAUSE_RE.finditer(goal_text)]
     negated, prefix = _negation_res_for(_WEB_APP_GOAL_SIGNAL_FRAGMENT)
     spans = [
         match.group(0)
@@ -282,6 +292,7 @@ def _goal_denies_web_app_artifact(goal_text: str) -> bool:
         if not (
             _AFFIRMATIVE_FLIP_RE.search(match.group("path") or "")
             or _QUALITY_NOUN_RE.search(match.group("path") or "")
+            or any(start <= match.start() < end for start, end in content_regions)
         )
     ]
     # A prefix denial is analyzed both bare ("non-web-app" denies an app)
@@ -663,7 +674,9 @@ _WEB_APP_ARTIFACT_PHRASE_RE = re.compile(
 _INFINITIVE_TARGET_RE = re.compile(r"\bto\s+(?!be\b)[\w\-]+\s+[^,.;]*")
 _RELATIONAL_TARGET_RE = re.compile(
     r"\b(?:targeting|supporting|serving|powering|backing|aimed\s+at|"
-    r"used\s+by|consumed\s+by|embedded\s+in|integrating\s+with)\s+"
+    r"used\s+by|consumed\s+by|embedded\s+in|integrat\w*\s+with|"
+    r"compatible\s+with|used\s+with|works?\s+with|interopera\w*\s+with|"
+    r"paired\s+with)\s+"
     r"(?:an?\s+|the\s+)?(?:[\w\-'’]+\s+){0,2}?"
     r"(?:web[\s\-]?app(?:lication)?s?|webapps?|websites?|web\s+uis?|frontends?|"
     r"front[\s\-]ends?|single[\s\-]page\s+app(?:lication)?s?)\b"
@@ -678,7 +691,11 @@ def _goal_artifact_head_is_web_app(goal_text: str) -> bool:
     position, since English modifiers precede their head."""
     if _goal_denies_web_app_artifact(goal_text):
         return False
-    core = _CONSUMED_DEPENDENCY_RE.sub(" ", _SUBJECT_CLAUSE_RE.sub(" ", goal_text))
+    # Negated spans leave first (#1813 R31): clause stripping would
+    # otherwise behead a coordinated denial at its first comma and leave
+    # the surviving alternatives looking affirmative.
+    core = _strip_negated_signals(goal_text, _WEB_APP_GOAL_SIGNAL_FRAGMENT)
+    core = _CONSUMED_DEPENDENCY_RE.sub(" ", _SUBJECT_CLAUSE_RE.sub(" ", core))
     # "to test/analyze/deploy a web app" names the target of another
     # artifact, not the produced one (#1813 R28), and participial
     # relations ("SDK targeting web apps", "package used by web apps")
@@ -698,6 +715,14 @@ def _goal_has_web_co_product_conjunct(goal_text: str) -> bool:
     """True only for genuinely coordinated goals where a SEPARATE conjunct
     requests a web product by artifact phrase (#1813 R30) — a lone goal
     mentioning the web is not a co-product declaration."""
+    # Relational consumers ("integrating/compatible/used with a web app")
+    # are normalized away first, so a raw "with" split cannot promote a
+    # consumer to a co-produced artifact (#1813 R31); denied spans are
+    # stripped before splitting so the comma pieces of a coordinated
+    # denial ("not a browser, web app, or frontend") cannot masquerade
+    # as co-product conjuncts.
+    goal_text = _RELATIONAL_TARGET_RE.sub(" ", goal_text)
+    goal_text = _strip_negated_signals(goal_text, _WEB_APP_GOAL_SIGNAL_FRAGMENT)
     pieces = _GOAL_CONJUNCT_SPLIT_RE.split(goal_text)
     if len(pieces) < 2:
         return False
