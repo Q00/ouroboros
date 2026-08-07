@@ -73,34 +73,47 @@ _EXPLICIT_TERMINAL_PRECEDENCE = {
     "cancelled": 2,
     "failed": 3,
 }
-_RUNTIME_STATUSES = frozenset({"running", "paused", "completed", "failed", "cancelled"})
 
 
-def _runtime_status(event: dict[str, Any]) -> str | None:
-    """Return the session status carried by one ordered durable event."""
-    event_type = event["event_type"]
-    explicit = {
+def _explicit_lifecycle_status(event: dict[str, Any]) -> str | None:
+    """Return status carried by an authoritative session lifecycle event."""
+    return {
         "orchestrator.session.completed": "completed",
         "orchestrator.session.failed": "failed",
         "orchestrator.session.paused": "paused",
         "orchestrator.session.cancelled": "cancelled",
-    }.get(event_type)
-    if explicit is not None:
-        return explicit
-    if event_type not in {"orchestrator.progress.updated", "workflow.progress.updated"}:
-        return None
+    }.get(event["event_type"])
+
+
+def _progress_acknowledges_running(event: dict[str, Any]) -> bool:
+    """Return whether progress durably acknowledges pause-to-running resume.
+
+    Runtime progress describes the latest agent turn, not the whole orchestration,
+    so terminal-looking values must not author a global run status.  ``running``
+    is the sole exception because no ``orchestrator.session.resumed`` event exists.
+    The two production producers place it under ``progress`` and ``last_update``;
+    top-level remains supported for legacy rows.  This mirrors the canonical TUI
+    lifecycle projection without coupling the dependency-free reader to the TUI.
+    """
+    if event["event_type"] not in {
+        "orchestrator.progress.updated",
+        "workflow.progress.updated",
+    }:
+        return False
 
     payload = event.get("payload")
     if not isinstance(payload, dict):
-        return None
-    progress = payload.get("progress")
-    value = progress.get("runtime_status") if isinstance(progress, dict) else None
-    if not value:
-        value = payload.get("runtime_status")
-    if not isinstance(value, str):
-        return None
-    normalized = value.strip().lower()
-    return normalized if normalized in _RUNTIME_STATUSES else None
+        return False
+    candidates: list[object] = []
+    for container_key in ("progress", "last_update"):
+        container = payload.get(container_key)
+        if isinstance(container, dict):
+            candidates.append(container.get("runtime_status"))
+    candidates.append(payload.get("runtime_status"))
+    for candidate in candidates:
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip().lower() == "running"
+    return False
 
 
 def _summary_status(
@@ -119,7 +132,7 @@ def _summary_status(
     resumable_status: str | None = None
     for event in events:
         event_type = event["event_type"]
-        status = _runtime_status(event)
+        status = _explicit_lifecycle_status(event)
         if event_type in {
             "orchestrator.session.completed",
             "orchestrator.session.failed",
@@ -133,8 +146,12 @@ def _summary_status(
             ):
                 explicit_terminal = status
             continue
-        if explicit_terminal is None and status is not None:
+        if explicit_terminal is not None:
+            continue
+        if status == "paused":
             resumable_status = status
+        elif resumable_status == "paused" and _progress_acknowledges_running(event):
+            resumable_status = "running"
 
     if explicit_terminal in {"failed", "cancelled"}:
         return explicit_terminal

@@ -11,6 +11,7 @@ from ouroboros.dashboard_web.reader import (
     _connect_readonly,
     list_recent_executions,
 )
+from ouroboros.orchestrator.events import create_workflow_progress_event
 
 
 def _make_db(path) -> None:
@@ -191,8 +192,16 @@ def test_list_recent_executions_preserves_paused_status_and_pause_row(tmp_path) 
     assert runs[0]["last_row"] == 3
 
 
-def test_list_recent_executions_running_checkpoint_resumes_paused_run(tmp_path) -> None:
+def test_list_recent_executions_workflow_last_update_resumes_paused_run(tmp_path) -> None:
     db = tmp_path / "resumed.db"
+    resumed = create_workflow_progress_event(
+        execution_id="exec_resumed",
+        session_id="orch_resumed",
+        acceptance_criteria=[{"node_id": "ac_done", "status": "completed"}],
+        completed_count=1,
+        total_count=1,
+        last_update={"runtime_status": "running"},
+    )
     _make_events_db(
         db,
         [
@@ -203,25 +212,40 @@ def test_list_recent_executions_running_checkpoint_resumes_paused_run(tmp_path) 
             ),
             (
                 "orch_resumed",
-                "workflow.progress.updated",
-                {
-                    "execution_id": "exec_resumed",
-                    "runtime_status": "paused",
-                    "acceptance_criteria": [
-                        {"node_id": "ac_done", "status": "completed"},
-                    ],
-                },
-            ),
-            (
-                "orch_resumed",
                 "orchestrator.session.paused",
                 {"execution_id": "exec_resumed"},
             ),
+            (resumed.aggregate_id, resumed.type, resumed.data),
+        ],
+    )
+
+    runs = list_recent_executions(db)
+
+    assert len(runs) == 1
+    assert runs[0]["status"] == "running"
+    assert runs[0]["last_row"] == 3
+
+
+def test_list_recent_executions_nested_running_checkpoint_resumes_paused_run(tmp_path) -> None:
+    db = tmp_path / "nested-resume.db"
+    _make_events_db(
+        db,
+        [
             (
-                "orch_resumed",
+                "orch_nested_resume",
+                "orchestrator.session.started",
+                {"execution_id": "exec_nested_resume", "seed_goal": "Continue"},
+            ),
+            (
+                "orch_nested_resume",
+                "orchestrator.session.paused",
+                {"execution_id": "exec_nested_resume"},
+            ),
+            (
+                "orch_nested_resume",
                 "orchestrator.progress.updated",
                 {
-                    "execution_id": "exec_resumed",
+                    "execution_id": "exec_nested_resume",
                     "progress": {"runtime_status": "running"},
                 },
             ),
@@ -232,7 +256,7 @@ def test_list_recent_executions_running_checkpoint_resumes_paused_run(tmp_path) 
 
     assert len(runs) == 1
     assert runs[0]["status"] == "running"
-    assert runs[0]["last_row"] == 4
+    assert runs[0]["last_row"] == 3
 
 
 def test_list_recent_executions_true_terminal_absorbs_later_resume_noise(tmp_path) -> None:
@@ -270,32 +294,30 @@ def test_list_recent_executions_true_terminal_absorbs_later_resume_noise(tmp_pat
     assert runs[0]["last_row"] == 4
 
 
-def test_list_recent_executions_legacy_runtime_status_follows_event_order(tmp_path) -> None:
-    db = tmp_path / "legacy-runtime.db"
+def test_list_recent_executions_turn_completion_cannot_finish_pending_workflow(tmp_path) -> None:
+    db = tmp_path / "turn-completed-pending.db"
+    pending = create_workflow_progress_event(
+        execution_id="exec_pending",
+        session_id="orch_pending",
+        acceptance_criteria=[{"node_id": "ac_pending", "status": "pending"}],
+        completed_count=0,
+        total_count=1,
+    )
     _make_events_db(
         db,
         [
             (
-                "orch_legacy",
+                "orch_pending",
                 "orchestrator.session.started",
-                {"execution_id": "exec_legacy", "seed_goal": "Legacy"},
+                {"execution_id": "exec_pending", "seed_goal": "Keep working"},
             ),
+            (pending.aggregate_id, pending.type, pending.data),
             (
-                "orch_legacy",
-                "orchestrator.progress.updated",
-                {"execution_id": "exec_legacy", "runtime_status": "paused"},
-            ),
-            (
-                "orch_legacy",
-                "workflow.progress.updated",
-                {"execution_id": "exec_legacy", "runtime_status": "running"},
-            ),
-            (
-                "orch_legacy",
+                "orch_pending",
                 "orchestrator.progress.updated",
                 {
-                    "execution_id": "exec_legacy",
-                    "progress": {"runtime_status": "failed"},
+                    "execution_id": "exec_pending",
+                    "progress": {"runtime_status": "completed"},
                 },
             ),
         ],
@@ -304,7 +326,50 @@ def test_list_recent_executions_legacy_runtime_status_follows_event_order(tmp_pa
     runs = list_recent_executions(db)
 
     assert len(runs) == 1
-    assert runs[0]["status"] == "failed"
+    assert runs[0]["status"] == "running"
+    assert runs[0]["pending_count"] == 1
+    assert runs[0]["last_row"] == 3
+
+
+def test_list_recent_executions_turn_completion_cannot_terminalize_paused_run(tmp_path) -> None:
+    db = tmp_path / "turn-completed-paused.db"
+    pending = create_workflow_progress_event(
+        execution_id="exec_paused_turn",
+        session_id="orch_paused_turn",
+        acceptance_criteria=[{"node_id": "ac_pending", "status": "pending"}],
+        completed_count=0,
+        total_count=1,
+    )
+    _make_events_db(
+        db,
+        [
+            (
+                "orch_paused_turn",
+                "orchestrator.session.started",
+                {"execution_id": "exec_paused_turn", "seed_goal": "Resume later"},
+            ),
+            (
+                "orch_paused_turn",
+                "orchestrator.session.paused",
+                {"execution_id": "exec_paused_turn"},
+            ),
+            (pending.aggregate_id, pending.type, pending.data),
+            (
+                "orch_paused_turn",
+                "orchestrator.progress.updated",
+                {
+                    "execution_id": "exec_paused_turn",
+                    "progress": {"runtime_status": "completed"},
+                },
+            ),
+        ],
+    )
+
+    runs = list_recent_executions(db)
+
+    assert len(runs) == 1
+    assert runs[0]["status"] == "paused"
+    assert runs[0]["pending_count"] == 1
     assert runs[0]["last_row"] == 4
 
 
