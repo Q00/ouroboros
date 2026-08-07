@@ -1492,7 +1492,10 @@ class TestJobManager:
                 )
             )
 
-            snapshot = await manager.get_snapshot("job_default_failed")
+            with patch.object(
+                job_manager_module, "persisted_process_owner_alive", return_value=False
+            ):
+                snapshot = await manager.get_snapshot("job_default_failed")
 
             assert snapshot.status is JobStatus.FAILED
             assert "Linked execution failed" in (snapshot.error or "")
