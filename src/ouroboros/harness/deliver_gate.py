@@ -34,6 +34,29 @@ _COMMAND_ARTIFACT_SCHEMA_VERSION = 1
 _COMMAND_ARTIFACT_CAPTURE = "ouroboros.leaf-dispatch.v1"
 _MAX_COMMAND_ARTIFACTS = 128
 _MAX_COMMAND_ARTIFACT_PATH_CHARS = 4096
+RUNTIME_FAILURE_BOOLEAN_FIELDS = (
+    "is_error",
+    "error",
+    "failure",
+    "failed",
+    "cancel",
+    "cancelled",
+    "canceled",
+    "timeout",
+    "timed_out",
+    "abort",
+    "aborted",
+)
+RUNTIME_TOOL_EXIT_STATUS_FIELDS = (
+    "exit_code",
+    "exit_status",
+    "exitCode",
+    "exitStatus",
+    "returncode",
+    "return_code",
+    "status_code",
+    "statusCode",
+)
 _FILESYSTEM_EFFECT_KEYS = frozenset(
     {
         "capture",
@@ -788,25 +811,13 @@ def _mapping_has_failure_verdict(value: Mapping[str, Any]) -> bool:
         success = value["success"]
         if not isinstance(success, bool) or not success:
             return True
-    for key in (
-        "is_error",
-        "error",
-        "failure",
-        "failed",
-        "cancel",
-        "cancelled",
-        "canceled",
-        "timeout",
-        "timed_out",
-        "abort",
-        "aborted",
-    ):
+    for key in RUNTIME_FAILURE_BOOLEAN_FIELDS:
         if key not in value:
             continue
         flag = value[key]
         if not isinstance(flag, bool) or flag:
             return True
-    for key in ("exit_code", "exit_status"):
+    for key in RUNTIME_TOOL_EXIT_STATUS_FIELDS:
         if key not in value:
             continue
         exit_value = value[key]
@@ -1682,6 +1693,8 @@ __all__ = [
     "DeliverEvidenceFact",
     "DeliverGateVerdict",
     "EventStoreEvidenceReader",
+    "RUNTIME_FAILURE_BOOLEAN_FIELDS",
+    "RUNTIME_TOOL_EXIT_STATUS_FIELDS",
     "TraceGuardResultLike",
     "TraceGuardEvidenceInput",
     "TraceGuardValidator",

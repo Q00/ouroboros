@@ -149,14 +149,13 @@ async def _artifact_fact(
     return manifest, facts[0]
 
 
-def _set_completion_verdict(
-    events: list[BaseEvent],
+def _set_verdict_payload(
+    completion_data: dict[str, Any],
     *,
     location: str,
     field: str,
     value: object,
 ) -> None:
-    completion_data = dict(events[1].data)
     if location == "top_level":
         completion_data[field] = value
     elif location == "top_level_meta":
@@ -168,6 +167,32 @@ def _set_completion_verdict(
         else:
             tool_result["meta"] = {**tool_result["meta"], field: value}
         completion_data["tool_result"] = tool_result
+
+
+def _verdict_payload_value(data: dict[str, Any], *, location: str, field: str) -> object:
+    if location == "top_level":
+        return data[field]
+    if location == "top_level_meta":
+        return data["meta"][field]
+    if location == "tool_result":
+        return data["tool_result"][field]
+    return data["tool_result"]["meta"][field]
+
+
+def _set_completion_verdict(
+    events: list[BaseEvent],
+    *,
+    location: str,
+    field: str,
+    value: object,
+) -> None:
+    completion_data = dict(events[1].data)
+    _set_verdict_payload(
+        completion_data,
+        location=location,
+        field=field,
+        value=value,
+    )
     events[1] = events[1].model_copy(update={"data": completion_data})
 
 
@@ -267,6 +292,112 @@ async def test_production_capture_persists_through_journal_to_verifier(tmp_path:
 
     assert len(manifest.entries[0].source_event_ids) == 2
     assert fact.evidence_handle == manifest.entries[0].handle
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("field", "failure"),
+    (
+        *(
+            (field, True)
+            for field in deliver_gate_module.RUNTIME_FAILURE_BOOLEAN_FIELDS
+            if field != "is_error"
+        ),
+        ("failure", "yes"),
+        ("success", False),
+        ("status", "failed"),
+        *((field, 9) for field in deliver_gate_module.RUNTIME_TOOL_EXIT_STATUS_FIELDS),
+    ),
+)
+@pytest.mark.parametrize(
+    "location", ("top_level", "top_level_meta", "tool_result", "tool_result_meta")
+)
+async def test_production_projection_cannot_launder_command_failure_verdict(
+    tmp_path: Path,
+    location: str,
+    field: str,
+    failure: object,
+) -> None:
+    call_id = f"projection-{location}-{field}"
+
+    class StubRuntime:
+        runtime_backend = "opencode"
+        permission_mode = "acceptEdits"
+        working_directory = str(tmp_path)
+
+        async def execute_task(self, **_kwargs: Any):
+            yield AgentMessage(
+                type="assistant",
+                content="write artifact",
+                tool_name="Bash",
+                data={
+                    "tool_call_id": call_id,
+                    "tool_input": {"command": "printf accepted > claimed.txt"},
+                },
+            )
+            subprocess.run(
+                ["/bin/sh", "-c", "printf accepted > claimed.txt"],
+                cwd=tmp_path,
+                check=True,
+            )
+            completion_data: dict[str, Any] = {
+                "subtype": "tool_result",
+                "tool_call_id": call_id,
+                "tool_result": {"is_error": False, "meta": {"exit_status": 0}},
+            }
+            _set_verdict_payload(
+                completion_data,
+                location=location,
+                field=field,
+                value=failure,
+            )
+            yield AgentMessage(
+                type="assistant",
+                content="contradictory completion",
+                tool_name="Bash",
+                data=completion_data,
+            )
+            yield AgentMessage(
+                type="result", content="[TASK_COMPLETE]", data={"subtype": "success"}
+            )
+
+    store = _EventStore([])
+    executor = ParallelACExecutor(
+        adapter=StubRuntime(),
+        event_store=store,
+        console=MagicMock(),
+        enable_decomposition=False,
+        task_cwd=str(tmp_path),
+        run_verify_commands=False,
+    )
+    await executor._execute_atomic_ac(
+        ac_index=0,
+        ac_content="Create claimed.txt",
+        session_id="sess_1",
+        execution_id="exec_1",
+        tools=["Bash"],
+        system_prompt="test",
+        seed_goal="test provenance",
+        depth=0,
+        start_time=datetime.now(UTC),
+        retry_attempt=1,
+        node_identity=ExecutionNodeIdentity.root(execution_context_id="exec_1", ac_index=0),
+    )
+    tool_start = next(event for event in store.events if event.type == "execution.tool.started")
+    tool_completion = next(
+        event for event in store.events if event.type == "execution.tool.completed"
+    )
+    assert _verdict_payload_value(tool_completion.data, location=location, field=field) == failure
+
+    manifest, fact = await _artifact_fact(
+        store.events,
+        task_cwd=tmp_path,
+        ac_id=str(tool_start.data["ac_id"]),
+        session_attempt_id=str(tool_start.data["session_attempt_id"]),
+    )
+
+    assert all("command_artifacts" not in entry.payload for entry in manifest.entries)
+    assert fact.evidence_handle == "missing:files_touched:0"
 
 
 @pytest.mark.asyncio
@@ -995,6 +1126,79 @@ async def test_false_boolean_failure_aliases_are_neutral(
     assert len(manifest.entries) == 1
     assert "command_artifacts" in manifest.entries[0].payload
     assert fact.evidence_handle == manifest.entries[0].handle
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "field",
+    deliver_gate_module.RUNTIME_TOOL_EXIT_STATUS_FIELDS,
+)
+@pytest.mark.parametrize("failure", (True, "1", 9))
+@pytest.mark.parametrize(
+    "location", ("top_level", "top_level_meta", "tool_result", "tool_result_meta")
+)
+async def test_exit_status_aliases_veto_journal_authority(
+    tmp_path: Path,
+    location: str,
+    failure: object,
+    field: str,
+) -> None:
+    artifact = tmp_path / "claimed.txt"
+    artifact.write_text("failed", encoding="utf-8")
+    events = _command_events(
+        call_id=f"{location}-{field}-failed",
+        effects=[_effect(artifact, relative_path=artifact.name)],
+    )
+    _set_completion_verdict(events, location=location, field=field, value=failure)
+
+    manifest, fact = await _artifact_fact(events, task_cwd=tmp_path)
+
+    assert all("command_artifacts" not in entry.payload for entry in manifest.entries)
+    assert fact.evidence_handle == "missing:files_touched:0"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "field",
+    deliver_gate_module.RUNTIME_TOOL_EXIT_STATUS_FIELDS,
+)
+@pytest.mark.parametrize(
+    "location", ("top_level", "top_level_meta", "tool_result", "tool_result_meta")
+)
+async def test_zero_exit_status_aliases_are_neutral(
+    tmp_path: Path,
+    location: str,
+    field: str,
+) -> None:
+    artifact = tmp_path / "claimed.txt"
+    artifact.write_text("accepted", encoding="utf-8")
+    events = _command_events(
+        call_id=f"{location}-{field}-zero",
+        effects=[_effect(artifact, relative_path=artifact.name)],
+    )
+    _set_completion_verdict(events, location=location, field=field, value=0)
+
+    manifest, fact = await _artifact_fact(events, task_cwd=tmp_path)
+
+    assert len(manifest.entries) == 1
+    assert "command_artifacts" in manifest.entries[0].payload
+    assert fact.evidence_handle == manifest.entries[0].handle
+
+
+def test_exit_status_alias_vocabulary_matches_runtime_normalizer() -> None:
+    aliases = deliver_gate_module.RUNTIME_TOOL_EXIT_STATUS_FIELDS
+
+    assert aliases == (
+        "exit_code",
+        "exit_status",
+        "exitCode",
+        "exitStatus",
+        "returncode",
+        "return_code",
+        "status_code",
+        "statusCode",
+    )
+    assert len(aliases) == len(set(aliases))
 
 
 @pytest.mark.asyncio
