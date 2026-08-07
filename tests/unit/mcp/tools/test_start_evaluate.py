@@ -311,6 +311,55 @@ class TestPluginModeDispatch:
         assert result.value.meta["job_id"] is None
 
     @pytest.mark.asyncio
+    async def test_pre_envelope_cancellation_restores_handoff_for_retry(
+        self,
+        event_store: EventStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from ouroboros.mcp.tools.seed_handoff import SeedHandoffRegistry
+
+        registry = SeedHandoffRegistry()
+        handoff_id = registry.register(
+            session_id="orch_plugin_cancel",
+            seed_content="goal: retry plugin dispatch safely\n",
+        )
+        handler = StartEvaluateHandler(
+            event_store=event_store,
+            agent_runtime_backend="opencode",
+            opencode_mode="plugin",
+            seed_handoff_registry=registry,
+        )
+        arguments = {
+            "session_id": "orch_plugin_cancel",
+            "artifact": "partial artifact",
+            "seed_handoff_id": handoff_id,
+            "auto_evolve": False,
+        }
+        initialize_started = asyncio.Event()
+        original_initialize = event_store.initialize
+
+        async def blocking_initialize() -> None:
+            initialize_started.set()
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(event_store, "initialize", blocking_initialize)
+        dispatch = asyncio.create_task(handler.handle(arguments))
+        await initialize_started.wait()
+        dispatch.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await dispatch
+
+        assert registry.resolve(handoff_id, session_id="orch_plugin_cancel") is not None
+
+        monkeypatch.setattr(event_store, "initialize", original_initialize)
+        retry = await handler.handle(arguments)
+
+        assert retry.is_ok
+        assert retry.value.meta["status"] == "delegated_to_plugin"
+        assert registry.resolve(handoff_id, session_id="orch_plugin_cancel") is None
+
+    @pytest.mark.asyncio
     async def test_status_delegated_to_plugin(self, handler) -> None:
         result = await handler.handle({"session_id": "orch_xyz", "artifact": "code"})
         assert result.value.meta["status"] == "delegated_to_plugin"

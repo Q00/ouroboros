@@ -2200,6 +2200,7 @@ class StartEvaluateHandler:
                     resolve_working_dir=_resolve_evaluate_working_dir,
                 ),
                 require_ok=True,
+                cancellation_may_have_accepted=False,
             )
 
         # The shared helper preserves job-scoped cancellation across restart.

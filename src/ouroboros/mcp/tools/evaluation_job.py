@@ -51,13 +51,26 @@ class SeedHandoffRedemption:
                 seed_content=self.seed_content,
             )
 
-    async def accept(self, operation: Awaitable[Any], *, require_ok: bool = False) -> Any:
+    async def accept(
+        self,
+        operation: Awaitable[Any],
+        *,
+        require_ok: bool = False,
+        cancellation_may_have_accepted: bool = True,
+    ) -> Any:
+        """Commit redemption once the selected transport accepts ownership.
+
+        Detached transports may spawn an external owner before cancellation is
+        observed, so their cancellation remains ambiguous.  Plugin dispatch is
+        different: no owner exists until the ``_subagent`` envelope is returned,
+        and its caller therefore opts into compensation on pre-envelope cancel.
+        """
         try:
             result = await operation
         except BaseException as exc:
-            acceptance_unknown = isinstance(exc, asyncio.CancelledError) or (
-                getattr(exc, "error_code", None) == "detached_job_acceptance_pending"
-            )
+            acceptance_unknown = (
+                isinstance(exc, asyncio.CancelledError) and cancellation_may_have_accepted
+            ) or (getattr(exc, "error_code", None) == "detached_job_acceptance_pending")
             if not acceptance_unknown:
                 self.rollback()
             raise
