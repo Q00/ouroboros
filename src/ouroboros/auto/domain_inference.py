@@ -479,13 +479,22 @@ def _matches_webhook(ledger: SeedDraftLedger) -> bool:
     return has_webhook_in and has_side_effect
 
 
+_WEB_SERVICE_SIGNAL_FRAGMENT = (
+    r"(?:rest\s+apis?|rest\s+endpoints?|web\s+services?|web\s+servers?|"
+    r"https?\s+servers?|apis?|endpoints?)"
+)
+
+
 def _matches_web_service(ledger: SeedDraftLedger) -> bool:
     outputs = _section_text(ledger, "outputs")
     goal = _goal_text(ledger)
     if not (outputs or goal):
         return False
+    # Denied service vocabulary is not evidence (#1813 R32): the goal
+    # routes through the shared negation strip before keyword matching.
+    service_goal = _strip_negated_signals(goal, _WEB_SERVICE_SIGNAL_FRAGMENT)
     api_signal = _any_of(
-        _CONSUMED_DEPENDENCY_RE.sub(" ", outputs + " " + goal),
+        _CONSUMED_DEPENDENCY_RE.sub(" ", outputs + " " + service_goal),
         (
             "rest endpoint",
             "rest api",
@@ -726,11 +735,15 @@ def _goal_has_web_co_product_conjunct(goal_text: str) -> bool:
     pieces = _GOAL_CONJUNCT_SPLIT_RE.split(goal_text)
     if len(pieces) < 2:
         return False
+    # Each piece is judged on its own head (#1813 R32): a web mention
+    # that is the target of documentation/plugins/adapters ("with
+    # documentation for web apps") is not a co-produced app.
+    piece_cores = [_CONTENT_CLAUSE_RE.sub(" ", piece) for piece in pieces]
     return any(
-        _WEB_APP_ARTIFACT_PHRASE_RE.search(piece)
-        and not _LIBRARY_INTENT_RE.search(piece)
-        and _goal_has_unnegated_web_app_signal(piece)
-        for piece in pieces
+        _WEB_APP_ARTIFACT_PHRASE_RE.search(core)
+        and not _LIBRARY_INTENT_RE.search(core)
+        and _goal_has_unnegated_web_app_signal(core)
+        for core in piece_cores
     )
 
 

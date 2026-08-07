@@ -2133,3 +2133,40 @@ def test_integration_consumers_are_not_co_products(goal: str) -> None:
     result = derive_domain_from_ledger(ledger)
     assert result.is_single
     assert result.single is TaskClass.LIBRARY
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
+        "Build a web app, not a REST API",
+        "Build a web app without a REST API",
+        "Build a web app rather than a web service",
+        "Build a web app with no HTTP server",
+    ],
+)
+def test_denied_service_vocabulary_is_not_service_evidence(goal: str) -> None:
+    """R32 probe: web-service signals share the goal-side negation
+    discipline."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value="Login page with signup form and navigation")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
+        "Build a Python library with documentation for web apps",
+        "Build a Python library with plugins for web apps",
+        "Build an SDK plus adapters for web apps",
+    ],
+)
+def test_coordinated_target_phrases_are_not_co_products(goal: str) -> None:
+    """R32 probe: a with/plus phrase whose web mention is the TARGET of
+    documentation/plugins/adapters is not a co-produced app."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value="An importable package with a public API")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.LIBRARY
