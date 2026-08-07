@@ -523,8 +523,8 @@ class TestRuntimeHelperLookups:
         ):
             assert get_agent_runtime_backend() == "codex"
 
-    def test_get_agent_runtime_backend_defaults_to_cli_profile(self) -> None:
-        """A missing config must not re-select the optional SDK runtime."""
+    def test_get_agent_runtime_backend_defaults_to_sdk_profile(self) -> None:
+        """A missing config preserves the default Claude SDK runtime."""
         with (
             patch.dict(os.environ, {}, clear=True),
             patch(
@@ -532,7 +532,7 @@ class TestRuntimeHelperLookups:
                 side_effect=ConfigError("config unavailable"),
             ),
         ):
-            assert get_agent_runtime_backend() == "claude_mcp"
+            assert get_agent_runtime_backend() == "claude"
 
     def test_get_codex_cli_path_prefers_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Environment variable overrides config for Codex CLI path."""

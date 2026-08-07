@@ -83,36 +83,35 @@ The package profile is a process contract, not a dependency-pin workaround:
 
 | Extra | Transport/runtime | Python payload | Combine with `[mcp]`? |
 |-------|-------------------|----------------|-----------------------|
-| `[claude]` | Claude CLI; compatibility alias for `[claude-cli]` | None | Yes |
+| `[claude]` | Default in-process Claude Agent SDK runtime | Exact SDK/Anthropic pins and MCP 1.x graph | **No** — separate process/environment |
 | `[claude-cli]` | Claude CLI subprocess for completions and agent workers | None | Yes |
 | `[mcp]` | MCP 2 server/client process | `mcp==2.0.0` | Yes, with CLI profiles |
-| `[claude-sdk]` | In-process Claude Agent SDK for SDK hooks/streaming | `claude-agent-sdk` and its MCP 1.x graph | **No** — separate environment only |
-| `[all]` | All co-installable optional payloads | Includes Claude CLI identity; excludes MCP and Claude SDK | Add `[mcp]` explicitly when needed; keep SDK separate |
+| `[claude-sdk]` | Explicit alias for the Claude Agent SDK runtime | Same exact SDK/Anthropic pins and MCP 1.x graph | **No** — separate process/environment |
+| `[all]` | MCP 1.x application bundle | Includes `[claude]`; excludes MCP 2 | **No** — run `[mcp]` separately |
 
 Supported resolver commands include:
 
 ```bash
 uv tool install 'ouroboros-ai[claude]'
-uv tool install 'ouroboros-ai[mcp,claude]'
 uv tool install 'ouroboros-ai[mcp,claude-cli]'
 uv tool install 'ouroboros-ai[claude-sdk]'
 ```
 
-`ouroboros-ai[mcp,claude-sdk]` is unsupported. A normal resolver rejects its
-MCP 2/MCP 1.x constraints. If an environment is forced past dependency
-resolution, setup and `ouroboros mcp doctor` fail before changing configuration
-with this message:
+`ouroboros-ai[mcp,claude]`, `[mcp,claude-sdk]`, and `[all,mcp]` are unsupported.
+A normal resolver rejects their MCP 2/MCP 1.x constraints. If an environment is
+forced past dependency resolution, setup and `ouroboros mcp doctor` fail before
+changing configuration with this message:
 
 ```text
-Unsupported package profiles: ouroboros-ai[mcp] requires MCP 2, while ouroboros-ai[claude-sdk] requires MCP 1.x. Use ouroboros-ai[claude] (or [claude-cli]) with [mcp], or install [claude-sdk] in a separate environment.
+Unsupported package profiles: ouroboros-ai[mcp] requires MCP 2, while ouroboros-ai[claude] and ouroboros-ai[claude-sdk] require MCP 1.x. Use [claude] alone for the Claude SDK runtime, or use [claude-cli] with [mcp]; run the MCP 2 server in a separate environment/process.
 ```
 
 ### Migration from 0.50.8 and earlier
 
 | Previous command/state | New action | Result |
 |------------------------|------------|--------|
-| `[claude]` used for ordinary Claude Code work | Keep `[claude]`; run `ouroboros setup --runtime claude` | Explicitly moves to the dependency-free CLI profile |
-| Existing `runtime_backend: claude` SDK installation | An unattended installer/update preserves it as `[claude-sdk]`; run `ouroboros setup --runtime claude` to opt into CLI | Avoids silently dropping SDK hooks/streaming during upgrade |
-| `[claude]` used specifically for SDK hooks/streaming | Reinstall as `[claude-sdk]`; run `ouroboros setup --runtime claude-sdk` | Preserves the SDK runtime in its own MCP 1.x environment |
-| `[mcp,claude]` silently resolved to 0.50.6 | Re-run the same command against the fixed release and verify `ouroboros --version` | Resolves latest as MCP 2 + Claude CLI; no backtracking |
-| `[all]` implicitly installed the Claude SDK | Use `[all]` for co-installable integrations; create a separate `[claude-sdk]` tool/env only if required | Avoids an implicit MCP-major collision |
+| `[claude]` or `runtime_backend: claude` | Keep `[claude]`; run `ouroboros setup --runtime claude` | Preserves SDK hooks/streaming on MCP 1.x |
+| Explicit CLI worker (`runtime_backend: claude_mcp`) | Install `[claude-cli]`; run `ouroboros setup --runtime claude-cli` | Preserves the out-of-process worker used by MCP 2 |
+| `[claude-sdk]` | Keep the profile or use `[claude]`; both select the SDK runtime | Makes the alias explicit without changing behavior |
+| `[mcp,claude]` silently resolved to 0.50.6 | Replace it with two environments: `[claude]` for the app and `[mcp]` for the server launcher | Prevents backtracking and preserves both MCP majors |
+| `[all]` application bundle | Keep `[all]` alone; launch `[mcp]` through isolated `uvx`/`pipx` | Prevents an implicit MCP-major collision |

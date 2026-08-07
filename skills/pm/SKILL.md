@@ -35,8 +35,9 @@ The PM interview MCP tool is unavailable in this runtime.
 Configure a supported CLI-backed host with:
   ouroboros setup --runtime <codex|opencode|kiro|copilot|hermes>
 
-Then restart that host and retry ooo pm. The [claude] CLI profile may be combined
-with [mcp]; do not combine [claude-sdk] with [mcp] or add a direct Python fallback.
+Then restart that host and retry ooo pm. Claude SDK profiles ([claude] and
+[claude-sdk]) stay on MCP 1.x; the separate [mcp] server uses [claude-cli]. Do
+not combine both MCP majors or add a direct Python fallback.
 ```
 
 Stop.

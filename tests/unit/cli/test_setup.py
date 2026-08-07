@@ -4222,7 +4222,7 @@ class TestClaudeSetup:
 
     @pytest.mark.parametrize(
         ("persisted", "profile"),
-        [("claude_mcp", "claude"), ("claude", "claude-sdk")],
+        [("claude_mcp", "claude-cli"), ("claude", "claude")],
     )
     def test_current_backend_preserves_claude_profile_identity(
         self, tmp_path: Path, persisted: str, profile: str
@@ -4237,7 +4237,7 @@ class TestClaudeSetup:
         with patch("pathlib.Path.home", return_value=tmp_path):
             assert setup_cmd._get_current_backend() == profile
 
-    def test_setup_claude_selects_dependency_free_cli_runtime(self, tmp_path: Path) -> None:
+    def test_setup_claude_selects_sdk_runtime(self, tmp_path: Path) -> None:
         config_dir = tmp_path / ".ouroboros"
         config_dir.mkdir()
         config_path = config_dir / "config.yaml"
@@ -4250,9 +4250,46 @@ class TestClaudeSetup:
             setup_cmd._setup_claude("/usr/local/bin/claude")
 
         config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-        assert config_dict["orchestrator"]["runtime_backend"] == "claude_mcp"
+        assert config_dict["orchestrator"]["runtime_backend"] == "claude"
         assert config_dict["orchestrator"]["cli_path"] == "/usr/local/bin/claude"
         assert config_dict["llm"]["backend"] == "claude"
+
+    def test_forced_mcp2_sdk_mix_fails_before_setup_detection(self, tmp_path: Path) -> None:
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        original = "orchestrator:\n  runtime_backend: codex\n"
+        config_path.write_text(original, encoding="utf-8")
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch(
+                "ouroboros.cli.commands.setup.has_unsupported_claude_sdk_mcp_mix",
+                return_value=True,
+            ),
+            patch(
+                "ouroboros.cli.commands.setup._detect_runtimes",
+                side_effect=AssertionError("must fail before runtime detection"),
+            ),
+        ):
+            result = CliRunner().invoke(setup_cmd.app, ["--runtime", "codex"])
+
+        assert result.exit_code == 1
+        assert "Unsupported package profiles" in result.output
+        assert config_path.read_text(encoding="utf-8") == original
+
+    def test_setup_claude_cli_selects_dependency_free_worker(self, tmp_path: Path) -> None:
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        config_path.write_text("{}", encoding="utf-8")
+
+        with patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir):
+            setup_cmd._setup_claude_cli("/usr/local/bin/claude")
+
+        config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert config_dict["orchestrator"]["runtime_backend"] == "claude_mcp"
+        assert config_dict["orchestrator"]["cli_path"] == "/usr/local/bin/claude"
 
     def test_setup_claude_sdk_fails_closed_before_config_write(self, tmp_path: Path) -> None:
         config_dir = tmp_path / ".ouroboros"

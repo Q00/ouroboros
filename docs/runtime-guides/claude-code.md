@@ -21,10 +21,10 @@ Ouroboros can use **Claude Code** as a runtime backend, leveraging your **Claude
 - Python >= 3.12
 - Ouroboros installed (see [Getting Started](../getting-started.md) for install options)
 
-> Install `ouroboros-ai[claude]` for ordinary Claude CLI workflows; it is the
-> compatibility alias for `[claude-cli]` and can be combined with `[mcp]`.
-> Install `[claude-sdk]` only when in-process SDK hooks/streaming are required,
-> and keep that MCP 1.x profile separate from the MCP 2 server environment.
+> Install `ouroboros-ai[claude]` for the default in-process SDK runtime on MCP
+> 1.x. The marketplace plugin launches the MCP 2 server from an isolated
+> `ouroboros-ai[mcp]` environment and selects the `[claude-cli]` worker. Never
+> combine `[mcp]` with `[claude]`, `[claude-sdk]`, or `[all]` in one interpreter.
 
 ## Configuration
 
@@ -32,7 +32,7 @@ To select Claude Code as the runtime backend, set the following in your Ouroboro
 
 ```yaml
 orchestrator:
-  runtime_backend: claude_mcp  # written by `ouroboros setup --runtime claude`
+  runtime_backend: claude  # written by `ouroboros setup --runtime claude`
 ```
 
 When using the `--orchestrator` CLI flag, Claude Code is the default runtime backend.
@@ -57,10 +57,10 @@ When using the `--orchestrator` CLI flag, Claude Code is the default runtime bac
                         +------------------+
 ```
 
-The ordinary profile invokes the authenticated `claude` CLI as a subprocess, so
-it needs no Python SDK or API key. Run `ouroboros setup --runtime claude-sdk` in
-a separate `[claude-sdk]` environment only when the in-process SDK transport is
-required. For LiteLLM consensus models, see [`credentials.yaml`](../config-reference.md#credentialsyaml).
+The default profile uses the Agent SDK and its bundled/authenticated Claude Code
+transport. The SDK remains on MCP 1.x. The plugin-owned MCP 2 server is a
+separate `uvx` process and uses `--runtime claude-cli`, so no interpreter loads
+both MCP majors. For LiteLLM consensus models, see [`credentials.yaml`](../config-reference.md#credentialsyaml).
 
 > For a side-by-side comparison of all runtime backends, see the [runtime capability matrix](../runtime-capability-matrix.md).
 

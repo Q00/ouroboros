@@ -94,10 +94,16 @@ def test_built_wheel_preserves_packaging_contracts(tmp_path: Path) -> None:
         for requirement in requires_dist
         if requirement.startswith(("claude-agent-sdk", "anthropic"))
     ]
-    assert len(sdk_requirements) == 2
-    assert all("extra == 'claude-sdk'" in requirement for requirement in sdk_requirements)
-    assert all("extra == 'claude'" not in requirement for requirement in sdk_requirements)
-    assert all("extra == 'all'" not in requirement for requirement in sdk_requirements)
+    assert len(sdk_requirements) == 6
+    assert all(
+        "extra == 'all'" in requirement
+        or "extra == 'claude'" in requirement
+        or "extra == 'claude-sdk'" in requirement
+        for requirement in sdk_requirements
+    )
+    assert any("extra == 'all'" in requirement for requirement in sdk_requirements)
+    assert any("extra == 'claude'" in requirement for requirement in sdk_requirements)
+    assert any("extra == 'claude-sdk'" in requirement for requirement in sdk_requirements)
 
     pyproject = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     litellm_requirement = pyproject["project"]["optional-dependencies"]["litellm"][0]
@@ -117,11 +123,9 @@ def test_built_wheel_preserves_packaging_contracts(tmp_path: Path) -> None:
         "claude",
         "claude-cli",
         "mcp",
-        "mcp,claude",
         "mcp,claude-cli",
         "claude-sdk",
         "all",
-        "all,mcp",
     )
     for profiles in supported_profiles:
         result = subprocess.run(
@@ -146,27 +150,28 @@ def test_built_wheel_preserves_packaging_contracts(tmp_path: Path) -> None:
             f"stdout={result.stdout!r} stderr={result.stderr!r}"
         )
 
-    unsupported = subprocess.run(
-        [
-            "uv",
-            "pip",
-            "install",
-            "--dry-run",
-            "--python",
-            sys.executable,
-            "--target",
-            str(tmp_path / "target-mcp-claude-sdk"),
-            f"{wheels[0]}[mcp,claude-sdk]",
-        ],
-        capture_output=True,
-        text=True,
-        timeout=180,
-        check=False,
-    )
-    assert unsupported.returncode != 0
-    resolver_error = unsupported.stdout + unsupported.stderr
-    assert "claude-agent-sdk" in resolver_error
-    assert "mcp" in resolver_error
+    for profiles in ("mcp,claude", "mcp,claude-sdk", "all,mcp"):
+        unsupported = subprocess.run(
+            [
+                "uv",
+                "pip",
+                "install",
+                "--dry-run",
+                "--python",
+                sys.executable,
+                "--target",
+                str(tmp_path / f"target-{profiles.replace(',', '-')}"),
+                f"{wheels[0]}[{profiles}]",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=180,
+            check=False,
+        )
+        assert unsupported.returncode != 0
+        resolver_error = unsupported.stdout + unsupported.stderr
+        assert "claude-agent-sdk" in resolver_error
+        assert "mcp" in resolver_error
 
 
 @pytest.mark.skipif(

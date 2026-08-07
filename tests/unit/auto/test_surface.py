@@ -35,6 +35,7 @@ def test_cli_auto_runtime_enum_matches_supported_backends() -> None:
 
     assert {item.value for item in AgentRuntimeBackend} == {
         "claude",
+        "claude-cli",
         "codex",
         "opencode",
         "hermes",

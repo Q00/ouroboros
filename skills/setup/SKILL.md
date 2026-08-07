@@ -28,13 +28,13 @@ ooo setup
 ```
 
 > **Note**: Claude setup does two things:
-> 1. **Runtime configuration** — selects the dependency-free Claude CLI profile
+> 1. **Runtime configuration** — selects the Claude Agent SDK profile on MCP 1.x
 > 2. **CLAUDE.md integration** (optional) — per-project, adds an Ouroboros command reference block
 >
 > It deliberately leaves `~/.claude/mcp.json` untouched because marketplace
-> plugin wiring owns that file. `[claude]` is the `[claude-cli]` compatibility
-> alias and may be combined with `[mcp]`. Use `[claude-sdk]` only in a separate
-> environment when SDK hooks/streaming are required.
+> plugin wiring owns that file. `[claude]` and its explicit `[claude-sdk]` alias
+> use MCP 1.x. The plugin launches `[mcp]` in a separate MCP 2 process with the
+> dependency-free `[claude-cli]` worker.
 
 ---
 
@@ -155,7 +155,7 @@ Runtime backend            [✓] Detected
 
 | Environment | Mode | Action |
 |:------------|:-----|:-------|
-| Python >= 3.12 + Claude CLI | **Ready** | Configure `[claude]` / `[claude-cli]` and skills |
+| Python >= 3.12 + Claude CLI | **Ready** | Configure `[claude]` SDK/MCP 1 and skills |
 | uvx + Python >= 3.12 | **MCP-capable elsewhere** | Use a supported CLI-backed runtime setup for isolated `ouroboros-ai[mcp]` |
 | Python < 3.12 only | **Install needed** | Run `uv python install 3.12` then proceed |
 | No package runner or Ouroboros package | **Install needed** | Install uv first, then proceed |
@@ -172,11 +172,12 @@ Or install uv (recommended — handles deps automatically). Any one of:
 Then re-run: ooo setup
 ```
 
-**IMPORTANT**: Never install `[mcp,claude-sdk]` together and never write a direct
+**IMPORTANT**: Never install `[mcp,claude]`, `[mcp,claude-sdk]`, or `[all,mcp]`
+together and never write a direct
 `ouroboros` or `python -m ouroboros` MCP fallback. MCP 2 launchers must use an
 isolated `uvx --from 'ouroboros-ai[mcp]' ...` or
-`pipx run --spec 'ouroboros-ai[mcp]' ...` process. `[mcp,claude]` and
-`[mcp,claude-cli]` are supported because the CLI is out of process. Do not write
+`pipx run --spec 'ouroboros-ai[mcp]' ...` process. Only `[mcp,claude-cli]` is
+supported because the CLI worker is out of process. Do not write
 an Ouroboros entry to `~/.claude/mcp.json`; the plugin owns that registration.
 
 **If prerequisites are missing, show:**
@@ -209,8 +210,8 @@ Great news! You're ready for the full Ouroboros experience.
   Verifying Runtime Boundary...
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-The ordinary Claude CLI profile is compatible with MCP 2. The optional
-`[claude-sdk]` profile remains separate.
+The default Claude SDK profile stays on MCP 1.x. The plugin-owned MCP server
+runs MCP 2 separately and selects the `[claude-cli]` worker.
 This setup enables:
 
   Visual TUI Dashboard    [Watch execution in real-time]
@@ -228,8 +229,8 @@ marketplace plugin or another supported host setup owns that registration.
 ```
 Runtime boundary verified! You can now:
 - Use Claude-native ooo interview, seed, evaluate, and unstuck workflows
-- Use the Claude CLI profile with isolated MCP 2 tools
-- Keep the optional Claude SDK and MCP 2 dependency graphs conflict-free
+- Use the Claude SDK on MCP 1.x with isolated MCP 2 tools
+- Keep the Claude SDK and MCP 2 dependency graphs conflict-free
 ```
 
 ---
@@ -629,11 +630,12 @@ For Full Mode, install Python >= 3.12:
 ```
 uvx is recommended but not required. Alternative:
 
-For ordinary Claude CLI workflows:
+For the default Claude SDK runtime:
   pip install 'ouroboros-ai[claude]'
 
-For SDK hooks/streaming, use `ouroboros-ai[claude-sdk]` in a separate environment.
-Do not combine `[claude-sdk]` with `[mcp]` or add a direct Python fallback to mcp.json.
+`[claude-sdk]` is an explicit alias. Use `[claude-cli]` only for the isolated
+MCP 2 server worker. Do not combine `[claude]`, `[claude-sdk]`, or `[all]` with
+`[mcp]`, and do not add a direct Python fallback to mcp.json.
 ```
 
 ### "~/.claude/mcp.json conflicts"

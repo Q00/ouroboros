@@ -136,17 +136,18 @@ No Python, pip, or API key configuration needed -- Claude Code handles the runti
 
 ```bash
 pip install ouroboros-ai              # Base package (core engine)
-pip install 'ouroboros-ai[claude]'      # + Claude CLI profile (alias of [claude-cli])
-pip install 'ouroboros-ai[claude-sdk]'  # + isolated Claude Agent SDK profile (MCP 1.x)
+pip install 'ouroboros-ai[claude]'      # + default Claude Agent SDK profile (MCP 1.x)
+pip install 'ouroboros-ai[claude-cli]'  # + dependency-free Claude CLI worker
+pip install 'ouroboros-ai[claude-sdk]'  # + explicit alias for the SDK profile
 pip install 'ouroboros-ai[litellm]'     # + LiteLLM multi-provider support; Python 3.12-3.13
 pip install 'ouroboros-ai[mcp]'         # + MCP server/client runtime support
 pip install 'ouroboros-ai[tui]'         # + Textual terminal UI
-pip install 'ouroboros-ai[all]'         # co-installable extras; excludes MCP and Claude SDK
+pip install 'ouroboros-ai[all]'         # MCP 1.x app bundle; excludes the MCP 2 server
 
 ouroboros --version                   # verify CLI
 ```
 
-> **Which extra do I need?** Use `ouroboros-ai[claude]` (the compatibility alias for `[claude-cli]`) for ordinary Claude CLI workflows and `ouroboros-ai[mcp]` for the modern protocol server; those two may be combined. Use `ouroboros-ai[claude-sdk]` only when SDK hooks/streaming are required, and keep it in a separate environment because the current SDK embeds MCP 1.x. See the [package compatibility and migration matrix](platform-support.md#mcp-2-and-claude-package-profiles).
+> **Which extra do I need?** Use `ouroboros-ai[claude]` for the default Agent SDK runtime on MCP 1.x. Use `ouroboros-ai[mcp]` for the modern protocol server in a separate environment; its Claude launcher selects the dependency-free `[claude-cli]` worker. `[claude-sdk]` is an explicit alias for `[claude]`. Never combine either SDK spelling or `[all]` with `[mcp]` in one interpreter. See the [package compatibility and migration matrix](platform-support.md#mcp-2-and-claude-package-profiles).
 > For multi-model support via LiteLLM, use `ouroboros-ai[litellm]` or just grab everything with `ouroboros-ai[all]` from Python 3.12 or 3.13; examples prefer Python 3.13.
 > Core and non-LiteLLM installs support Python 3.12-3.14. See the [Python profile matrix](platform-support.md#python-profile-matrix).
 > Legacy note: `ouroboros-ai[dashboard]` is still accepted as a compatibility alias/no-op and does not install dashboard runtime payload; `[all]` includes that no-op alias only for compatibility.
@@ -162,11 +163,11 @@ curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.
 git clone https://github.com/Q00/ouroboros
 cd ouroboros
 uv sync                              # base dependencies only
-uv sync --python 3.13 --extra all     # include co-installable extras, including LiteLLM
+uv sync --python 3.13 --extra all     # include the MCP 1.x app bundle and LiteLLM
 uv run ouroboros --version            # verify CLI
 ```
 
-Source checkouts use the repository `.python-version`, which currently defaults to **stable Python 3.14**. Core and non-LiteLLM source environments support Python 3.12-3.14. LiteLLM-bearing source environments, including `--extra all`, support Python 3.12-3.13; examples prefer Python 3.13 without making it the minimum. Do not use `--all-extras`: that asks uv to select the intentionally conflicting `[mcp]` and `[claude-sdk]` profiles together.
+Source checkouts use the repository `.python-version`, which currently defaults to **stable Python 3.14**. Core and non-LiteLLM source environments support Python 3.12-3.14. LiteLLM-bearing source environments, including `--extra all`, support Python 3.12-3.13; examples prefer Python 3.13 without making it the minimum. Do not use `--all-extras`: that asks uv to select the intentionally conflicting MCP 1.x application and MCP 2 server profiles together.
 
 ```bash
 uv sync --python 3.13                  # base dependencies on the preferred current interpreter
@@ -216,7 +217,7 @@ export OPENAI_API_KEY="your-openai-key"
 
 ```yaml
 orchestrator:
-  runtime_backend: claude_mcp   # Claude CLI default; `claude` is the isolated SDK runtime
+  runtime_backend: claude   # default SDK runtime on MCP 1.x
 
 llm:
   backend: claude_code      # claude_code | codex | litellm | copilot | opencode | gemini | goose | kiro | pi
@@ -385,9 +386,9 @@ Ouroboros delegates code execution to a pluggable runtime backend. Three ship ou
 | | Claude Code | Codex CLI | OpenCode |
 |---|---|---|---|
 | **Best for** | Claude Code users; subscription billing | OpenAI ecosystem; pay-per-token billing | Multi-provider flexibility; open-source tooling |
-| **Install** | `pip install 'ouroboros-ai[claude]'` (CLI profile); `[claude-sdk]` only in a separate SDK environment | `pip install ouroboros-ai` + `npm install -g @openai/codex` | `pip install ouroboros-ai` + `opencode` on PATH |
+| **Install** | `pip install 'ouroboros-ai[claude]'` (SDK/MCP 1.x); plugin MCP server uses isolated `[mcp]`/MCP 2 | `pip install ouroboros-ai` + `npm install -g @openai/codex` | `pip install ouroboros-ai` + `opencode` on PATH |
 | **Skill shortcuts** | `ooo` inside Claude Code | `ooo` after `ouroboros setup --runtime codex` installs managed Codex skills | `ooo` after `ouroboros setup --runtime opencode` |
-| **Config value** | `claude_mcp` (`claude` only for SDK) | `codex` | `opencode` |
+| **Config value** | `claude` (SDK default); `claude_mcp` only for explicit CLI worker | `codex` | `opencode` |
 
 All three backends run the same core workflow engine (seed execution, TUI). However, user-facing commands still differ: Claude Code has native in-session `ooo` workflows, while Codex CLI and OpenCode rely on `ouroboros setup --runtime <backend>` to configure the integration. The `ouroboros` CLI remains the most universal terminal path, and some advanced operations are still MCP/Claude-only.
 

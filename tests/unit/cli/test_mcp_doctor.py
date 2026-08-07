@@ -225,7 +225,7 @@ class TestCheckClaudeAgentSdkImport:
             result = check_claude_agent_sdk_import()
         assert result.status == "pass"
         assert "codex" in result.message
-        assert "ouroboros-ai[claude-sdk]" in result.remediation
+        assert "ouroboros-ai[claude]" in result.remediation
 
     def test_warns_when_not_importable_on_opencode_backend(self):
         """Missing SDK on an OpenCode runtime is expected."""
@@ -243,7 +243,7 @@ class TestCheckClaudeAgentSdkImport:
             result = check_claude_agent_sdk_import()
         assert result.status == "pass"
         assert "opencode" in result.message
-        assert "ouroboros-ai[claude-sdk]" in result.remediation
+        assert "ouroboros-ai[claude]" in result.remediation
 
     def test_claude_llm_on_non_sdk_runtime_uses_cli_without_sdk(self):
         """The Claude completion adapter has a CLI fallback and needs no SDK."""

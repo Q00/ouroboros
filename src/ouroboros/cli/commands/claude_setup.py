@@ -36,28 +36,32 @@ def _write_claude_runtime_config(claude_path: str, *, runtime_backend: str) -> P
 
 
 def setup_claude(claude_path: str) -> None:
-    """Configure the dependency-free Claude CLI package profile."""
-    config_path = _write_claude_runtime_config(claude_path, runtime_backend="claude_mcp")
-    print_success(f"Configured Claude CLI runtime (CLI: {claude_path})")
-    print_info("Package profile: ouroboros-ai[claude-cli] ([claude] is an alias)")
-    print_info(f"Config saved to: {config_path}")
-
-
-def setup_claude_sdk(claude_path: str) -> None:
-    """Configure the isolated Claude Agent SDK package profile."""
+    """Configure the default isolated Claude Agent SDK package profile."""
     if has_unsupported_claude_sdk_mcp_mix():
         print_error(UNSUPPORTED_CLAUDE_SDK_MCP_MESSAGE)
         raise typer.Exit(1)
 
     config_path = _write_claude_runtime_config(claude_path, runtime_backend="claude")
     print_warning(
-        "Skipped Ouroboros MCP registration for ouroboros-ai[claude-sdk]: "
-        "its MCP 1.x runtime cannot share the isolated MCP 2 server process. "
-        "Use `ouroboros setup --runtime claude` for the compatible CLI profile."
+        "Claude SDK uses MCP 1.x in this environment. The Ouroboros MCP 2 server "
+        "must run through its isolated ouroboros-ai[mcp] launcher."
     )
     print_success(f"Configured Claude SDK runtime (CLI: {claude_path})")
-    print_info("Package profile: ouroboros-ai[claude-sdk]")
+    print_info("Package profile: ouroboros-ai[claude] (SDK/MCP 1.x)")
     print_info(f"Config saved to: {config_path}")
 
 
-__all__ = ["setup_claude", "setup_claude_sdk"]
+def setup_claude_sdk(claude_path: str) -> None:
+    """Configure the explicit alias for the Claude Agent SDK profile."""
+    setup_claude(claude_path)
+
+
+def setup_claude_cli(claude_path: str) -> None:
+    """Configure the dependency-free CLI worker used with an MCP 2 server."""
+    config_path = _write_claude_runtime_config(claude_path, runtime_backend="claude_mcp")
+    print_success(f"Configured Claude CLI runtime (CLI: {claude_path})")
+    print_info("Package profile: ouroboros-ai[claude-cli] (MCP 2 compatible)")
+    print_info(f"Config saved to: {config_path}")
+
+
+__all__ = ["setup_claude", "setup_claude_cli", "setup_claude_sdk"]

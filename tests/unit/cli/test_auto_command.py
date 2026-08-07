@@ -159,7 +159,7 @@ def test_auto_goal_skip_run_does_not_require_subcommand() -> None:
     assert "auto_test" in result.output
 
 
-def test_auto_public_claude_runtime_selects_cli_worker() -> None:
+def test_auto_public_claude_runtime_selects_sdk() -> None:
     result_value = AutoPipelineResult(
         status="complete",
         auto_session_id="auto_claude_cli",
@@ -179,7 +179,7 @@ def test_auto_public_claude_runtime_selects_cli_worker() -> None:
         )
 
     assert result.exit_code == 0
-    assert run_auto.await_args.kwargs["runtime"] == "claude_mcp"
+    assert run_auto.await_args.kwargs["runtime"] == "claude"
 
 
 def test_auto_detached_start_output_includes_handles_and_wait_retrieve_guidance() -> None:

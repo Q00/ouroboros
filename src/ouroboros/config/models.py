@@ -660,7 +660,7 @@ class OrchestratorConfig(BaseModel, frozen=True):
         "antigravity",
         "grok",
         "zcode",
-    ] = "claude_mcp"
+    ] = "claude"
     runtime_profile: RuntimeProfileConfig | None = None
 
     @field_validator("runtime_profile", mode="before")

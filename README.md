@@ -187,21 +187,23 @@ Then run `ooo setup` inside a Claude Code session.
 **pip / uv / pipx**:
 ```bash
 pip install ouroboros-ai                # base
-pip install 'ouroboros-ai[claude]'        # + Claude CLI profile (alias of [claude-cli])
-pip install 'ouroboros-ai[claude-sdk]'    # + isolated Claude Agent SDK profile (MCP 1.x)
+pip install 'ouroboros-ai[claude]'        # + default Claude Agent SDK profile (MCP 1.x)
+pip install 'ouroboros-ai[claude-cli]'    # + dependency-free Claude CLI worker profile
+pip install 'ouroboros-ai[claude-sdk]'    # + explicit alias for the Claude SDK profile
 pip install 'ouroboros-ai[litellm]'       # + LiteLLM multi-provider; Python 3.12-3.13
 pip install 'ouroboros-ai[mcp]'           # + MCP server/client support
 pip install 'ouroboros-ai[tui]'           # + Textual terminal UI
-pip install 'ouroboros-ai[all]'           # co-installable extras; excludes MCP and Claude SDK
+pip install 'ouroboros-ai[all]'           # MCP 1.x app bundle; excludes the MCP 2 server
 ouroboros setup                         # configure runtime
 ```
 
 Core and non-LiteLLM installs support Python 3.12-3.14. LiteLLM-bearing installs (`[litellm]`, `[all]`, and source `--extra all`) support Python 3.12-3.13; use Python 3.13 for current examples. See [Platform Support](./docs/platform-support.md#python-profile-matrix).
 
-`[claude]` is the backward-compatible name for the dependency-free
-`[claude-cli]` profile, so `[mcp,claude]` is supported. The in-process Agent SDK
-is now explicit as `[claude-sdk]` and must stay in a separate environment from
-`[mcp]`. See the [package compatibility and migration matrix](./docs/platform-support.md#mcp-2-and-claude-package-profiles).
+`[claude]` preserves the in-process Agent SDK and its MCP 1.x dependency graph;
+`[claude-sdk]` is its explicit alias. The MCP 2 server runs from a separate
+`[mcp]` environment and selects the `[claude-cli]` subprocess worker when
+Claude is the host. Never install `[mcp,claude]`, `[mcp,claude-sdk]`, or
+`[all,mcp]` in one interpreter. See the [package compatibility and migration matrix](./docs/platform-support.md#mcp-2-and-claude-package-profiles).
 
 `pip install 'ouroboros-ai[mcp]'` is valid for embedding the MCP client/server library in an already isolated Python environment, but host registration requires `uvx` or `pipx`. Use `pipx install 'ouroboros-ai[mcp]'` or `uv tool install 'ouroboros-ai[mcp]'` before `ouroboros setup --runtime <kiro|copilot|hermes>`; setup exits without changing runtime configuration when neither isolated launcher is available.
 

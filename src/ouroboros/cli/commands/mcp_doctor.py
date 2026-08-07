@@ -166,7 +166,7 @@ def _get_runtime_backend() -> str:
 
         return get_agent_runtime_backend()
     except Exception:
-        return "claude_mcp"
+        return "claude"
 
 
 def _get_llm_backend() -> str:
@@ -180,7 +180,7 @@ def _get_llm_backend() -> str:
 
 
 def check_claude_agent_sdk_import() -> CheckResult:
-    """Diagnose the isolated ``claude-sdk`` profile without requiring it for CLI use."""
+    """Diagnose the default Claude SDK/MCP 1 profile."""
     runtime = _get_runtime_backend()
     needs_sdk = runtime in _CLAUDE_SDK_RUNTIME_BACKENDS
 
@@ -190,8 +190,8 @@ def check_claude_agent_sdk_import() -> CheckResult:
             status="fail",
             message=UNSUPPORTED_CLAUDE_SDK_MCP_MESSAGE,
             remediation=(
-                "Recreate this environment with 'ouroboros-ai[mcp,claude]' for the "
-                "CLI path, or keep 'ouroboros-ai[claude-sdk]' in a separate environment."
+                "Recreate this environment with 'ouroboros-ai[claude]' for the SDK/MCP 1 "
+                "runtime, or use 'ouroboros-ai[mcp,claude-cli]' for the MCP 2 CLI worker."
             ),
         )
 
@@ -205,25 +205,25 @@ def check_claude_agent_sdk_import() -> CheckResult:
         return CheckResult(
             name="claude_agent_sdk_import",
             status="pass",
-            message=f"claude-agent-sdk {version} (isolated [claude-sdk] profile)",
+            message=f"claude-agent-sdk {version} (isolated [claude]/[claude-sdk] profile)",
         )
     except ImportError:
         if needs_sdk:
             return CheckResult(
                 name="claude_agent_sdk_import",
                 status="fail",
-                message="Claude SDK runtime is configured but [claude-sdk] is not installed",
+                message="Claude SDK runtime is configured but [claude] is not installed",
                 remediation=(
-                    "Use `ouroboros setup --runtime claude` for the dependency-free CLI "
-                    "profile, or install 'ouroboros-ai[claude-sdk]' in a separate "
-                    "environment. Never combine [claude-sdk] with [mcp]."
+                    "Install 'ouroboros-ai[claude]' alone for SDK/MCP 1, or use "
+                    "`ouroboros setup --runtime claude-cli` from an MCP 2 environment. "
+                    "Never combine [claude] or [claude-sdk] with [mcp]."
                 ),
             )
         return CheckResult(
             name="claude_agent_sdk_import",
             status="pass",
             message=f"claude-agent-sdk not installed (expected for {runtime} CLI/MCP profile)",
-            remediation="Use 'ouroboros-ai[claude-sdk]' only in a separate SDK environment.",
+            remediation="Use 'ouroboros-ai[claude]' only in a separate MCP 1 SDK environment.",
         )
 
 

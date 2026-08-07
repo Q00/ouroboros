@@ -313,7 +313,7 @@ class TestShorthandCommands:
         # Should invoke workflow command (orchestrator by default calls _run_orchestrator)
         mock_run_orchestrator.assert_awaited_once()
 
-    def test_run_public_claude_runtime_selects_cli_worker(self, tmp_path: Path) -> None:
+    def test_run_public_claude_runtime_selects_sdk(self, tmp_path: Path) -> None:
         seed_file = tmp_path / "seed.yaml"
         seed_file.write_text("goal: test\nacceptance_criteria:\n  - criterion: test\n")
 
@@ -325,7 +325,7 @@ class TestShorthandCommands:
             result = runner.invoke(app, ["run", str(seed_file), "--runtime", "claude"])
 
         assert result.exit_code == 0
-        assert mock_run_orchestrator.await_args.kwargs["runtime_backend"] == "claude_mcp"
+        assert mock_run_orchestrator.await_args.kwargs["runtime_backend"] == "claude"
 
     def test_run_shorthand_with_no_orchestrator(self, tmp_path: Path) -> None:
         """Test that 'ouroboros run seed.yaml --no-orchestrator' uses placeholder mode."""

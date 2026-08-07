@@ -37,10 +37,11 @@ interpreter: the Claude SDK embeds MCP 1.x internals and declares `mcp<2`.
 Ouroboros therefore treats them as separate runtime profiles and processes:
 
 - Run the Ouroboros protocol server/client boundary from the `[mcp]` profile.
-- Run ordinary Claude work through `[claude]` / `[claude-cli]`; both use the
-  out-of-process CLI and are compatible with `[mcp]`.
-- Run Claude Agent SDK work only from a separate `[claude-sdk]` environment.
-- Do not install `[mcp,claude-sdk]` together or override either package's
+- Run ordinary Claude SDK work through `[claude]` (or its explicit
+  `[claude-sdk]` alias) in an MCP 1.x environment.
+- Run the MCP 2 server from `[mcp]`; when Claude is the host, select the
+  dependency-free `[claude-cli]` subprocess worker.
+- Do not install `[mcp,claude]`, `[mcp,claude-sdk]`, or `[all,mcp]` together or override either package's
   declared dependency constraint.
 
 This is a process boundary, not a feature flag. Data crossing it should use

@@ -172,7 +172,7 @@ def test_preserves_opencode_backend_from_existing_config(tmp_path: Path) -> None
     ]
 
 
-def test_explicit_claude_uses_dependency_free_cli_profile(tmp_path: Path) -> None:
+def test_explicit_claude_uses_isolated_sdk_profile(tmp_path: Path) -> None:
     result = _run_installer(
         tmp_path,
         env={"OUROBOROS_INSTALL_RUNTIME": "claude"},
@@ -182,10 +182,26 @@ def test_explicit_claude_uses_dependency_free_cli_profile(tmp_path: Path) -> Non
     assert result.returncode == 0, result.stderr
     calls = (tmp_path / "calls.log").read_text(encoding="utf-8")
     assert "Runtime: claude (from --runtime / OUROBOROS_INSTALL_RUNTIME)" in result.stdout
+    assert "Installing .[claude,tui]" in result.stdout
+    _assert_calls_include_pyproject_pins(calls, "claude")
+    assert "--with mcp==" not in calls
+    assert "ouroboros setup --runtime claude --non-interactive" in calls
+    assert "Claude SDK is isolated on MCP 1.x" in result.stdout
+
+
+def test_explicit_claude_cli_uses_dependency_free_mcp2_profile(tmp_path: Path) -> None:
+    result = _run_installer(
+        tmp_path,
+        env={"OUROBOROS_INSTALL_RUNTIME": "claude-cli"},
+        fake_commands={"claude": "#!/bin/sh\nexit 0\n"},
+    )
+
+    assert result.returncode == 0, result.stderr
+    calls = (tmp_path / "calls.log").read_text(encoding="utf-8")
     assert "Installing .[claude-cli,tui]" in result.stdout
     assert "--with claude-agent-sdk" not in calls
     assert "--with mcp==" not in calls
-    assert "ouroboros setup --runtime claude --non-interactive" in calls
+    assert "ouroboros setup --runtime claude-cli --non-interactive" in calls
 
 
 def test_explicit_claude_sdk_uses_isolated_sdk_profile(tmp_path: Path) -> None:
@@ -201,7 +217,7 @@ def test_explicit_claude_sdk_uses_isolated_sdk_profile(tmp_path: Path) -> None:
     _assert_calls_include_pyproject_pins(calls, "claude-sdk")
     assert "--with mcp==" not in calls
     assert "ouroboros setup --runtime claude-sdk --non-interactive" in calls
-    assert "MCP registration skipped: [claude-sdk] requires MCP 1.x" in result.stdout
+    assert "Claude SDK is isolated on MCP 1.x" in result.stdout
 
 
 def test_legacy_claude_config_preserves_sdk_profile_on_upgrade(tmp_path: Path) -> None:
@@ -219,9 +235,9 @@ def test_legacy_claude_config_preserves_sdk_profile_on_upgrade(tmp_path: Path) -
 
     assert result.returncode == 0, result.stderr
     calls = (tmp_path / "calls.log").read_text(encoding="utf-8")
-    assert "Runtime: claude-sdk (preserved from" in result.stdout
-    assert "Installing .[claude-sdk,tui]" in result.stdout
-    assert "ouroboros setup --runtime claude-sdk --non-interactive" in calls
+    assert "Runtime: claude (preserved from" in result.stdout
+    assert "Installing .[claude,tui]" in result.stdout
+    assert "ouroboros setup --runtime claude --non-interactive" in calls
 
 
 def test_cli_backed_claude_config_preserves_cli_profile_on_upgrade(tmp_path: Path) -> None:
@@ -239,9 +255,9 @@ def test_cli_backed_claude_config_preserves_cli_profile_on_upgrade(tmp_path: Pat
 
     assert result.returncode == 0, result.stderr
     calls = (tmp_path / "calls.log").read_text(encoding="utf-8")
-    assert "Runtime: claude (preserved from" in result.stdout
+    assert "Runtime: claude-cli (preserved from" in result.stdout
     assert "Installing .[claude-cli,tui]" in result.stdout
-    assert "ouroboros setup --runtime claude --non-interactive" in calls
+    assert "ouroboros setup --runtime claude-cli --non-interactive" in calls
 
 
 def test_explicit_hermes_mcp_extra_matches_pyproject_pins(tmp_path: Path) -> None:
@@ -402,7 +418,7 @@ def test_all_runtime_uv_install_uses_litellm_python_range(tmp_path: Path) -> Non
     assert ("uv tool install --upgrade --python >=3.12,<3.14 . --with click>=8.1.0,<9.0.0") in calls
     assert "--with litellm==1.91.0" in calls
 
-    assert "--with claude-agent-sdk" not in calls
+    assert "--with claude-agent-sdk==0.2.123" in calls
 
 
 def test_non_litellm_uv_install_retains_python_312_floor(tmp_path: Path) -> None:
@@ -667,7 +683,7 @@ def test_pypi_lookup_failure_stays_stable_only_for_remote_install(tmp_path: Path
 # explicit (rather than parsed from pyproject) so a wrong rename or removal
 # fails loudly here instead of silently desyncing.
 _EXTRA_TO_PACKAGES: dict[str, tuple[str, ...]] = {
-    "claude": (),  # compatibility alias for the dependency-free CLI profile
+    "claude": ("claude-agent-sdk", "anthropic"),
     "claude-cli": (),
     "claude-sdk": ("claude-agent-sdk", "anthropic"),
     "copilot": (),  # pyproject declares copilot extras as []; nothing to install
@@ -677,7 +693,7 @@ _EXTRA_TO_PACKAGES: dict[str, tuple[str, ...]] = {
     "tui": ("textual",),
 }
 
-_ALL_AGGREGATED_EXTRAS = {"claude-cli", "copilot", "litellm", "dashboard", "tui"}
+_ALL_AGGREGATED_EXTRAS = {"claude", "copilot", "litellm", "dashboard", "tui"}
 
 
 def _read_pyproject_extras() -> dict[str, list[str]]:
@@ -751,4 +767,4 @@ def test_install_all_extras_match_pyproject_pins(tmp_path: Path) -> None:
 
     _assert_calls_include_pyproject_pins(calls, *_ALL_AGGREGATED_EXTRAS)
     assert "--with mcp==" not in calls
-    assert "--with claude-agent-sdk" not in calls
+    assert "--with claude-agent-sdk==0.2.123" in calls

@@ -153,7 +153,7 @@ def test_litellm_public_extra_excludes_unsupported_python():
 
 
 def test_mcp_claude_cli_and_sdk_profiles_have_explicit_contracts():
-    """The CLI alias co-installs with MCP 2; the SDK remains isolated."""
+    """Claude defaults to SDK/MCP 1; only the CLI profile co-installs with MCP 2."""
     root = Path(__file__).parent.parent.parent
     pyproject = tomllib.loads((root / "pyproject.toml").read_text())
 
@@ -162,24 +162,31 @@ def test_mcp_claude_cli_and_sdk_profiles_have_explicit_contracts():
     conflicts = pyproject["tool"]["uv"]["conflicts"]
 
     assert optional_deps["mcp"] == ["mcp==2.0.0"]
-    assert optional_deps["claude"] == []
-    assert optional_deps["claude-cli"] == []
-    assert optional_deps["claude-sdk"] == [
+    sdk_pins = [
         "claude-agent-sdk==0.2.123",
         "anthropic==0.117.0",
     ]
+    assert optional_deps["claude"] == sdk_pins
+    assert optional_deps["claude-cli"] == []
+    assert optional_deps["claude-sdk"] == sdk_pins
     assert "mcp" not in optional_deps["all"][0]
     assert "claude-sdk" not in optional_deps["all"][0]
-    assert "claude-cli" in optional_deps["all"][0]
+    assert "claude" in optional_deps["all"][0]
     assert groups["mcp-test"] == ["mcp==2.0.0"]
     assert groups["claude-sdk-test"] == ["ouroboros-ai[claude-sdk]"]
     assert not any("mcp" in dep or "claude" in dep for dep in groups["dev"])
+    assert [
+        {"extra": "claude"},
+        {"extra": "mcp"},
+    ] in conflicts
+    assert [{"extra": "claude"}, {"group": "mcp-test"}] in conflicts
     assert [
         {"extra": "claude-sdk"},
         {"extra": "mcp"},
     ] in conflicts
     assert [{"extra": "claude-sdk"}, {"group": "mcp-test"}] in conflicts
-    assert [{"extra": "claude"}, {"extra": "mcp"}] not in conflicts
+    assert [{"extra": "all"}, {"extra": "mcp"}] in conflicts
+    assert [{"extra": "all"}, {"group": "mcp-test"}] in conflicts
     assert [{"extra": "claude-cli"}, {"extra": "mcp"}] not in conflicts
 
 
@@ -204,9 +211,25 @@ def test_shipped_mcp_launchers_use_the_isolated_mcp_profile() -> None:
         "mcp_servers"
     ]["ouroboros"]
 
-    for entry in (repository_entry, plugin_entry, codex_entry):
+    claude_args = [
+        *expected_args,
+        "--runtime",
+        "claude-cli",
+        "--llm-backend",
+        "claude_code",
+    ]
+    for entry in (repository_entry, plugin_entry):
         assert entry["command"] == "uvx"
-        assert entry["args"] == expected_args
+        assert entry["args"] == claude_args
+
+    assert codex_entry["command"] == "uvx"
+    assert codex_entry["args"] == [
+        *expected_args,
+        "--runtime",
+        "codex",
+        "--llm-backend",
+        "codex",
+    ]
 
 
 def test_runtime_guides_require_isolated_mcp_host_launchers() -> None:

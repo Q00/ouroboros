@@ -165,7 +165,7 @@ Controls how Ouroboros launches and communicates with the agent runtime backend.
 
 ```yaml
 orchestrator:
-  runtime_backend: claude_mcp   # "claude_mcp" | "claude" | "codex" | "opencode" | "hermes" | "gemini" | "kiro" | "copilot" | "pi" | "gjc" | "antigravity" | "grok" | "zcode"
+  runtime_backend: claude       # "claude" | "claude_mcp" | "codex" | "opencode" | "hermes" | "gemini" | "kiro" | "copilot" | "pi" | "gjc" | "antigravity" | "grok" | "zcode"
   permission_mode: acceptEdits  # "default" | "acceptEdits" | "bypassPermissions"
   opencode_permission_mode: bypassPermissions
   max_parallel_workers: 3       # Maximum concurrent AC workers
@@ -180,7 +180,7 @@ orchestrator:
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `runtime_backend` | `"claude_mcp"` \| `"claude"` \| `"codex"` \| `"opencode"` \| `"hermes"` \| `"gemini"` \| `"kiro"` \| `"copilot"` \| `"pi"` \| `"gjc"` \| `"antigravity"` \| `"grok"` \| `"zcode"` | `"claude_mcp"` | The agent runtime backend used for workflow execution. `claude_mcp` is the ordinary Claude CLI worker; legacy `claude` selects the in-process SDK runtime and requires the isolated `[claude-sdk]` profile. Overridable via `OUROBOROS_AGENT_RUNTIME`. See [runtime capability matrix](runtime-capability-matrix.md). |
+| `runtime_backend` | `"claude_mcp"` \| `"claude"` \| `"codex"` \| `"opencode"` \| `"hermes"` \| `"gemini"` \| `"kiro"` \| `"copilot"` \| `"pi"` \| `"gjc"` \| `"antigravity"` \| `"grok"` \| `"zcode"` | `"claude"` | The agent runtime backend used for workflow execution. `claude` is the default Agent SDK runtime in an MCP 1.x environment. `claude_mcp` is the explicit out-of-process CLI worker used by the isolated MCP 2 server. Overridable via `OUROBOROS_AGENT_RUNTIME`. See [runtime capability matrix](runtime-capability-matrix.md). |
 | `permission_mode` | `"default"` \| `"acceptEdits"` \| `"bypassPermissions"` | `"acceptEdits"` | Stored permission preference. Runner-driven seed execution forces the native `bypassPermissions` equivalent for both fresh and resumed dispatches wherever the backend exposes an approval surface; persisted handles cannot downgrade it. Pi and GJC expose no separate approval flag and run headlessly without an approval dialogue. |
 | `opencode_permission_mode` | `"default"` \| `"acceptEdits"` \| `"bypassPermissions"` | `"bypassPermissions"` | Permission mode when using the OpenCode runtime. Overridable via `OUROBOROS_OPENCODE_PERMISSION_MODE`. |
 | `max_parallel_workers` | `int >= 1` | `3` | Maximum Acceptance Criteria workers the adaptive dispatch window may reach. Overridable via `OUROBOROS_MAX_PARALLEL_WORKERS`. Invalid explicit values fail instead of falling back to the default. The native Claude backend starts at this value and is paced by its RPM/TPM bucket. CLI runtimes whose underlying LLM limits are unknown (`hermes`, `codex`, `gemini`, `opencode`, ...) start at 1, halve the window on 429 pressure, honor `Retry-After`, and add one worker after sustained success until this ceiling. |
@@ -759,7 +759,7 @@ A flat top-level mapping (backend → fields, without the `backends:` wrapper) i
 ```yaml
 # ~/.ouroboros/config.yaml
 orchestrator:
-  runtime_backend: claude_mcp
+  runtime_backend: claude
 
 logging:
   level: info
@@ -858,7 +858,7 @@ Pi is available as an agent runtime backend and, when the Pi LLM adapter is inst
 
 ```yaml
 orchestrator:
-  runtime_backend: claude_mcp
+  runtime_backend: claude
   permission_mode: acceptEdits
   opencode_permission_mode: bypassPermissions
   max_parallel_workers: 3

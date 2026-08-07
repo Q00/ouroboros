@@ -78,8 +78,8 @@ def test_serve_defaults_to_port_8080_when_port_omitted(monkeypatch):
     )
 
 
-def test_public_claude_runtime_selects_cli_worker(monkeypatch):
-    """The public `claude` name must never select the SDK inside MCP 2."""
+def test_public_claude_cli_runtime_selects_cli_worker(monkeypatch):
+    """The explicit `claude-cli` name selects the worker inside MCP 2."""
     monkeypatch.delenv("_OUROBOROS_NESTED", raising=False)
 
     mock_run_mcp_server = AsyncMock()
@@ -87,7 +87,7 @@ def test_public_claude_runtime_selects_cli_worker(monkeypatch):
         "ouroboros.cli.commands.mcp._run_mcp_server",
         new=mock_run_mcp_server,
     ):
-        result = runner.invoke(app, ["serve", "--runtime", "claude"])
+        result = runner.invoke(app, ["serve", "--runtime", "claude-cli"])
 
     assert result.exit_code == 0
     mock_run_mcp_server.assert_awaited_once_with(
@@ -98,6 +98,17 @@ def test_public_claude_runtime_selects_cli_worker(monkeypatch):
         "claude_mcp",
         None,
     )
+
+
+def test_public_claude_sdk_runtime_fails_before_process_state(monkeypatch):
+    """The MCP 2 server cannot select the in-process SDK runtime."""
+    monkeypatch.delenv("_OUROBOROS_NESTED", raising=False)
+
+    result = runner.invoke(app, ["serve", "--runtime", "claude"])
+
+    assert result.exit_code == 1
+    assert "Unsupported package profiles" in result.output
+    assert "_OUROBOROS_NESTED" not in os.environ
 
 
 def test_forced_sdk_mcp_mix_fails_before_process_state(monkeypatch):

@@ -35,23 +35,22 @@ dependencies = [
 # this metadata, NOT from uv.lock). Motivated by the 2026-03 litellm
 # 1.82.7/1.82.8 supply-chain incident. Updates land via reviewed Dependabot
 # PRs; uv.lock additionally hash-pins the full transitive graph for repo/CI.
-# Claude CLI is an out-of-process runtime and needs no Python SDK dependency.
-# Keep the historical `[claude]` name as its compatibility alias so an old
-# `[mcp,claude]` command resolves to the current release instead of silently
-# backtracking to the last release where `[claude]` meant the SDK.
-claude = []
+# Claude's default runtime preserves the Agent SDK and its MCP 1.x graph. The
+# MCP 2 server runs in a separate process/profile; these extras must never be
+# selected in one interpreter.
+claude = ["claude-agent-sdk==0.2.123", "anthropic==0.117.0"]
 claude-cli = []
-# SDK hooks/streaming remain available, but only in a separately named profile
-# that must not share an interpreter with the MCP 2 server profile.
+# Explicit alias for automation and migrations that want to spell out the SDK
+# transport rather than rely on the historical `[claude]` name.
 claude-sdk = ["claude-agent-sdk==0.2.123", "anthropic==0.117.0"]
 copilot = []
 litellm = ["litellm==1.91.0; python_version < '3.14'"]
 dashboard = []
 mcp = ["mcp==2.0.0"]
 tui = ["textual==8.2.8", "textual-serve==1.1.3"]
-# `[all]` means every co-installable profile. The isolated MCP server and Claude
-# SDK profiles stay explicit so the name can never create a mixed MCP 1/2 env.
-all = ["ouroboros-ai[claude-cli,copilot,litellm,tui,dashboard]"]
+# `[all]` remains the MCP 1.x application bundle. The MCP 2 server profile is
+# explicit and isolated; `[all,mcp]` is intentionally unsupported.
+all = ["ouroboros-ai[claude,copilot,litellm,tui,dashboard]"]
 
 [project.scripts]
 ooo = "ouroboros.cli.main:app"
@@ -150,13 +149,16 @@ claude-sdk-test = [
 litellm-test = { requires-python = ">=3.12,<3.14" }
 
 [tool.uv]
-# The official Claude Agent SDK still embeds MCP 1.x internals. Declaring the
-# incompatibility lets uv lock and test both profiles without pretending they
-# are safe to import into one interpreter. The dependency-free `[claude]` and
-# `[claude-cli]` profiles are intentionally compatible with `[mcp]`.
+# The official Claude Agent SDK still embeds MCP 1.x internals. Declare every
+# SDK spelling incompatible with the MCP 2 profile and test group. The
+# dependency-free `[claude-cli]` profile remains compatible with `[mcp]`.
 conflicts = [
+    [{ extra = "claude" }, { extra = "mcp" }],
+    [{ extra = "claude" }, { group = "mcp-test" }],
     [{ extra = "claude-sdk" }, { extra = "mcp" }],
     [{ extra = "claude-sdk" }, { group = "mcp-test" }],
+    [{ extra = "all" }, { extra = "mcp" }],
+    [{ extra = "all" }, { group = "mcp-test" }],
 ]
 
 [tool.mypy]

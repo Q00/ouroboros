@@ -40,6 +40,9 @@ from ouroboros.cli.commands.claude_setup import (
     setup_claude as _setup_claude,
 )
 from ouroboros.cli.commands.claude_setup import (
+    setup_claude_cli as _setup_claude_cli,
+)
+from ouroboros.cli.commands.claude_setup import (
     setup_claude_sdk as _setup_claude_sdk,
 )
 from ouroboros.cli.formatters import console
@@ -71,6 +74,10 @@ from ouroboros.config._model_defaults import (
     recognized_shipped_defaults,
 )
 from ouroboros.core.errors import ConfigError
+from ouroboros.package_profiles import (
+    UNSUPPORTED_CLAUDE_SDK_MCP_MESSAGE,
+    has_unsupported_claude_sdk_mcp_mix,
+)
 from ouroboros.persistence.brownfield import BrownfieldStore
 
 
@@ -176,7 +183,7 @@ def _commit_runtime_activation(
 
 
 def _ensure_claude_mcp_entry() -> None:
-    """Fail closed for legacy callers that still assume the SDK profile.
+    """Explain the process boundary for legacy callers.
 
     Kept as a compatibility shim for callers from older plugin artifacts. The
     current Claude Agent SDK requires MCP 1.x, while the Ouroboros protocol
@@ -184,8 +191,8 @@ def _ensure_claude_mcp_entry() -> None:
     isolated process. Never mutate user-owned Claude MCP configuration here.
     """
     print_warning(
-        "Skipped Ouroboros MCP registration for ouroboros-ai[claude-sdk]. "
-        "Use `ouroboros setup --runtime claude` for the MCP-compatible CLI profile."
+        "Claude SDK stays on MCP 1.x. Launch the Ouroboros MCP 2 server from "
+        "the separate ouroboros-ai[mcp] profile with --runtime claude-cli."
     )
 
 
@@ -208,9 +215,7 @@ def _get_current_backend() -> str | None:
         data = yaml.safe_load(config_path.read_text()) or {}
         backend = data.get("orchestrator", {}).get("runtime_backend")
         if backend == "claude_mcp":
-            return "claude"
-        if backend == "claude":
-            return "claude-sdk"
+            return "claude-cli"
         return backend
     except Exception:
         return None
@@ -2664,7 +2669,7 @@ def _config_execute_runtime_backend(config_dict: dict) -> str:
     """Return the saved Execute runtime backend using setup's inheritance rules."""
     orchestrator = config_dict.get("orchestrator")
     if not isinstance(orchestrator, dict):
-        return "claude_mcp"
+        return "claude"
     runtime_profile = orchestrator.get("runtime_profile")
     stage_backend = None
     profile_default = None
@@ -2674,7 +2679,7 @@ def _config_execute_runtime_backend(config_dict: dict) -> str:
             stage_backend = stages.get("execute")
         profile_default = runtime_profile.get("default")
     backend = str(
-        stage_backend or profile_default or orchestrator.get("runtime_backend") or "claude_mcp"
+        stage_backend or profile_default or orchestrator.get("runtime_backend") or "claude"
     )
     return "codex" if backend.strip().lower() in {"codex", "codex_cli"} else backend
 
@@ -4502,7 +4507,7 @@ def _setup_opencode(opencode_path: str, mode: str = "plugin") -> bool:
     # All installs succeeded — now safe to persist config.
     # Plugin mode still needs runtime_backend=opencode so the MCP server's
     # should_dispatch_via_plugin() gate recognises the OpenCode context.
-    # Without this, fresh installs default to runtime_backend=claude_mcp and the
+    # Without this, fresh installs default to runtime_backend=claude and the
     # gate always returns False — plugin dispatch never activates.
     # opencode_cli_path is also set so `ouroboros run` (subprocess fallback)
     # can still locate the CLI binary if needed.
@@ -4694,7 +4699,7 @@ def setup(
         typer.Option(
             "--runtime",
             "-r",
-            help="Runtime backend to configure (claude, claude-sdk, codex, opencode, hermes, gemini, goose, kiro, copilot, pi, gjc, antigravity, grok, zcode).",
+            help="Runtime backend to configure (claude, claude-sdk, claude-cli, codex, opencode, hermes, gemini, goose, kiro, copilot, pi, gjc, antigravity, grok, zcode).",
         ),
     ] = None,
     non_interactive: Annotated[
@@ -4742,6 +4747,9 @@ def setup(
     """
     if ctx.invoked_subcommand is not None:
         return
+    if has_unsupported_claude_sdk_mcp_mix():
+        print_error(UNSUPPORTED_CLAUDE_SDK_MCP_MESSAGE)
+        raise typer.Exit(1)
 
     console.print("\n[bold cyan]Ouroboros Setup[/bold cyan]\n")
 
@@ -4754,11 +4762,10 @@ def setup(
     # Detect available runtimes
     detected = _detect_runtimes()
     available = {k: v for k, v in detected.items() if v is not None}
-    # The SDK and CLI profiles share one Claude executable. Expose the SDK
-    # identity only when it is already configured so a no-argument setup run
-    # preserves it instead of silently migrating to the CLI profile.
-    if current_backend == "claude-sdk" and "claude" in available:
-        available["claude-sdk"] = available["claude"]
+    # All Claude profiles share one executable. Expose an explicit alias only
+    # when already configured so no-argument setup preserves its transport.
+    if current_backend in {"claude-sdk", "claude-cli"} and "claude" in available:
+        available[current_backend] = available["claude"]
 
     if available:
         console.print("[bold]Detected runtimes:[/bold]")
@@ -4833,6 +4840,12 @@ def setup(
             print_error("Claude Code CLI not found in PATH.")
             raise typer.Exit(1)
         _setup_claude(claude_path)
+    elif selected in ("claude-cli", "claude_mcp"):
+        claude_path = available.get("claude")
+        if not claude_path:
+            print_error("Claude Code CLI not found in PATH.")
+            raise typer.Exit(1)
+        _setup_claude_cli(claude_path)
     elif selected in ("claude-sdk", "claude_sdk"):
         claude_path = available.get("claude")
         if not claude_path:

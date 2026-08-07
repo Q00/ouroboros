@@ -1091,18 +1091,18 @@ On startup, `mcp serve` automatically cancels any sessions left in `RUNNING` or 
 
 **MCP host integration:**
 
-`ouroboros setup --runtime claude` configures the dependency-free Claude CLI
-profile (`runtime_backend: claude_mcp`). `ouroboros setup --runtime claude-sdk`
-selects the legacy in-process SDK runtime and refuses an environment that also
-contains MCP 2. Setup leaves `~/.claude/mcp.json` untouched; the marketplace
-plugin or another supported host can launch an isolated server equivalent to:
+`ouroboros setup --runtime claude` configures the default Agent SDK profile
+(`runtime_backend: claude`) on MCP 1.x. `claude-sdk` is an explicit alias;
+`ouroboros setup --runtime claude-cli` selects the dependency-free worker used
+inside an MCP 2 server environment. Setup leaves `~/.claude/mcp.json` untouched;
+the marketplace plugin launches an isolated server equivalent to:
 
 ```json
 {
   "mcpServers": {
     "ouroboros": {
       "command": "uvx",
-      "args": ["--from", "ouroboros-ai[mcp]", "ouroboros", "mcp", "serve"]
+      "args": ["--from", "ouroboros-ai[mcp]", "ouroboros", "mcp", "serve", "--runtime", "claude-cli", "--llm-backend", "claude_code"]
     }
   }
 }
@@ -1125,7 +1125,7 @@ If `uvx` is unavailable, use the package-isolated pipx runner:
 
 ```yaml
 orchestrator:
-  runtime_backend: claude_mcp   # CLI default; use "claude" only for the isolated SDK runtime
+  runtime_backend: claude   # SDK default; isolated MCP 2 launchers use "claude_mcp"
 ```
 
 Override per-session with the `OUROBOROS_AGENT_RUNTIME` environment variable if needed.

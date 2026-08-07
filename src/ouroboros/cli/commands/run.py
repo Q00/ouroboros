@@ -138,6 +138,7 @@ class AgentRuntimeBackend(str, Enum):  # noqa: UP042
     """Supported orchestrator runtime backends for CLI selection."""
 
     CLAUDE = "claude"
+    CLAUDE_CLI = "claude-cli"
     CODEX = "codex"
     OPENCODE = "opencode"
     HERMES = "hermes"
@@ -909,7 +910,7 @@ def workflow(
         typer.Option(
             "--runtime",
             help=(
-                "Agent runtime backend for orchestrator mode (claude, codex, "
+                "Agent runtime backend for orchestrator mode (claude, claude-cli, codex, "
                 "opencode, hermes, gemini, copilot, goose, kiro, pi, gjc, "
                 "antigravity, grok, or zcode)."
             ),

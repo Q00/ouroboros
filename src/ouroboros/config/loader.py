@@ -655,7 +655,7 @@ def get_agent_runtime_backend() -> str:
         1. OUROBOROS_AGENT_RUNTIME environment variable
         2. OUROBOROS_RUNTIME environment variable
         3. config.yaml orchestrator.runtime_backend
-        4. "claude_mcp" (dependency-free Claude CLI worker)
+        4. "claude" (Claude Agent SDK runtime)
 
     Returns:
         Normalized runtime backend name.
@@ -672,7 +672,7 @@ def get_agent_runtime_backend() -> str:
         config = load_config()
         return config.orchestrator.runtime_backend
     except ConfigError:
-        return "claude_mcp"
+        return "claude"
 
 
 def get_runtime() -> str:

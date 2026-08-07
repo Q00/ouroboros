@@ -69,6 +69,7 @@ class AgentRuntimeBackend(str, Enum):  # noqa: UP042
     """Supported orchestrator runtime backends for MCP commands."""
 
     CLAUDE = "claude"
+    CLAUDE_CLI = "claude-cli"
     CODEX = "codex"
     OPENCODE = "opencode"
     HERMES = "hermes"
@@ -935,7 +936,7 @@ def serve(
         typer.Option(
             "--runtime",
             help=(
-                "Agent runtime backend for orchestrator-driven tools (claude, codex, "
+                "Agent runtime backend for orchestrator-driven tools (claude, claude-cli, codex, "
                 "opencode, hermes, gemini, copilot, goose, kiro, pi, gjc, "
                 "antigravity, grok, or zcode)."
             ),
@@ -983,9 +984,10 @@ def serve(
         ouroboros mcp serve --runtime codex --llm-backend codex
 
     """
-    # A resolver normally prevents this environment. If a user forced it,
-    # refuse before setting process state or starting the server.
-    if has_unsupported_claude_sdk_mcp_mix():
+    # A resolver normally prevents a mixed interpreter. Also reject an
+    # explicit SDK runtime request: this command is the MCP 2 server boundary,
+    # so Claude execution here must use the out-of-process CLI worker.
+    if has_unsupported_claude_sdk_mcp_mix() or (runtime is not None and runtime.value == "claude"):
         _stderr_console.print(f"[red]{UNSUPPORTED_CLAUDE_SDK_MCP_MESSAGE}[/red]")
         raise typer.Exit(1)
 
@@ -1020,8 +1022,8 @@ def serve(
             "  uvx --from 'ouroboros-ai\\[mcp]' ouroboros mcp serve\n"
             "or:\n"
             "  pipx run --spec 'ouroboros-ai\\[mcp]' ouroboros mcp serve\n"
-            "Do not combine it with the MCP 1.x-based \\[claude-sdk] extra; "
-            "use \\[claude] or \\[claude-cli] for the CLI path.[/blue]"
+            "Do not combine it with the MCP 1.x-based \\[claude] or "
+            "\\[claude-sdk] extras; use \\[claude-cli] for the CLI path.[/blue]"
         )
         raise typer.Exit(1) from e
     except OSError as e:
@@ -1050,7 +1052,7 @@ def info(
         typer.Option(
             "--runtime",
             help=(
-                "Agent runtime backend for orchestrator-driven tools (claude, codex, "
+                "Agent runtime backend for orchestrator-driven tools (claude, claude-cli, codex, "
                 "opencode, hermes, gemini, copilot, goose, kiro, pi, gjc, "
                 "antigravity, grok, or zcode)."
             ),

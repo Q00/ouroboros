@@ -89,16 +89,16 @@ When the user invokes this skill:
    pipx list 2>/dev/null | grep -q ouroboros && echo "pipx"
    ```
 
-   Determine the configured profile. Legacy `runtime_backend: claude` means the
-   SDK profile; new CLI setup persists `claude_mcp`:
+   Determine the configured profile. `runtime_backend: claude` is the default
+   SDK/MCP 1 profile; `claude_mcp` is the explicit CLI worker:
    ```bash
-   CLAUDE_PROFILE=$(python3 -c "import pathlib,re; p=pathlib.Path.home()/'.ouroboros/config.yaml'; s=p.read_text() if p.exists() else ''; print('claude-sdk' if re.search(r'(?m)^  runtime_backend:\\s*claude\\s*(?:#.*)?$', s) else 'claude')" 2>/dev/null || echo claude)
+   CLAUDE_PROFILE=$(python3 -c "import pathlib,re; p=pathlib.Path.home()/'.ouroboros/config.yaml'; s=p.read_text() if p.exists() else ''; print('claude-cli' if re.search(r'(?m)^  runtime_backend:\\s*claude_mcp\\s*(?:#.*)?$', s) else 'claude')" 2>/dev/null || echo claude)
    ```
 
-   > `[claude]` is the dependency-free `[claude-cli]` compatibility alias and
-   > may be combined with `[mcp]`. `[claude-sdk]` embeds MCP 1.x and must remain
-   > in a separate environment. If setup/doctor reports an unsupported
-   > `[mcp]` + `[claude-sdk]` environment, stop instead of updating in place.
+   > `[claude]` and `[claude-sdk]` use MCP 1.x. `[claude-cli]` is the only Claude
+   > profile compatible with the isolated `[mcp]`/MCP 2 server environment. If
+   > setup/doctor reports a mixed SDK + MCP 2 environment, stop instead of
+   > updating in place.
 
    - If installed via **uv tool** (most common with install.sh):
      ```bash
@@ -125,9 +125,9 @@ When the user invokes this skill:
      python3 -m pip install --upgrade "ouroboros-ai[$CLAUDE_PROFILE]"
      ```
 
-   > **Note**: SDK users stay on `[claude-sdk]`; ordinary users converge to the
-   > MCP-compatible `[claude]` CLI profile instead of silently downgrading the
-   > Ouroboros package.
+   > **Note**: Default Claude users stay on `[claude]`/MCP 1. Explicit
+   > `claude_mcp` users stay on `[claude-cli]`; the plugin launches MCP 2 in a
+   > separate environment instead of asking the resolver for both majors.
 
    b. **Update runtime integration**:
 

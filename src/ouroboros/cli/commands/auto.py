@@ -118,6 +118,7 @@ class AgentRuntimeBackend(str, Enum):  # noqa: UP042
     """Supported runtime backends for auto execution handoff."""
 
     CLAUDE = "claude"
+    CLAUDE_CLI = "claude-cli"
     CODEX = "codex"
     OPENCODE = "opencode"
     HERMES = "hermes"
