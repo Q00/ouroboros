@@ -362,18 +362,77 @@ class TestCodexCliLLMAdapter:
             encoding="utf-8",
         )
         monkeypatch.setenv("CODEX_HOME", str(codex_home))
-        adapter = CodexCliLLMAdapter(
-            cli_path="codex",
-            runtime_profile=runtime_profile,
-            strict_mcp_config=True,
-        )
+        with patch(
+            "ouroboros.providers.codex_cli_adapter.codex_uses_profile_v2", return_value=True
+        ):
+            adapter = CodexCliLLMAdapter(
+                cli_path="codex",
+                runtime_profile=runtime_profile,
+                strict_mcp_config=True,
+            )
 
-        command = adapter._build_command(
-            output_last_message_path="/tmp/out.txt",
-            output_schema_path=None,
-            model=None,
-            profile=task_profile,
+            command = adapter._build_command(
+                output_last_message_path="/tmp/out.txt",
+                output_schema_path=None,
+                model=None,
+                profile=task_profile,
+            )
+
+        assert "mcp_servers.ouroboros.enabled=false" in command
+
+    def test_strict_legacy_profile_ignores_dormant_profile_v2_mcp(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Legacy --profile must not inspect a dormant profile-v2 config file."""
+        codex_home = tmp_path / "codex-home"
+        codex_home.mkdir()
+        (codex_home / "config.toml").write_text(
+            '[profiles.custom]\nmodel = "gpt-5.4"\n', encoding="utf-8"
         )
+        (codex_home / "custom.config.toml").write_text(
+            '[mcp_servers.ouroboros]\ncommand = "ouroboros"\n', encoding="utf-8"
+        )
+        monkeypatch.setenv("CODEX_HOME", str(codex_home))
+        adapter = CodexCliLLMAdapter(cli_path="codex", strict_mcp_config=True)
+
+        with patch(
+            "ouroboros.providers.codex_cli_adapter.codex_uses_profile_v2", return_value=False
+        ):
+            command = adapter._build_command(
+                output_last_message_path="/tmp/out.txt",
+                output_schema_path=None,
+                model=None,
+                profile="custom",
+            )
+
+        assert "mcp_servers.ouroboros.enabled=false" not in command
+
+    def test_strict_legacy_profile_reads_selected_profile_table(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Legacy --profile inspects its selected nested profile table."""
+        codex_home = tmp_path / "codex-home"
+        codex_home.mkdir()
+        (codex_home / "config.toml").write_text(
+            '[profiles.custom.mcp_servers.ouroboros]\ncommand = "ouroboros"\n',
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("CODEX_HOME", str(codex_home))
+        adapter = CodexCliLLMAdapter(cli_path="codex", strict_mcp_config=True)
+
+        with patch(
+            "ouroboros.providers.codex_cli_adapter.codex_uses_profile_v2", return_value=False
+        ):
+            command = adapter._build_command(
+                output_last_message_path="/tmp/out.txt",
+                output_schema_path=None,
+                model=None,
+                profile="custom",
+            )
 
         assert "mcp_servers.ouroboros.enabled=false" in command
 

@@ -67,6 +67,7 @@ from ouroboros.cli.setup_model_config import (
 )
 from ouroboros.codex.cli_policy import resolve_codex_cli_path
 from ouroboros.codex.home import resolve_codex_home
+from ouroboros.codex.runtime_profile import codex_uses_profile_v2 as _shared_codex_uses_profile_v2
 from ouroboros.config._model_defaults import (
     DEFAULT_CONSENSUS_OPUS_MODEL,
     DEFAULT_OPUS_MODEL,
@@ -1119,43 +1120,7 @@ def _upsert_codex_mcp_section(raw: str, section: str) -> tuple[str, bool]:
 
 def _codex_uses_profile_v2(codex_path: str | None = None) -> bool:
     """Return whether ``codex --profile`` expects ``<name>.config.toml`` files."""
-    if codex_path is None:
-        return False
-
-    command = codex_path or "codex"
-    try:
-        result = subprocess.run(
-            [command, "--help"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            check=False,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-        return False
-
-    help_text = f"{result.stdout}\n{result.stderr}"
-    lines = help_text.splitlines()
-    for index, line in enumerate(lines):
-        if "--profile-v2" in line:
-            continue
-        if "--profile" not in line:
-            continue
-
-        description_lines: list[str] = []
-        for description_line in lines[index + 1 :]:
-            stripped = description_line.strip()
-            if stripped.startswith("-") or stripped.startswith("--"):
-                break
-            if stripped:
-                description_lines.append(stripped)
-        return any(
-            "Layer $CODEX_HOME/<name>.config.toml on top of the base user config"
-            in description_line
-            for description_line in description_lines
-        )
-
-    return False
+    return _shared_codex_uses_profile_v2(codex_path, run_command=subprocess.run)
 
 
 def _register_codex_mcp_server(

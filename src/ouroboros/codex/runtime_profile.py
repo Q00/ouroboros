@@ -22,6 +22,8 @@ the Codex LLM adapter.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+import subprocess
 from typing import Any
 
 # Maps the orchestrator-level ``runtime_profile`` value to the Codex-side
@@ -31,6 +33,50 @@ from typing import Any
 RUNTIME_PROFILE_TO_CODEX_PROFILE: dict[str, str] = {
     "worker": "ouroboros-worker",
 }
+
+
+def codex_uses_profile_v2(
+    codex_path: str | None,
+    *,
+    run_command: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+) -> bool:
+    """Return whether ``--profile`` selects ``<name>.config.toml`` files."""
+    if codex_path is None:
+        return False
+
+    try:
+        result = run_command(
+            [codex_path, "--help"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return False
+
+    help_text = f"{result.stdout}\n{result.stderr}"
+    lines = help_text.splitlines()
+    for index, line in enumerate(lines):
+        if "--profile-v2" in line:
+            continue
+        if "--profile" not in line:
+            continue
+
+        description_lines: list[str] = []
+        for description_line in lines[index + 1 :]:
+            stripped = description_line.strip()
+            if stripped.startswith("-") or stripped.startswith("--"):
+                break
+            if stripped:
+                description_lines.append(stripped)
+        return any(
+            "Layer $CODEX_HOME/<name>.config.toml on top of the base user config"
+            in description_line
+            for description_line in description_lines
+        )
+
+    return False
 
 
 def resolve_codex_profile(
@@ -73,4 +119,8 @@ def resolve_codex_profile(
     return mapped
 
 
-__all__ = ["RUNTIME_PROFILE_TO_CODEX_PROFILE", "resolve_codex_profile"]
+__all__ = [
+    "RUNTIME_PROFILE_TO_CODEX_PROFILE",
+    "codex_uses_profile_v2",
+    "resolve_codex_profile",
+]

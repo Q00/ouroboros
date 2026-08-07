@@ -28,7 +28,7 @@ from ouroboros.codex.cli_policy import (
     resolve_codex_cli_path,
 )
 from ouroboros.codex.home import resolve_codex_home
-from ouroboros.codex.runtime_profile import resolve_codex_profile
+from ouroboros.codex.runtime_profile import codex_uses_profile_v2, resolve_codex_profile
 from ouroboros.codex_permissions import (
     build_codex_exec_permission_args,
     resolve_codex_permission_mode,
@@ -186,28 +186,35 @@ class CodexCliLLMAdapter(RuntimeStreamMixin):
             for key in ("command", "url")
         )
 
-    @classmethod
-    def _config_file_has_effective_ouroboros_mcp(cls, path: Path) -> bool:
-        """Read one Codex config layer without turning malformed state into an override."""
+    @staticmethod
+    def _read_config_mapping(path: Path) -> dict[str, object] | None:
+        """Read one Codex config layer without treating malformed state as effective."""
         try:
             parsed = tomllib.loads(path.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
-            return False
-        return cls._mapping_has_effective_ouroboros_mcp(parsed)
+            return None
+        return parsed
 
-    def _has_effective_ouroboros_mcp(self, *, task_profile: str | None) -> bool:
+    def _has_effective_ouroboros_mcp(self, *, active_profile: str | None) -> bool:
         """Inspect only config layers reachable by this exact Codex child command."""
         codex_home = resolve_codex_home()
-        if self._config_file_has_effective_ouroboros_mcp(codex_home / "config.toml"):
+        base_config = self._read_config_mapping(codex_home / "config.toml")
+        if self._mapping_has_effective_ouroboros_mcp(base_config):
             return True
 
-        active_profile = self._codex_profile or task_profile
         if not active_profile:
             return False
+        if not codex_uses_profile_v2(self._cli_path):
+            profiles = base_config.get("profiles") if base_config is not None else None
+            if not isinstance(profiles, dict):
+                return False
+            return self._mapping_has_effective_ouroboros_mcp(profiles.get(active_profile))
+
         profile_filename = f"{active_profile}.config.toml"
         if Path(profile_filename).name != profile_filename:
             return False
-        return self._config_file_has_effective_ouroboros_mcp(codex_home / profile_filename)
+        profile_config = self._read_config_mapping(codex_home / profile_filename)
+        return self._mapping_has_effective_ouroboros_mcp(profile_config)
 
     def _get_configured_cli_path(self) -> str | None:
         """Resolve an explicit CLI path from config helpers when available."""
@@ -463,6 +470,7 @@ class CodexCliLLMAdapter(RuntimeStreamMixin):
         The prompt is always fed via stdin to avoid ARG_MAX limits.
         """
         command = [self._cli_path, "exec"]
+        active_profile = self._codex_profile or profile
         # Codex has one --profile selector. Runtime-profile worker isolation
         # owns that flag when configured; task-profile resolution may still
         # contribute a --model fallback, but must not emit a competing profile.
@@ -481,7 +489,9 @@ class CodexCliLLMAdapter(RuntimeStreamMixin):
 
         command.extend(self._build_permission_args())
 
-        if self._strict_mcp_config and self._has_effective_ouroboros_mcp(task_profile=profile):
+        if self._strict_mcp_config and self._has_effective_ouroboros_mcp(
+            active_profile=active_profile
+        ):
             command.extend(["-c", "mcp_servers.ouroboros.enabled=false"])
 
         if self._ephemeral:
