@@ -809,40 +809,38 @@ def _mapping_has_failure_verdict(value: Mapping[str, Any]) -> bool:
         exit_value = value[key]
         if isinstance(exit_value, bool) or not isinstance(exit_value, int) or exit_value != 0:
             return True
-    for key in ("subtype", "status", "runtime_status", "runtime_signal", "runtime_event_type"):
+    allowed_statuses = {"completed", "success", "succeeded"}
+    allowed_values = {
+        "subtype": {*allowed_statuses, "tool_result"},
+        "status": allowed_statuses,
+        "runtime_status": allowed_statuses,
+        "runtime_signal": {"tool_completed", "session_completed"},
+        "runtime_event_type": {
+            "tool.completed",
+            "tool.output",
+            "tool.result",
+            "result.completed",
+            "run.completed",
+            "session.completed",
+            "task.completed",
+            "turn.completed",
+        },
+    }
+    for key, accepted in allowed_values.items():
         if key not in value:
             continue
         status = value[key]
         if not isinstance(status, str) or not status.strip():
             return True
         normalized = status.strip().lower()
-        if normalized in {
-            "error",
-            "failed",
-            "failure",
-            "cancelled",
-            "canceled",
-            "timeout",
-            "timed_out",
-            "aborted",
-        } or normalized.endswith(
-            (
-                ".error",
-                ".failed",
-                ".cancelled",
-                ".canceled",
-                ".timeout",
-                ".timed_out",
-                ".aborted",
-                "_error",
-                "_failed",
-                "_cancelled",
-                "_canceled",
-                "_timeout",
-                "_timed_out",
-                "_aborted",
-            )
+        if (
+            key == "runtime_status"
+            and normalized == "running"
+            and isinstance(value.get("runtime_signal"), str)
+            and str(value["runtime_signal"]).strip().lower() == "tool_completed"
         ):
+            continue
+        if normalized not in accepted:
             return True
     return False
 

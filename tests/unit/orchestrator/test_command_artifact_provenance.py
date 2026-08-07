@@ -927,6 +927,85 @@ async def test_nested_and_boolean_failure_verdicts_veto_journal_authority(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("location", "failure"),
+    (
+        ("top_level", {"status": "mystery"}),
+        ("top_level", {"status": "running"}),
+        ("top_level", {"runtime_signal": "tool_mystery"}),
+        ("tool_result", {"status": "mystery"}),
+        ("tool_result_meta", {"status": "mystery"}),
+        ("top_level_meta", {"runtime_status": "pending"}),
+        (
+            "tool_result_meta",
+            {"status": "completed", "runtime_signal": "tool_mystery"},
+        ),
+    ),
+)
+async def test_unknown_or_in_progress_status_vetoes_journal_authority(
+    tmp_path: Path,
+    location: str,
+    failure: dict[str, str],
+) -> None:
+    artifact = tmp_path / "claimed.txt"
+    artifact.write_text("failed", encoding="utf-8")
+    events = _command_events(
+        call_id="unknown-status",
+        effects=[_effect(artifact, relative_path=artifact.name)],
+    )
+    completion_data = dict(events[1].data)
+    if location == "top_level":
+        completion_data.update(failure)
+    elif location == "top_level_meta":
+        completion_data["meta"] = failure
+    else:
+        tool_result = dict(completion_data["tool_result"])
+        if location == "tool_result":
+            tool_result.update(failure)
+        else:
+            tool_result["meta"] = {**tool_result["meta"], **failure}
+        completion_data["tool_result"] = tool_result
+    events[1] = events[1].model_copy(update={"data": completion_data})
+
+    manifest, fact = await _artifact_fact(events, task_cwd=tmp_path)
+
+    assert manifest.entries == ()
+    assert fact.evidence_handle == "missing:files_touched:0"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "success_status",
+    (
+        {"status": "completed"},
+        {"status": "success"},
+        {"status": "succeeded"},
+        {"runtime_event_type": "tool.completed"},
+        {"runtime_event_type": "tool.output"},
+        {"runtime_event_type": "tool.result"},
+        {"runtime_event_type": "run.completed"},
+        {"runtime_signal": "tool_completed", "runtime_status": "running"},
+    ),
+)
+async def test_closed_terminal_success_status_preserves_journal_authority(
+    tmp_path: Path,
+    success_status: dict[str, str],
+) -> None:
+    artifact = tmp_path / "claimed.txt"
+    artifact.write_text("accepted", encoding="utf-8")
+    events = _command_events(
+        call_id="closed-success",
+        effects=[_effect(artifact, relative_path=artifact.name)],
+    )
+    events[1] = events[1].model_copy(update={"data": {**events[1].data, **success_status}})
+
+    manifest, fact = await _artifact_fact(events, task_cwd=tmp_path)
+
+    assert manifest.entries[0].payload.get("command_artifacts") is not None
+    assert fact.evidence_handle == manifest.entries[0].handle
+
+
+@pytest.mark.asyncio
 async def test_pre_start_completion_poisons_later_valid_completion(tmp_path: Path) -> None:
     artifact = tmp_path / "claimed.txt"
     artifact.write_text("captured", encoding="utf-8")
