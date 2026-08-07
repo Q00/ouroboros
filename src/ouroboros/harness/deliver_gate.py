@@ -37,6 +37,7 @@ _MAX_COMMAND_ARTIFACT_PATH_CHARS = 4096
 RUNTIME_SUCCESS_BOOLEAN_FIELDS = ("success", "ok")
 RUNTIME_FAILURE_BOOLEAN_FIELDS = (
     "is_error",
+    "is_error_invalid",
     "isError",
     "error",
     "failure",
@@ -625,21 +626,23 @@ def _journal_entry_proves_command_artifact(
     artifact = matches[0]
     if frozenset(artifact) != _COMMAND_ARTIFACT_KEYS:
         return False
-    current = _nofollow_workspace_artifact_stat(task_cwd, relative_path)
-    if current is None:
-        return False
-    return stat.S_ISREG(current.st_mode) and all(
-        artifact.get(key) == getattr(current, key) for key in _COMMAND_ARTIFACT_KEYS - {"path"}
+    return _nofollow_workspace_artifact_matches(
+        task_cwd,
+        relative_path,
+        expected=artifact,
     )
 
 
-def _nofollow_workspace_artifact_stat(
+def _nofollow_workspace_artifact_matches(
     task_cwd: str,
     relative_path: str,
-) -> os.stat_result | None:
-    """Read an artifact through a stable workspace-rooted no-follow fd chain."""
+    *,
+    expected: Mapping[str, object],
+) -> bool:
+    """Match an artifact while its no-follow directory and leaf fds stay held."""
     leased_directory_fds: list[int] = []
     current_directory_fds: list[int] = []
+    leaf_fds: list[int] = []
     try:
         if (
             not hasattr(os, "O_DIRECTORY")
@@ -648,18 +651,26 @@ def _nofollow_workspace_artifact_stat(
             or os.stat not in os.supports_dir_fd
             or os.stat not in os.supports_follow_symlinks
         ):
-            return None
+            return False
         workspace = Path(os.path.abspath(Path(task_cwd).expanduser()))
         relative = Path(relative_path)
         if not _is_canonical_command_artifact_path(relative_path):
-            return None
+            return False
         flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
         leased_fd = os.open(workspace, flags)
         leased_directory_fds.append(leased_fd)
         for part in relative.parts[:-1]:
             leased_fd = os.open(part, flags, dir_fd=leased_fd)
             leased_directory_fds.append(leased_fd)
-        leased_leaf = os.stat(relative.name, dir_fd=leased_fd, follow_symlinks=False)
+        leaf_flags = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0)
+        leased_leaf_fd = os.open(relative.name, leaf_flags, dir_fd=leased_fd)
+        leaf_fds.append(leased_leaf_fd)
+        leased_leaf = os.fstat(leased_leaf_fd)
+        if not stat.S_ISREG(leased_leaf.st_mode) or any(
+            expected.get(key) != getattr(leased_leaf, key)
+            for key in _COMMAND_ARTIFACT_KEYS - {"path"}
+        ):
+            return False
 
         # A parent can be renamed and replaced after ``open`` returns.  Rewalk
         # the current lexical path and bind every opened directory identity,
@@ -669,24 +680,51 @@ def _nofollow_workspace_artifact_stat(
         if _filesystem_identity(os.fstat(current_fd)) != _filesystem_identity(
             os.fstat(leased_directory_fds[0])
         ):
-            return None
+            return False
         for index, part in enumerate(relative.parts[:-1], start=1):
             current_fd = os.open(part, flags, dir_fd=current_fd)
             current_directory_fds.append(current_fd)
             if _filesystem_identity(os.fstat(current_fd)) != _filesystem_identity(
                 os.fstat(leased_directory_fds[index])
             ):
-                return None
-        current_leaf = os.stat(relative.name, dir_fd=current_fd, follow_symlinks=False)
+                return False
+        current_leaf_fd = os.open(relative.name, leaf_flags, dir_fd=current_fd)
+        leaf_fds.append(current_leaf_fd)
+        current_leaf = os.fstat(current_leaf_fd)
         if _command_artifact_stat_fingerprint(current_leaf) != _command_artifact_stat_fingerprint(
             leased_leaf
         ):
-            return None
-        return current_leaf
+            return False
+
+        # Revalidate names after reading the leaf.  The lexical workspace or a
+        # child directory can be replaced after its second ``open`` and the
+        # immediate fd comparison above; held fds alone would then keep seeing
+        # the displaced tree.  Every current parent must still name the opened
+        # child, the final parent must still name the same leaf fingerprint,
+        # and the absolute workspace path must still name the current root.
+        for index, part in enumerate(relative.parts[:-1], start=1):
+            named_child = os.stat(
+                part,
+                dir_fd=current_directory_fds[index - 1],
+                follow_symlinks=False,
+            )
+            if _filesystem_identity(named_child) != _filesystem_identity(
+                os.fstat(current_directory_fds[index])
+            ):
+                return False
+        named_leaf = os.stat(relative.name, dir_fd=current_fd, follow_symlinks=False)
+        if _command_artifact_stat_fingerprint(named_leaf) != _command_artifact_stat_fingerprint(
+            current_leaf
+        ):
+            return False
+        named_workspace = os.stat(workspace, follow_symlinks=False)
+        return _filesystem_identity(named_workspace) == _filesystem_identity(
+            os.fstat(current_directory_fds[0])
+        )
     except (OSError, RuntimeError, ValueError):
-        return None
+        return False
     finally:
-        for directory_fd in reversed(current_directory_fds + leased_directory_fds):
+        for directory_fd in reversed(leaf_fds + current_directory_fds + leased_directory_fds):
             try:
                 os.close(directory_fd)
             except OSError:

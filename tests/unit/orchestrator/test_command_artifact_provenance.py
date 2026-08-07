@@ -379,6 +379,7 @@ async def test_production_capture_persists_through_journal_to_verifier(tmp_path:
             if field != "is_error"
         ),
         ("failure", "yes"),
+        ("is_error_invalid", "yes"),
         ("isError", "yes"),
         ("success", False),
         ("ok", False),
@@ -507,6 +508,7 @@ async def test_production_projection_preserves_present_null_container_as_poison(
     ("field", "neutral"),
     (
         ("ok", True),
+        ("is_error_invalid", False),
         ("isError", False),
         ("exit", 0),
         ("errorCode", 0),
@@ -516,7 +518,7 @@ async def test_production_projection_preserves_present_null_container_as_poison(
 @pytest.mark.parametrize(
     "location", ("top_level", "top_level_meta", "tool_result", "tool_result_meta")
 )
-async def test_production_projection_preserves_neutral_codex_verdict_alias(
+async def test_production_projection_preserves_neutral_runtime_verdict_alias(
     tmp_path: Path,
     location: str,
     field: str,
@@ -938,11 +940,12 @@ async def test_parent_swap_after_workspace_open_is_rejected(
     receiver_parent.mkdir()
     artifact = receiver_parent / "claimed.txt"
     artifact.write_text("captured", encoding="utf-8")
-    observed = _effect(artifact, relative_path="sub/claimed.txt")
     displaced_parent = tmp_path / "original-sub"
     outside_parent = tmp_path.parent / f"{tmp_path.name}-outside"
     outside_parent.mkdir()
     os.link(artifact, outside_parent / artifact.name)
+    observed = _effect(artifact, relative_path="sub/claimed.txt")
+    assert observed == _effect(artifact, relative_path="sub/claimed.txt")
     original_open = deliver_gate_module.os.open
     swapped = False
 
@@ -973,28 +976,35 @@ async def test_parent_swap_after_workspace_open_is_rejected(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("swap_on_open", (1, 2), ids=("lease", "rewalk"))
 async def test_parent_swap_after_child_dirfd_open_is_rejected(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    swap_on_open: int,
 ) -> None:
     receiver_parent = tmp_path / "sub"
     receiver_parent.mkdir()
     artifact = receiver_parent / "claimed.txt"
     artifact.write_text("captured", encoding="utf-8")
-    observed = _effect(artifact, relative_path="sub/claimed.txt")
     displaced_parent = tmp_path / "original-sub"
     outside_parent = tmp_path.parent / f"{tmp_path.name}-outside-after-open"
     outside_parent.mkdir()
     os.link(artifact, outside_parent / artifact.name)
+    observed = _effect(artifact, relative_path="sub/claimed.txt")
+    assert observed == _effect(artifact, relative_path="sub/claimed.txt")
     original_open = deliver_gate_module.os.open
     swapped = False
+    matching_open_count = 0
 
     def adversarial_open(path, flags, mode=0o777, *, dir_fd=None):
-        nonlocal swapped
+        nonlocal matching_open_count, swapped
         fd = original_open(path, flags, mode, dir_fd=dir_fd)
-        if not swapped and dir_fd is not None and os.fspath(path) == "sub":
-            receiver_parent.rename(displaced_parent)
-            receiver_parent.symlink_to(outside_parent, target_is_directory=True)
-            swapped = True
+        if dir_fd is not None and os.fspath(path) == "sub":
+            matching_open_count += 1
+            if not swapped and matching_open_count == swap_on_open:
+                receiver_parent.rename(displaced_parent)
+                receiver_parent.symlink_to(outside_parent, target_is_directory=True)
+                swapped = True
         return fd
 
     monkeypatch.setattr(deliver_gate_module.os, "open", adversarial_open)
@@ -1005,7 +1015,7 @@ async def test_parent_swap_after_child_dirfd_open_is_rejected(
     )
 
     _manifest, fact = await _artifact_fact(
-        _command_events(call_id="parent-swap-after-child-open", effects=[observed]),
+        _command_events(call_id=f"parent-swap-after-child-open-{swap_on_open}", effects=[observed]),
         task_cwd=tmp_path,
         claim="sub/claimed.txt",
     )
@@ -1015,28 +1025,35 @@ async def test_parent_swap_after_child_dirfd_open_is_rejected(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("swap_on_open", (1, 2), ids=("lease", "rewalk"))
 async def test_workspace_swap_after_root_dirfd_open_is_rejected(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    swap_on_open: int,
 ) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     artifact = workspace / "claimed.txt"
     artifact.write_text("captured", encoding="utf-8")
-    observed = _effect(artifact, relative_path=artifact.name)
     displaced_workspace = tmp_path / "original-workspace"
     outside_workspace = tmp_path / "outside-workspace"
     outside_workspace.mkdir()
     os.link(artifact, outside_workspace / artifact.name)
+    observed = _effect(artifact, relative_path=artifact.name)
+    assert observed == _effect(artifact, relative_path=artifact.name)
     original_open = deliver_gate_module.os.open
     swapped = False
+    matching_open_count = 0
 
     def adversarial_open(path, flags, mode=0o777, *, dir_fd=None):
-        nonlocal swapped
+        nonlocal matching_open_count, swapped
         fd = original_open(path, flags, mode, dir_fd=dir_fd)
-        if not swapped and dir_fd is None and os.fspath(path) == str(workspace):
-            workspace.rename(displaced_workspace)
-            workspace.symlink_to(outside_workspace, target_is_directory=True)
-            swapped = True
+        if dir_fd is None and os.fspath(path) == str(workspace):
+            matching_open_count += 1
+            if not swapped and matching_open_count == swap_on_open:
+                workspace.rename(displaced_workspace)
+                workspace.symlink_to(outside_workspace, target_is_directory=True)
+                swapped = True
         return fd
 
     monkeypatch.setattr(deliver_gate_module.os, "open", adversarial_open)
@@ -1047,10 +1064,67 @@ async def test_workspace_swap_after_root_dirfd_open_is_rejected(
     )
 
     _manifest, fact = await _artifact_fact(
-        _command_events(call_id="workspace-swap-after-root-open", effects=[observed]),
+        _command_events(
+            call_id=f"workspace-swap-after-root-open-{swap_on_open}", effects=[observed]
+        ),
         task_cwd=workspace,
     )
 
+    assert swapped is True
+    assert fact.evidence_handle == "missing:files_touched:0"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("swap_target", ("parent", "workspace_root"))
+async def test_namespace_swap_after_current_leaf_fstat_is_rejected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    swap_target: str,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    if swap_target == "parent":
+        namespace_path = workspace / "sub"
+        namespace_path.mkdir()
+        relative_path = "sub/claimed.txt"
+    else:
+        namespace_path = workspace
+        relative_path = "claimed.txt"
+    artifact = workspace / relative_path
+    artifact.write_text("captured", encoding="utf-8")
+    displaced_namespace = tmp_path / f"displaced-{swap_target}"
+    outside_namespace = tmp_path / f"outside-{swap_target}"
+    outside_namespace.mkdir()
+    os.link(artifact, outside_namespace / artifact.name)
+    observed = _effect(artifact, relative_path=relative_path)
+    assert observed == _effect(artifact, relative_path=relative_path)
+    original_fstat = deliver_gate_module.os.fstat
+    regular_fstat_count = 0
+    swapped = False
+
+    def adversarial_fstat(fd: int):
+        nonlocal regular_fstat_count, swapped
+        current = original_fstat(fd)
+        if stat.S_ISREG(current.st_mode):
+            regular_fstat_count += 1
+            if not swapped and regular_fstat_count == 2:
+                namespace_path.rename(displaced_namespace)
+                namespace_path.symlink_to(outside_namespace, target_is_directory=True)
+                swapped = True
+        return current
+
+    monkeypatch.setattr(deliver_gate_module.os, "fstat", adversarial_fstat)
+
+    _manifest, fact = await _artifact_fact(
+        _command_events(
+            call_id=f"namespace-swap-after-current-leaf-fstat-{swap_target}",
+            effects=[observed],
+        ),
+        task_cwd=workspace,
+        claim=relative_path,
+    )
+
+    assert regular_fstat_count >= 2
     assert swapped is True
     assert fact.evidence_handle == "missing:files_touched:0"
 
@@ -1307,7 +1381,7 @@ async def test_nested_and_boolean_failure_verdicts_veto_journal_authority(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("field", ("failure", "cancel", "abort", "isError"))
+@pytest.mark.parametrize("field", ("failure", "cancel", "abort", "isError", "is_error_invalid"))
 @pytest.mark.parametrize(
     "location", ("top_level", "top_level_meta", "tool_result", "tool_result_meta")
 )
@@ -1331,7 +1405,7 @@ async def test_boolean_failure_aliases_veto_journal_authority(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("field", ("failure", "cancel", "abort", "isError"))
+@pytest.mark.parametrize("field", ("failure", "cancel", "abort", "isError", "is_error_invalid"))
 @pytest.mark.parametrize(
     "location", ("top_level", "top_level_meta", "tool_result", "tool_result_meta")
 )
