@@ -6,6 +6,7 @@ import http.client
 import json
 import os
 import sqlite3
+import threading
 import time
 
 import pytest
@@ -247,6 +248,14 @@ class TestPendingRun:
             db_path=str(empty_db), host="127.0.0.1", port=daemon._free_port("127.0.0.1")
         )
         try:
+            touch_completed = threading.Event()
+            original_touch = server.touch
+
+            def synchronized_touch() -> None:
+                original_touch()
+                touch_completed.set()
+
+            server.touch = synchronized_touch  # type: ignore[method-assign]
             server.last_activity = time.monotonic() - daemon.DEFAULT_IDLE_SHUTDOWN_SEC - 1
             assert server.idle_seconds() > daemon.DEFAULT_IDLE_SHUTDOWN_SEC
 
@@ -254,6 +263,7 @@ class TestPendingRun:
 
             assert status == 200
             assert json.loads(body) == {"runs": []}
+            assert touch_completed.wait(timeout=2.0)
             assert server.idle_seconds() < 1.0
         finally:
             server.shutdown()
