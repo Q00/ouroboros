@@ -59,10 +59,30 @@ def test_non_utf8_tracked_evidence_remains_workspace_visible(tmp_path: Path) -> 
         stderr=b"",
     )
 
-    with patch("ouroboros.orchestrator.parallel_executor.subprocess.run", return_value=result):
+    with patch(
+        "ouroboros.orchestrator.workspace_evidence_paths.subprocess.run",
+        return_value=result,
+    ):
         digest = ParallelACExecutor._workspace_content_digest(str(tmp_path))
 
     assert digest is not None
+
+
+def test_git_tracking_failure_keeps_generated_evidence_workspace_visible(tmp_path: Path) -> None:
+    evidence = tmp_path / "evidence"
+    evidence.mkdir()
+    report = evidence / "readback.md"
+    report.write_text("first\n", encoding="utf-8")
+
+    with patch(
+        "ouroboros.orchestrator.workspace_evidence_paths.subprocess.run",
+        side_effect=OSError("git unavailable"),
+    ):
+        before = ParallelACExecutor._workspace_content_digest(str(tmp_path))
+        report.write_text("second\n", encoding="utf-8")
+        after = ParallelACExecutor._workspace_content_digest(str(tmp_path))
+
+    assert before != after
 
 
 def test_declared_evidence_output_remains_acceptance_visible(tmp_path: Path) -> None:

@@ -41,7 +41,6 @@ import os
 from pathlib import Path
 import re
 import shlex
-import subprocess
 import time
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 from uuid import uuid4
@@ -396,6 +395,10 @@ from ouroboros.orchestrator.verifier import (
     VerifierContractError,
     VerifierVerdict,
     verifier_operational_failure_verdict,
+)
+from ouroboros.orchestrator.workspace_evidence_paths import (
+    is_untracked_top_level_evidence_path,
+    load_tracked_workspace_paths,
 )
 
 _PARALLEL_PAUSE_REPLAY_PAGE_SIZE = 64
@@ -5138,34 +5141,7 @@ class ParallelACExecutor:
                     for declared in declared_paths
                 )
 
-            tracked_paths: set[Path] | None = None
-            try:
-                tracked = subprocess.run(
-                    ["git", "ls-files", "--cached", "-z"],
-                    cwd=root,
-                    capture_output=True,
-                    text=False,
-                    timeout=30,
-                    check=False,
-                )
-                if tracked.returncode == 0:
-                    tracked_paths = {
-                        Path(os.fsdecode(value)) for value in tracked.stdout.split(b"\0") if value
-                    }
-            except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
-                pass
-
-            def is_untracked_generated_evidence_path(relative: Path) -> bool:
-                return bool(
-                    tracked_paths is not None
-                    and relative.parts[0] == "evidence"
-                    and not any(
-                        relative == tracked
-                        or relative in tracked.parents
-                        or tracked in relative.parents
-                        for tracked in tracked_paths
-                    )
-                )
+            tracked_paths = load_tracked_workspace_paths(root)
 
             digest = hashlib.sha256()
             paths = sorted(root.rglob("*"), key=lambda path: path.as_posix())
@@ -5173,7 +5149,10 @@ class ParallelACExecutor:
                 relative = path.relative_to(root)
                 declared_contract_path = is_declared_contract_path(relative)
                 if (
-                    is_untracked_generated_evidence_path(relative)
+                    is_untracked_top_level_evidence_path(
+                        relative,
+                        tracked_paths=tracked_paths,
+                    )
                     or any(
                         part in _WORKSPACE_FINGERPRINT_IGNORED_DIRECTORIES
                         for part in relative.parts
