@@ -48,7 +48,13 @@ from ouroboros.evolution.directive_mapping import (
     watchdog_timeout_to_directive,
 )
 from ouroboros.evolution.drift_recording import record_generation_drift
-from ouroboros.evolution.projector import LineageProjector
+from ouroboros.evolution.generation_claims import (
+    LineageStepClaimDenied,
+    StepLease,
+    append_lineage_event_if_owner,
+    owned_lineage_step,
+    step_claims_for,
+)
 from ouroboros.evolution.reflect import ReflectEngine, ReflectOutput
 from ouroboros.evolution.regression import RegressionDetector, RegressionReport
 from ouroboros.evolution.rewind import (
@@ -56,6 +62,7 @@ from ouroboros.evolution.rewind import (
     NoOpRewindObserver,
     RewindObserver,
 )
+from ouroboros.evolution.step_seed import prepare_existing_step
 from ouroboros.evolution.validation_result import normalize_validation_result
 from ouroboros.evolution.watchdog import (
     GenerationProgressWatchdog,
@@ -577,50 +584,86 @@ class EvolutionaryLoop:
         conductor_directive: ConductorDirective | None = None,
         benchmark_control: bool = False,
     ) -> Result[StepResult, OuroborosError]:
-        """Advance one lineage once while task-local policy and durable claims coalesce retries."""
+        """Advance one lineage once while a durable lease owns all effects."""
         from ouroboros.evolution.step_receipt import decode_step_result, encode_step_result
 
         durable_policy = loop_support.evolution_execution_policy(self.config, benchmark_control)
+
+        async def _owned() -> Result[StepResult, OuroborosError]:
+            try:
+                async with owned_lineage_step(
+                    step_claims_for(self.event_store), lineage_id
+                ) as lease:
+                    while True:
+                        generation_number = await loop_support.planned_evolve_generation(
+                            self.event_store, lineage_id, execute=execute
+                        )
+                        request_key = loop_support.evolve_request_key(
+                            initial_seed,
+                            execute=execute,
+                            parallel=parallel,
+                            conductor_directive=conductor_directive,
+                            project_dir=self.get_project_dir(),
+                            generation_number=generation_number,
+                            execution_policy=durable_policy,
+                        )
+                        try:
+                            return await loop_support.run_lineage_single_flight(
+                                self.event_store,
+                                lineage_id,
+                                request_key,
+                                lambda: loop_support.run_durable_lineage_single_flight(
+                                    self.event_store,
+                                    lineage_id,
+                                    request_key,
+                                    lambda: self._evolve_step_once(
+                                        lineage_id,
+                                        initial_seed=initial_seed,
+                                        execute=execute,
+                                        parallel=parallel,
+                                        conductor_directive=conductor_directive,
+                                        lease=lease,
+                                    ),
+                                    generation_number=generation_number,
+                                    encode=encode_step_result,
+                                    decode=lambda payload: decode_step_result(
+                                        self.event_store, payload
+                                    ),
+                                ),
+                                replan_on_different=True,
+                            )
+                        except loop_support.LineageWinnerAdvanced:
+                            continue
+            except LineageStepClaimDenied as denied:
+                return Result.err(OuroborosError(str(denied)))
+
+        preflight_key = loop_support.evolve_request_key(
+            initial_seed,
+            execute=execute,
+            parallel=parallel,
+            conductor_directive=conductor_directive,
+            project_dir=self.get_project_dir(),
+            execution_policy=durable_policy,
+        )
         with loop_support.evolution_execution_policy_context(self.config, benchmark_control):
-            while True:
-                generation_number = await loop_support.planned_evolve_generation(
+            try:
+                return await loop_support.run_lineage_single_flight(
                     self.event_store,
                     lineage_id,
-                    execute=execute,
+                    preflight_key,
+                    _owned,
+                    scope="evolve-lease",
+                    reject_different=True,
                 )
-                request_key = loop_support.evolve_request_key(
-                    initial_seed,
-                    execute=execute,
-                    parallel=parallel,
-                    conductor_directive=conductor_directive,
-                    project_dir=self.get_project_dir(),
-                    generation_number=generation_number,
-                    execution_policy=durable_policy,
-                )
-                try:
-                    return await loop_support.run_lineage_single_flight(
-                        self.event_store,
-                        lineage_id,
-                        request_key,
-                        lambda: loop_support.run_durable_lineage_single_flight(
-                            self.event_store,
-                            lineage_id,
-                            request_key,
-                            lambda: self._evolve_step_once(
-                                lineage_id,
-                                initial_seed=initial_seed,
-                                execute=execute,
-                                parallel=parallel,
-                                conductor_directive=conductor_directive,
-                            ),
-                            generation_number=generation_number,
-                            encode=encode_step_result,
-                            decode=lambda payload: decode_step_result(self.event_store, payload),
-                        ),
-                        replan_on_different=True,
-                    )
-                except loop_support.LineageWinnerAdvanced:
-                    continue
+            except loop_support.LineageFlightConflict as conflict:
+                return Result.err(OuroborosError(str(conflict)))
+
+    @staticmethod
+    def _lease_lost_error(context: str) -> OuroborosError:
+        return OuroborosError(
+            f"evolve_step: lineage step lease was lost {context}; "
+            "the reclaiming caller owns this lineage's record"
+        )
 
     async def _evolve_step_once(
         self,
@@ -629,9 +672,11 @@ class EvolutionaryLoop:
         execute: bool = True,
         parallel: bool = True,
         conductor_directive: ConductorDirective | None = None,
+        lease: StepLease | None = None,
     ) -> Result[StepResult, OuroborosError]:
         """Run one event-reconstructed generation under lineage ownership."""
-        projector = LineageProjector()
+        if lease is None:
+            return Result.err(OuroborosError("evolve_step requires a lineage step lease"))
         hard_crash_record: GenerationRecord | None = None
 
         # Step 1: Replay events to reconstruct state
@@ -651,141 +696,32 @@ class EvolutionaryLoop:
                 lineage_id=lineage_id,
                 goal=initial_seed.goal,
             )
-            await self.event_store.append(lineage_created(lineage.lineage_id, lineage.goal))
+            created = await append_lineage_event_if_owner(
+                self.event_store,
+                step_claims_for(self.event_store),
+                lineage_id,
+                lease,
+                lineage_created(lineage.lineage_id, lineage.goal),
+            )
+            if not created:
+                return Result.err(self._lease_lost_error("before the lineage was created"))
             generation_number = 1
             current_seed = initial_seed
             last_phase = GenerationPhase.COMPLETED  # Gen 1: no prior state
             interrupted_at_phase = None
 
         else:
-            # Gen 2+: reconstruct from events
-            lineage = projector.project(events)
-            if lineage is None:
-                return Result.err(OuroborosError("Failed to project lineage from events"))
-
-            # Check if lineage is already terminated
-            if lineage.status in (LineageStatus.CONVERGED, LineageStatus.EXHAUSTED):
-                return Result.err(
-                    OuroborosError(
-                        f"Lineage already terminated with status: {lineage.status.value}"
-                    )
-                )
-
-            # Determine resume point
-            last_gen, last_phase, interrupted_at_phase = projector.find_resume_point(events)
-
-            try:
-                generation_number, recovered_seed = loop_support.recovery_plan(
-                    lineage, last_gen, last_phase
-                )
-            except ValueError as exc:
-                return Result.err(OuroborosError(str(exc)))
-            hard_crash_record, recovery_error = loop_support.hard_crash_recovery(
+            prepared = prepare_existing_step(events, initial_seed=initial_seed, execute=execute)
+            if prepared.is_err:
+                return Result.err(prepared.error)
+            (
                 lineage,
                 generation_number,
                 last_phase,
-                execute=execute,
-            )
-            if recovery_error is not None:
-                return Result.err(OuroborosError(recovery_error))
-            if recovered_seed is not None:
-                current_seed = recovered_seed
-            elif initial_seed is not None and not lineage.verification_handoff_pending:
-                # Caller provided seed explicitly (e.g., after rewind)
-                current_seed = initial_seed
-            elif last_phase == GenerationPhase.INTERRUPTED:
-                # Try to use the interrupted generation's seed (preserves evolved state)
-                interrupted_gen = next(
-                    (
-                        g
-                        for g in reversed(lineage.generations)
-                        if g.phase == GenerationPhase.INTERRUPTED
-                    ),
-                    None,
-                )
-                if interrupted_gen and interrupted_gen.seed_json:
-                    try:
-                        current_seed = Seed.from_dict(json.loads(interrupted_gen.seed_json))
-                    except Exception as e:
-                        # A present interrupted Seed is the durable state for
-                        # this generation. If its structured contract is no
-                        # longer valid, rolling back to the prior completed
-                        # Seed would silently change acceptance semantics and
-                        # may redispatch work under stale direction.
-                        return Result.err(
-                            OuroborosError(
-                                f"Failed to reconstruct interrupted seed from seed_json: {e}"
-                            )
-                        )
-
-                if not interrupted_gen or not interrupted_gen.seed_json:
-                    # Fallback: use last completed generation's seed.
-                    # IMPORTANT: also reset interrupted_at_phase so we don't
-                    # skip phases with a stale seed from a different generation.
-                    interrupted_at_phase = None
-                    last_completed = next(
-                        (
-                            g
-                            for g in reversed(lineage.generations)
-                            if g.phase == GenerationPhase.COMPLETED
-                        ),
-                        None,
-                    )
-                    if last_completed and last_completed.seed_json:
-                        try:
-                            current_seed = Seed.from_dict(json.loads(last_completed.seed_json))
-                        except Exception as e:
-                            return Result.err(
-                                OuroborosError(
-                                    f"Failed to reconstruct fallback seed from seed_json: {e}"
-                                )
-                            )
-                    else:
-                        return Result.err(
-                            OuroborosError(
-                                "Lineage was interrupted before any generation completed. "
-                                "Re-provide initial_seed to resume."
-                            )
-                        )
-            elif lineage.generations:
-                last_completed = next(
-                    (
-                        g
-                        for g in reversed(lineage.generations)
-                        if g.phase == GenerationPhase.COMPLETED
-                    ),
-                    None,
-                )
-                if last_completed is None:
-                    has_interrupted = any(
-                        g.phase == GenerationPhase.INTERRUPTED for g in lineage.generations
-                    )
-                    if has_interrupted:
-                        return Result.err(
-                            OuroborosError(
-                                "Lineage was interrupted before any generation completed. "
-                                "Re-provide initial_seed to resume."
-                            )
-                        )
-                    return Result.err(
-                        OuroborosError("Events exist but no completed generations found")
-                    )
-                if last_completed.seed_json:
-                    try:
-                        current_seed = Seed.from_dict(json.loads(last_completed.seed_json))
-                    except Exception as e:
-                        return Result.err(
-                            OuroborosError(f"Failed to reconstruct seed from seed_json: {e}")
-                        )
-                else:
-                    return Result.err(
-                        OuroborosError(
-                            "Cannot reconstruct seed: no seed_json in last generation's events. "
-                            "This lineage may have been created with an older version."
-                        )
-                    )
-            else:
-                return Result.err(OuroborosError("Events exist but no completed generations found"))
+                interrupted_at_phase,
+                current_seed,
+                hard_crash_record,
+            ) = prepared.value
 
         if lineage.verification_handoff_pending and not execute:
             previous = next(
@@ -885,6 +821,7 @@ class EvolutionaryLoop:
                     resume_after_phase=resume_after_phase,
                     agent_process_handle=handle,
                     conductor_directive=conductor_directive,
+                    lease=lease,
                 )
             finally:
                 self._uninstall_sigint_handler()
@@ -970,20 +907,37 @@ class EvolutionaryLoop:
 
             result = gen_result.value
 
+            async def _append_owned(event: Any) -> bool:
+                appended = await append_lineage_event_if_owner(
+                    self.event_store,
+                    step_claims_for(self.event_store),
+                    lineage.lineage_id,
+                    lease,
+                    event,
+                )
+                if not appended:
+                    logger.warning(
+                        "evolution.generation.fenced_write_refused",
+                        extra={"lineage_id": lineage.lineage_id, "generation": generation_number},
+                    )
+                    container.result = Result.err(self._lease_lost_error("before persistence"))
+                return appended
+
             preservation_error = _conductor_preservation_error(
                 approved_seed,
                 result.seed,
                 conductor_directive,
             )
             if preservation_error is not None:
-                await self.event_store.append(
+                if not await _append_owned(
                     lineage_generation_failed(
                         lineage.lineage_id,
                         generation_number,
                         "conductor_preservation",
                         preservation_error,
                     )
-                )
+                ):
+                    return
                 container.result = Result.err(OuroborosError(preservation_error))
                 return
 
@@ -1057,7 +1011,7 @@ class EvolutionaryLoop:
             if conv_signal.ontology_stable:
                 record = record.model_copy(update={"verification_handoff_pending": True})
                 nonlocal_lineage = nonlocal_lineage.with_generation(record)
-            await self.event_store.append(
+            if not await _append_owned(
                 lineage_generation_completed(
                     nonlocal_lineage.lineage_id,
                     generation_number,
@@ -1079,50 +1033,55 @@ class EvolutionaryLoop:
                     frozen_ac_indices=list(result.frozen_ac_indices),
                     verification_handoff_pending=record.verification_handoff_pending,
                 )
-            )
+            ):
+                return
             # Emit ontology evolved event if delta exists.
             if result.ontology_delta and result.ontology_delta.similarity < 1.0:
-                await self.event_store.append(
+                if not await _append_owned(
                     lineage_ontology_evolved(
                         nonlocal_lineage.lineage_id,
                         generation_number,
                         result.ontology_delta.model_dump(mode="json"),
                     )
-                )
+                ):
+                    return
             action = StepAction.CONTINUE
             if conv_signal.should_stop:
                 if conv_signal.converged:
-                    await self.event_store.append(
+                    if not await _append_owned(
                         lineage_converged(
                             nonlocal_lineage.lineage_id,
                             generation_number,
                             conv_signal.reason,
                             conv_signal.ontology_similarity,
                         )
-                    )
+                    ):
+                        return
                     nonlocal_lineage = nonlocal_lineage.with_status(LineageStatus.CONVERGED)
                     action = StepAction.CONVERGED
                 elif conv_signal.ontology_stable:
                     action = StepAction.ONTOLOGY_STABLE
                 elif generation_number >= self.config.max_generations:
-                    await self.event_store.append(
+                    if not await _append_owned(
                         lineage_exhausted(
                             nonlocal_lineage.lineage_id,
                             generation_number,
                             self.config.max_generations,
                         )
-                    )
+                    ):
+                        return
                     nonlocal_lineage = nonlocal_lineage.with_status(LineageStatus.EXHAUSTED)
                     action = StepAction.EXHAUSTED
                 else:
-                    await self.event_store.append(
+                    if not await _append_owned(
                         lineage_stagnated(
                             nonlocal_lineage.lineage_id,
                             generation_number,
                             conv_signal.reason,
                             self.config.stagnation_window,
                         )
-                    )
+                    ):
+                        return
                     # Stagnation is a non-terminal control handoff: the shared
                     # Directive contract maps STAGNATED to UNSTUCK, so keep the
                     # lineage resumable for the lateral-thinking recovery path.
@@ -1150,10 +1109,18 @@ class EvolutionaryLoop:
                 )
             )
 
+        if lease.lost.is_set():
+            return Result.err(self._lease_lost_error("before the generation started"))
         handle = await self._agent_process.spawn(
             intent=f"evolve_step generation={generation_number}",
             work_fn=_generation_work,
         )
+
+        async def _fence_on_lease_loss() -> None:
+            await lease.lost.wait()
+            await handle.abort(reason="lineage step lease lost to a reclaimer")
+
+        fence = asyncio.create_task(_fence_on_lease_loss())
         try:
             await handle.wait_until_complete()
         except asyncio.CancelledError:
@@ -1166,6 +1133,10 @@ class EvolutionaryLoop:
             with suppress(asyncio.CancelledError):
                 await asyncio.shield(handle.wait_until_complete())
             raise
+        finally:
+            fence.cancel()
+            with suppress(asyncio.CancelledError):
+                await fence
 
         if container.result is None:
             failure = handle.failure()
@@ -1190,6 +1161,7 @@ class EvolutionaryLoop:
         execution_id: str | None = None,
         agent_process_handle: AgentProcessHandle | None = None,
         conductor_directive: ConductorDirective | None = None,
+        lease: StepLease | None = None,
     ) -> Result[GenerationResult, OuroborosError]:
         """Run a single generation within the loop.
 
@@ -1213,6 +1185,12 @@ class EvolutionaryLoop:
                 conductor_directive=conductor_directive,
             )
         except asyncio.CancelledError:
+            if lease is not None and lease.lost.is_set():
+                logger.warning(
+                    "evolution.generation.fenced",
+                    extra={"lineage_id": lineage.lineage_id, "generation": generation_number},
+                )
+                raise
             # MCP transport disconnect, timeout, or external task cancellation.
             # Use 'failed' (not 'interrupted') to avoid conflicting with the
             # graceful SIGINT shutdown path which emits 'interrupted'.
@@ -1246,6 +1224,7 @@ class EvolutionaryLoop:
         resume_after_phase: str | None = None,
         agent_process_handle: AgentProcessHandle | None = None,
         conductor_directive: ConductorDirective | None = None,
+        lease: StepLease | None = None,
     ) -> Result[GenerationResult, OuroborosError]:
         """Run one generation under progress-aware liveness controls."""
         execution_id = loop_support.generation_execution_id(lineage.lineage_id, generation_number)
@@ -1268,6 +1247,7 @@ class EvolutionaryLoop:
                     execution_id=execution_id,
                     agent_process_handle=agent_process_handle,
                     conductor_directive=conductor_directive,
+                    lease=lease,
                 )
             )
         except GenerationWatchdogTimeout as exc:

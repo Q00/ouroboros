@@ -15,7 +15,7 @@ import inspect
 import json
 import os
 import re
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -86,6 +86,16 @@ If `ouroboros_auto` is unavailable or interpreted as normal text, stop and repor
 
 _AUTO_ID_RE = re.compile(r"auto_[0-9a-f]+")
 _UUID_HEX_RE = re.compile(r"\b[0-9a-f]{32}\b")
+
+
+def _linux_owner_identity(pid: int, *, start_ticks: int = 111) -> dict[str, object]:
+    return {
+        "version": 1,
+        "platform": "linux",
+        "pid": pid,
+        "boot_id": "11111111-2222-3333-4444-555555555555",
+        "start_ticks": start_ticks,
+    }
 
 
 def _managed_workspace(tmp_path) -> TaskWorkspace:
@@ -1894,6 +1904,7 @@ class TestBackgroundJobPath:
                     "updated_at": datetime.now(UTC).isoformat(),
                     "owner_pid": os.getpid(),
                     "owner_start_time": 0.0,
+                    "owner_identity": _linux_owner_identity(os.getpid()),
                 }
             ),
             encoding="utf-8",
@@ -1938,7 +1949,11 @@ class TestBackgroundJobPath:
         )
         h._inner_auto = fake_inner_auto
 
-        result = await h.handle({"resume": state.auto_session_id})
+        with patch(
+            "ouroboros.mcp.tools.auto_handler.persisted_process_owner_alive",
+            return_value=False,
+        ):
+            result = await h.handle({"resume": state.auto_session_id})
 
         assert result.is_ok
         assert result.value.meta["job_id"] == "job_new"
@@ -2135,6 +2150,7 @@ class TestBackgroundJobPath:
                     "expires_at": (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
                     "owner_pid": os.getpid(),
                     "owner_start_time": 0.0,
+                    "owner_identity": _linux_owner_identity(os.getpid()),
                 }
             ),
             encoding="utf-8",
@@ -2152,11 +2168,165 @@ class TestBackgroundJobPath:
         )
         h._inner_auto = fake_inner_auto
 
-        result = await h.handle({"resume": state.auto_session_id})
+        with patch(
+            "ouroboros.mcp.tools.auto_handler.persisted_process_owner_alive",
+            return_value=False,
+        ):
+            result = await h.handle({"resume": state.auto_session_id})
 
         assert result.is_ok
         assert result.value.meta["status"] == "delegated_to_plugin"
         job_manager.start_job.assert_not_called()
+        fake_inner_auto.handle.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_live_versioned_owner_survives_legacy_epoch_drift(
+        self, event_store, tmp_path, fake_inner_auto
+    ) -> None:
+        """The stable Linux contract, not the drifting epoch, owns release authority."""
+        store = AutoStore(tmp_path)
+        state = AutoPipelineState(goal="build a CLI", cwd=str(tmp_path))
+        store.save(state)
+        lease_path = store.path_for(state.auto_session_id).with_suffix(".start_auto_lease.json")
+        lease_path.write_text(
+            json.dumps(
+                {
+                    "token": "lease_live",
+                    "mode": "plugin_dispatched",
+                    "created_at": datetime.now(UTC).isoformat(),
+                    "expires_at": (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+                    "owner_pid": os.getpid(),
+                    "owner_start_time": 0.0,
+                    "owner_identity": _linux_owner_identity(os.getpid()),
+                }
+            ),
+            encoding="utf-8",
+        )
+        job_manager = MagicMock()
+        job_manager.find_active_job_by_session = AsyncMock(return_value=None)
+        h = StartAutoHandler(
+            event_store=event_store,
+            job_manager=job_manager,
+            store=store,
+            agent_runtime_backend="opencode",
+            opencode_mode="plugin",
+        )
+        h._inner_auto = fake_inner_auto
+
+        with patch(
+            "ouroboros.mcp.tools.auto_handler.persisted_process_owner_alive",
+            return_value=True,
+        ):
+            result = await h.handle({"resume": state.auto_session_id})
+
+        assert result.is_err
+        assert "active plugin dispatch" in result.error.message
+        assert lease_path.exists()
+        fake_inner_auto.handle.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_legacy_linux_owner_is_fail_closed_until_lease_expiry(
+        self, event_store, tmp_path, fake_inner_auto
+    ) -> None:
+        """An unversioned epoch record cannot authorize cross-process release."""
+        store = AutoStore(tmp_path)
+        state = AutoPipelineState(goal="build a CLI", cwd=str(tmp_path))
+        store.save(state)
+        lease_path = store.path_for(state.auto_session_id).with_suffix(".start_auto_lease.json")
+        lease_path.write_text(
+            json.dumps(
+                {
+                    "token": "legacy_live_or_unknown",
+                    "mode": "plugin_dispatched",
+                    "created_at": datetime.now(UTC).isoformat(),
+                    "expires_at": (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+                    "owner_pid": os.getpid(),
+                    "owner_start_time": 0.0,
+                }
+            ),
+            encoding="utf-8",
+        )
+        job_manager = MagicMock()
+        job_manager.find_active_job_by_session = AsyncMock(return_value=None)
+        h = StartAutoHandler(
+            event_store=event_store,
+            job_manager=job_manager,
+            store=store,
+            agent_runtime_backend="opencode",
+            opencode_mode="plugin",
+        )
+        h._inner_auto = fake_inner_auto
+
+        with patch(
+            "ouroboros.mcp.tools.auto_handler.persisted_process_owner_alive",
+            return_value=None,
+        ):
+            result = await h.handle({"resume": state.auto_session_id})
+
+        assert result.is_err
+        assert lease_path.exists()
+        fake_inner_auto.handle.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "owner_identity",
+        [
+            {
+                **_linux_owner_identity(os.getpid() + 1),
+            },
+            {
+                **_linux_owner_identity(os.getpid()),
+                "boot_id": "corrupt-not-a-linux-boot-uuid",
+            },
+        ],
+        ids=("owner-pid-disagreement", "malformed-boot-id"),
+    )
+    @pytest.mark.asyncio
+    async def test_corrupt_linux_owner_cannot_release_plugin_lease(
+        self,
+        event_store,
+        tmp_path,
+        fake_inner_auto,
+        owner_identity: dict[str, object],
+    ) -> None:
+        store = AutoStore(tmp_path)
+        state = AutoPipelineState(goal="build a CLI", cwd=str(tmp_path))
+        store.save(state)
+        lease_path = store.path_for(state.auto_session_id).with_suffix(".start_auto_lease.json")
+        lease_path.write_text(
+            json.dumps(
+                {
+                    "token": "corrupt_owner",
+                    "mode": "plugin_dispatched",
+                    "created_at": datetime.now(UTC).isoformat(),
+                    "expires_at": (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+                    "owner_pid": os.getpid(),
+                    "owner_start_time": 0.0,
+                    "owner_identity": owner_identity,
+                }
+            ),
+            encoding="utf-8",
+        )
+        job_manager = MagicMock()
+        job_manager.find_active_job_by_session = AsyncMock(return_value=None)
+        h = StartAutoHandler(
+            event_store=event_store,
+            job_manager=job_manager,
+            store=store,
+            agent_runtime_backend="opencode",
+            opencode_mode="plugin",
+        )
+        h._inner_auto = fake_inner_auto
+
+        with patch(
+            "ouroboros.orchestrator.persisted_process_identity.platform.system",
+            return_value="Linux",
+        ):
+            result = await h.handle({"resume": state.auto_session_id})
+
+        assert result.is_err
+        assert "active plugin dispatch" in result.error.message
+        assert lease_path.exists()
+        assert json.loads(lease_path.read_text(encoding="utf-8"))["token"] == "corrupt_owner"
         fake_inner_auto.handle.assert_not_called()
 
     @pytest.mark.asyncio
@@ -2173,7 +2343,16 @@ class TestBackgroundJobPath:
         )
         h._inner_auto = fake_inner_auto
 
-        result = await h.handle({"goal": "build a CLI", "pipeline_timeout_seconds": 900})
+        owner_identity = _linux_owner_identity(os.getpid())
+        with patch(
+            "ouroboros.mcp.tools.auto_handler.current_persisted_process_owner",
+            return_value={
+                "owner_pid": os.getpid(),
+                "owner_start_time": 1.0,
+                "owner_identity": owner_identity,
+            },
+        ):
+            result = await h.handle({"goal": "build a CLI", "pipeline_timeout_seconds": 900})
 
         assert result.is_ok
         auto_session_id = result.value.meta["auto_session_id"]
@@ -2186,6 +2365,7 @@ class TestBackgroundJobPath:
             lease["updated_at"]
         )
         assert lease["mode"] == "plugin_dispatched"
+        assert lease["owner_identity"] == owner_identity
         assert lease_window <= timedelta(seconds=_START_AUTO_PENDING_LEASE_SECONDS + 1)
 
     @pytest.mark.asyncio
@@ -2584,6 +2764,7 @@ class TestAutoHandlerLeaseRelease:
                     "expires_at": (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
                     "owner_pid": os.getpid(),
                     "owner_start_time": 0.0,
+                    "owner_identity": _linux_owner_identity(os.getpid()),
                 }
             ),
             encoding="utf-8",
@@ -2602,7 +2783,11 @@ class TestAutoHandlerLeaseRelease:
                 )
 
         h = StubAutoHandler(store=store)
-        result = await h.handle({"resume": state.auto_session_id})
+        with patch(
+            "ouroboros.mcp.tools.auto_handler.persisted_process_owner_alive",
+            return_value=False,
+        ):
+            result = await h.handle({"resume": state.auto_session_id})
 
         assert result.is_ok
         assert not lease_path.exists()
