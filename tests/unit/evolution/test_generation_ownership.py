@@ -460,6 +460,7 @@ async def test_revocation_fences_the_owner_before_takeover(
     fenced and aborted before the reclaimer's takeover CAS can succeed —
     the successor never runs alongside the stale executor.
     """
+    from sqlalchemy import select as sa_select
     from sqlalchemy import update as sa_update
 
     from ouroboros.evolution import loop as loop_module
@@ -472,13 +473,17 @@ async def test_revocation_fences_the_owner_before_takeover(
         # Keep expiry far beyond scheduler noise; drive revocation explicitly
         # below while retaining a fast heartbeat for prompt fence delivery.
         class _ObservableClaims(DurableStepClaims):
-            """Expose the exact refresh that observes durable revocation."""
+            """Pause the owner immediately before its durable heartbeat."""
 
             def __init__(self, database_url: str) -> None:
                 super().__init__(database_url, lease_seconds=60.0)
+                self.heartbeat_entered = asyncio.Event()
+                self.release_heartbeat = asyncio.Event()
                 self.revocation_observed = asyncio.Event()
 
             async def refresh(self, lineage_id: str, claim_token: str) -> bool:
+                self.heartbeat_entered.set()
+                await self.release_heartbeat.wait()
                 still_owner = await super().refresh(lineage_id, claim_token)
                 if not still_owner:
                     self.revocation_observed.set()
@@ -502,21 +507,60 @@ async def test_revocation_fences_the_owner_before_takeover(
         owner = asyncio.create_task(
             owner_loop.evolve_step("lineage-revoke", initial_seed=_make_seed())
         )
-        await asyncio.wait_for(entered.wait(), timeout=30)
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        await asyncio.wait_for(claims.heartbeat_entered.wait(), timeout=5)
 
         engine = await claims._engine_once()
+        async with engine.connect() as conn:
+            owner_row = (
+                await conn.execute(
+                    sa_select(
+                        lineage_step_claims_table.c.claim_token,
+                        lineage_step_claims_table.c.revoking_token,
+                        lineage_step_claims_table.c.revoked_at,
+                    ).where(lineage_step_claims_table.c.lineage_id == "lineage-revoke")
+                )
+            ).one()
+        owner_token = owner_row.claim_token
+        assert owner_row.revoking_token is None
+        assert owner_row.revoked_at is None
+
+        # The owner heartbeat is paused before its durable refresh, so the
+        # exact row age below cannot be raced back to fresh before phase one.
         async with engine.begin() as conn:
-            await conn.execute(sa_update(lineage_step_claims_table).values(refreshed_at=0.0))
+            await conn.execute(
+                sa_update(lineage_step_claims_table)
+                .where(lineage_step_claims_table.c.lineage_id == "lineage-revoke")
+                .values(refreshed_at=0.0)
+            )
         assert await claims.acquire("lineage-revoke", "reclaimer") is False, (
             "reclaim starts with revocation, never immediate takeover"
         )
 
-        # Synchronize on the protocol transition itself. The timeout is only
-        # a deadlock guard; correctness no longer depends on the owner fully
-        # unwinding inside a five-second scheduling window. Repeating this
-        # case catches ordering regressions under xdist worker pressure.
-        await asyncio.wait_for(claims.revocation_observed.wait(), timeout=30)
-        owner_result = await asyncio.wait_for(owner, timeout=30)
+        # `False` alone is ambiguous: a fresh live owner is also denied. Prove
+        # phase one from the durable row before allowing the heartbeat to run.
+        async with engine.connect() as conn:
+            revoking_row = (
+                await conn.execute(
+                    sa_select(
+                        lineage_step_claims_table.c.claim_token,
+                        lineage_step_claims_table.c.revoking_token,
+                        lineage_step_claims_table.c.revoked_at,
+                    ).where(lineage_step_claims_table.c.lineage_id == "lineage-revoke")
+                )
+            ).one()
+        assert revoking_row.claim_token == owner_token
+        assert revoking_row.revoking_token == "reclaimer"
+        assert revoking_row.revoked_at is not None
+
+        # The successor stays denied while the owner is still running. The
+        # owner's release below is the termination acknowledgement, not the
+        # passage of a wall-clock grace period.
+        assert await claims.acquire("lineage-revoke", "reclaimer") is False
+
+        claims.release_heartbeat.set()
+        await asyncio.wait_for(claims.revocation_observed.wait(), timeout=5)
+        owner_result = await asyncio.wait_for(owner, timeout=5)
         assert owner_result.is_err, "a revoked owner must not report success"
         assert executions == [1]
 
