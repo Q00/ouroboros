@@ -201,7 +201,7 @@ async def test_reclaimed_lease_fences_the_stale_owner_before_the_successor_start
     class _OutageClaims(LocalStepClaims):
         """Refresh outage: the owner is alive but cannot prove it."""
 
-        refresh_blocked = True
+        refresh_blocked = False
 
         async def refresh(self, lineage_id: str, claim_token: str) -> bool:
             if self.refresh_blocked:
@@ -211,8 +211,15 @@ async def test_reclaimed_lease_fences_the_stale_owner_before_the_successor_start
     store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'evolve-fence.db'}")
     await store.initialize()
     try:
-        claims = _OutageClaims(lease_seconds=0.12)
+        claims = _OutageClaims(lease_seconds=0.6)
         monkeypatch.setattr(loop_module, "step_claims_for", lambda _store: claims)
+        monkeypatch.setattr(
+            loop_module,
+            "owned_lineage_step",
+            lambda backend, lineage_id: owned_lineage_step(
+                backend, lineage_id, heartbeat_interval=0.01
+            ),
+        )
 
         executions: list[int] = []
         entered = asyncio.Event()
@@ -223,6 +230,7 @@ async def test_reclaimed_lease_fences_the_stale_owner_before_the_successor_start
             owner_loop.evolve_step("lineage-fence", initial_seed=_make_seed())
         )
         await asyncio.wait_for(entered.wait(), timeout=5)
+        claims.refresh_blocked = True
 
         # No reclaimer acts here: the owner must fence itself once half the
         # lease passes without a confirmed refresh.
@@ -673,14 +681,8 @@ async def test_lost_lease_suppresses_a_cancellation_resistant_success(
         loss_requested = asyncio.Event()
 
         class _BarrierClaims(_RecordingClaims):
-            creation_confirmed = False
-
             async def refresh(self, lineage_id: str, claim_token: str) -> bool:
-                if not self.creation_confirmed:
-                    self.creation_confirmed = True
-                    return True
-                await loss_requested.wait()
-                return False
+                return not loss_requested.is_set()
 
         # The heartbeat may start under arbitrary suite load, but cannot
         # report loss until the real executor barrier confirms entry.
