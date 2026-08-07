@@ -41,6 +41,7 @@ def _put(
     *,
     active: bool = False,
     retain_until: datetime | None = None,
+    commit_check: Any = None,
 ):
     return store.put_for_contract(
         contract_id=contract_id,
@@ -51,6 +52,7 @@ def _put(
         active=active,
         retain_until=retain_until or NOW + timedelta(days=90),
         now=NOW,
+        commit_check=commit_check,
     )
 
 
@@ -87,6 +89,21 @@ def _try_replaced_artifact_lock(
         result.put("blocked")
     except BaseException as exc:  # pragma: no cover - diagnostic transport
         result.put(f"error:{type(exc).__name__}:{exc}")
+
+
+def _publish_after_store_replacement(
+    artifact_root: str,
+    attempting: Any,
+    result: Any,
+) -> None:
+    """Publish through a second store generation in a spawned process."""
+    store = ContentAddressedArtifactStore(Path(artifact_root))
+    attempting.put("attempting")
+    try:
+        envelope = _put(store, "CONTRACTRACE", {"writer": "second"})
+        result.put(("published", envelope.artifact_ref))
+    except BaseException as exc:  # pragma: no cover - diagnostic transport
+        result.put(("error", f"{type(exc).__name__}:{exc}"))
 
 
 def _assert_replaced_lock_authority_stays_held(
@@ -143,6 +160,132 @@ def test_contract_lock_replacement_cannot_duplicate_dispatch(tmp_path: Path) -> 
     )
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX rename semantics only")
+def test_stable_store_authority_replacement_cannot_split_serialization(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    store.initialize()
+    context = multiprocessing.get_context("spawn")
+    result = context.Queue()
+    process = context.Process(
+        target=_try_replaced_artifact_lock,
+        args=(str(store.root), None, result),
+    )
+    authority_path: Path | None = None
+    displaced_path: Path | None = None
+
+    try:
+        with pytest.raises(OSError, match="lockfile changed while locked"):
+            with store._store_lock(exclusive=True):
+                authority_paths = list(store.root.parent.glob(".ouroboros-artifact-store-*.lock"))
+                assert len(authority_paths) == 1
+                authority_path = authority_paths[0]
+                displaced_path = authority_path.with_name(f"{authority_path.name}.displaced")
+                authority_path.rename(displaced_path)
+                authority_path.touch(mode=0o600)
+
+                process.start()
+                process.join(20)
+                assert process.exitcode == 0
+                assert result.get(timeout=5) == "blocked"
+    finally:
+        if process.is_alive():
+            process.terminate()
+        process.join(5)
+
+    assert authority_path is not None
+    assert displaced_path is not None
+    assert authority_path.parent == store.root.parent
+    assert displaced_path.parent == store.root.parent
+    assert authority_path.is_file()
+    assert displaced_path.is_file()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX stable-parent authority only")
+def test_contract_authority_reuses_parent_for_nested_store_publication(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    contract_id = "CONTRACTNESTED"
+
+    with store.contract_execution_lock(contract_id):
+        with store._store_lock(exclusive=True, blocking=False):
+            pass
+        envelope = _put(store, contract_id, {"nested": "publication"})
+
+    assert store.fetch(contract_id).envelope == envelope
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX rename semantics only")
+def test_contract_parent_replacement_cannot_create_competing_authority(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    contract_id = "CONTRACTPARENT"
+    store.initialize()
+    contract_root = store.root / "contracts" / contract_id
+    displaced = tmp_path / "displaced-contract"
+    lock = store.contract_execution_lock(contract_id)
+
+    context = multiprocessing.get_context("spawn")
+    result = context.Queue()
+    process = context.Process(
+        target=_try_replaced_artifact_lock,
+        args=(str(store.root), contract_id, result),
+    )
+    try:
+        with pytest.raises((OSError, ArtifactIntegrityError), match="changed"):
+            with lock:
+                contract_root.rename(displaced)
+                process.start()
+                process.join(20)
+                assert process.exitcode == 0
+                assert result.get(timeout=5) == "blocked"
+    finally:
+        if process.is_alive():
+            process.terminate()
+        process.join(5)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX rename semantics only")
+def test_store_root_replacement_cannot_overwrite_contract_binding(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    store.initialize()
+    displaced = tmp_path / "displaced-store"
+    context = multiprocessing.get_context("spawn")
+    attempting = context.Queue()
+    result = context.Queue()
+    process = context.Process(
+        target=_publish_after_store_replacement,
+        args=(str(store.root), attempting, result),
+    )
+
+    def replace_root_at_commit() -> None:
+        store.root.rename(displaced)
+        process.start()
+        assert attempting.get(timeout=20) == "attempting"
+        process.join(1)
+
+    try:
+        with pytest.raises((OSError, ArtifactIntegrityError), match="changed"):
+            _put(
+                store,
+                "CONTRACTRACE",
+                {"writer": "first"},
+                commit_check=replace_root_at_commit,
+            )
+        process.join(20)
+        assert process.exitcode == 0
+        assert result.get(timeout=5)[0] == "published"
+    finally:
+        if process.is_alive():
+            process.terminate()
+        process.join(5)
+
+    assert store.fetch("CONTRACTRACE").body == {"writer": "second"}
+
+
 def test_put_uses_content_addressed_layout_and_deduplicates(tmp_path: Path) -> None:
     store = _store(tmp_path)
     first = _put(store, "CONTRACT1", {"answer": 42})
@@ -168,9 +311,14 @@ def test_commit_gate_immediately_precedes_first_publication_mutation(
         sequence.append("load")
         return original_load(contract_id, missing_ok=missing_ok)
 
-    def track_write(digest: str, payload: bytes) -> None:
+    def track_write(
+        digest: str,
+        payload: bytes,
+        *,
+        authority_check: Any = None,
+    ) -> None:
         sequence.append("write")
-        original_write(digest, payload)
+        original_write(digest, payload, authority_check=authority_check)
 
     monkeypatch.setattr(store, "_load_manifest_locked", track_load)
     monkeypatch.setattr(store, "_write_blob_locked", track_write)
@@ -575,12 +723,21 @@ def test_blob_survives_until_every_shared_contract_tombstone_is_durable(
     original_write = store._write_manifest_locked
     writes = 0
 
-    def fail_second_manifest(contract_id: str, manifest: dict) -> None:
+    def fail_second_manifest(
+        contract_id: str,
+        manifest: dict,
+        *,
+        authority_check: Any = None,
+    ) -> None:
         nonlocal writes
         writes += 1
         if writes == 2:
             raise OSError("simulated second tombstone failure")
-        original_write(contract_id, manifest)
+        original_write(
+            contract_id,
+            manifest,
+            authority_check=authority_check,
+        )
 
     monkeypatch.setattr(store, "_write_manifest_locked", fail_second_manifest)
     with pytest.raises(OSError, match="second tombstone"):

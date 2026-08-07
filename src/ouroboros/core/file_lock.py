@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass
 import errno
 import os
 from pathlib import Path
@@ -17,6 +19,22 @@ else:  # pragma: no branch
 
 
 _LOCK_BUSY_ERRNOS = frozenset({errno.EACCES, errno.EAGAIN, errno.EDEADLK})
+
+
+@dataclass(slots=True)
+class _StableParentAuthorityLease:
+    """Live authority shared by copied logical contexts until owner release."""
+
+    process_id: int
+    device_id: int
+    inode: int
+    exclusive: bool
+    active: bool = True
+
+
+_HELD_STABLE_PARENT_AUTHORITIES: ContextVar[tuple[_StableParentAuthorityLease, ...]] = ContextVar(
+    "held_stable_parent_authorities", default=()
+)
 _DIRECTORY_FD_LOCK_OPEN_SUPPORTED = bool(
     os.name != "nt"
     and hasattr(os, "O_DIRECTORY")
@@ -35,8 +53,9 @@ def file_lock(
     *,
     blocking: bool = True,
     parent_fd: int | None = None,
+    stable_parent_authority: bool = False,
 ) -> Iterator[None]:
-    """Context manager for blocking or fail-fast cross-platform file locking."""
+    """Lock one file, optionally retaining its parent as stable authority."""
     lock_path = file_path.with_suffix(file_path.suffix + ".lock")
     if parent_fd is None:
         lock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -46,6 +65,7 @@ def file_lock(
         exclusive=exclusive,
         blocking=blocking,
         parent_fd=parent_fd,
+        stable=stable_parent_authority,
     ) as authority_fd:
         with _open_lockfile(lock_path, parent_fd=parent_fd) as handle:
             _ensure_lockfile_content(handle)
@@ -117,8 +137,9 @@ def _lock_parent_authority(
     exclusive: bool,
     blocking: bool,
     parent_fd: int | None,
+    stable: bool,
 ) -> Iterator[int | None]:
-    """Keep POSIX lock authority on the parent inode, not a replaceable entry."""
+    """Pin a POSIX parent and optionally retain its lock as stable authority."""
     if os.name == "nt":  # pragma: no cover - Windows handles deny deletion
         yield None
         return
@@ -138,16 +159,54 @@ def _lock_parent_authority(
 
     try:
         _validate_lock_parent_binding(directory_fd, lock_path.parent)
+        if not stable:
+            yield directory_fd
+            _validate_lock_parent_binding(directory_fd, lock_path.parent)
+            return
+
+        opened = os.fstat(directory_fd)
+        identity = (os.getpid(), opened.st_dev, opened.st_ino)
+        held_authorities = _HELD_STABLE_PARENT_AUTHORITIES.get()
+        held_authority = next(
+            (
+                held
+                for held in held_authorities
+                if held.active and (held.process_id, held.device_id, held.inode) == identity
+            ),
+            None,
+        )
+        if held_authority is not None:
+            if exclusive and not held_authority.exclusive:
+                raise OSError(
+                    errno.EDEADLK,
+                    "cannot upgrade a reentrant stable parent authority",
+                    str(lock_path.parent),
+                )
+            yield directory_fd
+            _validate_lock_parent_binding(directory_fd, lock_path.parent)
+            return
+
         _acquire_posix_lock(
             directory_fd,
             exclusive=exclusive,
             blocking=blocking,
+        )
+        lease = _StableParentAuthorityLease(
+            process_id=identity[0],
+            device_id=identity[1],
+            inode=identity[2],
+            exclusive=exclusive,
+        )
+        token = _HELD_STABLE_PARENT_AUTHORITIES.set(
+            (*(held for held in held_authorities if held.active), lease)
         )
         try:
             _validate_lock_parent_binding(directory_fd, lock_path.parent)
             yield directory_fd
             _validate_lock_parent_binding(directory_fd, lock_path.parent)
         finally:
+            lease.active = False
+            _HELD_STABLE_PARENT_AUTHORITIES.reset(token)
             _release_posix_lock(directory_fd)
     finally:
         os.close(directory_fd)

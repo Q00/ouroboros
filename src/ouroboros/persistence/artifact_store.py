@@ -31,8 +31,13 @@ from ouroboros.core.disposable_memory import (
     DisposableResultSummary,
 )
 from ouroboros.core.errors import PersistenceError
-from ouroboros.core.file_lock import file_lock
 from ouroboros.persistence.artifact_io import read_fd_bounded as _read_fd_bounded
+from ouroboros.persistence.artifact_lock import (
+    nearest_existing_directory as _nearest_existing_directory,
+)
+from ouroboros.persistence.artifact_lock import (
+    validate_pinned_directory as _validate_pinned_directory,
+)
 import ouroboros.persistence.artifact_schema as _artifact_schema
 from ouroboros.persistence.artifact_schema import MANIFEST_MAX_BYTES, require_fields
 
@@ -160,6 +165,9 @@ class ContentAddressedArtifactStore:
         self.root = Path(os.path.abspath(artifact_root.expanduser()))
         self._project_root = project_root.expanduser().resolve() if project_root else None
         self._directory_anchor = self._project_root or _nearest_existing_directory(self.root)
+        self._lock_directory_anchor = self._project_root or _nearest_existing_directory(
+            self.root.parent
+        )
         self.max_artifact_bytes = max_artifact_bytes
         self._contracts_root = self.root / "contracts"
         self._lock_target = self.root / ".artifact-store"
@@ -192,22 +200,13 @@ class ContentAddressedArtifactStore:
         self._validate_project_boundary()
 
     @contextmanager
-    def _store_lock(self, *, exclusive: bool, blocking: bool = True) -> Iterator[None]:
-        """Hold the store directory authority together with its lockfile."""
-        with _pinned_directory_tree(
-            self.root,
-            anchor=self._directory_anchor,
-            root=self.root,
-            label="artifact store lock",
-        ) as directory_fd:
-            with file_lock(
-                self._lock_target,
-                exclusive=exclusive,
-                blocking=blocking,
-                parent_fd=directory_fd,
-            ):
-                self._validate_project_boundary()
-                yield
+    def _store_lock(self, *, exclusive: bool, blocking: bool = True) -> Iterator[Any]:
+        """Hold stable and generation-specific store lock authorities."""
+        from ouroboros.persistence.artifact_lock import store_lock
+
+        with store_lock(self, exclusive=exclusive, blocking=blocking) as authority:
+            self._validate_project_boundary()
+            yield authority
 
     @contextmanager
     def contract_execution_lock(
@@ -215,26 +214,13 @@ class ContentAddressedArtifactStore:
         contract_id: str,
         *,
         blocking: bool = True,
-    ) -> Iterator[None]:
+    ) -> Iterator[Any]:
         """Serialize one contract's child effects across processes."""
-        self.initialize()
-        contract_id = _validate_contract_id(contract_id)
-        lock_target = self._contract_execution_lock_target(contract_id)
-        with _pinned_directory_tree(
-            lock_target.parent,
-            anchor=self._directory_anchor,
-            root=self._contracts_root,
-            label="contract execution lock",
-        ) as directory_fd:
-            with file_lock(
-                lock_target,
-                exclusive=True,
-                blocking=blocking,
-                parent_fd=directory_fd,
-            ):
-                self._validate_project_boundary()
-                self._contract_execution_lock_target(contract_id)
-                yield
+        from ouroboros.persistence.artifact_lock import contract_execution_lock
+
+        with contract_execution_lock(self, contract_id, blocking=blocking) as authority:
+            self._validate_project_boundary()
+            yield authority
 
     def put_for_contract(
         self,
@@ -282,7 +268,7 @@ class ContentAddressedArtifactStore:
             duration_ms=duration_ms,
             events_emitted_count=events_emitted_count,
         )
-        with self._store_lock(exclusive=True):
+        with self._store_lock(exclusive=True) as lock_authority:
             if precommit_check is not None:
                 precommit_check()
             manifest = self._load_manifest_locked(contract_id, missing_ok=True)
@@ -312,7 +298,12 @@ class ContentAddressedArtifactStore:
                 commit_check()
             elif precommit_check is not None:
                 precommit_check()
-            self._write_blob_locked(digest, payload)
+            lock_authority.validate()
+            self._write_blob_locked(
+                digest,
+                payload,
+                authority_check=lock_authority.validate,
+            )
             manifest["active"] = bool(active)
             manifest["retain_until"] = retention.isoformat()
             manifest["updated_at"] = timestamp.isoformat()
@@ -325,7 +316,11 @@ class ContentAddressedArtifactStore:
                     "envelope": envelope.model_dump(mode="json"),
                 }
             )
-            self._write_manifest_locked(contract_id, manifest)
+            self._write_manifest_locked(
+                contract_id,
+                manifest,
+                authority_check=lock_authority.validate,
+            )
         return envelope
 
     def fetch(self, contract_id: str) -> FetchedArtifact:
@@ -426,12 +421,16 @@ class ContentAddressedArtifactStore:
         self.initialize()
         contract_id = _validate_contract_id(contract_id)
         timestamp = _as_utc(now or datetime.now(UTC))
-        with self._store_lock(exclusive=True):
+        with self._store_lock(exclusive=True) as lock_authority:
             manifest = self._load_manifest_locked(contract_id, missing_ok=False)
             manifest["active"] = bool(active)
             manifest["retain_until"] = _as_utc(retain_until).isoformat()
             manifest["updated_at"] = timestamp.isoformat()
-            self._write_manifest_locked(contract_id, manifest)
+            self._write_manifest_locked(
+                contract_id,
+                manifest,
+                authority_check=lock_authority.validate,
+            )
 
     def prune(
         self,
@@ -446,7 +445,7 @@ class ContentAddressedArtifactStore:
             raise ValueError("ttl must not be negative")
         self.initialize()
         timestamp = _as_utc(now or datetime.now(UTC))
-        with self._store_lock(exclusive=True):
+        with self._store_lock(exclusive=True) as lock_authority:
             manifests = self._load_all_manifests_locked()
             candidates = self._plan_prune_locked(
                 manifests,
@@ -476,7 +475,11 @@ class ContentAddressedArtifactStore:
                         }
                     )
                     manifest["updated_at"] = timestamp.isoformat()
-                    self._write_manifest_locked(contract_id, manifest)
+                    self._write_manifest_locked(
+                        contract_id,
+                        manifest,
+                        authority_check=lock_authority.validate,
+                    )
 
                 try:
                     # Tombstones become durable first. Deletion then pins the
@@ -484,6 +487,7 @@ class ContentAddressedArtifactStore:
                     # through that same handle before a directory-relative
                     # unlink. The store lock excludes cooperating writers, not
                     # hostile or unrelated filesystem mutation.
+                    lock_authority.validate()
                     self._unlink_blob_candidate_locked(candidate)
                 except FileNotFoundError:
                     pass
@@ -560,7 +564,13 @@ class ContentAddressedArtifactStore:
             )
         return sorted(candidates, key=lambda item: item.artifact_ref)
 
-    def _write_blob_locked(self, digest: str, payload: bytes) -> None:
+    def _write_blob_locked(
+        self,
+        digest: str,
+        payload: bytes,
+        *,
+        authority_check: Callable[[], None] | None = None,
+    ) -> None:
         path = self._blob_path_from_digest(digest)
         _atomic_write_bytes(
             path,
@@ -569,6 +579,7 @@ class ContentAddressedArtifactStore:
             anchor=self._directory_anchor,
             label="artifact body",
             matching_existing=payload,
+            authority_check=authority_check,
         )
 
     def _read_blob_locked(self, artifact_ref: str) -> bytes:
@@ -733,7 +744,13 @@ class ContentAddressedArtifactStore:
         )
         return json.loads(payload)
 
-    def _write_manifest_locked(self, contract_id: str, manifest: dict[str, Any]) -> None:
+    def _write_manifest_locked(
+        self,
+        contract_id: str,
+        manifest: dict[str, Any],
+        *,
+        authority_check: Callable[[], None] | None = None,
+    ) -> None:
         path = self._manifest_path(contract_id)
         validated = _validate_manifest(manifest, contract_id=contract_id, path=path)
         payload = (json.dumps(validated, indent=2, sort_keys=True) + "\n").encode("utf-8")
@@ -743,6 +760,7 @@ class ContentAddressedArtifactStore:
             root=self._contracts_root,
             anchor=self._directory_anchor,
             label="artifact manifest",
+            authority_check=authority_check,
         )
 
     def _iter_blob_paths_locked(self) -> list[Path]:
@@ -1229,47 +1247,6 @@ def _unlink_blob_candidate_guarded(
         path.unlink()
 
 
-def _nearest_existing_directory(path: Path) -> Path:
-    """Choose the nearest lexical ancestor that can anchor safe creation."""
-    candidate = path
-    while not candidate.exists():
-        parent = candidate.parent
-        if parent == candidate:
-            break
-        candidate = parent
-    return candidate
-
-
-def _validate_pinned_directory(
-    directory_fd: int,
-    path: Path,
-    *,
-    anchor: Path,
-    label: str,
-) -> None:
-    """Prove one held directory is still the live descendant of its anchor."""
-    try:
-        path.relative_to(anchor)
-        opened = os.fstat(directory_fd)
-        current = os.stat(path, follow_symlinks=False)
-    except (OSError, ValueError) as exc:
-        raise ArtifactIntegrityError(
-            f"{label} directory ancestor changed during creation",
-            operation="path_resolution",
-            details={"path": str(path), "anchor": str(anchor)},
-        ) from exc
-    if (
-        not stat.S_ISDIR(opened.st_mode)
-        or not stat.S_ISDIR(current.st_mode)
-        or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)
-    ):
-        raise ArtifactIntegrityError(
-            f"{label} directory ancestor changed during creation",
-            operation="path_resolution",
-            details={"path": str(path), "anchor": str(anchor)},
-        )
-
-
 @contextmanager
 def _pinned_directory_tree(
     path: Path,
@@ -1638,13 +1615,18 @@ def _atomic_write_bytes(
     anchor: Path,
     label: str,
     matching_existing: bytes | None = None,
+    authority_check: Callable[[], None] | None = None,
 ) -> None:
+    if authority_check is not None:
+        authority_check()
     with _pinned_directory_tree(
         path.parent,
         anchor=anchor,
         root=root,
         label=label,
     ) as directory_fd:
+        if authority_check is not None:
+            authority_check()
         _validate_publication_path(path, root=root, label=label)
         if directory_fd is not None:
             if matching_existing is not None and _matching_existing_payload_at(
@@ -1661,6 +1643,7 @@ def _atomic_write_bytes(
                 payload,
                 root=root,
                 label=label,
+                authority_check=authority_check,
             )
             return
         if matching_existing is not None and _matching_existing_payload_guarded(
@@ -1770,6 +1753,7 @@ def _atomic_write_bytes_at(
     *,
     root: Path,
     label: str,
+    authority_check: Callable[[], None] | None = None,
 ) -> None:
     """Publish relative to a pinned, non-link parent directory handle."""
     temporary_name = f".{path.name}.{os.urandom(16).hex()}.tmp"
@@ -1777,6 +1761,8 @@ def _atomic_write_bytes_at(
     backup_name: str | None = None
     published = False
     try:
+        if authority_check is not None:
+            authority_check()
         _validate_directory_binding(directory_fd, path, root=root, label=label)
         file_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
         file_flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
@@ -1792,6 +1778,8 @@ def _atomic_write_bytes_at(
             handle.flush()
             os.fsync(handle.fileno())
         _validate_directory_binding(directory_fd, path, root=root, label=label)
+        if authority_check is not None:
+            authority_check()
         backup_name = _backup_existing_destination_at(
             directory_fd,
             path,

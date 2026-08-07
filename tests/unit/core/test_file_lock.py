@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextvars import copy_context
 import errno
 import os
 from pathlib import Path
@@ -63,6 +64,51 @@ def test_file_lock_nonblocking_exclusive_fails_fast(tmp_path: Path) -> None:
         with pytest.raises(BlockingIOError):
             with file_lock(target, blocking=False):
                 pytest.fail("a held exclusive lock must not be reacquired")
+
+
+def test_sibling_file_locks_do_not_implicitly_lock_their_parent(tmp_path: Path) -> None:
+    first = tmp_path / "first.json"
+    second = tmp_path / "second.json"
+
+    with file_lock(first):
+        with file_lock(second, blocking=False):
+            pass
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX stable-parent authority only")
+def test_stable_parent_authority_is_reentrant_in_one_context(tmp_path: Path) -> None:
+    first = tmp_path / "first.json"
+    second = tmp_path / "second.json"
+
+    with file_lock(first, stable_parent_authority=True):
+        with file_lock(
+            second,
+            blocking=False,
+            stable_parent_authority=True,
+        ):
+            pass
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX stable-parent authority only")
+def test_copied_context_cannot_reuse_released_parent_authority(tmp_path: Path) -> None:
+    original = tmp_path / "original.json"
+    current = tmp_path / "current.json"
+    contender = tmp_path / "contender.json"
+
+    with file_lock(original, stable_parent_authority=True):
+        stale_context = copy_context()
+
+    def acquire_from_stale_context() -> None:
+        with file_lock(
+            contender,
+            blocking=False,
+            stable_parent_authority=True,
+        ):
+            pytest.fail("a released copied context must not retain parent authority")
+
+    with file_lock(current, stable_parent_authority=True):
+        with pytest.raises(BlockingIOError):
+            stale_context.run(acquire_from_stale_context)
 
 
 def test_file_lock_windows_nonblocking_uses_fail_fast_mode(

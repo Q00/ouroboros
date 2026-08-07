@@ -433,11 +433,16 @@ async def test_timeout_after_commit_gate_waits_for_durable_publication(
     original_write = service.artifact_store._write_blob_locked
     child_calls = 0
 
-    def pause_after_commit_gate(digest: str, payload: bytes) -> None:
+    def pause_after_commit_gate(
+        digest: str,
+        payload: bytes,
+        *,
+        authority_check: Any = None,
+    ) -> None:
         commit_entered.set()
         if not release_commit.wait(2.0):
             raise AssertionError("test did not release the durable commit")
-        original_write(digest, payload)
+        original_write(digest, payload, authority_check=authority_check)
 
     monkeypatch.setattr(service.artifact_store, "_write_blob_locked", pause_after_commit_gate)
 
