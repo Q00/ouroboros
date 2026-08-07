@@ -4242,14 +4242,14 @@ def _atomic_write_text(
             os.fchmod(fd, mode)
         with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
             f.write(content)
+        try:
+            os.chmod(tmp_name, mode)
+        except OSError:
+            pass  # e.g. Windows FAT — not fatal
+        actual_mode = stat.S_IMODE(Path(tmp_name).lstat().st_mode)
         if expected_current is not None:
             _require_path_snapshot(path, expected_current)
         os.replace(tmp_name, write_path)
-        try:
-            os.chmod(write_path, mode)
-        except OSError:
-            pass  # e.g. Windows FAT — not fatal
-        actual_mode = stat.S_IMODE(write_path.lstat().st_mode)
         return _PathSnapshot(kind="file", mode=actual_mode, contents=content.encode("utf-8"))
     except OSError:
         try:

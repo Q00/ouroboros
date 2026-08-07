@@ -2798,6 +2798,27 @@ class TestCodexSetup:
         assert setup_cmd._require_path_snapshot(target, snapshot) == snapshot
         assert not list(tmp_path.glob(".credentials.yaml.*.tmp"))
 
+    def test_atomic_setup_write_metadata_failure_preserves_previous_generation(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A reported metadata failure must happen before replacement commits."""
+        target = tmp_path / "config.yaml"
+        target.write_text("operator: original\n", encoding="utf-8")
+
+        with (
+            patch(
+                "pathlib.Path.lstat",
+                autospec=True,
+                side_effect=PermissionError("transient metadata failure"),
+            ),
+            pytest.raises(PermissionError, match="transient metadata failure"),
+        ):
+            setup_cmd._atomic_write_text(target, "setup: new\n", mode=0o644)
+
+        assert target.read_text(encoding="utf-8") == "operator: original\n"
+        assert not list(tmp_path.glob(".config.yaml.*.tmp"))
+
     def test_setup_codex_refuses_concurrent_codex_edit_before_profile_retirement(
         self, tmp_path: Path
     ) -> None:
