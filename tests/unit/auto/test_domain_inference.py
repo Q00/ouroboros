@@ -2003,3 +2003,48 @@ def test_consumed_tooling_and_services_stay_dependencies(goal: str, outputs: str
     result = derive_domain_from_ledger(ledger)
     assert result.is_single
     assert result.single is TaskClass.WEB_APP
+
+
+@pytest.mark.parametrize(
+    ("goal", "outputs"),
+    [
+        (
+            "Build a web app powered by an existing REST API",
+            "Product catalog with shopping cart and checkout flow",
+        ),
+        (
+            "Build a web app for shopping",
+            "Dashboard fetches data from a REST API and shows product listings",
+        ),
+        (
+            "Build a web app that invokes an existing CLI",
+            "Photo gallery, uploads, and comments",
+        ),
+    ],
+)
+def test_dependency_relations_do_not_fabricate_competing_classes(goal: str, outputs: str) -> None:
+    """R29 probe: powered-by/fetches-from/invokes name dependencies; the
+    normalization covers goals and outputs alike."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value=outputs)
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
+        "Build an SDK targeting web apps",
+        "Build a library supporting web apps",
+        "Build a package used by web apps",
+    ],
+)
+def test_participial_consumer_web_apps_are_not_the_product(goal: str) -> None:
+    """R29 probe: a web app the artifact targets/supports/serves is the
+    consumer, not the produced artifact."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value="An importable package with a public API")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.LIBRARY

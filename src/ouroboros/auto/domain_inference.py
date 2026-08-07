@@ -474,7 +474,7 @@ def _matches_web_service(ledger: SeedDraftLedger) -> bool:
     if not (outputs or goal):
         return False
     api_signal = _any_of(
-        outputs + " " + _CONSUMED_DEPENDENCY_RE.sub(" ", goal),
+        _CONSUMED_DEPENDENCY_RE.sub(" ", outputs + " " + goal),
         (
             "rest endpoint",
             "rest api",
@@ -661,6 +661,13 @@ _WEB_APP_ARTIFACT_PHRASE_RE = re.compile(
 
 
 _INFINITIVE_TARGET_RE = re.compile(r"\bto\s+(?!be\b)[\w\-]+\s+[^,.;]*")
+_RELATIONAL_TARGET_RE = re.compile(
+    r"\b(?:targeting|supporting|serving|powering|backing|aimed\s+at|"
+    r"used\s+by|consumed\s+by|embedded\s+in|integrating\s+with)\s+"
+    r"(?:an?\s+|the\s+)?(?:[\w\-'’]+\s+){0,2}?"
+    r"(?:web[\s\-]?app(?:lication)?s?|webapps?|websites?|web\s+uis?|frontends?|"
+    r"front[\s\-]ends?|single[\s\-]page\s+app(?:lication)?s?)\b"
+)
 
 
 def _goal_artifact_head_is_web_app(goal_text: str) -> bool:
@@ -673,8 +680,11 @@ def _goal_artifact_head_is_web_app(goal_text: str) -> bool:
         return False
     core = _CONSUMED_DEPENDENCY_RE.sub(" ", _SUBJECT_CLAUSE_RE.sub(" ", goal_text))
     # "to test/analyze/deploy a web app" names the target of another
-    # artifact, not the produced one (#1813 R28).
+    # artifact, not the produced one (#1813 R28), and participial
+    # relations ("SDK targeting web apps", "package used by web apps")
+    # name the consumer (#1813 R29).
     core = _INFINITIVE_TARGET_RE.sub(" ", core)
+    core = _RELATIONAL_TARGET_RE.sub(" ", core)
     web_matches = list(_WEB_APP_ARTIFACT_PHRASE_RE.finditer(core))
     if not web_matches:
         return False
@@ -817,7 +827,9 @@ def _matches_web_app(ledger: SeedDraftLedger) -> bool:
 
 
 _CONSUMED_DEPENDENCY_RE = re.compile(
-    r"\b(?:to|from|against|via|using|through|consumes?|consuming|calls?|calling)\s+"
+    r"\b(?:to|from|against|via|using|through|consumes?|consuming|calls?|calling|"
+    r"powered\s+by|backed\s+by|built\s+on|driven\s+by|served\s+by|"
+    r"integrat\w*\s+with|invokes?|invoking|fetch\w*\s+(?:data\s+)?from)\s+"
     r"(?!be\b)(?:an?\s+|the\s+)?(?:[\w\-'’]+\s+){0,2}?"
     r"(?:public\s+api|rest\s+apis?|apis?|sdks?|clis?|command[\s\-]line|web\s+services?)\b"
 )
