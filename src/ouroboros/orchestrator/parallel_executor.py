@@ -83,7 +83,12 @@ from ouroboros.harness.deliver_gate import (
 from ouroboros.harness.journal import EvidenceEntry, EvidenceManifest
 from ouroboros.harness.traceguard_validator import validate_evidence_claims
 from ouroboros.observability.logging import get_logger
-from ouroboros.orchestrator import adaptive_concurrency, provider_admission, provider_effect_scope
+from ouroboros.orchestrator import (
+    adaptive_concurrency,
+    provider_admission,
+    provider_effect_scope,
+    retry_hints,
+)
 from ouroboros.orchestrator.ac_execution_capsule import (
     UnmaterializableSuccessContractError,
     bind_capsule_to_runtime_handle,
@@ -364,7 +369,6 @@ from ouroboros.orchestrator.rate_limit import (
     estimate_runtime_request_tokens,
 )
 from ouroboros.orchestrator.recoverable_failure import is_usage_limit_pause_message
-from ouroboros.orchestrator.retry_hints import build_assertion_safe_retry_hint
 from ouroboros.orchestrator.route_compat import (
     RouteCompatProjection,
     admit_compat_escalation_route,
@@ -10619,39 +10623,7 @@ Respond with either ATOMIC or the structured JSON object only.
 
     def _failure_class_for_result(self, result: ACExecutionResult) -> str | None:
         """Best-effort failure taxonomy label for a failed AC result."""
-        from ouroboros.orchestrator.failure_taxonomy import (
-            FailureClass,
-            classify_hard_precondition,
-        )
-
-        if result.outcome is ACExecutionOutcome.BLOCKED:
-            return FailureClass.BLOCKED.value
-        for message in reversed(result.messages):
-            if not (message.is_final and message.is_error):
-                continue
-            hard_precondition = classify_hard_precondition(message.content, message.data)
-            if hard_precondition is not None:
-                return hard_precondition.value
-        hard_precondition = classify_hard_precondition(
-            " ".join(part for part in (result.error, result.final_message) if part)
-        )
-        if hard_precondition is not None:
-            return hard_precondition.value
-        verdict = result.atomic_verifier_verdict
-        if verdict is not None and verdict.failure_class:
-            return verdict.failure_class
-        if result.error == _STALL_SENTINEL:
-            return FailureClass.STALL.value
-        return None
-
-    def _is_retryable_failure(self, result: ACExecutionResult | BaseException) -> bool:
-        """Whether a batch result is a runnable non-stall AC failure (PR-V V3)."""
-        if not isinstance(result, ACExecutionResult):
-            return False
-        if result.success or result.is_blocked or result.is_invalid:
-            return False
-        # Stall retries are handled separately by the atomic leaf loop.
-        return result.error != _STALL_SENTINEL
+        return retry_hints.failure_class_for_result(result)
 
     def _build_ac_retry_prompt(
         self,
@@ -10663,67 +10635,20 @@ Respond with either ATOMIC or the structured JSON object only.
         spec: AcceptanceCriterionSpec | None = None,
     ) -> str:
         """Build the enriched retry prompt section for a re-dispatched AC (PR-V V3/V4)."""
-        parts: list[str] = []
         failure_class = self._failure_class_for_result(result)
-        if failure_class:
-            parts.append(f"### Prior failure classification\n{failure_class}")
-        if result.error != _STALL_SENTINEL:
-            hint = build_assertion_safe_retry_hint(
-                outcome=(
-                    result.verify_gate_outcome
-                    if isinstance(result.verify_gate_outcome, _VerifyGateOutcome)
-                    else None
-                ),
-                result=result,
-                manifest=manifest,
-                spec=spec,
-            )
-            if hint:
-                parts.append(hint)
-        if is_final_attempt:
-            from ouroboros.resilience.lateral import (
-                build_lateral_change_of_approach_directive,
-            )
-
-            parts.append(
-                build_lateral_change_of_approach_directive(
-                    problem_context=ac_content,
-                    current_approach=(
-                        "The previous attempts failed as described above; the same "
-                        "approach is not working."
-                    ),
-                    failed_attempts=(failure_class,) if failure_class else (),
-                )
-            )
-        return "\n\n".join(parts)
-
-    async def _load_ac_retry_manifest(
-        self,
-        *,
-        ac_index: int,
-        execution_id: str,
-    ) -> EvidenceManifest | None:
-        """Best-effort read-only evidence load for retry coaching."""
-
-        try:
-            identity = build_ac_runtime_identity(
-                ac_index,
-                execution_context_id=execution_id,
-                retry_attempt=0,
-            )
-            return await load_ac_evidence_manifest(
-                self._event_store,
-                ac_id=identity.ac_id,
-                execution_id=execution_id,
-            )
-        except Exception as exc:
-            log.warning(
-                "parallel_executor.ac.retry_hint_manifest_unavailable",
-                ac_index=ac_index,
-                execution_id=execution_id,
-                error=str(exc),
-            )
-            return None
+        return retry_hints.build_ac_retry_prompt(
+            failure_class=failure_class,
+            outcome=(
+                result.verify_gate_outcome
+                if isinstance(result.verify_gate_outcome, _VerifyGateOutcome)
+                else None
+            ),
+            result=result,
+            ac_content=ac_content,
+            is_final_attempt=is_final_attempt,
+            manifest=manifest,
+            spec=spec,
+        )
 
     async def _run_batch_with_verify_and_retry(
         self,
@@ -10817,7 +10742,7 @@ Respond with either ATOMIC or the structured JSON object only.
                         execution_id=execution_id,
                         retry_termination_reason=(
                             "budget_exhausted"
-                            if self._is_retryable_failure(result)
+                            if retry_hints.is_retryable_failure(result)
                             else "not_retryable"
                         ),
                     )
@@ -10829,7 +10754,7 @@ Respond with either ATOMIC or the structured JSON object only.
         pending = {
             ac_idx
             for position, ac_idx in enumerate(batch_executable)
-            if self._is_retryable_failure(results[position])
+            if retry_hints.is_retryable_failure(results[position])
         }
         last_failure_class = {
             ac_idx: self._failure_class_for_result(results[position_by_idx[ac_idx]])
@@ -10849,7 +10774,8 @@ Respond with either ATOMIC or the structured JSON object only.
                 is_final = ac_retry_attempts[ac_idx] >= self._ac_retry_attempts
                 prior = results[position_by_idx[ac_idx]]
                 if isinstance(prior, ACExecutionResult):
-                    manifest = await self._load_ac_retry_manifest(
+                    manifest = await retry_hints.load_ac_retry_manifest(
+                        self._event_store,
                         ac_index=ac_idx,
                         execution_id=execution_id,
                     )
@@ -10903,7 +10829,7 @@ Respond with either ATOMIC or the structured JSON object only.
                         execution_id=execution_id,
                     )
 
-                if not self._is_retryable_failure(gated):
+                if not retry_hints.is_retryable_failure(gated):
                     if (
                         isinstance(gated, ACExecutionResult)
                         and not gated.success
@@ -11045,7 +10971,7 @@ Respond with either ATOMIC or the structured JSON object only.
                     retry_termination_reason=retry_termination_reasons.get(
                         ac_idx,
                         "budget_exhausted"
-                        if self._is_retryable_failure(result)
+                        if retry_hints.is_retryable_failure(result)
                         else "not_retryable",
                     ),
                 )
@@ -11624,7 +11550,8 @@ Respond with either ATOMIC or the structured JSON object only.
                     ac_retry_attempts[ac_idx] += 1
                     next_pending.add(ac_idx)
                     next_overrides[ac_idx] = decision.selected
-                    manifest = await self._load_ac_retry_manifest(
+                    manifest = await retry_hints.load_ac_retry_manifest(
+                        self._event_store,
                         ac_index=ac_idx,
                         execution_id=execution_id,
                     )
@@ -11707,12 +11634,13 @@ Respond with either ATOMIC or the structured JSON object only.
 
         while (
             allow_root_redispatch
-            and self._is_retryable_failure(current)
+            and retry_hints.is_retryable_failure(current)
             and ac_retry_attempts[ac_idx] < self._ac_retry_attempts
         ):
             ac_retry_attempts[ac_idx] += 1
             is_final = ac_retry_attempts[ac_idx] >= self._ac_retry_attempts
-            manifest = await self._load_ac_retry_manifest(
+            manifest = await retry_hints.load_ac_retry_manifest(
+                self._event_store,
                 ac_index=ac_idx,
                 execution_id=execution_id,
             )
@@ -11758,7 +11686,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 session_id=session_id,
                 execution_id=execution_id,
             )
-            if not self._is_retryable_failure(current):
+            if not retry_hints.is_retryable_failure(current):
                 termination_reason = "not_retryable"
                 break
 
