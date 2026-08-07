@@ -78,7 +78,18 @@ class SynapseSignalHandler:
             name=_TOOL_NAME,
             description=(
                 "Send one audited Ouroboros Synapse intent signal to an exact active "
-                "AC session attempt. A queued result does not mean the signal was applied."
+                "AC session attempt. Shipped runtime adapters currently advertise and apply "
+                "only inform and after_turn; direct requested modes require the selected exact "
+                "attempt to advertise that mode. redirect and replace remain reserved, "
+                "capability-gated advertised/effective modes; no shipped adapter currently "
+                "advertises or applies either directly. redirect nevertheless remains a valid "
+                "requested mode on one explicit fallback path: fallback_mode=after_turn must "
+                "be present and that exact attempt must advertise after_turn, which becomes "
+                "the effective queued mode. All other unsupported requests fail closed, "
+                "including redirect without that fallback and replace without its "
+                "capabilities. Query ouroboros_session_signal_targets for the selected exact "
+                "attempt's live capabilities before sending. A queued result does not mean "
+                "the signal was applied."
             ),
             parameters=(
                 MCPToolParameter(
@@ -99,13 +110,24 @@ class SynapseSignalHandler:
                 MCPToolParameter(
                     name="mode",
                     type=ToolInputType.STRING,
-                    description="Requested Synapse delivery mode.",
+                    description=(
+                        "Requested Synapse delivery mode. For the direct path, the exact attempt "
+                        "must advertise the requested mode in ouroboros_session_signal_targets. "
+                        "For the sole fallback path, redirect may be requested while omitted "
+                        "from discovery only when fallback_mode=after_turn is explicit and that "
+                        "attempt advertises after_turn; its effective mode is then after_turn. "
+                        "Shipped adapters currently advertise/effect only inform and after_turn; "
+                        "redirect and replace remain reserved advertised/effective capabilities."
+                    ),
                     enum=tuple(mode.value for mode in SessionSignalMode),
                 ),
                 MCPToolParameter(
                     name="fallback_mode",
                     type=ToolInputType.STRING,
-                    description="Explicit redirect fallback; only after_turn is valid.",
+                    description=(
+                        "Explicit redirect-only fallback; after_turn is the sole valid value "
+                        "and is used only when the selected attempt advertises after_turn."
+                    ),
                     required=False,
                     enum=(SessionSignalMode.AFTER_TURN.value,),
                 ),
@@ -269,9 +291,15 @@ class SynapseTargetsHandler:
         return MCPToolDefinition(
             name="ouroboros_session_signal_targets",
             description=(
-                "List exact active AC attempts for one execution before sending a "
-                "Synapse signal. The main session should match the user's intent to "
-                "AC content and ask only when multiple candidates remain genuinely ambiguous."
+                "List exact active AC attempts and each attempt's live SessionSignal "
+                "capabilities for one execution before sending a signal. Advertised modes are "
+                "valid direct requested modes for that exact attempt. One explicit fallback "
+                "path is also valid: redirect may be requested while omitted from discovery "
+                "only with fallback_mode=after_turn when after_turn is advertised, and the "
+                "effective queued mode is after_turn. Shipped adapters currently do not "
+                "advertise or effect redirect or replace; other unsupported requests fail "
+                "closed. Match the user's intent to AC content, and ask only when multiple "
+                "candidates remain genuinely ambiguous."
             ),
             parameters=(
                 MCPToolParameter(
