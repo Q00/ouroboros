@@ -101,6 +101,16 @@ class TestFirstTimePrefs:
 
 
 class TestDetectKeywords:
+    def test_ooo_run_routes_to_non_reserved_claude_skill_name(self):
+        result = detect_keywords("ooo run seed.yaml")
+        assert result["detected"] is True
+        assert result["suggested_skill"] == "/ouroboros:ouroboros-run"
+
+    def test_ooo_execute_alias_routes_to_non_reserved_claude_skill_name(self):
+        result = detect_keywords("ooo execute seed.yaml")
+        assert result["detected"] is True
+        assert result["suggested_skill"] == "/ouroboros:ouroboros-run"
+
     def test_ooo_qa_detected(self):
         result = detect_keywords("ooo qa src/main.py")
         assert result["detected"] is True

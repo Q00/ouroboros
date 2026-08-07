@@ -98,7 +98,7 @@ Ouroboros is a **requirement crystallization engine** for AI workflows. It trans
 | `/ouroboros:welcome` | First-touch welcome experience | Plugin |
 | `/ouroboros:interview` | Socratic requirement clarification | Plugin |
 | `/ouroboros:seed` | Generate validated seed spec | Plugin |
-| `/ouroboros:run` | Execute seed workflow | MCP |
+| `/ouroboros:ouroboros-run` | Execute seed workflow | MCP |
 | `/ouroboros:evaluate` | 3-stage verification | MCP |
 | `/ouroboros:unstuck` | 5 lateral thinking personas | Plugin |
 | `/ouroboros:ouroboros-status` | Session status + drift check | MCP |

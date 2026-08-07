@@ -113,7 +113,7 @@ When Ouroboros is already in control and `runtime_backend: pi` is selected,
 
 The Pi runtime calls the shared `SkillInterceptor` at the top of
 `PiRuntime.execute_task()`. If the prompt is an Ouroboros skill shortcut such
-as `ooo interview` or `/ouroboros:run`, the interceptor resolves the skill and
+as `ooo interview` or `/ouroboros:ouroboros-run`, the interceptor resolves the skill and
 invokes the matching Ouroboros MCP handler. Pi does not receive that prompt as
 ordinary chat input.
 

@@ -47,7 +47,10 @@ KEYWORD_MAP = [
     {"patterns": ["ooo auto"], "skill": "/ouroboros:auto"},
     {"patterns": ["ooo interview", "ooo socratic"], "skill": "/ouroboros:interview"},
     {"patterns": ["ooo seed", "ooo crystallize"], "skill": "/ouroboros:seed"},
-    {"patterns": ["ooo run", "ooo execute"], "skill": "/ouroboros:run"},
+    {
+        "patterns": ["ooo run", "ooo execute"],
+        "skill": "/ouroboros:ouroboros-run",
+    },
     {"patterns": ["ooo eval", "ooo evaluate"], "skill": "/ouroboros:evaluate"},
     {"patterns": ["ooo evolve"], "skill": "/ouroboros:evolve"},
     {"patterns": ["ooo stuck", "ooo unstuck", "ooo lateral"], "skill": "/ouroboros:unstuck"},
@@ -98,7 +101,7 @@ KEYWORD_MAP = [
     },
     {
         "patterns": ["ouroboros run", "execute seed", "run seed", "run workflow"],
-        "skill": "/ouroboros:run",
+        "skill": "/ouroboros:ouroboros-run",
     },
     {
         "patterns": ["evaluate this", "3-stage check", "three-stage", "verify execution"],
