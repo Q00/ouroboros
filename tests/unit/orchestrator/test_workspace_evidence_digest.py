@@ -34,6 +34,16 @@ def test_undeclared_evidence_output_does_not_invalidate_prior_workspace_digest(
     assert before == after
 
 
+def test_root_file_named_evidence_remains_workspace_visible(tmp_path: Path) -> None:
+    _init_repo(tmp_path)
+    before = ParallelACExecutor._workspace_content_digest(str(tmp_path))
+
+    (tmp_path / "evidence").write_text("not a directory\n", encoding="utf-8")
+    after = ParallelACExecutor._workspace_content_digest(str(tmp_path))
+
+    assert before != after
+
+
 def test_tracked_evidence_output_remains_workspace_visible(tmp_path: Path) -> None:
     _init_repo(tmp_path)
     evidence = tmp_path / "evidence"

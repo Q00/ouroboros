@@ -60,8 +60,10 @@ from ouroboros.harness.projection import (
 )
 from ouroboros.harness.projection_event_semantics import (
     canonical_ac_id,
+    current_attempt_identity,
     extract_tool_call_id,
     resolve_tool_terminal_ok,
+    scoped_attempt_identity,
     scoped_tool_call_identity,
 )
 
@@ -374,11 +376,14 @@ class ProjectionBuilder:
     def _match_idless_tool_start(self, returned_event: BaseEvent) -> str | None:
         """Return the oldest compatible producer start for an id-less result."""
         returned_ac_id = _extract_ac_id(returned_event)
+        returned_attempt_id = _extract_attempt_id(returned_event)
         returned_tool_name = _extract_tool_name(returned_event)
         for call_identity, start_event in self._tool_started.items():
             if call_identity not in self._idless_tool_started:
                 continue
             if _extract_ac_id(start_event) != returned_ac_id:
+                continue
+            if _extract_attempt_id(start_event) != returned_attempt_id:
                 continue
             started_tool_name = _extract_tool_name(start_event)
             if (
@@ -394,7 +399,7 @@ class ProjectionBuilder:
         ac_id = _extract_ac_id(event)
         if ac_id is None:
             return
-        call_id = ac_id
+        call_id = _current_evidence_identity(event)
         key = _slot_key("evidence", call_id)
         verifier_ran = _safe_bool(event.data.get("verifier_ran"))
         if verifier_ran is False:
@@ -505,6 +510,23 @@ def _extract_ac_id(event: BaseEvent | None) -> str | None:
     if event is None or not isinstance(event.data, dict):
         return None
     return canonical_ac_id(event.data)
+
+
+def _extract_attempt_id(event: BaseEvent | None) -> str | None:
+    if event is None or not isinstance(event.data, dict):
+        return None
+    return current_attempt_identity(event.data)
+
+
+def _current_evidence_identity(event: BaseEvent) -> str:
+    if not isinstance(event.data, dict):
+        msg = "current evidence event requires mapping data"
+        raise ValueError(msg)
+    identity = scoped_attempt_identity(event.data)
+    if identity is None:
+        msg = "current evidence event requires AC identity"
+        raise ValueError(msg)
+    return identity
 
 
 def _tool_call_identity(event: BaseEvent, call_id: str) -> str:
@@ -761,7 +783,7 @@ def _artifact_from_event(
         return None
     typed_evidence = event.type == _TYPED_EVIDENCE_OBSERVED
     call_id = (
-        _extract_ac_id(event)
+        _current_evidence_identity(event)
         if typed_evidence
         else _extract_call_id(event) or _optional_str(event.data.get("step_call_id"))
     )

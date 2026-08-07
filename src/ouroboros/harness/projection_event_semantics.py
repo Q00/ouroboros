@@ -45,10 +45,47 @@ def extract_tool_call_id(data: Mapping[str, Any]) -> str | None:
     return None
 
 
+def current_attempt_identity(data: Mapping[str, Any]) -> str | None:
+    """Return the narrowest durable identity for one current AC attempt.
+
+    Current producers persist both a globally unique session_attempt_id
+    and a zero-based retry_attempt. Prefer the former so distinct runtime
+    nodes under the same root AC cannot collide; retain the retry index as a
+    compatibility fallback for partially populated historical events.
+    """
+    session_attempt_id = data.get("session_attempt_id")
+    if isinstance(session_attempt_id, str) and session_attempt_id.strip():
+        return f"session:{session_attempt_id.strip()}"
+
+    retry_attempt = data.get("retry_attempt")
+    if (
+        isinstance(retry_attempt, int)
+        and not isinstance(retry_attempt, bool)
+        and retry_attempt >= 0
+    ):
+        return f"retry:{retry_attempt}"
+    return None
+
+
+def scoped_current_identity(data: Mapping[str, Any], local_identity: str) -> str:
+    """Scope a provider/read-model-local identity by public AC and attempt."""
+    attempt_scope = scoped_attempt_identity(data)
+    return f"{attempt_scope}\0{local_identity}" if attempt_scope else local_identity
+
+
+def scoped_attempt_identity(data: Mapping[str, Any]) -> str | None:
+    """Return canonical public AC plus private attempt scope when available."""
+    scopes = tuple(
+        value
+        for value in (canonical_ac_id(data), current_attempt_identity(data))
+        if value is not None
+    )
+    return "\0".join(scopes) if scopes else None
+
+
 def scoped_tool_call_identity(data: Mapping[str, Any], call_id: str) -> str:
-    """Scope a provider-local call ID to its canonical AC when possible."""
-    ac_id = canonical_ac_id(data)
-    return f"{ac_id}\0{call_id}" if ac_id is not None else call_id
+    """Scope a provider-local call ID to its canonical AC and attempt."""
+    return scoped_current_identity(data, call_id)
 
 
 def resolve_tool_terminal_ok(data: Mapping[str, Any]) -> bool | None:
@@ -92,7 +129,10 @@ def _tool_envelopes(data: Mapping[str, Any]) -> tuple[Mapping[str, Any], ...]:
 
 __all__ = [
     "canonical_ac_id",
+    "current_attempt_identity",
     "extract_tool_call_id",
     "resolve_tool_terminal_ok",
+    "scoped_attempt_identity",
+    "scoped_current_identity",
     "scoped_tool_call_identity",
 ]

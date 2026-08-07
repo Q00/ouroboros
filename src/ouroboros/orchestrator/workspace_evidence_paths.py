@@ -29,12 +29,18 @@ def is_untracked_top_level_evidence_path(
     relative: Path,
     *,
     tracked_paths: frozenset[Path] | None,
+    is_directory: bool,
 ) -> bool:
-    """Return True only when Git proves a top-level evidence path untracked."""
+    """Return True only for an untracked evidence directory or descendant.
+
+    A regular file or symlink named exactly evidence is not contained by that
+    directory and must remain visible to workspace trust gates.
+    """
     return bool(
         tracked_paths is not None
         and relative.parts
         and relative.parts[0] == "evidence"
+        and (len(relative.parts) > 1 or is_directory)
         and not any(
             relative == tracked or relative in tracked.parents or tracked in relative.parents
             for tracked in tracked_paths

@@ -69,6 +69,18 @@ def test_prepare_task_workspace_rejects_untracked_files_outside_evidence(
         prepare_task_workspace(repo, "orch_test", allow_untracked_evidence=True)
 
 
+def test_prepare_task_workspace_rejects_root_file_named_evidence(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    (repo / "evidence").write_text("not a directory\n", encoding="utf-8")
+
+    with (
+        patch("ouroboros.core.worktree._worktree_root", return_value=tmp_path / "worktrees"),
+        pytest.raises(WorktreeError, match="dirty checkout"),
+    ):
+        prepare_task_workspace(repo, "orch_test", allow_untracked_evidence=True)
+
+
 def test_prepare_task_workspace_accepts_non_utf8_untracked_evidence(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     _init_repo(repo)

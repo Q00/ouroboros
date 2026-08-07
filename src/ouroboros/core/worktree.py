@@ -232,7 +232,7 @@ def _ensure_only_untracked_evidence(repo_root: Path) -> None:
         )
     untracked = _run_git_bytes(["ls-files", "--others", "--exclude-standard", "-z"], repo_root)
     if any(
-        not path.parts or path.parts[0] != "evidence"
+        len(path.parts) < 2 or path.parts[0] != "evidence"
         for value in untracked.split(b"\0")
         if value
         for path in (Path(os.fsdecode(value)),)

@@ -5152,6 +5152,7 @@ class ParallelACExecutor:
                     is_untracked_top_level_evidence_path(
                         relative,
                         tracked_paths=tracked_paths,
+                        is_directory=path.is_dir() and not path.is_symlink(),
                     )
                     or any(
                         part in _WORKSPACE_FINGERPRINT_IGNORED_DIRECTORIES

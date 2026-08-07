@@ -209,6 +209,112 @@ def test_current_tool_call_ids_are_scoped_by_canonical_ac_identity() -> None:
     }
 
 
+def test_current_tool_and_evidence_steps_preserve_retry_attempt_history() -> None:
+    started = datetime(2026, 8, 6, tzinfo=UTC)
+    events: list[BaseEvent] = []
+    for retry_attempt in range(2):
+        attempt_metadata = {
+            "ac_id": "exec_current_runtime_0",
+            "root_ac_index": 0,
+            "retry_attempt": retry_attempt,
+            "session_attempt_id": f"exec_current_runtime_0_attempt_{retry_attempt + 1}",
+        }
+        events.extend(
+            (
+                _event(
+                    f"evt_start_attempt_{retry_attempt}",
+                    "execution.tool.started",
+                    started + timedelta(seconds=retry_attempt * 3),
+                    {
+                        **attempt_metadata,
+                        "tool_call_id": "item_0",
+                        "tool_name": "Bash",
+                    },
+                ),
+                _event(
+                    f"evt_complete_attempt_{retry_attempt}",
+                    "execution.tool.completed",
+                    started + timedelta(seconds=retry_attempt * 3 + 1),
+                    {
+                        **attempt_metadata,
+                        "tool_call_id": "item_0",
+                        "tool_name": "Bash",
+                        "is_error": retry_attempt == 0,
+                    },
+                ),
+                _event(
+                    f"evt_evidence_attempt_{retry_attempt}",
+                    "execution.ac.typed_evidence.observed",
+                    started + timedelta(seconds=retry_attempt * 3 + 2),
+                    {
+                        **attempt_metadata,
+                        "typed_evidence_valid": retry_attempt == 1,
+                        "verifier_ran": False,
+                        "verifier_passed": False,
+                    },
+                ),
+            )
+        )
+
+    result = build_projection(tuple(events), seed_id="seed_current")
+
+    assert len(result.steps) == 4
+    assert {step.ac_id for step in result.steps} == {"ac_0"}
+    assert len({step.step_id for step in result.steps}) == 4
+    tool_steps = [step for step in result.steps if step.kind is StepKind.SHELL_COMMAND]
+    assert {step.source_event_ids for step in tool_steps} == {
+        ("evt_start_attempt_0", "evt_complete_attempt_0"),
+        ("evt_start_attempt_1", "evt_complete_attempt_1"),
+    }
+    assert {step.source_event_ids: step.ok for step in tool_steps} == {
+        ("evt_start_attempt_0", "evt_complete_attempt_0"): False,
+        ("evt_start_attempt_1", "evt_complete_attempt_1"): True,
+    }
+    evidence_steps = [step for step in result.steps if step.kind is StepKind.EVIDENCE_SUBMISSION]
+    assert {step.source_event_ids: step.ok for step in evidence_steps} == {
+        ("evt_evidence_attempt_0",): False,
+        ("evt_evidence_attempt_1",): True,
+    }
+    assert len(result.artifacts) == 2
+    evidence_step_ids = {step.step_id for step in evidence_steps}
+    assert {artifact.step_id for artifact in result.artifacts} == evidence_step_ids
+    assert all(step.artifact_ids for step in evidence_steps)
+
+
+def test_current_retry_index_scopes_calls_when_session_attempt_id_is_missing() -> None:
+    started = datetime(2026, 8, 6, tzinfo=UTC)
+    events: list[BaseEvent] = []
+    for retry_attempt in range(2):
+        for event_type, suffix in (
+            ("execution.tool.started", "start"),
+            ("execution.tool.completed", "complete"),
+        ):
+            events.append(
+                _event(
+                    f"evt_{suffix}_{retry_attempt}",
+                    event_type,
+                    started + timedelta(seconds=retry_attempt, milliseconds=len(events)),
+                    {
+                        "ac_id": "runtime_ac0",
+                        "root_ac_index": 0,
+                        "retry_attempt": retry_attempt,
+                        "tool_call_id": "item_0",
+                        "tool_name": "Bash",
+                        "is_error": False,
+                    },
+                )
+            )
+
+    result = build_projection(tuple(events), seed_id="seed_current")
+
+    assert len(result.steps) == 2
+    assert len({step.step_id for step in result.steps}) == 2
+    assert {step.source_event_ids for step in result.steps} == {
+        ("evt_start_0", "evt_complete_0"),
+        ("evt_start_1", "evt_complete_1"),
+    }
+
+
 def test_current_idless_tool_events_use_ac_scoped_fifo_fallback() -> None:
     started = datetime(2026, 8, 6, tzinfo=UTC)
     events = (
