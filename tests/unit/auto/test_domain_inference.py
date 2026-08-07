@@ -1435,3 +1435,54 @@ def test_artifact_denial_covers_browser_wording_in_outputs() -> None:
     result = derive_domain_from_ledger(ledger)
     assert result.is_single
     assert result.single is TaskClass.CLI
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
+        "Build a web app, not a frontend SDK",
+        "Build a web app, not a browser extension for login pages",
+    ],
+)
+def test_denied_head_noun_scopes_dominance(goal: str) -> None:
+    """R16 probe: dominance keys on the artifact actually denied (SDK,
+    extension) — modifiers and PP objects inside the denied phrase do not
+    make it an app denial."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value="Login forms and settings panels")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP
+
+
+def test_prefix_style_web_app_denial_dominates() -> None:
+    """R16 probe: "non-web-app" is an artifact-type denial too."""
+    ledger = _bare_ledger("Build a non-web-app CLI for browser audits")
+    _seed_section(
+        ledger,
+        "outputs",
+        value="Login forms and settings panels listed in the report, printed to stdout",
+    )
+    _seed_section(ledger, "runtime_context", value="Local shell / terminal")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.CLI
+
+
+def test_game_subject_matter_does_not_erase_requested_web_app() -> None:
+    """R16 probe: "for game leaderboards" is the app's subject, not its
+    artifact shape."""
+    ledger = _bare_ledger("Build a web app for game leaderboards")
+    _seed_section(ledger, "outputs", value="Leaderboard page with a filters panel")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP
+
+
+def test_co_produced_api_does_not_erase_requested_web_app() -> None:
+    """R16 probe: a co-produced public API must not suppress the explicit
+    browser UI — web_app survives, alone or in honest ambiguity."""
+    ledger = _bare_ledger("Build a web application with a public API")
+    _seed_section(ledger, "outputs", value="Login forms and settings panels")
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP in result.classes

@@ -192,30 +192,64 @@ def _strip_negated_signals(text: str, signal_fragment: str) -> str:
 # "single page" alone is document vocabulary ("a single page PDF report");
 # only the full single-page-application phrase denotes browser context.
 _WEB_APP_GOAL_SIGNAL_FRAGMENT = (
-    r"(?:browser|web\s?app(?:lication)?|frontend|front[\s\-]end|"
+    r"(?:browser|web[\s\-]?app(?:lication)?|frontend|front[\s\-]end|"
     r"single[\s\-]page\s+app(?:lication)?)"
 )
 _WEB_APP_GOAL_SIGNAL_RE = re.compile(rf"\b{_WEB_APP_GOAL_SIGNAL_FRAGMENT}\b")
 
 
-# Nouns that make a denied browser-family span a denial of the produced
-# app/UI artifact itself ("not a web app", "not a browser UI") rather than
-# of some other browser-family thing ("not a browser extension", "not a
-# browser game") — only the former dominates the goal (#1813 R15).
-_WEB_APP_ARTIFACT_NOUN_RE = re.compile(
-    r"\b(?:web\s?app(?:lication)?s?|webapps?|apps?|applications?|uis?|"
-    r"interfaces?|pages?|frontends?|front[\s\-]ends?|sites?|websites?)\b"
+_ARTIFACT_HEAD_NOUNS = frozenset(
+    {
+        "app",
+        "apps",
+        "application",
+        "applications",
+        "webapp",
+        "webapps",
+        "ui",
+        "uis",
+        "interface",
+        "interfaces",
+        "page",
+        "pages",
+        "frontend",
+        "frontends",
+        "site",
+        "sites",
+        "website",
+        "websites",
+    }
 )
+_DENIED_PP_TAIL_RE = re.compile(r"\b(?:for|about)\b.*$")
+_DENIED_PIECE_SPLIT_RE = re.compile(r"\s*(?:,|/|\bor\b|\band\b|\bnor\b)\s*")
+
+
+_SUBJECT_CLAUSE_RE = re.compile(r"\b(?:for|with|about)\s+[^,.;]*")
 
 
 def _goal_denies_web_app_artifact(goal_text: str) -> bool:
-    """True when a non-flip denial span rejects the app/UI artifact type."""
-    negated, _prefix = _negation_res_for(_WEB_APP_GOAL_SIGNAL_FRAGMENT)
-    return any(
-        _WEB_APP_ARTIFACT_NOUN_RE.search(match.group(0))
+    """True when a denial rejects the app/UI artifact type itself.
+
+    Dominance keys on the head noun of each denied alternative (#1813
+    R16): "not a web app" and "non-web-app" deny the artifact, while
+    "not a frontend SDK" denies an SDK and "not a browser extension for
+    login pages" denies an extension — the modifier "frontend" and the
+    PP object "pages" are not what is being denied.
+    """
+    negated, prefix = _negation_res_for(_WEB_APP_GOAL_SIGNAL_FRAGMENT)
+    spans = [
+        match.group(0)
         for match in negated.finditer(goal_text)
         if not _AFFIRMATIVE_FLIP_RE.search(match.group("path") or "")
-    )
+    ]
+    spans.extend(match.group(0) for match in prefix.finditer(goal_text))
+    for span in spans:
+        core = _DENIED_PP_TAIL_RE.sub(" ", span)
+        for piece in _DENIED_PIECE_SPLIT_RE.split(core):
+            words = re.findall(r"[a-z]+", piece)
+            if words and words[-1] in _ARTIFACT_HEAD_NOUNS:
+                return True
+    return False
 
 
 def _goal_has_unnegated_web_app_signal(goal_text: str) -> bool:
@@ -608,10 +642,18 @@ def _matches_web_app(ledger: SeedDraftLedger) -> bool:
     # accessibility report") cannot revive the denied classification.
     if _goal_denies_web_app_artifact(_goal_text(ledger)):
         return False
-    intent_text = _MANIFEST_TOKEN_RE.sub(" ", outputs + " " + _library_visible_goal(ledger))
+    # Subject/secondary clauses in the goal ("for game leaderboards",
+    # "with a public API") name what the app is about or co-produces, not
+    # its artifact shape — they do not surrender ownership (#1813 R16).
+    ownership_goal = _SUBJECT_CLAUSE_RE.sub(" ", _goal_text(ledger))
+    intent_text = _MANIFEST_TOKEN_RE.sub(
+        " ",
+        outputs + " " + _strip_negated_signals(ownership_goal, _LIBRARY_INTENT_FRAGMENT),
+    )
     if _LIBRARY_INTENT_RE.search(intent_text):
         return False
-    if _GAME_DOMAIN_RE.search(_game_visible_text(ledger)):
+    game_text = outputs + " " + _strip_negated_signals(ownership_goal, _GAME_GOAL_SIGNAL_FRAGMENT)
+    if _GAME_DOMAIN_RE.search(game_text):
         return False
     # Two-signal AND (the webhook shape): browser context plus UI
     # composition. Goal-side browser mentions route through the negation
