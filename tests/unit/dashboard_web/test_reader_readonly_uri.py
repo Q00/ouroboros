@@ -5,9 +5,14 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
 
+import pytest
+
+from ouroboros.dashboard_web import reader as reader_module
 from ouroboros.dashboard_web.reader import (
     _RELEVANT_EVENT_TYPES,
+    EventTail,
     _connect_readonly,
     list_recent_executions,
 )
@@ -259,6 +264,172 @@ def test_list_recent_executions_nested_running_checkpoint_resumes_paused_run(tmp
     assert runs[0]["last_row"] == 3
 
 
+def test_list_recent_executions_later_running_suppresses_inferred_completion(tmp_path) -> None:
+    db = tmp_path / "post-ac-running.db"
+    _make_events_db(
+        db,
+        [
+            (
+                "orch_post_ac",
+                "orchestrator.session.started",
+                {"execution_id": "exec_post_ac", "seed_goal": "Finish synthesis"},
+            ),
+            (
+                "orch_post_ac",
+                "workflow.progress.updated",
+                {
+                    "execution_id": "exec_post_ac",
+                    "acceptance_criteria": [{"node_id": "ac_done", "status": "completed"}],
+                },
+            ),
+            (
+                "orch_post_ac",
+                "orchestrator.progress.updated",
+                {
+                    "execution_id": "exec_post_ac",
+                    "progress": {"runtime_status": "running"},
+                },
+            ),
+        ],
+    )
+
+    runs = list_recent_executions(db)
+
+    assert len(runs) == 1
+    assert runs[0]["status"] == "running"
+    assert runs[0]["completed_count"] == 1
+    assert runs[0]["last_row"] == 3
+
+
+def test_list_recent_executions_newer_ac_state_supersedes_older_running(tmp_path) -> None:
+    db = tmp_path / "running-before-settled.db"
+    _make_events_db(
+        db,
+        [
+            (
+                "orch_settled",
+                "orchestrator.session.started",
+                {"execution_id": "exec_settled"},
+            ),
+            (
+                "orch_settled",
+                "orchestrator.progress.updated",
+                {
+                    "execution_id": "exec_settled",
+                    "progress": {"runtime_status": "running"},
+                },
+            ),
+            (
+                "orch_settled",
+                "workflow.progress.updated",
+                {
+                    "execution_id": "exec_settled",
+                    "acceptance_criteria": [{"node_id": "ac_done", "status": "completed"}],
+                },
+            ),
+        ],
+    )
+
+    runs = list_recent_executions(db)
+
+    assert len(runs) == 1
+    assert runs[0]["status"] == "completed"
+    assert runs[0]["last_row"] == 3
+
+
+def test_list_recent_executions_keeps_running_evidence_before_newer_turn_completion(
+    tmp_path,
+) -> None:
+    db = tmp_path / "running-before-turn-completed.db"
+    _make_events_db(
+        db,
+        [
+            (
+                "orch_turn",
+                "orchestrator.session.started",
+                {"execution_id": "exec_turn"},
+            ),
+            (
+                "orch_turn",
+                "workflow.progress.updated",
+                {
+                    "execution_id": "exec_turn",
+                    "acceptance_criteria": [{"node_id": "ac_done", "status": "completed"}],
+                },
+            ),
+            (
+                "orch_turn",
+                "orchestrator.progress.updated",
+                {
+                    "execution_id": "exec_turn",
+                    "progress": {"runtime_status": "running"},
+                },
+            ),
+            (
+                "orch_turn",
+                "orchestrator.progress.updated",
+                {
+                    "execution_id": "exec_turn",
+                    "progress": {"runtime_status": "completed"},
+                },
+            ),
+        ],
+    )
+
+    runs = list_recent_executions(db)
+
+    assert len(runs) == 1
+    assert runs[0]["status"] == "running"
+    assert runs[0]["last_row"] == 4
+
+
+@pytest.mark.parametrize(
+    ("terminal_event", "expected"),
+    [
+        ("orchestrator.session.completed", "completed"),
+        ("orchestrator.session.cancelled", "cancelled"),
+        ("orchestrator.session.failed", "failed"),
+    ],
+)
+def test_list_recent_executions_terminal_absorbs_running_on_both_sides(
+    tmp_path,
+    terminal_event: str,
+    expected: str,
+) -> None:
+    db = tmp_path / f"{expected}-absorbs-running.db"
+    _make_events_db(
+        db,
+        [
+            ("orch_terminal_running", "orchestrator.session.started", {"execution_id": "exec"}),
+            (
+                "orch_terminal_running",
+                "workflow.progress.updated",
+                {
+                    "execution_id": "exec",
+                    "acceptance_criteria": [{"node_id": "ac", "status": "completed"}],
+                },
+            ),
+            (
+                "orch_terminal_running",
+                "orchestrator.progress.updated",
+                {"execution_id": "exec", "progress": {"runtime_status": "running"}},
+            ),
+            ("orch_terminal_running", terminal_event, {"execution_id": "exec"}),
+            (
+                "orch_terminal_running",
+                "orchestrator.progress.updated",
+                {"execution_id": "exec", "progress": {"runtime_status": "running"}},
+            ),
+        ],
+    )
+
+    runs = list_recent_executions(db)
+
+    assert len(runs) == 1
+    assert runs[0]["status"] == expected
+    assert runs[0]["last_row"] == 5
+
+
 def test_list_recent_executions_true_terminal_absorbs_later_resume_noise(tmp_path) -> None:
     db = tmp_path / "terminal-absorbs.db"
     _make_events_db(
@@ -462,3 +633,130 @@ def test_list_recent_executions_unknown_ac_status_stays_running(tmp_path) -> Non
     assert len(runs) == 1
     assert runs[0]["status"] == "running"
     assert runs[0]["completed_count"] == 0
+
+
+def test_malformed_unrelated_json_is_ignored_by_picker_and_tail(tmp_path) -> None:
+    db = tmp_path / "malformed.db"
+    conn = sqlite3.connect(db)
+    try:
+        conn.execute("CREATE TABLE events (aggregate_id TEXT, event_type TEXT, payload TEXT)")
+        conn.executemany(
+            "INSERT INTO events (aggregate_id, event_type, payload) VALUES (?, ?, ?)",
+            [
+                (
+                    "orch_good",
+                    "orchestrator.session.started",
+                    json.dumps({"execution_id": "exec_good", "seed_goal": "Still visible"}),
+                ),
+                ("foreign", "orchestrator.progress.updated", "{not-json"),
+                ("foreign-node", "execution.node.updated", "{also-not-json"),
+                ("orch_good", "orchestrator.progress.updated", "{local-not-json"),
+            ],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    runs = list_recent_executions(db)
+    tail = EventTail(db, "exec_good")
+
+    assert [(run["execution_id"], run["status"]) for run in runs] == [("exec_good", "running")]
+    assert [event["event_type"] for event in tail.fetch_new()] == ["orchestrator.session.started"]
+    assert tail.fetch_new() == []
+
+
+def test_picker_progress_queries_are_aggregate_bounded_at_scale(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    db = tmp_path / "progress-scale.db"
+    conn = sqlite3.connect(db)
+    try:
+        conn.execute("CREATE TABLE events (aggregate_id TEXT, event_type TEXT, payload TEXT)")
+        conn.execute("CREATE INDEX ix_events_aggregate_id ON events (aggregate_id)")
+        conn.execute("CREATE INDEX ix_events_event_type ON events (event_type)")
+        foreign_payload = json.dumps(
+            {"execution_id": "exec_foreign", "progress": {"runtime_status": "running"}}
+        )
+        conn.executemany(
+            "INSERT INTO events (aggregate_id, event_type, payload) VALUES (?, ?, ?)",
+            (
+                (f"orch_foreign_{index % 100}", "orchestrator.progress.updated", foreign_payload)
+                for index in range(100_000)
+            ),
+        )
+        conn.executemany(
+            "INSERT INTO events (aggregate_id, event_type, payload) VALUES (?, ?, ?)",
+            [
+                (
+                    f"orch_{index}",
+                    "orchestrator.session.started",
+                    json.dumps({"execution_id": f"exec_{index}"}),
+                )
+                for index in range(10)
+            ],
+        )
+        conn.commit()
+        conn.execute("ANALYZE")
+        plan = conn.execute(
+            "EXPLAIN QUERY PLAN SELECT rowid FROM events "
+            "WHERE aggregate_id = ? AND event_type = 'orchestrator.progress.updated' "
+            "ORDER BY rowid DESC LIMIT 1",
+            ["orch_9"],
+        ).fetchall()
+    finally:
+        conn.close()
+
+    statements: list[str] = []
+    original_connect = reader_module._connect_readonly
+
+    def traced_connect(db_path):
+        traced = original_connect(db_path)
+        traced.set_trace_callback(statements.append)
+        return traced
+
+    monkeypatch.setattr(reader_module, "_connect_readonly", traced_connect)
+    started = time.perf_counter()
+    runs = list_recent_executions(db, limit=10)
+    picker_elapsed = time.perf_counter() - started
+    picker_statements = list(statements)
+
+    statements.clear()
+    started = time.perf_counter()
+    tail_events = EventTail(db, "exec_9").fetch_new()
+    tail_elapsed = time.perf_counter() - started
+    tail_statements = list(statements)
+
+    progress_queries = [
+        statement
+        for statement in picker_statements
+        if "event_type = 'orchestrator.progress.updated'" in statement
+    ]
+    direct_tail_query = next(
+        statement
+        for statement in tail_statements
+        if "event_type IN" in statement and "aggregate_id =" in statement
+    )
+    linked_tail_query = next(
+        statement
+        for statement in tail_statements
+        if "event_type = 'execution.node.created'" in statement
+    )
+    conn = sqlite3.connect(db)
+    try:
+        direct_tail_plan = conn.execute("EXPLAIN QUERY PLAN " + direct_tail_query).fetchall()
+        linked_tail_plan = conn.execute("EXPLAIN QUERY PLAN " + linked_tail_query).fetchall()
+    finally:
+        conn.close()
+
+    assert len(runs) == 10
+    assert [event["event_type"] for event in tail_events] == ["orchestrator.session.started"]
+    assert picker_elapsed < 0.5
+    assert tail_elapsed < 0.5
+    assert len(progress_queries) == 20
+    assert all("aggregate_id =" in statement for statement in progress_queries)
+    assert any("ix_events_aggregate_id" in str(row[3]) for row in plan)
+    assert all("TEMP B-TREE" not in str(row[3]) for row in plan)
+    assert any("ix_events_aggregate_id" in str(row[3]) for row in direct_tail_plan)
+    assert any("ix_events_event_type" in str(row[3]) for row in linked_tail_plan)
+    assert all("TEMP B-TREE" not in str(row[3]) for row in direct_tail_plan + linked_tail_plan)

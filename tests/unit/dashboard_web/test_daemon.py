@@ -267,3 +267,48 @@ class TestPendingRun:
             assert server.idle_seconds() < 1.0
         finally:
             server.shutdown()
+
+    def test_runs_api_ignores_malformed_progress_and_refreshes_watchdog(self, tmp_path) -> None:
+        from ouroboros.dashboard_web.server import serve_background
+
+        db = tmp_path / "malformed-progress.db"
+        conn = sqlite3.connect(db)
+        try:
+            conn.execute("CREATE TABLE events (aggregate_id TEXT, event_type TEXT, payload TEXT)")
+            conn.executemany(
+                "INSERT INTO events (aggregate_id, event_type, payload) VALUES (?, ?, ?)",
+                [
+                    (
+                        "orch_good",
+                        "orchestrator.session.started",
+                        json.dumps({"execution_id": "exec_good", "seed_goal": "Visible"}),
+                    ),
+                    ("foreign", "orchestrator.progress.updated", "{not-json"),
+                ],
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        server, _thread = serve_background(
+            db_path=str(db), host="127.0.0.1", port=daemon._free_port("127.0.0.1")
+        )
+        try:
+            touch_completed = threading.Event()
+            original_touch = server.touch
+
+            def synchronized_touch() -> None:
+                original_touch()
+                touch_completed.set()
+
+            server.touch = synchronized_touch  # type: ignore[method-assign]
+            server.last_activity = time.monotonic() - daemon.DEFAULT_IDLE_SHUTDOWN_SEC - 1
+
+            status, body = self._get(server.server_address[1], "/api/runs")
+
+            assert status == 200
+            assert json.loads(body)["runs"][0]["execution_id"] == "exec_good"
+            assert touch_completed.wait(timeout=2.0)
+            assert server.idle_seconds() < 1.0
+        finally:
+            server.shutdown()
