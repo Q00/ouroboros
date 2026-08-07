@@ -614,6 +614,7 @@ _UI_ARTIFACT_TAIL = (
     r"library|libraries|sdks?|packages?|validation|reference|"
     r"documentation|docs|examples?|objects?|fixtures?|locators?|models?|"
     r"errors?|failures?|warnings?|issues?|bugs?|urls?|findings?|counts?|"
+    r"screenshots?|snapshots?|"
     r"listed|returned|printed|logged|reported|exported|emitted|dumped|"
     r"and\s+(?:[\w\-]+\s+){0,3}?"
     r"(?:listed|returned|printed|logged|reported|exported|emitted|dumped)))"
@@ -726,7 +727,8 @@ _MANIPULATED_TARGET_RE = re.compile(
     r"\b(?:opens?|opening|submits?|submitting|clicks?|clicking|fills?|filling|"
     r"screenshots?|captures?|capturing|crawls?|crawling|scrapes?|scraping|"
     r"visits?|visiting|navigates?|navigating|audits?|auditing|inspects?|"
-    r"inspecting|aggregat\w*|pars\w*|extracts?|extracting|scans?|scanning)\s+"
+    r"inspecting|aggregat\w*|pars\w*|extracts?|extracting|scans?|scanning|"
+    r"verif\w*|checks?|checking|asserts?|asserting)\s+"
     r"(?:an?\s+|the\s+)?(?:[\w\-'’]+\s+){0,2}?"
     r"(?:forms?|pages?|panels?|buttons?|screens?|dialogs?|modals?|menus?)\b"
 )
@@ -754,6 +756,13 @@ def _matches_web_app(ledger: SeedDraftLedger) -> bool:
     # accessibility report") cannot revive the denied classification.
     if _goal_denies_web_app_artifact(_goal_text(ledger)):
         return False
+    # An affirmative web-product request owns its output description
+    # (#1813 R27): when the goal's artifact head is a web app, the
+    # standardized outputs describe that requested product, and no widget
+    # catalog is required. Non-web-product goals (extensions, crawlers,
+    # test suites, CLIs) still need genuine UI-composition evidence.
+    if _goal_artifact_head_is_web_app(_goal_text(ledger)):
+        return True
     # Subject/secondary clauses in the goal ("for game leaderboards",
     # "with a public API") name what the app is about or co-produces, not
     # its artifact shape — they do not surrender ownership (#1813 R16).

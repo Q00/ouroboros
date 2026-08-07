@@ -1927,3 +1927,37 @@ def test_layout_and_homepage_vocabulary_is_ui_composition(goal: str, outputs: st
     result = derive_domain_from_ledger(ledger)
     assert result.is_single
     assert result.single is TaskClass.WEB_APP
+
+
+def test_extension_screenshot_content_is_not_produced_ui() -> None:
+    """R27 probe: screenshots of login pages are inspected content."""
+    ledger = _bare_ledger("Build a browser extension for account security")
+    _seed_section(ledger, "outputs", value="Login page screenshots with risk scores")
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes
+
+
+def test_verification_target_is_not_produced_ui() -> None:
+    """R27 probe: a test suite verifying a page does not produce it."""
+    ledger = _bare_ledger("Build a browser automation test suite")
+    _seed_section(ledger, "outputs", value="Verifies the login page is displayed correctly")
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes
+
+
+@pytest.mark.parametrize(
+    ("goal", "outputs"),
+    [
+        ("Build an ecommerce web app", "Product catalog with shopping cart and checkout flow"),
+        ("Build a blog website", "Article list, comments, tags, and pagination"),
+        ("Build a web app for photo sharing", "Photo gallery, uploads, likes, and comments"),
+    ],
+)
+def test_requested_web_product_owns_its_output_description(goal: str, outputs: str) -> None:
+    """R27 probe: an affirmative web-app artifact request owns outputs
+    that describe the requested product — no widget catalog required."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value=outputs)
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP
