@@ -8,7 +8,7 @@ Hook: PostToolUse (Write|Edit)
 Output: Advisory message if active session detected
 
 This is a lightweight check - actual drift measurement
-requires calling /ouroboros:status with the MCP server.
+requires calling /ouroboros:ouroboros-status with the MCP server.
 """
 
 from pathlib import Path
@@ -67,7 +67,7 @@ def main() -> None:
     if session["active"]:
         print(
             f"Ouroboros session active ({session['session_file']}). "
-            f"Use /ouroboros:status to check drift."
+            f"Use /ouroboros:ouroboros-status to check drift."
         )
     else:
         print("Success")

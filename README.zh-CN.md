@@ -223,6 +223,12 @@ Ralph Cycle 3: evolve_step(lineage)       -> Gen 3 -> action=CONVERGED
 | `ooo brownfield`     | *(经由 skill)*                                                    | 扫描并管理 brownfield 仓库 / worktree 默认值                  |
 | `ooo publish`        | *(skill / 运行时；底层用 `gh` CLI)*                               | 把 Seed 发布成 GitHub Epic / Task issue，用于团队协作         |
 
+> Claude Code 将 `/run`、`/status`、`/help` 和 `/config` 保留为内置命令。
+> 直接调用 Ouroboros skill 时请使用 `/ouroboros:ouroboros-run`、
+> `/ouroboros:ouroboros-status`、`/ouroboros:ouroboros-help` 和
+> `/ouroboros:ouroboros-config`；原有的 `ooo run`、`ooo status`、
+> `ooo help` 和 `ooo config` 文本入口仍然受支持。
+
 > 不是所有技能都有直接对应的 CLI 子命令。其中一些（`evaluate`、`evolve`、`unstuck`、`ralph`、`publish`）通过 agent 技能、运行时规则或 MCP 工具暴露，而不是 `ouroboros <subcommand>` 这种 shell 命令。
 > `/resume` 是 Claude Code 内置的会话选择器保留指令；要恢复 Ouroboros 进行中的会话，请使用 `ooo resume-session`。
 
