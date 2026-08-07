@@ -437,7 +437,9 @@ def _matches_cli(ledger: SeedDraftLedger) -> bool:
     # #1264 blocker), and naked token matching still classifies "not a
     # CLI" / "no CLI" goals as CLI (second-round PR #1264 blocker), so
     # both classes route through `_goal_has_unnegated_cli_signal`.
-    goal_text = _goal_text(ledger)
+    # Consumed tooling ("using a command-line image converter") is a
+    # dependency, not the produced artifact (#1813 R28).
+    goal_text = _CONSUMED_DEPENDENCY_RE.sub(" ", _goal_text(ledger))
     goal_signal = _goal_has_unnegated_cli_signal(goal_text)
     # Each of the three signals is independently sufficient once the
     # ledger-evidence gate above is satisfied. The earlier form
@@ -472,7 +474,7 @@ def _matches_web_service(ledger: SeedDraftLedger) -> bool:
     if not (outputs or goal):
         return False
     api_signal = _any_of(
-        outputs + " " + goal,
+        outputs + " " + _CONSUMED_DEPENDENCY_RE.sub(" ", goal),
         (
             "rest endpoint",
             "rest api",
@@ -658,6 +660,9 @@ _WEB_APP_ARTIFACT_PHRASE_RE = re.compile(
 )
 
 
+_INFINITIVE_TARGET_RE = re.compile(r"\bto\s+(?!be\b)[\w\-]+\s+[^,.;]*")
+
+
 def _goal_artifact_head_is_web_app(goal_text: str) -> bool:
     """Ownership follows the goal's artifact head (#1813 R21): in
     "package delivery tracking web app" or "SDK documentation web app"
@@ -667,6 +672,9 @@ def _goal_artifact_head_is_web_app(goal_text: str) -> bool:
     if _goal_denies_web_app_artifact(goal_text):
         return False
     core = _CONSUMED_DEPENDENCY_RE.sub(" ", _SUBJECT_CLAUSE_RE.sub(" ", goal_text))
+    # "to test/analyze/deploy a web app" names the target of another
+    # artifact, not the produced one (#1813 R28).
+    core = _INFINITIVE_TARGET_RE.sub(" ", core)
     web_matches = list(_WEB_APP_ARTIFACT_PHRASE_RE.finditer(core))
     if not web_matches:
         return False
@@ -810,7 +818,8 @@ def _matches_web_app(ledger: SeedDraftLedger) -> bool:
 
 _CONSUMED_DEPENDENCY_RE = re.compile(
     r"\b(?:to|from|against|via|using|through|consumes?|consuming|calls?|calling)\s+"
-    r"(?:an?\s+|the\s+)?(?:[\w\-'’]+\s+){0,2}?(?:public\s+api|apis?|sdks?)\b"
+    r"(?!be\b)(?:an?\s+|the\s+)?(?:[\w\-'’]+\s+){0,2}?"
+    r"(?:public\s+api|rest\s+apis?|apis?|sdks?|clis?|command[\s\-]line|web\s+services?)\b"
 )
 
 

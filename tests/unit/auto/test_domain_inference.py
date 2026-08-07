@@ -1961,3 +1961,45 @@ def test_requested_web_product_owns_its_output_description(goal: str, outputs: s
     result = derive_domain_from_ledger(ledger)
     assert result.is_single
     assert result.single is TaskClass.WEB_APP
+
+
+def test_infinitive_target_web_app_is_not_the_produced_artifact() -> None:
+    """R28 probe: "to test a web app" names a target, not the product."""
+    ledger = _bare_ledger("Build a CLI to test a web app")
+    _seed_section(ledger, "outputs", value="Deterministic stdout and exit code 0")
+    _seed_section(ledger, "runtime_context", value="Local shell / terminal")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.CLI
+
+
+def test_infinitive_target_web_app_pipeline_variant() -> None:
+    ledger = _bare_ledger("Build a data pipeline to analyze a web app")
+    _seed_section(ledger, "inputs", value="Dataset of access logs")
+    _seed_section(ledger, "outputs", value="Aggregated output dataset in Parquet")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.DATA_PIPELINE
+
+
+@pytest.mark.parametrize(
+    ("goal", "outputs"),
+    [
+        (
+            "Build a web app using a command-line image converter",
+            "Photo gallery, uploads, and comments",
+        ),
+        (
+            "Build a web app using an existing REST API",
+            "Product catalog with shopping cart and checkout flow",
+        ),
+    ],
+)
+def test_consumed_tooling_and_services_stay_dependencies(goal: str, outputs: str) -> None:
+    """R28 probe: the produced-versus-consumed rule is shared across
+    classes — consumed CLIs and REST APIs are dependencies."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value=outputs)
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP
