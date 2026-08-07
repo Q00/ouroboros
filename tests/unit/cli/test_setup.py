@@ -2079,7 +2079,8 @@ class TestCodexSetup:
 
         assert (config_dir / "config.yaml").exists()
         assert credentials_path.exists()
-        assert credentials_path.stat().st_mode & 0o777 == 0o600
+        if os.name != "nt":
+            assert credentials_path.stat().st_mode & 0o777 == 0o600
 
     def test_setup_codex_rolls_back_fresh_config_when_credentials_write_fails(
         self, tmp_path: Path
@@ -2777,6 +2778,45 @@ class TestCodexSetup:
             setup_cmd._atomic_write_text_if_current_matches(target, "setup edit\n", expected)
 
         assert target.read_text(encoding="utf-8") == "operator edit\n"
+        assert not list(tmp_path.glob(".config.yaml.*.tmp"))
+
+    def test_atomic_setup_write_tracks_actual_mode_without_fchmod(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Windows writes must snapshot the mode the filesystem actually kept."""
+        target = tmp_path / "credentials.yaml"
+        monkeypatch.delattr(setup_cmd.os, "fchmod", raising=False)
+        monkeypatch.setattr(setup_cmd.os, "chmod", lambda *_args, **_kwargs: None)
+
+        snapshot = setup_cmd._atomic_write_text(target, "token: secret\n", mode=0o644)
+
+        assert target.read_text(encoding="utf-8") == "token: secret\n"
+        assert target.read_bytes() == b"token: secret\n"
+        assert snapshot == setup_cmd._snapshot_path(target)
+        assert setup_cmd._require_path_snapshot(target, snapshot) == snapshot
+        assert not list(tmp_path.glob(".credentials.yaml.*.tmp"))
+
+    def test_atomic_setup_write_metadata_failure_preserves_previous_generation(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A reported metadata failure must happen before replacement commits."""
+        target = tmp_path / "config.yaml"
+        target.write_text("operator: original\n", encoding="utf-8")
+
+        with (
+            patch(
+                "pathlib.Path.lstat",
+                autospec=True,
+                side_effect=PermissionError("transient metadata failure"),
+            ),
+            pytest.raises(PermissionError, match="transient metadata failure"),
+        ):
+            setup_cmd._atomic_write_text(target, "setup: new\n", mode=0o644)
+
+        assert target.read_text(encoding="utf-8") == "operator: original\n"
         assert not list(tmp_path.glob(".config.yaml.*.tmp"))
 
     def test_setup_codex_refuses_concurrent_codex_edit_before_profile_retirement(

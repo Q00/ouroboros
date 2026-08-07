@@ -400,6 +400,10 @@ def _raise_rename_error(source_path: Path, target_path: Path) -> None:
 
 def _rename_noreplace(source_path: Path, target_path: Path) -> None:
     """Atomically rename without replacing a target created by another writer."""
+    if os.name == "nt":
+        os.rename(source_path, target_path)
+        return
+
     source_bytes = os.fsencode(source_path)
     target_bytes = os.fsencode(target_path)
     libc = ctypes.CDLL(None, use_errno=True)
@@ -424,10 +428,6 @@ def _rename_noreplace(source_path: Path, target_path: Path) -> None:
         rename_exclusive.restype = ctypes.c_int
         if rename_exclusive(-100, source_bytes, -100, target_bytes, 0x00000001) != 0:
             _raise_rename_error(source_path, target_path)
-        return
-
-    if os.name == "nt":
-        os.rename(source_path, target_path)
         return
 
     if source_path.is_dir() and not source_path.is_symlink():
