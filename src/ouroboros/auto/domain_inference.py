@@ -164,7 +164,9 @@ def _negation_res_for(signal_fragment: str) -> tuple[re.Pattern[str], re.Pattern
     denied = rf"{signal_fragment}(?:[\s\-](?!(?:or|and|nor|but|rather|instead)\b)\w+)*"
     negated = re.compile(
         rf"\b(?P<cue>{_NEGATION_CUE_FRAGMENT})"
-        r"(?P<path>(?:\s+\S+){0,7}?)"
+        # Path tokens cannot carry sentence punctuation (#1813 R26): a
+        # denial in one clause must not consume the next clause's artifact.
+        r"(?P<path>(?:\s+[^\s.;!?]+){0,7}?)"
         rf"\s+{denied}"
         rf"(?:(?:\s*,\s*(?:or\s+|and\s+|nor\s+)?|\s+(?:or|and|nor)\s+|\s*/\s*)"
         rf"(?:an?\s+|the\s+)?{denied})*\b"
@@ -633,7 +635,8 @@ _UI_COMPOSITION_RE = re.compile(
     r"users?\s+can\s+(?:add|edit|delete|create|update|remove|drag|click|"
     r"filter|search|browse|submit|save|cancel|manage|view)|"
     r"drag[\s\-]and[\s\-]drop|"
-    r"navigation\s+bars?|data\s+tables?"
+    r"navigation\s+bars?|data\s+tables?|"
+    r"homepages?|responsive\s+layouts?|accessible\s+controls?"
     r")\b"
 )
 
@@ -719,6 +722,16 @@ def _library_visible_goal(ledger: SeedDraftLedger) -> str:
     return _strip_negated_signals(goal, _LIBRARY_INTENT_FRAGMENT)
 
 
+_MANIPULATED_TARGET_RE = re.compile(
+    r"\b(?:opens?|opening|submits?|submitting|clicks?|clicking|fills?|filling|"
+    r"screenshots?|captures?|capturing|crawls?|crawling|scrapes?|scraping|"
+    r"visits?|visiting|navigates?|navigating|audits?|auditing|inspects?|"
+    r"inspecting|aggregat\w*|pars\w*|extracts?|extracting|scans?|scanning)\s+"
+    r"(?:an?\s+|the\s+)?(?:[\w\-'’]+\s+){0,2}?"
+    r"(?:forms?|pages?|panels?|buttons?|screens?|dialogs?|modals?|menus?)\b"
+)
+
+
 _UI_SIGNAL_STRIP_FRAGMENT = (
     r"(?:user\s+interface|forms?|panels?|buttons?|dashboards?|pages?|"
     r"screens?|dialogs?|modals?|menus?|toolbars?|sidebars?)"
@@ -777,14 +790,18 @@ def _matches_web_app(ledger: SeedDraftLedger) -> bool:
     # pages") and domain references ("browser form parsing"), neither of
     # which asserts that the artifact HAS a UI.
     # Output-side UI denials count too (#1813 R21): "No user interface"
-    # is an explicit statement that the artifact has none.
+    # is an explicit statement that the artifact has none. Widgets of an
+    # inspected or manipulated TARGET ("submits login forms",
+    # "screenshots login pages", "aggregated login page metadata") are
+    # not UI the artifact produces (#1813 R26).
     ui_text = _strip_negated_signals(outputs, _UI_SIGNAL_STRIP_FRAGMENT)
+    ui_text = _MANIPULATED_TARGET_RE.sub(" ", ui_text)
     return _ledger_has_browser_context(ledger) and bool(_UI_COMPOSITION_RE.search(ui_text))
 
 
 _CONSUMED_DEPENDENCY_RE = re.compile(
     r"\b(?:to|from|against|via|using|through|consumes?|consuming|calls?|calling)\s+"
-    r"(?:an?\s+|the\s+)?(?:[\w\-]+\s+){0,2}?(?:public\s+api|apis?|sdks?)\b"
+    r"(?:an?\s+|the\s+)?(?:[\w\-'’]+\s+){0,2}?(?:public\s+api|apis?|sdks?)\b"
 )
 
 

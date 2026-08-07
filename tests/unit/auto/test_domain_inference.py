@@ -1844,3 +1844,86 @@ def test_coordinated_report_data_is_not_ui_composition() -> None:
     result = derive_domain_from_ledger(ledger)
     assert result.is_single
     assert result.single is TaskClass.CLI
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
+        "No desktop app; build a web app for accounts",
+        "No native UI. Create a website for accounts",
+    ],
+)
+def test_negation_does_not_cross_sentence_punctuation(goal: str) -> None:
+    """R26 probe: a denial in one clause cannot consume the affirmative
+    artifact of the next."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value="Login form with settings panel")
+    _seed_section(ledger, "runtime_context", value="Browser runtime")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP
+
+
+@pytest.mark.parametrize(
+    ("goal", "outputs"),
+    [
+        ("Build a web app using Stripe's SDK", "A login form with an account settings panel"),
+        (
+            "Build a website for payments",
+            "Checkout form using Stripe's SDK and a confirmation page",
+        ),
+    ],
+)
+def test_possessive_dependencies_are_not_library_ownership(goal: str, outputs: str) -> None:
+    """R26 probe: possessive vendor dependencies are consumed, not
+    produced."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value=outputs)
+    _seed_section(ledger, "runtime_context", value="Browser")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP
+
+
+def test_automation_target_widgets_are_not_produced_ui() -> None:
+    """R26 probe: a CLI that manipulates login forms in a browser does
+    not produce those forms."""
+    ledger = _bare_ledger("Build a shell CLI for browser logins")
+    _seed_section(ledger, "outputs", value="Opens a browser and submits login forms")
+    _seed_section(ledger, "runtime_context", value="Local shell / terminal")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.CLI
+
+
+def test_crawler_screenshot_targets_are_not_produced_ui() -> None:
+    ledger = _bare_ledger("Build a browser crawler")
+    _seed_section(ledger, "outputs", value="Screenshots login pages and saves them to disk")
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes
+
+
+def test_pipeline_widget_metadata_is_not_produced_ui() -> None:
+    ledger = _bare_ledger("Build a data pipeline for browser analytics")
+    _seed_section(ledger, "inputs", value="Dataset of crawled sessions")
+    _seed_section(ledger, "outputs", value="Aggregated login page metadata in Parquet")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.DATA_PIPELINE
+
+
+@pytest.mark.parametrize(
+    ("goal", "outputs"),
+    [
+        ("Build a React web app", "Responsive layout with accessible controls and routing"),
+        ("Build a website", "Homepage with responsive layout and accessibility"),
+    ],
+)
+def test_layout_and_homepage_vocabulary_is_ui_composition(goal: str, outputs: str) -> None:
+    """R26 probe: routine layout/control vocabulary is affirmative web-app
+    composition."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value=outputs)
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP
