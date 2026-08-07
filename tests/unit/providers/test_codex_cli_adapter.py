@@ -305,6 +305,132 @@ class TestCodexCliLLMAdapter:
 
         assert "--sandbox" in command
         assert "read-only" in command
+        assert "mcp_servers.ouroboros.enabled=false" not in command
+
+    @pytest.mark.parametrize(
+        "transport",
+        ('command = "ouroboros"', 'url = "http://127.0.0.1:8765/mcp"'),
+    )
+    def test_strict_child_disables_only_configured_ouroboros_mcp(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        transport: str,
+    ) -> None:
+        """Strict isolation is a transient override and leaves other MCP state intact."""
+        codex_home = tmp_path / "codex-home"
+        codex_home.mkdir()
+        config_path = codex_home / "config.toml"
+        original = (
+            f"[mcp_servers.ouroboros]\n{transport}\n\n"
+            '[mcp_servers.other]\ncommand = "other-server"\n'
+        )
+        config_path.write_text(original, encoding="utf-8")
+        monkeypatch.setenv("CODEX_HOME", str(codex_home))
+        adapter = CodexCliLLMAdapter(cli_path="codex", strict_mcp_config=True)
+
+        command = adapter._build_command(
+            output_last_message_path="/tmp/out.txt",
+            output_schema_path=None,
+            model=None,
+        )
+
+        assert "mcp_servers.ouroboros.enabled=false" in command
+        assert "mcp_servers.other.enabled=false" not in command
+        assert config_path.read_text(encoding="utf-8") == original
+
+    @pytest.mark.parametrize(
+        ("runtime_profile", "task_profile", "profile_name"),
+        (
+            (None, "custom-task", "custom-task"),
+            ("worker", "ignored-task", "ouroboros-worker"),
+        ),
+    )
+    def test_strict_child_reads_effective_profile_v2_mcp_transport(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        runtime_profile: str | None,
+        task_profile: str,
+        profile_name: str,
+    ) -> None:
+        """The profile selected by the command participates in strict isolation."""
+        codex_home = tmp_path / "codex-home"
+        codex_home.mkdir()
+        (codex_home / f"{profile_name}.config.toml").write_text(
+            '[mcp_servers.ouroboros]\ncommand = "ouroboros"\n',
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("CODEX_HOME", str(codex_home))
+        adapter = CodexCliLLMAdapter(
+            cli_path="codex",
+            runtime_profile=runtime_profile,
+            strict_mcp_config=True,
+        )
+
+        command = adapter._build_command(
+            output_last_message_path="/tmp/out.txt",
+            output_schema_path=None,
+            model=None,
+            profile=task_profile,
+        )
+
+        assert "mcp_servers.ouroboros.enabled=false" in command
+
+    @pytest.mark.parametrize(
+        "contents",
+        (
+            None,
+            "[mcp_servers.ouroboros\n",
+            '[mcp_servers.ouroboros]\ncommand = ""\n',
+            '[mcp_servers.ouroboros]\ncommand = "ouroboros"\nenabled = false\n',
+            '[mcp_servers.ouroboros]\ncommand = "ouroboros"\nenabled = "false"\n',
+        ),
+    )
+    def test_strict_child_does_not_synthesize_invalid_mcp_transport(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        contents: str | None,
+    ) -> None:
+        """Missing, malformed, empty, or disabled servers receive no override table."""
+        codex_home = tmp_path / "codex-home"
+        codex_home.mkdir()
+        if contents is not None:
+            (codex_home / "config.toml").write_text(contents, encoding="utf-8")
+        monkeypatch.setenv("CODEX_HOME", str(codex_home))
+        adapter = CodexCliLLMAdapter(cli_path="codex", strict_mcp_config=True)
+
+        command = adapter._build_command(
+            output_last_message_path="/tmp/out.txt",
+            output_schema_path=None,
+            model=None,
+        )
+
+        assert "mcp_servers.ouroboros.enabled=false" not in command
+
+    def test_non_strict_child_keeps_configured_ouroboros_mcp(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Ordinary Codex completion commands preserve the user's MCP configuration."""
+        codex_home = tmp_path / "codex-home"
+        codex_home.mkdir()
+        (codex_home / "config.toml").write_text(
+            '[mcp_servers.ouroboros]\ncommand = "ouroboros"\n',
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("CODEX_HOME", str(codex_home))
+        adapter = CodexCliLLMAdapter(cli_path="codex")
+
+        command = adapter._build_command(
+            output_last_message_path="/tmp/out.txt",
+            output_schema_path=None,
+            model=None,
+        )
+
+        assert "mcp_servers.ouroboros.enabled=false" not in command
 
     def test_build_command_forwards_valid_reasoning_effort(self) -> None:
         """Completion profiles retain their per-call Codex effort after setup migration."""

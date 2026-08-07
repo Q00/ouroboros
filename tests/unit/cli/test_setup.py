@@ -3707,7 +3707,7 @@ class TestCodexSetup:
         assert "Setup complete!" not in result.output
 
     def test_fresh_codex_setup_installs_every_role_effort_mapping(self, tmp_path: Path) -> None:
-        """Generated legacy defaults are not user pins that suppress Codex roles."""
+        """Fresh config is model-neutral while Codex role defaults stay effective."""
         config_dir = tmp_path / ".ouroboros"
         config_dir.mkdir()
 
@@ -3722,6 +3722,20 @@ class TestCodexSetup:
             setup_cmd._setup_codex("/usr/local/bin/codex")
 
         config_dict = yaml.safe_load((config_dir / "config.yaml").read_text(encoding="utf-8"))
+        assert "qa_model" not in config_dict["llm"]
+        assert "dependency_analysis_model" not in config_dict["llm"]
+        assert "ontology_analysis_model" not in config_dict["llm"]
+        assert "context_compression_model" not in config_dict["llm"]
+        assert "default_model" not in config_dict["clarification"]
+        assert "semantic_model" not in config_dict["evaluation"]
+        assert "assertion_extraction_model" not in config_dict["evaluation"]
+        assert "wonder_model" not in config_dict["resilience"]
+        assert "reflect_model" not in config_dict["resilience"]
+        assert "models" not in config_dict["consensus"]
+        assert "advocate_model" not in config_dict["consensus"]
+        assert "devil_model" not in config_dict["consensus"]
+        assert "judge_model" not in config_dict["consensus"]
+
         role_profiles = config_dict["llm_role_profiles"]
         assert role_profiles == setup_cmd._CODEX_DEFAULT_LLM_ROLE_PROFILES
         for profile_name in set(role_profiles.values()):
@@ -3729,6 +3743,19 @@ class TestCodexSetup:
                 "reasoning_effort"
             ]
             assert effort in {"low", "medium", "high", "xhigh"}
+
+        from ouroboros.config.loader import get_qa_model, load_config
+
+        loaded = load_config(config_dir / "config.yaml")
+        with patch("ouroboros.config.loader.load_config", return_value=loaded):
+            assert get_qa_model(backend="codex") == "default"
+        with patch("ouroboros.providers.profiles.load_config", return_value=loaded):
+            resolved = resolve_completion_profile(
+                CompletionConfig(model="default", role="qa"),
+                backend="codex",
+            )
+        assert resolved.config.model == "default"
+        assert resolved.config.reasoning_effort == "xhigh"
 
     def test_existing_default_config_installs_every_role_effort_mapping(self) -> None:
         """Serialized shipped defaults must not suppress Codex effort profiles."""
@@ -4062,6 +4089,31 @@ class TestCodexSetup:
         assert config_dict["llm"]["backend"] == "codex"
         assert config_dict["llm"]["qa_model"] == "claude-sonnet-4-20250514"
         assert config_dict["llm_role_profiles"]["qa"] == "frontier"
+
+    def test_setup_codex_preserves_existing_custom_consensus_roster(self, tmp_path: Path) -> None:
+        """A user-authored consensus roster remains a pin across Codex setup."""
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        custom_roster = ["vendor/alpha", "vendor/beta", "vendor/gamma"]
+        config_path.write_text(
+            yaml.safe_dump({"consensus": {"models": custom_roster}}, sort_keys=False),
+            encoding="utf-8",
+        )
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch("ouroboros.cli.commands.setup._install_codex_artifacts"),
+            patch("ouroboros.cli.commands.setup._register_codex_mcp_server"),
+            patch("ouroboros.cli.commands.setup._retire_codex_default_profiles"),
+            patch("ouroboros.cli.commands.setup._register_codex_worker_profile"),
+        ):
+            assert setup_cmd._setup_codex("/usr/local/bin/codex") is True
+
+        config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert config_dict["consensus"]["models"] == custom_roster
+        assert "consensus_vote" not in config_dict["llm_role_profiles"]
 
     def test_setup_codex_merges_codex_mapping_into_existing_profiles(self, tmp_path: Path) -> None:
         """Existing same-name profiles should be made safe before role mappings target them."""

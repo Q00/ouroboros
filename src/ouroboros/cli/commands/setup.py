@@ -2142,6 +2142,48 @@ def _has_explicit_codex_model_override(config_dict: dict, role: str) -> bool:
     return False
 
 
+def _neutralize_fresh_codex_model_defaults(config_dict: dict) -> None:
+    """Omit setup-owned model literals from a newly generated Codex config.
+
+    The default Pydantic model contains provider-specific literals so other
+    backends have useful defaults.  A fresh Codex setup knows those values are
+    setup-owned rather than user pins, so persisting them would make the shared
+    config claim that Claude/OpenRouter models are effective Codex choices.
+
+    Existing config never calls this helper: without provenance, current and
+    legacy shipped literals must remain reversible when users switch backends.
+    The backend-aware loader and Codex role profiles already classify those
+    recognized shipped values as implicit defaults.
+    """
+    visited: set[tuple[str, ...]] = set()
+    for overrides in _CODEX_ROLE_MODEL_OVERRIDE_DEFAULTS.values():
+        for path, shipped_default in overrides:
+            if path in visited:
+                continue
+            visited.add(path)
+
+            current: object = config_dict
+            for part in path[:-1]:
+                if not isinstance(current, dict):
+                    current = _MISSING
+                    break
+                current = current.get(part, _MISSING)
+            if not isinstance(current, dict):
+                continue
+
+            key = path[-1]
+            value = current.get(key, _MISSING)
+            if isinstance(shipped_default, str):
+                if isinstance(value, str) and value in recognized_shipped_defaults(shipped_default):
+                    current.pop(key, None)
+            elif (
+                isinstance(shipped_default, tuple)
+                and isinstance(value, (list, tuple))
+                and _is_shipped_default_roster(value, shipped_default)
+            ):
+                current.pop(key, None)
+
+
 def _install_codex_default_llm_profiles(
     config_dict: dict,
     *,
@@ -2725,6 +2767,9 @@ def _setup_codex(codex_path: str, *, mcp_mode: CodexMcpMode = "auto") -> bool:
 
         llm_config = _ensure_mapping_section(config_dict, "llm")
         llm_config["backend"] = "codex"
+
+        if fresh_config:
+            _neutralize_fresh_codex_model_defaults(config_dict)
 
         added_profiles, updated_profiles, added_role_profiles = _install_codex_default_llm_profiles(
             config_dict,

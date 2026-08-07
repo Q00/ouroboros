@@ -16,6 +16,7 @@ from pathlib import Path
 import re
 import subprocess
 import tempfile
+import tomllib
 from typing import Any
 
 import structlog
@@ -26,6 +27,7 @@ from ouroboros.codex.cli_policy import (
     build_codex_child_env,
     resolve_codex_cli_path,
 )
+from ouroboros.codex.home import resolve_codex_home
 from ouroboros.codex.runtime_profile import resolve_codex_profile
 from ouroboros.codex_permissions import (
     build_codex_exec_permission_args,
@@ -133,6 +135,7 @@ class CodexCliLLMAdapter(RuntimeStreamMixin):
         ephemeral: bool = True,
         timeout: float | None = None,
         runtime_profile: str | None = None,
+        strict_mcp_config: bool = False,
     ) -> None:
         self._cli_path = self._resolve_cli_path(cli_path)
         self._cwd = str(Path(cwd).expanduser()) if cwd is not None else os.getcwd()
@@ -144,6 +147,7 @@ class CodexCliLLMAdapter(RuntimeStreamMixin):
         self._ephemeral = ephemeral
         self._timeout = timeout if timeout and timeout > 0 else None
         self._runtime_profile = runtime_profile
+        self._strict_mcp_config = bool(strict_mcp_config)
         self._codex_profile = resolve_codex_profile(
             runtime_profile,
             logger=log,
@@ -161,6 +165,49 @@ class CodexCliLLMAdapter(RuntimeStreamMixin):
             default_mode="default",
             source=f"{self._log_namespace}.llm_adapter",
         )
+
+    @staticmethod
+    def _mapping_has_effective_ouroboros_mcp(config: object) -> bool:
+        """Return whether parsed Codex config declares a usable enabled transport."""
+        if not isinstance(config, dict):
+            return False
+        mcp_servers = config.get("mcp_servers")
+        if not isinstance(mcp_servers, dict):
+            return False
+        ouroboros = mcp_servers.get("ouroboros")
+        if not isinstance(ouroboros, dict):
+            return False
+
+        enabled = ouroboros.get("enabled", True)
+        if not isinstance(enabled, bool) or not enabled:
+            return False
+        return any(
+            isinstance(ouroboros.get(key), str) and bool(ouroboros[key].strip())
+            for key in ("command", "url")
+        )
+
+    @classmethod
+    def _config_file_has_effective_ouroboros_mcp(cls, path: Path) -> bool:
+        """Read one Codex config layer without turning malformed state into an override."""
+        try:
+            parsed = tomllib.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+            return False
+        return cls._mapping_has_effective_ouroboros_mcp(parsed)
+
+    def _has_effective_ouroboros_mcp(self, *, task_profile: str | None) -> bool:
+        """Inspect only config layers reachable by this exact Codex child command."""
+        codex_home = resolve_codex_home()
+        if self._config_file_has_effective_ouroboros_mcp(codex_home / "config.toml"):
+            return True
+
+        active_profile = self._codex_profile or task_profile
+        if not active_profile:
+            return False
+        profile_filename = f"{active_profile}.config.toml"
+        if Path(profile_filename).name != profile_filename:
+            return False
+        return self._config_file_has_effective_ouroboros_mcp(codex_home / profile_filename)
 
     def _get_configured_cli_path(self) -> str | None:
         """Resolve an explicit CLI path from config helpers when available."""
@@ -433,6 +480,9 @@ class CodexCliLLMAdapter(RuntimeStreamMixin):
         )
 
         command.extend(self._build_permission_args())
+
+        if self._strict_mcp_config and self._has_effective_ouroboros_mcp(task_profile=profile):
+            command.extend(["-c", "mcp_servers.ouroboros.enabled=false"])
 
         if self._ephemeral:
             command.append("--ephemeral")
