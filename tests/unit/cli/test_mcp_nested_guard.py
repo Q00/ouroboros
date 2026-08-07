@@ -76,3 +76,39 @@ def test_serve_defaults_to_port_8080_when_port_omitted(monkeypatch):
         None,
         None,
     )
+
+
+def test_public_claude_runtime_selects_cli_worker(monkeypatch):
+    """The public `claude` name must never select the SDK inside MCP 2."""
+    monkeypatch.delenv("_OUROBOROS_NESTED", raising=False)
+
+    mock_run_mcp_server = AsyncMock()
+    with patch(
+        "ouroboros.cli.commands.mcp._run_mcp_server",
+        new=mock_run_mcp_server,
+    ):
+        result = runner.invoke(app, ["serve", "--runtime", "claude"])
+
+    assert result.exit_code == 0
+    mock_run_mcp_server.assert_awaited_once_with(
+        "localhost",
+        8080,
+        "stdio",
+        None,
+        "claude_mcp",
+        None,
+    )
+
+
+def test_forced_sdk_mcp_mix_fails_before_process_state(monkeypatch):
+    monkeypatch.delenv("_OUROBOROS_NESTED", raising=False)
+
+    with patch(
+        "ouroboros.cli.commands.mcp.has_unsupported_claude_sdk_mcp_mix",
+        return_value=True,
+    ):
+        result = runner.invoke(app, ["serve"])
+
+    assert result.exit_code == 1
+    assert "Unsupported package profiles" in result.output
+    assert "_OUROBOROS_NESTED" not in os.environ

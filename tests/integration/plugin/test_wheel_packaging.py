@@ -14,6 +14,7 @@ from email.parser import Parser
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tomllib
 import zipfile
 
@@ -85,6 +86,18 @@ def test_built_wheel_preserves_packaging_contracts(tmp_path: Path) -> None:
         assert len(metadata_paths) == 1, f"expected one METADATA file, got {metadata_paths}"
         metadata = Parser().parsestr(archive.read(metadata_paths[0]).decode("utf-8"))
         requires_dist = metadata.get_all("Requires-Dist") or []
+        provided_extras = set(metadata.get_all("Provides-Extra") or [])
+
+    assert {"claude", "claude-cli", "claude-sdk", "mcp", "all"} <= provided_extras
+    sdk_requirements = [
+        requirement
+        for requirement in requires_dist
+        if requirement.startswith(("claude-agent-sdk", "anthropic"))
+    ]
+    assert len(sdk_requirements) == 2
+    assert all("extra == 'claude-sdk'" in requirement for requirement in sdk_requirements)
+    assert all("extra == 'claude'" not in requirement for requirement in sdk_requirements)
+    assert all("extra == 'all'" not in requirement for requirement in sdk_requirements)
 
     pyproject = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     litellm_requirement = pyproject["project"]["optional-dependencies"]["litellm"][0]
@@ -99,6 +112,61 @@ def test_built_wheel_preserves_packaging_contracts(tmp_path: Path) -> None:
             "python_version < '3.14'" in requirement and f"extra == '{extra}'" in requirement
             for requirement in wheel_litellm_requirements
         ), f"wheel metadata lost the LiteLLM Python marker for [{extra}]"
+
+    supported_profiles = (
+        "claude",
+        "claude-cli",
+        "mcp",
+        "mcp,claude",
+        "mcp,claude-cli",
+        "claude-sdk",
+        "all",
+        "all,mcp",
+    )
+    for profiles in supported_profiles:
+        result = subprocess.run(
+            [
+                "uv",
+                "pip",
+                "install",
+                "--dry-run",
+                "--python",
+                sys.executable,
+                "--target",
+                str(tmp_path / f"target-{profiles.replace(',', '-')}"),
+                f"{wheels[0]}[{profiles}]",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=180,
+            check=False,
+        )
+        assert result.returncode == 0, (
+            f"wheel profile [{profiles}] must resolve: "
+            f"stdout={result.stdout!r} stderr={result.stderr!r}"
+        )
+
+    unsupported = subprocess.run(
+        [
+            "uv",
+            "pip",
+            "install",
+            "--dry-run",
+            "--python",
+            sys.executable,
+            "--target",
+            str(tmp_path / "target-mcp-claude-sdk"),
+            f"{wheels[0]}[mcp,claude-sdk]",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+    assert unsupported.returncode != 0
+    resolver_error = unsupported.stdout + unsupported.stderr
+    assert "claude-agent-sdk" in resolver_error
+    assert "mcp" in resolver_error
 
 
 @pytest.mark.skipif(

@@ -81,7 +81,7 @@ When the user invokes this skill:
 4. **Run update** (if user chose to update):
 
    a. **Update PyPI package** — detect the original install method and preserve
-   the standalone `[claude]` profile:
+   the explicit Claude CLI/SDK profile:
 
    Check which installer was used:
    ```bash
@@ -89,39 +89,45 @@ When the user invokes this skill:
    pipx list 2>/dev/null | grep -q ouroboros && echo "pipx"
    ```
 
-   > This skill runs inside Claude Code, so use `ouroboros-ai[claude]`.
-   > Never combine it with `[mcp]`: the current Claude Agent SDK embeds MCP 1.x,
-   > while the protocol server requires MCP 2. Supported MCP hosts launch their
-   > own isolated `ouroboros-ai[mcp]` process through `uvx` or `pipx run`.
+   Determine the configured profile. Legacy `runtime_backend: claude` means the
+   SDK profile; new CLI setup persists `claude_mcp`:
+   ```bash
+   CLAUDE_PROFILE=$(python3 -c "import pathlib,re; p=pathlib.Path.home()/'.ouroboros/config.yaml'; s=p.read_text() if p.exists() else ''; print('claude-sdk' if re.search(r'(?m)^  runtime_backend:\\s*claude\\s*(?:#.*)?$', s) else 'claude')" 2>/dev/null || echo claude)
+   ```
+
+   > `[claude]` is the dependency-free `[claude-cli]` compatibility alias and
+   > may be combined with `[mcp]`. `[claude-sdk]` embeds MCP 1.x and must remain
+   > in a separate environment. If setup/doctor reports an unsupported
+   > `[mcp]` + `[claude-sdk]` environment, stop instead of updating in place.
 
    - If installed via **uv tool** (most common with install.sh):
      ```bash
      # For pre-release targets:
-     uv tool install --upgrade --prerelease=allow 'ouroboros-ai[claude]'
+     uv tool install --upgrade --prerelease=allow "ouroboros-ai[$CLAUDE_PROFILE]"
      # For stable targets:
-     uv tool install --upgrade 'ouroboros-ai[claude]'
+     uv tool install --upgrade "ouroboros-ai[$CLAUDE_PROFILE]"
      ```
 
    - If installed via **pipx**:
      > `pipx upgrade` cannot add extras to an existing venv — use `install --force` to reinstall with extras.
      ```bash
      # For pre-release targets:
-     pipx install --force --pip-args='--pre' 'ouroboros-ai[claude]'
+     pipx install --force --pip-args='--pre' "ouroboros-ai[$CLAUDE_PROFILE]"
      # For stable targets:
-     pipx install --force 'ouroboros-ai[claude]'
+     pipx install --force "ouroboros-ai[$CLAUDE_PROFILE]"
      ```
 
    - If installed via **pip** (fallback):
      ```bash
      # For pre-release targets:
-     python3 -m pip install --upgrade --pre 'ouroboros-ai[claude]'
+     python3 -m pip install --upgrade --pre "ouroboros-ai[$CLAUDE_PROFILE]"
      # For stable targets:
-     python3 -m pip install --upgrade 'ouroboros-ai[claude]'
+     python3 -m pip install --upgrade "ouroboros-ai[$CLAUDE_PROFILE]"
      ```
 
-   > **Note**: `[claude]` is the complete standalone Claude SDK profile. MCP tools
-   > are intentionally not registered by this profile; configure a supported
-   > CLI-backed runtime separately when MCP 2 is required.
+   > **Note**: SDK users stay on `[claude-sdk]`; ordinary users converge to the
+   > MCP-compatible `[claude]` CLI profile instead of silently downgrading the
+   > Ouroboros package.
 
    b. **Update runtime integration**:
 
@@ -142,13 +148,13 @@ When the user invokes this skill:
 
    For Claude Code:
    ```bash
-   ouroboros setup --runtime claude --non-interactive
+   ouroboros setup --runtime "$CLAUDE_PROFILE" --non-interactive
    ```
 
    For Codex CLI (already handled by step b above — skip this step).
 
-   Standalone Claude setup leaves `~/.claude/mcp.json` untouched. It refreshes
-   the Claude runtime/LLM settings and preserves the MCP 1.x / MCP 2 boundary.
+   Claude setup leaves `~/.claude/mcp.json` untouched. It refreshes the selected
+   CLI/SDK runtime identity and preserves the MCP 1.x / MCP 2 boundary.
 
    d. **Verify and update CLAUDE.md version marker**:
    ```bash

@@ -43,6 +43,7 @@ from ouroboros.orchestrator.decomposition_limits import (
     MAX_DURABLE_DECOMPOSITION_DEPTH,
     validate_max_decomposition_depth,
 )
+from ouroboros.package_profiles import public_runtime_backend
 
 
 def _execution_model_status(runtime_backend: str | None, model: str | None) -> str:
@@ -1012,7 +1013,7 @@ def workflow(
                     debug,
                     parallel=not sequential,
                     no_qa=no_qa,
-                    runtime_backend=runtime.value if runtime else None,
+                    runtime_backend=public_runtime_backend(runtime.value if runtime else None),
                     max_decomposition_depth=max_decomposition_depth,
                     skip_completed=skip_completed,
                     project_dir=project_dir,

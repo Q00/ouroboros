@@ -523,6 +523,17 @@ class TestRuntimeHelperLookups:
         ):
             assert get_agent_runtime_backend() == "codex"
 
+    def test_get_agent_runtime_backend_defaults_to_cli_profile(self) -> None:
+        """A missing config must not re-select the optional SDK runtime."""
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch(
+                "ouroboros.config.loader.load_config",
+                side_effect=ConfigError("config unavailable"),
+            ),
+        ):
+            assert get_agent_runtime_backend() == "claude_mcp"
+
     def test_get_codex_cli_path_prefers_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Environment variable overrides config for Codex CLI path."""
         monkeypatch.setenv("OUROBOROS_CODEX_CLI_PATH", "~/bin/codex")
@@ -1471,6 +1482,24 @@ class TestLLMHelperLookups:
         ):
             assert get_llm_backend_for_role("reflect") == "codex"
             assert get_llm_backend_for_role("context_compression") == "codex"
+
+    def test_missing_config_does_not_use_cli_runtime_as_llm_backend(self) -> None:
+        """The default Claude CLI worker is runtime-only, not a provider name."""
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch(
+                "ouroboros.config.loader.load_config",
+                side_effect=ConfigError("config unavailable"),
+            ),
+        ):
+            assert (
+                get_llm_backend_for_role("interview", fallback_runtime_backend="claude_mcp")
+                == "claude_code"
+            )
+            assert (
+                get_llm_backend_for_stage("interview", fallback_runtime_backend="claude_mcp")
+                == "claude_code"
+            )
 
     def test_get_llm_backend_for_role_preserves_explicit_override(self) -> None:
         with patch.dict(os.environ, {}, clear=True):

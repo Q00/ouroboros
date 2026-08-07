@@ -714,7 +714,7 @@ def _effective_runtime_backend(data: dict) -> str:
     env_runtime = os.environ.get("OUROBOROS_RUNTIME", "").strip().lower()
     if env_runtime:
         return env_runtime
-    return str(data.get("orchestrator", {}).get("runtime_backend", "claude"))
+    return str(data.get("orchestrator", {}).get("runtime_backend", "claude_mcp"))
 
 
 def _check_runtime_backend(data: dict) -> dict[str, str]:

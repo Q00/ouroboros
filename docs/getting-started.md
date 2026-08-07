@@ -136,16 +136,17 @@ No Python, pip, or API key configuration needed -- Claude Code handles the runti
 
 ```bash
 pip install ouroboros-ai              # Base package (core engine)
-pip install 'ouroboros-ai[claude]'      # + standalone Claude SDK profile (MCP 1.x based)
+pip install 'ouroboros-ai[claude]'      # + Claude CLI profile (alias of [claude-cli])
+pip install 'ouroboros-ai[claude-sdk]'  # + isolated Claude Agent SDK profile (MCP 1.x)
 pip install 'ouroboros-ai[litellm]'     # + LiteLLM multi-provider support; Python 3.12-3.13
 pip install 'ouroboros-ai[mcp]'         # + MCP server/client runtime support
 pip install 'ouroboros-ai[tui]'         # + Textual terminal UI
-pip install 'ouroboros-ai[all]'         # Claude + LiteLLM + TUI; excludes MCP 2
+pip install 'ouroboros-ai[all]'         # co-installable extras; excludes MCP and Claude SDK
 
 ouroboros --version                   # verify CLI
 ```
 
-> **Which extra do I need?** Use `ouroboros-ai[claude]` for standalone Claude SDK workflows and `ouroboros-ai[mcp]` for the modern protocol server. Do not combine them: the current Claude Agent SDK embeds MCP 1.x, while the server uses MCP 2. Supported host setups launch the `[mcp]` profile through `uvx` or `pipx`; use `pipx install 'ouroboros-ai[mcp]'` or `uv tool install 'ouroboros-ai[mcp]'` before host setup. A plain pip install is suitable only inside an environment you isolate and invoke yourself; setup will not register its interpreter as a host launcher.
+> **Which extra do I need?** Use `ouroboros-ai[claude]` (the compatibility alias for `[claude-cli]`) for ordinary Claude CLI workflows and `ouroboros-ai[mcp]` for the modern protocol server; those two may be combined. Use `ouroboros-ai[claude-sdk]` only when SDK hooks/streaming are required, and keep it in a separate environment because the current SDK embeds MCP 1.x. See the [package compatibility and migration matrix](platform-support.md#mcp-2-and-claude-package-profiles).
 > For multi-model support via LiteLLM, use `ouroboros-ai[litellm]` or just grab everything with `ouroboros-ai[all]` from Python 3.12 or 3.13; examples prefer Python 3.13.
 > Core and non-LiteLLM installs support Python 3.12-3.14. See the [Python profile matrix](platform-support.md#python-profile-matrix).
 > Legacy note: `ouroboros-ai[dashboard]` is still accepted as a compatibility alias/no-op and does not install dashboard runtime payload; `[all]` includes that no-op alias only for compatibility.
@@ -161,15 +162,15 @@ curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.
 git clone https://github.com/Q00/ouroboros
 cd ouroboros
 uv sync                              # base dependencies only
-uv sync --python 3.13 --all-extras    # include all optional extras, including LiteLLM
+uv sync --python 3.13 --extra all     # include co-installable extras, including LiteLLM
 uv run ouroboros --version            # verify CLI
 ```
 
-Source checkouts use the repository `.python-version`, which currently defaults to **stable Python 3.14**. Core and non-LiteLLM source environments support Python 3.12-3.14. LiteLLM-bearing source environments, including `--all-extras`, support Python 3.12-3.13; examples prefer Python 3.13 without making it the minimum.
+Source checkouts use the repository `.python-version`, which currently defaults to **stable Python 3.14**. Core and non-LiteLLM source environments support Python 3.12-3.14. LiteLLM-bearing source environments, including `--extra all`, support Python 3.12-3.13; examples prefer Python 3.13 without making it the minimum. Do not use `--all-extras`: that asks uv to select the intentionally conflicting `[mcp]` and `[claude-sdk]` profiles together.
 
 ```bash
 uv sync --python 3.13                  # base dependencies on the preferred current interpreter
-uv sync --python 3.13 --all-extras     # include optional backends/extras, including LiteLLM
+uv sync --python 3.13 --extra all      # include co-installable backends/extras, including LiteLLM
 uv run --python 3.13 ouroboros --version
 uv run --python 3.13 pytest tests/unit/ -q
 ```
@@ -215,7 +216,7 @@ export OPENAI_API_KEY="your-openai-key"
 
 ```yaml
 orchestrator:
-  runtime_backend: claude   # claude | codex | opencode | hermes | gemini | copilot | goose | kiro | pi
+  runtime_backend: claude_mcp   # Claude CLI default; `claude` is the isolated SDK runtime
 
 llm:
   backend: claude_code      # claude_code | codex | litellm | copilot | opencode | gemini | goose | kiro | pi
@@ -384,9 +385,9 @@ Ouroboros delegates code execution to a pluggable runtime backend. Three ship ou
 | | Claude Code | Codex CLI | OpenCode |
 |---|---|---|---|
 | **Best for** | Claude Code users; subscription billing | OpenAI ecosystem; pay-per-token billing | Multi-provider flexibility; open-source tooling |
-| **Install** | `pip install 'ouroboros-ai[claude]'` (standalone SDK; no MCP registration) | `pip install ouroboros-ai` + `npm install -g @openai/codex` | `pip install ouroboros-ai` + `opencode` on PATH |
+| **Install** | `pip install 'ouroboros-ai[claude]'` (CLI profile); `[claude-sdk]` only in a separate SDK environment | `pip install ouroboros-ai` + `npm install -g @openai/codex` | `pip install ouroboros-ai` + `opencode` on PATH |
 | **Skill shortcuts** | `ooo` inside Claude Code | `ooo` after `ouroboros setup --runtime codex` installs managed Codex skills | `ooo` after `ouroboros setup --runtime opencode` |
-| **Config value** | `claude` | `codex` | `opencode` |
+| **Config value** | `claude_mcp` (`claude` only for SDK) | `codex` | `opencode` |
 
 All three backends run the same core workflow engine (seed execution, TUI). However, user-facing commands still differ: Claude Code has native in-session `ooo` workflows, while Codex CLI and OpenCode rely on `ouroboros setup --runtime <backend>` to configure the integration. The `ouroboros` CLI remains the most universal terminal path, and some advanced operations are still MCP/Claude-only.
 
@@ -421,7 +422,7 @@ pip install --force-reinstall ouroboros-ai
 ouroboros --version
 ```
 
-For source checkouts, `uv run ...` follows `.python-version` and may choose Python 3.14. Use Python 3.13 for LiteLLM-bearing source environments such as `uv sync --python 3.13 --all-extras`, or Python 3.12 when validating the lower supported bound. Core and non-LiteLLM source environments still support Python 3.12-3.14.
+For source checkouts, `uv run ...` follows `.python-version` and may choose Python 3.14. Use Python 3.13 for LiteLLM-bearing source environments such as `uv sync --python 3.13 --extra all`, or Python 3.12 when validating the lower supported bound. Core and non-LiteLLM source environments still support Python 3.12-3.14.
 
 ### API key not found
 

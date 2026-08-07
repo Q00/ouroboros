@@ -28,6 +28,11 @@ from ouroboros.orchestrator.heartbeat import (
     is_process_identity_alive,
     process_start_time,
 )
+from ouroboros.package_profiles import (
+    UNSUPPORTED_CLAUDE_SDK_MCP_MESSAGE,
+    has_unsupported_claude_sdk_mcp_mix,
+    public_runtime_backend,
+)
 
 # Per-instance PID registry for stale-instance accounting. Many servers run
 # concurrently (one per MCP client session), so a single-slot PID file is
@@ -978,6 +983,12 @@ def serve(
         ouroboros mcp serve --runtime codex --llm-backend codex
 
     """
+    # A resolver normally prevents this environment. If a user forced it,
+    # refuse before setting process state or starting the server.
+    if has_unsupported_claude_sdk_mcp_mix():
+        _stderr_console.print(f"[red]{UNSUPPORTED_CLAUDE_SDK_MCP_MESSAGE}[/red]")
+        raise typer.Exit(1)
+
     # Guard: prevent recursive MCP server spawning.
     # When ouroboros spawns a runtime (Codex/Claude/OpenCode), the child process
     # inherits this env var. If that runtime's MCP config tries to spawn another
@@ -996,7 +1007,7 @@ def serve(
                 port,
                 transport,
                 db_path,
-                runtime.value if runtime else None,
+                public_runtime_backend(runtime.value if runtime else None),
                 llm_backend.value if llm_backend else None,
             )
         )
@@ -1009,7 +1020,8 @@ def serve(
             "  uvx --from 'ouroboros-ai\\[mcp]' ouroboros mcp serve\n"
             "or:\n"
             "  pipx run --spec 'ouroboros-ai\\[mcp]' ouroboros mcp serve\n"
-            "Do not combine it with the MCP 1.x-based Claude SDK extra.[/blue]"
+            "Do not combine it with the MCP 1.x-based \\[claude-sdk] extra; "
+            "use \\[claude] or \\[claude-cli] for the CLI path.[/blue]"
         )
         raise typer.Exit(1) from e
     except OSError as e:
@@ -1064,7 +1076,7 @@ def info(
     # Create server with all tools pre-registered
     server = create_ouroboros_server(
         name="ouroboros-mcp",
-        runtime_backend=runtime.value if runtime else None,
+        runtime_backend=public_runtime_backend(runtime.value if runtime else None),
         llm_backend=llm_backend.value if llm_backend else None,
     )
 

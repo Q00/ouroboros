@@ -14,6 +14,7 @@ from pathlib import Path
 import sys
 from unittest.mock import MagicMock, patch
 
+import pytest
 from typer.testing import CliRunner
 
 from ouroboros.cli.commands.mcp_doctor import (
@@ -177,6 +178,14 @@ class TestCheckMcpImport:
 class TestCheckClaudeAgentSdkImport:
     """Tests for check_claude_agent_sdk_import — backend-aware behaviour."""
 
+    @pytest.fixture(autouse=True)
+    def _supported_profile_environment(self):
+        with patch(
+            "ouroboros.cli.commands.mcp_doctor.has_unsupported_claude_sdk_mcp_mix",
+            return_value=False,
+        ):
+            yield
+
     def test_passes_when_importable(self):
         mock_sdk = MagicMock()
         with (
@@ -197,11 +206,11 @@ class TestCheckClaudeAgentSdkImport:
         ):
             result = check_claude_agent_sdk_import()
         assert result.status == "fail"
-        assert "separate" in result.remediation
-        assert "[mcp] and [claude]" in result.remediation
+        assert "--runtime claude" in result.remediation
+        assert "[claude-sdk]" in result.remediation
 
     def test_warns_when_not_importable_on_codex_backend(self):
-        """Missing SDK on a Codex runtime is only a warning, not a failure."""
+        """Missing SDK on a Codex runtime is expected."""
         with (
             patch(
                 "ouroboros.cli.commands.mcp_doctor._get_runtime_backend",
@@ -214,12 +223,12 @@ class TestCheckClaudeAgentSdkImport:
             patch("builtins.__import__", side_effect=_import_error_for("claude_agent_sdk")),
         ):
             result = check_claude_agent_sdk_import()
-        assert result.status == "warn"
+        assert result.status == "pass"
         assert "codex" in result.message
-        assert "ouroboros-ai[claude]" in result.remediation
+        assert "ouroboros-ai[claude-sdk]" in result.remediation
 
     def test_warns_when_not_importable_on_opencode_backend(self):
-        """Missing SDK on an OpenCode runtime is only a warning."""
+        """Missing SDK on an OpenCode runtime is expected."""
         with (
             patch(
                 "ouroboros.cli.commands.mcp_doctor._get_runtime_backend",
@@ -232,12 +241,12 @@ class TestCheckClaudeAgentSdkImport:
             patch("builtins.__import__", side_effect=_import_error_for("claude_agent_sdk")),
         ):
             result = check_claude_agent_sdk_import()
-        assert result.status == "warn"
+        assert result.status == "pass"
         assert "opencode" in result.message
-        assert "ouroboros-ai[claude]" in result.remediation
+        assert "ouroboros-ai[claude-sdk]" in result.remediation
 
-    def test_fails_for_non_claude_runtime_with_claude_llm(self):
-        """The completion backend is independently SDK-dependent."""
+    def test_claude_llm_on_non_sdk_runtime_uses_cli_without_sdk(self):
+        """The Claude completion adapter has a CLI fallback and needs no SDK."""
         with (
             patch(
                 "ouroboros.cli.commands.mcp_doctor._get_runtime_backend",
@@ -250,8 +259,20 @@ class TestCheckClaudeAgentSdkImport:
             patch("builtins.__import__", side_effect=_import_error_for("claude_agent_sdk")),
         ):
             result = check_claude_agent_sdk_import()
+        assert result.status == "pass"
+        assert "not installed" in result.message
+
+    def test_forced_mcp2_and_claude_sdk_mix_fails_with_canonical_message(self):
+        with patch(
+            "ouroboros.cli.commands.mcp_doctor.has_unsupported_claude_sdk_mcp_mix",
+            return_value=True,
+        ):
+            result = check_claude_agent_sdk_import()
+
         assert result.status == "fail"
-        assert "CLI-backed runtime and LLM backend" in result.remediation
+        assert "Unsupported package profiles" in result.message
+        assert "ouroboros-ai[mcp]" in result.message
+        assert "ouroboros-ai[claude-sdk]" in result.message
 
     def test_passes_with_unknown_version(self):
         mock_sdk = MagicMock()

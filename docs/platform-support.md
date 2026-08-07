@@ -70,9 +70,49 @@ The minimum required version is **Python >= 3.12** as specified in `pyproject.to
 | Profile | Supported Python | Python 3.14 behavior |
 |---------|------------------|----------------------|
 | Base package | 3.12-3.14 | Install and run |
-| `claude`, `mcp`, `tui`, and non-LiteLLM combinations | 3.12-3.14 | Install and run |
+| `claude`, `claude-cli`, `claude-sdk`, `mcp`, `tui`, and supported non-LiteLLM combinations | 3.12-3.14 | Install and run |
 | `litellm` | 3.12-3.13 | Package installs, but the LiteLLM dependency is omitted by its Python marker |
 | `all` | 3.12-3.13 for LiteLLM; 3.12-3.14 for remaining extras | Installer selects Python 3.13 when available; direct 3.14 installs omit LiteLLM |
-| Source checkout with `--all-extras` | 3.12-3.13 for LiteLLM; 3.14 for remaining extras | Select Python 3.13 for the full profile; Python 3.14 omits LiteLLM |
+| Source checkout with `--extra all` | 3.12-3.13 for LiteLLM; 3.14 for remaining extras | Select Python 3.13 for the co-installable profile; Python 3.14 omits LiteLLM |
 
 LiteLLM currently publishes a `<3.14` Python bound. Use Python 3.13 for current LiteLLM examples, or Python 3.12 when validating the lower supported bound. On Python 3.14, the public extras remain installable but omit LiteLLM; requesting the LiteLLM backend then returns remediation for creating a Python 3.13 environment.
+
+## MCP 2 and Claude Package Profiles
+
+The package profile is a process contract, not a dependency-pin workaround:
+
+| Extra | Transport/runtime | Python payload | Combine with `[mcp]`? |
+|-------|-------------------|----------------|-----------------------|
+| `[claude]` | Claude CLI; compatibility alias for `[claude-cli]` | None | Yes |
+| `[claude-cli]` | Claude CLI subprocess for completions and agent workers | None | Yes |
+| `[mcp]` | MCP 2 server/client process | `mcp==2.0.0` | Yes, with CLI profiles |
+| `[claude-sdk]` | In-process Claude Agent SDK for SDK hooks/streaming | `claude-agent-sdk` and its MCP 1.x graph | **No** — separate environment only |
+| `[all]` | All co-installable optional payloads | Includes Claude CLI identity; excludes MCP and Claude SDK | Add `[mcp]` explicitly when needed; keep SDK separate |
+
+Supported resolver commands include:
+
+```bash
+uv tool install 'ouroboros-ai[claude]'
+uv tool install 'ouroboros-ai[mcp,claude]'
+uv tool install 'ouroboros-ai[mcp,claude-cli]'
+uv tool install 'ouroboros-ai[claude-sdk]'
+```
+
+`ouroboros-ai[mcp,claude-sdk]` is unsupported. A normal resolver rejects its
+MCP 2/MCP 1.x constraints. If an environment is forced past dependency
+resolution, setup and `ouroboros mcp doctor` fail before changing configuration
+with this message:
+
+```text
+Unsupported package profiles: ouroboros-ai[mcp] requires MCP 2, while ouroboros-ai[claude-sdk] requires MCP 1.x. Use ouroboros-ai[claude] (or [claude-cli]) with [mcp], or install [claude-sdk] in a separate environment.
+```
+
+### Migration from 0.50.8 and earlier
+
+| Previous command/state | New action | Result |
+|------------------------|------------|--------|
+| `[claude]` used for ordinary Claude Code work | Keep `[claude]`; run `ouroboros setup --runtime claude` | Explicitly moves to the dependency-free CLI profile |
+| Existing `runtime_backend: claude` SDK installation | An unattended installer/update preserves it as `[claude-sdk]`; run `ouroboros setup --runtime claude` to opt into CLI | Avoids silently dropping SDK hooks/streaming during upgrade |
+| `[claude]` used specifically for SDK hooks/streaming | Reinstall as `[claude-sdk]`; run `ouroboros setup --runtime claude-sdk` | Preserves the SDK runtime in its own MCP 1.x environment |
+| `[mcp,claude]` silently resolved to 0.50.6 | Re-run the same command against the fixed release and verify `ouroboros --version` | Resolves latest as MCP 2 + Claude CLI; no backtracking |
+| `[all]` implicitly installed the Claude SDK | Use `[all]` for co-installable integrations; create a separate `[claude-sdk]` tool/env only if required | Avoids an implicit MCP-major collision |

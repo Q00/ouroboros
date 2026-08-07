@@ -35,16 +35,23 @@ dependencies = [
 # this metadata, NOT from uv.lock). Motivated by the 2026-03 litellm
 # 1.82.7/1.82.8 supply-chain incident. Updates land via reviewed Dependabot
 # PRs; uv.lock additionally hash-pins the full transitive graph for repo/CI.
-claude = ["claude-agent-sdk==0.2.123", "anthropic==0.117.0"]
+# Claude CLI is an out-of-process runtime and needs no Python SDK dependency.
+# Keep the historical `[claude]` name as its compatibility alias so an old
+# `[mcp,claude]` command resolves to the current release instead of silently
+# backtracking to the last release where `[claude]` meant the SDK.
+claude = []
+claude-cli = []
+# SDK hooks/streaming remain available, but only in a separately named profile
+# that must not share an interpreter with the MCP 2 server profile.
+claude-sdk = ["claude-agent-sdk==0.2.123", "anthropic==0.117.0"]
 copilot = []
 litellm = ["litellm==1.91.0; python_version < '3.14'"]
 dashboard = []
 mcp = ["mcp==2.0.0"]
 tui = ["textual==8.2.8", "textual-serve==1.1.3"]
-# MCP 2.x and claude-agent-sdk currently require incompatible major versions
-# of the `mcp` distribution. Keep the agent runtime and the protocol server in
-# separate processes; setup registers the latter through `uvx ...[mcp]`.
-all = ["ouroboros-ai[claude,copilot,litellm,tui,dashboard]"]
+# `[all]` means every co-installable profile. The isolated MCP server and Claude
+# SDK profiles stay explicit so the name can never create a mixed MCP 1/2 env.
+all = ["ouroboros-ai[claude-cli,copilot,litellm,tui,dashboard]"]
 
 [project.scripts]
 ooo = "ouroboros.cli.main:app"
@@ -135,8 +142,8 @@ litellm-test = [
 mcp-test = [
     "mcp==2.0.0",
 ]
-claude-test = [
-    "ouroboros-ai[claude]",
+claude-sdk-test = [
+    "ouroboros-ai[claude-sdk]",
 ]
 
 [tool.uv.dependency-groups]
@@ -145,12 +152,11 @@ litellm-test = { requires-python = ">=3.12,<3.14" }
 [tool.uv]
 # The official Claude Agent SDK still embeds MCP 1.x internals. Declaring the
 # incompatibility lets uv lock and test both profiles without pretending they
-# are safe to import into one interpreter.
+# are safe to import into one interpreter. The dependency-free `[claude]` and
+# `[claude-cli]` profiles are intentionally compatible with `[mcp]`.
 conflicts = [
-    [{ extra = "claude" }, { extra = "mcp" }],
-    [{ extra = "all" }, { extra = "mcp" }],
-    [{ extra = "claude" }, { group = "mcp-test" }],
-    [{ extra = "all" }, { group = "mcp-test" }],
+    [{ extra = "claude-sdk" }, { extra = "mcp" }],
+    [{ extra = "claude-sdk" }, { group = "mcp-test" }],
 ]
 
 [tool.mypy]

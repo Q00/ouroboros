@@ -81,6 +81,7 @@ from ouroboros.mcp.tools.qa import QAHandler
 from ouroboros.mcp.tools.ralph_handlers import RalphHandler
 from ouroboros.mcp.tools.subagent import should_dispatch_via_plugin
 from ouroboros.orchestrator import resolve_agent_runtime_backend
+from ouroboros.package_profiles import public_runtime_backend
 from ouroboros.persistence.event_store import EventStore
 from ouroboros.runtime.controls import load_runtime_controls
 from ouroboros.runtime.watchdog import Watchdog
@@ -336,7 +337,7 @@ def auto_command(
             _run_auto(
                 goal=goal,
                 resume=resume,
-                runtime=runtime.value if runtime else None,
+                runtime=public_runtime_backend(runtime.value if runtime else None),
                 max_interview_rounds=max_interview_rounds,
                 max_repair_rounds=max_repair_rounds,
                 skip_run=skip_run,
