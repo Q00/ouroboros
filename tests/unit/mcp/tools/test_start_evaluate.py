@@ -18,6 +18,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from ouroboros.core.types import Result
+from ouroboros.mcp.errors import MCPToolError
 from ouroboros.mcp.job_manager import JobManager
 from ouroboros.mcp.tools.evaluation_handlers import (
     EvaluateHandler,
@@ -114,6 +115,94 @@ class TestDefinition:
             assert request.arguments["seed_content"].startswith("goal: parent only")
             assert request.arguments["auto_evolve"] is True
             assert request.arguments["_auto_evolve_max_generations"] >= 1
+        finally:
+            await store.close()
+
+    @pytest.mark.asyncio
+    async def test_failed_detached_acceptance_restores_handoff_for_retry(
+        self, tmp_path: Path, fake_inner_handler
+    ) -> None:
+        from ouroboros.mcp.tools.seed_handoff import SeedHandoffRegistry
+
+        store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'handoff-retry.db'}")
+        await store.initialize()
+        registry = SeedHandoffRegistry()
+        handoff_id = registry.register(
+            session_id="orch_handoff_retry",
+            seed_content="goal: retry safely\n",
+        )
+        snapshot = MagicMock(job_id="job_handoff_retry", cursor=0)
+        snapshot.status.value = "queued"
+        launch = AsyncMock(side_effect=[RuntimeError("not accepted"), snapshot])
+        handler = StartEvaluateHandler(
+            evaluate_handler=fake_inner_handler,
+            event_store=store,
+            job_manager=JobManager(store, durable_jobs=True),
+            seed_handoff_registry=registry,
+        )
+        arguments = {
+            "session_id": "orch_handoff_retry",
+            "artifact": "partial artifact",
+            "seed_handoff_id": handoff_id,
+            "auto_evolve": True,
+        }
+
+        try:
+            with patch("ouroboros.mcp.tools.background.launch_detached_job", new=launch):
+                with pytest.raises(RuntimeError, match="not accepted"):
+                    await handler.handle(arguments)
+                assert registry.resolve(handoff_id, session_id="orch_handoff_retry") is not None
+                result = await handler.handle(arguments)
+
+            assert result.is_ok
+            assert registry.resolve(handoff_id, session_id="orch_handoff_retry") is None
+        finally:
+            await store.close()
+
+    @pytest.mark.asyncio
+    async def test_pending_detached_acceptance_keeps_handoff_consumed(
+        self, tmp_path: Path, fake_inner_handler
+    ) -> None:
+        from ouroboros.mcp.detached_jobs import DetachedJobAcceptanceTimeout
+        from ouroboros.mcp.tools.seed_handoff import SeedHandoffRegistry
+
+        store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'handoff-pending.db'}")
+        await store.initialize()
+        registry = SeedHandoffRegistry()
+        handoff_id = registry.register(
+            session_id="orch_handoff_pending",
+            seed_content="goal: do not duplicate\n",
+        )
+        handler = StartEvaluateHandler(
+            evaluate_handler=fake_inner_handler,
+            event_store=store,
+            job_manager=JobManager(store, durable_jobs=True),
+            seed_handoff_registry=registry,
+        )
+
+        try:
+            with patch(
+                "ouroboros.mcp.tools.background.launch_detached_job",
+                new=AsyncMock(
+                    side_effect=DetachedJobAcceptanceTimeout(
+                        job_id="job_handoff_pending",
+                        worker_pid=4242,
+                        timeout_seconds=0.1,
+                    )
+                ),
+            ):
+                with pytest.raises(MCPToolError, match="acceptance is still pending") as raised:
+                    await handler.handle(
+                        {
+                            "session_id": "orch_handoff_pending",
+                            "artifact": "partial artifact",
+                            "seed_handoff_id": handoff_id,
+                            "auto_evolve": True,
+                        }
+                    )
+
+            assert raised.value.error_code == "detached_job_acceptance_pending"
+            assert registry.resolve(handoff_id, session_id="orch_handoff_pending") is None
         finally:
             await store.close()
 

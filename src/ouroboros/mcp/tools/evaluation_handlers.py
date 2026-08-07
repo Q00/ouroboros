@@ -2166,7 +2166,7 @@ class StartEvaluateHandler:
         from ouroboros.mcp.tools.evaluation_job import restore_seed_handoff
 
         try:
-            arguments = restore_seed_handoff(
+            arguments, seed_handoff = restore_seed_handoff(
                 arguments, session_id=session_id, registry=self.seed_handoff_registry
             )
         except ValueError as exc:
@@ -2179,6 +2179,7 @@ class StartEvaluateHandler:
                 arguments, configured_enabled=get_auto_evolve_enabled()
             )
         except ValueError as exc:
+            seed_handoff.rollback()
             return Result.err(MCPToolError(str(exc), tool_name="ouroboros_start_evaluate"))
 
         # --- Subagent dispatch: gate on runtime + opencode_mode ---
@@ -2190,23 +2191,18 @@ class StartEvaluateHandler:
         if plugin_dispatch and not auto_evolve_enabled:
             from ouroboros.mcp.tools.evaluation_job import dispatch_plugin_evaluation
 
-            return await dispatch_plugin_evaluation(
-                arguments=arguments,
-                session_id=session_id,
-                artifact=artifact,
-                event_store=self._event_store,
-                resolve_working_dir=_resolve_evaluate_working_dir,
+            return await seed_handoff.accept(
+                dispatch_plugin_evaluation(
+                    arguments=arguments,
+                    session_id=session_id,
+                    artifact=artifact,
+                    event_store=self._event_store,
+                    resolve_working_dir=_resolve_evaluate_working_dir,
+                ),
+                require_ok=True,
             )
 
-        # Fall-through: real background job path.
-        #
-        # NOTE: this path now routes through ``start_background_tool_job``,
-        # which gives StartEvaluate the same job-scoped ``cancel_key`` and
-        # AgentProcess ``process_id`` as evolve/execute/ralph.  Before this
-        # extraction StartEvaluate passed neither, so the durable
-        # ``mcp_job:{job_id}`` cancel marker written by
-        # ``JobManager.cancel_job`` was never observable by the evaluate
-        # agent process — a restart-visible cancel was silently dropped.
+        # The shared helper preserves job-scoped cancellation across restart.
         async def _runner(_handle) -> MCPToolResult:
             from ouroboros.mcp.tools.evaluation_job import run_evaluation_job
 
@@ -2222,21 +2218,23 @@ class StartEvaluateHandler:
                 start_ralph_handler=self.start_ralph_handler,
             )
 
-        snapshot = await start_background_tool_job(
-            job_manager=self._job_manager,
-            event_store=self._event_store,
-            job_type="evaluate",
-            intent="evaluate",
-            process_scope=f"evaluate:{session_id}",
-            initial_message=f"Queued evaluation for {session_id}",
-            links=JobLinks(session_id=session_id),
-            work_fn=_runner,
-            cancelled_text="Evaluation cancelled before work began.",
-            detached_tool_name="ouroboros_start_evaluate",
-            detached_arguments=arguments,
-            runtime_backend=self.agent_runtime_backend,
-            llm_backend=self.llm_backend,
-            opencode_mode=self.opencode_mode,
+        snapshot = await seed_handoff.accept(
+            start_background_tool_job(
+                job_manager=self._job_manager,
+                event_store=self._event_store,
+                job_type="evaluate",
+                intent="evaluate",
+                process_scope=f"evaluate:{session_id}",
+                initial_message=f"Queued evaluation for {session_id}",
+                links=JobLinks(session_id=session_id),
+                work_fn=_runner,
+                cancelled_text="Evaluation cancelled before work began.",
+                detached_tool_name="ouroboros_start_evaluate",
+                detached_arguments=arguments,
+                runtime_backend=self.agent_runtime_backend,
+                llm_backend=self.llm_backend,
+                opencode_mode=self.opencode_mode,
+            )
         )
 
         text = (

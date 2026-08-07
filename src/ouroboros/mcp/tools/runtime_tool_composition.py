@@ -7,13 +7,85 @@ same configured run -> evaluate -> Ralph -> evolve graph as the MCP server.
 
 from __future__ import annotations
 
+import asyncio
 from contextvars import ContextVar
+import inspect
 from typing import Any
 
 _COMPOSING_RUNTIME_TOOLS: ContextVar[bool] = ContextVar(
     "ouroboros_composing_runtime_tools",
     default=False,
 )
+
+
+class ConfiguredRuntimeTools(tuple[Any, ...]):
+    """Configured handlers plus the composition root that owns their resources.
+
+    Builtin runtimes index the handlers into a local registry, but the handlers
+    retain EventStore, ControlBus, bridge, and JobManager dependencies owned by
+    the temporary :class:`MCPServerAdapter`.  Keeping that adapter here provides
+    a deterministic shutdown path instead of discarding the only resource owner.
+    """
+
+    server_owner: Any
+    _closed: bool
+    _shutdown_lock: asyncio.Lock
+
+    def __new__(
+        cls,
+        handlers: tuple[Any, ...],
+        *,
+        server_owner: Any,
+    ) -> ConfiguredRuntimeTools:
+        instance = super().__new__(cls, handlers)
+        instance.server_owner = server_owner
+        instance._closed = False
+        instance._shutdown_lock = asyncio.Lock()
+        return instance
+
+    async def shutdown(self) -> None:
+        """Drain live jobs, then close the composed resources exactly once."""
+        async with self._shutdown_lock:
+            if self._closed:
+                return
+            job_manager = getattr(self.server_owner, "job_manager", None)
+            drain = getattr(job_manager, "drain", None)
+            if callable(drain):
+                await drain()
+            await self.server_owner.shutdown()
+            self._closed = True
+
+
+def _retain_runtime_tool_composition(
+    runtime_adapter: Any,
+    composition: ConfiguredRuntimeTools,
+) -> None:
+    existing = getattr(runtime_adapter, "_builtin_mcp_tool_composition", None)
+    if existing is not None and existing is not composition:
+        raise RuntimeError("Builtin MCP tool composition is already configured")
+    runtime_adapter._builtin_mcp_tool_composition = composition  # noqa: SLF001
+    previous_aclose = getattr(runtime_adapter, "aclose", None)
+
+    async def close_runtime() -> None:
+        await shutdown_configured_runtime_tools(runtime_adapter)
+        if getattr(runtime_adapter, "aclose", None) is close_runtime:
+            runtime_adapter.aclose = previous_aclose
+        if inspect.iscoroutinefunction(previous_aclose):
+            await previous_aclose()
+
+    runtime_adapter.aclose = close_runtime
+
+
+async def shutdown_configured_runtime_tools(runtime_adapter: Any) -> None:
+    """Release and clear a runtime's configured builtin handler resources."""
+    composition = getattr(runtime_adapter, "_builtin_mcp_tool_composition", None)
+    if composition is None:
+        return
+    await composition.shutdown()
+    if getattr(runtime_adapter, "_builtin_mcp_tool_composition", None) is composition:
+        runtime_adapter._builtin_mcp_tool_composition = None  # noqa: SLF001
+        if hasattr(runtime_adapter, "_builtin_mcp_handlers"):
+            runtime_adapter._builtin_mcp_handlers = None  # noqa: SLF001
 
 
 def lightweight_runtime_tool_map(
@@ -39,7 +111,7 @@ def configured_runtime_tools(
     include_auto: bool,
     mcp_bridge: Any | None,
     runtime_adapter: Any | None = None,
-) -> tuple[Any, ...] | None:
+) -> ConfiguredRuntimeTools | None:
     """Return the production handler graph, or ``None`` for lightweight fallback.
 
     ``create_ouroboros_server`` constructs runtime adapters whose registry
@@ -52,9 +124,10 @@ def configured_runtime_tools(
     # using it only for capability discovery. They therefore need the complete
     # parent-owned run -> evaluate -> Ralph -> evolve graph. OpenCode also uses
     # the graph as the process-local vault behind its opaque hidden-Seed handoff.
-    executing_builtin_runtime = (
-        runtime_adapter is not None and runtime_backend in {"codex", "hermes"}
-    ) or (runtime_backend == "opencode" and opencode_mode == "plugin")
+    executing_builtin_runtime = runtime_adapter is not None and (
+        runtime_backend in {"codex", "hermes"}
+        or (runtime_backend == "opencode" and opencode_mode == "plugin")
+    )
     if not executing_builtin_runtime or _COMPOSING_RUNTIME_TOOLS.get():
         return None
 
@@ -120,4 +193,10 @@ def configured_runtime_tools(
         "ouroboros_pm_interview",
         "ouroboros_qa",
     )
-    return tuple(configured[name] for name in ordered_names)
+    tools = ConfiguredRuntimeTools(
+        tuple(configured[name] for name in ordered_names),
+        server_owner=server,
+    )
+    if runtime_adapter is not None:
+        _retain_runtime_tool_composition(runtime_adapter, tools)
+    return tools

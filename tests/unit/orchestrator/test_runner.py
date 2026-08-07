@@ -721,6 +721,13 @@ class TestOrchestratorRunner:
         _allow_mocked_precreated_durable_state(runner)
         return runner
 
+    async def test_close_adapter_awaits_runtime_lifecycle(self, runner) -> None:
+        runner._adapter.aclose = AsyncMock()
+
+        await runner._close_adapter()
+
+        runner._adapter.aclose.assert_awaited_once()
+
     def test_param_degradation_notice_surfaces_for_serial_runner(
         self,
         mock_adapter: MagicMock,

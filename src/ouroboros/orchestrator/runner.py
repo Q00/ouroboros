@@ -8539,6 +8539,11 @@ class OrchestratorRunner:
             )
         )
 
+    async def _close_adapter(self) -> None:
+        adapter_aclose = getattr(self._adapter, "aclose", None)
+        if inspect.iscoroutinefunction(adapter_aclose):
+            await adapter_aclose()
+
     async def execute_seed(
         self,
         seed: Seed,
@@ -10138,6 +10143,7 @@ class OrchestratorRunner:
                     session_id=tracker.session_id,
                     context="execute",
                 )
+                await self._close_adapter()
 
     async def _execute_parallel(
         self,
@@ -10469,16 +10475,7 @@ class OrchestratorRunner:
                     expected_root_indices=range(len(seed.acceptance_criteria)),
                 )
         finally:
-            # Release any warm worker-pool sessions the runtime holds (e.g. the
-            # codex-mcp persistent connection pool). The non-parallel path closes
-            # per-turn handles, but the parallel path otherwise leaves the pool to
-            # its idle TTL — a process-leak window after every run. Guard on
-            # ``iscoroutinefunction`` so this is a no-op for runtimes without a
-            # real async ``aclose`` (and so MagicMock test adapters, whose
-            # attribute access auto-creates a non-awaitable child, are skipped).
-            adapter_aclose = getattr(self._adapter, "aclose", None)
-            if inspect.iscoroutinefunction(adapter_aclose):
-                await adapter_aclose()
+            await self._close_adapter()
 
         # Check for cancellation after parallel execution
         if await self._check_cancellation(tracker.session_id):
@@ -12086,6 +12083,7 @@ Note: This is a resumed session. Please continue from where execution was interr
                     session_id=session_id,
                     context="resume",
                 )
+                await self._close_adapter()
 
 
 __all__ = [
