@@ -2406,3 +2406,31 @@ def test_routine_coordination_forms_are_co_products(goal: str) -> None:
     result = derive_domain_from_ledger(ledger)
     assert TaskClass.WEB_APP in result.classes
     assert TaskClass.LIBRARY in result.classes
+
+
+def test_adversative_but_ends_content_clause_without_tool_keyword() -> None:
+    """R34 probe: the denial after "but" is top-level even when the
+    for-clause carries no inspection keyword."""
+    ledger = _bare_ledger("Build a CLI for frontend developers but not a web app")
+    _seed_section(ledger, "outputs", value="Interactive dashboard panels and deterministic stdout")
+    _seed_section(ledger, "runtime_context", value="Local shell / terminal")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.CLI
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
+        "Build a Python library & an admin web app",
+        "Build a Python library in addition to an admin web app",
+        "Build a Python library but also an admin web app",
+    ],
+)
+def test_ampersand_and_additive_coordinators_declare_co_products(goal: str) -> None:
+    """R34 probe: routine explicit coordinators declare co-products."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value="Generated documentation and an admin portal")
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP in result.classes
+    assert TaskClass.LIBRARY in result.classes

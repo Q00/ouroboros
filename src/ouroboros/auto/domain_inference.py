@@ -271,7 +271,12 @@ _WEB_SUBTYPE_RE = re.compile(r"single[\s\-]page")
 _TRAILING_ADVERBS = frozenset(
     {"anymore", "anyway", "either", "though", "whatsoever", "now", "yet", "all", "at"}
 )
-_CONTENT_CLAUSE_RE = re.compile(r"\b(?:that|which|for|about)\s+[^,.;]*")
+# Content clauses end at punctuation OR adversative coordination (#1813
+# R34): "for frontend developers but not a web app" returns to the main
+# artifact claim at "but".
+_CONTENT_CLAUSE_RE = re.compile(
+    r"\b(?:that|which|for|about)\s+[^,.;]*?(?=\s+but\b|\s+yet\b|[,.;]|$)"
+)
 
 
 def _goal_denies_web_app_artifact(goal_text: str) -> bool:
@@ -701,7 +706,8 @@ _LIBRARY_PACKAGE_WORD_RE = re.compile(r"\bpackage\b(?!-)")
 
 _GOAL_CONJUNCT_SPLIT_RE = re.compile(
     r"\s*(?:\band\b|\bplus\b|\bwith\b|\balongside\b|\bas\s+well\s+as\b|"
-    r"\balong\s+with\b|\btogether\s+with\b|[,;])\s*"
+    r"\balong\s+with\b|\btogether\s+with\b|\bin\s+addition\s+to\b|"
+    r"\bbut\s+also\b|&|[,;])\s*"
 )
 _GAME_CONJUNCT_VOCAB_RE = re.compile(rf"\b{_GAME_GOAL_SIGNAL_FRAGMENT}\b")
 
@@ -712,7 +718,9 @@ _WEB_APP_ARTIFACT_PHRASE_RE = re.compile(
 )
 
 
-_INFINITIVE_TARGET_RE = re.compile(r"\bto\s+(?!be\b)[\w\-]+\s+[^,.;]*")
+# "to <verb> X" is an action target; "to a/an/the X" is a plain PP and
+# "in addition to an X" a coordinator (#1813 R34) — articles are excluded.
+_INFINITIVE_TARGET_RE = re.compile(r"\bto\s+(?!be\b|an?\b|the\b)[\w\-]+\s+[^,.;]*")
 _RELATIONAL_TARGET_RE = re.compile(
     r"\b(?:targeting|supporting|serving|powering|backing|aimed\s+at|"
     r"used\s+by|consumed\s+by|embedded\s+in|integrat\w*\s+with|"
