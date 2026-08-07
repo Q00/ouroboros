@@ -2378,3 +2378,31 @@ def test_adjacent_classes_keep_ownership_over_web_modifiers(goal, outputs, expec
     result = derive_domain_from_ledger(ledger)
     assert result.is_single
     assert result.single is expected
+
+
+def test_but_coordination_ends_the_content_clause() -> None:
+    """R33 probe: "for browser audits but not a web app" — the denial
+    after "but" returns to the main artifact claim."""
+    ledger = _bare_ledger("Build a CLI for browser audits but not a web app")
+    _seed_section(ledger, "outputs", value="Interactive dashboard panels with deterministic stdout")
+    _seed_section(ledger, "runtime_context", value="Local shell / terminal")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.CLI
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
+        "Build a Python library alongside an admin web app",
+        "Build a Python library as well as an admin web app",
+    ],
+)
+def test_routine_coordination_forms_are_co_products(goal: str) -> None:
+    """R33 probe: alongside / as well as coordinate co-products, and the
+    library conjunct keeps its own goal evidence."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value="Generated documentation and an admin portal")
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP in result.classes
+    assert TaskClass.LIBRARY in result.classes

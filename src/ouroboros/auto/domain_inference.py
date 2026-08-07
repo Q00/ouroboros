@@ -699,7 +699,10 @@ _MANIFEST_TOKEN_RE = re.compile(r"\S*package(?:-lock)?\.json\S*")
 _LIBRARY_PACKAGE_WORD_RE = re.compile(r"\bpackage\b(?!-)")
 
 
-_GOAL_CONJUNCT_SPLIT_RE = re.compile(r"\s*(?:\band\b|\bplus\b|\bwith\b|[,;])\s*")
+_GOAL_CONJUNCT_SPLIT_RE = re.compile(
+    r"\s*(?:\band\b|\bplus\b|\bwith\b|\balongside\b|\bas\s+well\s+as\b|"
+    r"\balong\s+with\b|\btogether\s+with\b|[,;])\s*"
+)
 _GAME_CONJUNCT_VOCAB_RE = re.compile(rf"\b{_GAME_GOAL_SIGNAL_FRAGMENT}\b")
 
 
@@ -730,6 +733,11 @@ def _goal_artifact_head_is_web_app(goal_text: str) -> bool:
     position, since English modifiers precede their head."""
     if _goal_denies_web_app_artifact(goal_text):
         return False
+    # The head is judged on the goal's FIRST conjunct (#1813 R33): a web
+    # phrase in a later coordinated conjunct is a co-product (the grant
+    # handles it) and must not erase the first conjunct's own artifact
+    # evidence.
+    goal_text = _GOAL_CONJUNCT_SPLIT_RE.split(goal_text)[0]
     # Negated spans leave first (#1813 R31): clause stripping would
     # otherwise behead a coordinated denial at its first comma and leave
     # the surviving alternatives looking affirmative.
