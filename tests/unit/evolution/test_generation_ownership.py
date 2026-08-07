@@ -262,12 +262,31 @@ async def test_fenced_cancellation_appends_no_lineage_events(tmp_path, monkeypat
     store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'evolve-fenced-writes.db'}")
     await store.initialize()
     try:
-        # A short lease keeps the default heartbeat (lease/6) fast enough
-        # for the loss to be observed promptly and deterministically. The
-        # first refresh (the creation append's ownership gate) succeeds; the
-        # heartbeat then observes the loss.
-        claims = _RecordingClaims(refresh_results=[True, False], lease_seconds=0.6)
+        loss_requested = asyncio.Event()
+        loss_observed = asyncio.Event()
+
+        class _ControlledLossClaims(_RecordingClaims):
+            """Keep ownership until the executor barrier requests its loss."""
+
+            async def refresh(self, lineage_id: str, claim_token: str) -> bool:
+                still_owner = not loss_requested.is_set()
+                if not still_owner:
+                    loss_observed.set()
+                return still_owner
+
+        # Refresh call order is intentionally irrelevant. Under xdist load
+        # the heartbeat may run before the lineage-created ownership gate;
+        # the old scripted [True, False] sequence therefore fenced before
+        # the executor barrier and made the test wait forever for `entered`.
+        claims = _ControlledLossClaims(lease_seconds=60.0)
         monkeypatch.setattr(loop_module, "step_claims_for", lambda _store: claims)
+        monkeypatch.setattr(
+            loop_module,
+            "owned_lineage_step",
+            lambda backend, lineage_id: owned_lineage_step(
+                backend, lineage_id, heartbeat_interval=0.01
+            ),
+        )
 
         config = EvolutionaryLoopConfig(
             max_generations=10,
@@ -290,9 +309,11 @@ async def test_fenced_cancellation_appends_no_lineage_events(tmp_path, monkeypat
         owner = asyncio.create_task(
             loop.evolve_step("lineage-fenced-writes", initial_seed=_make_seed())
         )
-        await asyncio.wait_for(entered.wait(), timeout=5)
+        await asyncio.wait_for(entered.wait(), timeout=30)
+        loss_requested.set()
+        await asyncio.wait_for(loss_observed.wait(), timeout=30)
 
-        owner_result = await asyncio.wait_for(owner, timeout=10)
+        owner_result = await asyncio.wait_for(owner, timeout=30)
         assert owner_result.is_err
 
         events = await store.replay_lineage("lineage-fenced-writes")
@@ -320,8 +341,18 @@ async def test_lease_lost_before_completion_append_refuses_the_write(tmp_path, m
     store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'evolve-inflight.db'}")
     await store.initialize()
     try:
-        claims = DurableStepClaims(store.database_url, lease_seconds=0.6)
+        # Silence the heartbeat so this regression controls both reclaim
+        # phases directly. It tests the commit-time token fence, not the
+        # separate heartbeat-delivery contract exercised below.
+        claims = DurableStepClaims(store.database_url, lease_seconds=600.0)
         monkeypatch.setattr(loop_module, "step_claims_for", lambda _store: claims)
+        monkeypatch.setattr(
+            loop_module,
+            "owned_lineage_step",
+            lambda backend, lineage_id: owned_lineage_step(
+                backend, lineage_id, heartbeat_interval=3600.0
+            ),
+        )
 
         executions: list[int] = []
         entered = asyncio.Event()
@@ -340,11 +371,11 @@ async def test_lease_lost_before_completion_append_refuses_the_write(tmp_path, m
         async with engine.begin() as conn:
             await conn.execute(sa_update(lineage_step_claims_table).values(refreshed_at=0.0))
         assert await claims.acquire("lineage-inflight", "reclaimer") is False
-        await asyncio.sleep(0.15)  # grace = lease/6 = 0.1s
+        await _rewind_claim(claims, refreshed_at=0.0, revoked_at=0.0)
         assert await claims.acquire("lineage-inflight", "reclaimer") is True
 
         stolen.set()
-        owner_result = await asyncio.wait_for(owner, timeout=10)
+        owner_result = await asyncio.wait_for(owner, timeout=30)
         assert owner_result.is_err, "a stale owner must not report a persisted completion"
 
         events = await store.replay_lineage("lineage-inflight")
@@ -418,8 +449,11 @@ async def test_abandoned_nonterminal_generation_is_resumed_not_skipped(tmp_path)
         await store.close()
 
 
+@pytest.mark.parametrize("_attempt", range(8))
 @pytest.mark.asyncio
-async def test_revocation_fences_the_owner_before_takeover(tmp_path, monkeypatch) -> None:
+async def test_revocation_fences_the_owner_before_takeover(
+    tmp_path, monkeypatch, _attempt: int
+) -> None:
     """Phase one of a reclaim stops the owner inside the grace window.
 
     A revoked lease refuses the owner's refresh, so a scheduling owner is
@@ -437,7 +471,20 @@ async def test_revocation_fences_the_owner_before_takeover(tmp_path, monkeypatch
     try:
         # Keep expiry far beyond scheduler noise; drive revocation explicitly
         # below while retaining a fast heartbeat for prompt fence delivery.
-        claims = DurableStepClaims(store.database_url, lease_seconds=60.0)
+        class _ObservableClaims(DurableStepClaims):
+            """Expose the exact refresh that observes durable revocation."""
+
+            def __init__(self, database_url: str) -> None:
+                super().__init__(database_url, lease_seconds=60.0)
+                self.revocation_observed = asyncio.Event()
+
+            async def refresh(self, lineage_id: str, claim_token: str) -> bool:
+                still_owner = await super().refresh(lineage_id, claim_token)
+                if not still_owner:
+                    self.revocation_observed.set()
+                return still_owner
+
+        claims = _ObservableClaims(store.database_url)
         monkeypatch.setattr(loop_module, "step_claims_for", lambda _store: claims)
         monkeypatch.setattr(
             loop_module,
@@ -455,7 +502,7 @@ async def test_revocation_fences_the_owner_before_takeover(tmp_path, monkeypatch
         owner = asyncio.create_task(
             owner_loop.evolve_step("lineage-revoke", initial_seed=_make_seed())
         )
-        await asyncio.wait_for(entered.wait(), timeout=5)
+        await asyncio.wait_for(entered.wait(), timeout=30)
 
         engine = await claims._engine_once()
         async with engine.begin() as conn:
@@ -464,9 +511,12 @@ async def test_revocation_fences_the_owner_before_takeover(tmp_path, monkeypatch
             "reclaim starts with revocation, never immediate takeover"
         )
 
-        # The owner's next heartbeat observes the revocation and aborts the
-        # blocked generation — before the grace elapses and any takeover.
-        owner_result = await asyncio.wait_for(owner, timeout=5)
+        # Synchronize on the protocol transition itself. The timeout is only
+        # a deadlock guard; correctness no longer depends on the owner fully
+        # unwinding inside a five-second scheduling window. Repeating this
+        # case catches ordering regressions under xdist worker pressure.
+        await asyncio.wait_for(claims.revocation_observed.wait(), timeout=30)
+        owner_result = await asyncio.wait_for(owner, timeout=30)
         assert owner_result.is_err, "a revoked owner must not report success"
         assert executions == [1]
 
