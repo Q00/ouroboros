@@ -10,6 +10,7 @@ background task, let callers poll ``job_status`` / ``job_wait`` / ``job_result``
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -17,6 +18,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from ouroboros.core.types import Result
+from ouroboros.mcp.job_manager import JobManager
 from ouroboros.mcp.tools.evaluation_handlers import (
     EvaluateHandler,
     StartEvaluateHandler,
@@ -62,8 +64,58 @@ class TestDefinition:
         h = StartEvaluateHandler()
         inner = EvaluateHandler()
         assert {p.name for p in h.definition.parameters} == {
-            p.name for p in inner.definition.parameters
+            *(p.name for p in inner.definition.parameters),
+            "auto_evolve",
+            "seed_handoff_id",
         }
+        assert "auto_evolve" not in {p.name for p in inner.definition.parameters}
+
+    @pytest.mark.asyncio
+    async def test_consumed_handoff_is_safe_for_detached_worker_reentry(
+        self, tmp_path: Path, fake_inner_handler
+    ) -> None:
+        """The durable request carries the restored Seed, never a process-local handle."""
+        from ouroboros.mcp.tools.seed_handoff import SeedHandoffRegistry
+
+        store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'handoff.db'}")
+        await store.initialize()
+        manager = JobManager(store, durable_jobs=True)
+        registry = SeedHandoffRegistry()
+        handoff_id = registry.register(
+            session_id="orch_detached_handoff",
+            seed_content="goal: parent only\nprivate_marker: HIDDEN_PARENT_SEED\n",
+        )
+        snapshot = MagicMock(job_id="job_detached", cursor=0)
+        snapshot.status.value = "queued"
+
+        with patch(
+            "ouroboros.mcp.tools.background.launch_detached_job",
+            new=AsyncMock(return_value=snapshot),
+        ) as launch:
+            handler = StartEvaluateHandler(
+                evaluate_handler=fake_inner_handler,
+                event_store=store,
+                job_manager=manager,
+                seed_handoff_registry=registry,
+            )
+            result = await handler.handle(
+                {
+                    "session_id": "orch_detached_handoff",
+                    "artifact": "partial artifact",
+                    "seed_handoff_id": handoff_id,
+                    "auto_evolve": True,
+                }
+            )
+
+        try:
+            assert result.is_ok
+            request = launch.await_args.kwargs["request"]
+            assert "seed_handoff_id" not in request.arguments
+            assert request.arguments["seed_content"].startswith("goal: parent only")
+            assert request.arguments["auto_evolve"] is True
+            assert request.arguments["_auto_evolve_max_generations"] >= 1
+        finally:
+            await store.close()
 
 
 class TestRequiredArguments:
@@ -151,7 +203,11 @@ class TestPluginModeDispatch:
     """OpenCode plugin mode: terminal subagent delegation, no job enqueue."""
 
     @pytest.fixture
-    def handler(self, event_store):
+    def handler(self, event_store, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setattr(
+            "ouroboros.mcp.tools.evaluation_handlers.get_auto_evolve_enabled",
+            lambda: False,
+        )
         return StartEvaluateHandler(
             evaluate_handler=MagicMock(),
             event_store=event_store,
@@ -231,6 +287,77 @@ class TestPluginModeDispatch:
         assert "Tasks can be listed" in forwarded
 
     @pytest.mark.asyncio
+    async def test_restored_handoff_stays_hidden_in_delegated_evaluation(self, event_store) -> None:
+        from ouroboros.mcp.tools.execution_handlers import ExecuteSeedHandler
+        from ouroboros.mcp.tools.seed_handoff import SeedHandoffRegistry
+
+        registry = SeedHandoffRegistry()
+        seed_content = (
+            "goal: Judge the artifact\n"
+            "constraints:\n"
+            "  - Never print python secret_check.py --token TOP_SECRET\n"
+            "  - Never print HIDDEN_SENTINEL\n"
+            "acceptance_criteria:\n"
+            "  - description: Produce output.json without HIDDEN_SENTINEL\n"
+            "    expected_artifacts: [output.json]\n"
+            "    verify_command: python secret_check.py --token TOP_SECRET\n"
+            "    output_assertion: HIDDEN_SENTINEL\n"
+            "ontology_schema:\n"
+            "  name: HiddenContractArtifact\n"
+            "  description: Artifact with parent-owned verification\n"
+            "metadata:\n"
+            "  ambiguity_score: 0.0\n"
+        )
+        execute_handler = ExecuteSeedHandler(
+            agent_runtime_backend="opencode",
+            opencode_mode="plugin",
+            seed_handoff_registry=registry,
+        )
+        execution = await execute_handler.handle(
+            {
+                "seed_content": seed_content,
+                "auto_evaluate": True,
+                "auto_evolve": False,
+            }
+        )
+        assert execution.is_ok
+        execution_payload = execution.value.meta["_subagent"]
+        session_id = execution.value.meta["session_id"]
+        handoff_id = execution_payload["context"]["seed_handoff_id"]
+        assert "status `delegated_to_plugin` with no job_id" in execution_payload["prompt"]
+        assert "do not poll job tools" in execution_payload["prompt"]
+        assert "poll the returned job" not in execution_payload["prompt"]
+
+        handler = StartEvaluateHandler(
+            evaluate_handler=MagicMock(),
+            event_store=event_store,
+            agent_runtime_backend="opencode",
+            opencode_mode="plugin",
+            seed_handoff_registry=registry,
+        )
+
+        result = await handler.handle(
+            {
+                "session_id": session_id,
+                "artifact": "partial artifact HIDDEN_SENTINEL",
+                "seed_handoff_id": handoff_id,
+                "auto_evolve": False,
+            }
+        )
+
+        assert result.is_ok
+        assert result.value.meta["status"] == "delegated_to_plugin"
+        assert result.value.meta["job_id"] is None
+        payload = result.value.meta["_subagent"]
+        visible = payload["prompt"] + str(payload["context"])
+        assert "Produce output.json" in visible
+        assert "output.json" in visible
+        assert "TOP_SECRET" not in visible
+        assert "HIDDEN_SENTINEL" not in visible
+        assert "verify_command" not in visible
+        assert "output_assertion" not in visible
+
+    @pytest.mark.asyncio
     async def test_evaluate_handler_seed_acceptance_criteria_preserved_in_plugin_payload(
         self, event_store
     ) -> None:
@@ -306,6 +433,43 @@ class TestPluginModeDispatch:
         assert result.is_ok
         payload_context = result.value.meta["_subagent"]["context"]
         assert payload_context["working_dir"] == str(default_project.resolve())
+
+    @pytest.mark.asyncio
+    async def test_auto_evolve_keeps_verdict_parent_owned_and_pollable(
+        self,
+        event_store,
+        fake_inner_handler,
+    ) -> None:
+        manager = JobManager(event_store)
+        handler = StartEvaluateHandler(
+            evaluate_handler=fake_inner_handler,
+            event_store=event_store,
+            job_manager=manager,
+            agent_runtime_backend="opencode",
+            opencode_mode="plugin",
+        )
+
+        result = await handler.handle(
+            {
+                "session_id": "orch_converge",
+                "artifact": "code",
+                "auto_evolve": True,
+            }
+        )
+
+        assert result.is_ok
+        assert isinstance(result.value.meta["job_id"], str)
+        assert "_subagent" not in result.value.meta
+        for _ in range(200):
+            snapshot = await manager.get_snapshot(result.value.meta["job_id"])
+            if snapshot.is_terminal:
+                break
+            await asyncio.sleep(0.01)
+        else:
+            raise AssertionError("parent-owned evaluation did not finish")
+        forwarded = fake_inner_handler.handle.await_args.args[0]
+        assert forwarded["_force_in_process"] is True
+        assert snapshot.result_meta["final_approved"] is True
 
 
 class TestFactoryWiring:

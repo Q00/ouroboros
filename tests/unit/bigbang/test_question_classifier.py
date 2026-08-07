@@ -291,6 +291,21 @@ class TestQuestionClassifierPassthrough:
         assert classification.original_question == planning_q
 
     @pytest.mark.asyncio
+    async def test_classify_fenced_array_falls_back_to_passthrough(self) -> None:
+        """A fenced top-level array is malformed shape, not a crash (#1838)."""
+        adapter = MagicMock()
+        question = "What is the target market?"
+        adapter.complete = AsyncMock(return_value=Result.ok(_mock_completion("```json\n[]\n```")))
+
+        classifier = QuestionClassifier(llm_adapter=adapter)
+        result = await classifier.classify(question)
+
+        assert result.is_ok
+        classification = result.value
+        assert classification.output_type == ClassifierOutputType.PASSTHROUGH
+        assert classification.question_for_pm == question
+
+    @pytest.mark.asyncio
     async def test_classify_parse_failure_defaults_to_passthrough(self) -> None:
         """When LLM response cannot be parsed, default is PASSTHROUGH."""
         adapter = MagicMock()

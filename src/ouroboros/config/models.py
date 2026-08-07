@@ -228,8 +228,11 @@ class ExecutionConfig(BaseModel, frozen=True):
         max_iterations_per_ac: Maximum iterations per acceptance criteria
         retrospective_interval: Iterations between retrospectives
         tui_autolaunch: Whether `ooo run` should open the TUI without prompting
-        auto_evaluate: When true, a successful `execute_seed` run automatically
-            enqueues formal evaluation as a background job.
+        auto_evaluate: When true, an evaluable terminal `execute_seed` run
+            automatically enqueues formal evaluation as a background job.
+        auto_evolve: When true, a rejected formal evaluation automatically
+            continues through a bounded Ralph evolution loop.
+        auto_evolve_max_generations: Maximum Ralph generations for that chain.
         default_model: Optional model pin for every Execute-stage runtime call.
             ``None`` (the default) keeps the runtime's own selected model.
         run_verify_commands: Whether the orchestrator checks an AC's success
@@ -259,6 +262,8 @@ class ExecutionConfig(BaseModel, frozen=True):
     retrospective_interval: int = Field(default=3, ge=1)
     tui_autolaunch: bool = False
     auto_evaluate: bool = True
+    auto_evolve: bool = True
+    auto_evolve_max_generations: int = Field(default=3, ge=1, le=10)
     default_model: str | None = None
     run_verify_commands: bool = True
     verify_command_timeout_seconds: int = Field(default=600, ge=1)
@@ -274,6 +279,24 @@ class ExecutionConfig(BaseModel, frozen=True):
     def _migrate_legacy_decomposition_mode(cls, value: object) -> object:
         """Retire pre-execution splitting without breaking stored config files."""
         return "bounce_only" if value == "preflight" else value
+
+    @field_validator("auto_evolve_max_generations", mode="before")
+    @classmethod
+    def _clamp_auto_evolve_max_generations(cls, value: object) -> object:
+        """Keep the automatic loop inside Ralph's public 1..10 envelope."""
+
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, int):
+            parsed = value
+        elif isinstance(value, str):
+            try:
+                parsed = int(value)
+            except ValueError:
+                return value
+        else:
+            return value
+        return max(1, min(10, parsed))
 
     @field_validator("project_guidance")
     @classmethod

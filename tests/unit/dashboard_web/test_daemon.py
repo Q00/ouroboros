@@ -227,7 +227,7 @@ class TestPendingRun:
             assert status == 200
             page = body.decode("utf-8")
             assert "waiting for run" in page
-            assert "while (!runId)" in page
+            assert "startList()" in page
             assert "no active run" not in page
         finally:
             server.shutdown()

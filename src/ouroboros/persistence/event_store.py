@@ -20,6 +20,7 @@ from urllib.parse import quote, unquote
 from uuid import uuid4
 
 from sqlalchemy import and_, case, event, func, or_, select, text
+from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError, OperationalError
 
 if TYPE_CHECKING:
@@ -29,6 +30,7 @@ from sqlalchemy.pool import AsyncAdaptedQueuePool
 
 from ouroboros.core.errors import PersistenceError
 from ouroboros.events.base import BaseEvent
+from ouroboros.persistence.backend_contract import require_sqlite_event_store_url
 from ouroboros.persistence.schema import (
     ac_acceptance_guards_table,
     events_table,
@@ -602,8 +604,8 @@ class EventStore:
         """Initialize EventStore with database URL.
 
         Args:
-            database_url: SQLAlchemy database URL.
-                         For async SQLite: "sqlite+aiosqlite:///path/to/db.sqlite"
+            database_url: SQLAlchemy database URL — SQLite-only, else ValueError
+                         (#1832). For async SQLite: "sqlite+aiosqlite:///path/to/db.sqlite"
                          If not provided, uses the configured EventStore path
                          with the legacy ~/.ouroboros/ouroboros.db fallback.
             read_only: When True, open the underlying SQLite database in true
@@ -615,7 +617,7 @@ class EventStore:
                 ``sqlite3.OperationalError: attempt to write a readonly database``.
                 Callers that opt in should also skip schema creation by calling
                 ``initialize(create_schema=False)`` — this is the default when
-                ``read_only=True``. ``read_only`` is a no-op for non-SQLite URLs.
+                ``read_only=True``.
         """
         self._configuration_error: ValueError | None = None
         if database_url is None:
@@ -636,6 +638,7 @@ class EventStore:
         self._lifecycle_lock = asyncio.Lock()
         if read_only:
             database_url = self._coerce_to_readonly_url(database_url)
+        require_sqlite_event_store_url(database_url)
         self._database_url = database_url
         self._engine: AsyncEngine | None = None
         # Anchor connection for process-shared in-memory databases (memdb VFS):
@@ -670,23 +673,22 @@ class EventStore:
     def _sqlite_path_from_url(database_url: str) -> str | None:
         """Filesystem path of the SQLite file this URL points at, else ``None``.
 
-        Returns ``None`` for in-memory or non-SQLite backends (they have no local
-        file). Understands both the plain ``sqlite+aiosqlite:///<path>`` form and
-        the read-only ``…///file:<path>?mode=ro&uri=true`` URI form.
+        Returns ``None`` for in-memory or non-SQLite backends. Parsed
+        structurally, so a query string on any accepted form — plain,
+        ``:memory:``, or ``file:`` URIs (``mode=ro``/``mode=memory``) —
+        never masquerades as part of a filesystem path.
         """
-        prefix = "sqlite+aiosqlite:///"
-        if not database_url.startswith(prefix):
+        try:
+            parsed = make_url(database_url)
+        except Exception:
             return None
-        path_part = database_url[len(prefix) :]
-        if path_part.startswith("file:"):
-            # URI form — drop the ``file:`` scheme and any ``?query``/``#fragment``,
-            # then percent-decode the path back to its filesystem form.
-            rest = path_part[len("file:") :]
-            rest = rest.split("?", 1)[0].split("#", 1)[0]
-            path_part = unquote(rest)
-        if path_part in (":memory:", ""):
+        is_memory_mode = str(parsed.query.get("mode", "")).lower() == "memory"
+        if parsed.get_backend_name() != "sqlite" or is_memory_mode:
             return None
-        return path_part
+        database = parsed.database or ""
+        if database.startswith("file:"):
+            database = unquote(database[len("file:") :])
+        return None if database in (":memory:", "") else database
 
     def sqlite_path(self) -> str | None:
         """Filesystem path of the backing SQLite file, or ``None``.
@@ -712,8 +714,6 @@ class EventStore:
     @property
     def supports_cross_process_workers(self) -> bool:
         """Whether another process can observe this store's event stream."""
-        if not self._database_url.startswith("sqlite+aiosqlite:///"):
-            return True
         return self.sqlite_path() is not None
 
     def _raise_invalid_append_input(
