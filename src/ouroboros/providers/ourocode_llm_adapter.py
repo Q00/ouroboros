@@ -199,9 +199,20 @@ class OurocodeLLMAdapter:
         response_model: str,
     ) -> Result[CompletionResponse, ProviderError]:
         if not config.response_format:
-            return Result.ok(
-                await self._run(client, prompt_text, config, response_model=response_model)
-            )
+            parsed = await self._run(client, prompt_text, config, response_model=response_model)
+            if not parsed.content.strip():
+                # A turn that produced no text is a failed turn, whatever it
+                # stopped for. Returning it as `ok` hands the caller an empty
+                # string where an answer belongs, and every sibling adapter
+                # fails closed here instead.
+                return Result.err(
+                    ProviderError(
+                        message="Empty response from ourocode",
+                        provider="ourocode",
+                        details={"stop_reason": parsed.raw_response["stop_reason"]},
+                    )
+                )
+            return Result.ok(parsed)
 
         last_response_preview = ""
         for _attempt in range(_STRUCTURED_RESPONSE_ATTEMPTS):
@@ -248,7 +259,10 @@ class OurocodeLLMAdapter:
             model=response_model,
             usage=_ZERO_USAGE,
             finish_reason=self._finish_reason(result.stop_reason),
-            raw_response={"ourocode_model": response_model},
+            raw_response={
+                "ourocode_model": response_model,
+                "stop_reason": result.stop_reason,
+            },
         )
 
     def _resolve_ourocode_model(
@@ -320,7 +334,19 @@ class OurocodeLLMAdapter:
 
     @staticmethod
     def _finish_reason(stop_reason: str) -> str:
-        return {"end_turn": "stop", "cancelled": "cancelled"}.get(stop_reason, stop_reason)
+        """Translate an ACP ``stopReason`` into this codebase's ``finish_reason``.
+
+        ``max_tokens`` has to become ``"length"``: that is the marker callers
+        test for, and an untranslated one reads as an unremarkable stop rather
+        than a truncation. Unknown reasons pass through unchanged so a new ACP
+        value is visible rather than silently recoded as a clean stop.
+        """
+        return {
+            "end_turn": "stop",
+            "cancelled": "cancelled",
+            "max_tokens": "length",
+            "max_turn_requests": "length",
+        }.get(stop_reason, stop_reason)
 
     @staticmethod
     def _compose_prompt(messages: list[Message]) -> str:

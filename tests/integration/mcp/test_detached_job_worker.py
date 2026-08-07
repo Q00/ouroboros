@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 from pathlib import Path
+import platform
 import subprocess
 import sys
 import textwrap
@@ -18,6 +19,9 @@ from ouroboros.mcp.errors import MCPToolError
 from ouroboros.mcp.job_manager import JobLinks, JobManager, JobStatus
 from ouroboros.mcp.tools.background import start_background_tool_job
 from ouroboros.orchestrator.heartbeat import is_process_identity_alive
+from ouroboros.orchestrator.persisted_process_identity import (
+    persisted_process_owner_alive,
+)
 from ouroboros.persistence.event_store import EventStore
 
 _LAUNCH_PARENT = textwrap.dedent(
@@ -226,6 +230,13 @@ async def test_detached_job_survives_accepting_process_exit(tmp_path: Path) -> N
         assert owner_pid != parent_pid
         assert snapshot.status in {JobStatus.QUEUED, JobStatus.RUNNING}
         assert is_process_identity_alive(owner_pid, owner_start_time)
+        if platform.system() == "Linux":
+            owner_identity = created.data.get("owner_identity")
+            assert isinstance(owner_identity, dict)
+            assert owner_identity["pid"] == owner_pid
+            assert persisted_process_owner_alive(created.data) is True
+        else:
+            assert "owner_identity" not in created.data
 
         terminal = await _wait_terminal(manager, job_id)
         assert terminal.status == JobStatus.COMPLETED
