@@ -41,6 +41,10 @@ class LineageWinnerAdvanced(RuntimeError):
     """The caller must recompute its request from the durable winner state."""
 
 
+class LineageFlightConflict(RuntimeError):
+    """A different same-lineage request already owns the local flight."""
+
+
 @dataclass(frozen=True, slots=True)
 class EffectiveEvolutionExecutionPolicy:
     """Task-local focus policy after applying an explicit benchmark override."""
@@ -52,9 +56,6 @@ class EffectiveEvolutionExecutionPolicy:
 
 _ACTIVE_EVOLUTION_EXECUTION_POLICY: ContextVar[EffectiveEvolutionExecutionPolicy | None] = (
     ContextVar("ouroboros_effective_evolution_execution_policy", default=None)
-)
-_CLAIMED_GENERATION: ContextVar[int | None] = ContextVar(
-    "ouroboros_claimed_evolve_generation", default=None
 )
 
 
@@ -616,6 +617,7 @@ async def run_lineage_single_flight[T](
     *,
     scope: str = "evolve-core",
     replan_on_different: bool = False,
+    reject_different: bool = False,
 ) -> T:
     """Run one process-local writer per lineage and coalesce identical calls.
 
@@ -642,6 +644,11 @@ async def run_lineage_single_flight[T](
 
         if current.request_key == request_key:
             return await _await_lineage_flight(current)
+
+        if reject_different:
+            raise LineageFlightConflict(
+                f"lineage {lineage_id} is owned by a concurrent evolve_step request"
+            )
 
         try:
             await asyncio.shield(current.task)
@@ -835,61 +842,6 @@ async def run_durable_lineage_single_flight[T](
                 owner_id=claim.owner_id,
                 waiter_id=waiter_id,
             )
-
-
-async def run_generation_claim_flight[T](
-    event_store: EventStore,
-    lineage_id: str,
-    request_key: str,
-    operation: Callable[[], Awaitable[T]],
-    *,
-    generation_number: int,
-    encode: Callable[[T], dict[str, Any]],
-    decode: Callable[[Mapping[str, Any]], T | Awaitable[T]],
-    on_claimed: GenerationClaimCallback | None = None,
-) -> T:
-    """Combine local duplicate coalescing with an optional exact-claim handoff."""
-
-    async def run_operation(claimed_generation: int) -> T:
-        token = _CLAIMED_GENERATION.set(claimed_generation)
-        try:
-            return await operation()
-        finally:
-            _CLAIMED_GENERATION.reset(token)
-
-    async def run_claimed() -> T:
-        return await run_durable_lineage_single_flight(
-            event_store,
-            lineage_id,
-            request_key,
-            lambda: run_operation(generation_number),
-            generation_number=generation_number,
-            encode=encode,
-            decode=decode,
-            on_claimed=on_claimed,
-            operation_for_generation=run_operation,
-        )
-
-    if on_claimed is not None:
-        return await run_claimed()
-    return await run_lineage_single_flight(
-        event_store,
-        lineage_id,
-        request_key,
-        run_claimed,
-        replan_on_different=True,
-    )
-
-
-def claimed_generation_error(projected: int) -> str | None:
-    """Describe a projection that advanced after its durable claim was selected."""
-    expected = _CLAIMED_GENERATION.get()
-    if expected in (None, projected):
-        return None
-    return (
-        "Claimed evolve generation changed before execution: "
-        f"expected {expected}, projected {projected}"
-    )
 
 
 async def _renew_claim_until_cancelled(
