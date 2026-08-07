@@ -437,6 +437,83 @@ class TestCodexCliLLMAdapter:
         assert command[-2:] == ["--profile", "custom"]
         assert "mcp_servers.ouroboros.enabled=false" in command
 
+    @pytest.mark.parametrize(
+        ("base_server", "profile_server"),
+        (
+            ('command = "ouroboros"\nenabled = false', "enabled = true"),
+            ("enabled = true", 'command = "ouroboros"'),
+        ),
+    )
+    def test_strict_child_deep_merges_profile_v2_mcp_transport(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        base_server: str,
+        profile_server: str,
+    ) -> None:
+        """Split MCP fields are evaluated from Codex's effective merged config."""
+        codex_home = tmp_path / "codex-home"
+        codex_home.mkdir()
+        config_path = codex_home / "config.toml"
+        profile_path = codex_home / "custom.config.toml"
+        base_contents = (
+            f"[mcp_servers.ouroboros]\n{base_server}\n\n"
+            '[mcp_servers.other]\ncommand = "other-server"\n'
+        )
+        profile_contents = (
+            f"[mcp_servers.ouroboros]\n{profile_server}\n\n[mcp_servers.other]\nenabled = false\n"
+        )
+        config_path.write_text(base_contents, encoding="utf-8")
+        profile_path.write_text(profile_contents, encoding="utf-8")
+        cli = self._write_profile_help_cli(
+            tmp_path / "codex-unified",
+            "  -p, --profile <CONFIG_PROFILE_V2>\n"
+            "          Layer $CODEX_HOME/<name>.config.toml on top of the base user config",
+        )
+        monkeypatch.setenv("CODEX_HOME", str(codex_home))
+        adapter = CodexCliLLMAdapter(cli_path=cli, strict_mcp_config=True)
+
+        command = adapter._build_command(
+            output_last_message_path="/tmp/out.txt",
+            output_schema_path=None,
+            model=None,
+            profile="custom",
+        )
+
+        assert "mcp_servers.ouroboros.enabled=false" in command
+        assert "mcp_servers.other.enabled=false" not in command
+        assert config_path.read_text(encoding="utf-8") == base_contents
+        assert profile_path.read_text(encoding="utf-8") == profile_contents
+
+    def test_strict_profile_v2_respects_profile_disable_after_deep_merge(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A selected profile can disable an otherwise effective base transport."""
+        codex_home = tmp_path / "codex-home"
+        codex_home.mkdir()
+        (codex_home / "config.toml").write_text(
+            '[mcp_servers.ouroboros]\ncommand = "ouroboros"\n', encoding="utf-8"
+        )
+        (codex_home / "custom.config.toml").write_text(
+            "[mcp_servers.ouroboros]\nenabled = false\n", encoding="utf-8"
+        )
+        monkeypatch.setenv("CODEX_HOME", str(codex_home))
+        adapter = CodexCliLLMAdapter(cli_path="codex", strict_mcp_config=True)
+
+        with patch(
+            "ouroboros.providers.codex_cli_adapter.codex_uses_profile_v2", return_value=True
+        ):
+            command = adapter._build_command(
+                output_last_message_path="/tmp/out.txt",
+                output_schema_path=None,
+                model=None,
+                profile="custom",
+            )
+
+        assert "mcp_servers.ouroboros.enabled=false" not in command
+
     def test_strict_child_fails_closed_when_unified_help_exceeds_timeout(
         self,
         tmp_path: Path,
@@ -520,6 +597,40 @@ class TestCodexCliLLMAdapter:
         assert "Cannot guarantee strict MCP isolation" in str(result.error)
         spawn.assert_not_called()
 
+    @pytest.mark.asyncio
+    async def test_strict_unknown_profile_mode_fails_closed_for_merged_transport(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Unknown selector mode cannot ignore transport fields split across layers."""
+        codex_home = tmp_path / "codex-home"
+        codex_home.mkdir()
+        (codex_home / "config.toml").write_text(
+            '[mcp_servers.ouroboros]\ncommand = "ouroboros"\nenabled = false\n',
+            encoding="utf-8",
+        )
+        (codex_home / "ouroboros-worker.config.toml").write_text(
+            "[mcp_servers.ouroboros]\nenabled = true\n", encoding="utf-8"
+        )
+        cli = self._write_unlaunchable_cli(tmp_path / "codex-broken-interpreter")
+        monkeypatch.setenv("CODEX_HOME", str(codex_home))
+        adapter = CodexCliLLMAdapter(
+            cli_path=cli,
+            runtime_profile="worker",
+            strict_mcp_config=True,
+        )
+
+        with patch("ouroboros.providers.codex_cli_adapter.asyncio.create_subprocess_exec") as spawn:
+            result = await adapter._complete_once(
+                [Message(role=MessageRole.USER, content="Do not inherit merged MCP")],
+                CompletionConfig(model="default"),
+            )
+
+        assert result.is_err
+        assert "Cannot guarantee strict MCP isolation" in str(result.error)
+        spawn.assert_not_called()
+
     def test_strict_legacy_profile_ignores_dormant_profile_v2_mcp(
         self,
         tmp_path: Path,
@@ -533,6 +644,36 @@ class TestCodexCliLLMAdapter:
         )
         (codex_home / "custom.config.toml").write_text(
             '[mcp_servers.ouroboros]\ncommand = "ouroboros"\n', encoding="utf-8"
+        )
+        monkeypatch.setenv("CODEX_HOME", str(codex_home))
+        adapter = CodexCliLLMAdapter(cli_path="codex", strict_mcp_config=True)
+
+        with patch(
+            "ouroboros.providers.codex_cli_adapter.codex_uses_profile_v2", return_value=False
+        ):
+            command = adapter._build_command(
+                output_last_message_path="/tmp/out.txt",
+                output_schema_path=None,
+                model=None,
+                profile="custom",
+            )
+
+        assert "mcp_servers.ouroboros.enabled=false" not in command
+
+    def test_strict_legacy_profile_does_not_merge_dormant_transport_fields(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Definitive legacy mode never completes base MCP from a dormant v2 file."""
+        codex_home = tmp_path / "codex-home"
+        codex_home.mkdir()
+        (codex_home / "config.toml").write_text(
+            '[mcp_servers.ouroboros]\ncommand = "ouroboros"\nenabled = false\n',
+            encoding="utf-8",
+        )
+        (codex_home / "custom.config.toml").write_text(
+            "[mcp_servers.ouroboros]\nenabled = true\n", encoding="utf-8"
         )
         monkeypatch.setenv("CODEX_HOME", str(codex_home))
         adapter = CodexCliLLMAdapter(cli_path="codex", strict_mcp_config=True)

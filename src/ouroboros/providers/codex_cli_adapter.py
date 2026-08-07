@@ -8,7 +8,7 @@ without requiring an API key.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 import contextlib
 import json
 import os
@@ -82,6 +82,29 @@ _CODEX_PROVIDER_MARKERS = (
     "codex",
 )
 _OPENAI_RESPONSES_ENDPOINT = "api.openai.com/v1/responses"
+
+
+def _deep_merge_config_mappings(
+    base: Mapping[str, object] | None,
+    overlay: Mapping[str, object] | None,
+) -> dict[str, object]:
+    """Merge one Codex config layer onto another without mutating either.
+
+    Codex profile-v2 files layer nested tables recursively over ``config.toml``.
+    Reproducing that behavior here is necessary because MCP transport fields can
+    be split across the base and selected profile files.
+    """
+    merged = dict(base or {})
+    if overlay is None:
+        return merged
+
+    for key, overlay_value in overlay.items():
+        base_value = merged.get(key)
+        if isinstance(base_value, dict) and isinstance(overlay_value, dict):
+            merged[key] = _deep_merge_config_mappings(base_value, overlay_value)
+        else:
+            merged[key] = overlay_value
+    return merged
 
 
 class CodexCliLLMAdapter(RuntimeStreamMixin):
@@ -199,25 +222,25 @@ class CodexCliLLMAdapter(RuntimeStreamMixin):
         """Inspect only config layers reachable by this exact Codex child command."""
         codex_home = resolve_codex_home()
         base_config = self._read_config_mapping(codex_home / "config.toml")
-        if self._mapping_has_effective_ouroboros_mcp(base_config):
-            return True
+        base_has_mcp = self._mapping_has_effective_ouroboros_mcp(base_config)
 
         if not active_profile:
-            return False
+            return base_has_mcp
         uses_profile_v2 = codex_uses_profile_v2(self._cli_path)
         if uses_profile_v2 is False:
             # Split-mode Codex selects [profiles.<name>] for profile options,
             # but it does not promote a nested mcp_servers table into the
             # effective top-level MCP namespace. Only the base transport,
             # checked above, is reachable in this mode.
-            return False
+            return base_has_mcp
 
         profile_filename = f"{active_profile}.config.toml"
         if Path(profile_filename).name != profile_filename:
-            return False
+            return base_has_mcp
         profile_config = self._read_config_mapping(codex_home / profile_filename)
-        profile_has_mcp = self._mapping_has_effective_ouroboros_mcp(profile_config)
-        if uses_profile_v2 is None and profile_has_mcp:
+        effective_profile_config = _deep_merge_config_mappings(base_config, profile_config)
+        profile_v2_has_mcp = self._mapping_has_effective_ouroboros_mcp(effective_profile_config)
+        if uses_profile_v2 is None and profile_v2_has_mcp and not base_has_mcp:
             raise ProviderError(
                 message=(
                     "Cannot guarantee strict MCP isolation because the Codex "
@@ -230,7 +253,13 @@ class CodexCliLLMAdapter(RuntimeStreamMixin):
                     "profile_config": str(codex_home / profile_filename),
                 },
             )
-        return profile_has_mcp
+        if uses_profile_v2 is None:
+            # If the base transport is already effective, the transient
+            # ``enabled=false`` override is safe in either selector mode. A
+            # profile-v2 layer may disable it, but the redundant override does
+            # not synthesize a new transport or mutate user configuration.
+            return base_has_mcp
+        return profile_v2_has_mcp
 
     def _get_configured_cli_path(self) -> str | None:
         """Resolve an explicit CLI path from config helpers when available."""
