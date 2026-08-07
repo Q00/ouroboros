@@ -60,10 +60,10 @@ from ouroboros.router.types import ParsedOooCommand as TypesParsedOooCommand
             ),
         ),
         (
-            "  /OUROBOROS:status",
+            "  /OUROBOROS:ouroboros-status",
             ParsedOooCommand(
-                skill_name="status",
-                command_prefix="/ouroboros:status",
+                skill_name="ouroboros-status",
+                command_prefix="/ouroboros:ouroboros-status",
                 remainder=None,
             ),
         ),
@@ -108,10 +108,10 @@ def test_parse_ooo_command_normalizes_prefix_and_preserves_argument_text() -> No
             id="tab-separated-ooo-command",
         ),
         pytest.param(
-            " \f/OUROBOROS:Status\torch_123",
+            " \f/OUROBOROS:Ouroboros-Status\torch_123",
             ParsedOooCommand(
-                skill_name="status",
-                command_prefix="/ouroboros:status",
+                skill_name="ouroboros-status",
+                command_prefix="/ouroboros:ouroboros-status",
                 remainder="orch_123",
             ),
             id="form-feed-leading-slash-prefix",
