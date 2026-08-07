@@ -224,7 +224,7 @@ _DENIED_PP_TAIL_RE = re.compile(r"\b(?:for|about)\b.*$")
 _DENIED_PIECE_SPLIT_RE = re.compile(r"\s*(?:,|/|\bor\b|\band\b|\bnor\b)\s*")
 
 
-_SUBJECT_CLAUSE_RE = re.compile(r"\b(?:for|with|about)\s+[^,.;]*")
+_SUBJECT_CLAUSE_RE = re.compile(r"\b(?:for|with|about)\s+[^,.;]*|\b(?:that|which)\s+[^,.;]*")
 
 
 def _goal_denies_web_app_artifact(goal_text: str) -> bool:
@@ -459,8 +459,6 @@ def _matches_data_pipeline(ledger: SeedDraftLedger) -> bool:
 # by ledger context instead: in a ledger that carries browser context the
 # shared words describe the UI and the game classifier cedes them, while
 # the unshared game vocabulary (frame/canvas/scene/...) always counts.
-_GAME_RENDER_OR_SCREEN_RE = re.compile(r"\brender(?:s|ing|ed)?\b|\bscreens?\b")
-
 # Game-domain vocabulary marks game ownership of the shared render/screen
 # words even under browser deployment ("Build a browser game"), and
 # symmetrically makes the web_app matcher cede — browser hosting does not
@@ -482,8 +480,12 @@ _GAME_GOAL_SIGNAL_FRAGMENT = (
 )
 
 
-_GAME_FAST_PATH_RE = re.compile(
-    r"\b(?:frames?|canvas(?:es)?|game\s+loops?|playable|2d\s+games?|scenes?)\b"
+# "game loop", "playable", and "2d game" are unconditionally game-shaped;
+# canvas/scene/frame join render/screen as shared rendering vocabulary
+# (#1813 R18) — browser drawing surfaces and scene editors are UIs.
+_GAME_CORE_RE = re.compile(r"\b(?:game\s+loops?|playable|2d\s+games?)\b")
+_GAME_SHARED_SHAPE_RE = re.compile(
+    r"\b(?:render(?:s|ing|ed)?|screens?|canvas(?:es)?|scenes?|frames?)\b"
 )
 
 
@@ -501,9 +503,9 @@ def _matches_game_2d(ledger: SeedDraftLedger) -> bool:
     visible = _game_visible_text(ledger)
     # Token-bounded (#1813 R13): substring matching made "iframe" satisfy
     # "frame" and would accept similar embeddings for the other terms.
-    if _GAME_FAST_PATH_RE.search(visible):
+    if _GAME_CORE_RE.search(visible):
         return True
-    if not _GAME_RENDER_OR_SCREEN_RE.search(outputs + " " + goal):
+    if not _GAME_SHARED_SHAPE_RE.search(outputs + " " + goal):
         return False
     if _GAME_DOMAIN_RE.search(visible):
         return True
@@ -586,7 +588,7 @@ _UI_COMPOSITION_RE = re.compile(
 # Whole manifest/lockfile path tokens ("packages/web/package.json",
 # "package-lock.json") and the token-bounded library word (#1813 R5).
 _MANIFEST_TOKEN_RE = re.compile(r"\S*package(?:-lock)?\.json\S*")
-_LIBRARY_PACKAGE_WORD_RE = re.compile(r"\bpackage\b")
+_LIBRARY_PACKAGE_WORD_RE = re.compile(r"\bpackage\b(?!-)")
 
 
 def _ledger_has_browser_context(ledger: SeedDraftLedger) -> bool:
@@ -615,7 +617,7 @@ def _ledger_has_browser_context(ledger: SeedDraftLedger) -> bool:
 # are stripped before either matcher consults the goal ("not a library"
 # is not intent).
 _LIBRARY_INTENT_RE = re.compile(
-    r"\b(?:importable|librar(?:y|ies)|sdks?|api\s+surface|public\s+api|package)\b"
+    r"\b(?:importable|librar(?:y|ies)|sdks?|api\s+surface|public\s+api|package(?!-))\b"
 )
 _LIBRARY_INTENT_FRAGMENT = (
     r"(?:librar(?:y|ies)|sdks?|packages?|api\s+surface|public\s+api|importable)"
@@ -623,7 +625,11 @@ _LIBRARY_INTENT_FRAGMENT = (
 
 
 def _library_visible_goal(ledger: SeedDraftLedger) -> str:
-    return _strip_negated_signals(_goal_text(ledger), _LIBRARY_INTENT_FRAGMENT)
+    """Goal text for library ownership: subject/relative clauses name what
+    the artifact is about ("that displays SDK documentation"), not its
+    shape (#1813 R18), and denials are stripped (#1813 R12)."""
+    goal = _SUBJECT_CLAUSE_RE.sub(" ", _goal_text(ledger))
+    return _strip_negated_signals(goal, _LIBRARY_INTENT_FRAGMENT)
 
 
 def _matches_web_app(ledger: SeedDraftLedger) -> bool:
@@ -649,10 +655,7 @@ def _matches_web_app(ledger: SeedDraftLedger) -> bool:
     # outputs enumerate every deliverable, so an API/SDK co-produced next
     # to an affirmative browser UI stays an honest multi-class question
     # for _matches_library rather than a web_app veto.
-    ownership_goal = _SUBJECT_CLAUSE_RE.sub(" ", _goal_text(ledger))
-    intent_text = _MANIFEST_TOKEN_RE.sub(
-        " ", _strip_negated_signals(ownership_goal, _LIBRARY_INTENT_FRAGMENT)
-    )
+    intent_text = _MANIFEST_TOKEN_RE.sub(" ", _library_visible_goal(ledger))
     if _LIBRARY_INTENT_RE.search(intent_text):
         return False
     # Game vocabulary suppresses web_app only when the game predicate has

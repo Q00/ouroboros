@@ -77,12 +77,14 @@ class CompletionMode(StrEnum):
 
 
 class TaskClass(StrEnum):
-    """Canonical task classes for L1-a.
+    """Canonical task classes.
 
-    Frozen at this PR. Additional classes (``game_3d``, ``desktop_app``,
-    ``notebook_analysis``, ...) land as their own follow-up PRs of
-    ~10 LoC plus a unit test once a canonical scenario demonstrates
-    real need.
+    The original seven were frozen at L1-a; ``web_app`` (#1813) is the
+    first class added through the PR-per-class growth path. Additional
+    classes (``game_3d``, ``desktop_app``, ``notebook_analysis``, ...)
+    land as their own follow-up PRs once a canonical scenario
+    demonstrates real need — see the domain_inference module docstring
+    for the full extension obligations.
     """
 
     LIBRARY = "library"

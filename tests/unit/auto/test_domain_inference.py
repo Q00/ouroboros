@@ -1513,3 +1513,46 @@ def test_co_produced_api_in_outputs_keeps_web_app_ownership(outputs: str) -> Non
     _seed_section(ledger, "outputs", value=outputs)
     result = derive_domain_from_ledger(ledger)
     assert TaskClass.WEB_APP in result.classes
+
+
+@pytest.mark.parametrize(
+    ("goal", "outputs"),
+    [
+        (
+            "Build a browser-based drawing application",
+            "Canvas drawing surface with a color toolbar and settings panel",
+        ),
+        (
+            "Build a browser vector-scene editor",
+            "Scene editing surface with layer panels and a toolbar",
+        ),
+    ],
+)
+def test_canvas_and_scene_uis_are_not_conclusive_game_evidence(goal: str, outputs: str) -> None:
+    """R18 probe: canvas/scene are shared rendering vocabulary — browser
+    drawing and editing UIs are not games."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value=outputs)
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP
+
+
+def test_sdk_documentation_subject_does_not_own_the_web_app() -> None:
+    """R18 probe: a relative clause naming SDK documentation is subject
+    matter, not library artifact-shape evidence."""
+    ledger = _bare_ledger("Build a web app that displays SDK documentation")
+    _seed_section(ledger, "outputs", value="Browser dashboard with search and a navigation bar")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP
+
+
+def test_package_delivery_subject_does_not_own_the_web_app() -> None:
+    """R18 probe: physical package-delivery vocabulary is not the library
+    package signal."""
+    ledger = _bare_ledger("Build a package-delivery tracking web app")
+    _seed_section(ledger, "outputs", value="Tracking dashboard with a search form and status pages")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP
