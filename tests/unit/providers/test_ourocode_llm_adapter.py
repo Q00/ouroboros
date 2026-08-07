@@ -33,9 +33,87 @@ async def test_complete_returns_completion_response() -> None:
     assert response.content == "hi there"
     assert response.model == "claude"
     assert response.raw_response["ourocode_model"] == "claude"
+    assert response.raw_response["stop_reason"] == "end_turn"
     # ACP carries no token usage — honestly zero, not fabricated.
     assert response.usage.total_tokens == 0
     assert response.finish_reason == "stop"
+
+
+@pytest.mark.parametrize(
+    ("text", "stop_reason"),
+    [
+        ("", "end_turn"),
+        ("", "refusal"),
+        ("", "max_tokens"),
+        ("", "max_turn_requests"),
+        ("   \n\t", "end_turn"),
+    ],
+    ids=["end-turn", "refusal", "max-tokens", "max-turn-requests", "whitespace-only"],
+)
+@pytest.mark.asyncio
+async def test_complete_rejects_a_turn_that_produced_no_text(text: str, stop_reason: str) -> None:
+    """A turn with no text is a failed turn, whatever it stopped for.
+
+    Returning it as ``ok`` handed the caller an empty string where an answer
+    belongs, and a refusal arrived indistinguishable from a clean stop.
+    """
+    adapter = OurocodeLLMAdapter()
+    turn = AcpTurnResult(text=text, stop_reason=stop_reason, session_id="s1")
+    with (
+        patch.object(OurocodeLLMAdapter, "_compose_prompt", return_value="composed"),
+        patch(
+            "ouroboros.providers.ourocode_llm_adapter.OurocodeAcpClient.run_turn",
+            new=AsyncMock(return_value=turn),
+        ),
+    ):
+        result = await adapter.complete(
+            messages=[Message(role=MessageRole.USER, content="hi")],
+            config=CompletionConfig(model="claude-sonnet-4-6"),
+        )
+
+    assert result.is_err, f"empty turn stopping on {stop_reason!r} must not report success"
+    assert result.error.provider == "ourocode"
+    assert result.error.details == {"stop_reason": stop_reason}
+
+
+@pytest.mark.parametrize(
+    ("stop_reason", "expected"),
+    [
+        ("end_turn", "stop"),
+        ("max_tokens", "length"),
+        ("max_turn_requests", "length"),
+        ("cancelled", "cancelled"),
+        ("refusal", "refusal"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_complete_preserves_raw_stop_reason_while_normalizing_public_finish_reason(
+    stop_reason: str,
+    expected: str,
+) -> None:
+    """Truncation has to surface as ``length`` — that is the marker callers test for.
+
+    ``max_tokens`` reaching a caller untranslated reads as an unremarkable stop,
+    so a cut-off answer was consumed as a complete one. Reasons with no
+    established translation pass through rather than being recoded as ``stop``.
+    """
+    adapter = OurocodeLLMAdapter()
+    turn = AcpTurnResult(text="partial answer", stop_reason=stop_reason, session_id="s1")
+    with (
+        patch.object(OurocodeLLMAdapter, "_compose_prompt", return_value="composed"),
+        patch(
+            "ouroboros.providers.ourocode_llm_adapter.OurocodeAcpClient.run_turn",
+            new=AsyncMock(return_value=turn),
+        ),
+    ):
+        result = await adapter.complete(
+            messages=[Message(role=MessageRole.USER, content="hi")],
+            config=CompletionConfig(model="claude-sonnet-4-6"),
+        )
+
+    assert result.is_ok
+    assert result.value.finish_reason == expected
+    assert result.value.raw_response["stop_reason"] == stop_reason
 
 
 @pytest.mark.asyncio
