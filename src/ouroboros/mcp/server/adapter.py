@@ -1944,6 +1944,7 @@ def create_ouroboros_server(
             mcp_tool_prefix=_evo_mcp_prefix,
             debug=False,
             enable_decomposition=True,
+            session_signal_hub=session_signal_hub,
         )
         return await evolution_runner.execute_seed(
             seed=seed,
@@ -2283,7 +2284,10 @@ def create_ouroboros_server(
         SessionSignalMailbox(
             event_store=event_store,
             target_resolver=session_signal_target_resolver,
-            delivery_queue=session_signal_hub,
+            # Detached workers own distinct process-local hubs. Persist the
+            # accepted signal here; the owning worker imports it at a safe
+            # execution boundary through SessionSignalHub.refresh_pending().
+            delivery_queue=None,
         )
     )
     evolve_step = EvolveStepHandler(

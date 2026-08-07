@@ -2375,6 +2375,40 @@ class TestAsyncJobHandlers:
         handler = StartEvolveStepHandler()
         assert handler.definition.name == "ouroboros_start_evolve_step"
 
+    async def test_start_evolve_step_exposes_generation_execution_id(
+        self,
+        memory_event_store: EventStore,
+    ) -> None:
+        """The start receipt, durable job link, and observer share one generation ID."""
+
+        class FakeJobManager:
+            async def allocate_job_id(self) -> str:
+                return "job_evolve"
+
+            async def start_job(self, *, job_type, initial_message, runner, links, job_id=None):
+                runner.close()
+                return SimpleNamespace(
+                    job_id=job_id or "job_evolve",
+                    links=links,
+                    status=SimpleNamespace(value="queued"),
+                    cursor=1,
+                )
+
+        handler = StartEvolveStepHandler(
+            event_store=memory_event_store,
+            job_manager=FakeJobManager(),  # type: ignore[arg-type]
+            agent_runtime_backend="codex",
+        )
+
+        result = await handler.handle({"lineage_id": "lin_signal", "execute": True})
+
+        assert result.is_ok
+        expected = "evolve:lin_signal:generation:1"
+        assert result.value.meta["execution_id"] == expected
+        assert result.value.structured_content["execution_id"] == expected
+        assert result.value.meta["job_observer"]["execution_id"] == expected
+        assert f"Execution ID: {expected}" in result.value.text_content
+
     def test_start_evolve_step_inherits_seed_yaml_text_schema(self) -> None:
         evolve_seed = next(
             parameter

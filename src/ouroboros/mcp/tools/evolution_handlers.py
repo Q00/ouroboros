@@ -1629,6 +1629,20 @@ class StartEvolveStepHandler:
 
         # Fall-through: real background job path. The shared pipeline owns the
         # ``should_cancel()`` pre-work guard, so the runner only does the work.
+        await self._event_store.initialize()
+        generation_number = await loop_support.planned_evolve_generation(
+            self._event_store,
+            str(lineage_id),
+            execute=bool(arguments.get("execute", True)),
+        )
+        # Generation execution IDs are deterministic. Publishing the same ID
+        # in the durable job link and observer lets the caller discover the
+        # exact AC attempts once their lifecycle events become visible.
+        execution_id = loop_support.generation_execution_id(
+            str(lineage_id),
+            generation_number,
+        )
+
         async def _runner(_handle) -> MCPToolResult:
             result = await self._evolve_handler.handle(arguments)
             if result.is_err:
@@ -1642,7 +1656,7 @@ class StartEvolveStepHandler:
             intent="evolve_step",
             process_scope=f"evolve_step:{lineage_id}",
             initial_message=f"Queued evolve_step for {lineage_id}",
-            links=JobLinks(lineage_id=lineage_id),
+            links=JobLinks(lineage_id=lineage_id, execution_id=execution_id),
             work_fn=_runner,
             cancelled_text="evolve_step cancelled before restart work began.",
             detached_tool_name="ouroboros_start_evolve_step",
@@ -1654,17 +1668,20 @@ class StartEvolveStepHandler:
         text = (
             f"Started background evolve_step.\n\n"
             f"Job ID: {snapshot.job_id}\n"
-            f"Lineage ID: {lineage_id}\n\n"
+            f"Lineage ID: {lineage_id}\n"
+            f"Execution ID: {snapshot.links.execution_id}\n\n"
             "Use ouroboros_job_status, ouroboros_job_wait, or ouroboros_job_result to monitor it."
         )
         meta = {
             "job_id": snapshot.job_id,
             "lineage_id": lineage_id,
+            "execution_id": snapshot.links.execution_id,
             "status": snapshot.status.value,
             "cursor": snapshot.cursor,
             "job_observer": build_job_observer_contract(
                 job_id=snapshot.job_id,
                 cursor=snapshot.cursor,
+                execution_id=snapshot.links.execution_id,
             ),
         }
         return Result.ok(
