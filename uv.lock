@@ -1585,12 +1585,14 @@ all = [
     { name = "anthropic" },
     { name = "claude-agent-sdk" },
     { name = "litellm", marker = "python_full_version < '3.14'" },
+    { name = "mcp", version = "1.28.1", source = { registry = "https://pypi.org/simple" } },
     { name = "textual" },
     { name = "textual-serve" },
 ]
 claude = [
     { name = "anthropic" },
     { name = "claude-agent-sdk" },
+    { name = "mcp", version = "1.28.1", source = { registry = "https://pypi.org/simple" } },
 ]
 litellm = [
     { name = "litellm", marker = "python_full_version < '3.14' or (extra == 'extra-12-ouroboros-ai-all' and extra == 'extra-12-ouroboros-ai-mcp') or (extra == 'extra-12-ouroboros-ai-all' and extra == 'group-12-ouroboros-ai-mcp-test') or (extra == 'extra-12-ouroboros-ai-claude' and extra == 'extra-12-ouroboros-ai-mcp') or (extra == 'extra-12-ouroboros-ai-claude' and extra == 'group-12-ouroboros-ai-mcp-test')" },
@@ -1638,6 +1640,8 @@ requires-dist = [
     { name = "jsonschema", specifier = ">=4.21.0,<5.0.0" },
     { name = "litellm", marker = "python_full_version < '3.14' and extra == 'all'", specifier = "==1.91.0" },
     { name = "litellm", marker = "python_full_version < '3.14' and extra == 'litellm'", specifier = "==1.91.0" },
+    { name = "mcp", marker = "extra == 'all'", specifier = "==1.28.1" },
+    { name = "mcp", marker = "extra == 'claude'", specifier = "==1.28.1" },
     { name = "mcp", marker = "extra == 'mcp'", specifier = "==2.0.0" },
     { name = "prompt-toolkit", specifier = ">=3.0.0,<4.0.0" },
     { name = "pydantic", specifier = ">=2.0.0,<3.0.0" },

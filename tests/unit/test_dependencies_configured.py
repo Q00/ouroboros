@@ -153,6 +153,11 @@ def test_mcp_and_claude_profiles_are_isolated():
     groups = pyproject["dependency-groups"]
     conflicts = pyproject["tool"]["uv"]["conflicts"]
 
+    assert optional_deps["claude"] == [
+        "claude-agent-sdk==0.2.128",
+        "anthropic==0.120.0",
+        "mcp==1.28.1",
+    ]
     assert optional_deps["mcp"] == ["mcp==2.0.0"]
     assert "mcp" not in optional_deps["all"][0]
     assert groups["mcp-test"] == ["mcp==2.0.0"]
