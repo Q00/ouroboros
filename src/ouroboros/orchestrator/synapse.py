@@ -357,6 +357,16 @@ class SessionSignalHub:
             return ()
         return tuple(live.pending)
 
+    def is_registered(self, target: SessionSignalTarget) -> bool:
+        """Return whether this hub still owns the exact live target."""
+        key = self._key(
+            target.execution_id,
+            target.session_scope_id,
+            target.session_attempt_id,
+        )
+        live = self._targets.get(key)
+        return live is not None and live.target == target
+
     async def resolve(self, signal: SessionSignal) -> SessionSignalTarget:
         key = self._key(
             signal.expected_execution_id,
@@ -763,6 +773,15 @@ class SessionSignalMailbox:
             accepted=accepted,
             queued=queued,
             rejected=ended,
+            locally_owned=(
+                isinstance(self.target_resolver, SessionSignalHub)
+                and self.delivery_queue is self.target_resolver
+                and (
+                    self.target_resolver.event_store is None
+                    or self.target_resolver.event_store is self.event_store
+                )
+                and self.target_resolver.is_registered(target)
+            ),
         )
         if admitted is None:
             await self.event_store.append_batch([accepted, queued])

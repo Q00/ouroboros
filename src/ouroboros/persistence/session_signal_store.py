@@ -195,12 +195,28 @@ async def admit_if_target_active(
     accepted: BaseEvent,
     queued: BaseEvent,
     rejected: BaseEvent,
+    locally_owned: bool = False,
 ) -> bool | None:
-    """Queue under the ownership fence, or reject after target shutdown."""
+    """Queue under the ownership fence, or reject after target shutdown.
+
+    A resolver/queue pair backed by the same live ``SessionSignalHub`` can own
+    a target before a durable lifecycle guard exists.  That process-local
+    ownership is admitted only while the guard row is absent; an explicit
+    inactive guard always wins and prevents a stale hub from reopening it.
+    """
     engine = _engine(event_store)
     if engine is None:
         return None
-    return await _settle(_admit_if_target_active(engine, identity, accepted, queued, rejected))
+    return await _settle(
+        _admit_if_target_active(
+            engine,
+            identity,
+            accepted,
+            queued,
+            rejected,
+            locally_owned=locally_owned,
+        )
+    )
 
 
 async def _admit_if_target_active(
@@ -209,6 +225,8 @@ async def _admit_if_target_active(
     accepted: BaseEvent,
     queued: BaseEvent,
     rejected: BaseEvent,
+    *,
+    locally_owned: bool,
 ) -> bool:
     conn = await _begin(engine)
     try:
@@ -219,11 +237,12 @@ async def _admit_if_target_active(
                 session_signal_target_guards_table.c.session_attempt_id == identity[2],
             )
         )
-        events = (accepted, queued) if active is True else (rejected,)
+        admitted = active is True or (active is None and locally_owned)
+        events = (accepted, queued) if admitted else (rejected,)
         for event in events:
             await conn.execute(events_table.insert().values(**event.to_db_dict()))
         await conn.commit()
-        return active is True
+        return admitted
     except BaseException:
         if conn.in_transaction():
             await conn.rollback()

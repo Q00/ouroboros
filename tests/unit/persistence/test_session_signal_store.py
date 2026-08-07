@@ -16,7 +16,11 @@ from ouroboros.core.session_signal import (
 )
 from ouroboros.core.session_signal_projection import project_session_signal
 from ouroboros.events.base import BaseEvent
-from ouroboros.orchestrator.synapse import SessionSignalMailbox, SessionSignalTarget
+from ouroboros.orchestrator.synapse import (
+    SessionSignalHub,
+    SessionSignalMailbox,
+    SessionSignalTarget,
+)
 from ouroboros.persistence.event_store import EventStore, sqlite_database_url
 from ouroboros.persistence.session_signal_store import append_runtime_lifecycle
 
@@ -75,6 +79,83 @@ class _ResolvedTarget:
         if self.release is not None:
             await self.release.wait()
         return _target()
+
+
+@pytest.mark.asyncio
+async def test_registered_local_hub_admits_without_lifecycle_guard(tmp_path: Path) -> None:
+    store = EventStore(sqlite_database_url(tmp_path / "synapse-local-owner.db"))
+    await store.initialize()
+    hub = SessionSignalHub()
+    target = _target()
+    hub.register(target)
+    try:
+        mailbox = SessionSignalMailbox(store, hub, delivery_queue=hub)
+
+        projection = await mailbox.request(_signal(100))
+
+        assert projection.state is SessionSignalState.QUEUED
+        pending = hub.pop_pending(target)
+        assert pending is not None
+        assert pending.signal.signal_id == "sig_race_100"
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_absent_guard_still_rejects_nonlocal_resolver(tmp_path: Path) -> None:
+    store = EventStore(sqlite_database_url(tmp_path / "synapse-unfenced-resolver.db"))
+    await store.initialize()
+    try:
+        mailbox = SessionSignalMailbox(store, _ResolvedTarget())  # type: ignore[arg-type]
+
+        projection = await mailbox.request(_signal(101))
+
+        assert projection.state is SessionSignalState.REJECTED
+        events = await store.replay("session_signal", "sig_race_101")
+        assert events[-1].data["rejection_code"] == "target_ended_before_admission"
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_absent_guard_rejects_hub_bound_to_a_different_store(tmp_path: Path) -> None:
+    runtime_store = EventStore(sqlite_database_url(tmp_path / "synapse-runtime-owner.db"))
+    mailbox_store = EventStore(sqlite_database_url(tmp_path / "synapse-mailbox-owner.db"))
+    await runtime_store.initialize()
+    await mailbox_store.initialize()
+    hub = SessionSignalHub(event_store=runtime_store)
+    hub.register(_target())
+    try:
+        mailbox = SessionSignalMailbox(mailbox_store, hub, delivery_queue=hub)
+
+        projection = await mailbox.request(_signal(103))
+
+        assert projection.state is SessionSignalState.REJECTED
+        assert hub.pop_pending(_target()) is None
+    finally:
+        await mailbox_store.close()
+        await runtime_store.close()
+
+
+@pytest.mark.asyncio
+async def test_terminal_guard_overrides_registered_local_hub(tmp_path: Path) -> None:
+    store = EventStore(sqlite_database_url(tmp_path / "synapse-stale-local-owner.db"))
+    await store.initialize()
+    hub = SessionSignalHub()
+    hub.register(_target())
+    try:
+        assert await append_runtime_lifecycle(store, _lifecycle("execution.session.started"))
+        assert await append_runtime_lifecycle(store, _lifecycle("execution.session.completed"))
+        mailbox = SessionSignalMailbox(store, hub, delivery_queue=hub)
+
+        projection = await mailbox.request(_signal(102))
+
+        assert projection.state is SessionSignalState.REJECTED
+        assert hub.pop_pending(_target()) is None
+        events = await store.replay("session_signal", "sig_race_102")
+        assert events[-1].data["rejection_code"] == "target_ended_before_admission"
+    finally:
+        await store.close()
 
 
 @pytest.mark.asyncio
