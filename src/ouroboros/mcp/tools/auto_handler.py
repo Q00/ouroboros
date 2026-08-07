@@ -82,6 +82,15 @@ from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.job_manager import JobLinks, JobManager, JobSnapshot, JobStatus
 from ouroboros.mcp.tools._dashboard import resolve_dashboard_base_url
 from ouroboros.mcp.tools.authoring_handlers import GenerateSeedHandler, InterviewHandler
+from ouroboros.mcp.tools.auto_start_lease_store import (
+    CORRUPT_START_LEASE,
+)
+from ouroboros.mcp.tools.auto_start_lease_store import (
+    read_start_lease_locked as _read_start_lease_locked,
+)
+from ouroboros.mcp.tools.auto_start_lease_store import (
+    write_start_lease_locked as _write_start_lease_locked,
+)
 from ouroboros.mcp.tools.background import start_background_tool_job
 from ouroboros.mcp.tools.evaluation_handlers import LateralThinkHandler
 from ouroboros.mcp.tools.execution_handlers import ExecuteSeedHandler, StartExecuteSeedHandler
@@ -1099,6 +1108,8 @@ class StartAutoHandler:
         lease = _read_start_lease(self._store, auto_session_id)
         if lease is None:
             return None, False
+        if lease is CORRUPT_START_LEASE:
+            return _lease_conflict_error(auto_session_id, lease), False
         if _lease_is_expired(lease):
             _release_start_lease(self._store, auto_session_id, token=lease.get("token"))
             return None, True
@@ -1321,16 +1332,6 @@ def _read_start_lease(store: AutoStore, auto_session_id: str) -> dict[str, Any] 
         return _read_start_lease_locked(path)
 
 
-def _read_start_lease_locked(path: Path) -> dict[str, Any] | None:
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return None
-    except json.JSONDecodeError:
-        return None
-    return payload if isinstance(payload, dict) else None
-
-
 def _reserve_start_lease(
     store: AutoStore,
     auto_session_id: str,
@@ -1391,10 +1392,9 @@ def _release_start_lease(
 ) -> None:
     path = _start_lease_path(store, auto_session_id)
     with file_lock(path):
-        if token is not None:
-            lease = _read_start_lease_locked(path)
-            if lease is not None and lease.get("token") != token:
-                return
+        lease = _read_start_lease_locked(path)
+        if lease is None or not isinstance(token, str) or lease.get("token") != token:
+            return
         path.unlink(missing_ok=True)
 
 
@@ -1455,6 +1455,8 @@ def _validate_start_lease_payload(
             is_retriable=True,
             details={"auto_session_id": auto_session_id, "session_id": auto_session_id},
         )
+    if lease is CORRUPT_START_LEASE:
+        return _lease_conflict_error(auto_session_id, lease)
     if _lease_is_expired(lease):
         return MCPToolError(
             "Invalid start_auto lease token: lease has expired for "
@@ -1482,11 +1484,6 @@ def _validate_start_lease_payload(
     return None
 
 
-def _write_start_lease_locked(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
-
-
 def _lease_is_expired(lease: dict[str, Any]) -> bool:
     expires_at = lease.get("expires_at")
     if not isinstance(expires_at, str) or not expires_at:
@@ -1511,6 +1508,14 @@ def _lease_owner_is_alive(lease: dict[str, Any]) -> bool:
 
 
 def _lease_conflict_error(auto_session_id: str, lease: dict[str, Any]) -> MCPToolError:
+    if lease is CORRUPT_START_LEASE:
+        return MCPToolError(
+            "Auto session start lease is corrupt or unreadable; refusing to replace or "
+            f"release it for auto_session_id={auto_session_id}.",
+            tool_name="ouroboros_start_auto",
+            is_retriable=True,
+            details={"auto_session_id": auto_session_id, "session_id": auto_session_id},
+        )
     mode = str(lease.get("mode") or "unknown")
     return MCPToolError(
         "Auto session already has a pending start lease: "
