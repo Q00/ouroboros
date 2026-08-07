@@ -130,6 +130,72 @@ def test_linux_identity_rejects_prior_boot(monkeypatch: pytest.MonkeyPatch) -> N
     )
 
 
+def test_linux_owner_pid_disagreement_is_unknown(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A torn redundant owner record cannot authorize recovery."""
+    pid = 424242
+    monkeypatch.setattr(platform, "system", lambda: "Linux")
+    monkeypatch.setattr(
+        identity_module.os,
+        "kill",
+        lambda _pid, _signal: pytest.fail("mismatched owner PID must not probe liveness"),
+    )
+
+    assert (
+        identity_module.persisted_process_owner_alive(
+            {
+                "owner_pid": pid + 1,
+                "owner_start_time": 1.0,
+                "owner_identity": _identity(pid, 12),
+            }
+        )
+        is None
+    )
+
+
+def test_linux_malformed_persisted_boot_id_is_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An arbitrary boot token is corruption, not proof of a prior boot."""
+    pid = 424242
+    identity = _identity(pid, 12)
+    identity["boot_id"] = "corrupt-not-a-linux-boot-uuid"
+    monkeypatch.setattr(platform, "system", lambda: "Linux")
+    monkeypatch.setattr(
+        identity_module.os,
+        "kill",
+        lambda _pid, _signal: pytest.fail("malformed boot ID must not probe liveness"),
+    )
+
+    assert (
+        identity_module.persisted_process_owner_alive(
+            {
+                "owner_pid": pid,
+                "owner_start_time": 1.0,
+                "owner_identity": identity,
+            }
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    "boot_id",
+    [
+        b"corrupt-not-a-linux-boot-uuid",
+        b"11111111222233334444555555555555",
+        b"11111111-2222-3333-4444-55555555555g",
+    ],
+)
+def test_linux_boot_id_reader_rejects_non_uuid_values(
+    monkeypatch: pytest.MonkeyPatch,
+    boot_id: bytes,
+) -> None:
+    _install_linux_procfs(monkeypatch, pid=os.getpid(), ticks=12, boot_id=boot_id)
+
+    assert identity_module._linux_boot_id() is None
+    assert identity_module.current_persisted_process_identity() is None
+
+
 @pytest.mark.parametrize(
     "identity",
     [

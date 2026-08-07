@@ -6198,6 +6198,8 @@ class TestZombieJobReconciliation:
         owner_pid: int | None,
         owner_start_time: float | None,
         include_versioned_identity: bool = True,
+        owner_identity_pid: int | None = None,
+        owner_boot_id: str = "11111111-2222-3333-4444-555555555555",
         session_id: str | None = None,
         execution_id: str | None = None,
     ) -> JobManager:
@@ -6219,8 +6221,8 @@ class TestZombieJobReconciliation:
                 data["owner_identity"] = {
                     "version": 1,
                     "platform": "linux",
-                    "pid": owner_pid,
-                    "boot_id": "11111111-2222-3333-4444-555555555555",
+                    "pid": owner_identity_pid if owner_identity_pid is not None else owner_pid,
+                    "boot_id": owner_boot_id,
                     "start_ticks": 111,
                 }
         await writer._append_event("mcp.job.created", job_id, data)
@@ -6847,6 +6849,44 @@ class TestZombieJobReconciliation:
             alive.assert_called()
             assert snapshot.status is JobStatus.RUNNING
             events, _ = await store.get_events_after("job", "job_legacy_epoch", last_row_id=0)
+            assert [event.type for event in events] == ["mcp.job.created"]
+        finally:
+            await store.close()
+
+    @pytest.mark.parametrize(
+        ("owner_identity_pid", "owner_boot_id"),
+        [
+            (4_242_425, "11111111-2222-3333-4444-555555555555"),
+            (4_242_424, "corrupt-not-a-linux-boot-uuid"),
+        ],
+        ids=("owner-pid-disagreement", "malformed-boot-id"),
+    )
+    async def test_corrupt_linux_owner_record_cannot_terminalize_job(
+        self,
+        tmp_path,
+        owner_identity_pid: int,
+        owner_boot_id: str,
+    ) -> None:
+        store = _build_store(tmp_path)
+        try:
+            await self._seed_running_job(
+                store,
+                "job_corrupt_owner",
+                owner_pid=4_242_424,
+                owner_start_time=111.0,
+                owner_identity_pid=owner_identity_pid,
+                owner_boot_id=owner_boot_id,
+            )
+            restarted = JobManager(store)
+
+            with patch(
+                "ouroboros.orchestrator.persisted_process_identity.platform.system",
+                return_value="Linux",
+            ):
+                snapshot = await restarted.get_snapshot("job_corrupt_owner")
+
+            assert snapshot.status is JobStatus.RUNNING
+            events, _ = await store.get_events_after("job", "job_corrupt_owner", last_row_id=0)
             assert [event.type for event in events] == ["mcp.job.created"]
         finally:
             await store.close()

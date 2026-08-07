@@ -2267,6 +2267,68 @@ class TestBackgroundJobPath:
         assert lease_path.exists()
         fake_inner_auto.handle.assert_not_called()
 
+    @pytest.mark.parametrize(
+        "owner_identity",
+        [
+            {
+                **_linux_owner_identity(os.getpid() + 1),
+            },
+            {
+                **_linux_owner_identity(os.getpid()),
+                "boot_id": "corrupt-not-a-linux-boot-uuid",
+            },
+        ],
+        ids=("owner-pid-disagreement", "malformed-boot-id"),
+    )
+    @pytest.mark.asyncio
+    async def test_corrupt_linux_owner_cannot_release_plugin_lease(
+        self,
+        event_store,
+        tmp_path,
+        fake_inner_auto,
+        owner_identity: dict[str, object],
+    ) -> None:
+        store = AutoStore(tmp_path)
+        state = AutoPipelineState(goal="build a CLI", cwd=str(tmp_path))
+        store.save(state)
+        lease_path = store.path_for(state.auto_session_id).with_suffix(".start_auto_lease.json")
+        lease_path.write_text(
+            json.dumps(
+                {
+                    "token": "corrupt_owner",
+                    "mode": "plugin_dispatched",
+                    "created_at": datetime.now(UTC).isoformat(),
+                    "expires_at": (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+                    "owner_pid": os.getpid(),
+                    "owner_start_time": 0.0,
+                    "owner_identity": owner_identity,
+                }
+            ),
+            encoding="utf-8",
+        )
+        job_manager = MagicMock()
+        job_manager.find_active_job_by_session = AsyncMock(return_value=None)
+        h = StartAutoHandler(
+            event_store=event_store,
+            job_manager=job_manager,
+            store=store,
+            agent_runtime_backend="opencode",
+            opencode_mode="plugin",
+        )
+        h._inner_auto = fake_inner_auto
+
+        with patch(
+            "ouroboros.orchestrator.persisted_process_identity.platform.system",
+            return_value="Linux",
+        ):
+            result = await h.handle({"resume": state.auto_session_id})
+
+        assert result.is_err
+        assert "active plugin dispatch" in result.error.message
+        assert lease_path.exists()
+        assert json.loads(lease_path.read_text(encoding="utf-8"))["token"] == "corrupt_owner"
+        fake_inner_auto.handle.assert_not_called()
+
     @pytest.mark.asyncio
     async def test_plugin_dispatch_lease_uses_short_handoff_timeout(
         self, event_store, tmp_path, fake_inner_auto

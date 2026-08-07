@@ -6,6 +6,7 @@ from collections.abc import Mapping
 import os
 from pathlib import Path
 import platform
+import re
 
 from ouroboros.orchestrator.heartbeat import (
     current_process_identity,
@@ -14,6 +15,17 @@ from ouroboros.orchestrator.heartbeat import (
 
 _IDENTITY_VERSION = 1
 _LINUX_BOOT_ID_PATH = Path("/proc/sys/kernel/random/boot_id")
+_LINUX_BOOT_ID_PATTERN = re.compile(
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+)
+
+
+def _normalize_linux_boot_id(value: object) -> str | None:
+    """Validate and normalize Linux's canonical UUID-shaped boot identity."""
+    if not isinstance(value, str) or _LINUX_BOOT_ID_PATTERN.fullmatch(value) is None:
+        return None
+    return value.lower()
 
 
 def _linux_process_start_ticks(pid: int) -> int | None:
@@ -47,9 +59,7 @@ def _linux_boot_id() -> str | None:
         value = raw.decode("ascii")
     except (OSError, UnicodeError):
         return None
-    if not value or len(value) > 128:
-        return None
-    return value
+    return _normalize_linux_boot_id(value)
 
 
 def current_persisted_process_identity() -> dict[str, object] | None:
@@ -110,7 +120,7 @@ def persisted_process_identity_alive(
     version = identity.get("version")
     identity_platform = identity.get("platform")
     pid = identity.get("pid")
-    boot_id = identity.get("boot_id")
+    boot_id = _normalize_linux_boot_id(identity.get("boot_id"))
     start_ticks = identity.get("start_ticks")
     if (
         type(version) is not int
@@ -118,9 +128,8 @@ def persisted_process_identity_alive(
         or identity_platform != "linux"
         or type(pid) is not int
         or pid <= 0
-        or not isinstance(boot_id, str)
-        or not boot_id
-        or len(boot_id) > 128
+        or legacy_pid != pid
+        or boot_id is None
         or type(start_ticks) is not int
         or start_ticks < 0
     ):
