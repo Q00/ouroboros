@@ -87,7 +87,7 @@ _NEGATION_CUE_FRAGMENT = (
     r"won[’']?t|wouldn[’']?t|shouldn[’']?t|"
     r"can[’']?t|cannot|"
     r"doesn[’']?t|don[’']?t|didn[’']?t|"
-    r"instead\s+of|rather\s+than)"
+    r"instead\s+of|rather\s+than|as\s+opposed\s+to)"
 )
 _NEGATED_CLI_GOAL_RE = re.compile(
     rf"\b(?P<cue>{_NEGATION_CUE_FRAGMENT})"
@@ -276,7 +276,8 @@ _TRAILING_ADVERBS = frozenset(
 # artifact claim at "but".
 _CONTENT_CLAUSE_RE = re.compile(
     r"\b(?:that|which|for|about)\s+[^,.;]*?"
-    r"(?=\s+but\b|\s+yet\b|\s+although\b|\s+though\b|\s+whereas\b|[,.;]|$)"
+    r"(?=\s+but\b|\s+yet\b|\s+although\b|\s+though\b|\s+whereas\b|"
+    r"\s+as\s+opposed\s+to\b|[,.;]|$)"
 )
 
 
@@ -532,8 +533,6 @@ def _matches_web_service(ledger: SeedDraftLedger) -> bool:
         (
             "rest endpoint",
             "rest api",
-            "http response",
-            "json body",
             "multiple endpoints",
             "web service",
             "web server",
@@ -865,6 +864,27 @@ _INSPECTION_TOOL_GOAL_RE = re.compile(
 )
 
 
+_BROWSER_UI_PRODUCT_HEAD_RE = re.compile(
+    r"\b(?:dashboards?|pages?|websites?|web\s+uis?|user\s+interfaces?|frontends?)\b"
+)
+
+
+def _goal_has_browser_ui_product_head(goal_text: str) -> bool:
+    """True when browser context modifies the produced UI artifact.
+
+    Inspection vocabulary can describe the product's subject rather than a
+    separate tool ("browser monitoring dashboard", "dashboard for test
+    results").  After content clauses are removed, a final UI head preserves
+    that product ownership; inspection-suite/CLI/report heads still take the
+    target-widget exclusion below.
+    """
+    core = _CONTENT_CLAUSE_RE.sub(" ", goal_text)
+    matches = list(_BROWSER_UI_PRODUCT_HEAD_RE.finditer(core))
+    if not matches or re.search(r"\w", core[matches[-1].end() :]):
+        return False
+    return _goal_has_unnegated_web_app_signal(goal_text)
+
+
 _MANIPULATED_TARGET_RE = re.compile(
     r"\b(?:opens?|opening|submits?|submitting|clicks?|clicking|fills?|filling|"
     r"screenshots?|captures?|capturing|crawls?|crawling|scrapes?|scraping|"
@@ -953,7 +973,9 @@ def _matches_web_app(ledger: SeedDraftLedger) -> bool:
     # A goal declaring an inspection/automation artifact marks output
     # widgets as its targets (#1813 R30) — clause-level ownership, not
     # another noun list.
-    if _INSPECTION_TOOL_GOAL_RE.search(_goal_text(ledger)):
+    if _INSPECTION_TOOL_GOAL_RE.search(_goal_text(ledger)) and not (
+        _goal_has_browser_ui_product_head(_goal_text(ledger))
+    ):
         return False
     ui_text = _strip_negated_signals(outputs, _UI_SIGNAL_STRIP_FRAGMENT)
     ui_text = _MANIPULATED_TARGET_RE.sub(" ", ui_text)
@@ -961,7 +983,8 @@ def _matches_web_app(ledger: SeedDraftLedger) -> bool:
 
 
 _CONSUMED_DEPENDENCY_RE = re.compile(
-    r"\b(?:to|from|against|via|using|through|consumes?|consuming|calls?|calling|"
+    r"\b(?:to|from|against|via|using|through|clients?\s+for|consumers?\s+for|"
+    r"consumes?|consuming|calls?|calling|"
     r"powered\s+by|backed\s+by|built\s+on|driven\s+by|served\s+by|"
     r"integrat\w*\s+with|invokes?|invoking|fetch\w*\s+(?:data\s+)?from|"
     r"wrapp?\w*|built\s+around|compatible\s+with|works?\s+with|"

@@ -2085,6 +2085,57 @@ def test_inspection_tool_goal_voids_target_widget_outputs() -> None:
 @pytest.mark.parametrize(
     "goal",
     [
+        "Build a browser-based dashboard for test results",
+        "Build a browser monitoring dashboard",
+    ],
+)
+def test_inspection_subject_vocabulary_does_not_veto_browser_product(goal: str) -> None:
+    """R36 probe: test/monitoring describes a dashboard's subject; the
+    final browser-UI product head still owns the artifact."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value="Interactive charts and navigation")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP
+
+
+@pytest.mark.parametrize(
+    "outputs",
+    [
+        "Login form and panels showing HTTP responses from the API",
+        "Login form and panels displaying a JSON body from the REST API",
+    ],
+)
+def test_displayed_service_responses_do_not_create_service_ownership(outputs: str) -> None:
+    """R36 probe: response payloads displayed by an API client are
+    consumed data, not a produced endpoint/server surface."""
+    ledger = _bare_ledger("Build a web app client for a REST API")
+    _seed_section(ledger, "outputs", value=outputs)
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
+        "Build a Python library as opposed to a web app",
+        "Build a Python library for browser tooling as opposed to a web app",
+    ],
+)
+def test_as_opposed_to_denies_web_app(goal: str) -> None:
+    """R36 probe: the shared denial grammar covers this adversative cue,
+    including after a content clause."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value="An importable package with a public API")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.LIBRARY
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
         "Build a CLI, not web apps",
         "Build a CLI without web applications",
         "Build a CLI rather than web apps",
