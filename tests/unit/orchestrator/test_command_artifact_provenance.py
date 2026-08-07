@@ -149,6 +149,28 @@ async def _artifact_fact(
     return manifest, facts[0]
 
 
+def _set_completion_verdict(
+    events: list[BaseEvent],
+    *,
+    location: str,
+    field: str,
+    value: object,
+) -> None:
+    completion_data = dict(events[1].data)
+    if location == "top_level":
+        completion_data[field] = value
+    elif location == "top_level_meta":
+        completion_data["meta"] = {field: value}
+    else:
+        tool_result = dict(completion_data["tool_result"])
+        if location == "tool_result":
+            tool_result[field] = value
+        else:
+            tool_result["meta"] = {**tool_result["meta"], field: value}
+        completion_data["tool_result"] = tool_result
+    events[1] = events[1].model_copy(update={"data": completion_data})
+
+
 @pytest.mark.asyncio
 async def test_accepted_command_artifact_flows_from_journal_to_verifier(tmp_path: Path) -> None:
     artifact = tmp_path / "claimed.txt"
@@ -924,6 +946,55 @@ async def test_nested_and_boolean_failure_verdicts_veto_journal_authority(
 
     assert manifest.entries == ()
     assert fact.evidence_handle == "missing:files_touched:0"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("field", ("failure", "cancel", "abort"))
+@pytest.mark.parametrize(
+    "location", ("top_level", "top_level_meta", "tool_result", "tool_result_meta")
+)
+async def test_boolean_failure_aliases_veto_journal_authority(
+    tmp_path: Path,
+    location: str,
+    field: str,
+) -> None:
+    artifact = tmp_path / "claimed.txt"
+    artifact.write_text("failed", encoding="utf-8")
+    events = _command_events(
+        call_id=f"{location}-{field}-true",
+        effects=[_effect(artifact, relative_path=artifact.name)],
+    )
+    _set_completion_verdict(events, location=location, field=field, value=True)
+
+    manifest, fact = await _artifact_fact(events, task_cwd=tmp_path)
+
+    assert all("command_artifacts" not in entry.payload for entry in manifest.entries)
+    assert fact.evidence_handle == "missing:files_touched:0"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("field", ("failure", "cancel", "abort"))
+@pytest.mark.parametrize(
+    "location", ("top_level", "top_level_meta", "tool_result", "tool_result_meta")
+)
+async def test_false_boolean_failure_aliases_are_neutral(
+    tmp_path: Path,
+    location: str,
+    field: str,
+) -> None:
+    artifact = tmp_path / "claimed.txt"
+    artifact.write_text("accepted", encoding="utf-8")
+    events = _command_events(
+        call_id=f"{location}-{field}-false",
+        effects=[_effect(artifact, relative_path=artifact.name)],
+    )
+    _set_completion_verdict(events, location=location, field=field, value=False)
+
+    manifest, fact = await _artifact_fact(events, task_cwd=tmp_path)
+
+    assert len(manifest.entries) == 1
+    assert "command_artifacts" in manifest.entries[0].payload
+    assert fact.evidence_handle == manifest.entries[0].handle
 
 
 @pytest.mark.asyncio

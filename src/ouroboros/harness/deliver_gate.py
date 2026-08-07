@@ -791,11 +791,14 @@ def _mapping_has_failure_verdict(value: Mapping[str, Any]) -> bool:
     for key in (
         "is_error",
         "error",
+        "failure",
         "failed",
+        "cancel",
         "cancelled",
         "canceled",
         "timeout",
         "timed_out",
+        "abort",
         "aborted",
     ):
         if key not in value:
