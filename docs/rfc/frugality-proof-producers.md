@@ -22,10 +22,11 @@ But a row only `counts_in_proof` when it carries **all** axes. This branch imple
 the three previously-missing producers plus authoritative outcome finalization.
 Missing, unsafe, or malformed measurements still return `INSUFFICIENT_DATA`; in
 particular, shadow replay is unavailable on bundled production runtimes until one
-can attest complete local and external side-effect isolation. Runtime decomposition
-currently validates only response shape/count, not semantic MECE coverage and
-exclusivity, so live children also carry no decomposition-trust attestation and
-cannot enter a proof row yet.
+can attest complete local and external side-effect isolation. The live
+`bounce_only` decomposition path now has a Verified-MECE decision: an independent
+runtime attests coverage, sibling non-overlap, and simpler units after at most one
+repair. Only that finalized decision carries `trustworthy=true`; forced-atomic,
+parse-degraded, repair-exhausted, and other unverified children remain quarantined.
 
 ## The fixed event contract (consumed by the #1478 gate)
 
@@ -41,8 +42,8 @@ run/root has one unambiguous session; otherwise it remains uncounted.
 | Event type | Producer | Required fields | Seed AC |
 |---|---|---|---|
 | `execution.ac.model_routed` | **done** | `model_tier`, `model`, `model_mode`, `is_decomposed_child`, `root_ac_index`, `retry_attempt`, `ac_id`, run anchor, `session_id` | routing contract |
-| `execution.ac.token_attribution.reported` | **implemented on this branch** | `ac_id`, run anchor, `session_id`, `root_ac_index`, `retry_attempt`, `token_spend` | AC2 |
-| `execution.ac.deliver_verdict` | **implemented on this branch** | `ac_id`, run anchor, `session_id`, `root_ac_index`, `retry_attempt`, `traceguard_verdict`, `unsupported_claim_rate`, `grounding_regression` | AC4 |
+| `execution.ac.token_attribution.reported` | **implemented on this branch** | `ac_id`, run anchor, `session_id`, `session_attempt_id`, primary `ac_dispatch_id`, `root_ac_index`, `retry_attempt`, `token_spend` | AC2 |
+| `execution.ac.deliver_verdict` | **implemented on this branch** | `ac_id`, run anchor, `session_id`, `session_attempt_id`, primary `ac_dispatch_id`, `root_ac_index`, `retry_attempt`, `traceguard_verdict`, `unsupported_claim_rate`, `grounding_regression` | AC4 |
 | `execution.ac.shadow_replay` | **implemented, fail-closed without an isolation-attested runtime** | `ac_id`, run anchor, `session_id`, `root_ac_index`, `retry_attempt`, `baseline_token_spend`, `baseline_mode`, `baseline_tier`, `baseline_model`, `decomposition_trustworthy` | AC5 |
 | `execution.ac.attempt_judged` | **implemented in the outer verify/retry layer** | run anchor, `session_id`, `root_ac_index`, `retry_attempt`, `attempt_number`, `success`, `outcome`, `is_decomposed` | provisional attempt telemetry |
 | `execution.ac.acceptance_finalized` | **implemented by the terminal Final Gate** | run anchor, `session_id`, `acceptance_generation_id`, `root_ac_index`, `final_retry_attempt`, `accepted`, `disposition`, `outcome`, `terminal_status` | final admission |
@@ -140,10 +141,11 @@ with deterministic decomposition-trust attestation and an isolation-attested
 replay runtime is eligible for one re-execution at its **parent** model tier/effort.
 That run emits `execution.ac.shadow_replay` with `baseline_token_spend`,
 `baseline_mode: "shadow_replay"`, `baseline_tier`, `baseline_model`, and
-`decomposition_trustworthy`. The field is currently false for every live
-decomposition; only an explicitly attested test or future experiment producer may
-set it true. Untrusted units are quarantined out of the proof. This is the paired
-baseline the frugality bar measures reduction against.
+`decomposition_trustworthy`. A live `bounce_only` decision may now set the trust
+field true after Verified-MECE attestation; every other decomposition remains
+untrusted and quarantined. Trust alone does not authorize replay: the runtime must
+separately attest side-effect isolation. This is the paired baseline the frugality
+bar measures reduction against.
 
 The child and baseline must also resolve to different concrete model IDs. A sparse
 tier configuration may label a child `frugal` while falling upward to the same
@@ -195,6 +197,85 @@ triad pairs each child's lower-tier run with its parent-tier baseline.
 
 - The proof thresholds and verdict order remain fixed.
 - Reasoning-effort routing remains an auxiliary, independently observable contract.
+
+## Focused-evolution paired receipt completeness
+
+The evolve-level paired receipt is narrower than the population triad above, but
+uses the same fail-closed evidence posture. `execution.ac.attempt.dispatched`
+with `dispatch_kind=primary` defines the independently known executor attempt set
+for an arm. Its full identity is `(ac_id, retry_attempt, session_attempt_id,
+ac_dispatch_id, root_ac_index)`. Each identity must occur exactly once and have
+exactly one `execution.ac.token_attribution.reported` event sourced from
+`runtime_usage` and exactly one internally consistent
+`execution.ac.deliver_verdict`, both bound back to that primary dispatch.
+The producer emits one aggregate attribution for a primary attempt and any
+session-signal follow-up turns. Until those follow-ups expose a stable cross-arm
+semantic chain identity, the presence of any follow-up makes the paired receipt
+`INSUFFICIENT_DATA`; silently folding arm-specific follow-up work into a comparable
+primary subtotal could fabricate savings. The dispatched root set must exactly
+cover `active_ac_indices`.
+
+Executor telemetry is only one component of the generation total. A task-local
+collector also records the runtime usage of Wonder, every Reflect parse retry,
+validation repair, assertion extraction, semantic/consensus evaluation,
+dependency analysis, decomposition classification/proposal/attestation/repair,
+coordinator review, and shadow replay. Primary leaf execution remains joined
+through its exact durable attempt receipt. An opaque call site or any provider
+result without positive runtime usage invalidates the whole arm. Missing usage or
+claim surfaces remain honest `INSUFFICIENT_DATA`; duplicate or malformed evidence
+is never dropped and the remaining subset is never summed.
+
+The paired generation key hashes the complete canonical Seed and previous
+`EvaluationSummary`, plus the shared Git commit. Only volatile Seed identity and
+provenance (`seed_id`, `created_at`, `interview_id`, `parent_seed_id`) are removed.
+Final quality evidence is independently checked against each arm's current Seed:
+every AC index must appear once, in range, with matching content and structured
+semantic identity. Final approval, overall score, highest evaluation stage,
+drift, reward-hacking risk, per-AC scores, lineage regressions, and TraceGuard
+grounding are compared with lower-is-better direction where applicable. A
+metric present in only one arm is incomparable. The two arms must additionally
+have the same complete semantic fingerprint of the Seed actually evaluated;
+equal cardinality is not enough.
+These completeness facts and bounded digests of the executor and provider call
+identities are persisted in the observation before a PASS can be emitted.
+Separate normalized configuration fingerprints require and bind backend,
+model/tier/mode, effort level/mode, permission mode, and applicable request
+settings. Completion surfaces resolve the task profile once and dispatch the
+resulting sealed config. They require a versioned adapter-instance attestation
+validated against a centrally registered exact-key schema. The receipt binds the
+effective model, profile, sampling/output/effort fields, endpoint/routing,
+timeout, and retry field, while credential authority is persisted only as a
+deterministic HMAC. The prepared endpoint and credential remain secret-safe,
+in-memory dispatch authority and must be consumed unchanged at the actual
+provider-call boundary; dependency-global or post-attestation mutable routing is
+ineligible. The schema must mechanically establish one measured attempt;
+a self-declared retry-completeness boolean is insufficient. Unregistered,
+unattested, empty, partial, extra, secret-bearing, cyclic, over-deep, oversized,
+non-finite, retry-opaque, blank, or unknown configuration invalidates only the
+proof arm and never the evolution call.
+Assignment digests additionally preserve
+the root-AC-to-configuration and auxiliary-role-to-configuration call sequences
+across the pair, including order and multiplicity. A root or role realized in both
+arms must have an exactly equal sequence. The proof may remove an entire
+control-only root/role, but fails closed on partial removal within a shared unit
+until producers expose stable cross-arm semantic call identities. Missing, blank,
+or unknown phase roles are incomplete evidence. Equality of an unordered value
+set—or an identity-free subsequence—is insufficient because swapping or
+concentrating a cheap model could otherwise masquerade as a focused-evolution
+saving.
+Agent-runtime request envelopes also bind the tool set, system-prompt digest,
+known request kwargs, and whether the call is fresh or uses a scoped fresh
+handle. A true resumed transcript/session is ineligible until it exposes a
+stable semantic cross-arm context identity. Provider response model identity is
+normalized and revalidated for both completion and agent-stream surfaces, so a
+requested known model cannot be replaced by an opaque `unknown` or a different
+effective model without changing the assignment digest. Completion usage
+subtotals must reconcile exactly with the reported total.
+Proof-event reads use bounded keyset pages and provider-call capture has its own
+fixed cap. Either overflow fails incomplete while retaining only bounded metadata.
+Individual receipts, primary/provider subtotals, and their combined generation
+total must remain finite. A Wonder-only
+early exit persists a non-PASS receipt.
 
 ## Done = safe, fully measured runs stop returning INSUFFICIENT_DATA
 

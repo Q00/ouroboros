@@ -18,7 +18,7 @@ from ouroboros.cli.commands.init import (
     _start_workflow,
 )
 from ouroboros.cli.main import app
-from ouroboros.core.errors import ProviderError
+from ouroboros.core.errors import ProviderError, ValidationError
 from ouroboros.core.types import Result
 
 runner = CliRunner()
@@ -356,7 +356,9 @@ class TestInitWorkflowRuntimeHandoff:
             patch("ouroboros.cli.commands.init.SeedGenerator", return_value=mock_generator),
             patch("ouroboros.cli.commands.init.print_error") as mock_print_error,
         ):
-            seed_path, result = await _generate_seed_from_interview(state, llm_adapter)
+            seed_path, result = await _generate_seed_from_interview(
+                state, llm_adapter, engine=_persistence_engine()
+            )
 
         assert seed_path is None
         assert result == SeedGenerationResult.CANCELLED
@@ -412,7 +414,9 @@ class TestInitWorkflowRuntimeHandoff:
             patch("ouroboros.cli.commands.init.SeedGenerator", return_value=mock_generator),
             patch("ouroboros.cli.commands.init.Prompt.ask", return_value="2"),
         ):
-            seed_path, result = await _generate_seed_from_interview(state, llm_adapter)
+            seed_path, result = await _generate_seed_from_interview(
+                state, llm_adapter, engine=_persistence_engine()
+            )
 
         assert result == SeedGenerationResult.SUCCESS
         assert seed_path is not None
@@ -422,3 +426,147 @@ class TestInitWorkflowRuntimeHandoff:
         assert call_kwargs.get("force") is True
         passed_score = mock_generator.generate.call_args.args[1]
         assert passed_score.overall_score == 0.45
+
+
+def _scored(overall: float, clarity: float, justification: str) -> AmbiguityScore:
+    def component(name: str, weight: float) -> ComponentScore:
+        return ComponentScore(
+            name=name,
+            clarity_score=clarity,
+            weight=weight,
+            justification=justification,
+        )
+
+    return AmbiguityScore(
+        overall_score=overall,
+        breakdown=ScoreBreakdown(
+            goal_clarity=component("Goal", 0.4),
+            constraint_clarity=component("Constraints", 0.3),
+            success_criteria_clarity=component("Success", 0.3),
+        ),
+    )
+
+
+def _persistence_engine() -> MagicMock:
+    engine = MagicMock()
+    engine.save_state = AsyncMock(return_value=Result.ok(Path("/tmp/interview.json")))
+    return engine
+
+
+class TestSeedGenerationPersistsAmbiguity:
+    """CLI seed generation must persist the score like the MCP path (#1901)."""
+
+    @pytest.mark.asyncio
+    async def test_successful_generation_persists_score_and_breakdown(self) -> None:
+        state = InterviewState(
+            interview_id="interview_persist_success",
+            initial_context="Build a CLI",
+        )
+        score = _scored(0.05, 0.95, "clear")
+        mock_scorer = MagicMock()
+        mock_scorer.score = AsyncMock(return_value=Result.ok(score))
+        mock_seed = MagicMock()
+        mock_seed.metadata.seed_id = "seed_persist_success"
+        mock_generator = MagicMock()
+        mock_generator.generate = AsyncMock(return_value=Result.ok(mock_seed))
+        mock_generator.save_seed = AsyncMock(return_value=Result.ok(Path("/tmp/seed.yaml")))
+        engine = _persistence_engine()
+
+        with (
+            patch("ouroboros.cli.commands.init.AmbiguityScorer", return_value=mock_scorer),
+            patch("ouroboros.cli.commands.init.SeedGenerator", return_value=mock_generator),
+        ):
+            seed_path, result = await _generate_seed_from_interview(
+                state, MagicMock(), engine=engine
+            )
+
+        assert result == SeedGenerationResult.SUCCESS
+        assert seed_path is not None
+        assert state.ambiguity_score == pytest.approx(0.05)
+        assert state.ambiguity_breakdown == score.breakdown.model_dump(mode="json")
+        engine.save_state.assert_awaited_once_with(state)
+
+    @pytest.mark.asyncio
+    async def test_persistence_failure_is_nonfatal(self) -> None:
+        state = InterviewState(
+            interview_id="interview_persist_warn",
+            initial_context="Build a CLI",
+        )
+        mock_scorer = MagicMock()
+        mock_scorer.score = AsyncMock(return_value=Result.ok(_scored(0.05, 0.95, "clear")))
+        mock_seed = MagicMock()
+        mock_seed.metadata.seed_id = "seed_persist_warn"
+        mock_generator = MagicMock()
+        mock_generator.generate = AsyncMock(return_value=Result.ok(mock_seed))
+        mock_generator.save_seed = AsyncMock(return_value=Result.ok(Path("/tmp/seed.yaml")))
+        engine = MagicMock()
+        engine.save_state = AsyncMock(
+            return_value=Result.err(ValidationError("disk full", field="state"))
+        )
+
+        with (
+            patch("ouroboros.cli.commands.init.AmbiguityScorer", return_value=mock_scorer),
+            patch("ouroboros.cli.commands.init.SeedGenerator", return_value=mock_generator),
+        ):
+            seed_path, result = await _generate_seed_from_interview(
+                state, MagicMock(), engine=engine
+            )
+
+        assert result == SeedGenerationResult.SUCCESS
+        assert seed_path is not None
+        assert state.ambiguity_score == pytest.approx(0.05)
+
+    @pytest.mark.asyncio
+    async def test_cancel_after_scoring_still_persists_score(self) -> None:
+        # The reporter's monitor scenario: even without a generated seed, a
+        # completed interview that scored must not read as never-scored.
+        state = InterviewState(
+            interview_id="interview_persist_cancel",
+            initial_context="Build a CLI",
+        )
+        score = _scored(0.45, 0.5, "unclear")
+        mock_scorer = MagicMock()
+        mock_scorer.score = AsyncMock(return_value=Result.ok(score))
+        engine = _persistence_engine()
+
+        with (
+            patch("ouroboros.cli.commands.init.AmbiguityScorer", return_value=mock_scorer),
+            patch("ouroboros.cli.commands.init.SeedGenerator", return_value=MagicMock()),
+            patch("ouroboros.cli.commands.init.Prompt.ask", return_value="3"),
+        ):
+            seed_path, result = await _generate_seed_from_interview(
+                state, MagicMock(), engine=engine
+            )
+
+        assert result == SeedGenerationResult.CANCELLED
+        assert seed_path is None
+        assert state.ambiguity_score == pytest.approx(0.45)
+        engine.save_state.assert_awaited_once_with(state)
+
+    @pytest.mark.asyncio
+    async def test_continue_interview_invalidates_persisted_score(self) -> None:
+        # Reopening bypasses record_response's reopen contract, so the helper
+        # must clear the snapshot it just persisted; an in-progress interview
+        # with a live score would be exactly the staleness #1901 fixes.
+        state = InterviewState(
+            interview_id="interview_persist_reopen",
+            initial_context="Build a CLI",
+        )
+        mock_scorer = MagicMock()
+        mock_scorer.score = AsyncMock(return_value=Result.ok(_scored(0.45, 0.5, "unclear")))
+        engine = _persistence_engine()
+
+        with (
+            patch("ouroboros.cli.commands.init.AmbiguityScorer", return_value=mock_scorer),
+            patch("ouroboros.cli.commands.init.SeedGenerator", return_value=MagicMock()),
+            patch("ouroboros.cli.commands.init.Prompt.ask", return_value="1"),
+        ):
+            seed_path, result = await _generate_seed_from_interview(
+                state, MagicMock(), engine=engine
+            )
+
+        assert result == SeedGenerationResult.CONTINUE_INTERVIEW
+        assert seed_path is None
+        assert state.ambiguity_score is None
+        assert state.ambiguity_breakdown is None
+        assert engine.save_state.await_count == 2

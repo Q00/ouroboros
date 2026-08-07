@@ -83,6 +83,7 @@ from ouroboros.orchestrator.adapter import (
     RuntimeHandle,
     resolve_worker_cwd,
 )
+from ouroboros.orchestrator.adaptive_concurrency import adaptive_concurrency_policy
 from ouroboros.orchestrator.backend_limits import (
     BackendConcurrencyLimits,
     plan_fan_out_concurrency,
@@ -152,6 +153,12 @@ from ouroboros.orchestrator.execution_runtime_scope import (
     ExecutionNodeIdentity,
     build_ac_runtime_scope,
 )
+from ouroboros.orchestrator.execution_semantics import (
+    CURRENT_EXECUTION_SEMANTICS_VERSION,
+    pre_adaptive_execution_semantics_rejection,
+    valid_execution_semantics_contract,
+    valid_legacy_preflight_execution_semantics_contract,
+)
 from ouroboros.orchestrator.execution_strategy import ExecutionStrategy, get_strategy
 from ouroboros.orchestrator.failure_taxonomy import FailureClass
 from ouroboros.orchestrator.legacy_identity import (
@@ -165,6 +172,7 @@ from ouroboros.orchestrator.mcp_tools import (
     enumerate_runtime_builtin_tool_definitions,
     serialize_tool_catalog,
 )
+from ouroboros.orchestrator.parallel_executor_models import CoordinatorQuotaPause
 from ouroboros.orchestrator.policy import (
     PolicyContext,
     PolicyDecision,
@@ -271,15 +279,6 @@ def _mapping_has_exact_keys(value: object, expected: frozenset[str]) -> bool:
     return False
 
 
-class _UnresolvedProjectIdentity:
-    """Sentinel type separating omitted resolution from resolved absence."""
-
-    __slots__ = ()
-
-
-_UNRESOLVED_PROJECT_IDENTITY = _UnresolvedProjectIdentity()
-
-
 @dataclass(frozen=True, slots=True)
 class _PersistedExecutionStrategy:
     """Effect-bearing prompt/tool strategy restored without live config reads."""
@@ -353,6 +352,7 @@ class RecoverableFailurePause:
     resume_hint: str
     pause_seconds: int | None = None
     resume_after: datetime | None = None
+    coordinator_owner: CoordinatorQuotaPause | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -2379,13 +2379,13 @@ class OrchestratorRunner:
         return current_seed_id, tuple(cohort)
 
     def _plan_parallel_workers(self, requested_workers: int | None = None) -> int:
-        """Return the effective fan-out worker count for the connected backend.
+        """Return the initial fan-out estimate for the connected backend.
 
-        Ouroboros caps delivery fan-out to the connected backend's known
-        concurrency limit so it does not stampede the LLM's rate/quota window
-        (R3). Backends whose underlying LLM limits are unknown — the CLI
-        runtimes — serialize by default and are raised only via
-        ``OUROBOROS_MAX_CONCURRENCY``.
+        Backends whose underlying LLM limits are unknown — the CLI runtimes —
+        start serialized. ParallelACExecutor treats this immutable pre-flight
+        value as an AIMD initial window, shrinking on provider pressure and
+        cautiously probing toward ``max_parallel_workers`` after sustained
+        success.
         """
         limits = resolve_backend_limits(self._adapter.runtime_backend)
         requested = self._max_parallel_workers if requested_workers is None else requested_workers
@@ -3907,8 +3907,12 @@ class OrchestratorRunner:
     def _execution_semantics_contract(self) -> dict[str, object]:
         """Return every scalar setting that can change resumed AC effects."""
         backend_limits = resolve_backend_limits(self._adapter.runtime_backend)
+        effective_parallel_workers = plan_fan_out_concurrency(
+            self._max_parallel_workers,
+            backend_limits,
+        )
         return {
-            "version": 3,
+            "version": CURRENT_EXECUTION_SEMANTICS_VERSION,
             "run_verify_commands": self._run_verify_commands,
             "verify_command_timeout_seconds": self._verify_command_timeout_seconds,
             "ac_retry_attempts": self._ac_retry_attempts,
@@ -3917,9 +3921,10 @@ class OrchestratorRunner:
             "decomposition_mode": self._decomposition_mode,
             "max_decomposition_depth": self._max_decomposition_depth,
             "max_parallel_workers": self._max_parallel_workers,
-            "effective_parallel_workers": plan_fan_out_concurrency(
-                self._max_parallel_workers,
-                backend_limits,
+            "effective_parallel_workers": effective_parallel_workers,
+            "adaptive_concurrency_policy": adaptive_concurrency_policy(
+                initial_limit=effective_parallel_workers,
+                max_limit=self._max_parallel_workers,
             ),
             "fat_harness_mode": self._fat_harness_mode,
             "shadow_replay_enabled": self._shadow_replay_enabled,
@@ -3937,114 +3942,10 @@ class OrchestratorRunner:
             "runtime_effect_capabilities": runtime_effect_capabilities_contract(self._adapter),
         }
 
-    @staticmethod
-    def _valid_execution_semantics_contract(value: object) -> bool:
-        """Validate the exact current scalar executor schema."""
-        expected_keys = frozenset(
-            {
-                "version",
-                "run_verify_commands",
-                "verify_command_timeout_seconds",
-                "ac_retry_attempts",
-                "cross_harness_redispatch",
-                "enable_decomposition",
-                "decomposition_mode",
-                "max_decomposition_depth",
-                "max_parallel_workers",
-                "effective_parallel_workers",
-                "fat_harness_mode",
-                "shadow_replay_enabled",
-                "checkpoint_store_enabled",
-                "session_signal_hub_enabled",
-                "context_pack_enabled",
-                "backend_limits_backend",
-                "backend_max_concurrency",
-                "backend_requests_per_minute",
-                "backend_tokens_per_minute",
-                "backend_self_governs_rate_limit",
-                "usage_limit_pause_seconds",
-                "runtime_effect_capabilities",
-            }
-        )
-        if not isinstance(value, Mapping) or not _mapping_has_exact_keys(value, expected_keys):
-            return False
-        boolean_keys = (
-            "run_verify_commands",
-            "cross_harness_redispatch",
-            "enable_decomposition",
-            "fat_harness_mode",
-            "shadow_replay_enabled",
-            "checkpoint_store_enabled",
-            "session_signal_hub_enabled",
-            "context_pack_enabled",
-            "backend_self_governs_rate_limit",
-        )
-        if (
-            type(value.get("version")) is not int
-            or value.get("version") != 3
-            or any(type(value.get(key)) is not bool for key in boolean_keys)
-        ):
-            return False
-        timeout = value.get("verify_command_timeout_seconds")
-        retries = value.get("ac_retry_attempts")
-        max_depth = value.get("max_decomposition_depth")
-        max_workers = value.get("max_parallel_workers")
-        effective_workers = value.get("effective_parallel_workers")
-        mode = value.get("decomposition_mode")
-        backend = value.get("backend_limits_backend")
-        backend_max_concurrency = value.get("backend_max_concurrency")
-        backend_limits = (
-            backend_max_concurrency,
-            value.get("backend_requests_per_minute"),
-            value.get("backend_tokens_per_minute"),
-        )
-        usage_limit_pause_seconds = value.get("usage_limit_pause_seconds")
-        expected_effective_workers = (
-            min(max_workers, backend_max_concurrency)
-            if type(max_workers) is int and type(backend_max_concurrency) is int
-            else max_workers
-        )
-        return bool(
-            type(timeout) is int
-            and timeout >= 1
-            and type(retries) is int
-            and retries >= 0
-            and type(max_depth) is int
-            and max_depth >= 0
-            and type(max_workers) is int
-            and max_workers >= 1
-            and type(effective_workers) is int
-            and 1 <= effective_workers <= max_workers
-            and effective_workers == expected_effective_workers
-            and isinstance(mode, str)
-            and mode in {"bounce_only", "off"}
-            and (value.get("enable_decomposition") is True or mode == "off")
-            and isinstance(backend, str)
-            and bool(backend)
-            and all(item is None or (type(item) is int and item >= 1) for item in backend_limits)
-            and type(usage_limit_pause_seconds) is int
-            and 1 <= usage_limit_pause_seconds <= MAX_USAGE_LIMIT_PAUSE_SECONDS
-            and valid_runtime_effect_capabilities_contract(value.get("runtime_effect_capabilities"))
-        )
-
-    @staticmethod
-    def _valid_legacy_preflight_execution_semantics_contract(value: object) -> bool:
-        """Recognize only the retired current-schema preflight snapshot.
-
-        The migration changes one authority bit (``preflight`` to
-        ``bounce_only``); every other effect-bearing field must already satisfy
-        the exact current schema.  This helper never feeds a live constructor.
-        """
-
-        if (
-            not isinstance(value, Mapping)
-            or value.get("decomposition_mode") != "preflight"
-            or value.get("enable_decomposition") is not True
-        ):
-            return False
-        migrated = dict(value)
-        migrated["decomposition_mode"] = "bounce_only"
-        return OrchestratorRunner._valid_execution_semantics_contract(migrated)
+    _valid_execution_semantics_contract = staticmethod(valid_execution_semantics_contract)
+    _valid_legacy_preflight_execution_semantics_contract = staticmethod(
+        valid_legacy_preflight_execution_semantics_contract
+    )
 
     def _execution_semantics_snapshot(
         self,
@@ -5241,6 +5142,11 @@ class OrchestratorRunner:
                     pause_seconds=pause.pause_seconds,
                     resume_after=pause.resume_after,
                     pause_kind=pause.pause_kind,
+                    pause_owner=(
+                        pause.coordinator_owner.owner_payload()
+                        if pause.coordinator_owner is not None
+                        else None
+                    ),
                 )
                 resolved, pending = await self._resolve_pause_publication(
                     session_id=tracker.session_id,
@@ -5666,9 +5572,7 @@ class OrchestratorRunner:
         seed_fingerprint: str | None = None,
         authority_generation: _ProcessLocalAuthorityGeneration | None = None,
         execution_inputs_contract: Mapping[str, Any] | None = None,
-        project_identity: ProjectIdentity | None | _UnresolvedProjectIdentity = (
-            _UNRESOLVED_PROJECT_IDENTITY
-        ),
+        project_identity: ProjectIdentity | None,
         runtime_handle: RuntimeHandle | None = None,
     ) -> dict[str, Any]:
         """Build the durable resolved inputs shared by resume and proof cohorting."""
@@ -5725,12 +5629,7 @@ class OrchestratorRunner:
             ),
             "execution_inputs_fingerprint": self._execution_inputs_fingerprint(execution_inputs),
         }
-        resolved_project_identity = (
-            self._project_identity()
-            if isinstance(project_identity, _UnresolvedProjectIdentity)
-            else project_identity
-        )
-        workspace_identity = self._resolved_proof_workspace_identity(resolved_project_identity)
+        workspace_identity = self._resolved_proof_workspace_identity(project_identity)
         if workspace_identity is not None:
             proof_contract.update(workspace_identity)
         resolved_seed_fingerprint = seed_fingerprint
@@ -6197,6 +6096,17 @@ class OrchestratorRunner:
                 details={
                     "missing": "frugality_proof, model_routing, resume, or foundation_a_authority"
                 },
+            )
+
+        pre_adaptive_rejection = pre_adaptive_execution_semantics_rejection(
+            raw_execution_semantics,
+            raw_proof.get("execution_semantics_fingerprint"),
+            fingerprint=self._execution_semantics_fingerprint,
+        )
+        if pre_adaptive_rejection is not None:
+            raise OrchestratorError(
+                message=pre_adaptive_rejection.message,
+                details=pre_adaptive_rejection.details,
             )
 
         migrate_preflight_contract = self._valid_legacy_preflight_execution_semantics_contract(
@@ -7467,6 +7377,26 @@ class OrchestratorRunner:
                 failure_pause
                 if selected_pause is None
                 else latest_pause(selected_pause, failure_pause)
+            )
+
+        raw_coordinator_pause = getattr(parallel_result, "recoverable_coordinator_pause", None)
+        if raw_coordinator_pause is not None:
+            if not isinstance(raw_coordinator_pause, CoordinatorQuotaPause):
+                return None
+            consequence = raw_coordinator_pause.consequence
+            coordinator_pause = RecoverableFailurePause(
+                pause_kind=consequence.pause_kind,
+                reason=consequence.reason,
+                resume_hint=consequence.resume_hint,
+                pause_seconds=consequence.pause_seconds,
+                resume_after=consequence.resume_after,
+                coordinator_owner=raw_coordinator_pause,
+            )
+            found_failure = True
+            selected_pause = (
+                coordinator_pause
+                if selected_pause is None
+                else latest_pause(selected_pause, coordinator_pause)
             )
 
         if not found_failure:
@@ -10261,16 +10191,15 @@ class OrchestratorRunner:
                 require_bound=True,
             )
 
-        # Cap fan-out to the connected backend's concurrency constraints so a
-        # parallel dispatch never stampedes the LLM's rate/quota window (R3).
+        # Start from pre-flight, then probe toward the worker budget after sustained success.
         if effective_workers < max_parallel_workers:
             self._console.print(
-                f"[yellow]Fan-out capped to {effective_workers} worker(s) for backend "
-                f"'{self._adapter.runtime_backend}' (requested {max_parallel_workers}). "
-                f"Override with OUROBOROS_MAX_CONCURRENCY.[/yellow]"
+                f"[yellow]Initial fan-out set to {effective_workers} worker(s) for backend "
+                f"'{self._adapter.runtime_backend}' (adaptive ceiling "
+                f"{max_parallel_workers}).[/yellow]"
             )
             log.info(
-                "orchestrator.runner.fan_out_capped",
+                "orchestrator.runner.fan_out_initialized",
                 runtime_backend=self._adapter.runtime_backend,
                 requested_workers=max_parallel_workers,
                 effective_workers=effective_workers,
@@ -10288,6 +10217,7 @@ class OrchestratorRunner:
             enable_decomposition=execution_semantics["enable_decomposition"],
             decomposition_mode=execution_semantics["decomposition_mode"],
             max_concurrent=effective_workers,
+            adaptive_max_concurrent=max_parallel_workers,
             max_decomposition_depth=max_decomposition_depth,
             inherited_runtime_handle=inherited_runtime_handle,
             task_cwd=self._effective_cwd(),
@@ -10311,6 +10241,28 @@ class OrchestratorRunner:
             resolved_backend_limits=resolved_backend_limits,
             resolved_self_governs_rate_limit=execution_semantics["backend_self_governs_rate_limit"],
             expected_runtime_effect_capabilities=execution_semantics["runtime_effect_capabilities"],
+            usage_limit_pause_seconds=execution_semantics["usage_limit_pause_seconds"],
+        )
+
+        raw_published_pause_owner = tracker.progress.get("pause_owner")
+        if (
+            tracker.status is SessionStatus.PAUSED
+            and raw_published_pause_owner is not None
+            and not isinstance(raw_published_pause_owner, Mapping)
+        ):
+            raise OrchestratorError(
+                message="Persisted coordinator pause owner is malformed",
+                details={
+                    "session_id": tracker.session_id,
+                    "execution_id": exec_id,
+                    "resume_blocked": "coordinator_pause_owner_invalid",
+                },
+            )
+        published_coordinator_pause_owner = (
+            dict(raw_published_pause_owner)
+            if tracker.status is SessionStatus.PAUSED
+            and isinstance(raw_published_pause_owner, Mapping)
+            else None
         )
 
         # Check for cancellation before starting parallel execution
@@ -10367,6 +10319,7 @@ class OrchestratorRunner:
                     tool_catalog=tool_catalog.tools,
                     system_prompt=system_prompt,
                     externally_satisfied_acs=externally_satisfied_acs,
+                    published_coordinator_pause_owner=published_coordinator_pause_owner,
                 )
             except ParallelExecutionCancelled as cancelled:
                 return await self._handle_cancellation(
@@ -10410,6 +10363,7 @@ class OrchestratorRunner:
                 now=datetime.now(UTC),
                 require_all_failures_recoverable=not bool(
                     getattr(parallel_result, "recoverable_route_pause", False)
+                    or getattr(parallel_result, "recoverable_coordinator_pause", False)
                 ),
                 default_pause_seconds=execution_semantics["usage_limit_pause_seconds"],
             )
@@ -10489,6 +10443,11 @@ class OrchestratorRunner:
                 pause_seconds=recoverable_failure_pause.pause_seconds,
                 resume_after=recoverable_failure_pause.resume_after,
                 pause_kind=recoverable_failure_pause.pause_kind,
+                pause_owner=(
+                    recoverable_failure_pause.coordinator_owner.owner_payload()
+                    if recoverable_failure_pause.coordinator_owner is not None
+                    else None
+                ),
             )
             pause_status, pause_pending = await self._resolve_pause_publication(
                 session_id=tracker.session_id,

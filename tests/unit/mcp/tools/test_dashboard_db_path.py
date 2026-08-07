@@ -38,8 +38,10 @@ class TestDaemonDbTarget:
     def test_memory_store_is_suppressed(self) -> None:
         assert _dashboard._daemon_db_target(EventStore(_MEMORY_URL)) == (True, None)
 
-    def test_non_sqlite_store_is_suppressed(self) -> None:
-        assert _dashboard._daemon_db_target(EventStore("postgresql+asyncpg://h/db")) == (True, None)
+    def test_pathless_store_is_suppressed(self) -> None:
+        # Non-SQLite stores can no longer be constructed (#1832); a pathless
+        # in-memory store pins the same no-local-file suppression contract.
+        assert _dashboard._daemon_db_target(EventStore("sqlite+aiosqlite://")) == (True, None)
 
     def test_handlers_expose_injected_custom_store_to_resolution(self) -> None:
         # Each handler must surface the custom store via the exact attribute the

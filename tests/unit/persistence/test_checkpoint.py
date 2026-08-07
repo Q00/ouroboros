@@ -456,6 +456,95 @@ class TestCheckpointStoreRollback:
         assert not rollback4_path.exists()  # Should be deleted
 
 
+class TestCheckpointStateIsolation:
+    """#1829: caller mutation after create() must not desync payload and hash."""
+
+    def test_top_level_mutation_after_create_is_invisible(
+        self, checkpoint_store: CheckpointStore
+    ) -> None:
+        state = {"steps": [1]}
+        checkpoint = CheckpointData.create("mutable-state", "execution", state)
+        state["added"] = "later"
+
+        assert checkpoint_store.save(checkpoint).is_ok
+        loaded = checkpoint_store.load("mutable-state")
+        assert loaded.is_ok, "a mutated caller dict invalidated the saved checkpoint"
+        assert loaded.value.state == {"steps": [1]}, "the snapshot leaked caller mutation"
+
+    def test_nested_mutation_after_create_is_invisible(
+        self, checkpoint_store: CheckpointStore
+    ) -> None:
+        state = {"steps": [1], "nested": {"flag": True}}
+        checkpoint = CheckpointData.create("nested-state", "execution", state)
+        state["steps"].append(2)
+        state["nested"]["flag"] = False
+
+        assert checkpoint_store.save(checkpoint).is_ok
+        loaded = checkpoint_store.load("nested-state")
+        assert loaded.is_ok, "nested caller mutation invalidated the saved checkpoint"
+        assert loaded.value.state == {"steps": [1], "nested": {"flag": True}}
+
+    def test_save_refuses_a_checkpoint_whose_hash_does_not_match(
+        self, checkpoint_store: CheckpointStore
+    ) -> None:
+        """Integrity is validated before any rotation or write."""
+        valid = CheckpointData.create("tampered", "execution", {"step": 1})
+        assert checkpoint_store.save(valid).is_ok
+        current = checkpoint_store._get_checkpoint_path("tampered")
+        original = current.read_bytes()
+
+        tampered = CheckpointData(
+            seed_id="tampered",
+            phase="execution",
+            state={"step": 999},
+            timestamp=valid.timestamp,
+            hash=valid.hash,
+        )
+        result = checkpoint_store.save(tampered)
+
+        assert result.is_err, "save persisted a checkpoint load() would reject"
+        assert current.read_bytes() == original, (
+            "a refused save still touched the committed checkpoint"
+        )
+        rollback = checkpoint_store._get_checkpoint_path("tampered", 1)
+        assert not rollback.exists(), "a refused save rotated history"
+
+    def test_mutation_between_validation_and_serialization_is_harmless(
+        self, checkpoint_store: CheckpointStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """save() writes the exact snapshot it validated.
+
+        The file lock only serializes store access — it cannot protect the
+        caller-owned object. A mutation landing during lock acquisition must
+        not desync the written payload from its hash: the persisted file is
+        the validated snapshot, and load() accepts it.
+        """
+        from ouroboros.persistence import checkpoint as checkpoint_module
+
+        saved = CheckpointData.create("race-mutation", "execution", {"step": 1})
+        real_lock = checkpoint_module._file_lock
+
+        from contextlib import contextmanager
+
+        @contextmanager
+        def mutating_lock(path, exclusive):
+            # The bot-shaped interleaving: the holder mutates the live
+            # object while save() waits for the lock.
+            saved.state["step"] = 999
+            with real_lock(path, exclusive=exclusive):
+                yield
+
+        monkeypatch.setattr(checkpoint_module, "_file_lock", mutating_lock)
+        result = checkpoint_store.save(saved)
+
+        assert result.is_ok, str(result.error) if result.is_err else ""
+        loaded = checkpoint_store.load("race-mutation")
+        assert loaded.is_ok, "the persisted payload no longer matches its hash"
+        assert loaded.value.state == {"step": 1}, (
+            "save() wrote a different payload than the one it validated"
+        )
+
+
 class TestCheckpointStoreAtomicSave:
     """#1830: a failed save must not disturb the committed checkpoint chain."""
 

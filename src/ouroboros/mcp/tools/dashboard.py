@@ -32,7 +32,7 @@ def _extract_ac_history(
         for ac in es.ac_results:
             if ac.ac_index not in history:
                 history[ac.ac_index] = []
-            history[ac.ac_index].append((gen.generation_number, ac.passed))
+            history[ac.ac_index].append((gen.generation_number, ac.authoritative_pass))
 
     return history
 
@@ -119,7 +119,7 @@ def format_summary(lineage: OntologyLineage) -> str:
             stable_count += 1
             continue
 
-        status = "PASS" if ac.passed else "FAIL"
+        status = ac.authority_state.upper()
         desc = ac.ac_content[:50] + ("..." if len(ac.ac_content) > 50 else "")
         trend = _trend_dots(ac_history) if ac_history else "-"
         lines.append(f"| {ac.ac_index + 1} | {status} | {desc} | {trend} |")

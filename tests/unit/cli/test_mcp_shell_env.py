@@ -8,7 +8,18 @@ import os
 import subprocess
 import sys
 
+import pytest
+
 from ouroboros.cli.commands import mcp
+
+
+@pytest.fixture(autouse=True)
+def _restore_environ():
+    """Restore os.environ after every test; _ensure_shell_env writes it directly."""
+    saved = dict(os.environ)
+    yield
+    os.environ.clear()
+    os.environ.update(saved)
 
 
 def test_shell_env_loader_preserves_mcp_stdin(monkeypatch, tmp_path) -> None:
@@ -70,7 +81,6 @@ def test_shell_env_merge_is_whitelisted(monkeypatch, tmp_path) -> None:
     assert "/extra/bin" in os.environ["PATH"]
     assert "PYTHONPATH" not in os.environ
     assert "VIRTUAL_ENV" not in os.environ
-    monkeypatch.delenv("SOME_VENDOR_API_KEY", raising=False)
 
 
 def test_shell_env_cache_skips_login_shell(monkeypatch, tmp_path) -> None:
@@ -90,7 +100,6 @@ def test_shell_env_cache_skips_login_shell(monkeypatch, tmp_path) -> None:
     mcp._ensure_shell_env(timeout=1.25)
 
     assert os.environ["CACHED_TEST_API_KEY"] == "cached"
-    monkeypatch.delenv("CACHED_TEST_API_KEY", raising=False)
 
 
 def test_shell_env_cache_merges_other_provider_key_when_anthropic_is_present(
@@ -112,7 +121,6 @@ def test_shell_env_cache_merges_other_provider_key_when_anthropic_is_present(
     mcp._ensure_shell_env(timeout=1.25)
 
     assert os.environ["OPENAI_API_KEY"] == "openai-cached"
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
 
 
 def test_shell_env_cache_written_with_whitelisted_subset(monkeypatch, tmp_path) -> None:
@@ -134,7 +142,6 @@ def test_shell_env_cache_written_with_whitelisted_subset(monkeypatch, tmp_path) 
     cached = json.loads(cache_file.read_text(encoding="utf-8"))
     assert "FOO_API_KEY" in cached
     assert "RANDOM_VAR" not in cached
-    monkeypatch.delenv("FOO_API_KEY", raising=False)
 
 
 def test_shell_env_whitelist_admits_proxy_and_gateway_vars(monkeypatch, tmp_path) -> None:
@@ -165,5 +172,20 @@ def test_shell_env_whitelist_admits_proxy_and_gateway_vars(monkeypatch, tmp_path
     assert os.environ["NO_PROXY"] == "localhost"
     assert os.environ["ANTHROPIC_BASE_URL"] == "https://gw.example.com"
     assert os.environ["GH_TOKEN"] == "gho_x"
-    for key in ("HTTPS_PROXY", "NO_PROXY", "ANTHROPIC_BASE_URL", "GH_TOKEN"):
-        monkeypatch.delenv(key, raising=False)
+
+
+_LEAK_CHECK_BASELINE = {
+    key: os.environ.get(key)
+    for key in ("HTTPS_PROXY", "NO_PROXY", "ANTHROPIC_BASE_URL", "GH_TOKEN", "SOME_VENDOR_API_KEY")
+}
+
+
+def test_environ_mutations_do_not_survive_past_the_test() -> None:
+    """Regression test for #1793: no earlier test's env vars survive teardown.
+
+    Compares against the baseline captured at module import (before any test's
+    autouse fixture ran) rather than asserting absence, so a legitimately
+    ambient proxy/gateway/token value is not mistaken for a leak.
+    """
+    for key, baseline in _LEAK_CHECK_BASELINE.items():
+        assert os.environ.get(key) == baseline

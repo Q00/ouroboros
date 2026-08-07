@@ -16,12 +16,13 @@ from unittest.mock import MagicMock
 import pytest
 
 from ouroboros.core.lineage import (
+    ACResult,
     EvaluationSummary,
     GenerationPhase,
     OntologyLineage,
     OntologySchema,
 )
-from ouroboros.core.seed import Seed
+from ouroboros.core.seed import AcceptanceCriterionSpec, Seed
 from ouroboros.core.types import Result
 from ouroboros.events.base import BaseEvent
 from ouroboros.events.lineage import lineage_created, lineage_generation_interrupted
@@ -66,6 +67,7 @@ def _make_seed(seed_id: str = "seed-1") -> Seed:
     seed.metadata.seed_id = seed_id
     seed.metadata.parent_seed_id = None
     seed.ontology_schema = ontology
+    seed.acceptance_criteria = (AcceptanceCriterionSpec(description="Works"),)
     seed.to_dict.return_value = {"seed_id": seed_id}
     return seed
 
@@ -88,6 +90,7 @@ def _make_generation_result(
             score=0.8,
             final_approved=True,
             highest_stage_passed=1,
+            ac_results=(ACResult(ac_index=0, ac_content="Works", passed=True),),
         ),
         wonder_output=wonder_output,
         phase=phase,

@@ -738,6 +738,18 @@ async def _run_orchestrator(
         fat_harness_mode=resolved_fat_harness_mode,
     )
 
+    # The URL is emitted before execution starts so it can be opened while the
+    # board is still empty. It is pinned with ?run= and therefore remains
+    # correct when other run/auto invocations use the same singleton daemon.
+    try:
+        from ouroboros.mcp.tools._dashboard import resolve_dashboard_run_url
+
+        dashboard_url = await resolve_dashboard_run_url(execution_id, event_store)
+    except Exception:  # noqa: BLE001 - observability must never block execution
+        dashboard_url = None
+    if dashboard_url:
+        print_info(f"Live Dashboard: {dashboard_url}")
+
     # Execute
     try:
         if resume_session:

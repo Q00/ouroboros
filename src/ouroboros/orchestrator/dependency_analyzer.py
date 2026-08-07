@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 from ouroboros.config import get_llm_backend_for_role, get_llm_model_for_role
 from ouroboros.core.seed import AcceptanceCriterionInput, ac_text
 from ouroboros.core.types import Result
+from ouroboros.evolution.provider_usage import tracked_complete
 from ouroboros.observability.logging import get_logger
 
 if TYPE_CHECKING:
@@ -547,7 +548,8 @@ class DependencyAnalyzer:
         ac_list = "\n".join(f"AC {index}: {content}" for index, content in enumerate(criteria))
         prompt = DEPENDENCY_ANALYSIS_PROMPT.format(ac_list=ac_list)
 
-        response = await self._llm.complete(
+        response = await tracked_complete(
+            self._llm,
             messages=[Message(role=MessageRole.USER, content=prompt)],
             config=CompletionConfig(
                 model=self._model,

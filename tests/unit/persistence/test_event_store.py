@@ -3014,3 +3014,44 @@ class TestCancellationSettlement:
         stored = await store.replay("test", "settle-batch")
         assert len(stored) == 2
         await store.close()
+
+
+class TestSqliteOnlyBackendContract:
+    """#1832: the cursor APIs are rowid-built; the backend boundary says so."""
+
+    def test_non_sqlite_url_is_rejected_at_construction(self) -> None:
+        with pytest.raises(ValueError, match="SQLite-only"):
+            EventStore("postgresql+asyncpg://user:pass@localhost/ouroboros")
+
+    def test_every_sqlite_form_still_constructs(self, tmp_path) -> None:
+        EventStore("sqlite+aiosqlite://")
+        EventStore("sqlite+aiosqlite:///:memory:")
+        EventStore(f"sqlite+aiosqlite:///{tmp_path / 'events.db'}")
+        EventStore(f"sqlite+aiosqlite:///{tmp_path / 'events.db'}", read_only=True)
+
+    def test_capability_report_matches_the_contract(self, tmp_path) -> None:
+        """Cross-process capability requires a real file another process can open."""
+        file_store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'events.db'}")
+        assert file_store.supports_cross_process_workers is True
+
+        assert EventStore("sqlite+aiosqlite://").supports_cross_process_workers is False, (
+            "a pathless in-memory store is private to this process"
+        )
+        assert EventStore("sqlite+aiosqlite:///:memory:").supports_cross_process_workers is False
+        named_memory = EventStore(
+            "sqlite+aiosqlite:///file:namedmem?mode=memory&cache=shared&uri=true"
+        )
+        assert named_memory.supports_cross_process_workers is False, (
+            "a named in-memory database is process-local regardless of its name"
+        )
+        assert named_memory.sqlite_path() is None
+
+        for query_bearing in (
+            "sqlite+aiosqlite:///?cache=shared",
+            "sqlite+aiosqlite:///:memory:?cache=shared",
+        ):
+            store = EventStore(query_bearing)
+            assert store.sqlite_path() is None, (
+                f"a query string masqueraded as a path: {query_bearing}"
+            )
+            assert store.supports_cross_process_workers is False

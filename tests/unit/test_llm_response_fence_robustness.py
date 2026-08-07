@@ -2100,7 +2100,7 @@ class TestAssertionExtractorFenceRobustness:
         )
 
         if expected_description is None:
-            assert assertions == ()
+            assert assertions is None
         else:
             assert len(assertions) == 1
             assert assertions[0].description == expected_description
@@ -2130,7 +2130,7 @@ class TestAssertionExtractorFenceRobustness:
             ("AC number 1",),
         )
 
-        assert assertions == ()
+        assert assertions is None
 
     @pytest.mark.parametrize("prefixes", BLOCKQUOTE_INDENTED_PREFIX_VARIANTS)
     def test_blockquote_indented_example_stale_only_is_excluded(
@@ -2152,7 +2152,7 @@ class TestAssertionExtractorFenceRobustness:
             ("AC number 1",),
         )
 
-        assert assertions == ()
+        assert assertions is None
 
     @pytest.mark.parametrize("prefixes", QUOTED_LIST_FENCE_VARIANTS)
     def test_quoted_list_example_is_excluded_and_releases_actual(
@@ -2193,7 +2193,7 @@ class TestAssertionExtractorFenceRobustness:
             ("AC number 1",),
         )
 
-        assert stale_only == ()
+        assert stale_only is None
         assert len(actual) == 1
         assert actual[0].description == "actual assertion"
 
@@ -2258,7 +2258,7 @@ class TestAssertionExtractorFenceRobustness:
             ("AC number 1",),
         )
 
-        assert assertions == ()
+        assert assertions is None
 
     def test_disconnected_quoted_list_closer_cannot_release_later_stale(self) -> None:
         stale_payload = json.dumps(
@@ -2291,7 +2291,7 @@ class TestAssertionExtractorFenceRobustness:
             ("AC number 1",),
         )
 
-        assert assertions == ()
+        assert assertions is None
 
     def test_tab_continued_plain_list_fence_is_authoritative(self) -> None:
         actual_payload = json.dumps(
@@ -2354,7 +2354,7 @@ class TestAssertionExtractorFenceRobustness:
             ("AC number 1",),
         )
 
-        assert stale_only == ()
+        assert stale_only is None
         assert len(actual) == 1
         assert actual[0].description == "actual assertion"
 
@@ -2390,7 +2390,7 @@ class TestAssertionExtractorFenceRobustness:
             ("AC number 1",),
         )
 
-        assert stale_only == ()
+        assert stale_only is None
         assert len(actual) == 1
         assert actual[0].description == "ACTUAL_ASSERTION"
 
@@ -2431,7 +2431,7 @@ class TestAssertionExtractorFenceRobustness:
             ("AC number 1",),
         )
 
-        assert stale_only == ()
+        assert stale_only is None
         assert len(actual) == 1
         assert actual[0].description == "ACTUAL_ASSERTION"
 
@@ -2468,7 +2468,7 @@ class TestAssertionExtractorFenceRobustness:
             ("AC number 1",),
         )
 
-        assert stale_only == ()
+        assert stale_only is None
         assert len(actual) == 1
         assert actual[0].description == "ACTUAL_ASSERTION"
 
@@ -2501,7 +2501,7 @@ class TestAssertionExtractorFenceRobustness:
         )
 
         if case == "escaped":
-            assert result == ()
+            assert result is None
         else:
             assert len(result) == 1
             assert result[0].description == "ACTUAL_ASSERTION"
@@ -2526,7 +2526,7 @@ class TestAssertionExtractorFenceRobustness:
             ("AC number 1",),
         )
 
-        assert assertions == ()
+        assert assertions is None
 
     def test_unfenced_example_before_actual_answer_returns_empty(self) -> None:
         example_payload = json.dumps(
@@ -2555,7 +2555,7 @@ class TestAssertionExtractorFenceRobustness:
             ("AC number 1",),
         )
 
-        assert assertions == ()
+        assert assertions is None
 
     @pytest.mark.parametrize(
         "indentation",
@@ -2697,7 +2697,7 @@ class TestAssertionExtractorFenceRobustness:
             ("AC number 1",),
         )
 
-        assert assertions == ()
+        assert assertions is None
 
     def test_oversized_json_integer_returns_empty(self) -> None:
         content = (
@@ -2710,7 +2710,7 @@ class TestAssertionExtractorFenceRobustness:
             content, ("AC number 1",)
         )
 
-        assert assertions == ()
+        assert assertions is None
 
     def test_incidental_non_object_array_is_ignored(self) -> None:
         assertions = AssertionExtractor(llm_adapter=AsyncMock())._parse_response(
@@ -2718,7 +2718,7 @@ class TestAssertionExtractorFenceRobustness:
             ("AC number 1", "AC number 2"),
         )
 
-        assert assertions == ()
+        assert assertions is None
 
     @pytest.mark.parametrize("wrapper", MALFORMED_UNFENCED_WRAPPERS)
     def test_invalid_wrapper_does_not_create_nested_assertion(self, wrapper: str) -> None:
@@ -2731,7 +2731,7 @@ class TestAssertionExtractorFenceRobustness:
             content, ("AC number 1",)
         )
 
-        assert assertions == ()
+        assert assertions is None
 
     @pytest.mark.parametrize(
         "payload",
@@ -2759,4 +2759,4 @@ class TestAssertionExtractorFenceRobustness:
             json.dumps(payload), ("AC number 1",)
         )
 
-        assert assertions == ()
+        assert assertions is None

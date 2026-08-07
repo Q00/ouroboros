@@ -9,19 +9,27 @@ because it surfaced through a different orchestrator path.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from datetime import UTC, datetime
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from email.utils import parsedate_to_datetime
 import math
 import re
 
+from ouroboros.config import MAX_USAGE_LIMIT_PAUSE_SECONDS
 from ouroboros.orchestrator.adapter import AgentMessage
 
 _LONG_RETRY_AFTER_SECONDS = 60 * 60
 _MAX_METADATA_MAPS = 32
+_MAX_PLAIN_METADATA_FIELDS = 128
+_MAX_RETRY_TIMESTAMP_CHARS = 128
 _MISSING_METADATA_VALUE = object()
+_MAX_DURABLE_PAUSE_REASON_CHARS = 16_384
+_MAX_DURABLE_PAUSE_HINT_CHARS = 1_024
 _METADATA_CHILD_FIELDS = (
     "meta",
     "mcp_meta",
     "metadata",
+    "headers",
     "error",
     "details",
     "response",
@@ -68,6 +76,8 @@ _METADATA_FIELDS = tuple(
             "resetAfterMs",
             "retry_after",
             "retryAfter",
+            "retry-after",
+            "Retry-After",
             "reset_after",
             "resetAfter",
             "resume_after",
@@ -105,6 +115,110 @@ _LIMIT_PATTERN = re.compile(
     r"\b(?:hit|reached|exceeded|exhausted|depleted|reset|resets)\b",
     re.IGNORECASE,
 )
+_CONCURRENCY_LIMIT_PATTERN = re.compile(
+    r"\b(?:too\s+many\s+concurrent\s+requests"
+    r"|(?:request\s+)?concurrenc(?:y|ies)\s+(?:limit|cap|maximum|exceeded|reached)"
+    r"|(?:limit|cap|maximum)\s+(?:for\s+)?concurrent\s+requests?"
+    r"|concurrent\s+requests?\s+(?:exceeded|rejected))\b",
+    re.IGNORECASE,
+)
+
+
+@dataclass(frozen=True, slots=True)
+class UsageLimitPauseConsequence:
+    """Complete bounded consequence of one provider quota-ending effect."""
+
+    reason: str
+    resume_hint: str
+    pause_seconds: int
+    resume_after: datetime
+    pause_kind: str = "usage_limit"
+
+    def to_payload(self) -> dict[str, object]:
+        """Serialize the consequence into its closed durable schema."""
+
+        _validate_usage_limit_pause_consequence(self)
+        return {
+            "schema_version": 1,
+            "pause_kind": self.pause_kind,
+            "reason": self.reason,
+            "resume_hint": self.resume_hint,
+            "pause_seconds": self.pause_seconds,
+            "resume_after": self.resume_after.isoformat(),
+        }
+
+    @classmethod
+    def from_payload(cls, value: object) -> UsageLimitPauseConsequence:
+        """Restore an exact bounded consequence or reject the artifact."""
+
+        expected_keys = frozenset(
+            {
+                "schema_version",
+                "pause_kind",
+                "reason",
+                "resume_hint",
+                "pause_seconds",
+                "resume_after",
+            }
+        )
+        if (
+            not isinstance(value, Mapping)
+            or set(value.keys()) != expected_keys
+            or type(value.get("schema_version")) is not int
+            or value.get("schema_version") != 1
+        ):
+            raise ValueError("usage-limit pause consequence has an invalid schema")
+        raw_resume_after = value.get("resume_after")
+        if not isinstance(raw_resume_after, str) or not raw_resume_after:
+            raise ValueError("usage-limit pause consequence has an invalid resume_after")
+        try:
+            resume_after = datetime.fromisoformat(raw_resume_after)
+        except ValueError as exc:
+            raise ValueError("usage-limit pause consequence has an invalid resume_after") from exc
+        consequence = cls(
+            pause_kind=value.get("pause_kind"),  # type: ignore[arg-type]
+            reason=value.get("reason"),  # type: ignore[arg-type]
+            resume_hint=value.get("resume_hint"),  # type: ignore[arg-type]
+            pause_seconds=value.get("pause_seconds"),  # type: ignore[arg-type]
+            resume_after=resume_after,
+        )
+        _validate_usage_limit_pause_consequence(consequence)
+        if consequence.to_payload() != dict(value):
+            raise ValueError("usage-limit pause consequence is not canonical")
+        return consequence
+
+
+def _validate_usage_limit_pause_consequence(value: object) -> UsageLimitPauseConsequence:
+    if (
+        not isinstance(value, UsageLimitPauseConsequence)
+        or value.pause_kind != "usage_limit"
+        or type(value.reason) is not str
+        or not value.reason
+        or len(value.reason) > _MAX_DURABLE_PAUSE_REASON_CHARS
+        or type(value.resume_hint) is not str
+        or not value.resume_hint
+        or len(value.resume_hint) > _MAX_DURABLE_PAUSE_HINT_CHARS
+        or type(value.pause_seconds) is not int
+        or not 1 <= value.pause_seconds <= MAX_USAGE_LIMIT_PAUSE_SECONDS
+        or not isinstance(value.resume_after, datetime)
+        or value.resume_after.tzinfo is None
+        or value.resume_after.utcoffset() is None
+    ):
+        raise ValueError("usage-limit pause consequence exceeds its durable bounds")
+    return value
+
+
+def _format_pause_duration(seconds: int) -> str:
+    if seconds % (24 * 60 * 60) == 0:
+        days = seconds // (24 * 60 * 60)
+        return f"{days} day{'s' if days != 1 else ''}"
+    if seconds % (60 * 60) == 0:
+        hours = seconds // (60 * 60)
+        return f"{hours} hour{'s' if hours != 1 else ''}"
+    if seconds % 60 == 0:
+        minutes = seconds // 60
+        return f"{minutes} minute{'s' if minutes != 1 else ''}"
+    return f"{seconds} second{'s' if seconds != 1 else ''}"
 
 
 def project_failure_metadata(
@@ -136,6 +250,22 @@ def project_failure_metadata(
                 return tuple(candidates), True
             if raw is not _MISSING_METADATA_VALUE:
                 projected[key] = raw
+        if type(value) is dict:
+            # HTTP field names are case-insensitive.  Plain dictionaries are
+            # safe to inspect directly, but keep the scan bounded and never
+            # iterate an arbitrary provider-owned Mapping implementation.
+            if len(value) > _MAX_PLAIN_METADATA_FIELDS:
+                return tuple(candidates), True
+            retry_after_seen = False
+            for raw_key, raw in value.items():
+                if type(raw_key) is not str or raw_key.casefold() != "retry-after":
+                    continue
+                if retry_after_seen:
+                    # Multiple differently-cased fields are ambiguous rather
+                    # than an authority to pick the shorter cooldown.
+                    return tuple(candidates), True
+                projected["retry-after"] = raw
+                retry_after_seen = True
         candidates.append(projected)
         pending.extend(projected.get(key) for key in _METADATA_CHILD_FIELDS)
     return tuple(candidates), False
@@ -171,16 +301,22 @@ def _duration_text_to_seconds(text: str) -> int | None:
 
 
 def _parse_datetime(value: object) -> datetime | None:
-    """Parse an absolute provider retry boundary defensively."""
+    """Parse an ISO timestamp or standards-compliant HTTP-date defensively."""
 
     if isinstance(value, datetime):
         return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
-    if not isinstance(value, str) or not value.strip():
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    if not stripped or len(stripped) > _MAX_RETRY_TIMESTAMP_CHARS:
         return None
     try:
-        parsed = datetime.fromisoformat(value.strip())
+        parsed = datetime.fromisoformat(stripped)
     except ValueError:
-        return None
+        try:
+            parsed = parsedate_to_datetime(stripped)
+        except (TypeError, ValueError, OverflowError):
+            return None
     return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
 
 
@@ -226,7 +362,14 @@ def retry_duration_seconds_from_metadata(
         if parsed is not None:
             return max(1, (parsed + 999) // 1000)
 
-    for key in ("retry_after", "retryAfter", "reset_after", "resetAfter"):
+    for key in (
+        "retry_after",
+        "retryAfter",
+        "retry-after",
+        "Retry-After",
+        "reset_after",
+        "resetAfter",
+    ):
         value = _metadata_value(metadata, key)
         parsed_datetime = _parse_datetime(value)
         if parsed_datetime is not None:
@@ -327,6 +470,20 @@ def _metadata_has_http_429(metadata: Mapping[str, object]) -> bool:
     return False
 
 
+def _metadata_has_concurrency_limit_signal(metadata: Mapping[str, object]) -> bool:
+    """Return whether bounded provider metadata names a concurrency cap."""
+
+    kind = _metadata_value(metadata, "kind")
+    if isinstance(kind, str) and kind.strip().lower() in {
+        "concurrency_limit",
+        "concurrency_exceeded",
+        "concurrency_rejection",
+        "too_many_concurrent_requests",
+    }:
+        return True
+    return _CONCURRENCY_LIMIT_PATTERN.search(_metadata_text(metadata)) is not None
+
+
 def is_usage_limit_pause_message(
     message: AgentMessage,
     *,
@@ -344,12 +501,16 @@ def is_usage_limit_pause_message(
         return True
     runtime_shaped = any(_has_runtime_shape(metadata) for metadata in metadata_rows)
     has_http_429 = any(_metadata_has_http_429(metadata) for metadata in metadata_rows)
+    has_concurrency_limit_signal = (
+        any(_metadata_has_concurrency_limit_signal(metadata) for metadata in metadata_rows)
+        or _CONCURRENCY_LIMIT_PATTERN.search(message.content) is not None
+    )
     has_long_retry_window = any(
         (duration := _duration_from_metadata(metadata, now=resolved_now)) is not None
         and duration >= _LONG_RETRY_AFTER_SECONDS
         for metadata in metadata_rows
     )
-    if has_http_429 and has_long_retry_window:
+    if has_http_429 and has_long_retry_window and not has_concurrency_limit_signal:
         # Provider bridges may place the HTTP envelope and retry headers at
         # adjacent bounded metadata layers. They still describe one final
         # failure and must not authorize a costlier route merely because a
@@ -382,9 +543,54 @@ def is_usage_limit_pause_message(
     return _LIMIT_PATTERN.search(normalized_content) is not None
 
 
+def usage_limit_pause_consequence_from_message(
+    message: AgentMessage,
+    *,
+    now: datetime,
+    default_pause_seconds: int,
+) -> UsageLimitPauseConsequence | None:
+    """Freeze one quota message into the complete runner-owned pause decision."""
+
+    if (
+        type(default_pause_seconds) is not int
+        or not 1 <= default_pause_seconds <= MAX_USAGE_LIMIT_PAUSE_SECONDS
+    ):
+        raise ValueError("durable usage-limit pause policy is outside its range")
+    if not isinstance(now, datetime) or now.tzinfo is None or now.utcoffset() is None:
+        raise ValueError("usage-limit pause observation time must be timezone-aware")
+    if not is_usage_limit_pause_message(message, now=now):
+        return None
+
+    parsed_seconds = retry_duration_seconds_from_message(message, now=now)
+    pause_seconds = default_pause_seconds if parsed_seconds is None else parsed_seconds
+    pause_seconds = min(max(1, pause_seconds), MAX_USAGE_LIMIT_PAUSE_SECONDS)
+    try:
+        resume_after = now + timedelta(seconds=pause_seconds)
+    except OverflowError:
+        pause_seconds = default_pause_seconds
+        resume_after = now + timedelta(seconds=pause_seconds)
+    reason = message.content.strip()[:_MAX_DURABLE_PAUSE_REASON_CHARS]
+    if not reason:
+        reason = "Provider usage/quota window reached."
+    duration_display = _format_pause_duration(pause_seconds)
+    consequence = UsageLimitPauseConsequence(
+        reason=reason,
+        pause_seconds=pause_seconds,
+        resume_after=resume_after,
+        resume_hint=(
+            "Provider usage/quota window reached. "
+            f"Resume after {resume_after.isoformat()} "
+            f"(wait at least {duration_display})."
+        ),
+    )
+    return _validate_usage_limit_pause_consequence(consequence)
+
+
 __all__ = [
+    "UsageLimitPauseConsequence",
     "is_usage_limit_pause_message",
     "project_failure_metadata",
     "retry_duration_seconds_from_message",
     "retry_duration_seconds_from_metadata",
+    "usage_limit_pause_consequence_from_message",
 ]
