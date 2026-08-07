@@ -78,7 +78,13 @@ class SynapseSignalHandler:
             name=_TOOL_NAME,
             description=(
                 "Send one audited Ouroboros Synapse intent signal to an exact active "
-                "AC session attempt. A queued result does not mean the signal was applied."
+                "AC session attempt. The only delivery modes advertised by shipped runtime "
+                "adapters are inform and after_turn, and support is attempt-specific. redirect "
+                "and replace are reserved, capability-gated future modes. Unsupported requests "
+                "fail closed. A redirect falls back only when fallback_mode=after_turn is "
+                "explicit and the selected attempt advertises after_turn. Query "
+                "ouroboros_session_signal_targets for live capabilities before sending. A "
+                "queued result does not mean the signal was applied."
             ),
             parameters=(
                 MCPToolParameter(
@@ -99,13 +105,20 @@ class SynapseSignalHandler:
                 MCPToolParameter(
                     name="mode",
                     type=ToolInputType.STRING,
-                    description="Requested Synapse delivery mode.",
+                    description=(
+                        "Requested Synapse delivery mode. Shipped modes: inform and after_turn. "
+                        "Reserved future modes: redirect and replace. Select only a mode "
+                        "advertised by ouroboros_session_signal_targets for the exact attempt."
+                    ),
                     enum=tuple(mode.value for mode in SessionSignalMode),
                 ),
                 MCPToolParameter(
                     name="fallback_mode",
                     type=ToolInputType.STRING,
-                    description="Explicit redirect fallback; only after_turn is valid.",
+                    description=(
+                        "Explicit redirect-only fallback; after_turn is the sole valid value "
+                        "and is used only when the selected attempt advertises after_turn."
+                    ),
                     required=False,
                     enum=(SessionSignalMode.AFTER_TURN.value,),
                 ),
@@ -269,9 +282,10 @@ class SynapseTargetsHandler:
         return MCPToolDefinition(
             name="ouroboros_session_signal_targets",
             description=(
-                "List exact active AC attempts for one execution before sending a "
-                "Synapse signal. The main session should match the user's intent to "
-                "AC content and ask only when multiple candidates remain genuinely ambiguous."
+                "List exact active AC attempts and each attempt's live SessionSignal "
+                "capabilities for one execution before sending a signal. The main session "
+                "should select only an advertised mode, match the user's intent to AC content, "
+                "and ask only when multiple candidates remain genuinely ambiguous."
             ),
             parameters=(
                 MCPToolParameter(

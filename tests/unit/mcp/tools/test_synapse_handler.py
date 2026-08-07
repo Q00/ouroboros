@@ -70,6 +70,33 @@ def test_definition_exposes_clean_room_vocabulary() -> None:
     assert params["contract_effect"].enum == ("additive", "specification_change")
 
 
+def test_public_schema_distinguishes_shipped_reserved_and_fallback_modes() -> None:
+    signal = SynapseSignalHandler(_Mailbox()).definition  # type: ignore[arg-type]
+    targets = SynapseTargetsHandler(SessionSignalHub()).definition
+    schema = signal.to_input_schema()
+    mode = schema["properties"]["mode"]
+    fallback = schema["properties"]["fallback_mode"]
+    description = signal.description
+
+    assert (
+        "only delivery modes advertised by shipped runtime adapters are inform and after_turn"
+        in description
+    )
+    assert "redirect and replace are reserved, capability-gated future modes" in description
+    assert "Unsupported requests fail closed" in description
+    assert "fallback_mode=after_turn is explicit" in description
+    assert "selected attempt advertises after_turn" in description
+    assert "ouroboros_session_signal_targets for live capabilities" in description
+    assert mode["enum"] == ["inform", "after_turn", "redirect", "replace"]
+    assert "Shipped modes: inform and after_turn" in mode["description"]
+    assert "Reserved future modes: redirect and replace" in mode["description"]
+    assert "ouroboros_session_signal_targets" in mode["description"]
+    assert fallback["enum"] == ["after_turn"]
+    assert "Explicit redirect-only fallback" in fallback["description"]
+    assert "live SessionSignal capabilities" in targets.description
+    assert "select only an advertised mode" in targets.description
+
+
 @pytest.mark.asyncio
 async def test_valid_request_returns_queued_not_applied() -> None:
     mailbox = _Mailbox()
