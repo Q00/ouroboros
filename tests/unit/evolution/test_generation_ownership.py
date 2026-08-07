@@ -427,8 +427,17 @@ async def test_revocation_fences_the_owner_before_takeover(tmp_path, monkeypatch
     store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'evolve-revoke.db'}")
     await store.initialize()
     try:
-        claims = DurableStepClaims(store.database_url, lease_seconds=0.6)
+        # Keep expiry far beyond scheduler noise; drive revocation explicitly
+        # below while retaining a fast heartbeat for prompt fence delivery.
+        claims = DurableStepClaims(store.database_url, lease_seconds=60.0)
         monkeypatch.setattr(loop_module, "step_claims_for", lambda _store: claims)
+        monkeypatch.setattr(
+            loop_module,
+            "owned_lineage_step",
+            lambda backend, lineage_id: owned_lineage_step(
+                backend, lineage_id, heartbeat_interval=0.05
+            ),
+        )
 
         executions: list[int] = []
         entered = asyncio.Event()
@@ -453,7 +462,8 @@ async def test_revocation_fences_the_owner_before_takeover(tmp_path, monkeypatch
         assert owner_result.is_err, "a revoked owner must not report success"
         assert executions == [1]
 
-        await asyncio.sleep(0.15)  # grace = lease/6 = 0.1s
+        # Exiting the fenced owner releases its token, which is the durable
+        # stop acknowledgement. No wall-clock grace sleep is needed.
         assert await claims.acquire("lineage-revoke", "reclaimer") is True
     finally:
         await store.close()
@@ -660,9 +670,29 @@ async def test_lost_lease_suppresses_a_cancellation_resistant_success(
     store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'evolve-resistant.db'}")
     await store.initialize()
     try:
-        # Creation gate passes, the first heartbeat reports the loss.
-        claims = _RecordingClaims(refresh_results=[True, False], lease_seconds=0.6)
+        loss_requested = asyncio.Event()
+
+        class _BarrierClaims(_RecordingClaims):
+            creation_confirmed = False
+
+            async def refresh(self, lineage_id: str, claim_token: str) -> bool:
+                if not self.creation_confirmed:
+                    self.creation_confirmed = True
+                    return True
+                await loss_requested.wait()
+                return False
+
+        # The heartbeat may start under arbitrary suite load, but cannot
+        # report loss until the real executor barrier confirms entry.
+        claims = _BarrierClaims(lease_seconds=60.0)
         monkeypatch.setattr(loop_module, "step_claims_for", lambda _store: claims)
+        monkeypatch.setattr(
+            loop_module,
+            "owned_lineage_step",
+            lambda backend, lineage_id: owned_lineage_step(
+                backend, lineage_id, heartbeat_interval=0.01
+            ),
+        )
 
         config = EvolutionaryLoopConfig(
             max_generations=10,
@@ -686,6 +716,7 @@ async def test_lost_lease_suppresses_a_cancellation_resistant_success(
             loop.evolve_step("lineage-resistant", initial_seed=_make_seed())
         )
         await asyncio.wait_for(entered.wait(), timeout=5)
+        loss_requested.set()
 
         owner_result = await asyncio.wait_for(owner, timeout=10)
         assert owner_result.is_err, "a lost lease must suppress a cancellation-resistant success"
