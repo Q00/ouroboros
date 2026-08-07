@@ -52,18 +52,18 @@ from ouroboros.router.types import ParsedOooCommand as TypesParsedOooCommand
             ),
         ),
         (
-            "/ouroboros:run seed.yaml",
+            "/ouroboros:ouroboros-run seed.yaml",
             ParsedOooCommand(
-                skill_name="run",
-                command_prefix="/ouroboros:run",
+                skill_name="ouroboros-run",
+                command_prefix="/ouroboros:ouroboros-run",
                 remainder="seed.yaml",
             ),
         ),
         (
-            "  /OUROBOROS:status",
+            "  /OUROBOROS:ouroboros-status",
             ParsedOooCommand(
-                skill_name="status",
-                command_prefix="/ouroboros:status",
+                skill_name="ouroboros-status",
+                command_prefix="/ouroboros:ouroboros-status",
                 remainder=None,
             ),
         ),
@@ -108,10 +108,10 @@ def test_parse_ooo_command_normalizes_prefix_and_preserves_argument_text() -> No
             id="tab-separated-ooo-command",
         ),
         pytest.param(
-            " \f/OUROBOROS:Status\torch_123",
+            " \f/OUROBOROS:Ouroboros-Status\torch_123",
             ParsedOooCommand(
-                skill_name="status",
-                command_prefix="/ouroboros:status",
+                skill_name="ouroboros-status",
+                command_prefix="/ouroboros:ouroboros-status",
                 remainder="orch_123",
             ),
             id="form-feed-leading-slash-prefix",
@@ -135,11 +135,11 @@ def test_parse_ooo_command_handles_raw_command_whitespace_variants(
 
 
 def test_parse_ooo_command_normalizes_slash_prefix_and_skill_case() -> None:
-    parsed = parse_ooo_command(" \t/OUROBOROS:Run   Seed.yaml")
+    parsed = parse_ooo_command(" \t/OUROBOROS:Ouroboros-Run   Seed.yaml")
 
     assert parsed == ParsedOooCommand(
-        skill_name="run",
-        command_prefix="/ouroboros:run",
+        skill_name="ouroboros-run",
+        command_prefix="/ouroboros:ouroboros-run",
         remainder="Seed.yaml",
     )
 
@@ -147,9 +147,9 @@ def test_parse_ooo_command_normalizes_slash_prefix_and_skill_case() -> None:
 def test_parse_ooo_command_accepts_multiline_slash_payload() -> None:
     payload = "goal: test\nconstraints:\n  - keep it simple\nacceptance_criteria:\n  - works"
 
-    assert parse_ooo_command(f"/ouroboros:run\n{payload}") == ParsedOooCommand(
-        skill_name="run",
-        command_prefix="/ouroboros:run",
+    assert parse_ooo_command(f"/ouroboros:ouroboros-run\n{payload}") == ParsedOooCommand(
+        skill_name="ouroboros-run",
+        command_prefix="/ouroboros:ouroboros-run",
         remainder=payload,
     )
 
@@ -157,9 +157,9 @@ def test_parse_ooo_command_accepts_multiline_slash_payload() -> None:
 def test_parse_ooo_command_preserves_multiline_payload_leading_whitespace() -> None:
     payload = "  goal: test\n  constraints:\n    - keep it simple"
 
-    assert parse_ooo_command(f"/ouroboros:run\n{payload}") == ParsedOooCommand(
-        skill_name="run",
-        command_prefix="/ouroboros:run",
+    assert parse_ooo_command(f"/ouroboros:ouroboros-run\n{payload}") == ParsedOooCommand(
+        skill_name="ouroboros-run",
+        command_prefix="/ouroboros:ouroboros-run",
         remainder=payload,
     )
 
@@ -191,7 +191,7 @@ def test_parsed_ooo_command_type_is_immutable_normalized_command_data() -> None:
         "ooorun seed.yaml",
         "ouroboros:run seed.yaml",
         "please ooo run seed.yaml",
-        "note /ouroboros:run seed.yaml",
+        "note /ouroboros:ouroboros-run seed.yaml",
         "@ouroboros ooo run seed.yaml",
         "`ooo run seed.yaml`",
         "> ooo run seed.yaml",
@@ -212,7 +212,7 @@ def test_parse_ooo_command_rejects_non_runtime_intercept_forms(prompt: str) -> N
         "ooo run:seed.yaml",
         "/ouroboros: run seed.yaml",
         "/ouroboros:-run seed.yaml",
-        "/ouroboros:run!",
+        "/ouroboros:ouroboros-run!",
     ],
 )
 def test_parse_ooo_command_rejects_malformed_command_prefixes(prompt: str) -> None:
