@@ -204,6 +204,33 @@ class TestCodexCliLLMAdapter:
         path.chmod(0o755)
         return path
 
+    @staticmethod
+    def _write_profile_help_cli(
+        path: Path,
+        help_text: str,
+        *,
+        delay_seconds: float = 0.0,
+    ) -> Path:
+        """Write an executable CLI probe with a production-shaped help contract."""
+        path.write_text(
+            "#!/usr/bin/env python3\n"
+            "import sys\n"
+            "import time\n"
+            "if '--help' in sys.argv:\n"
+            f"    time.sleep({delay_seconds!r})\n"
+            f"    print({help_text!r})\n",
+            encoding="utf-8",
+        )
+        path.chmod(0o755)
+        return path
+
+    @staticmethod
+    def _write_unlaunchable_cli(path: Path) -> Path:
+        """Write an executable whose missing interpreter makes subprocess raise OSError."""
+        path.write_text("#!/definitely/missing/python\n", encoding="utf-8")
+        path.chmod(0o755)
+        return path
+
     def test_build_prompt_preserves_system_and_roles(self) -> None:
         """Prompt builder keeps system instructions and conversation order."""
         adapter = CodexCliLLMAdapter(cli_path="codex", cwd="/tmp/project")
@@ -380,6 +407,119 @@ class TestCodexCliLLMAdapter:
 
         assert "mcp_servers.ouroboros.enabled=false" in command
 
+    def test_strict_child_detects_actual_profile_v2_transport(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A real unified help probe enables the safe profile transport override."""
+        codex_home = tmp_path / "codex-home"
+        codex_home.mkdir()
+        (codex_home / "custom.config.toml").write_text(
+            '[mcp_servers.ouroboros]\ncommand = "ouroboros"\n', encoding="utf-8"
+        )
+        cli = self._write_profile_help_cli(
+            tmp_path / "codex-unified",
+            "  -p, --profile <CONFIG_PROFILE_V2>\n"
+            "          Layer $CODEX_HOME/<name>.config.toml on top of the base user config",
+        )
+        monkeypatch.setenv("CODEX_HOME", str(codex_home))
+        adapter = CodexCliLLMAdapter(cli_path=cli, strict_mcp_config=True)
+
+        command = adapter._build_command(
+            output_last_message_path="/tmp/out.txt",
+            output_schema_path=None,
+            model=None,
+            profile="custom",
+        )
+
+        assert command[0] == str(cli)
+        assert command[-2:] == ["--profile", "custom"]
+        assert "mcp_servers.ouroboros.enabled=false" in command
+
+    def test_strict_child_fails_closed_when_unified_help_exceeds_timeout(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A slow supported selector cannot silently inherit profile-scoped MCP."""
+        codex_home = tmp_path / "codex-home"
+        codex_home.mkdir()
+        (codex_home / "custom.config.toml").write_text(
+            '[mcp_servers.ouroboros]\ncommand = "ouroboros"\n', encoding="utf-8"
+        )
+        cli = self._write_profile_help_cli(
+            tmp_path / "codex-slow-unified",
+            "  -p, --profile <CONFIG_PROFILE_V2>\n"
+            "          Layer $CODEX_HOME/<name>.config.toml on top of the base user config",
+            delay_seconds=5.25,
+        )
+        monkeypatch.setenv("CODEX_HOME", str(codex_home))
+        adapter = CodexCliLLMAdapter(cli_path=cli, strict_mcp_config=True)
+
+        with pytest.raises(ProviderError, match="Cannot guarantee strict MCP isolation"):
+            adapter._build_command(
+                output_last_message_path="/tmp/out.txt",
+                output_schema_path=None,
+                model=None,
+                profile="custom",
+            )
+
+    def test_strict_child_fails_closed_when_help_raises_oserror(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """An unlaunchable resolved CLI is unknown, never definitive legacy mode."""
+        codex_home = tmp_path / "codex-home"
+        codex_home.mkdir()
+        (codex_home / "custom.config.toml").write_text(
+            '[mcp_servers.ouroboros]\nurl = "http://127.0.0.1:8765/mcp"\n',
+            encoding="utf-8",
+        )
+        cli = self._write_unlaunchable_cli(tmp_path / "codex-broken-interpreter")
+        monkeypatch.setenv("CODEX_HOME", str(codex_home))
+        adapter = CodexCliLLMAdapter(cli_path=cli, strict_mcp_config=True)
+
+        assert adapter._cli_path == str(cli)
+        with pytest.raises(ProviderError, match="Cannot guarantee strict MCP isolation"):
+            adapter._build_command(
+                output_last_message_path="/tmp/out.txt",
+                output_schema_path=None,
+                model=None,
+                profile="custom",
+            )
+
+    @pytest.mark.asyncio
+    async def test_strict_unknown_profile_mode_never_starts_child_process(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Provider completion returns an isolation error before spawning Codex."""
+        codex_home = tmp_path / "codex-home"
+        codex_home.mkdir()
+        (codex_home / "ouroboros-worker.config.toml").write_text(
+            '[mcp_servers.ouroboros]\ncommand = "ouroboros"\n', encoding="utf-8"
+        )
+        cli = self._write_unlaunchable_cli(tmp_path / "codex-broken-interpreter")
+        monkeypatch.setenv("CODEX_HOME", str(codex_home))
+        adapter = CodexCliLLMAdapter(
+            cli_path=cli,
+            runtime_profile="worker",
+            strict_mcp_config=True,
+        )
+
+        with patch("ouroboros.providers.codex_cli_adapter.asyncio.create_subprocess_exec") as spawn:
+            result = await adapter._complete_once(
+                [Message(role=MessageRole.USER, content="Do not inherit MCP")],
+                CompletionConfig(model="default"),
+            )
+
+        assert result.is_err
+        assert "Cannot guarantee strict MCP isolation" in str(result.error)
+        spawn.assert_not_called()
+
     def test_strict_legacy_profile_ignores_dormant_profile_v2_mcp(
         self,
         tmp_path: Path,
@@ -438,6 +578,39 @@ class TestCodexCliLLMAdapter:
         assert command[-2:] == ["--profile", "custom"]
         assert "mcp_servers.ouroboros.enabled=false" not in command
 
+    def test_strict_child_detects_actual_legacy_nested_transport_as_dormant(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A real legacy help probe does not promote nested profile MCP state."""
+        codex_home = tmp_path / "codex-home"
+        codex_home.mkdir()
+        (codex_home / "config.toml").write_text(
+            '[profiles.custom.mcp_servers.ouroboros]\ncommand = "ouroboros"\n',
+            encoding="utf-8",
+        )
+        (codex_home / "custom.config.toml").write_text(
+            '[mcp_servers.ouroboros]\ncommand = "dormant"\n', encoding="utf-8"
+        )
+        cli = self._write_profile_help_cli(
+            tmp_path / "codex-legacy",
+            "  -p, --profile <CONFIG_PROFILE>\n"
+            "          Configuration profile from config.toml to specify default options",
+        )
+        monkeypatch.setenv("CODEX_HOME", str(codex_home))
+        adapter = CodexCliLLMAdapter(cli_path=cli, strict_mcp_config=True)
+
+        command = adapter._build_command(
+            output_last_message_path="/tmp/out.txt",
+            output_schema_path=None,
+            model=None,
+            profile="custom",
+        )
+
+        assert command[-2:] == ["--profile", "custom"]
+        assert "mcp_servers.ouroboros.enabled=false" not in command
+
     def test_strict_legacy_profile_disables_top_level_mcp_transport(
         self,
         tmp_path: Path,
@@ -461,6 +634,31 @@ class TestCodexCliLLMAdapter:
         )
         monkeypatch.setenv("CODEX_HOME", str(codex_home))
         adapter = CodexCliLLMAdapter(cli_path="codex", strict_mcp_config=True)
+
+        command = adapter._build_command(
+            output_last_message_path="/tmp/out.txt",
+            output_schema_path=None,
+            model=None,
+            profile="custom",
+        )
+
+        assert command[-2:] == ["--profile", "custom"]
+        assert "mcp_servers.ouroboros.enabled=false" in command
+
+    def test_strict_child_disables_top_level_transport_without_help_probe(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Base MCP isolation is deterministic even when help cannot execute."""
+        codex_home = tmp_path / "codex-home"
+        codex_home.mkdir()
+        (codex_home / "config.toml").write_text(
+            '[mcp_servers.ouroboros]\ncommand = "ouroboros"\n', encoding="utf-8"
+        )
+        cli = self._write_unlaunchable_cli(tmp_path / "codex-broken-interpreter")
+        monkeypatch.setenv("CODEX_HOME", str(codex_home))
+        adapter = CodexCliLLMAdapter(cli_path=cli, strict_mcp_config=True)
 
         command = adapter._build_command(
             output_last_message_path="/tmp/out.txt",

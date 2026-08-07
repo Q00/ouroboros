@@ -28,6 +28,7 @@ from ouroboros.cli.commands.setup import (
     _set_default_repo,
 )
 from ouroboros.codex import CodexArtifactInstallResult
+from ouroboros.codex.runtime_profile import codex_uses_profile_v2
 from ouroboros.config._model_defaults import DEFAULT_OPUS_MODEL
 from ouroboros.config.models import OuroborosConfig, get_default_config
 from ouroboros.providers.base import CompletionConfig
@@ -187,6 +188,24 @@ class TestCodexSetup:
 
         with patch("ouroboros.cli.commands.setup.subprocess.run", return_value=completed):
             assert _codex_uses_profile_v2("/Applications/Codex.app/codex") is False
+
+    @pytest.mark.parametrize(
+        "failure",
+        (
+            subprocess.TimeoutExpired(["codex", "--help"], timeout=5),
+            OSError("cannot execute Codex help"),
+        ),
+    )
+    def test_shared_codex_profile_detection_preserves_unknown_failures(
+        self,
+        failure: BaseException,
+    ) -> None:
+        """Help failures are unknown and must not be reported as legacy evidence."""
+
+        def failing_run(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            raise failure
+
+        assert codex_uses_profile_v2("/configured/codex", run_command=failing_run) is None
 
     def test_register_codex_mcp_server_writes_guidance_comment(self, tmp_path: Path) -> None:
         """The generated Codex config should explain the config file split."""

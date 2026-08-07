@@ -204,7 +204,8 @@ class CodexCliLLMAdapter(RuntimeStreamMixin):
 
         if not active_profile:
             return False
-        if not codex_uses_profile_v2(self._cli_path):
+        uses_profile_v2 = codex_uses_profile_v2(self._cli_path)
+        if uses_profile_v2 is False:
             # Split-mode Codex selects [profiles.<name>] for profile options,
             # but it does not promote a nested mcp_servers table into the
             # effective top-level MCP namespace. Only the base transport,
@@ -215,7 +216,21 @@ class CodexCliLLMAdapter(RuntimeStreamMixin):
         if Path(profile_filename).name != profile_filename:
             return False
         profile_config = self._read_config_mapping(codex_home / profile_filename)
-        return self._mapping_has_effective_ouroboros_mcp(profile_config)
+        profile_has_mcp = self._mapping_has_effective_ouroboros_mcp(profile_config)
+        if uses_profile_v2 is None and profile_has_mcp:
+            raise ProviderError(
+                message=(
+                    "Cannot guarantee strict MCP isolation because the Codex "
+                    "--profile contract could not be detected"
+                ),
+                provider=self._provider_name,
+                details={
+                    "cli_path": self._cli_path,
+                    "profile": active_profile,
+                    "profile_config": str(codex_home / profile_filename),
+                },
+            )
+        return profile_has_mcp
 
     def _get_configured_cli_path(self) -> str | None:
         """Resolve an explicit CLI path from config helpers when available."""
@@ -978,23 +993,29 @@ class CodexCliLLMAdapter(RuntimeStreamMixin):
         # Goose and Pi reuse this completion flow but expose no Codex-style
         # per-invocation effort flag. Pass it only to Codex's command builder;
         # their narrower overrides intentionally do not accept this argument.
-        if self._completion_profile_backend == "codex":
-            command = self._build_command(
-                output_last_message_path=str(output_path),
-                output_schema_path=str(schema_path) if schema_path else None,
-                model=normalized_model,
-                profile=resolved.backend_profile,
-                reasoning_effort=effective_config.reasoning_effort,
-                prompt=prompt,
-            )
-        else:
-            command = self._build_command(
-                output_last_message_path=str(output_path),
-                output_schema_path=str(schema_path) if schema_path else None,
-                model=normalized_model,
-                profile=resolved.backend_profile,
-                prompt=prompt,
-            )
+        try:
+            if self._completion_profile_backend == "codex":
+                command = self._build_command(
+                    output_last_message_path=str(output_path),
+                    output_schema_path=str(schema_path) if schema_path else None,
+                    model=normalized_model,
+                    profile=resolved.backend_profile,
+                    reasoning_effort=effective_config.reasoning_effort,
+                    prompt=prompt,
+                )
+            else:
+                command = self._build_command(
+                    output_last_message_path=str(output_path),
+                    output_schema_path=str(schema_path) if schema_path else None,
+                    model=normalized_model,
+                    profile=resolved.backend_profile,
+                    prompt=prompt,
+                )
+        except ProviderError as exc:
+            output_path.unlink(missing_ok=True)
+            if schema_path:
+                schema_path.unlink(missing_ok=True)
+            return Result.err(exc)
 
         prompt_stdin_bytes = self._prompt_stdin_bytes(prompt)
 

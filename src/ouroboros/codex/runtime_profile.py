@@ -39,10 +39,16 @@ def codex_uses_profile_v2(
     codex_path: str | None,
     *,
     run_command: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
-) -> bool:
-    """Return whether ``--profile`` selects ``<name>.config.toml`` files."""
+) -> bool | None:
+    """Detect whether ``--profile`` selects ``<name>.config.toml`` files.
+
+    ``True`` means the unified profile-v2 selector, ``False`` means the
+    legacy split selector, and ``None`` means the CLI contract could not be
+    determined.  In particular, a help timeout or OS error is uncertainty,
+    not evidence that the CLI is legacy.
+    """
     if codex_path is None:
-        return False
+        return None
 
     try:
         result = run_command(
@@ -53,7 +59,7 @@ def codex_uses_profile_v2(
             check=False,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-        return False
+        return None
 
     help_text = f"{result.stdout}\n{result.stderr}"
     lines = help_text.splitlines()
@@ -70,13 +76,20 @@ def codex_uses_profile_v2(
                 break
             if stripped:
                 description_lines.append(stripped)
-        return any(
+        if any(
             "Layer $CODEX_HOME/<name>.config.toml on top of the base user config"
             in description_line
             for description_line in description_lines
-        )
+        ):
+            return True
+        if "<CONFIG_PROFILE>" in line or any(
+            "Configuration profile from config.toml" in description_line
+            for description_line in description_lines
+        ):
+            return False
+        return None
 
-    return False
+    return None
 
 
 def resolve_codex_profile(

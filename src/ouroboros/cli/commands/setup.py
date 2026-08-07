@@ -1120,7 +1120,7 @@ def _upsert_codex_mcp_section(raw: str, section: str) -> tuple[str, bool]:
 
 def _codex_uses_profile_v2(codex_path: str | None = None) -> bool:
     """Return whether ``codex --profile`` expects ``<name>.config.toml`` files."""
-    return _shared_codex_uses_profile_v2(codex_path, run_command=subprocess.run)
+    return _shared_codex_uses_profile_v2(codex_path, run_command=subprocess.run) is True
 
 
 def _register_codex_mcp_server(
