@@ -348,6 +348,12 @@ Gen 3: {Task, Priority, Status, DueDate}     → similarity 1.00 → CONVERGED �
 
 > `ooo publish`는 직접적인 `ouroboros publish` 셸 서브커맨드가 아니라, AI 런타임 세션에서 실행되는 skill/runtime surface이며 내부적으로 `gh` CLI를 사용합니다.
 
+> Claude Code의 `/run`, `/status`, `/help`, `/config`는 예약 명령입니다.
+> Ouroboros skill을 직접 호출할 때는 `/ouroboros:ouroboros-run`,
+> `/ouroboros:ouroboros-status`, `/ouroboros:ouroboros-help`,
+> `/ouroboros:ouroboros-config`를 사용하세요. 기존 `ooo run`, `ooo status`,
+> `ooo help`, `ooo config` 문구도 계속 지원됩니다.
+
 ---
 
 ## 아홉 개의 사고

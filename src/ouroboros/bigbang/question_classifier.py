@@ -16,12 +16,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import StrEnum
 import json
-import re
 
 import structlog
 
 from ouroboros.config import get_llm_model_for_role
 from ouroboros.core.errors import ProviderError
+from ouroboros.core.json_utils import extract_json_payload
 from ouroboros.core.types import Result
 from ouroboros.providers.base import (
     CompletionConfig,
@@ -311,18 +311,14 @@ class QuestionClassifier:
         Raises:
             ValueError: If response cannot be parsed.
         """
-        text = response.strip()
-
-        # Extract JSON from markdown code blocks if present
-        json_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
-        if json_match:
-            text = json_match.group(1)
-        else:
-            json_match = re.search(r"\{.*\}", text, re.DOTALL)
-            if json_match:
-                text = json_match.group(0)
+        # One authoritative payload or nothing (#1838).
+        text = extract_json_payload(response.strip())
+        if text is None:
+            raise ValueError("no unambiguous JSON payload in classification response")
 
         data = json.loads(text)
+        if not isinstance(data, dict):
+            raise ValueError("classification payload must be a JSON object")
 
         category_str = data.get("category", "planning").lower()
         if category_str == "decide_later":

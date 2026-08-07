@@ -55,13 +55,16 @@ indistinguishable from genuine exploration *in advance*, so guardrails are emitt
 - **The agent runtime + LLM backend** own *how cheaply* a commissioned unit
   executes (re-reads, retries, regeneration); core can only **advise** (a guardrail
   in the spec) or **route** there.
-- **Sharpening (owner):** **fan-out discipline is core's job, not the runtime's** —
-  and core already shipped the first response. `orchestrator/backend_limits.py`
-  serializes delivery to **1 AC at a time** for any backend whose limits Ouroboros
-  can't know (every CLI runtime, hermes included), raised only via explicit
-  `OUROBOROS_MAX_CONCURRENCY`; [#1372](https://github.com/Q00/ouroboros/pull/1372)
-  added configurable rate-budget pacing for non-Claude delivery. The 14-AC stampede
-  from the #1377 incident cannot recur in that form.
+- **Sharpening (owner):** **fan-out discipline is core's job, not the runtime's**.
+  `orchestrator/backend_limits.py` supplies a conservative initial estimate of
+  **1 AC at a time** for any backend whose limits Ouroboros cannot know (every
+  CLI runtime, Hermes included). The delivery controller then uses AIMD feedback:
+  halve on 429/concurrency rejection, honor a safely saturated `Retry-After`, and
+  cautiously add one worker after sustained success. The complete static policy is
+  durably fingerprinted so static-semaphore sessions cannot resume under AIMD effects.
+  [#1372](https://github.com/Q00/ouroboros/pull/1372)
+  supplies configurable rate-budget pacing for non-Claude delivery. The 14-AC
+  stampede from the #1377 incident cannot recur in that form.
 
 ### Signals exist but are not aggregated into waste
 

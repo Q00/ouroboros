@@ -279,6 +279,71 @@ class TestOpenCodeLLMAdapter:
         assert result.is_err, "Top-level error must override exit code"
         assert "Session crashed" in result.error.message
 
+    @pytest.mark.parametrize(
+        "payload",
+        [None, "", 0, [], {}],
+        ids=["null", "empty-string", "zero", "empty-list", "empty-dict"],
+    )
+    @pytest.mark.asyncio
+    async def test_complete_error_frame_with_empty_payload_still_fails(
+        self, payload: object
+    ) -> None:
+        """A terminal error frame stays terminal however thin its payload is.
+
+        The frame's own ``type`` declares the failure; the payload only carries
+        the reason. Reading emptiness as "no error" let a failed run return the
+        partial text it had produced as a success.
+        """
+        stdout = (
+            json.dumps({"type": "error", "sessionID": "sess-1", "error": payload})
+            + "\n"
+            + json.dumps({"type": "text", "part": {"type": "text", "text": "partial answer"}})
+            + "\n"
+        )
+        process = _FakeProcess(stdout=stdout, returncode=0)
+        adapter = OpenCodeLLMAdapter(cli_path="opencode", cwd="/tmp")
+
+        with patch("asyncio.create_subprocess_exec", return_value=process):
+            result = await adapter.complete(
+                messages=[Message(role=MessageRole.USER, content="Calculate")],
+                config=CompletionConfig(model="default"),
+            )
+
+        assert result.is_err, f"error frame with payload {payload!r} must not report success"
+        assert "partial answer" not in result.error.message
+
+    @pytest.mark.asyncio
+    async def test_complete_empty_error_frame_does_not_mask_a_later_one(self) -> None:
+        """An early thin frame must not answer for the frames behind it.
+
+        ``_extract_error_from_events`` returned from inside its own loop, so the
+        first error frame decided the whole stream — and a null one decided it
+        was clean, discarding the populated frame that followed.
+        """
+        stdout = "".join(
+            json.dumps(event) + "\n"
+            for event in (
+                {"type": "error", "sessionID": "sess-1", "error": None},
+                {
+                    "type": "error",
+                    "sessionID": "sess-1",
+                    "error": {"name": "RuntimeError", "data": {"message": "Session crashed"}},
+                },
+                {"type": "text", "part": {"type": "text", "text": "partial answer"}},
+            )
+        )
+        process = _FakeProcess(stdout=stdout, returncode=0)
+        adapter = OpenCodeLLMAdapter(cli_path="opencode", cwd="/tmp")
+
+        with patch("asyncio.create_subprocess_exec", return_value=process):
+            result = await adapter.complete(
+                messages=[Message(role=MessageRole.USER, content="Calculate")],
+                config=CompletionConfig(model="default"),
+            )
+
+        assert result.is_err
+        assert "Session crashed" in result.error.message
+
     def test_extract_error_tool_use_not_terminal(self) -> None:
         """tool_use.state.error is not returned by _extract_error_from_events."""
         adapter = OpenCodeLLMAdapter(cli_path="opencode", cwd="/tmp")

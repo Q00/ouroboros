@@ -61,6 +61,42 @@ SESSION_RUNTIME_IDENTITY_PROGRESS_KEY = "_session_runtime_identity"
 ACCEPTANCE_ROOT_INDICES_PROGRESS_KEY = "acceptance_root_indices"
 
 
+def _normalize_pause_owner(value: object) -> dict[str, object]:
+    """Validate the closed coordinator owner carried by a PAUSED event."""
+
+    expected_keys = frozenset(
+        {
+            "schema_version",
+            "kind",
+            "execution_id",
+            "session_id",
+            "level_number",
+            "coordinator_aggregate_id",
+        }
+    )
+    if not isinstance(value, Mapping) or set(value.keys()) != expected_keys:
+        raise ValueError("pause owner has an invalid schema")
+    normalized = dict(value)
+    if (
+        type(normalized.get("schema_version")) is not int
+        or normalized.get("schema_version") != 1
+        or normalized.get("kind") != "coordinator_quota"
+        or type(normalized.get("execution_id")) is not str
+        or not normalized["execution_id"]
+        or len(normalized["execution_id"]) > 1_024
+        or type(normalized.get("session_id")) is not str
+        or not normalized["session_id"]
+        or len(normalized["session_id"]) > 1_024
+        or type(normalized.get("level_number")) is not int
+        or normalized["level_number"] < 1
+        or type(normalized.get("coordinator_aggregate_id")) is not str
+        or not normalized["coordinator_aggregate_id"]
+        or len(normalized["coordinator_aggregate_id"]) > 4_096
+    ):
+        raise ValueError("pause owner exceeds its durable bounds")
+    return normalized
+
+
 def _normalize_acceptance_root_indices(value: object) -> list[int] | None:
     """Normalize the immutable root set persisted at session publication."""
     if value is None:
@@ -533,10 +569,23 @@ class SessionRepository:
             return {}
 
         progress: dict[str, Any] = {"runtime_status": SessionStatus.PAUSED.value}
-        for key in ("pause_kind", "pause_seconds", "resume_after", "paused_at", "resume_hint"):
+        for key in (
+            "pause_kind",
+            "pause_seconds",
+            "resume_after",
+            "paused_at",
+            "resume_hint",
+        ):
             value = event_data.get(key)
             if value is not None:
                 progress[key] = value
+
+        pause_owner = event_data.get("pause_owner")
+        if pause_owner is not None:
+            # The durable PAUSED owner is effect-bearing resume authority.
+            # Re-apply the same closed schema used at publication instead of
+            # trusting an arbitrary JSON mapping recovered from the store.
+            progress["pause_owner"] = _normalize_pause_owner(pause_owner)
 
         reason = event_data.get("reason")
         if reason is not None:
@@ -1062,6 +1111,7 @@ class SessionRepository:
         pause_seconds: int | None = None,
         resume_after: datetime | None = None,
         pause_kind: str | None = None,
+        pause_owner: Mapping[str, object] | None = None,
     ) -> Result[bool, PersistenceError]:
         """Mark session as paused and resumable.
 
@@ -1085,6 +1135,8 @@ class SessionRepository:
             data["resume_after"] = resume_after.isoformat()
         if pause_kind is not None:
             data["pause_kind"] = pause_kind
+        if pause_owner is not None:
+            data["pause_owner"] = _normalize_pause_owner(pause_owner)
 
         event = BaseEvent(
             type="orchestrator.session.paused",
@@ -1408,6 +1460,7 @@ class SessionRepository:
                             "resume_hint",
                             "paused_at",
                             "pause_reason",
+                            "pause_owner",
                         ):
                             last_progress.pop(key, None)
                     elif event.type in {

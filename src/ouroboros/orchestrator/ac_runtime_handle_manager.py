@@ -92,6 +92,13 @@ class ACRuntimeHandleManager:
         return isinstance(dispatch_id, str) and dispatch_id in self._non_replayable_dispatch_ids
 
     @staticmethod
+    def cancellation_seal_policy(provider_effect_entered: bool) -> tuple[str, bool]:
+        """Return the durable reason and replayability for cancellation."""
+        if provider_effect_entered:
+            return "provider attempt cancelled after dispatch boundary", False
+        return "provider admission cancelled before provider entry", True
+
+    @staticmethod
     def _build_expected_ac_runtime_metadata(
         runtime_scope: Any,
         *,
@@ -812,13 +819,7 @@ class ACRuntimeHandleManager:
                 return runtime_handle
 
             if expected_capsule_fingerprint is not None:
-                if any(
-                    event.type == _AC_ATTEMPT_DISPATCHED_EVENT
-                    and self._event_matches_ac_runtime_identity(
-                        event.data if isinstance(event.data, dict) else {}, runtime_identity
-                    )
-                    for event in events
-                ):
+                if dispatch_indices:
                     raise AmbiguousACExecutionError(
                         "AC provider boundary exists without a reusable same-attempt handle"
                     )
@@ -1011,6 +1012,7 @@ class ACRuntimeHandleManager:
         seal_indices: list[int] = []
         dispatch_ids: set[str] = set()
         dispatch_index_by_id: dict[str, int] = {}
+        dispatch_predecessor_by_id: dict[str, str | None] = {}
         previous_dispatch_id: str | None = None
 
         matching_compiled_exists = any(
@@ -1126,6 +1128,7 @@ class ACRuntimeHandleManager:
                         )
                 dispatch_ids.add(dispatch_id)
                 dispatch_index_by_id[dispatch_id] = index
+                dispatch_predecessor_by_id[dispatch_id] = predecessor
                 previous_dispatch_id = dispatch_id
                 dispatch_indices.append(index)
                 continue
@@ -1143,6 +1146,14 @@ class ACRuntimeHandleManager:
                 dispatch_index = dispatch_index_by_id.get(dispatch_id)
                 if dispatch_index is None or dispatch_index >= index:
                     raise AmbiguousACExecutionError("AC dispatch seal does not follow its dispatch")
+                if event_data.get("reason") == cls.cancellation_seal_policy(False)[0]:
+                    if dispatch_id != previous_dispatch_id:
+                        raise AmbiguousACExecutionError(
+                            "AC dispatch abort is not the active boundary"
+                        )
+                    dispatch_indices.remove(dispatch_index)
+                    previous_dispatch_id = dispatch_predecessor_by_id[dispatch_id]
+                    continue
                 seal_indices.append(index)
 
         if not compiled_indices:

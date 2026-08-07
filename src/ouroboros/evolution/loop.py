@@ -1939,16 +1939,18 @@ class EvolutionaryLoop:
             )
         elif execute and self.evaluator:
             try:
+                from ouroboros.evolution.evaluation_result import normalize_evaluator_result
+
                 eval_result = await focus.call(self.evaluator, current_seed, execution_output)
-                if hasattr(eval_result, "is_ok") and eval_result.is_ok:
-                    evaluation_summary = eval_result.value
-                elif isinstance(eval_result, EvaluationSummary):
-                    evaluation_summary = eval_result
+                evaluation_summary = normalize_evaluator_result(eval_result)
             except Exception as e:
                 logger.warning(
                     "evolution.evaluation.failed",
                     extra={"error": str(e), "generation": generation_number},
                 )
+                from ouroboros.evolution.evaluation_result import evaluation_error_summary
+
+                evaluation_summary = evaluation_error_summary(str(e))
 
         await self.event_store.append(
             loop_support.generation_phase_checkpoint(

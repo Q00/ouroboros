@@ -15,9 +15,10 @@ async def _discover_registry(tmp_path: Path) -> SkillRegistry:
     for skill_name in ("run", "interview", "welcome"):
         skill_path = skill_dir / skill_name
         skill_path.mkdir()
+        display_name = "ouroboros-run" if skill_name == "run" else skill_name
         (skill_path / "SKILL.md").write_text(
             f"""---
-name: {skill_name}
+name: {display_name}
 description: {skill_name} skill
 ---
 
@@ -47,7 +48,7 @@ class TestExactMagicCommandEligibility:
             ("/ouroboros", True),
             ("ouroboros", True),
             ("please ooo run", False),
-            ("note /ouroboros:run", False),
+            ("note /ouroboros:ouroboros-run", False),
             ("I used ooo run yesterday", False),
             ("ooo r", False),
         ],
@@ -70,7 +71,7 @@ class TestExactMagicKeywordRouting:
         [
             ("ooo run seed.yaml", "run"),
             ("ooo:run seed.yaml", "run"),
-            ("/ouroboros:run seed.yaml", "run"),
+            ("/ouroboros:ouroboros-run seed.yaml", "run"),
             ("ouroboros:run seed.yaml", "run"),
             ("ooo interview Build an API", "interview"),
             ("ooo", "welcome"),
@@ -99,7 +100,7 @@ class TestExactMagicKeywordRouting:
         "user_input",
         [
             "please ooo run seed.yaml",
-            "note /ouroboros:run seed.yaml",
+            "note /ouroboros:ouroboros-run seed.yaml",
             "ooo r",
             "/ouroboros:r",
         ],

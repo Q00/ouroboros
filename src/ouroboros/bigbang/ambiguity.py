@@ -13,7 +13,7 @@ import asyncio
 from dataclasses import dataclass, field
 from enum import StrEnum
 import json
-import re
+import math
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -27,6 +27,7 @@ from ouroboros.bigbang.interview import (
 )
 from ouroboros.config import get_llm_model_for_role
 from ouroboros.core.errors import ProviderError
+from ouroboros.core.json_utils import extract_json_payload
 from ouroboros.core.types import Result
 from ouroboros.providers.base import CompletionConfig, LLMAdapter, Message, MessageRole
 
@@ -330,6 +331,11 @@ def qualifies_for_seed_completion(
         score,
         is_brownfield=is_brownfield,
     )
+
+
+def _reject_non_finite_score(token: str) -> float:
+    """json.loads hook: NaN/Infinity literals are malformed scores, not values."""
+    raise ValueError(f"non-finite score literal: {token}")
 
 
 @dataclass
@@ -696,23 +702,18 @@ Additional context (intentional deferrals — do not penalise):
         Raises:
             ValueError: If response cannot be parsed.
         """
-        # Extract JSON from response (handle markdown code blocks)
-        text = response.strip()
-
-        # Try to find JSON in markdown code block
-        json_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
-        if json_match:
-            text = json_match.group(1)
-        else:
-            # Try to find raw JSON object
-            json_match = re.search(r"\{.*\}", text, re.DOTALL)
-            if json_match:
-                text = json_match.group(0)
+        # One authoritative payload or nothing: an echoed schema example
+        # must never outrank the real answer (#1838).
+        text = extract_json_payload(response.strip())
+        if text is None:
+            raise ValueError("Invalid JSON response: no unambiguous JSON payload")
 
         try:
-            data = json.loads(text)
+            data = json.loads(text, parse_constant=_reject_non_finite_score)
         except json.JSONDecodeError as e:
             raise ValueError(f"Invalid JSON response: {e}") from e
+        if not isinstance(data, dict):
+            raise ValueError("Invalid JSON response: payload must be an object")
 
         # Numeric score fields must be present. Missing justifications are recoverable.
         required_score_fields = [
@@ -728,6 +729,8 @@ Additional context (intentional deferrals — do not penalise):
         # Parse and clamp scores
         def clamp_score(value: Any) -> float:
             score = float(value)
+            if not math.isfinite(score):
+                raise ValueError(f"non-finite clarity score: {value!r}")
             return max(0.0, min(1.0, score))
 
         def justification_for(field_name: str, component_name: str) -> str:
@@ -843,24 +846,24 @@ Additional context (intentional deferrals — do not penalise):
         Raises:
             ValueError: If the response cannot be parsed or omits ``clarity_score``.
         """
-        text = response.strip()
-        json_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
-        if json_match:
-            text = json_match.group(1)
-        else:
-            json_match = re.search(r"\{.*\}", text, re.DOTALL)
-            if json_match:
-                text = json_match.group(0)
+        text = extract_json_payload(response.strip())
+        if text is None:
+            raise ValueError("Invalid JSON response: no unambiguous JSON payload")
 
         try:
-            data = json.loads(text)
+            data = json.loads(text, parse_constant=_reject_non_finite_score)
         except json.JSONDecodeError as exc:
             raise ValueError(f"Invalid JSON response: {exc}") from exc
+        if not isinstance(data, dict):
+            raise ValueError("Invalid JSON response: payload must be an object")
 
         if "clarity_score" not in data:
             raise ValueError("Missing required field: clarity_score")
 
-        clarity = max(0.0, min(1.0, float(data["clarity_score"])))
+        clarity_value = float(data["clarity_score"])
+        if not math.isfinite(clarity_value):
+            raise ValueError(f"non-finite clarity score: {data['clarity_score']!r}")
+        clarity = max(0.0, min(1.0, clarity_value))
         raw_justification = data.get("justification")
         justification = str(raw_justification).strip() if raw_justification is not None else ""
         if not justification:

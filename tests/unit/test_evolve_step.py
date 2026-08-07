@@ -2762,6 +2762,50 @@ class TestRunGenerationFailures:
     """Test failure event emission inside _run_generation()."""
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("failure_mode", ["exception", "err_result", "unexpected"])
+    async def test_evaluator_failures_persist_rejected_summary(self, failure_mode: str) -> None:
+        store = await create_event_store()
+        seed = make_seed(seed_id=f"seed_eval_{failure_mode}")
+
+        async def evaluator(*_args, **_kwargs):
+            if failure_mode == "exception":
+                raise RuntimeError("semantic evaluator exploded")
+            if failure_mode == "err_result":
+                return Result.err("semantic evaluator rejected its input")
+            return object()
+
+        loop = EvolutionaryLoop(
+            event_store=store,
+            config=EvolutionaryLoopConfig(min_generations=2),
+            executor=AsyncMock(return_value="execution completed"),
+            evaluator=evaluator,
+        )
+
+        result = await loop.evolve_step(
+            f"lin_eval_{failure_mode}",
+            initial_seed=seed,
+            execute=True,
+        )
+
+        assert result.is_ok
+        summary = result.value.generation_result.evaluation_summary
+        assert summary is not None
+        assert summary.final_approved is False
+        assert summary.score == 0.0
+        assert summary.approval_status == "rejected"
+        assert summary.execution_completion_status == "completed"
+        assert summary.failure_reason is not None
+        assert summary.failure_reason.startswith("evaluation errored:")
+        events = await store.replay_lineage(f"lin_eval_{failure_mode}")
+        completed = [event for event in events if event.type == "lineage.generation.completed"]
+        assert completed[-1].data["evaluation_summary"]["final_approved"] is False
+        assert (
+            completed[-1]
+            .data["evaluation_summary"]["failure_reason"]
+            .startswith("evaluation errored:")
+        )
+
+    @pytest.mark.asyncio
     async def test_seed_generation_failure_emits_failed_event(self) -> None:
         """Seed generation errors should emit lineage.generation.failed(seeding)."""
         store = await create_event_store()
