@@ -26,7 +26,7 @@ def read_start_lease_locked(path: Path) -> dict[str, Any] | None:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
         return None
-    except (OSError, json.JSONDecodeError):
+    except (OSError, UnicodeError, json.JSONDecodeError):
         return CORRUPT_START_LEASE
     if not _valid_start_lease_payload(payload):
         return CORRUPT_START_LEASE

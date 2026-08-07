@@ -38,6 +38,7 @@ def _live_legacy_lease(*, token: str = "original_token") -> dict[str, object]:
     "raw",
     [
         b"not-json",
+        b"\xff\xfe",
         b'{"token":"truncated"',
         b"[]",
         b'{"token":"future","mode":"future","created_at":"2026-08-08T00:00:00+00:00"}',
