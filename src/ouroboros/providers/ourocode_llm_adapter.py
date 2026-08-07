@@ -209,7 +209,7 @@ class OurocodeLLMAdapter:
                     ProviderError(
                         message="Empty response from ourocode",
                         provider="ourocode",
-                        details={"stop_reason": parsed.finish_reason},
+                        details={"stop_reason": parsed.raw_response["stop_reason"]},
                     )
                 )
             return Result.ok(parsed)
@@ -259,7 +259,10 @@ class OurocodeLLMAdapter:
             model=response_model,
             usage=_ZERO_USAGE,
             finish_reason=self._finish_reason(result.stop_reason),
-            raw_response={"ourocode_model": response_model},
+            raw_response={
+                "ourocode_model": response_model,
+                "stop_reason": result.stop_reason,
+            },
         )
 
     def _resolve_ourocode_model(

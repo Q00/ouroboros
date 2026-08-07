@@ -33,6 +33,7 @@ async def test_complete_returns_completion_response() -> None:
     assert response.content == "hi there"
     assert response.model == "claude"
     assert response.raw_response["ourocode_model"] == "claude"
+    assert response.raw_response["stop_reason"] == "end_turn"
     # ACP carries no token usage — honestly zero, not fabricated.
     assert response.usage.total_tokens == 0
     assert response.finish_reason == "stop"
@@ -44,9 +45,10 @@ async def test_complete_returns_completion_response() -> None:
         ("", "end_turn"),
         ("", "refusal"),
         ("", "max_tokens"),
+        ("", "max_turn_requests"),
         ("   \n\t", "end_turn"),
     ],
-    ids=["end-turn", "refusal", "max-tokens", "whitespace-only"],
+    ids=["end-turn", "refusal", "max-tokens", "max-turn-requests", "whitespace-only"],
 )
 @pytest.mark.asyncio
 async def test_complete_rejects_a_turn_that_produced_no_text(text: str, stop_reason: str) -> None:
@@ -71,6 +73,7 @@ async def test_complete_rejects_a_turn_that_produced_no_text(text: str, stop_rea
 
     assert result.is_err, f"empty turn stopping on {stop_reason!r} must not report success"
     assert result.error.provider == "ourocode"
+    assert result.error.details == {"stop_reason": stop_reason}
 
 
 @pytest.mark.parametrize(
@@ -84,7 +87,10 @@ async def test_complete_rejects_a_turn_that_produced_no_text(text: str, stop_rea
     ],
 )
 @pytest.mark.asyncio
-async def test_complete_reports_truncation_as_length(stop_reason: str, expected: str) -> None:
+async def test_complete_preserves_raw_stop_reason_while_normalizing_public_finish_reason(
+    stop_reason: str,
+    expected: str,
+) -> None:
     """Truncation has to surface as ``length`` — that is the marker callers test for.
 
     ``max_tokens`` reaching a caller untranslated reads as an unremarkable stop,
@@ -107,6 +113,7 @@ async def test_complete_reports_truncation_as_length(stop_reason: str, expected:
 
     assert result.is_ok
     assert result.value.finish_reason == expected
+    assert result.value.raw_response["stop_reason"] == stop_reason
 
 
 @pytest.mark.asyncio
