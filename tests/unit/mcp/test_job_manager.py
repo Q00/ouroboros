@@ -6187,7 +6187,9 @@ class TestZombieJobReconciliation:
 
     Closes the R-zombie gap: a job stuck in RUNNING/QUEUED whose owner crashed
     (with no recoverable linked-execution evidence) must not report RUNNING
-    forever. Authoritative liveness uses the recorded owner PID + start time.
+    forever. On Linux, authoritative liveness uses the versioned boot-ID,
+    start-ticks, and PID identity; non-Linux readers retain the legacy recorded
+    owner PID + epoch start-time fallback.
     """
 
     async def _seed_running_job(
