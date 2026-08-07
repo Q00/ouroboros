@@ -2434,3 +2434,37 @@ def test_ampersand_and_additive_coordinators_declare_co_products(goal: str) -> N
     result = derive_domain_from_ledger(ledger)
     assert TaskClass.WEB_APP in result.classes
     assert TaskClass.LIBRARY in result.classes
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
+        "Build either a Python library or an admin web app",
+        "Build a Python library or an admin web app",
+    ],
+)
+def test_alternative_requirements_keep_both_candidates(goal: str) -> None:
+    """R35 probe: explicit alternatives are an honest ambiguity, not a
+    last-phrase win."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value="Generated documentation and an admin portal")
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP in result.classes
+    assert TaskClass.LIBRARY in result.classes
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
+        "Build a CLI for frontend developers although not a web app",
+        "Build a CLI for frontend developers though not a web app",
+    ],
+)
+def test_although_and_though_end_content_clauses(goal: str) -> None:
+    """R35 probe: although/though are adversative boundaries like but."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value="Interactive dashboard panels and deterministic stdout")
+    _seed_section(ledger, "runtime_context", value="Local shell / terminal")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.CLI

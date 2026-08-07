@@ -275,7 +275,8 @@ _TRAILING_ADVERBS = frozenset(
 # R34): "for frontend developers but not a web app" returns to the main
 # artifact claim at "but".
 _CONTENT_CLAUSE_RE = re.compile(
-    r"\b(?:that|which|for|about)\s+[^,.;]*?(?=\s+but\b|\s+yet\b|[,.;]|$)"
+    r"\b(?:that|which|for|about)\s+[^,.;]*?"
+    r"(?=\s+but\b|\s+yet\b|\s+although\b|\s+though\b|\s+whereas\b|[,.;]|$)"
 )
 
 
@@ -707,7 +708,7 @@ _LIBRARY_PACKAGE_WORD_RE = re.compile(r"\bpackage\b(?!-)")
 _GOAL_CONJUNCT_SPLIT_RE = re.compile(
     r"\s*(?:\band\b|\bplus\b|\bwith\b|\balongside\b|\bas\s+well\s+as\b|"
     r"\balong\s+with\b|\btogether\s+with\b|\bin\s+addition\s+to\b|"
-    r"\bbut\s+also\b|&|[,;])\s*"
+    r"\bbut\s+also\b|\bor\b|&|[,;])\s*"
 )
 _GAME_CONJUNCT_VOCAB_RE = re.compile(rf"\b{_GAME_GOAL_SIGNAL_FRAGMENT}\b")
 
