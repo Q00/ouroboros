@@ -34,8 +34,10 @@ _COMMAND_ARTIFACT_SCHEMA_VERSION = 1
 _COMMAND_ARTIFACT_CAPTURE = "ouroboros.leaf-dispatch.v1"
 _MAX_COMMAND_ARTIFACTS = 128
 _MAX_COMMAND_ARTIFACT_PATH_CHARS = 4096
+RUNTIME_SUCCESS_BOOLEAN_FIELDS = ("success", "ok")
 RUNTIME_FAILURE_BOOLEAN_FIELDS = (
     "is_error",
+    "isError",
     "error",
     "failure",
     "failed",
@@ -56,6 +58,9 @@ RUNTIME_TOOL_EXIT_STATUS_FIELDS = (
     "return_code",
     "status_code",
     "statusCode",
+    "exit",
+    "errorCode",
+    "error_code",
 )
 _FILESYSTEM_EFFECT_KEYS = frozenset(
     {
@@ -632,8 +637,9 @@ def _nofollow_workspace_artifact_stat(
     task_cwd: str,
     relative_path: str,
 ) -> os.stat_result | None:
-    """Read a current artifact through one workspace-rooted no-follow fd chain."""
-    directory_fd: int | None = None
+    """Read an artifact through a stable workspace-rooted no-follow fd chain."""
+    leased_directory_fds: list[int] = []
+    current_directory_fds: list[int] = []
     try:
         if (
             not hasattr(os, "O_DIRECTORY")
@@ -648,20 +654,51 @@ def _nofollow_workspace_artifact_stat(
         if not _is_canonical_command_artifact_path(relative_path):
             return None
         flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
-        directory_fd = os.open(workspace, flags)
+        leased_fd = os.open(workspace, flags)
+        leased_directory_fds.append(leased_fd)
         for part in relative.parts[:-1]:
-            next_fd = os.open(part, flags, dir_fd=directory_fd)
-            os.close(directory_fd)
-            directory_fd = next_fd
-        return os.stat(relative.name, dir_fd=directory_fd, follow_symlinks=False)
+            leased_fd = os.open(part, flags, dir_fd=leased_fd)
+            leased_directory_fds.append(leased_fd)
+        leased_leaf = os.stat(relative.name, dir_fd=leased_fd, follow_symlinks=False)
+
+        # A parent can be renamed and replaced after ``open`` returns.  Rewalk
+        # the current lexical path and bind every opened directory identity,
+        # plus the leaf fingerprint, to the held no-follow traversal.
+        current_fd = os.open(workspace, flags)
+        current_directory_fds.append(current_fd)
+        if _filesystem_identity(os.fstat(current_fd)) != _filesystem_identity(
+            os.fstat(leased_directory_fds[0])
+        ):
+            return None
+        for index, part in enumerate(relative.parts[:-1], start=1):
+            current_fd = os.open(part, flags, dir_fd=current_fd)
+            current_directory_fds.append(current_fd)
+            if _filesystem_identity(os.fstat(current_fd)) != _filesystem_identity(
+                os.fstat(leased_directory_fds[index])
+            ):
+                return None
+        current_leaf = os.stat(relative.name, dir_fd=current_fd, follow_symlinks=False)
+        if _command_artifact_stat_fingerprint(current_leaf) != _command_artifact_stat_fingerprint(
+            leased_leaf
+        ):
+            return None
+        return current_leaf
     except (OSError, RuntimeError, ValueError):
         return None
     finally:
-        if directory_fd is not None:
+        for directory_fd in reversed(current_directory_fds + leased_directory_fds):
             try:
                 os.close(directory_fd)
             except OSError:
                 pass
+
+
+def _filesystem_identity(value: os.stat_result) -> tuple[int, int, int]:
+    return (value.st_dev, value.st_ino, value.st_mode)
+
+
+def _command_artifact_stat_fingerprint(value: os.stat_result) -> tuple[int, ...]:
+    return tuple(getattr(value, key) for key in _COMMAND_ARTIFACT_KEYS - {"path"})
 
 
 _TOOL_CALL_ID_KEYS = ("tool_call_id", "tool_use_id", "call_id")
@@ -673,20 +710,20 @@ def _event_tool_call_aliases(event: BaseEvent) -> tuple[tuple[str, ...], bool]:
         return (), True
     containers: list[Mapping[str, Any]] = [event.data]
     malformed = False
-    message_meta = event.data.get("meta")
-    if message_meta is not None:
+    if "meta" in event.data:
+        message_meta = event.data["meta"]
         if not isinstance(message_meta, Mapping):
             malformed = True
         else:
             containers.append(message_meta)
-    tool_result = event.data.get("tool_result")
-    if tool_result is not None:
+    if "tool_result" in event.data:
+        tool_result = event.data["tool_result"]
         if not isinstance(tool_result, Mapping):
             malformed = True
         else:
             containers.append(tool_result)
-            meta = tool_result.get("meta")
-            if meta is not None:
+            if "meta" in tool_result:
+                meta = tool_result["meta"]
                 if not isinstance(meta, Mapping):
                     malformed = True
                 else:
@@ -731,8 +768,8 @@ def _event_has_explicit_tool_success(
     if not isinstance(data, Mapping):
         return False
     verdict_containers: list[Mapping[str, Any]] = [data]
-    data_meta = data.get("meta")
-    if data_meta is not None:
+    if "meta" in data:
+        data_meta = data["meta"]
         if not isinstance(data_meta, Mapping):
             return False
         verdict_containers.append(data_meta)
@@ -743,9 +780,9 @@ def _event_has_explicit_tool_success(
     if data.get("is_error") is True:
         return False
     tool_result = data.get("tool_result")
-    if tool_result is not None and not isinstance(tool_result, Mapping):
-        return False
-    if isinstance(tool_result, Mapping):
+    if "tool_result" in data:
+        if not isinstance(tool_result, Mapping):
+            return False
         verdict_containers.append(tool_result)
         if tool_result.get("is_error_invalid") is True:
             return False
@@ -753,8 +790,8 @@ def _event_has_explicit_tool_success(
             return False
         if tool_result.get("is_error") is True:
             return False
-        meta = tool_result.get("meta")
-        if meta is not None:
+        if "meta" in tool_result:
+            meta = tool_result["meta"]
             if not isinstance(meta, Mapping):
                 return False
             verdict_containers.append(meta)
@@ -807,8 +844,10 @@ def _event_has_explicit_tool_success(
 
 def _mapping_has_failure_verdict(value: Mapping[str, Any]) -> bool:
     """Treat explicit failure flags, contradictions, and malformed verdicts as vetoes."""
-    if "success" in value:
-        success = value["success"]
+    for key in RUNTIME_SUCCESS_BOOLEAN_FIELDS:
+        if key not in value:
+            continue
+        success = value[key]
         if not isinstance(success, bool) or not success:
             return True
     for key in RUNTIME_FAILURE_BOOLEAN_FIELDS:
@@ -1694,6 +1733,7 @@ __all__ = [
     "DeliverGateVerdict",
     "EventStoreEvidenceReader",
     "RUNTIME_FAILURE_BOOLEAN_FIELDS",
+    "RUNTIME_SUCCESS_BOOLEAN_FIELDS",
     "RUNTIME_TOOL_EXIT_STATUS_FIELDS",
     "TraceGuardResultLike",
     "TraceGuardEvidenceInput",

@@ -8,6 +8,7 @@ from typing import Any
 
 from ouroboros.harness.deliver_gate import (
     RUNTIME_FAILURE_BOOLEAN_FIELDS,
+    RUNTIME_SUCCESS_BOOLEAN_FIELDS,
     RUNTIME_TOOL_EXIT_STATUS_FIELDS,
 )
 from ouroboros.mcp.types import MCPToolResult
@@ -54,7 +55,6 @@ _RUNTIME_FAILED_EVENT_TYPES = frozenset(
 # are metadata only: filesystem authority still comes exclusively from the
 # LeafDispatcher's held dirfd lease.
 _RUNTIME_STATUS_VERDICT_FIELDS = (
-    "success",
     "subtype",
     "status",
     "runtime_status",
@@ -62,6 +62,7 @@ _RUNTIME_STATUS_VERDICT_FIELDS = (
     "runtime_event_type",
 )
 _RUNTIME_VERDICT_FIELDS = (
+    *RUNTIME_SUCCESS_BOOLEAN_FIELDS,
     *RUNTIME_FAILURE_BOOLEAN_FIELDS,
     *RUNTIME_TOOL_EXIT_STATUS_FIELDS,
     *_RUNTIME_STATUS_VERDICT_FIELDS,
@@ -231,15 +232,16 @@ def serialize_runtime_message_metadata(
     from ouroboros.orchestrator.workflow_state import resolve_ac_marker_update
 
     metadata = _project_runtime_verdict_fields(message.data, exclude={"is_error"})
-    raw_meta = message.data.get("meta")
-    if isinstance(raw_meta, Mapping):
-        projected_meta = _project_runtime_verdict_fields(raw_meta)
-        if projected_meta:
-            metadata["meta"] = projected_meta
-    elif raw_meta is not None:
-        # Preserve a JSON-safe poison value.  Dropping a malformed-present
-        # verdict container would let a simultaneous zero exit launder it.
-        metadata["meta"] = True
+    if "meta" in message.data:
+        raw_meta = message.data["meta"]
+        if isinstance(raw_meta, Mapping):
+            projected_meta = _project_runtime_verdict_fields(raw_meta)
+            if projected_meta:
+                metadata["meta"] = projected_meta
+        else:
+            # Preserve a JSON-safe poison value.  Dropping a malformed-present
+            # verdict container would let a simultaneous zero exit launder it.
+            metadata["meta"] = True
 
     message_runtime_event_type = runtime_event_type(message)
     if message_runtime_event_type is not None and "runtime_event_type" not in metadata:
@@ -357,7 +359,7 @@ def serialize_runtime_message_metadata(
 
     if tool_result is not None:
         metadata["tool_result"] = tool_result
-    elif message.data.get("tool_result") is not None:
+    elif "tool_result" in message.data:
         # A malformed-present result container must remain visible to the
         # verifier rather than disappearing during normalization.
         metadata["tool_result"] = True
@@ -567,11 +569,12 @@ def _normalize_tool_result_payload(tool_result: object) -> dict[str, Any] | None
             # signal launder an unknown/failing result into success.
             normalized["is_error_invalid"] = True
 
-    meta = tool_result.get("meta")
-    if isinstance(meta, Mapping):
-        normalized["meta"] = _clone_metadata_value(meta)
-    elif meta is not None:
-        normalized["meta"] = True
+    if "meta" in tool_result:
+        meta = tool_result["meta"]
+        if isinstance(meta, Mapping):
+            normalized["meta"] = _clone_metadata_value(meta)
+        else:
+            normalized["meta"] = True
 
     return normalized
 

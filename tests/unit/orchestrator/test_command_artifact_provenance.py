@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import ast
 import asyncio
 from datetime import UTC, datetime, timedelta
+import inspect
 import os
 from pathlib import Path
 import stat
 import subprocess
+import textwrap
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -18,6 +21,7 @@ import ouroboros.harness.deliver_gate as deliver_gate_module
 from ouroboros.harness.deliver_gate import load_ac_evidence_manifest
 from ouroboros.harness.journal import EvidenceManifest
 from ouroboros.orchestrator.adapter import AgentMessage
+from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime
 from ouroboros.orchestrator.evidence_schema import EvidenceRecord
 from ouroboros.orchestrator.execution_runtime_scope import ExecutionNodeIdentity
 from ouroboros.orchestrator.parallel_executor import ParallelACExecutor, _standard_deliver_facts
@@ -196,6 +200,77 @@ def _set_completion_verdict(
     events[1] = events[1].model_copy(update={"data": completion_data})
 
 
+async def _run_production_artifact_route(
+    tmp_path: Path,
+    *,
+    call_id: str,
+    completion_data: dict[str, Any],
+):
+    class StubRuntime:
+        runtime_backend = "opencode"
+        permission_mode = "acceptEdits"
+        working_directory = str(tmp_path)
+
+        async def execute_task(self, **_kwargs: Any):
+            yield AgentMessage(
+                type="assistant",
+                content="write artifact",
+                tool_name="Bash",
+                data={
+                    "tool_call_id": call_id,
+                    "tool_input": {"command": "printf accepted > claimed.txt"},
+                },
+            )
+            subprocess.run(
+                ["/bin/sh", "-c", "printf accepted > claimed.txt"],
+                cwd=tmp_path,
+                check=True,
+            )
+            yield AgentMessage(
+                type="assistant",
+                content="command completion",
+                tool_name="Bash",
+                data={"subtype": "tool_result", "tool_call_id": call_id, **completion_data},
+            )
+            yield AgentMessage(
+                type="result", content="[TASK_COMPLETE]", data={"subtype": "success"}
+            )
+
+    store = _EventStore([])
+    executor = ParallelACExecutor(
+        adapter=StubRuntime(),
+        event_store=store,
+        console=MagicMock(),
+        enable_decomposition=False,
+        task_cwd=str(tmp_path),
+        run_verify_commands=False,
+    )
+    await executor._execute_atomic_ac(
+        ac_index=0,
+        ac_content="Create claimed.txt",
+        session_id="sess_1",
+        execution_id="exec_1",
+        tools=["Bash"],
+        system_prompt="test",
+        seed_goal="test provenance",
+        depth=0,
+        start_time=datetime.now(UTC),
+        retry_attempt=1,
+        node_identity=ExecutionNodeIdentity.root(execution_context_id="exec_1", ac_index=0),
+    )
+    tool_start = next(event for event in store.events if event.type == "execution.tool.started")
+    tool_completion = next(
+        event for event in store.events if event.type == "execution.tool.completed"
+    )
+    manifest, fact = await _artifact_fact(
+        store.events,
+        task_cwd=tmp_path,
+        ac_id=str(tool_start.data["ac_id"]),
+        session_attempt_id=str(tool_start.data["session_attempt_id"]),
+    )
+    return tool_completion, manifest, fact
+
+
 @pytest.mark.asyncio
 async def test_accepted_command_artifact_flows_from_journal_to_verifier(tmp_path: Path) -> None:
     artifact = tmp_path / "claimed.txt"
@@ -304,7 +379,10 @@ async def test_production_capture_persists_through_journal_to_verifier(tmp_path:
             if field != "is_error"
         ),
         ("failure", "yes"),
+        ("isError", "yes"),
         ("success", False),
+        ("ok", False),
+        ("ok", "yes"),
         ("status", "failed"),
         *((field, 9) for field in deliver_gate_module.RUNTIME_TOOL_EXIT_STATUS_FIELDS),
     ),
@@ -398,6 +476,72 @@ async def test_production_projection_cannot_launder_command_failure_verdict(
 
     assert all("command_artifacts" not in entry.payload for entry in manifest.entries)
     assert fact.evidence_handle == "missing:files_touched:0"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("completion_data", "poison_key"),
+    (
+        ({"meta": None, "tool_result": {"is_error": False, "meta": {"exit_status": 0}}}, "meta"),
+        ({"is_error": False, "tool_result": None}, "tool_result"),
+    ),
+)
+async def test_production_projection_preserves_present_null_container_as_poison(
+    tmp_path: Path,
+    completion_data: dict[str, Any],
+    poison_key: str,
+) -> None:
+    tool_completion, manifest, fact = await _run_production_artifact_route(
+        tmp_path,
+        call_id=f"null-{poison_key}",
+        completion_data=completion_data,
+    )
+
+    assert tool_completion.data[poison_key] is True
+    assert all("command_artifacts" not in entry.payload for entry in manifest.entries)
+    assert fact.evidence_handle == "missing:files_touched:0"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("field", "neutral"),
+    (
+        ("ok", True),
+        ("isError", False),
+        ("exit", 0),
+        ("errorCode", 0),
+        ("error_code", 0),
+    ),
+)
+@pytest.mark.parametrize(
+    "location", ("top_level", "top_level_meta", "tool_result", "tool_result_meta")
+)
+async def test_production_projection_preserves_neutral_codex_verdict_alias(
+    tmp_path: Path,
+    location: str,
+    field: str,
+    neutral: object,
+) -> None:
+    completion_data: dict[str, Any] = {
+        "tool_result": {"is_error": False, "meta": {"exit_status": 0}}
+    }
+    _set_verdict_payload(
+        completion_data,
+        location=location,
+        field=field,
+        value=neutral,
+    )
+
+    tool_completion, manifest, fact = await _run_production_artifact_route(
+        tmp_path,
+        call_id=f"neutral-{location}-{field}",
+        completion_data=completion_data,
+    )
+
+    assert _verdict_payload_value(tool_completion.data, location=location, field=field) == neutral
+    assert len(manifest.entries) == 1
+    assert "command_artifacts" in manifest.entries[0].payload
+    assert fact.evidence_handle == manifest.entries[0].handle
 
 
 @pytest.mark.asyncio
@@ -829,6 +973,89 @@ async def test_parent_swap_after_workspace_open_is_rejected(
 
 
 @pytest.mark.asyncio
+async def test_parent_swap_after_child_dirfd_open_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    receiver_parent = tmp_path / "sub"
+    receiver_parent.mkdir()
+    artifact = receiver_parent / "claimed.txt"
+    artifact.write_text("captured", encoding="utf-8")
+    observed = _effect(artifact, relative_path="sub/claimed.txt")
+    displaced_parent = tmp_path / "original-sub"
+    outside_parent = tmp_path.parent / f"{tmp_path.name}-outside-after-open"
+    outside_parent.mkdir()
+    os.link(artifact, outside_parent / artifact.name)
+    original_open = deliver_gate_module.os.open
+    swapped = False
+
+    def adversarial_open(path, flags, mode=0o777, *, dir_fd=None):
+        nonlocal swapped
+        fd = original_open(path, flags, mode, dir_fd=dir_fd)
+        if not swapped and dir_fd is not None and os.fspath(path) == "sub":
+            receiver_parent.rename(displaced_parent)
+            receiver_parent.symlink_to(outside_parent, target_is_directory=True)
+            swapped = True
+        return fd
+
+    monkeypatch.setattr(deliver_gate_module.os, "open", adversarial_open)
+    monkeypatch.setattr(
+        deliver_gate_module.os,
+        "supports_dir_fd",
+        {*deliver_gate_module.os.supports_dir_fd, adversarial_open},
+    )
+
+    _manifest, fact = await _artifact_fact(
+        _command_events(call_id="parent-swap-after-child-open", effects=[observed]),
+        task_cwd=tmp_path,
+        claim="sub/claimed.txt",
+    )
+
+    assert swapped is True
+    assert fact.evidence_handle == "missing:files_touched:0"
+
+
+@pytest.mark.asyncio
+async def test_workspace_swap_after_root_dirfd_open_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    artifact = workspace / "claimed.txt"
+    artifact.write_text("captured", encoding="utf-8")
+    observed = _effect(artifact, relative_path=artifact.name)
+    displaced_workspace = tmp_path / "original-workspace"
+    outside_workspace = tmp_path / "outside-workspace"
+    outside_workspace.mkdir()
+    os.link(artifact, outside_workspace / artifact.name)
+    original_open = deliver_gate_module.os.open
+    swapped = False
+
+    def adversarial_open(path, flags, mode=0o777, *, dir_fd=None):
+        nonlocal swapped
+        fd = original_open(path, flags, mode, dir_fd=dir_fd)
+        if not swapped and dir_fd is None and os.fspath(path) == str(workspace):
+            workspace.rename(displaced_workspace)
+            workspace.symlink_to(outside_workspace, target_is_directory=True)
+            swapped = True
+        return fd
+
+    monkeypatch.setattr(deliver_gate_module.os, "open", adversarial_open)
+    monkeypatch.setattr(
+        deliver_gate_module.os,
+        "supports_dir_fd",
+        {*deliver_gate_module.os.supports_dir_fd, adversarial_open},
+    )
+
+    _manifest, fact = await _artifact_fact(
+        _command_events(call_id="workspace-swap-after-root-open", effects=[observed]),
+        task_cwd=workspace,
+    )
+
+    assert swapped is True
+    assert fact.evidence_handle == "missing:files_touched:0"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("event_index", (0, 1))
 async def test_conflicting_call_id_aliases_reject_command_authority(
     tmp_path: Path, event_index: int
@@ -1080,7 +1307,7 @@ async def test_nested_and_boolean_failure_verdicts_veto_journal_authority(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("field", ("failure", "cancel", "abort"))
+@pytest.mark.parametrize("field", ("failure", "cancel", "abort", "isError"))
 @pytest.mark.parametrize(
     "location", ("top_level", "top_level_meta", "tool_result", "tool_result_meta")
 )
@@ -1104,7 +1331,7 @@ async def test_boolean_failure_aliases_veto_journal_authority(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("field", ("failure", "cancel", "abort"))
+@pytest.mark.parametrize("field", ("failure", "cancel", "abort", "isError"))
 @pytest.mark.parametrize(
     "location", ("top_level", "top_level_meta", "tool_result", "tool_result_meta")
 )
@@ -1120,6 +1347,31 @@ async def test_false_boolean_failure_aliases_are_neutral(
         effects=[_effect(artifact, relative_path=artifact.name)],
     )
     _set_completion_verdict(events, location=location, field=field, value=False)
+
+    manifest, fact = await _artifact_fact(events, task_cwd=tmp_path)
+
+    assert len(manifest.entries) == 1
+    assert "command_artifacts" in manifest.entries[0].payload
+    assert fact.evidence_handle == manifest.entries[0].handle
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("field", deliver_gate_module.RUNTIME_SUCCESS_BOOLEAN_FIELDS)
+@pytest.mark.parametrize(
+    "location", ("top_level", "top_level_meta", "tool_result", "tool_result_meta")
+)
+async def test_true_success_aliases_are_neutral(
+    tmp_path: Path,
+    location: str,
+    field: str,
+) -> None:
+    artifact = tmp_path / "claimed.txt"
+    artifact.write_text("accepted", encoding="utf-8")
+    events = _command_events(
+        call_id=f"{location}-{field}-true",
+        effects=[_effect(artifact, relative_path=artifact.name)],
+    )
+    _set_completion_verdict(events, location=location, field=field, value=True)
 
     manifest, fact = await _artifact_fact(events, task_cwd=tmp_path)
 
@@ -1187,17 +1439,26 @@ async def test_zero_exit_status_aliases_are_neutral(
 
 def test_exit_status_alias_vocabulary_matches_runtime_normalizer() -> None:
     aliases = deliver_gate_module.RUNTIME_TOOL_EXIT_STATUS_FIELDS
-
-    assert aliases == (
-        "exit_code",
-        "exit_status",
-        "exitCode",
-        "exitStatus",
-        "returncode",
-        "return_code",
-        "status_code",
-        "statusCode",
+    normalizer = ast.parse(
+        textwrap.dedent(inspect.getsource(CodexCliRuntime._resolve_item_completion_is_error))
     )
+    declared_aliases: set[str] = set()
+    for node in ast.walk(normalizer):
+        if not isinstance(node, ast.For) or not isinstance(node.target, ast.Name):
+            continue
+        if node.target.id not in {"exit_key", "fail_key"}:
+            continue
+        if not isinstance(node.iter, (ast.Tuple, ast.List)):
+            continue
+        declared_aliases.update(
+            item.value
+            for item in node.iter.elts
+            if isinstance(item, ast.Constant) and isinstance(item.value, str)
+        )
+
+    assert declared_aliases
+    assert declared_aliases <= set(aliases)
+    assert {"exit", "errorCode", "error_code"} <= declared_aliases
     assert len(aliases) == len(set(aliases))
 
 
