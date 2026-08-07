@@ -2552,7 +2552,7 @@ class TestCodexCliRuntime:
             tmp_path,
             "run",
             [
-                "name: run",
+                "name: ouroboros-run",
                 'description: "Execute a Seed specification through the workflow engine"',
                 "mcp_tool: ouroboros_execute_seed",
                 "mcp_args:",
@@ -2597,12 +2597,12 @@ class TestCodexCliRuntime:
     async def test_execute_task_uses_dispatcher_for_slash_prefix_intercepts(
         self, tmp_path: Path
     ) -> None:
-        """Legacy slash prefixes remain routed through the shared router."""
+        """Host-facing slash prefixes remain routed through the shared router."""
         self._write_skill(
             tmp_path,
             "run",
             [
-                "name: run",
+                "name: ouroboros-run",
                 'description: "Execute a Seed specification through the workflow engine"',
                 "mcp_tool: ouroboros_execute_seed",
                 "mcp_args:",
@@ -2626,14 +2626,15 @@ class TestCodexCliRuntime:
             "ouroboros.orchestrator.codex_cli_runtime.asyncio.create_subprocess_exec",
         ) as mock_exec:
             messages = [
-                message async for message in runtime.execute_task("/ouroboros:run seed.yaml")
+                message
+                async for message in runtime.execute_task("/ouroboros:ouroboros-run seed.yaml")
             ]
 
         dispatcher.assert_awaited_once()
         intercept_request = dispatcher.await_args.args[0]
         assert isinstance(intercept_request, Resolved)
         assert intercept_request.skill_name == "run"
-        assert intercept_request.command_prefix == "/ouroboros:run"
+        assert intercept_request.command_prefix == "/ouroboros:ouroboros-run"
         assert intercept_request.first_argument == "seed.yaml"
         assert intercept_request.mcp_args == {"seed_path": "seed.yaml"}
         mock_exec.assert_not_called()

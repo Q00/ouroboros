@@ -15,7 +15,7 @@ Do NOT interpret `ooo` commands as natural language. ALWAYS route to the MCP too
 | `ooo run <seed.yaml>` | `ouroboros_start_execute_seed` with `seed_path` |
 | `ooo auto ...` | `ouroboros_start_auto` with the resolved `goal` / `resume` / option arguments |
 | `ooo status [session_id]` | `ouroboros_session_status` |
-| `ooo evaluate <session_id>` | `ouroboros_evaluate` |
+| `ooo evaluate <session_id>` | `ouroboros_start_evaluate` |
 | `ooo evolve ...` | `ouroboros_evolve_step` |
 | `ooo cancel [execution_id]` | `ouroboros_cancel_execution` |
 | `ooo unstuck` / `ooo lateral` | `ouroboros_lateral_think` |
@@ -29,7 +29,13 @@ For natural-language requests, map to the corresponding MCP tool:
 - "generate a seed", "freeze requirements" → call `ouroboros_generate_seed`
 - "run the seed", "execute the workflow" → call `ouroboros_start_execute_seed`
 - "check status", "am I drifting?" → call `ouroboros_session_status`
-- "evaluate", "verify the result" → call `ouroboros_evaluate`
+- "evaluate", "verify the result" → call `ouroboros_start_evaluate`
+
+`ooo run` is a convergence pipeline by default: observe the run job, then the
+`chained_evaluate_job_id`, then any `chained_ralph_job_id` exposed by the rejected
+evaluation. The worker never receives the harness-owned verify command or output
+assertion. Treat Ralph's bounded terminal stop reason—not the first rejected
+evaluation—as the automatic pipeline's final state.
 
 ## Auto Dispatch Safety
 

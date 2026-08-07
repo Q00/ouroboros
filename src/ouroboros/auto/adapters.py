@@ -21,6 +21,10 @@ from ouroboros.core.requirement_candidate import RequirementDistillation
 from ouroboros.core.seed import Seed, ac_texts
 from ouroboros.mcp.errors import MCPServerError
 from ouroboros.mcp.job_manager import JobManager, JobStatus
+from ouroboros.mcp.tools.advisory_dispatch import (
+    directive_was_appended,
+    split_appended_dispatch,
+)
 from ouroboros.mcp.tools.authoring_handlers import (
     REQUIRED_CLIENT_GATES,
     GenerateSeedHandler,
@@ -260,6 +264,11 @@ class HandlerRunStarter:
             "cwd": self.cwd,
             "use_worktree": self.use_worktree,
             "efficiency_mode": self.efficiency_mode,
+            # Auto owns its own RALPH_HANDOFF and final-evaluation path. Keep
+            # the run handoff from adding a second evaluation owner or a
+            # competing run-session Ralph lineage.
+            "auto_evaluate": False,
+            "auto_evolve": False,
         }
         if self.frugality_assurance_explicit:
             arguments["frugality_assurance"] = self.frugality_assurance
@@ -316,7 +325,15 @@ class HandlerSynchronousRunStarter:
         }
         task = asyncio.create_task(
             self.handler.handle(
-                {"seed_content": seed_yaml, "cwd": self.cwd, "skip_qa": self.skip_qa},
+                {
+                    "seed_content": seed_yaml,
+                    "cwd": self.cwd,
+                    "skip_qa": self.skip_qa,
+                    # Complete-product Auto owns Ralph and the final formal
+                    # evaluation after the run artifact is available.
+                    "auto_evaluate": False,
+                    "auto_evolve": False,
+                },
                 execution_id=execution_id,
                 session_id_override=session_id,
                 synchronous=True,
@@ -1218,7 +1235,11 @@ def _turn_from_result(
     else:
         ambiguity_score = None
     return InterviewTurn(
-        question=_extract_interview_question(text, session_id=session_id),
+        question=_extract_interview_question(
+            text,
+            session_id=session_id,
+            dispatch_appended=directive_was_appended(meta),
+        ),
         session_id=session_id,
         seed_ready=bool(meta.get("seed_ready")),
         completed=bool(meta.get("completed")),
@@ -1226,8 +1247,26 @@ def _turn_from_result(
     )
 
 
-def _extract_interview_question(text: str, *, session_id: str) -> str:
-    """Strip this session's human-readable interview envelope from handler text."""
+def _extract_interview_question(
+    text: str, *, session_id: str, dispatch_appended: bool = False
+) -> str:
+    """Strip this session's human-readable interview envelope from handler text.
+
+    The advisory fan-out directive is addressed to a host *model* that spawns
+    subagents; auto is a programmatic driver that does not, so the directive is
+    cut rather than answered as part of the question.
+
+    ``dispatch_appended`` says whether the server appended one, read through
+    ``directive_was_appended`` so the gate and the renderer share one condition.
+    Cutting on shape alone truncated
+    a question that quoted the sentinel whenever no directive was there to
+    find — on ``PLUGIN_PASSIVE``, where the response is deliberately left
+    unchanged, that is every turn. Auto would then answer, and persist, a
+    question the server never asked. The producer knows whether it appended;
+    asking it is cheaper and surer than inferring from the text.
+    """
+    if dispatch_appended:
+        text = split_appended_dispatch(text)
     stripped = text.strip()
     if not stripped:
         return ""

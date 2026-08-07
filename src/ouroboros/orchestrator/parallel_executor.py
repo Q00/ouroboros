@@ -30,6 +30,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable, Mapping
 import contextlib
+from contextvars import ContextVar
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -58,15 +59,14 @@ from ouroboros.core.seed import (
 )
 from ouroboros.core.session_signal import (
     SessionSignalMode,
-    bounded_session_signal_reply,
 )
 from ouroboros.events.session_signal import (
     create_session_signal_applied_event,
     create_session_signal_completed_event,
-    create_session_signal_delivery_started_event,
     create_session_signal_delivery_uncertain_event,
     create_session_signal_rejected_event,
 )
+from ouroboros.evolution.provider_usage import tracked_agent_task
 
 # Import the harness submodules directly, NOT the ``ouroboros.harness`` package
 # aggregate: ``harness.__init__`` pulls in ``deliver_routing`` which imports from
@@ -83,10 +83,17 @@ from ouroboros.harness.deliver_gate import (
 from ouroboros.harness.journal import EvidenceEntry, EvidenceManifest
 from ouroboros.harness.traceguard_validator import validate_evidence_claims
 from ouroboros.observability.logging import get_logger
+from ouroboros.orchestrator import (
+    adaptive_concurrency,
+    provider_admission,
+    provider_effect_scope,
+    retry_hints,
+)
 from ouroboros.orchestrator.ac_execution_capsule import (
     UnmaterializableSuccessContractError,
     bind_capsule_to_runtime_handle,
     build_ac_dispatch_authority_scope,
+    build_ac_dispatch_request_digest,
     compile_ac_execution_capsule,
 )
 from ouroboros.orchestrator.ac_runtime_handle_manager import ACRuntimeHandleManager
@@ -104,12 +111,19 @@ from ouroboros.orchestrator.backend_limits import (
     BackendConcurrencyLimits,
     resolve_backend_limits,
 )
+from ouroboros.orchestrator.backend_outcomes import outcome_weights as _safe_backend_outcome_weights
 from ouroboros.orchestrator.context_governor import SiblingStatus, compose_context
 from ouroboros.orchestrator.coordinator import (
     CoordinatorReview,
     FileConflict,
     LevelCoordinator,
     validate_coordinator_started_payload,
+)
+from ouroboros.orchestrator.coordinator_quota import (
+    normalize_published_coordinator_pause_owner,
+    resolve_replayed_coordinator_quota_pause,
+    resolve_usage_limit_pause_seconds,
+    restore_checkpointed_coordinator_quota,
 )
 from ouroboros.orchestrator.decomposition_limits import (
     DEFAULT_MAX_DECOMPOSITION_DEPTH,
@@ -309,6 +323,12 @@ from ouroboros.orchestrator.execution_runtime_scope import (
     build_ac_runtime_identity,
     build_level_coordinator_runtime_scope,
 )
+from ouroboros.orchestrator.frugality_evidence import (
+    harvest_token_spend as _harvest_token_spend,
+)
+from ouroboros.orchestrator.frugality_evidence import (
+    observed_effective_model as _observed_effective_model,
+)
 from ouroboros.orchestrator.leaf_dispatcher import (
     LeafDispatcher,
     LeafDispatchState,
@@ -334,9 +354,11 @@ from ouroboros.orchestrator.model_routing import (
 from ouroboros.orchestrator.parallel_executor_models import (
     ACExecutionOutcome,
     ACExecutionResult,
+    CoordinatorQuotaPause,
     ParallelExecutionResult,
     ParallelExecutionStageResult,
     StageExecutionOutcome,
+    collect_decomposition_depth_warning_paths,
 )
 from ouroboros.orchestrator.profile_loader import ExecutionProfile, SuggestedModelTier
 from ouroboros.orchestrator.rate_limit import (
@@ -375,6 +397,13 @@ from ouroboros.orchestrator.route_policy import MAX_ROUTE_ID_CHARS, RouteCandida
 from ouroboros.orchestrator.runtime_param_negotiation import (
     announce_execution_param_degradations,
 )
+from ouroboros.orchestrator.session_signal_followup import (
+    CompletedProviderTurn,
+    _bounded_session_signal_runtime_reply,
+    _is_session_signal_application_acknowledgement,
+    abort_unentered_follow_up,
+    claim_follow_up_delivery,
+)
 from ouroboros.orchestrator.shadow_replay import isolated_workspace, run_shadow_replay
 from ouroboros.orchestrator.synapse import (
     SessionSignalTarget,
@@ -390,6 +419,10 @@ from ouroboros.orchestrator.verifier import (
 )
 
 _PARALLEL_PAUSE_REPLAY_PAGE_SIZE = 64
+_has_usage_limit_pause = adaptive_concurrency.has_usage_limit_pause
+_PROVIDER_OBSERVATION_SINK: ContextVar[
+    Callable[[adaptive_concurrency.ConcurrencyObservation], None] | None
+] = ContextVar("ouroboros_provider_observation_sink", default=None)
 _PARALLEL_ROUTE_OBSERVATION_KEYS = frozenset(
     {
         "schema_version",
@@ -1278,49 +1311,6 @@ def _make_execution_authority_registry() -> tuple[
 ) = _make_execution_authority_registry()
 
 
-def _is_session_signal_application_acknowledgement(message: AgentMessage) -> bool:
-    """Return whether a resumed-turn message proves provider context entry."""
-    subtype = message.data.get("subtype")
-    if message.type == "assistant":
-        return bool(message.content.strip()) and subtype not in {"error", "runtime_error"}
-    return message.type == "result" and subtype == "success"
-
-
-def _bounded_session_signal_runtime_reply(messages: list[AgentMessage]) -> str | None:
-    """Build one bounded provider reply without persisting a raw transcript.
-
-    Some CLIs emit one assistant message while streaming transports such as
-    Goose emit many token chunks.  Prefer an explicit completion payload when
-    present; otherwise concatenate only the acknowledging assistant chunks from
-    this signal turn.  A successful result message is the final fallback.
-    """
-    assistant_messages = [
-        message
-        for message in messages
-        if message.type == "assistant"
-        and _is_session_signal_application_acknowledgement(message)
-        and message.content.strip()
-    ]
-    completion_messages = [
-        message for message in assistant_messages if message.data.get("subtype") == "completion"
-    ]
-    if completion_messages:
-        return bounded_session_signal_reply(completion_messages[-1].content)
-    if assistant_messages:
-        return bounded_session_signal_reply(
-            "".join(message.content for message in assistant_messages)
-        )
-
-    for message in reversed(messages):
-        if message.type != "result":
-            continue
-        if not _is_session_signal_application_acknowledgement(message):
-            continue
-        if message.content.strip():
-            return bounded_session_signal_reply(message.content)
-    return None
-
-
 # -- Frugality-proof producer helpers ----------------------------------------
 # Token keys the deliver-verdict claim surface may carry a handle under. Mirrors
 # the vocabulary traceguard_validator._CHUNK_ID_KEYS accepts, so a leaf-emitted
@@ -1343,113 +1333,6 @@ _STANDARD_DELIVER_EVIDENCE_FIELDS: tuple[str, ...] = (
     "tests_passed",
 )
 _FILE_MUTATION_TOOLS = frozenset({"Edit", "Write", "NotebookEdit", "MultiEdit"})
-_TOKEN_SPEND_FALLBACK_KEYS: tuple[str, ...] = (
-    "input_tokens",
-    "output_tokens",
-    "cache_creation_input_tokens",
-    "cache_read_input_tokens",
-)
-_TOKEN_USAGE_KEYS: tuple[str, ...] = (
-    *_TOKEN_SPEND_FALLBACK_KEYS,
-    "cached_input_tokens",
-    "total_tokens",
-)
-
-
-def _finite_nonneg_number(value: object) -> float | None:
-    """Return ``value`` as a finite, non-negative float, else ``None``.
-
-    Mirrors ``frugality_proof._finite_number`` (rejects ``None``, booleans,
-    non-numerics, NaN/inf) and additionally rejects negatives: a token count is a
-    spend, and a negative spend is malformed telemetry that must be dropped rather
-    than counted (a negative would understate the run's real spend and skew the
-    proof's aggregate reduction).
-    """
-    if value is None or isinstance(value, bool) or not isinstance(value, (int, float)):
-        return None
-    try:
-        number = float(value)
-    except (OverflowError, TypeError, ValueError):
-        return None
-    if not math.isfinite(number) or number < 0:
-        return None
-    return number
-
-
-def _harvest_token_spend(
-    messages: list[AgentMessage],
-) -> tuple[float, dict[str, float]] | None:
-    """Sum runtime-reported token usage across a leaf's message stream.
-
-    Usage semantics are resolved PER MESSAGE before messages are added together:
-
-    * a usable ``total_tokens`` is authoritative for that message;
-    * otherwise spend is ``input_tokens + output_tokens`` plus Anthropic's
-      additive ``cache_creation_input_tokens + cache_read_input_tokens``;
-    * OpenAI's ``cached_input_tokens`` remains in the diagnostic breakdown but is
-      never added separately because it is already a subset of ``input_tokens``.
-
-    Token telemetry is all-or-nothing across the leaf. If a ``usage`` payload is
-    malformed, or any present recognized counter is invalid, the whole attempt
-    returns ``None``. Dropping only the bad component (or falling back when an
-    invalid ``total_tokens`` is present) would undercount spend and can create a
-    false frugality PASS. An absent payload or a valid payload with no spend
-    counter contributes nothing; when no spend is observed the function returns
-    ``None`` rather than fabricating a char-proxy or zero-token spend.
-
-    Multiple usage-bearing messages in one stream (e.g. a Claude result message
-    plus Codex ``turn.completed`` messages) are summed, so a decomposed child's
-    full spend is attributed even when the runtime reports it in pieces.
-
-    Returns:
-        ``(token_spend, usage_breakdown)`` where ``usage_breakdown`` is the summed
-        per-key total for every usable key, or ``None`` when no spend was seen.
-    """
-    breakdown: dict[str, float] = {}
-    token_spend = 0.0
-    observed_spend = False
-    for message in messages:
-        data = getattr(message, "data", None)
-        if not isinstance(data, dict):
-            continue
-        if data.get("usage_invalid") is True:
-            return None
-        if "usage" not in data:
-            continue
-        usage = data["usage"]
-        if not isinstance(usage, Mapping):
-            return None
-        usable_usage: dict[str, float] = {}
-        for key in _TOKEN_USAGE_KEYS:
-            if key not in usage:
-                continue
-            raw_value = usage[key]
-            number = _finite_nonneg_number(raw_value)
-            if number is None:
-                return None
-            usable_usage[key] = number
-            breakdown[key] = breakdown.get(key, 0.0) + number
-
-        total_tokens = usable_usage.get("total_tokens")
-        if total_tokens is not None:
-            token_spend += total_tokens
-            observed_spend = True
-            continue
-
-        spend_components = [
-            usable_usage[key] for key in _TOKEN_SPEND_FALLBACK_KEYS if key in usable_usage
-        ]
-        if spend_components:
-            token_spend += sum(spend_components)
-            observed_spend = True
-
-    if (
-        not observed_spend
-        or not math.isfinite(token_spend)
-        or any(not math.isfinite(value) for value in breakdown.values())
-    ):
-        return None
-    return token_spend, breakdown
 
 
 def _first_nonblank_str(entry: Mapping[str, Any], keys: tuple[str, ...]) -> str | None:
@@ -2010,24 +1893,12 @@ def _checkpoint_verify_gate_outcomes(
     return serialized
 
 
-def _has_usage_limit_pause(result: ACExecutionResult) -> bool:
-    """Return whether any leaf in an AC result tree carries a quota pause.
-
-    Decomposed aggregate results intentionally keep their own ``messages``
-    empty.  Pause ownership therefore has to follow the result tree down to
-    the atomic leaf instead of treating the aggregate envelope as the effect.
-    """
-    if any(is_usage_limit_pause_message(message) for message in reversed(result.messages)):
-        return True
-    return any(_has_usage_limit_pause(child) for child in result.sub_results)
-
-
 class _BatchInterruptedForRecoverablePause(RuntimeError):
     """Internal marker for an AC stopped before a shared-quota provider effect."""
 
 
 class _BatchEnteredAtRecoverablePause(RuntimeError):
-    """Internal marker for an AC cancelled after entering execution authority."""
+    """Internal marker for an AC cancelled after crossing a provider effect."""
 
 
 def _canonical_result_context(
@@ -2753,40 +2624,6 @@ def _revalidate_cached_verify_gate_outcome(
     )
 
 
-def _collect_decomposition_depth_warning_paths(
-    result: ACExecutionResult,
-    *,
-    index_path: tuple[int, ...],
-) -> list[str]:
-    """Collect dotted AC paths that hit the soft decomposition depth safety net."""
-    warning_paths: list[str] = []
-    if result.decomposition_depth_warning:
-        warning_paths.append(".".join(str(i) for i in index_path))
-
-    for idx, sub_result in enumerate(result.sub_results, start=1):
-        warning_paths.extend(
-            _collect_decomposition_depth_warning_paths(
-                sub_result,
-                index_path=index_path + (idx,),
-            )
-        )
-    return warning_paths
-
-
-def _safe_backend_outcome_weights() -> dict[str, float]:
-    """Per-backend outcome weights for the picker tie-break (PR-X X4), never raising.
-
-    The flywheel is a read-only SQLite scan; any failure collapses to no weights
-    so a failed AC's cross-harness redispatch is never blocked by it.
-    """
-    try:
-        from ouroboros.orchestrator.backend_outcomes import outcome_weights
-
-        return outcome_weights()
-    except Exception:
-        return {}
-
-
 def render_parallel_verification_report(
     parallel_result: ParallelExecutionResult,
     total_acceptance_criteria: int,
@@ -2809,7 +2646,7 @@ def render_parallel_verification_report(
     warning_paths: list[str] = []
     for user_facing_idx, result in enumerate(parallel_result.results, start=1):
         warning_paths.extend(
-            _collect_decomposition_depth_warning_paths(
+            collect_decomposition_depth_warning_paths(
                 result,
                 index_path=(user_facing_idx,),
             )
@@ -2900,6 +2737,7 @@ class ParallelACExecutor:
         enable_decomposition: bool = True,
         decomposition_mode: Literal["bounce_only", "off"] = "bounce_only",
         max_concurrent: int = 3,
+        adaptive_max_concurrent: int | None = None,
         max_decomposition_depth: int = DEFAULT_MAX_DECOMPOSITION_DEPTH,
         checkpoint_store: Any | None = None,
         inherited_runtime_handle: RuntimeHandle | None = None,
@@ -2920,6 +2758,7 @@ class ParallelACExecutor:
         resolved_backend_limits: BackendConcurrencyLimits | None = None,
         resolved_self_governs_rate_limit: bool | None = None,
         expected_runtime_effect_capabilities: Mapping[str, object] | None = None,
+        usage_limit_pause_seconds: int | None = None,
         _foundation_a_roots: _FoundationAClosedRoots = _FOUNDATION_A_CLOSED_ROOTS,
         _foundation_a_internal_entry_roots: _FoundationAInternalEntryRoots | None = None,
         _foundation_a_internal_entry_roots_are_closed: bool = False,
@@ -2935,7 +2774,7 @@ class ParallelACExecutor:
                 classified bounce or not at all. Historical ``preflight``
                 records remain readable, but no live constructor can authorize
                 a new pre-execution decomposition effect.
-            max_concurrent: Maximum number of concurrent AC executions.
+            max_concurrent: Initial number of concurrent AC executions.
             max_decomposition_depth: Maximum recursive decomposition depth.
             checkpoint_store: Optional CheckpointStore for state recovery (RC3).
             inherited_runtime_handle: Optional parent Claude runtime handle for
@@ -2989,6 +2828,9 @@ class ParallelACExecutor:
         )
         self._event_store = event_store
         self._console = console or Console()
+        self._usage_limit_pause_seconds = resolve_usage_limit_pause_seconds(
+            usage_limit_pause_seconds
+        )
         if decomposition_mode not in {"bounce_only", "off"}:
             msg = f"Unsupported decomposition_mode: {decomposition_mode!r}"
             raise ValueError(msg)
@@ -3069,7 +2911,10 @@ class ParallelACExecutor:
         )
         self._authority_coordinator = self._coordinator
         self._authority_coordinator_review = self._coordinator.run_review
-        self._semaphore = anyio.Semaphore(max_concurrent)
+        self._adaptive_concurrency = adaptive_concurrency.AdaptiveConcurrencyController(
+            initial_limit=max_concurrent,
+            max_limit=adaptive_max_concurrent,
+        )
         if process_local_resume_nonce is not None and (
             len(process_local_resume_nonce) != 32
             or any(char not in "0123456789abcdef" for char in process_local_resume_nonce)
@@ -3268,10 +3113,11 @@ class ParallelACExecutor:
         limits = get_attribute(self, "_resolved_backend_limits")
         coordinator_effort = getattr(coordinator, "_reasoning_effort", None)
         return {
-            "version": 1,
+            "version": 2,
             "decomposition_mode": get_attribute(self, "_decomposition_mode"),
             "max_decomposition_depth": get_attribute(self, "_max_decomposition_depth"),
             "max_concurrent": get_attribute(self, "_max_concurrent"),
+            "adaptive_concurrency": get_attribute(self, "_adaptive_concurrency").policy,
             "execution_profile": (
                 get_attribute(self, "_execution_profile").model_dump(mode="json")
                 if get_attribute(self, "_execution_profile") is not None
@@ -3864,6 +3710,7 @@ class ParallelACExecutor:
         retry_prompts: dict[int, str] | None = None,
         route_overrides: dict[int, RouteCandidate] | None = None,
         route_resume_states: Mapping[int, _ParallelRouteResumeState] | None = None,
+        batch_sibling_indices: list[int] | None = None,
         same_runtime_budget_exhausted: bool = True,
         force_legacy_routing: bool = False,
     ) -> list[ACExecutionResult | BaseException]:
@@ -3880,108 +3727,115 @@ class ParallelACExecutor:
         )
         recoverable_pause_detected = anyio.Event()
         sibling_cancel_scopes: dict[int, anyio.CancelScope] = {}
+        admission_sequence = provider_admission.AdmissionSequence(len(batch_indices))
+        provider_effects = provider_effect_scope.BatchProviderEffects(
+            recoverable_pause_detected,
+            admission_sequence,
+            _BatchInterruptedForRecoverablePause,
+        )
+        sibling_indices = batch_sibling_indices or batch_indices
         sibling_acs: list[_SiblingACRef] = (
-            [(i, ac_text(seed.acceptance_criteria[i])) for i in batch_indices]
-            if len(batch_indices) > 1
+            [(i, ac_text(seed.acceptance_criteria[i])) for i in sibling_indices]
+            if len(sibling_indices) > 1
             else []
         )
 
         async def _run_ac(idx: int, ac_idx: int) -> None:
+            def _observe_batch_provider(
+                observation: adaptive_concurrency.ConcurrencyObservation,
+            ) -> None:
+                if (
+                    not cancel_on_recoverable_pause
+                    or observation.kind
+                    is not adaptive_concurrency.BackendPressureKind.QUOTA_EXHAUSTION
+                ):
+                    return
+                recoverable_pause_detected.set()
+                for sibling_idx, scope in tuple(sibling_cancel_scopes.items()):
+                    if sibling_idx != idx and provider_effects.should_cancel(sibling_idx):
+                        scope.cancel()
+
+            admission_token = admission_sequence.bind(idx)
+            observation_sink_token = _PROVIDER_OBSERVATION_SINK.set(
+                _observe_batch_provider if cancel_on_recoverable_pause else None
+            )
+            provider_effect_tokens = provider_effects.bind(idx)
             with anyio.CancelScope() as sibling_scope:
                 sibling_cancel_scopes[idx] = sibling_scope
-                execution_authority_entered = False
                 try:
                     if cancel_on_recoverable_pause and recoverable_pause_detected.is_set():
                         batch_results[idx] = _BatchInterruptedForRecoverablePause(
                             "batch stopped at a recoverable provider quota boundary"
                         )
                         return
-                    async with self._semaphore:
-                        # Tasks are created together but may wait behind the
-                        # provider semaphore. Re-check under the permit so a
-                        # sibling that already found a shared quota window can
-                        # close this provider entrance before its first effect.
-                        if cancel_on_recoverable_pause and recoverable_pause_detected.is_set():
-                            batch_results[idx] = _BatchInterruptedForRecoverablePause(
-                                "batch stopped at a recoverable provider quota boundary"
-                            )
-                            return
-                        ac_criterion = seed.acceptance_criteria[ac_idx]
-                        resume_state = (route_resume_states or {}).get(ac_idx)
-                        expected_route = (
-                            resume_state.expected_route_candidate
+                    ac_criterion = seed.acceptance_criteria[ac_idx]
+                    resume_state = (route_resume_states or {}).get(ac_idx)
+                    expected_route = (
+                        resume_state.expected_route_candidate
+                        if resume_state is not None
+                        else (route_overrides or {}).get(ac_idx)
+                    )
+                    route_id_override = (
+                        resume_state.route_id_override
+                        if resume_state is not None
+                        else expected_route.route_id
+                        if expected_route is not None
+                        else None
+                    )
+                    attempt_siblings = (
+                        list(resume_state.sibling_acs) if resume_state is not None else sibling_acs
+                    )
+                    result = await _invoke_execution_authority_entry(
+                        self,
+                        _FOUNDATION_A_ENTRY_EXECUTE_SINGLE_AC,
+                        ac_index=ac_idx,
+                        ac_content=ac_text(ac_criterion),
+                        session_id=session_id,
+                        tools=tools,
+                        tool_catalog=tool_catalog,
+                        system_prompt=system_prompt,
+                        seed_goal=seed.goal,
+                        depth=0,
+                        execution_id=execution_id,
+                        level_contexts=level_contexts,
+                        sibling_acs=attempt_siblings,
+                        retry_attempt=ac_retry_attempts[ac_idx],
+                        execution_counters=execution_counters,
+                        retry_prompt_extra=(
+                            resume_state.retry_prompt_extra
                             if resume_state is not None
-                            else (route_overrides or {}).get(ac_idx)
-                        )
-                        route_id_override = (
-                            resume_state.route_id_override
-                            if resume_state is not None
-                            else expected_route.route_id
-                            if expected_route is not None
+                            else (retry_prompts or {}).get(ac_idx, "")
+                        ),
+                        route_id_override=route_id_override,
+                        expected_route_candidate=expected_route,
+                        force_legacy_routing=force_legacy_routing,
+                        same_runtime_budget_exhausted=same_runtime_budget_exhausted,
+                        expected_resume_dispatch_id=(
+                            resume_state.dispatch_id if resume_state is not None else None
+                        ),
+                        expected_resume_capsule_fingerprint=(
+                            resume_state.capsule_fingerprint if resume_state is not None else None
+                        ),
+                        expected_resume_runtime_scope_id=(
+                            resume_state.runtime_scope_id if resume_state is not None else None
+                        ),
+                        ac_spec=(
+                            ac_criterion
+                            if isinstance(ac_criterion, AcceptanceCriterionSpec)
                             else None
-                        )
-                        attempt_siblings = (
-                            list(resume_state.sibling_acs)
-                            if resume_state is not None
-                            else sibling_acs
-                        )
-                        execution_authority_entered = True
-                        result = await _invoke_execution_authority_entry(
-                            self,
-                            _FOUNDATION_A_ENTRY_EXECUTE_SINGLE_AC,
-                            ac_index=ac_idx,
-                            ac_content=ac_text(ac_criterion),
-                            session_id=session_id,
-                            tools=tools,
-                            tool_catalog=tool_catalog,
-                            system_prompt=system_prompt,
-                            seed_goal=seed.goal,
-                            depth=0,
-                            execution_id=execution_id,
-                            level_contexts=level_contexts,
-                            sibling_acs=attempt_siblings,
-                            retry_attempt=ac_retry_attempts[ac_idx],
-                            execution_counters=execution_counters,
-                            retry_prompt_extra=(
-                                resume_state.retry_prompt_extra
-                                if resume_state is not None
-                                else (retry_prompts or {}).get(ac_idx, "")
-                            ),
-                            route_id_override=route_id_override,
-                            expected_route_candidate=expected_route,
-                            force_legacy_routing=force_legacy_routing,
-                            same_runtime_budget_exhausted=same_runtime_budget_exhausted,
-                            expected_resume_dispatch_id=(
-                                resume_state.dispatch_id if resume_state is not None else None
-                            ),
-                            expected_resume_capsule_fingerprint=(
-                                resume_state.capsule_fingerprint
-                                if resume_state is not None
-                                else None
-                            ),
-                            expected_resume_runtime_scope_id=(
-                                resume_state.runtime_scope_id if resume_state is not None else None
-                            ),
-                            ac_spec=(
-                                ac_criterion
-                                if isinstance(ac_criterion, AcceptanceCriterionSpec)
-                                else None
-                            ),
-                            investment_spec=(
-                                ac_criterion.investment
-                                if isinstance(ac_criterion, AcceptanceCriterionSpec)
-                                else None
-                            ),
-                        )
-                        batch_results[idx] = result
-                        if cancel_on_recoverable_pause and _has_usage_limit_pause(result):
-                            # A provider quota belongs to the batch, not merely
-                            # the AC that observed it. Signal first, then cancel
-                            # every already-running or semaphore-waiting sibling.
-                            recoverable_pause_detected.set()
-                            for sibling_idx, scope in tuple(sibling_cancel_scopes.items()):
-                                if sibling_idx != idx:
-                                    scope.cancel()
+                        ),
+                        investment_spec=(
+                            ac_criterion.investment
+                            if isinstance(ac_criterion, AcceptanceCriterionSpec)
+                            else None
+                        ),
+                    )
+                    batch_results[idx] = result
+                    if cancel_on_recoverable_pause and _has_usage_limit_pause(result):
+                        recoverable_pause_detected.set()
+                        for sibling_idx, scope in tuple(sibling_cancel_scopes.items()):
+                            if sibling_idx != idx and provider_effects.should_cancel(sibling_idx):
+                                scope.cancel()
                 except BaseException as e:
                     if isinstance(e, anyio.get_cancelled_exc_class()):
                         if (
@@ -3991,7 +3845,7 @@ class ParallelACExecutor:
                         ):
                             marker_type = (
                                 _BatchEnteredAtRecoverablePause
-                                if execution_authority_entered
+                                if provider_effects.is_active(idx)
                                 else _BatchInterruptedForRecoverablePause
                             )
                             batch_results[idx] = marker_type(
@@ -4003,7 +3857,10 @@ class ParallelACExecutor:
                         raise
                     batch_results[idx] = e
                 finally:
+                    admission_sequence.finished(idx, admission_token)
                     sibling_cancel_scopes.pop(idx, None)
+                    _PROVIDER_OBSERVATION_SINK.reset(observation_sink_token)
+                    provider_effects.finish(idx, provider_effect_tokens)
 
         # Cross-AC concurrency is governed by the LevelCoordinator's
         # file-conflict guard, not by session-level tool catalog presence.
@@ -4032,6 +3889,7 @@ class ParallelACExecutor:
         execution_plan: StagedExecutionPlan | None = None,
         reconciled_level_contexts: list[LevelContext] | None = None,
         externally_satisfied_acs: dict[int, dict[str, Any]] | None = None,
+        published_coordinator_pause_owner: Mapping[str, object] | None = None,
     ) -> ParallelExecutionResult:
         """Execute ACs according to a staged execution plan.
 
@@ -4058,6 +3916,9 @@ class ParallelACExecutor:
                 msg = "execution_plan is required when dependency_graph is not provided"
                 raise ValueError(msg)
             execution_plan = dependency_graph.to_execution_plan()
+        published_pause_owner = normalize_published_coordinator_pause_owner(
+            published_coordinator_pause_owner
+        )
 
         start_time = datetime.now(UTC)
         all_results: list[ACExecutionResult] = []
@@ -4081,12 +3942,12 @@ class ParallelACExecutor:
             "tool_calls_count": 0,
         }
 
-        # Track AC statuses for TUI updates
         ac_statuses: dict[int, str] = dict.fromkeys(range(total_acs), "pending")
         ac_retry_attempts: dict[int, int] = dict.fromkeys(range(total_acs), 0)
         completed_count = 0
         resume_from_level = 0
         recoverable_route_pause = False
+        recoverable_coordinator_pause: CoordinatorQuotaPause | None = None
 
         # Restore the durable bounce phase before its consuming finalized event.
         # Both precede checkpoints, route projections, and every provider entry.
@@ -4102,7 +3963,6 @@ class ParallelACExecutor:
             session_id=session_id,
         )
 
-        # RC3: Attempt to recover from checkpoint
         if self._checkpoint_store:
             try:
                 seed_id = getattr(seed, "id", session_id)
@@ -4138,9 +3998,6 @@ class ParallelACExecutor:
                         )
                         if isinstance(raw_final_digest, str) and raw_final_digest:
                             post_coordinator_revalidation_workspace_digest = raw_final_digest
-                        # A checkpoint may have been written before the final
-                        # revalidation.  Never let its provisional successes be
-                        # accepted on recovery without replaying that boundary.
                         if post_coordinator_revalidation_required:
                             current_digest = self._workspace_content_digest(
                                 self._task_cwd
@@ -4175,11 +4032,17 @@ class ParallelACExecutor:
                         for idx in checkpoint_state.get("blocked_indices", []):
                             blocked_indices.add(int(idx))
                         completed_count = cp.state.get("completed_count", 0)
-                        # Restore level contexts so subsequent levels
-                        # have access to completed levels' output
                         saved_contexts = cp.state.get("level_contexts", [])
                         if saved_contexts:
                             level_contexts = deserialize_level_contexts(saved_contexts)
+                            restored_quota = await restore_checkpointed_coordinator_quota(
+                                event_store=self._event_store,
+                                level_contexts=level_contexts,
+                                execution_id=execution_id,
+                                session_id=session_id,
+                                published_owner=published_pause_owner,
+                            )
+                            recoverable_coordinator_pause, published_pause_owner = restored_quota
                         self._restore_checkpoint_decomposition_decisions(
                             checkpoint_state.get("decomposition_decisions", {}),
                             root_ac_count=total_acs,
@@ -4190,7 +4053,6 @@ class ParallelACExecutor:
                             seed_id=seed_id,
                             restored_contexts=len(level_contexts),
                         )
-                        # Reconstruct all_results for completed/failed/skipped ACs.
                         restored_outcomes = checkpoint_state.get(
                             "revalidated_ac_outcomes",
                             checkpoint_state.get("ac_outcomes", {}),
@@ -4344,7 +4206,6 @@ class ParallelACExecutor:
             dependency_edges=dependency_edges,
         )
 
-        # Emit initial progress for TUI
         await self._emit_workflow_progress(
             session_id=session_id,
             execution_id=execution_id,
@@ -4380,12 +4241,13 @@ class ParallelACExecutor:
             )
 
             for stage in execution_plan.stages:
+                if recoverable_coordinator_pause is not None:
+                    break
                 level_idx = stage.index
                 level = self._get_stage_ac_indices(stage)
                 stage_batches = self._get_stage_batches(stage)
                 level_num = level_idx + 1
 
-                # RC3: Skip already-completed levels on recovery
                 if level_idx < resume_from_level:
                     log.info(
                         "parallel_executor.recovery.skipping_level",
@@ -4845,11 +4707,37 @@ class ParallelACExecutor:
                                 self._task_cwd or self._adapter.working_directory or os.getcwd()
                             )
                             workspace_before = self._workspace_content_digest(workspace_root)
-                            review = await self._authority_coordinator_review(
-                                execution_id=execution_id,
-                                conflicts=conflicts,
-                                level_context=level_ctx,
-                                level_number=level_num,
+                            review: CoordinatorReview | None = None
+                            async with self._adaptive_concurrency.slot() as permit_epoch:
+                                _invoke_execution_authority_guard(self)
+                                provider_effect_scope.enter()
+                                try:
+                                    review = await self._authority_coordinator_review(
+                                        execution_id=execution_id,
+                                        conflicts=conflicts,
+                                        level_context=level_ctx,
+                                        level_number=level_num,
+                                    )
+                                finally:
+                                    try:
+                                        with anyio.CancelScope(shield=True):
+                                            await adaptive_concurrency.observe_provider_messages(
+                                                self._adaptive_concurrency,
+                                                () if review is None else review.messages,
+                                                permit_epoch,
+                                                None,
+                                                provider_completed=review is not None,
+                                            )
+                                    finally:
+                                        if review is not None:
+                                            provider_effect_scope.complete()
+                            if review is None:
+                                raise RuntimeError(
+                                    "coordinator provider completed without a review artifact"
+                                )
+                            review = review.with_recoverable_quota_state(
+                                now=datetime.now(UTC),
+                                default_pause_seconds=self._usage_limit_pause_seconds,
                             )
                             workspace_after = self._workspace_content_digest(workspace_root)
                             workspace_changed = (
@@ -4882,6 +4770,21 @@ class ParallelACExecutor:
                                 f"  [cyan]Coordinator review restored for level "
                                 f"{level_num}; provider effect not repeated.[/cyan]"
                             )
+                        (
+                            recoverable_coordinator_pause,
+                            published_pause_owner,
+                        ) = await resolve_replayed_coordinator_quota_pause(
+                            event_store=self._event_store,
+                            review=review,
+                            execution_id=execution_id,
+                            session_id=session_id,
+                            level_number=level_num,
+                            coordinator_aggregate_id=self._coordinator_aggregate_id(
+                                execution_id, level_num
+                            ),
+                            restored=restored_review is not None,
+                            published_owner=published_pause_owner,
+                        )
                         if coordinator_mutated_workspace:
                             post_coordinator_revalidation_required = True
                             post_coordinator_revalidated = False
@@ -4988,6 +4891,12 @@ class ParallelACExecutor:
                             level=level_num,
                             error=str(e),
                         )
+
+                if recoverable_coordinator_pause:
+                    # The completed coordinator artifact remains the replay
+                    # owner, but no later stage may cross a provider boundary
+                    # until the runner durably publishes and resumes the quota.
+                    break
 
             # All levels done — cancel the background progress emitter
             outer_tg.cancel_scope.cancel()
@@ -5178,6 +5087,7 @@ class ParallelACExecutor:
             total_messages=total_messages,
             total_duration_seconds=total_duration,
             recoverable_route_pause=recoverable_route_pause,
+            recoverable_coordinator_pause=recoverable_coordinator_pause,
         )
 
     @staticmethod
@@ -6312,12 +6222,7 @@ class ParallelACExecutor:
         system_prompt: str,
         independent_session: bool = False,
     ) -> str:
-        """Run one bounded tool-free decomposition-policy request.
-
-        Semantic attestation must not resume the proposer conversation. Passing
-        ``independent_session=True`` starts a fresh runtime session even when the
-        parent executor inherited a resumable handle.
-        """
+        """Run one bounded, tracked, tool-free decomposition-policy request."""
         self._announce_param_degradations(system_prompt=system_prompt, tools=[])
         _invoke_execution_authority_guard(self)
         await _invoke_execution_authority_entry(
@@ -6326,29 +6231,56 @@ class ParallelACExecutor:
             prompt=prompt,
             system_prompt=system_prompt,
         )
-        # Acquiring rate budget can suspend, so validate once more at the
-        # immediate effect boundary rather than assuming the pre-wait snapshot
-        # still applies.
         _invoke_execution_authority_guard(self)
         response_text = ""
-        async with asyncio.timeout(DECOMPOSITION_TIMEOUT_SECONDS):
-            async for message in self._adapter.execute_task(
-                prompt=prompt,
-                tools=[],
-                system_prompt=system_prompt,
-                resume_handle=None if independent_session else self._inherited_runtime_handle,
-            ):
-                if not message.content:
-                    continue
-                if getattr(self._adapter, "runtime_backend", "") == "goose":
-                    if message.type not in {"assistant", "result"}:
-                        continue
-                    if message.is_final:
-                        response_text = message.content
-                    else:
-                        response_text += message.content
-                else:
-                    response_text = message.content
+        feedback_messages: list[AgentMessage] = []
+        await provider_admission.wait()
+        async with self._adaptive_concurrency.slot() as permit_epoch:
+            _invoke_execution_authority_guard(self)
+            provider_effect_scope.enter()
+            provider_completed = False
+            try:
+                async with asyncio.timeout(DECOMPOSITION_TIMEOUT_SECONDS):
+                    async for message in tracked_agent_task(
+                        self._adapter,
+                        role="executor_decomposition_policy",
+                        prompt=prompt,
+                        tools=[],
+                        system_prompt=system_prompt,
+                        resume_handle=(
+                            None if independent_session else self._inherited_runtime_handle
+                        ),
+                    ):
+                        if message.is_final:
+                            feedback_messages.append(message)
+                            del feedback_messages[:-8]
+                        if not message.content:
+                            continue
+                        if getattr(self._adapter, "runtime_backend", "") == "goose":
+                            if message.type not in {"assistant", "result"}:
+                                continue
+                            if message.is_final:
+                                response_text = message.content
+                            else:
+                                response_text += message.content
+                        else:
+                            response_text = message.content
+                provider_completed = True
+            finally:
+                # Cancellation/timeout must not erase already-observed pressure.
+                try:
+                    with anyio.CancelScope(shield=True):
+                        await adaptive_concurrency.observe_provider_messages(
+                            self._adaptive_concurrency,
+                            feedback_messages,
+                            permit_epoch,
+                            None,
+                            provider_completed=provider_completed,
+                            on_observation=_PROVIDER_OBSERVATION_SINK.get(),
+                        )
+                finally:
+                    if provider_completed:
+                        provider_effect_scope.complete()
         return response_text.strip()
 
     async def _request_bounce_classification(
@@ -6388,6 +6320,8 @@ class ParallelACExecutor:
             return cause, remaining
         except (TimeoutError, ValueError, json.JSONDecodeError, TypeError):
             return BounceCause.UNKNOWN, False
+        except _BatchInterruptedForRecoverablePause:
+            raise
         except Exception as exc:
             log.warning(
                 "parallel_executor.bounce_classifier.error",
@@ -8070,6 +8004,55 @@ Respond with either ATOMIC or the structured JSON object only.
             effort=None,
         )
         try:
+            dispatch_contract: dict[str, object] = {
+                "backend": getattr(self._adapter, "runtime_backend", None),
+                "tools": list(tools),
+                # The allow-list is only a projection of the provider
+                # contract. Fingerprint the complete canonical catalog too,
+                # so schema/source changes cannot reuse a dispatch authority
+                # that merely has the same tool names.
+                "tool_catalog": {
+                    "present": tool_catalog is not None,
+                    "entries": serialize_tool_catalog(tool_catalog or ()),
+                },
+                "system_prompt": system_prompt,
+                "ac_content": ac_content,
+                "seed_goal": seed_goal,
+                "retry_prompt_extra": retry_prompt_extra,
+                "sibling_acs": [
+                    {"ac_index": sibling_index, "content": sibling_content}
+                    for sibling_index, sibling_content in (sibling_acs or [])
+                ],
+                "level_context_prompt": build_context_prompt(level_contexts or []),
+            }
+            execution_policy: dict[str, object] = {
+                "retry_attempt": retry_attempt,
+                "is_sub_ac": is_sub_ac,
+                "decomposition_trustworthy": decomposition_trustworthy,
+                "base_reasoning_effort": self._reasoning_effort,
+                "model_routing": serialize_model_router(model_router_snapshot),
+                "route_compat": serialize_route_compat_contract(durable_route_projection),
+                "route_id_override": route_id_override,
+                "expected_route_candidate": (
+                    expected_route_candidate.to_contract_data()
+                    if expected_route_candidate is not None
+                    else None
+                ),
+                "execution_profile": (
+                    self._execution_profile.model_dump(mode="json")
+                    if self._execution_profile is not None
+                    else None
+                ),
+                "run_verify_commands": self._run_verify_commands,
+                "fat_harness_mode": self._fat_harness_mode,
+                "investment_spec": (
+                    investment_spec.model_dump(mode="json") if investment_spec is not None else None
+                ),
+            }
+            request_authority_digest = build_ac_dispatch_request_digest(
+                dispatch_contract=dispatch_contract,
+                execution_policy=execution_policy,
+            )
             capsule = compile_ac_execution_capsule(
                 runtime_identity=runtime_identity,
                 execution_id=execution_context_id,
@@ -8082,66 +8065,8 @@ Respond with either ATOMIC or the structured JSON object only.
                 authority_scope=(
                     build_ac_dispatch_authority_scope(
                         base_scope=self.execution_authority.fingerprint,
-                        dispatch_contract={
-                            "backend": getattr(self._adapter, "runtime_backend", None),
-                            "tools": list(tools),
-                            # The allow-list is only a projection of the provider
-                            # contract.  Fingerprint the complete canonical catalog
-                            # too, so schema/source changes cannot reuse a dispatch
-                            # authority that merely has the same tool names.
-                            # Preserve presence separately from entries: ``None``
-                            # means the provider received no catalog authority,
-                            # while an explicit empty tuple means an intentionally
-                            # empty capability/control-plane contract.
-                            "tool_catalog": {
-                                "present": tool_catalog is not None,
-                                "entries": serialize_tool_catalog(tool_catalog or ()),
-                            },
-                            "system_prompt": system_prompt,
-                            "ac_content": ac_content,
-                            "seed_goal": seed_goal,
-                            "retry_prompt_extra": retry_prompt_extra,
-                            # These values are projected into the provider prompt
-                            # and therefore are part of the dispatch authority even
-                            # though they are not provider/session continuity.
-                            "sibling_acs": [
-                                {"ac_index": sibling_index, "content": sibling_content}
-                                for sibling_index, sibling_content in (sibling_acs or [])
-                            ],
-                            "level_context_prompt": build_context_prompt(level_contexts or []),
-                        },
-                        execution_policy={
-                            "retry_attempt": retry_attempt,
-                            "is_sub_ac": is_sub_ac,
-                            "decomposition_trustworthy": decomposition_trustworthy,
-                            "base_reasoning_effort": self._reasoning_effort,
-                            "model_routing": serialize_model_router(model_router_snapshot),
-                            "route_compat": serialize_route_compat_contract(
-                                durable_route_projection
-                            ),
-                            "route_id_override": route_id_override,
-                            "expected_route_candidate": (
-                                expected_route_candidate.to_contract_data()
-                                if expected_route_candidate is not None
-                                else None
-                            ),
-                            "execution_profile": (
-                                self._execution_profile.model_dump(mode="json")
-                                if self._execution_profile is not None
-                                else None
-                            ),
-                            "fat_harness_mode": self._fat_harness_mode,
-                            # Investment metadata is authority-bearing: the effort
-                            # router can lower or raise the dispatched tier from it.
-                            # Keep the canonical Seed representation in the capsule
-                            # scope so materially different investment decisions can
-                            # never reuse one durable dispatch identity.
-                            "investment_spec": (
-                                investment_spec.model_dump(mode="json")
-                                if investment_spec is not None
-                                else None
-                            ),
-                        },
+                        dispatch_contract=dispatch_contract,
+                        execution_policy=execution_policy,
                     )
                 ),
                 seed_goal=seed_goal,
@@ -8683,6 +8608,7 @@ Respond with either ATOMIC or the structured JSON object only.
             execution_id=execution_context_id,
             session_id=session_id,
             capsule_fingerprint=capsule.fingerprint,
+            request_authority_digest=request_authority_digest,
             session_origin=session_origin,
             runtime_handle=runtime_handle,
         )
@@ -8704,25 +8630,25 @@ Respond with either ATOMIC or the structured JSON object only.
         dispatch_state = LeafDispatchState(messages=messages, runtime_handle=runtime_handle)
         active_dispatch_id = dispatch_id
         sealed_dispatch_ids: set[str] = set()
+        provider_effect_active = False
 
-        async def _seal_dispatch(dispatch_id_to_seal: str, *, reason: str) -> None:
+        async def _seal_dispatch(sealed_id: str, *, reason: str, replayable: bool = False) -> None:
             """Seal one provider boundary at most once."""
-            if dispatch_id_to_seal in sealed_dispatch_ids:
+            if sealed_id in sealed_dispatch_ids:
                 return
-            # Poison the local recovery cache before the durable append.  If
-            # the event store rejects the seal, a same-executor retry must not
-            # treat the already-entered provider boundary as replayable merely
-            # because the in-memory handle is still present.
-            self._ac_runtime_handle_manager.mark_dispatch_non_replayable(dispatch_id_to_seal)
+            # Poison unsafe boundaries before the durable append so an append
+            # failure cannot expose a replayable in-memory handle.
+            if not replayable:
+                self._ac_runtime_handle_manager.mark_dispatch_non_replayable(sealed_id)
             await self._event_emitter.emit_ac_dispatch_sealed(
                 runtime_identity=runtime_identity,
-                dispatch_id=dispatch_id_to_seal,
+                dispatch_id=sealed_id,
                 execution_id=execution_context_id,
                 session_id=session_id,
                 capsule_fingerprint=capsule.fingerprint,
                 reason=reason,
             )
-            sealed_dispatch_ids.add(dispatch_id_to_seal)
+            sealed_dispatch_ids.add(sealed_id)
 
         async def _terminalize_route_drift(dispatch_id_to_terminalize: str) -> ACExecutionResult:
             """Close durable recovery state when live admission becomes stale."""
@@ -8745,6 +8671,72 @@ Respond with either ATOMIC or the structured JSON object only.
                 error="route admission blocked: live route state changed before provider entry",
             )
             return _route_drift_blocked_result()
+
+        async def _stream_provider_call(
+            *,
+            call_prompt: str,
+            call_tools: list[str],
+            before_provider_entry: Callable[[], Awaitable[None]] | None = None,
+        ) -> bool:
+            """Return whether an admitted, revalidated provider stream was entered."""
+
+            nonlocal provider_effect_active
+            feedback_start = len(dispatch_state.messages)
+            await provider_admission.wait()
+            async with self._adaptive_concurrency.slot() as permit_epoch:
+                provider_kwargs = _live_provider_kwargs()
+                if provider_kwargs is None:
+                    return False
+                _invoke_execution_authority_guard(self)
+                provider_completed = False
+                try:
+                    if before_provider_entry is not None:
+                        await before_provider_entry()
+                    # Durable SessionSignal bookkeeping is not an external
+                    # provider effect.  Keep the task replayable until that
+                    # bookkeeping completes and the batch gate admits the
+                    # actual adapter boundary.
+                    provider_effect_scope.enter()
+                    provider_effect_active = True
+                    await self._authority_leaf_dispatcher_stream(
+                        self._authority_leaf_dispatcher,
+                        state=dispatch_state,
+                        prompt=call_prompt,
+                        tools=call_tools,
+                        system_prompt=system_prompt,
+                        execute_effort_kwargs=provider_kwargs,
+                        runtime_identity=runtime_identity,
+                        execution_context_id=execution_context_id,
+                        session_id=session_id,
+                        ac_index=ac_index,
+                        ac_content=ac_content,
+                        is_sub_ac=is_sub_ac,
+                        parent_ac_index=parent_ac_index,
+                        sub_ac_index=sub_ac_index,
+                        node_identity=node_identity,
+                        retry_attempt=retry_attempt,
+                        semantic_ac_key=semantic_ac_key,
+                        label=label,
+                        indent=indent,
+                        execution_counters=execution_counters,
+                    )
+                    provider_completed = True
+                finally:
+                    try:
+                        with anyio.CancelScope(shield=True):
+                            await adaptive_concurrency.observe_provider_messages(
+                                self._adaptive_concurrency,
+                                tuple(dispatch_state.messages[feedback_start:]),
+                                permit_epoch,
+                                (session_id, execution_context_id, ac_index),
+                                provider_completed=provider_completed,
+                                on_observation=_PROVIDER_OBSERVATION_SINK.get(),
+                            )
+                    finally:
+                        if provider_completed:
+                            provider_effect_active = False
+                            provider_effect_scope.complete()
+            return True
 
         signal_target: SessionSignalTarget | None = None
         signal_target_registered = False
@@ -8770,32 +8762,12 @@ Respond with either ATOMIC or the structured JSON object only.
                 await self._session_signal_hub.register_replaying(signal_target)
                 signal_target_registered = True
 
-            provider_kwargs = _live_provider_kwargs()
-            if provider_kwargs is None:
-                return await _terminalize_route_drift(active_dispatch_id)
-            _invoke_execution_authority_guard(self)
-            await self._authority_leaf_dispatcher_stream(
-                self._authority_leaf_dispatcher,
-                state=dispatch_state,
-                prompt=prompt,
-                tools=tools,
-                system_prompt=system_prompt,
-                execute_effort_kwargs=provider_kwargs,
-                runtime_identity=runtime_identity,
-                execution_context_id=execution_context_id,
-                session_id=session_id,
-                ac_index=ac_index,
-                ac_content=ac_content,
-                is_sub_ac=is_sub_ac,
-                parent_ac_index=parent_ac_index,
-                sub_ac_index=sub_ac_index,
-                node_identity=node_identity,
-                retry_attempt=retry_attempt,
-                semantic_ac_key=semantic_ac_key,
-                label=label,
-                indent=indent,
-                execution_counters=execution_counters,
+            provider_entered = await _stream_provider_call(
+                call_prompt=prompt,
+                call_tools=tools,
             )
+            if not provider_entered:
+                return await _terminalize_route_drift(active_dispatch_id)
             runtime_handle = dispatch_state.runtime_handle
             ac_session_id = dispatch_state.ac_session_id
             final_message = dispatch_state.final_message
@@ -8935,9 +8907,10 @@ Respond with either ATOMIC or the structured JSON object only.
                         )
                         continue
 
-                    await _seal_dispatch(
+                    primary_turn = CompletedProviderTurn.capture(
                         active_dispatch_id,
-                        reason="completed provider turn superseded by a SessionSignal follow-up",
+                        follow_up_runtime_handle,
+                        dispatch_state,
                     )
                     follow_up_dispatch_id = uuid4().hex
                     follow_up_metadata = dict(follow_up_runtime_handle.metadata)
@@ -8949,10 +8922,11 @@ Respond with either ATOMIC or the structured JSON object only.
                     await self._event_emitter.emit_ac_attempt_dispatched(
                         runtime_identity=runtime_identity,
                         dispatch_id=follow_up_dispatch_id,
-                        previous_dispatch_id=active_dispatch_id,
+                        previous_dispatch_id=primary_turn.dispatch_id,
                         execution_id=execution_context_id,
                         session_id=session_id,
                         capsule_fingerprint=capsule.fingerprint,
+                        request_authority_digest=request_authority_digest,
                         session_origin="restored_same_attempt",
                         runtime_handle=candidate_follow_up_runtime_handle,
                         dispatch_kind="session_signal_followup",
@@ -8965,7 +8939,7 @@ Respond with either ATOMIC or the structured JSON object only.
                     # Do not expose the candidate handle to the outer failure
                     # path until its dispatch append is durable.  If the
                     # append fails, terminalization must retain the last
-                    # durable predecessor (the sealed primary), never the
+                    # durable predecessor (the completed primary), never the
                     # nonexistent follow-up ID.
                     active_dispatch_id = follow_up_dispatch_id
                     # Keep the same durable-before-cache invariant as the
@@ -8987,21 +8961,28 @@ Respond with either ATOMIC or the structured JSON object only.
                             "SessionSignal follow-up lost its capsule-bound runtime handle"
                         )
                     dispatch_state.runtime_handle = remembered_follow_up_runtime_handle
-                    message_count_before_signal = dispatch_state.message_count
-                    primary_final_message = dispatch_state.final_message
-                    primary_success = dispatch_state.success
-                    await self._event_store.append(
-                        create_session_signal_delivery_started_event(
-                            queued_signal.signal,
+                    message_count_before_signal = primary_turn.message_count
+                    inform_mode = queued_signal.effective_mode is SessionSignalMode.INFORM
+
+                    async def _claim_follow_up_delivery() -> None:
+                        # This durable claim is still pre-provider-entry.  The
+                        # completed primary remains active until the follow-up
+                        # provider stream itself has completed.
+                        await claim_follow_up_delivery(
+                            event_store=self._event_store,
+                            signal=queued_signal.signal,
                             effective_mode=queued_signal.effective_mode,
                             runtime_backend=signal_target.runtime_backend,
                             orchestrator_session_id=session_id,
                         )
-                    )
-                    inform_mode = queued_signal.effective_mode is SessionSignalMode.INFORM
+
                     try:
-                        provider_kwargs = _live_provider_kwargs()
-                        if provider_kwargs is None:
+                        provider_entered = await _stream_provider_call(
+                            call_prompt=follow_up_prompt,
+                            call_tools=[] if inform_mode else tools,
+                            before_provider_entry=_claim_follow_up_delivery,
+                        )
+                        if not provider_entered:
                             await self._event_store.append(
                                 create_session_signal_rejected_event(
                                     queued_signal.signal,
@@ -9016,29 +8997,30 @@ Respond with either ATOMIC or the structured JSON object only.
                                 )
                             )
                             return await _terminalize_route_drift(follow_up_dispatch_id)
-                        _invoke_execution_authority_guard(self)
-                        await self._authority_leaf_dispatcher_stream(
-                            self._authority_leaf_dispatcher,
-                            state=dispatch_state,
-                            prompt=(follow_up_prompt),
-                            tools=[] if inform_mode else tools,
-                            system_prompt=system_prompt,
-                            execute_effort_kwargs=provider_kwargs,
-                            runtime_identity=runtime_identity,
-                            execution_context_id=execution_context_id,
-                            session_id=session_id,
-                            ac_index=ac_index,
-                            ac_content=ac_content,
-                            is_sub_ac=is_sub_ac,
-                            parent_ac_index=parent_ac_index,
-                            sub_ac_index=sub_ac_index,
-                            node_identity=node_identity,
-                            retry_attempt=retry_attempt,
-                            semantic_ac_key=semantic_ac_key,
-                            label=label,
-                            indent=indent,
-                            execution_counters=execution_counters,
+                        await _seal_dispatch(
+                            primary_turn.dispatch_id,
+                            reason=(
+                                "completed provider turn superseded by a SessionSignal follow-up"
+                            ),
                         )
+                    except _BatchInterruptedForRecoverablePause:
+                        # This dispatch exists durably, but the provider gate
+                        # rejected it before the adapter call.  The claim may
+                        # already be durable; reject it terminally, abort only
+                        # the child boundary, and restore the still-unsealed
+                        # completed primary for the batch's pause owner.
+                        active_dispatch_id = await abort_unentered_follow_up(
+                            event_store=self._event_store,
+                            signal=queued_signal.signal,
+                            effective_mode=queued_signal.effective_mode,
+                            runtime_backend=signal_target.runtime_backend,
+                            orchestrator_session_id=session_id,
+                            follow_up_dispatch_id=follow_up_dispatch_id,
+                            primary=primary_turn,
+                            state=dispatch_state,
+                            seal_dispatch=_seal_dispatch,
+                        )
+                        break
                     except Exception as exc:
                         await self._event_store.append(
                             create_session_signal_delivery_uncertain_event(
@@ -9057,8 +9039,8 @@ Respond with either ATOMIC or the structured JSON object only.
                             reason="SessionSignal follow-up crossed an uncertain delivery boundary",
                         )
                         if inform_mode:
-                            dispatch_state.success = primary_success
-                            dispatch_state.final_message = primary_final_message
+                            dispatch_state.success = primary_turn.success
+                            dispatch_state.final_message = primary_turn.final_message
                             continue
                         raise
 
@@ -9091,8 +9073,8 @@ Respond with either ATOMIC or the structured JSON object only.
                             reason="SessionSignal follow-up acknowledgement was uncertain",
                         )
                         if inform_mode:
-                            dispatch_state.success = primary_success
-                            dispatch_state.final_message = primary_final_message
+                            dispatch_state.success = primary_turn.success
+                            dispatch_state.final_message = primary_turn.final_message
                             continue
                         dispatch_state.success = False
                         dispatch_state.final_message = (
@@ -9136,8 +9118,8 @@ Respond with either ATOMIC or the structured JSON object only.
                         ]
                     )
                     if inform_mode:
-                        dispatch_state.success = primary_success
-                        dispatch_state.final_message = primary_final_message
+                        dispatch_state.success = primary_turn.success
+                        dispatch_state.final_message = primary_turn.final_message
 
                 self._session_signal_hub.unregister(signal_target)
                 signal_target_registered = False
@@ -9399,15 +9381,18 @@ Respond with either ATOMIC or the structured JSON object only.
                 route_candidate=observed_route_candidate,
             )
 
+        except _BatchInterruptedForRecoverablePause:
+            raise
+
         except anyio.get_cancelled_exc_class():
-            # Cancellation after the durable dispatch event is an uncertain
-            # provider-effect boundary.  Shield the seal write so cancellation
-            # cannot leave a replayable handle that may resend work.
             try:
                 with anyio.CancelScope(shield=True):
+                    seal_policy = ACRuntimeHandleManager.cancellation_seal_policy
+                    reason, replayable = seal_policy(provider_effect_active)
                     await _seal_dispatch(
                         active_dispatch_id,
-                        reason="provider attempt cancelled after dispatch boundary",
+                        reason=reason,
+                        replayable=replayable,
                     )
             except Exception as seal_error:
                 # A cancellation seal is the last durable protection against
@@ -9416,6 +9401,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 raise RuntimeError(
                     "AC dispatch cancellation seal failed; refusing replayable recovery"
                 ) from seal_error
+            clear_cached_runtime_handle = not provider_effect_active
             self._remember_ac_runtime_handle(
                 ac_index,
                 dispatch_state.runtime_handle,
@@ -9516,6 +9502,7 @@ Respond with either ATOMIC or the structured JSON object only.
                     retry_attempt=retry_attempt,
                     model_decision=model_decision,
                     effort_decision=effort_decision,
+                    request_authority_digest=request_authority_digest,
                 )
                 if clear_cached_runtime_handle:
                     await self._terminate_runtime_handle(
@@ -9553,17 +9540,20 @@ Respond with either ATOMIC or the structured JSON object only.
         retry_attempt: int,
         model_decision: Any,
         effort_decision: Any,
+        request_authority_digest: str,
     ) -> None:
         """Harvest and emit this leaf's runtime token spend (frugality-proof AC2).
 
         Emits nothing when the stream carried no runtime usage telemetry — the
         proof treats missing as missing rather than fabricating a spend. Observe-only:
-        any failure degrades to a warning so token attribution never disrupts the
-        leaf's teardown or result.
+        failures degrade to warnings without disrupting leaf teardown or results.
         """
         try:
             harvested = _harvest_token_spend(messages)
             if harvested is None:
+                return
+            effective_model = _observed_effective_model(messages)
+            if effective_model is None:
                 return
             token_spend, usage_breakdown = harvested
             await self._event_emitter.emit_token_attribution(
@@ -9576,10 +9566,17 @@ Respond with either ATOMIC or the structured JSON object only.
                 token_spend=token_spend,
                 usage_breakdown=usage_breakdown,
                 model=getattr(model_decision, "model", None),
+                effective_model=effective_model,
                 model_tier=getattr(model_decision, "tier", None),
                 model_mode=getattr(model_decision, "mode", None),
                 effort_level=getattr(effort_decision, "level", None),
+                effort_mode=getattr(effort_decision, "mode", None),
                 runtime_backend=getattr(self._adapter, "runtime_backend", None),
+                llm_backend=(
+                    getattr(self._adapter, "llm_backend", None) or self._adapter.runtime_backend
+                ),
+                permission_mode=getattr(self._adapter, "permission_mode", None),
+                request_authority_digest=request_authority_digest,
             )
         except Exception as exc:
             log.warning(
@@ -9854,9 +9851,7 @@ Respond with either ATOMIC or the structured JSON object only.
         if spec.output_assertion and spec.output_assertion not in combined:
             return _VerifyGateOutcome(
                 passed=False,
-                reason=(
-                    f"output_assertion {spec.output_assertion!r} not found in verify_command output"
-                ),
+                reason="output_assertion not satisfied by verify_command output",
                 output_tail=tail,
                 workspace_digest=workspace_digest(),
             )
@@ -10628,39 +10623,7 @@ Respond with either ATOMIC or the structured JSON object only.
 
     def _failure_class_for_result(self, result: ACExecutionResult) -> str | None:
         """Best-effort failure taxonomy label for a failed AC result."""
-        from ouroboros.orchestrator.failure_taxonomy import (
-            FailureClass,
-            classify_hard_precondition,
-        )
-
-        if result.outcome is ACExecutionOutcome.BLOCKED:
-            return FailureClass.BLOCKED.value
-        for message in reversed(result.messages):
-            if not (message.is_final and message.is_error):
-                continue
-            hard_precondition = classify_hard_precondition(message.content, message.data)
-            if hard_precondition is not None:
-                return hard_precondition.value
-        hard_precondition = classify_hard_precondition(
-            " ".join(part for part in (result.error, result.final_message) if part)
-        )
-        if hard_precondition is not None:
-            return hard_precondition.value
-        verdict = result.atomic_verifier_verdict
-        if verdict is not None and verdict.failure_class:
-            return verdict.failure_class
-        if result.error == _STALL_SENTINEL:
-            return FailureClass.STALL.value
-        return None
-
-    def _is_retryable_failure(self, result: ACExecutionResult | BaseException) -> bool:
-        """Whether a batch result is a runnable non-stall AC failure (PR-V V3)."""
-        if not isinstance(result, ACExecutionResult):
-            return False
-        if result.success or result.is_blocked or result.is_invalid:
-            return False
-        # Stall retries are handled separately by the atomic leaf loop.
-        return result.error != _STALL_SENTINEL
+        return retry_hints.failure_class_for_result(result)
 
     def _build_ac_retry_prompt(
         self,
@@ -10668,35 +10631,24 @@ Respond with either ATOMIC or the structured JSON object only.
         result: ACExecutionResult,
         ac_content: str,
         is_final_attempt: bool,
+        manifest: EvidenceManifest | None = None,
+        spec: AcceptanceCriterionSpec | None = None,
     ) -> str:
         """Build the enriched retry prompt section for a re-dispatched AC (PR-V V3/V4)."""
-        parts: list[str] = []
         failure_class = self._failure_class_for_result(result)
-        if failure_class:
-            parts.append(f"### Prior failure classification\n{failure_class}")
-        last_error = result.error or result.final_message or ""
-        if last_error and last_error != _STALL_SENTINEL:
-            redacted_error = redact_and_truncate_text(
-                last_error,
-                max_chars=max(500, len(last_error) * 2),
-            )
-            parts.append("### Last error (tail)\n" + redacted_error[-500:])
-        if is_final_attempt:
-            from ouroboros.resilience.lateral import (
-                build_lateral_change_of_approach_directive,
-            )
-
-            parts.append(
-                build_lateral_change_of_approach_directive(
-                    problem_context=ac_content,
-                    current_approach=(
-                        "The previous attempts failed as described above; the same "
-                        "approach is not working."
-                    ),
-                    failed_attempts=(failure_class,) if failure_class else (),
-                )
-            )
-        return "\n\n".join(parts)
+        return retry_hints.build_ac_retry_prompt(
+            failure_class=failure_class,
+            outcome=(
+                result.verify_gate_outcome
+                if isinstance(result.verify_gate_outcome, _VerifyGateOutcome)
+                else None
+            ),
+            result=result,
+            ac_content=ac_content,
+            is_final_attempt=is_final_attempt,
+            manifest=manifest,
+            spec=spec,
+        )
 
     async def _run_batch_with_verify_and_retry(
         self,
@@ -10790,7 +10742,7 @@ Respond with either ATOMIC or the structured JSON object only.
                         execution_id=execution_id,
                         retry_termination_reason=(
                             "budget_exhausted"
-                            if self._is_retryable_failure(result)
+                            if retry_hints.is_retryable_failure(result)
                             else "not_retryable"
                         ),
                     )
@@ -10802,7 +10754,7 @@ Respond with either ATOMIC or the structured JSON object only.
         pending = {
             ac_idx
             for position, ac_idx in enumerate(batch_executable)
-            if self._is_retryable_failure(results[position])
+            if retry_hints.is_retryable_failure(results[position])
         }
         last_failure_class = {
             ac_idx: self._failure_class_for_result(results[position_by_idx[ac_idx]])
@@ -10822,10 +10774,18 @@ Respond with either ATOMIC or the structured JSON object only.
                 is_final = ac_retry_attempts[ac_idx] >= self._ac_retry_attempts
                 prior = results[position_by_idx[ac_idx]]
                 if isinstance(prior, ACExecutionResult):
+                    manifest = await retry_hints.load_ac_retry_manifest(
+                        self._event_store,
+                        ac_index=ac_idx,
+                        execution_id=execution_id,
+                    )
+                    spec = seed.acceptance_criteria[ac_idx]
                     retry_prompts[ac_idx] = self._build_ac_retry_prompt(
                         result=prior,
-                        ac_content=ac_text(seed.acceptance_criteria[ac_idx]),
+                        ac_content=ac_text(spec),
                         is_final_attempt=is_final,
+                        manifest=manifest,
+                        spec=spec if isinstance(spec, AcceptanceCriterionSpec) else None,
                     )
 
             # Pending ACs advance their retry counter in lockstep, so the batch
@@ -10869,7 +10829,7 @@ Respond with either ATOMIC or the structured JSON object only.
                         execution_id=execution_id,
                     )
 
-                if not self._is_retryable_failure(gated):
+                if not retry_hints.is_retryable_failure(gated):
                     if (
                         isinstance(gated, ACExecutionResult)
                         and not gated.success
@@ -11011,7 +10971,7 @@ Respond with either ATOMIC or the structured JSON object only.
                     retry_termination_reason=retry_termination_reasons.get(
                         ac_idx,
                         "budget_exhausted"
-                        if self._is_retryable_failure(result)
+                        if retry_hints.is_retryable_failure(result)
                         else "not_retryable",
                     ),
                 )
@@ -11209,7 +11169,11 @@ Respond with either ATOMIC or the structured JSON object only.
                 session_id=session_id,
                 execution_counters=execution_counters,
             )
-            round_indices = [ac_idx for ac_idx in batch_executable if ac_idx in pending]
+            resume_pending = pending & set(self._parallel_route_resumes)
+            resume_pending |= pending & partial_composite_resume_roots
+            round_indices = [
+                ac_idx for ac_idx in batch_executable if ac_idx in (resume_pending or pending)
+            ]
             round_results = await self._execute_ac_batch(
                 seed=seed,
                 batch_indices=round_indices,
@@ -11224,6 +11188,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 retry_prompts=retry_prompts,
                 route_overrides=route_overrides,
                 route_resume_states=self._parallel_route_resumes,
+                batch_sibling_indices=batch_executable,
                 # Route D owns recovery while active.  Legacy cross-harness and
                 # retry-count paths cannot run ahead of the finite route set.
                 same_runtime_budget_exhausted=False,
@@ -11232,9 +11197,9 @@ Respond with either ATOMIC or the structured JSON object only.
                 session_id=session_id,
                 execution_counters=execution_counters,
             )
-            next_pending: set[int] = set()
-            next_overrides: dict[int, RouteCandidate] = {}
-            next_prompts: dict[int, str] = {}
+            next_pending = pending - set(round_indices)
+            next_overrides = dict(route_overrides)
+            next_prompts = dict(retry_prompts)
             recoverable_pause_seen = any(
                 isinstance(value, ACExecutionResult) and _has_usage_limit_pause(value)
                 for value in round_results
@@ -11275,7 +11240,7 @@ Respond with either ATOMIC or the structured JSON object only.
                         ac_content=ac_text(seed.acceptance_criteria[ac_idx]),
                         success=False,
                         error=(
-                            "A sibling quota cancelled this AC after execution authority entry; "
+                            "A sibling quota cancelled this AC after provider-effect entry; "
                             "the provider-effect boundary is uncertain and human handoff is required."
                         ),
                         retry_attempt=ac_retry_attempts[ac_idx],
@@ -11585,10 +11550,18 @@ Respond with either ATOMIC or the structured JSON object only.
                     ac_retry_attempts[ac_idx] += 1
                     next_pending.add(ac_idx)
                     next_overrides[ac_idx] = decision.selected
+                    manifest = await retry_hints.load_ac_retry_manifest(
+                        self._event_store,
+                        ac_index=ac_idx,
+                        execution_id=execution_id,
+                    )
+                    spec = seed.acceptance_criteria[ac_idx]
                     next_prompts[ac_idx] = self._build_ac_retry_prompt(
                         result=gated,
-                        ac_content=ac_text(seed.acceptance_criteria[ac_idx]),
+                        ac_content=ac_text(spec),
                         is_final_attempt=not decision.remaining_route_ids,
+                        manifest=manifest,
+                        spec=spec if isinstance(spec, AcceptanceCriterionSpec) else None,
                     )
                     continue
 
@@ -11661,11 +11634,17 @@ Respond with either ATOMIC or the structured JSON object only.
 
         while (
             allow_root_redispatch
-            and self._is_retryable_failure(current)
+            and retry_hints.is_retryable_failure(current)
             and ac_retry_attempts[ac_idx] < self._ac_retry_attempts
         ):
             ac_retry_attempts[ac_idx] += 1
             is_final = ac_retry_attempts[ac_idx] >= self._ac_retry_attempts
+            manifest = await retry_hints.load_ac_retry_manifest(
+                self._event_store,
+                ac_index=ac_idx,
+                execution_id=execution_id,
+            )
+            spec = seed.acceptance_criteria[ac_idx]
             retried = await self._execute_ac_batch(
                 seed=seed,
                 batch_indices=[ac_idx],
@@ -11680,8 +11659,10 @@ Respond with either ATOMIC or the structured JSON object only.
                 retry_prompts={
                     ac_idx: self._build_ac_retry_prompt(
                         result=current,
-                        ac_content=ac_text(seed.acceptance_criteria[ac_idx]),
+                        ac_content=ac_text(spec),
                         is_final_attempt=is_final,
+                        manifest=manifest,
+                        spec=spec if isinstance(spec, AcceptanceCriterionSpec) else None,
                     )
                 },
                 same_runtime_budget_exhausted=is_final,
@@ -11705,7 +11686,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 session_id=session_id,
                 execution_id=execution_id,
             )
-            if not self._is_retryable_failure(current):
+            if not retry_hints.is_retryable_failure(current):
                 termination_reason = "not_retryable"
                 break
 
@@ -12445,7 +12426,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 raise RuntimeError("parallel uncertain handoff is duplicated")
             uncertain_handoffs.add(root_ac_index)
             terminals[root_ac_index] = (
-                "A sibling quota cancelled this AC after execution authority entry; "
+                "A sibling quota cancelled this AC after provider-effect entry; "
                 "the provider-effect boundary is uncertain and human handoff is required."
             )
 

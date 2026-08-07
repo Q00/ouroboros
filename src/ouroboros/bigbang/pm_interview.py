@@ -20,7 +20,6 @@ import asyncio
 from dataclasses import dataclass, field, replace
 import json
 from pathlib import Path
-import re
 from typing import Any
 
 import structlog
@@ -52,6 +51,7 @@ from ouroboros.bigbang.question_classifier import (
 )
 from ouroboros.config import get_llm_model_for_role
 from ouroboros.core.errors import ProviderError, ValidationError
+from ouroboros.core.json_utils import extract_json_payload
 from ouroboros.core.owner_only import write_owner_only
 from ouroboros.core.pm_snapshot import refresh_pm_snapshot_worktrees
 from ouroboros.core.types import Result
@@ -1322,18 +1322,15 @@ Include them as original question text in "decide_later_items":
             ValueError: If response cannot be parsed.
         """
 
-        text = response.strip()
-
-        # Extract JSON from markdown code blocks if present
-        json_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
-        if json_match:
-            text = json_match.group(1)
-        else:
-            json_match = re.search(r"\{.*\}", text, re.DOTALL)
-            if json_match:
-                text = json_match.group(0)
+        # One authoritative payload or nothing: an echoed schema example
+        # must never become the saved PMSeed (#1838).
+        text = extract_json_payload(response.strip())
+        if text is None:
+            raise ValueError("no unambiguous JSON payload in PM seed response")
 
         data = json.loads(text)
+        if not isinstance(data, dict):
+            raise ValueError("PM seed payload must be a JSON object")
 
         # Parse user stories
         stories = tuple(

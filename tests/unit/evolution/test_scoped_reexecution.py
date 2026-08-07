@@ -29,6 +29,7 @@ from ouroboros.core.seed import (
     SeedMetadata,
 )
 from ouroboros.core.types import Result
+from ouroboros.evolution.frugality import OBSERVATION_EVENT, PROOF_EVENT, EvolutionFrugalityStatus
 from ouroboros.evolution.loop import EvolutionaryLoop, EvolutionaryLoopConfig
 from ouroboros.evolution.reflect import ReflectEngine, ReflectOutput
 from ouroboros.evolution.wonder import WonderOutput
@@ -162,6 +163,9 @@ class TestConfig:
     def test_scoped_reexecution_can_disable(self) -> None:
         assert EvolutionaryLoopConfig(scoped_reexecution=False).scoped_reexecution is False
 
+    def test_focused_evolution_defaults_true(self) -> None:
+        assert EvolutionaryLoopConfig().focused_evolution is True
+
 
 def _make_loop_for_gen2(
     store, executor: _CaptureExecutor, config: EvolutionaryLoopConfig, settled: tuple[int, ...]
@@ -204,6 +208,36 @@ def _make_loop_for_gen2(
 
 
 class TestScopedForwardingIntegration:
+    async def test_ontology_only_wonder_stop_persists_insufficient_frugality_receipt(self) -> None:
+        store = await _store()
+        seed = _seed()
+        lineage = OntologyLineage(
+            lineage_id="lin_wonder_stop",
+            goal=seed.goal,
+            generations=(_gen(1, seed, _eval({0: True, 1: True})),),
+        )
+        executor = _CaptureExecutor()
+        loop = _make_loop_for_gen2(store, executor, EvolutionaryLoopConfig(), settled=())
+        loop.wonder_engine.wonder = AsyncMock(
+            return_value=Result.ok(
+                WonderOutput(questions=(), grounded_questions=(), should_continue=False)
+            )
+        )
+
+        result = await loop._run_generation(
+            lineage=lineage,
+            generation_number=2,
+            current_seed=seed,
+            execute=False,
+        )
+
+        assert result.is_ok
+        assert executor.called is False
+        observations = await store.query_events(event_type=OBSERVATION_EVENT, limit=10)
+        proofs = await store.query_events(event_type=PROOF_EVENT, limit=10)
+        assert len(observations) == 1
+        assert proofs[0].data["proof"]["status"] == EvolutionFrugalityStatus.INSUFFICIENT_DATA
+
     async def test_conductor_preservation_blocks_executor_before_side_effects(self) -> None:
         store = await _store()
         seed_v1 = _seed()
@@ -247,7 +281,12 @@ class TestScopedForwardingIntegration:
             generations=(_gen(1, seed_v1, _eval({0: True, 1: True})),),
         )
         executor = _CaptureExecutor()
-        loop = _make_loop_for_gen2(store, executor, EvolutionaryLoopConfig(), settled=(0, 1))
+        loop = _make_loop_for_gen2(
+            store,
+            executor,
+            EvolutionaryLoopConfig(focused_evolution=False),
+            settled=(0, 1),
+        )
 
         result = await loop._run_generation(
             lineage=lineage, generation_number=2, current_seed=seed_v1
@@ -276,6 +315,30 @@ class TestScopedForwardingIntegration:
         assert result.is_ok
         assert executor.called is True
         assert executor.captured is None
+
+    async def test_focus_is_derived_from_gate_not_reflect_claim(self) -> None:
+        """Prior PASS nodes freeze even when Reflect reports no settled indices."""
+        store = await _store()
+        seed_v1 = _seed()
+        lineage = OntologyLineage(
+            lineage_id="lin_focus",
+            goal=seed_v1.goal,
+            generations=(_gen(1, seed_v1, _eval({0: True, 1: False})),),
+        )
+        executor = _CaptureExecutor()
+        loop = _make_loop_for_gen2(store, executor, EvolutionaryLoopConfig(), settled=())
+
+        result = await loop._run_generation(
+            lineage=lineage,
+            generation_number=2,
+            current_seed=seed_v1,
+        )
+
+        assert result.is_ok
+        assert result.value.active_ac_indices == (1,)
+        assert result.value.frozen_ac_indices == (0,)
+        assert executor.captured is not None
+        assert set(executor.captured) == {0}
 
     async def test_empty_settled_not_forwarded_integration(self) -> None:
         store = await _store()

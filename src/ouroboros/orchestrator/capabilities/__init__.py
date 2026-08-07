@@ -12,12 +12,12 @@ import os
 from pathlib import Path
 import stat
 from typing import TYPE_CHECKING, Any
-import unicodedata
 
 import yaml
 
 from ouroboros.mcp.types import MCPToolDefinition
 from ouroboros.observability.logging import get_logger
+from ouroboros.orchestrator.capabilities.question_text import normalize_question_text
 from ouroboros.orchestrator.mcp_tools import (
     SessionToolCatalog,
     SessionToolCatalogEntry,
@@ -153,8 +153,7 @@ class CapabilityGraph:
 
 def stable_code_investigation_question_identity(question: str) -> str:
     """Return a deterministic identity for an interview-originating question."""
-    normalized = " ".join(unicodedata.normalize("NFKC", question).strip().split())
-    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
+    digest = hashlib.sha256(normalize_question_text(question).encode("utf-8")).hexdigest()[:16]
     return f"interview-question:{digest}"
 
 

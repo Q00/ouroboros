@@ -331,6 +331,11 @@ Inside AI coding agent sessions, use `ooo <cmd>` skills. From the terminal, use 
 
 > Not all skills have direct CLI equivalents. Some (`evaluate`, `evolve`, `unstuck`, `ralph`, `publish`) are available through agent skills, runtime rules, or MCP tools rather than a direct `ouroboros <subcommand>` shell command.
 > `/resume` is reserved for Claude Code's built-in session picker; use `ooo resume-session` for Ouroboros in-flight sessions.
+> Claude Code also reserves `/run`, `/status`, `/help`, and `/config`. The safe
+> direct skill forms are `/ouroboros:ouroboros-run`,
+> `/ouroboros:ouroboros-status`, `/ouroboros:ouroboros-help`, and
+> `/ouroboros:ouroboros-config`; the familiar `ooo run`, `ooo status`,
+> `ooo help`, and `ooo config` phrases remain supported.
 
 See the [CLI reference](./docs/cli-reference.md) for full details.
 

@@ -208,6 +208,12 @@ class TestStatusCommands:
         assert result.exit_code == 0
         assert "details" in result.output.lower()
 
+    def test_status_project_help(self) -> None:
+        """Test read-only cross-run project status help."""
+        result = runner.invoke(app, ["status", "project", "--help"])
+        assert result.exit_code == 0
+        assert "read-only" in result.output.lower()
+
     def test_status_health_help(self) -> None:
         """Test status health command help."""
         result = runner.invoke(app, ["status", "health", "--help"])

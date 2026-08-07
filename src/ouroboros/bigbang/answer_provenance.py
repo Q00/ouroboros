@@ -44,6 +44,18 @@ OBSERVATION_PREFIXES: tuple[str, ...] = (
     "[from-code]",
     "[from-repo]",
     "[from-research]",
+    # ``[from-data]`` has no forwarding path: the data lane's numbers are shown
+    # beside the question, the user reads them, and the answer is the user's own
+    # words on the ordinary ``[from-user]`` path (#1754).
+    #
+    # That held when the lane could only propose a read, and it is what still
+    # holds now that the lane runs one and carries the aggregate back
+    # (Q00/ouroboros#1825) -- the absence of a value field was never what kept a
+    # measurement out of the Seed; this is. So the entry matters more than it
+    # did, not less: a measurement is the least durable fact of the three, and
+    # if one arrives in an answer slot out of contract it must be withheld like
+    # the rest rather than treated as a decision because no rule named it.
+    "[from-data]",
 )
 
 #: Rendered in place of a withheld answer.  It names why the content is gone and

@@ -37,6 +37,7 @@ from ouroboros.cli.formatters.tables import (
 from ouroboros.config.loader import load_config
 from ouroboros.config.models import resolve_event_store_path
 from ouroboros.events.base import BaseEvent
+from ouroboros.mcp.tools.project_status_handler import ProjectStatusHandler
 from ouroboros.mcp.tools.projection_handlers import ProjectionQueryHandler
 from ouroboros.persistence.event_store import EventStore, sqlite_database_url
 
@@ -447,6 +448,64 @@ def run_projection(
     tool_result = result.value
     if json_output:
         typer.echo(json.dumps(tool_result.meta, indent=2, sort_keys=True))
+        return
+    typer.echo(tool_result.text_content, nl=False)
+
+
+@app.command(name="project")
+def project_status(
+    project_dir: Annotated[
+        str | None,
+        typer.Argument(
+            metavar="[PROJECT_DIR]",
+            help="Project or workspace directory. Defaults to the current directory.",
+        ),
+    ] = None,
+    workspace: Annotated[
+        str | None,
+        typer.Option(
+            "--workspace",
+            help="Optional canonical project-relative workspace filter.",
+        ),
+    ] = None,
+    limit: Annotated[
+        int,
+        typer.Option(
+            "--limit",
+            help="Complete-run safety cap; the command never truncates silently.",
+        ),
+    ] = 100,
+    json_output: Annotated[
+        bool,
+        typer.Option("--json", help="Emit the exact MCP ProjectRecord JSON payload."),
+    ] = False,
+) -> None:
+    """Show complete read-only run status for one project."""
+    if limit <= 0:
+        print_error("Project status failed: limit must be a positive integer")
+        raise typer.Exit(_STATUS_RUN_EXIT_MALFORMED_INPUT)
+    if workspace is not None and (not workspace or workspace != workspace.strip()):
+        print_error("Project status failed: workspace must be a canonical relative path")
+        raise typer.Exit(_STATUS_RUN_EXIT_MALFORMED_INPUT)
+
+    arguments: dict[str, Any] = {
+        "project_dir": project_dir if project_dir is not None else str(Path.cwd()),
+        "limit": limit,
+    }
+    if workspace is not None:
+        arguments["workspace"] = workspace
+
+    result = asyncio.run(ProjectStatusHandler().handle(arguments))
+    if result.is_err:
+        print_error(f"Project status failed: {escape(str(result.error))}")
+        raise typer.Exit(_STATUS_RUN_EXIT_GENERIC_ERROR)
+
+    tool_result = result.value
+    if json_output:
+        if not isinstance(tool_result.structured_content, dict):
+            print_error("Project status failed: MCP handler returned no ProjectRecord")
+            raise typer.Exit(_STATUS_RUN_EXIT_GENERIC_ERROR)
+        typer.echo(json.dumps(tool_result.structured_content, indent=2, sort_keys=True))
         return
     typer.echo(tool_result.text_content, nl=False)
 

@@ -8,6 +8,7 @@ the default handler tuple for MCP registration.
 Handler modules:
 - execution_handlers: ExecuteSeedHandler, StartExecuteSeedHandler
 - query_handlers: SessionStatusHandler, QueryEventsHandler, ACDashboardHandler
+- project_status_handler: ProjectStatusHandler
 - projection_handlers: ProjectionQueryHandler
 - authoring_handlers: GenerateSeedHandler, InterviewHandler
 - evaluation_handlers: MeasureDriftHandler, EvaluateHandler, LateralThinkHandler
@@ -53,6 +54,7 @@ from ouroboros.mcp.tools.job_handlers import (
     JobStatusHandler,
     JobWaitHandler,
 )
+from ouroboros.mcp.tools.project_status_handler import ProjectStatusHandler
 from ouroboros.mcp.tools.projection_handlers import ProjectionQueryHandler
 from ouroboros.mcp.tools.qa import QAHandler
 from ouroboros.mcp.tools.query_handlers import (
@@ -61,6 +63,7 @@ from ouroboros.mcp.tools.query_handlers import (
     SessionStatusHandler,
 )
 from ouroboros.mcp.tools.ralph_handlers import RalphHandler, StartRalphHandler
+from ouroboros.mcp.tools.seed_handoff import SeedHandoffRegistry
 from ouroboros.mcp.tools.subagent import FanoutRegistry
 
 if TYPE_CHECKING:
@@ -189,6 +192,11 @@ def query_events_handler() -> QueryEventsHandler:
 def projection_query_handler() -> ProjectionQueryHandler:
     """Create a ProjectionQueryHandler instance."""
     return ProjectionQueryHandler()
+
+
+def project_status_handler() -> ProjectStatusHandler:
+    """Create a ProjectStatusHandler instance."""
+    return ProjectStatusHandler()
 
 
 def generate_seed_handler(
@@ -414,6 +422,7 @@ OuroborosToolHandlers = tuple[
     | CancelJobHandler
     | QueryEventsHandler
     | ProjectionQueryHandler
+    | ProjectStatusHandler
     | GenerateSeedHandler
     | MeasureDriftHandler
     | InterviewHandler
@@ -444,6 +453,7 @@ def get_ouroboros_tools(
     opencode_mode: str | None = None,
     include_auto: bool = True,
     context: AgentRuntimeContext | None = None,
+    runtime_adapter: object | None = None,
 ) -> OuroborosToolHandlers:
     """Create the default set of Ouroboros MCP tool handlers.
 
@@ -458,24 +468,44 @@ def get_ouroboros_tools(
     bridge supersedes the explicit ``mcp_manager`` / ``mcp_tool_prefix``
     kwargs (see :func:`_resolve_bridge_fields`). This is the migration
     path captured by #474; legacy kwargs continue to work unchanged.
+
+    Runtime-owned builtin interceptors receive the same configured object graph
+    as the MCP server composition root. The lightweight constructor path
+    remains for capability discovery, where ``runtime_adapter`` is absent.
     """
     resolved_manager, resolved_prefix = _resolve_bridge_fields(
         context, mcp_manager, mcp_tool_prefix
     )
+    needs_configured_runtime_graph = (
+        runtime_adapter is not None and runtime_backend in {"codex", "hermes"}
+    ) or (runtime_backend == "opencode" and opencode_mode == "plugin")
+    if needs_configured_runtime_graph and (
+        resolved_manager is None or (context is not None and context.mcp_bridge is not None)
+    ):
+        from ouroboros.mcp.tools.runtime_tool_composition import configured_runtime_tools
+
+        configured_tools = configured_runtime_tools(
+            runtime_backend=runtime_backend,
+            llm_backend=llm_backend,
+            opencode_mode=opencode_mode,
+            include_auto=include_auto,
+            mcp_bridge=(context.mcp_bridge if context is not None else None),
+            runtime_adapter=runtime_adapter,
+        )
+        if configured_tools is not None:
+            return configured_tools
+
     # One shared fan-out registry: interview/lateral producers register pending
     # fan-outs into it, and the submit tool reads them back for synthesis.
     fanout_registry = FanoutRegistry()
+    seed_handoff_registry = SeedHandoffRegistry()
     execute_seed = ExecuteSeedHandler(
         agent_runtime_backend=runtime_backend,
         llm_backend=llm_backend,
         mcp_manager=resolved_manager,
         mcp_tool_prefix=resolved_prefix,
         opencode_mode=opencode_mode,
-    )
-    start_execute = StartExecuteSeedHandler(
-        execute_handler=execute_seed,
-        agent_runtime_backend=runtime_backend,
-        opencode_mode=opencode_mode,
+        seed_handoff_registry=seed_handoff_registry,
     )
     job_status = JobStatusHandler()
     job_wait = JobWaitHandler()
@@ -501,6 +531,14 @@ def get_ouroboros_tools(
         llm_backend=llm_backend,
         agent_runtime_backend=runtime_backend,
         opencode_mode=opencode_mode,
+        seed_handoff_registry=seed_handoff_registry,
+    )
+    start_execute = StartExecuteSeedHandler(
+        execute_handler=execute_seed,
+        agent_runtime_backend=runtime_backend,
+        opencode_mode=opencode_mode,
+        start_evaluate_handler=start_evaluate,
+        seed_handoff_registry=seed_handoff_registry,
     )
     auto = (
         (
@@ -534,6 +572,7 @@ def get_ouroboros_tools(
         CancelJobHandler(),
         QueryEventsHandler(),
         ProjectionQueryHandler(),
+        ProjectStatusHandler(),
         generate_seed,
         MeasureDriftHandler(),
         interview,

@@ -9,16 +9,18 @@ quota because nothing on the Ouroboros side bounded concurrency for that
 runtime (only the native Claude adapter carried a shared rate-limit bucket).
 
 Policy: backends whose underlying LLM limits Ouroboros cannot know — every CLI
-runtime (hermes, codex, gemini, opencode, ...) — are **serialized by default**
-(one acceptance criterion at a time) and raised only by explicit operator
-override. The native Claude backend is left uncapped for fan-out here because it
-is already governed by its RPM/TPM bucket (``SharedRateLimitBucket``).
+runtime (hermes, codex, gemini, opencode, ...) — **start serialized** (one
+acceptance criterion at a time). Runner-owned execution treats that conservative
+pre-flight value as an adaptive controller's initial estimate, then probes toward
+the configured worker budget from live success/429 feedback. The native Claude
+backend starts at the requested fan-out because its RPM/TPM bucket already paces
+requests.
 
 Every limit — fan-out concurrency, requests-per-minute, tokens-per-minute — is
 configurable **without source-level changes** through three layers, highest
 precedence first:
 
-1. Environment variables — ``OUROBOROS_MAX_CONCURRENCY`` (cap, any backend) and
+1. Environment variables — ``OUROBOROS_MAX_CONCURRENCY`` (initial estimate, any backend) and
    per-backend ``OUROBOROS_<BACKEND>_RPM`` / ``OUROBOROS_<BACKEND>_TPM`` (the
    backend name upper-cased with non-alphanumerics collapsed to ``_``, e.g.
    ``hermes_cli`` → ``OUROBOROS_HERMES_CLI_RPM``).
@@ -48,7 +50,7 @@ from ouroboros.orchestrator.rate_limit import (
 
 log = get_logger(__name__)
 
-#: Default fan-out cap for backends with no Ouroboros-known LLM limits.
+#: Default initial fan-out for backends with no Ouroboros-known LLM limits.
 DEFAULT_UNKNOWN_MAX_CONCURRENCY = 1
 
 #: Operator override for the resolved concurrency cap (applies to any backend).
@@ -70,9 +72,11 @@ class BackendConcurrencyLimits:
 
     Attributes:
         backend: Canonical backend identifier the limits were resolved for.
-        max_concurrency: Maximum acceptance criteria to dispatch in parallel.
-            ``None`` means Ouroboros imposes no fan-out cap (the backend is
-            governed elsewhere, e.g. the native Claude RPM/TPM bucket).
+        max_concurrency: Conservative pre-flight parallelism estimate.
+            ``None`` means start from the caller's requested fan-out (the backend
+            is governed elsewhere, e.g. the native Claude RPM/TPM bucket).
+            The field name is retained for config compatibility; runner-owned
+            execution uses the result as the AIMD window's initial value.
         requests_per_minute: Known request ceiling, if any. Consumed by the
             shared rate-limit bucket; ``None`` leaves request pacing dormant.
         tokens_per_minute: Known token ceiling, if any; ``None`` leaves token
@@ -361,7 +365,7 @@ def plan_fan_out_concurrency(
     requested_workers: int,
     limits: BackendConcurrencyLimits,
 ) -> int:
-    """Return the effective parallel-worker count for delivery fan-out.
+    """Return the initial parallel-worker count for delivery fan-out.
 
     The result is the requested worker count, clamped to at least 1 and capped
     by ``limits.max_concurrency`` when the backend declares one.

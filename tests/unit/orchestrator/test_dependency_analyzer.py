@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any
 
 import pytest
 
 from ouroboros.core.errors import ProviderError
 from ouroboros.core.types import Result
+from ouroboros.evolution import provider_usage as provider_usage_module
+from ouroboros.evolution.provider_usage import capture_generation_provider_usage
 from ouroboros.orchestrator.dependency_analyzer import (
     ACDependencySpec,
     ACNode,
@@ -18,7 +21,13 @@ from ouroboros.orchestrator.dependency_analyzer import (
     ExecutionStage,
     HybridExecutionPlanner,
 )
-from ouroboros.providers.base import CompletionResponse, UsageInfo
+from ouroboros.providers.base import CompletionConfig, CompletionResponse, UsageInfo
+from ouroboros.providers.frugality_attestation import (
+    PreparedFrugalityCompletion,
+    credential_authority_digest,
+    effective_completion_request,
+)
+from ouroboros.providers.profiles import ResolvedCompletionProfile
 
 
 class StubLLMAdapter:
@@ -27,6 +36,33 @@ class StubLLMAdapter:
     def __init__(self, content: str | None = None, error: ProviderError | None = None) -> None:
         self._content = content
         self._error = error
+
+    def frugality_prepare_completion(
+        self,
+        config: CompletionConfig,
+    ) -> Result[PreparedFrugalityCompletion, ProviderError]:
+        resolved = ResolvedCompletionProfile(config=config)
+        return Result.ok(
+            PreparedFrugalityCompletion(
+                config=replace(config, role=None, profile=None),
+                contract={
+                    "schema_version": 1,
+                    "schema_id": "test.dependency-adapter.v1",
+                    "internal_attempt_limit": 1,
+                    "credential_authority": credential_authority_digest("test-credential"),
+                    "effective_request": effective_completion_request(
+                        resolved,
+                        provider_model=config.model,
+                    ),
+                    "settings": {
+                        "api_base": "https://provider.example/v1",
+                        "timeout": 30.0,
+                        "max_retries": 1,
+                        "io_recorder_configured": False,
+                    },
+                },
+            )
+        )
 
     async def complete(
         self, messages: list[Any], config: Any
@@ -41,6 +77,21 @@ class StubLLMAdapter:
                 usage=UsageInfo(prompt_tokens=1, completion_tokens=1, total_tokens=2),
             )
         )
+
+
+@pytest.fixture(autouse=True)
+def _register_stub_completion_schema(monkeypatch: pytest.MonkeyPatch) -> None:
+    adapter_class = f"{StubLLMAdapter.__module__}.{StubLLMAdapter.__qualname__}"
+    monkeypatch.setitem(
+        provider_usage_module._COMPLETION_ADAPTER_SCHEMAS,
+        adapter_class,
+        provider_usage_module._CompletionAdapterSchema(
+            schema_id="test.dependency-adapter.v1",
+            settings=frozenset({"api_base", "timeout", "max_retries", "io_recorder_configured"}),
+            retry_setting="max_retries",
+            proof_retry_value=1,
+        ),
+    )
 
 
 def _empty_dependency_response(ac_count: int) -> str:
@@ -139,6 +190,22 @@ class TestDependencyAnalyzer:
         assert graph.serialized_indices == expected_serialized
         for ac_index, expected in expected_dependencies.items():
             assert graph.get_dependencies(ac_index) == expected
+
+    @pytest.mark.asyncio
+    async def test_llm_analysis_is_included_in_generation_provider_usage(self) -> None:
+        analyzer = DependencyAnalyzer(
+            llm_adapter=StubLLMAdapter(_empty_dependency_response(2)),
+            model="test-model",
+        )
+
+        with capture_generation_provider_usage() as capture:
+            result = await analyzer.analyze(("first", "second"))
+
+        assert result.is_ok
+        summary = capture.summary()
+        assert summary.complete is True
+        assert summary.call_count == 1
+        assert summary.token_spend == 2
 
     @pytest.mark.asyncio
     async def test_analyze_uses_prerequisites_and_metadata_dependencies(self) -> None:

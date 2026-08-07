@@ -331,6 +331,9 @@ class TestCheckShutdownSerialization:
         assert ps["reflect_output"]["refined_goal"] == "g"
         assert ps["execution_output"] == "exec output"
         assert ps["evaluation_summary"]["score"] == 0.6
+        assert ps["wonder_output_complete"] is True
+        assert ps["reflect_output_complete"] is True
+        assert ps["evaluation_summary_complete"] is True
 
 
 # -- Resume restore tests --
@@ -354,13 +357,16 @@ class TestResumeRestore:
         from ouroboros.core.lineage import OntologyLineage
 
         gen = MagicMock()
+        gen.generation_number = 2
         gen.phase = GenerationPhase.INTERRUPTED
+        gen.last_completed_phase = last_completed_phase
         gen.partial_state = partial_state
         gen.evaluation_summary = None
         gen.execution_output = None
         gen.seed_json = None
 
         prev_gen = MagicMock()
+        prev_gen.generation_number = 1
         prev_gen.phase = GenerationPhase.COMPLETED
         prev_gen.evaluation_summary = EvaluationSummary(
             final_approved=False, highest_stage_passed=1, score=0.5

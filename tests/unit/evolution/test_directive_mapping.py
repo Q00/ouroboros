@@ -29,6 +29,12 @@ class TestStepActionMapping:
     def test_converged_maps_to_converge(self) -> None:
         assert step_action_to_directive(StepAction.CONVERGED) == Directive.CONVERGE
 
+    def test_ontology_stable_maps_to_nonterminal_evaluate(self) -> None:
+        directive = step_action_to_directive(StepAction.ONTOLOGY_STABLE)
+
+        assert directive == Directive.EVALUATE
+        assert directive.is_terminal is False
+
     def test_stagnated_maps_to_unstuck_not_terminal_success(self) -> None:
         directive = step_action_to_directive(StepAction.STAGNATED)
 
@@ -57,6 +63,7 @@ class TestStepActionMapping:
     def test_string_value_accepted(self) -> None:
         """The function accepts the StepAction value verbatim (StrEnum semantics)."""
         assert step_action_to_directive("converged") == Directive.CONVERGE
+        assert step_action_to_directive("ontology_stable") == Directive.EVALUATE
         assert step_action_to_directive("stagnated") == Directive.UNSTUCK
         assert step_action_to_directive("continue") is None
 
