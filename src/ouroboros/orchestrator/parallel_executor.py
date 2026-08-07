@@ -9408,17 +9408,7 @@ Respond with either ATOMIC or the structured JSON object only.
                         execution_context_id,
                         observed=bool(dispatch_state.lifecycle_event_count),
                     ):
-                        await self._emit_ac_runtime_event(
-                            event_type="execution.session.failed",
-                            runtime_identity=runtime_identity,
-                            ac_content=ac_content,
-                            runtime_handle=dispatch_state.runtime_handle,
-                            execution_id=execution_context_id,
-                            session_id=dispatch_state.ac_session_id,
-                            orchestrator_session_id=session_id,
-                            success=False,
-                            error="Runtime attempt cancelled or interrupted.",
-                        )
+                        await _emit_runtime_failure("Runtime attempt cancelled or interrupted.")
             except Exception as seal_error:
                 raise RuntimeError(
                     "AC dispatch cancellation seal failed; refusing replayable recovery"
