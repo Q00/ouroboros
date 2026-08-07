@@ -1697,3 +1697,52 @@ def test_library_subject_modifiers_do_not_erase_web_app_head(goal: str) -> None:
     result = derive_domain_from_ledger(ledger)
     assert result.is_single
     assert result.single is TaskClass.WEB_APP
+
+
+def test_with_joined_web_app_co_product_keeps_web_ownership() -> None:
+    """R22 probe: a with-clause can introduce a co-produced web app."""
+    ledger = _bare_ledger("Build an SDK with an admin web app")
+    _seed_section(
+        ledger, "outputs", value="Browser admin dashboard with login forms and a companion SDK"
+    )
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP in result.classes
+
+
+@pytest.mark.parametrize(
+    "outputs",
+    [
+        "There are no errors in the signup form",
+        "No validation errors appear in the signup form",
+    ],
+)
+def test_quality_statements_are_not_ui_denials(outputs: str) -> None:
+    """R22 probe: "no errors in the form" denies errors, not the form."""
+    ledger = _bare_ledger("Build a browser application")
+    _seed_section(ledger, "outputs", value=outputs)
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP
+
+
+@pytest.mark.parametrize(
+    ("goal", "outputs"),
+    [
+        (
+            "Build a website with a contact form",
+            "Responsive landing page with contact form and navigation",
+        ),
+        (
+            "Build a web UI for account management",
+            "Login page with settings panel and navigation",
+        ),
+    ],
+)
+def test_website_and_web_ui_are_browser_context(goal: str, outputs: str) -> None:
+    """R22 probe: "website" and "web UI" are direct browser-UI artifact
+    names."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value=outputs)
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP

@@ -173,6 +173,11 @@ def _negation_res_for(signal_fragment: str) -> tuple[re.Pattern[str], re.Pattern
     return negated, prefix
 
 
+_QUALITY_NOUN_RE = re.compile(
+    r"\b(?:errors?|issues?|bugs?|warnings?|problems?|defects?|failures?|crashes?)\b"
+)
+
+
 def _strip_negated_signals(text: str, signal_fragment: str) -> str:
     """Remove recognized denials of *signal_fragment* from *text*, keeping
     affirmative-flip expansions ("not just a browser page") intact."""
@@ -180,7 +185,12 @@ def _strip_negated_signals(text: str, signal_fragment: str) -> str:
 
     def _keep_if_affirmative(match: re.Match[str]) -> str:
         path = match.group("path") or ""
-        return match.group(0) if _AFFIRMATIVE_FLIP_RE.search(path) else " "
+        # A quality noun in the path means the negation targets the
+        # defect, not the artifact: "no errors in the signup form" keeps
+        # its form (#1813 R22), like the affirmative-flip expansions.
+        if _AFFIRMATIVE_FLIP_RE.search(path) or _QUALITY_NOUN_RE.search(path):
+            return match.group(0)
+        return " "
 
     return prefix.sub(" ", negated.sub(_keep_if_affirmative, text))
 
@@ -192,8 +202,8 @@ def _strip_negated_signals(text: str, signal_fragment: str) -> str:
 # "single page" alone is document vocabulary ("a single page PDF report");
 # only the full single-page-application phrase denotes browser context.
 _WEB_APP_GOAL_SIGNAL_FRAGMENT = (
-    r"(?:browser|web[\s\-]?app(?:lication)?|frontend|front[\s\-]end|"
-    r"single[\s\-]page\s+app(?:lication)?)"
+    r"(?:browser|web[\s\-]?app(?:lication)?|websites?|web\s+uis?|frontend|"
+    r"front[\s\-]end|single[\s\-]page\s+app(?:lication)?)"
 )
 _WEB_APP_GOAL_SIGNAL_RE = re.compile(rf"\b{_WEB_APP_GOAL_SIGNAL_FRAGMENT}\b")
 
@@ -618,13 +628,13 @@ _MANIFEST_TOKEN_RE = re.compile(r"\S*package(?:-lock)?\.json\S*")
 _LIBRARY_PACKAGE_WORD_RE = re.compile(r"\bpackage\b(?!-)")
 
 
-_GOAL_CONJUNCT_SPLIT_RE = re.compile(r"\s*(?:\band\b|\bplus\b|[,;])\s*")
+_GOAL_CONJUNCT_SPLIT_RE = re.compile(r"\s*(?:\band\b|\bplus\b|\bwith\b|[,;])\s*")
 _GAME_CONJUNCT_VOCAB_RE = re.compile(rf"\b{_GAME_GOAL_SIGNAL_FRAGMENT}\b")
 
 
 _WEB_APP_ARTIFACT_PHRASE_RE = re.compile(
-    r"\b(?:web[\s\-]?app(?:lication)?s?|webapps?|frontends?|front[\s\-]ends?|"
-    r"single[\s\-]page\s+app(?:lication)?s?)\b"
+    r"\b(?:web[\s\-]?app(?:lication)?s?|webapps?|websites?|web\s+uis?|frontends?|"
+    r"front[\s\-]ends?|single[\s\-]page\s+app(?:lication)?s?)\b"
 )
 
 
@@ -671,6 +681,8 @@ def _ledger_has_browser_context(ledger: SeedDraftLedger) -> bool:
             "web application",
             "frontend",
             "front-end",
+            "website",
+            "web ui",
             "single-page app",
             "single page app",
         ),
@@ -736,7 +748,7 @@ def _matches_web_app(ledger: SeedDraftLedger) -> bool:
     )
     if (
         _LIBRARY_INTENT_RE.search(intent_text)
-        and not _goal_has_web_only_conjunct(guard_goal, _LIBRARY_INTENT_RE)
+        and not _goal_has_web_only_conjunct(_goal_text(ledger), _LIBRARY_INTENT_RE)
         and not _goal_artifact_head_is_web_app(_goal_text(ledger))
     ):
         return False
