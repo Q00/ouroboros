@@ -16,6 +16,13 @@ Recognized event families in PR-1b:
   ``Bash`` tool calls are classified as :attr:`StepKind.SHELL_COMMAND`.
 * ``llm.call.requested`` / ``llm.call.returned`` — paired by ``call_id``
   into a :class:`StepRecord` of kind :attr:`StepKind.MODEL_CALL`.
+* ``execution.tool.started`` / ``execution.tool.completed`` — paired within
+  their canonical acceptance-criterion scope, including producer-supported
+  events without provider call IDs.
+* ``execution.ac.typed_evidence.observed`` — projected as terminal evidence
+  submission steps and evidence artifacts.
+* ``execution.ac.acceptance_finalized`` — projected as AC-scoped terminal
+  verdicts with the same canonical AC identity as current steps.
 * ``harness.artifact.recorded`` / ``evaluation.artifact.recorded`` —
   attached to already-projected steps as :class:`ArtifactRecord` rows.
 * ``harness.verdict.recorded`` / ``evaluation.verdict.recorded`` —
@@ -50,6 +57,12 @@ from ouroboros.harness.projection import (
     StepRecord,
     VerdictOutcome,
     VerdictRecord,
+)
+from ouroboros.harness.projection_event_semantics import (
+    canonical_ac_id,
+    extract_tool_call_id,
+    resolve_tool_terminal_ok,
+    scoped_tool_call_identity,
 )
 
 _TOOL_STARTED_TYPES = frozenset({"tool.call.started", "execution.tool.started"})
@@ -132,6 +145,7 @@ class ProjectionBuilder:
         self._stage_id_override = stage_id.strip() if stage_id and stage_id.strip() else None
         self._source_key = source_key.strip() if source_key and source_key.strip() else None
         self._tool_started: OrderedDict[str, BaseEvent] = OrderedDict()
+        self._idless_tool_started: set[str] = set()
         self._llm_started: OrderedDict[str, BaseEvent] = OrderedDict()
         self._steps: OrderedDict[str, StepRecord] = OrderedDict()
         self._identity_events: list[BaseEvent] = []
@@ -156,17 +170,23 @@ class ProjectionBuilder:
 
         if event.type in _TOOL_STARTED_TYPES:
             call_id = _extract_call_id(event)
-            if call_id is not None:
-                self._tool_started[call_id] = event
-                key = _slot_key("tool", call_id)
-                self._steps[key] = _step_from_start_only(
-                    call_id=call_id,
-                    start_event=event,
-                    run_id="run_placeholder",
-                    stage_id="stage_placeholder",
-                    kind=_tool_kind(event),
-                    family="tool",
-                )
+            call_identity = (
+                _tool_call_identity(event, call_id)
+                if call_id is not None
+                else _idless_tool_call_identity(event)
+            )
+            self._tool_started[call_identity] = event
+            if call_id is None:
+                self._idless_tool_started.add(call_identity)
+            key = _slot_key("tool", call_identity)
+            self._steps[key] = _step_from_start_only(
+                call_id=call_identity,
+                start_event=event,
+                run_id="run_placeholder",
+                stage_id="stage_placeholder",
+                kind=_tool_kind(event),
+                family="tool",
+            )
             return self
 
         if event.type in _TOOL_RETURNED_TYPES:
@@ -310,9 +330,14 @@ class ProjectionBuilder:
 
     def _handle_tool_returned(self, returned_event: BaseEvent) -> None:
         call_id = _extract_call_id(returned_event)
-        if call_id is None:
-            return
-        start_event = self._tool_started.pop(call_id, None)
+        call_identity = (
+            _tool_call_identity(returned_event, call_id)
+            if call_id is not None
+            else self._match_idless_tool_start(returned_event)
+            or _idless_tool_call_identity(returned_event)
+        )
+        start_event = self._tool_started.pop(call_identity, None)
+        self._idless_tool_started.discard(call_identity)
         kind = _tool_kind(start_event or returned_event)
         tool_name = _extract_tool_name(start_event or returned_event)
         if not tool_name:
@@ -324,16 +349,15 @@ class ProjectionBuilder:
         if not source_event_ids:
             return
 
-        is_error = _safe_bool(returned_event.data.get("is_error"))
-        ok = (not is_error) if is_error is not None else None
+        ok = resolve_tool_terminal_ok(returned_event.data)
 
-        key = _slot_key("tool", call_id)
+        key = _slot_key("tool", call_identity)
         previous = self._steps.get(key)
         step = StepRecord(
             schema_version=PROJECTION_SCHEMA_VERSION,
             step_id=previous.step_id
             if previous is not None
-            else stable_step_id("pending", "tool", call_id),
+            else stable_step_id("pending", "tool", call_identity),
             run_id="run_placeholder",  # rewritten in build()
             stage_id="stage_placeholder",
             kind=kind,
@@ -347,15 +371,38 @@ class ProjectionBuilder:
         )
         self._steps[key] = step
 
+    def _match_idless_tool_start(self, returned_event: BaseEvent) -> str | None:
+        """Return the oldest compatible producer start for an id-less result."""
+        returned_ac_id = _extract_ac_id(returned_event)
+        returned_tool_name = _extract_tool_name(returned_event)
+        for call_identity, start_event in self._tool_started.items():
+            if call_identity not in self._idless_tool_started:
+                continue
+            if _extract_ac_id(start_event) != returned_ac_id:
+                continue
+            started_tool_name = _extract_tool_name(start_event)
+            if (
+                returned_tool_name is not None
+                and started_tool_name is not None
+                and returned_tool_name != started_tool_name
+            ):
+                continue
+            return call_identity
+        return None
+
     def _handle_typed_evidence(self, event: BaseEvent) -> None:
         ac_id = _extract_ac_id(event)
         if ac_id is None:
             return
         call_id = ac_id
         key = _slot_key("evidence", call_id)
-        passed = _safe_bool(event.data.get("verifier_passed"))
-        if passed is None:
+        verifier_ran = _safe_bool(event.data.get("verifier_ran"))
+        if verifier_ran is False:
             passed = _safe_bool(event.data.get("typed_evidence_valid"))
+        else:
+            passed = _safe_bool(event.data.get("verifier_passed"))
+            if verifier_ran is None and passed is None:
+                passed = _safe_bool(event.data.get("typed_evidence_valid"))
         self._steps[key] = StepRecord(
             step_id="step_placeholder",
             run_id="run_placeholder",
@@ -433,10 +480,7 @@ def build_projection(
 def _extract_call_id(event: BaseEvent) -> str | None:
     if not isinstance(event.data, dict):
         return None
-    value = event.data.get("call_id", event.data.get("tool_call_id"))
-    if isinstance(value, str) and value.strip():
-        return value.strip()
-    return None
+    return extract_tool_call_id(event.data)
 
 
 def _extract_tool_name(event: BaseEvent | None) -> str | None:
@@ -460,10 +504,20 @@ def _extract_model_id(event: BaseEvent | None) -> str | None:
 def _extract_ac_id(event: BaseEvent | None) -> str | None:
     if event is None or not isinstance(event.data, dict):
         return None
-    value = event.data.get("ac_id")
-    if isinstance(value, str) and value.strip():
-        return value.strip()
-    return None
+    return canonical_ac_id(event.data)
+
+
+def _tool_call_identity(event: BaseEvent, call_id: str) -> str:
+    if event.type not in {"execution.tool.started", "execution.tool.completed"} or not isinstance(
+        event.data, dict
+    ):
+        return call_id
+    return scoped_tool_call_identity(event.data, call_id)
+
+
+def _idless_tool_call_identity(event: BaseEvent) -> str:
+    fallback_id = f"event:{event.id}"
+    return _tool_call_identity(event, fallback_id)
 
 
 def _tool_kind(event: BaseEvent | None) -> StepKind:
@@ -768,7 +822,7 @@ def _verdict_from_event(
             case _:
                 return None
     ac_id = (
-        _acceptance_ac_id(event.data)
+        canonical_ac_id(event.data)
         if acceptance
         else _optional_str(event.data.get("ac_id"))
         if scope == "ac"
@@ -907,16 +961,6 @@ def _verdict_outcome(data: dict[str, Any]) -> VerdictOutcome | None:
     approved = data.get("approved")
     if isinstance(approved, bool):
         return VerdictOutcome.PASS if approved else VerdictOutcome.FAIL
-    return None
-
-
-def _acceptance_ac_id(data: dict[str, Any]) -> str | None:
-    ac_id = _optional_str(data.get("ac_id"))
-    if ac_id is not None:
-        return ac_id
-    root_ac_index = data.get("root_ac_index")
-    if isinstance(root_ac_index, int) and root_ac_index >= 0:
-        return f"ac_{root_ac_index}"
     return None
 
 

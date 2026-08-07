@@ -32,7 +32,8 @@ def test_current_execution_events_project_steps_artifacts_and_ac_verdicts() -> N
             started,
             {
                 "execution_id": "exec_current",
-                "ac_id": "node_1",
+                "ac_id": "exec_current_node_1",
+                "root_ac_index": 0,
                 "tool_call_id": "item_1",
                 "tool_name": "Bash",
                 "tool_detail": "pytest -q",
@@ -44,7 +45,8 @@ def test_current_execution_events_project_steps_artifacts_and_ac_verdicts() -> N
             started + timedelta(seconds=1),
             {
                 "execution_id": "exec_current",
-                "ac_id": "node_1",
+                "ac_id": "exec_current_node_1",
+                "root_ac_index": 0,
                 "tool_call_id": "item_1",
                 "tool_name": "Bash",
                 "tool_result_text": "1 passed",
@@ -57,10 +59,12 @@ def test_current_execution_events_project_steps_artifacts_and_ac_verdicts() -> N
             started + timedelta(seconds=2),
             {
                 "execution_id": "exec_current",
-                "ac_id": "node_1",
+                "ac_id": "exec_current_node_1",
+                "root_ac_index": 0,
                 "typed_evidence_valid": True,
-                "verifier_passed": True,
-                "verifier_status": "PASS",
+                "verifier_ran": False,
+                "verifier_passed": False,
+                "verifier_status": None,
             },
         ),
         _event(
@@ -86,11 +90,13 @@ def test_current_execution_events_project_steps_artifacts_and_ac_verdicts() -> N
     assert tool_step.source_event_ids == ("evt_tool_start", "evt_tool_complete")
     evidence_step = next(step for step in result.steps if step.kind is StepKind.EVIDENCE_SUBMISSION)
     assert evidence_step.ok is True
+    assert tool_step.ac_id == evidence_step.ac_id == "ac_0"
     assert len(result.artifacts) == 1
     assert result.artifacts[0].step_id == evidence_step.step_id
     assert len(result.verdicts) == 1
     assert result.verdicts[0].scope == "ac"
     assert result.verdicts[0].ac_id == "ac_0"
+    assert result.verdicts[0].ac_id == tool_step.ac_id
     assert result.verdicts[0].outcome is VerdictOutcome.PASS
     assert "args_preview" not in tool_step.metadata
     assert "result_preview" not in tool_step.metadata
@@ -156,3 +162,165 @@ def test_current_acceptance_preserves_terminal_outcome_semantics() -> None:
 
         assert len(result.verdicts) == 1
         assert result.verdicts[0].outcome is expected
+
+
+def test_current_tool_call_ids_are_scoped_by_canonical_ac_identity() -> None:
+    started = datetime(2026, 8, 6, tzinfo=UTC)
+    events: list[BaseEvent] = []
+    for root_ac_index in range(2):
+        events.extend(
+            (
+                _event(
+                    f"evt_start_{root_ac_index}",
+                    "execution.tool.started",
+                    started + timedelta(milliseconds=root_ac_index),
+                    {
+                        "execution_id": "exec_current",
+                        "ac_id": f"exec_current_runtime_{root_ac_index}",
+                        "root_ac_index": root_ac_index,
+                        "tool_call_id": "item_0",
+                        "tool_name": "Bash",
+                    },
+                ),
+                _event(
+                    f"evt_complete_{root_ac_index}",
+                    "execution.tool.completed",
+                    started + timedelta(seconds=root_ac_index + 1),
+                    {
+                        "execution_id": "exec_current",
+                        "ac_id": f"exec_current_runtime_{root_ac_index}",
+                        "root_ac_index": root_ac_index,
+                        "tool_call_id": "item_0",
+                        "tool_name": "Bash",
+                        "is_error": False,
+                    },
+                ),
+            )
+        )
+
+    result = build_projection(tuple(events), seed_id="seed_current")
+
+    assert len(result.steps) == 2
+    assert {step.ac_id for step in result.steps} == {"ac_0", "ac_1"}
+    assert len({step.step_id for step in result.steps}) == 2
+    assert {step.source_event_ids for step in result.steps} == {
+        ("evt_start_0", "evt_complete_0"),
+        ("evt_start_1", "evt_complete_1"),
+    }
+
+
+def test_current_idless_tool_events_use_ac_scoped_fifo_fallback() -> None:
+    started = datetime(2026, 8, 6, tzinfo=UTC)
+    events = (
+        _event(
+            "evt_start_ac0",
+            "execution.tool.started",
+            started,
+            {
+                "ac_id": "runtime_ac0",
+                "root_ac_index": 0,
+                "tool_name": "Bash",
+            },
+        ),
+        _event(
+            "evt_start_ac1",
+            "execution.tool.started",
+            started + timedelta(milliseconds=1),
+            {
+                "ac_id": "runtime_ac1",
+                "root_ac_index": 1,
+                "tool_name": "Bash",
+            },
+        ),
+        _event(
+            "evt_complete_ac1",
+            "execution.tool.completed",
+            started + timedelta(seconds=1),
+            {
+                "ac_id": "runtime_ac1",
+                "root_ac_index": 1,
+                "tool_name": "Bash",
+                "tool_result": {"is_error": False},
+            },
+        ),
+        _event(
+            "evt_complete_ac0",
+            "execution.tool.completed",
+            started + timedelta(seconds=2),
+            {
+                "ac_id": "runtime_ac0",
+                "root_ac_index": 0,
+                "tool_name": "Bash",
+                "tool_result": {"is_error": False},
+            },
+        ),
+    )
+
+    result = build_projection(events, seed_id="seed_current")
+
+    assert len(result.steps) == 2
+    assert {step.source_event_ids for step in result.steps} == {
+        ("evt_start_ac0", "evt_complete_ac0"),
+        ("evt_start_ac1", "evt_complete_ac1"),
+    }
+    assert all(step.ok is True for step in result.steps)
+
+
+def test_current_nested_tool_results_preserve_fail_closed_outcomes() -> None:
+    started = datetime(2026, 8, 6, tzinfo=UTC)
+    cases: tuple[tuple[dict[str, object], bool | None], ...] = (
+        ({"tool_result": {"is_error": False}}, True),
+        ({"tool_result": {"is_error": True}}, False),
+        ({"tool_result": {"is_error": "invalid"}}, False),
+        ({"is_error": False, "tool_result": {"is_error": True}}, False),
+        ({"tool_result": "malformed"}, False),
+        ({}, None),
+    )
+
+    for index, (outcome_data, expected) in enumerate(cases):
+        event = _event(
+            f"evt_result_{index}",
+            "execution.tool.completed",
+            started + timedelta(seconds=index),
+            {
+                "ac_id": "runtime_ac0",
+                "root_ac_index": 0,
+                "tool_call_id": f"item_{index}",
+                "tool_name": "Bash",
+                **outcome_data,
+            },
+        )
+
+        result = build_projection((event,), seed_id="seed_current")
+
+        assert len(result.steps) == 1
+        assert result.steps[0].ok is expected
+
+
+def test_typed_evidence_uses_verifier_result_only_when_verifier_ran() -> None:
+    started = datetime(2026, 8, 6, tzinfo=UTC)
+    cases = (
+        (False, False, True, True),
+        (False, True, False, False),
+        (True, False, True, False),
+        (True, True, False, True),
+    )
+
+    for index, (verifier_ran, verifier_passed, evidence_valid, expected) in enumerate(cases):
+        event = _event(
+            f"evt_evidence_{index}",
+            "execution.ac.typed_evidence.observed",
+            started + timedelta(seconds=index),
+            {
+                "ac_id": "runtime_ac0",
+                "root_ac_index": 0,
+                "typed_evidence_valid": evidence_valid,
+                "verifier_ran": verifier_ran,
+                "verifier_passed": verifier_passed,
+            },
+        )
+
+        result = build_projection((event,), seed_id="seed_current")
+
+        assert len(result.steps) == 1
+        assert result.steps[0].ok is expected
