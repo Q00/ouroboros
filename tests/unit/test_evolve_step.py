@@ -36,6 +36,7 @@ from ouroboros.core.seed import (
 )
 from ouroboros.core.types import Result
 from ouroboros.core.worktree import TaskWorkspace, WorktreeError
+from ouroboros.events.base import BaseEvent
 from ouroboros.events.lineage import (
     lineage_created,
     lineage_generation_completed,
@@ -57,7 +58,11 @@ from ouroboros.evolution.projector import LineageProjector
 from ouroboros.evolution.reflect import ACPatch, ReflectOutput
 from ouroboros.evolution.watchdog import GenerationWatchdogTimeout
 from ouroboros.evolution.wonder import WonderOutput
+from ouroboros.mcp.job_manager import JobManager, JobStatus
 from ouroboros.mcp.server.adapter import _extract_feedback_metadata_from_artifact
+from ouroboros.mcp.tools.evolution_handlers import EvolveStepHandler, StartEvolveStepHandler
+from ouroboros.mcp.tools.synapse_handler import SynapseTargetsHandler
+from ouroboros.orchestrator.synapse import EventStoreSessionSignalTargetResolver
 from ouroboros.persistence.event_store import EventStore
 
 # -- Helpers --
@@ -236,6 +241,135 @@ async def seed_events_for_gen1(
             seed_json=json.dumps(seed.to_dict()),
         )
     )
+
+
+@pytest.mark.asyncio
+async def test_start_evolve_links_generation_selected_after_interleaving(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The public job identity follows the durable core claim, not stale planning."""
+    store = await create_event_store()
+    lineage_id = "lin_start_claim_interleaving"
+    initial = make_seed(seed_id="seed_start_claim_initial")
+    successor = make_seed(
+        seed_id="seed_start_claim_successor",
+        parent_seed_id=initial.metadata.seed_id,
+    )
+    generation_result = GenerationResult(
+        generation_number=2,
+        seed=successor,
+        evaluation_summary=make_eval_summary(),
+        phase=GenerationPhase.COMPLETED,
+        success=True,
+    )
+    loop = make_loop(store)
+    generation_started = asyncio.Event()
+    release_generation = asyncio.Event()
+
+    async def run_generation(**kwargs):  # type: ignore[no-untyped-def]
+        generation_number = kwargs["generation_number"]
+        execution_id = loop_support.generation_execution_id(lineage_id, generation_number)
+        await store.append(
+            BaseEvent(
+                type="execution.session.started",
+                aggregate_type="execution",
+                aggregate_id=f"{execution_id}:ac:0",
+                data={
+                    "execution_id": execution_id,
+                    "session_scope_id": f"{execution_id}:ac:0",
+                    "session_attempt_id": f"{execution_id}:ac:0:attempt:1",
+                    "runtime_backend": "codex",
+                    "ac_index": 0,
+                    "acceptance_criterion": "Tasks can be created",
+                },
+            )
+        )
+        generation_started.set()
+        await release_generation.wait()
+        return Result.ok(generation_result)
+
+    loop._run_generation = AsyncMock(side_effect=run_generation)
+    manager = JobManager(store)
+    evolve = EvolveStepHandler(
+        evolutionary_loop=loop,
+        event_store=store,
+        agent_runtime_backend="codex",
+    )
+    start = StartEvolveStepHandler(
+        evolve_handler=evolve,
+        event_store=store,
+        job_manager=manager,
+        agent_runtime_backend="codex",
+    )
+    original_planned = loop_support.planned_evolve_generation
+    core_planning = asyncio.Event()
+    release_core_planning = asyncio.Event()
+    planning_calls = 0
+
+    async def interleaved_planning(*args, **kwargs):  # type: ignore[no-untyped-def]
+        nonlocal planning_calls
+        planning_calls += 1
+        if planning_calls == 2:
+            core_planning.set()
+            await release_core_planning.wait()
+        return await original_planned(*args, **kwargs)
+
+    monkeypatch.setattr(loop_support, "planned_evolve_generation", interleaved_planning)
+    start_task = asyncio.create_task(
+        start.handle(
+            {
+                "lineage_id": lineage_id,
+                "seed_content": json.dumps(initial.to_dict()),
+                "execute": False,
+            }
+        )
+    )
+    try:
+        await asyncio.wait_for(core_planning.wait(), timeout=1.0)
+        await seed_events_for_gen1(store, lineage_id, initial, make_eval_summary(False))
+        release_core_planning.set()
+        started = await asyncio.wait_for(start_task, timeout=2.0)
+
+        assert started.is_ok
+        expected = f"evolve:{lineage_id}:generation:2"
+        stale = f"evolve:{lineage_id}:generation:1"
+        assert started.value.meta["execution_id"] == expected
+        assert started.value.meta["job_observer"]["execution_id"] == expected
+        assert started.value.structured_content["execution_id"] == expected
+
+        await asyncio.wait_for(generation_started.wait(), timeout=1.0)
+        targets = SynapseTargetsHandler(EventStoreSessionSignalTargetResolver(store))
+        discovered = await targets.handle({"execution_id": expected})
+        assert discovered.is_ok
+        assert discovered.value.meta["active_target_count"] == 1
+        assert discovered.value.meta["targets"][0]["execution_id"] == expected
+
+        release_generation.set()
+
+        job_id = started.value.meta["job_id"]
+        snapshot = await manager.get_snapshot(job_id)
+        for _ in range(100):
+            if snapshot.is_terminal:
+                break
+            await asyncio.sleep(0.01)
+            snapshot = await manager.get_snapshot(job_id)
+        assert snapshot.status == JobStatus.COMPLETED
+        assert snapshot.links.execution_id == expected
+        assert loop._run_generation.call_args.kwargs["generation_number"] == 2
+
+        job_events, _ = await store.get_events_after("job", job_id, last_row_id=0)
+        created = next(event for event in job_events if event.type == "mcp.job.created")
+        assert created.data["links"]["execution_id"] == expected
+        assert stale not in json.dumps(created.data)
+    finally:
+        release_core_planning.set()
+        release_generation.set()
+        if not start_task.done():
+            start_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await start_task
+        await manager.drain(grace_seconds=0.1)
+        await store.close()
 
 
 def create_clean_git_project(path: Path) -> Path:

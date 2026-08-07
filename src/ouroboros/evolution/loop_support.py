@@ -34,6 +34,7 @@ from ouroboros.persistence.event_store import EventStore
 
 logger = logging.getLogger(__name__)
 _PHASE_ORDER = ("wondering", "reflecting", "seeding", "executing", "evaluating")
+type GenerationClaimCallback = Callable[[int], Awaitable[None]]
 
 
 class LineageWinnerAdvanced(RuntimeError):
@@ -51,6 +52,9 @@ class EffectiveEvolutionExecutionPolicy:
 
 _ACTIVE_EVOLUTION_EXECUTION_POLICY: ContextVar[EffectiveEvolutionExecutionPolicy | None] = (
     ContextVar("ouroboros_effective_evolution_execution_policy", default=None)
+)
+_CLAIMED_GENERATION: ContextVar[int | None] = ContextVar(
+    "ouroboros_claimed_evolve_generation", default=None
 )
 
 
@@ -661,6 +665,8 @@ async def run_durable_lineage_single_flight[T](
     encode: Callable[[T], dict[str, Any]],
     decode: Callable[[Mapping[str, Any]], T | Awaitable[T]],
     scope: str = "evolve-core",
+    on_claimed: Callable[[int], Awaitable[None]] | None = None,
+    operation_for_generation: Callable[[int], Awaitable[T]] | None = None,
 ) -> T:
     """Coordinate one lineage writer across EventStore instances and processes."""
     from ouroboros.persistence import lineage_claims
@@ -686,6 +692,8 @@ async def run_durable_lineage_single_flight[T](
                 and claim.request_key == request_key
                 and claim.result_payload is not None
             ):
+                if on_claimed is not None:
+                    await on_claimed(claim.generation_number)
                 decoded = decode(claim.result_payload)
                 return await decoded if inspect.isawaitable(decoded) else decoded
             if claim.generation_number == generation_number:
@@ -693,6 +701,7 @@ async def run_durable_lineage_single_flight[T](
             await asyncio.sleep(0.01)
             continue
         if claim.acquired:
+            claimed_generation = claim.generation_number
             heartbeat = asyncio.create_task(
                 _renew_claim_until_cancelled(
                     event_store,
@@ -702,7 +711,13 @@ async def run_durable_lineage_single_flight[T](
                 )
             )
             try:
-                result = await operation()
+                if on_claimed is not None:
+                    await on_claimed(claimed_generation)
+                result = await (
+                    operation_for_generation(claimed_generation)
+                    if operation_for_generation is not None
+                    else operation()
+                )
                 if heartbeat.done():
                     heartbeat_error = None if heartbeat.cancelled() else heartbeat.exception()
                     if heartbeat_error is not None:
@@ -781,6 +796,8 @@ async def run_durable_lineage_single_flight[T](
                     )
                 if winner.completed:
                     if winner.request_key == request_key and winner.result_payload is not None:
+                        if on_claimed is not None:
+                            await on_claimed(winner.generation_number)
                         decoded = decode(winner.result_payload)
                         return await decoded if inspect.isawaitable(decoded) else decoded
                     raise LineageWinnerAdvanced
@@ -800,6 +817,61 @@ async def run_durable_lineage_single_flight[T](
                 owner_id=claim.owner_id,
                 waiter_id=waiter_id,
             )
+
+
+async def run_generation_claim_flight[T](
+    event_store: EventStore,
+    lineage_id: str,
+    request_key: str,
+    operation: Callable[[], Awaitable[T]],
+    *,
+    generation_number: int,
+    encode: Callable[[T], dict[str, Any]],
+    decode: Callable[[Mapping[str, Any]], T | Awaitable[T]],
+    on_claimed: GenerationClaimCallback | None = None,
+) -> T:
+    """Combine local duplicate coalescing with an optional exact-claim handoff."""
+
+    async def run_operation(claimed_generation: int) -> T:
+        token = _CLAIMED_GENERATION.set(claimed_generation)
+        try:
+            return await operation()
+        finally:
+            _CLAIMED_GENERATION.reset(token)
+
+    async def run_claimed() -> T:
+        return await run_durable_lineage_single_flight(
+            event_store,
+            lineage_id,
+            request_key,
+            lambda: run_operation(generation_number),
+            generation_number=generation_number,
+            encode=encode,
+            decode=decode,
+            on_claimed=on_claimed,
+            operation_for_generation=run_operation,
+        )
+
+    if on_claimed is not None:
+        return await run_claimed()
+    return await run_lineage_single_flight(
+        event_store,
+        lineage_id,
+        request_key,
+        run_claimed,
+        replan_on_different=True,
+    )
+
+
+def claimed_generation_error(projected: int) -> str | None:
+    """Describe a projection that advanced after its durable claim was selected."""
+    expected = _CLAIMED_GENERATION.get()
+    if expected in (None, projected):
+        return None
+    return (
+        "Claimed evolve generation changed before execution: "
+        f"expected {expected}, projected {projected}"
+    )
 
 
 async def _renew_claim_until_cancelled(

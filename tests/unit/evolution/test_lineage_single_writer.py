@@ -852,6 +852,69 @@ async def test_post_commit_heartbeat_error_does_not_override_receipt(
 
 
 @pytest.mark.asyncio
+async def test_generation_claim_callback_holds_operation_until_released(tmp_path: Path) -> None:
+    """The exact durable generation is published before generation effects begin."""
+    writer, reader = await _stores(tmp_path / "claim-handoff.db")
+    claimed = asyncio.Event()
+    release = asyncio.Event()
+    operation_started = asyncio.Event()
+    claimed_generations: list[int] = []
+
+    async def on_claimed(generation_number: int) -> None:
+        claimed_generations.append(generation_number)
+        claimed.set()
+        await release.wait()
+
+    async def operation() -> str:
+        operation_started.set()
+        return "generation-result"
+
+    task = asyncio.create_task(
+        run_durable_lineage_single_flight(
+            writer,
+            "claim-handoff-lineage",
+            "claim-handoff-request",
+            operation,
+            generation_number=2,
+            encode=lambda value: {"value": value},
+            decode=lambda payload: str(payload["value"]),
+            on_claimed=on_claimed,
+        )
+    )
+    try:
+        await asyncio.wait_for(claimed.wait(), timeout=1.0)
+        assert claimed_generations == [2]
+        assert not operation_started.is_set()
+
+        release.set()
+        assert await asyncio.wait_for(task, timeout=1.0) == "generation-result"
+        assert operation_started.is_set()
+
+        replayed_claims: list[int] = []
+        replayed = await run_durable_lineage_single_flight(
+            reader,
+            "claim-handoff-lineage",
+            "claim-handoff-request",
+            lambda: asyncio.sleep(0, result="must-not-run"),
+            generation_number=2,
+            encode=lambda value: {"value": value},
+            decode=lambda payload: str(payload["value"]),
+            on_claimed=lambda generation: asyncio.sleep(
+                0, result=replayed_claims.append(generation)
+            ),
+        )
+        assert replayed == "generation-result"
+        assert replayed_claims == [2]
+    finally:
+        if not task.done():
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        await writer.close()
+        await reader.close()
+
+
+@pytest.mark.asyncio
 async def test_failed_step_receipt_replays_seed_from_started_event(tmp_path: Path) -> None:
     """Cross-process waiters reproduce a failed winner without inventing a Seed."""
     writer, reader = await _stores(tmp_path / "failed-receipt.db")

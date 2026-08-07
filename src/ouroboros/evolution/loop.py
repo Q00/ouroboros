@@ -576,6 +576,7 @@ class EvolutionaryLoop:
         parallel: bool = True,
         conductor_directive: ConductorDirective | None = None,
         benchmark_control: bool = False,
+        on_generation_claimed: loop_support.GenerationClaimCallback | None = None,
     ) -> Result[StepResult, OuroborosError]:
         """Advance one lineage once while task-local policy and durable claims coalesce retries."""
         from ouroboros.evolution.step_receipt import decode_step_result, encode_step_result
@@ -598,26 +599,21 @@ class EvolutionaryLoop:
                     execution_policy=durable_policy,
                 )
                 try:
-                    return await loop_support.run_lineage_single_flight(
+                    return await loop_support.run_generation_claim_flight(
                         self.event_store,
                         lineage_id,
                         request_key,
-                        lambda: loop_support.run_durable_lineage_single_flight(
-                            self.event_store,
+                        lambda: self._evolve_step_once(
                             lineage_id,
-                            request_key,
-                            lambda: self._evolve_step_once(
-                                lineage_id,
-                                initial_seed=initial_seed,
-                                execute=execute,
-                                parallel=parallel,
-                                conductor_directive=conductor_directive,
-                            ),
-                            generation_number=generation_number,
-                            encode=encode_step_result,
-                            decode=lambda payload: decode_step_result(self.event_store, payload),
+                            initial_seed=initial_seed,
+                            execute=execute,
+                            parallel=parallel,
+                            conductor_directive=conductor_directive,
                         ),
-                        replan_on_different=True,
+                        generation_number=generation_number,
+                        encode=encode_step_result,
+                        decode=lambda payload: decode_step_result(self.event_store, payload),
+                        on_claimed=on_generation_claimed,
                     )
                 except loop_support.LineageWinnerAdvanced:
                     continue
@@ -817,6 +813,9 @@ class EvolutionaryLoop:
                     next_generation=generation_number,
                 )
             )
+
+        if error := loop_support.claimed_generation_error(generation_number):
+            return Result.err(OuroborosError(error))
 
         approved_seed = current_seed
         if conductor_directive is not None:

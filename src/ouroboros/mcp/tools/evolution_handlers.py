@@ -7,6 +7,7 @@ Contains handlers for evolutionary loop operations:
 - StartEvolveStepHandler: Start an evolve_step asynchronously (background job)
 """
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 import os
 from pathlib import Path
@@ -47,6 +48,7 @@ from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.job_manager import JobLinks, JobManager
 from ouroboros.mcp.tools.background import start_background_tool_job
 from ouroboros.mcp.tools.bridge_mixin import BridgeAwareMixin
+from ouroboros.mcp.tools.evolve_start_claim import PreparedEvolveClaim
 from ouroboros.mcp.tools.job_observer import build_job_observer_contract
 from ouroboros.mcp.tools.subagent import (
     DELEGATED_TO_PLUGIN,
@@ -501,6 +503,8 @@ class EvolveStepHandler(BridgeAwareMixin):
     async def handle(
         self,
         arguments: dict[str, Any],
+        *,
+        on_generation_claimed: Callable[[int], Awaitable[None]] | None = None,
     ) -> Result[MCPToolResult, MCPServerError]:
         """Coalesce the complete public request before workspace acquisition."""
         lineage_id = arguments.get("lineage_id")
@@ -639,9 +643,15 @@ class EvolveStepHandler(BridgeAwareMixin):
             )
 
             async def run_bounded_handler() -> Result[MCPToolResult, MCPServerError]:
+                claimed_callback = on_generation_claimed
+                if recovered_evolve_result is not None and claimed_callback is not None:
+                    assert recovered_generation is not None
+                    await claimed_callback(recovered_generation)
+                    claimed_callback = None
                 raw_result = await self._handle_once(
                     dict(arguments),
                     recovered_evolve_result=recovered_evolve_result,
+                    on_generation_claimed=claimed_callback,
                 )
                 return decode_evolve_handler_result(encode_evolve_handler_result(raw_result))
 
@@ -667,6 +677,8 @@ class EvolveStepHandler(BridgeAwareMixin):
                 except loop_support.LineageWinnerAdvanced:
                     continue
 
+        if on_generation_claimed is not None:
+            return await run_public_request()
         return await loop_support.run_lineage_single_flight(
             event_store,
             str(lineage_id),
@@ -680,6 +692,7 @@ class EvolveStepHandler(BridgeAwareMixin):
         arguments: dict[str, Any],
         *,
         recovered_evolve_result: Any | None = None,
+        on_generation_claimed: Callable[[int], Awaitable[None]] | None = None,
     ) -> Result[MCPToolResult, MCPServerError]:
         """Run one complete evolve handler request under public ownership."""
         lineage_id = arguments.get("lineage_id")
@@ -820,6 +833,7 @@ class EvolveStepHandler(BridgeAwareMixin):
                     lineage_id,
                     initial_seed,
                     **evolve_kwargs,
+                    on_generation_claimed=on_generation_claimed,
                 )
             if result.is_ok:
                 step = result.value
@@ -1630,23 +1644,32 @@ class StartEvolveStepHandler:
         # Fall-through: real background job path. The shared pipeline owns the
         # ``should_cancel()`` pre-work guard, so the runner only does the work.
         await self._event_store.initialize()
-        replay_lineage = getattr(self._event_store, "replay_lineage", None)
-        generation_number = (
-            await loop_support.planned_evolve_generation(
-                self._event_store,
-                str(lineage_id),
-                execute=bool(arguments.get("execute", True)),
-            )
-            if callable(replay_lineage)
-            else 1
+        supports_claimed_handoff = (
+            isinstance(self._event_store, EventStore)
+            and getattr(self._evolve_handler, "evolutionary_loop", None) is not None
         )
-        # Generation execution IDs are deterministic. Publishing the same ID
-        # in the durable job link and observer lets the caller discover the
-        # exact AC attempts once their lifecycle events become visible.
-        execution_id = loop_support.generation_execution_id(
+        prepared_claim = PreparedEvolveClaim(
+            self._evolve_handler,
+            arguments,
             str(lineage_id),
-            generation_number,
         )
+
+        execution_id = None
+        if not supports_claimed_handoff:
+            replay_lineage = getattr(self._event_store, "replay_lineage", None)
+            generation_number = (
+                await loop_support.planned_evolve_generation(
+                    self._event_store,
+                    str(lineage_id),
+                    execute=bool(arguments.get("execute", True)),
+                )
+                if callable(replay_lineage)
+                else 1
+            )
+            execution_id = loop_support.generation_execution_id(
+                str(lineage_id),
+                generation_number,
+            )
 
         async def _runner(_handle) -> MCPToolResult:
             result = await self._evolve_handler.handle(arguments)
@@ -1668,6 +1691,11 @@ class StartEvolveStepHandler:
             detached_arguments=arguments,
             runtime_backend=self.agent_runtime_backend,
             opencode_mode=self.opencode_mode,
+            prepare_inline=prepared_claim.prepare if supports_claimed_handoff else None,
+            on_cancel_before_work=prepared_claim.abort if supports_claimed_handoff else None,
+            on_enqueue_failure=(
+                prepared_claim.abort_on_failure if supports_claimed_handoff else None
+            ),
         )
 
         text = (
