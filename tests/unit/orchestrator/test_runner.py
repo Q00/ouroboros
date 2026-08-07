@@ -220,7 +220,9 @@ def _attach_live_process_local_contract(
     if not isinstance(getattr(runner._adapter, "_model", None), str):
         runner._adapter._model = "test-model"
     generation = runner._begin_process_local_authority_generation()
-    contract = runner._build_execution_contract(seed=seed, authority_generation=generation)
+    contract = runner._build_execution_contract(
+        project_identity=runner._project_identity(), seed=seed, authority_generation=generation
+    )
     runner._register_process_local_authority(
         session_id=session_id,
         execution_id=tracker.execution_id,
@@ -6180,7 +6182,9 @@ class TestOrchestratorRunner:
             sample_seed.metadata.seed_id,
             session_id="sess_parallel_semantics_drift",
         )
-        execution_contract = runner._build_execution_contract(seed=sample_seed)
+        execution_contract = runner._build_execution_contract(
+            project_identity=runner._project_identity(), seed=sample_seed
+        )
         runner._run_verify_commands = not runner._run_verify_commands
         analyzer = MagicMock()
         analyzer.analyze = AsyncMock(
@@ -6261,7 +6265,9 @@ class TestOrchestratorRunner:
             sample_seed.metadata.seed_id,
             session_id="sess_parallel_resolved_limits",
         )
-        execution_contract = runner._build_execution_contract(seed=sample_seed)
+        execution_contract = runner._build_execution_contract(
+            project_identity=runner._project_identity(), seed=sample_seed
+        )
         semantics = execution_contract["execution_semantics"]
         executor_cls = MagicMock()
         cancellation_result: Result[OrchestratorResult, OrchestratorError] = Result.err(
@@ -6731,6 +6737,7 @@ class TestOrchestratorRunner:
         execution_id = "exec-legacy-managed-linked"
         generation = runner._begin_process_local_authority_generation()
         contract = runner._build_execution_contract(
+            project_identity=runner._project_identity(),
             seed=sample_seed,
             authority_generation=generation,
         )
@@ -7402,7 +7409,11 @@ class TestOrchestratorRunner:
         from ouroboros.orchestrator.mcp_tools import assemble_session_tool_catalog
 
         runner = OrchestratorRunner(mock_adapter, mock_event_store, mock_console)
-        legacy_contract = copy.deepcopy(runner._build_execution_contract(seed=sample_seed))
+        legacy_contract = copy.deepcopy(
+            runner._build_execution_contract(
+                project_identity=runner._project_identity(), seed=sample_seed
+            )
+        )
         legacy_contract["execution_semantics"]["decomposition_mode"] = "preflight"
         legacy_contract["frugality_proof"]["execution_semantics_fingerprint"] = (
             runner._execution_semantics_fingerprint(legacy_contract["execution_semantics"])
@@ -8489,7 +8500,9 @@ class TestOrchestratorRunner:
             mock_console,
             inherited_runtime_handle=inherited_handle,
         )
-        execution_contract = runner._build_execution_contract(seed=sample_seed)
+        execution_contract = runner._build_execution_contract(
+            project_identity=runner._project_identity(), seed=sample_seed
+        )
         persisted_profile = runner._execution_profile_snapshot(
             execution_contract,
             require_bound=True,

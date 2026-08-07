@@ -275,15 +275,6 @@ def _mapping_has_exact_keys(value: object, expected: frozenset[str]) -> bool:
     return False
 
 
-class _UnresolvedProjectIdentity:
-    """Sentinel type separating omitted resolution from resolved absence."""
-
-    __slots__ = ()
-
-
-_UNRESOLVED_PROJECT_IDENTITY = _UnresolvedProjectIdentity()
-
-
 @dataclass(frozen=True, slots=True)
 class _PersistedExecutionStrategy:
     """Effect-bearing prompt/tool strategy restored without live config reads."""
@@ -5594,9 +5585,7 @@ class OrchestratorRunner:
         seed_fingerprint: str | None = None,
         authority_generation: _ProcessLocalAuthorityGeneration | None = None,
         execution_inputs_contract: Mapping[str, Any] | None = None,
-        project_identity: ProjectIdentity | None | _UnresolvedProjectIdentity = (
-            _UNRESOLVED_PROJECT_IDENTITY
-        ),
+        project_identity: ProjectIdentity | None,
         runtime_handle: RuntimeHandle | None = None,
     ) -> dict[str, Any]:
         """Build the durable resolved inputs shared by resume and proof cohorting."""
@@ -5653,12 +5642,7 @@ class OrchestratorRunner:
             ),
             "execution_inputs_fingerprint": self._execution_inputs_fingerprint(execution_inputs),
         }
-        resolved_project_identity = (
-            self._project_identity()
-            if isinstance(project_identity, _UnresolvedProjectIdentity)
-            else project_identity
-        )
-        workspace_identity = self._resolved_proof_workspace_identity(resolved_project_identity)
+        workspace_identity = self._resolved_proof_workspace_identity(project_identity)
         if workspace_identity is not None:
             proof_contract.update(workspace_identity)
         resolved_seed_fingerprint = seed_fingerprint

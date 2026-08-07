@@ -364,6 +364,7 @@ from ouroboros.orchestrator.rate_limit import (
     estimate_runtime_request_tokens,
 )
 from ouroboros.orchestrator.recoverable_failure import is_usage_limit_pause_message
+from ouroboros.orchestrator.retry_hints import build_assertion_safe_retry_hint
 from ouroboros.orchestrator.route_compat import (
     RouteCompatProjection,
     admit_compat_escalation_route,
@@ -9846,9 +9847,7 @@ Respond with either ATOMIC or the structured JSON object only.
         if spec.output_assertion and spec.output_assertion not in combined:
             return _VerifyGateOutcome(
                 passed=False,
-                reason=(
-                    f"output_assertion {spec.output_assertion!r} not found in verify_command output"
-                ),
+                reason="output_assertion not satisfied by verify_command output",
                 output_tail=tail,
                 workspace_digest=workspace_digest(),
             )
@@ -10660,19 +10659,27 @@ Respond with either ATOMIC or the structured JSON object only.
         result: ACExecutionResult,
         ac_content: str,
         is_final_attempt: bool,
+        manifest: EvidenceManifest | None = None,
+        spec: AcceptanceCriterionSpec | None = None,
     ) -> str:
         """Build the enriched retry prompt section for a re-dispatched AC (PR-V V3/V4)."""
         parts: list[str] = []
         failure_class = self._failure_class_for_result(result)
         if failure_class:
             parts.append(f"### Prior failure classification\n{failure_class}")
-        last_error = result.error or result.final_message or ""
-        if last_error and last_error != _STALL_SENTINEL:
-            redacted_error = redact_and_truncate_text(
-                last_error,
-                max_chars=max(500, len(last_error) * 2),
+        if result.error != _STALL_SENTINEL:
+            hint = build_assertion_safe_retry_hint(
+                outcome=(
+                    result.verify_gate_outcome
+                    if isinstance(result.verify_gate_outcome, _VerifyGateOutcome)
+                    else None
+                ),
+                result=result,
+                manifest=manifest,
+                spec=spec,
             )
-            parts.append("### Last error (tail)\n" + redacted_error[-500:])
+            if hint:
+                parts.append(hint)
         if is_final_attempt:
             from ouroboros.resilience.lateral import (
                 build_lateral_change_of_approach_directive,
@@ -10689,6 +10696,34 @@ Respond with either ATOMIC or the structured JSON object only.
                 )
             )
         return "\n\n".join(parts)
+
+    async def _load_ac_retry_manifest(
+        self,
+        *,
+        ac_index: int,
+        execution_id: str,
+    ) -> EvidenceManifest | None:
+        """Best-effort read-only evidence load for retry coaching."""
+
+        try:
+            identity = build_ac_runtime_identity(
+                ac_index,
+                execution_context_id=execution_id,
+                retry_attempt=0,
+            )
+            return await load_ac_evidence_manifest(
+                self._event_store,
+                ac_id=identity.ac_id,
+                execution_id=execution_id,
+            )
+        except Exception as exc:
+            log.warning(
+                "parallel_executor.ac.retry_hint_manifest_unavailable",
+                ac_index=ac_index,
+                execution_id=execution_id,
+                error=str(exc),
+            )
+            return None
 
     async def _run_batch_with_verify_and_retry(
         self,
@@ -10814,10 +10849,17 @@ Respond with either ATOMIC or the structured JSON object only.
                 is_final = ac_retry_attempts[ac_idx] >= self._ac_retry_attempts
                 prior = results[position_by_idx[ac_idx]]
                 if isinstance(prior, ACExecutionResult):
+                    manifest = await self._load_ac_retry_manifest(
+                        ac_index=ac_idx,
+                        execution_id=execution_id,
+                    )
+                    spec = seed.acceptance_criteria[ac_idx]
                     retry_prompts[ac_idx] = self._build_ac_retry_prompt(
                         result=prior,
-                        ac_content=ac_text(seed.acceptance_criteria[ac_idx]),
+                        ac_content=ac_text(spec),
                         is_final_attempt=is_final,
+                        manifest=manifest,
+                        spec=spec if isinstance(spec, AcceptanceCriterionSpec) else None,
                     )
 
             # Pending ACs advance their retry counter in lockstep, so the batch
@@ -11582,10 +11624,17 @@ Respond with either ATOMIC or the structured JSON object only.
                     ac_retry_attempts[ac_idx] += 1
                     next_pending.add(ac_idx)
                     next_overrides[ac_idx] = decision.selected
+                    manifest = await self._load_ac_retry_manifest(
+                        ac_index=ac_idx,
+                        execution_id=execution_id,
+                    )
+                    spec = seed.acceptance_criteria[ac_idx]
                     next_prompts[ac_idx] = self._build_ac_retry_prompt(
                         result=gated,
-                        ac_content=ac_text(seed.acceptance_criteria[ac_idx]),
+                        ac_content=ac_text(spec),
                         is_final_attempt=not decision.remaining_route_ids,
+                        manifest=manifest,
+                        spec=spec if isinstance(spec, AcceptanceCriterionSpec) else None,
                     )
                     continue
 
@@ -11663,6 +11712,11 @@ Respond with either ATOMIC or the structured JSON object only.
         ):
             ac_retry_attempts[ac_idx] += 1
             is_final = ac_retry_attempts[ac_idx] >= self._ac_retry_attempts
+            manifest = await self._load_ac_retry_manifest(
+                ac_index=ac_idx,
+                execution_id=execution_id,
+            )
+            spec = seed.acceptance_criteria[ac_idx]
             retried = await self._execute_ac_batch(
                 seed=seed,
                 batch_indices=[ac_idx],
@@ -11677,8 +11731,10 @@ Respond with either ATOMIC or the structured JSON object only.
                 retry_prompts={
                     ac_idx: self._build_ac_retry_prompt(
                         result=current,
-                        ac_content=ac_text(seed.acceptance_criteria[ac_idx]),
+                        ac_content=ac_text(spec),
                         is_final_attempt=is_final,
+                        manifest=manifest,
+                        spec=spec if isinstance(spec, AcceptanceCriterionSpec) else None,
                     )
                 },
                 same_runtime_budget_exhausted=is_final,

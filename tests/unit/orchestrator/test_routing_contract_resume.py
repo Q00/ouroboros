@@ -228,6 +228,18 @@ def _clear_model_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("ouroboros.config.load_config", get_default_config)
 
 
+def test_execution_contract_requires_explicit_project_identity() -> None:
+    """#1798: the self-resolving sentinel default is gone.
+
+    Omitting project_identity used to silently trigger a Git-subprocess
+    resolution through a private sentinel that no call site could see. The
+    parameter is required now, so an implicit call fails at the call site
+    instead of hiding a resolution cost.
+    """
+    with pytest.raises(TypeError, match="project_identity"):
+        _runner()._build_execution_contract(seed=_seed())
+
+
 def test_router_contract_round_trips_custom_frontier_policy() -> None:
     router = _frontier_custom_router()
 
@@ -303,7 +315,9 @@ def test_router_contract_rejects_semantically_invalid_ladder(router_payload: dic
 def test_resume_restores_persisted_custom_frontier_router() -> None:
     original = _runner()
     _use_frontier_custom_routing(original)
-    persisted = original._build_execution_contract()
+    persisted = original._build_execution_contract(
+        project_identity=original._project_identity(),
+    )
 
     resumed = _runner()
     resumed._route_economics = _frontier_custom_economics()
@@ -335,7 +349,11 @@ def test_v9_resume_rejects_every_inexact_top_level_shape_before_effects(
     schema_mutation: str,
 ) -> None:
     original = _runner()
-    persisted = copy.deepcopy(original._build_execution_contract(seed=_seed()))
+    persisted = copy.deepcopy(
+        original._build_execution_contract(
+            project_identity=original._project_identity(), seed=_seed()
+        )
+    )
     assert frozenset(persisted) == EXECUTION_CONTRACT_V9_TOP_LEVEL_KEYS
     if schema_mutation == "unknown_top_level_key":
         persisted[schema_mutation] = "not part of v9"
@@ -376,7 +394,11 @@ def test_v9_resume_rejects_every_inexact_top_level_shape_before_effects(
 
 def test_resume_rejects_router_policy_that_validates_its_own_projection() -> None:
     original = _runner()
-    persisted = copy.deepcopy(original._build_execution_contract())
+    persisted = copy.deepcopy(
+        original._build_execution_contract(
+            project_identity=original._project_identity(),
+        )
+    )
     routing = persisted["model_routing"]
     router = routing["router"]
     projection = routing["route_compat"]["projection"]
@@ -391,7 +413,11 @@ def test_resume_rejects_router_policy_that_validates_its_own_projection() -> Non
 
 def test_pre_admission_v2_contract_fails_closed_without_complete_effect_inputs() -> None:
     original = _runner()
-    persisted = copy.deepcopy(original._build_execution_contract(seed=_seed()))
+    persisted = copy.deepcopy(
+        original._build_execution_contract(
+            project_identity=original._project_identity(), seed=_seed()
+        )
+    )
     persisted["version"] = 2
     routing = persisted["model_routing"]
     del routing["reasoning_effort"]
@@ -414,7 +440,11 @@ def test_pre_admission_v2_contract_fails_closed_without_complete_effect_inputs()
 
 def test_pre_requested_tier_v3_contract_fails_closed_without_complete_effect_inputs() -> None:
     original = _runner(base_model_tier="frontier")
-    persisted = copy.deepcopy(original._build_execution_contract(seed=_seed()))
+    persisted = copy.deepcopy(
+        original._build_execution_contract(
+            project_identity=original._project_identity(), seed=_seed()
+        )
+    )
     persisted["version"] = 3
     routing = persisted["model_routing"]
     del routing["requested_model_tier"]
@@ -435,7 +465,11 @@ def test_pre_requested_tier_v3_contract_fails_closed_without_complete_effect_inp
 
 def test_pre_execution_semantics_v4_contract_fails_closed_without_complete_effect_inputs() -> None:
     original = _runner()
-    persisted = copy.deepcopy(original._build_execution_contract(seed=_seed()))
+    persisted = copy.deepcopy(
+        original._build_execution_contract(
+            project_identity=original._project_identity(), seed=_seed()
+        )
+    )
     persisted["version"] = 4
     del persisted["execution_semantics"]
     del persisted["frugality_proof"]["execution_semantics_fingerprint"]
@@ -453,7 +487,11 @@ def test_pre_execution_semantics_v4_contract_fails_closed_without_complete_effec
 def test_recent_contracts_without_complete_effect_inputs_fail_closed(
     legacy_version: int,
 ) -> None:
-    persisted = copy.deepcopy(_runner()._build_execution_contract(seed=_seed()))
+    persisted = copy.deepcopy(
+        _runner()._build_execution_contract(
+            project_identity=_runner()._project_identity(), seed=_seed()
+        )
+    )
     persisted["version"] = legacy_version
 
     with pytest.raises(OrchestratorError, match="without durable effect inputs") as exc_info:
@@ -468,7 +506,9 @@ def test_recent_contracts_without_complete_effect_inputs_fail_closed(
 
 def test_fat_harness_contract_freezes_resolved_profile_strategy_and_catalog() -> None:
     runner = _runner(fat_harness_mode=True)
-    contract = runner._build_execution_contract(seed=_seed())
+    contract = runner._build_execution_contract(
+        project_identity=runner._project_identity(), seed=_seed()
+    )
 
     strategy = runner._execution_strategy_snapshot(contract, require_bound=True)
     inputs = contract["execution_inputs"]
@@ -498,7 +538,9 @@ def test_v9_inputs_freeze_context_profile_parent_lineage_pause_and_runtime_capab
     )
     runner = _runner(cwd=str(tmp_path), inherited_runtime_handle=inherited)
     seed = _seed()
-    contract = runner._build_execution_contract(seed=seed)
+    contract = runner._build_execution_contract(
+        project_identity=runner._project_identity(), seed=seed
+    )
 
     inputs = contract["execution_inputs"]
     semantics = contract["execution_semantics"]
@@ -560,7 +602,7 @@ def test_execution_inputs_reject_noncanonical_parent_handle_before_publication()
     )
 
     with pytest.raises(OrchestratorError, match="non-canonical execution effect inputs"):
-        runner._build_execution_contract(seed=_seed())
+        runner._build_execution_contract(project_identity=None, seed=_seed())
 
 
 @pytest.mark.parametrize(
@@ -572,7 +614,11 @@ def test_execution_inputs_reject_noncanonical_parent_handle_before_publication()
     ],
 )
 def test_current_execution_inputs_require_complete_effect_population(field: str) -> None:
-    persisted = copy.deepcopy(_runner()._build_execution_contract(seed=_seed()))
+    persisted = copy.deepcopy(
+        _runner()._build_execution_contract(
+            project_identity=_runner()._project_identity(), seed=_seed()
+        )
+    )
     del persisted["execution_inputs"][field]
     persisted["frugality_proof"]["execution_inputs_fingerprint"] = (
         OrchestratorRunner._execution_inputs_fingerprint(persisted["execution_inputs"])
@@ -588,7 +634,9 @@ def test_current_execution_inputs_require_complete_effect_population(field: str)
 def test_persisted_research_strategy_does_not_gain_edit_on_resume() -> None:
     runner = _runner()
     research_seed = _seed().model_copy(update={"task_type": "research"})
-    contract = runner._build_execution_contract(seed=research_seed)
+    contract = runner._build_execution_contract(
+        project_identity=runner._project_identity(), seed=research_seed
+    )
 
     strategy = runner._execution_strategy_snapshot(contract, require_bound=True)
 
@@ -601,7 +649,9 @@ def test_complete_tool_catalog_drift_is_rejected_before_resume_dispatch() -> Non
 
     runner = _runner()
     research_seed = _seed().model_copy(update={"task_type": "research"})
-    contract = runner._build_execution_contract(seed=research_seed)
+    contract = runner._build_execution_contract(
+        project_identity=runner._project_identity(), seed=research_seed
+    )
     drifted_catalog = assemble_session_tool_catalog(
         ["Read", "Write", "Edit", "Bash", "Glob", "Grep"]
     )
@@ -616,7 +666,11 @@ def test_complete_tool_catalog_drift_is_rejected_before_resume_dispatch() -> Non
 
 def test_malformed_v3_contract_does_not_bypass_effect_input_version_gate() -> None:
     original = _runner()
-    persisted = copy.deepcopy(original._build_execution_contract())
+    persisted = copy.deepcopy(
+        original._build_execution_contract(
+            project_identity=original._project_identity(),
+        )
+    )
     persisted["version"] = 3
     routing = persisted["model_routing"]
     del routing["requested_model_tier"]
@@ -633,7 +687,9 @@ def test_malformed_v3_contract_does_not_bypass_effect_input_version_gate() -> No
 
 def test_execution_semantics_change_contract_without_changing_route_identity() -> None:
     runner = _runner()
-    baseline = runner._build_execution_contract()
+    baseline = runner._build_execution_contract(
+        project_identity=runner._project_identity(),
+    )
     baseline_routing_fingerprint = baseline["frugality_proof"]["routing_fingerprint"]
 
     runner._run_verify_commands = False
@@ -643,7 +699,9 @@ def test_execution_semantics_change_contract_without_changing_route_identity() -
     runner._decomposition_mode = "off"
     runner._max_decomposition_depth = 7
     runner._fat_harness_mode = True
-    changed = runner._build_execution_contract()
+    changed = runner._build_execution_contract(
+        project_identity=runner._project_identity(),
+    )
 
     assert changed["model_routing"] == baseline["model_routing"]
     assert changed["frugality_proof"]["routing_fingerprint"] == baseline_routing_fingerprint
@@ -659,7 +717,9 @@ def test_resume_rejects_weaker_current_execution_semantics_before_dispatch() -> 
     original._run_verify_commands = True
     original._verify_command_timeout_seconds = 600
     original._ac_retry_attempts = 2
-    persisted = original._build_execution_contract(seed=_seed())
+    persisted = original._build_execution_contract(
+        project_identity=original._project_identity(), seed=_seed()
+    )
 
     resumed = _runner(enable_decomposition=False, fat_harness_mode=False)
     resumed._run_verify_commands = False
@@ -727,7 +787,9 @@ def test_resume_rejects_context_pack_and_effective_concurrency_drift(
     monkeypatch.setenv("OUROBOROS_CONTEXT_PACK", "1")
     monkeypatch.setenv("OUROBOROS_MAX_CONCURRENCY", "1")
     original = _runner(max_parallel_workers=3)
-    persisted = original._build_execution_contract(seed=_seed())
+    persisted = original._build_execution_contract(
+        project_identity=original._project_identity(), seed=_seed()
+    )
     assert persisted["execution_semantics"]["context_pack_enabled"] is True
     assert persisted["execution_semantics"]["effective_parallel_workers"] == 1
 
@@ -749,7 +811,9 @@ def test_resume_rejects_backend_rate_and_pacing_owner_drift(
     monkeypatch.setenv("OUROBOROS_CLAUDE_RPM", "10")
     original = _runner(max_parallel_workers=3)
     original._adapter.self_governs_rate_limit = False
-    persisted = original._build_execution_contract(seed=_seed())
+    persisted = original._build_execution_contract(
+        project_identity=original._project_identity(), seed=_seed()
+    )
     assert persisted["execution_semantics"]["backend_requests_per_minute"] == 10
     assert persisted["execution_semantics"]["backend_self_governs_rate_limit"] is False
 
@@ -770,7 +834,9 @@ def test_resume_rejects_usage_limit_pause_policy_drift(
     """Recovery timing is immutable execution authority, not live resume config."""
 
     monkeypatch.setenv("OUROBOROS_USAGE_LIMIT_PAUSE_HOURS", "1")
-    persisted = _runner()._build_execution_contract(seed=_seed())
+    persisted = _runner()._build_execution_contract(
+        project_identity=_runner()._project_identity(), seed=_seed()
+    )
     assert persisted["execution_semantics"]["usage_limit_pause_seconds"] == 3600
 
     monkeypatch.setenv("OUROBOROS_USAGE_LIMIT_PAUSE_HOURS", "9")
@@ -816,7 +882,9 @@ def test_resume_rejects_runtime_effort_capability_or_vocabulary_drift(
         enforceable_reasoning_efforts=frozenset({"low", "medium", "high", "xhigh"}),
         model_override_support=ParamSupport.NATIVE,
     )
-    persisted = original._build_execution_contract(seed=_seed())
+    persisted = original._build_execution_contract(
+        project_identity=original._project_identity(), seed=_seed()
+    )
     assert (
         persisted["execution_semantics"]["runtime_effect_capabilities"]["reasoning_effort_support"]
         == "native"
@@ -862,7 +930,11 @@ def test_resume_rejects_runtime_effort_capability_or_vocabulary_drift(
 )
 def test_current_execution_semantics_requires_complete_exact_population(field: str) -> None:
     original = _runner()
-    persisted = copy.deepcopy(original._build_execution_contract())
+    persisted = copy.deepcopy(
+        original._build_execution_contract(
+            project_identity=original._project_identity(),
+        )
+    )
     del persisted["execution_semantics"][field]
     persisted["frugality_proof"]["execution_semantics_fingerprint"] = (
         OrchestratorRunner._execution_semantics_fingerprint(persisted["execution_semantics"])
@@ -873,7 +945,11 @@ def test_current_execution_semantics_requires_complete_exact_population(field: s
 
 
 def test_current_execution_semantics_migrates_retired_preflight_authority_once() -> None:
-    persisted = copy.deepcopy(_runner()._build_execution_contract())
+    persisted = copy.deepcopy(
+        _runner()._build_execution_contract(
+            project_identity=_runner()._project_identity(),
+        )
+    )
     persisted["execution_semantics"]["decomposition_mode"] = "preflight"
     persisted["frugality_proof"]["execution_semantics_fingerprint"] = (
         OrchestratorRunner._execution_semantics_fingerprint(persisted["execution_semantics"])
@@ -893,7 +969,11 @@ def test_current_execution_semantics_migrates_retired_preflight_authority_once()
 
 
 def test_legacy_preflight_migration_rejects_unsealed_semantics() -> None:
-    persisted = copy.deepcopy(_runner()._build_execution_contract())
+    persisted = copy.deepcopy(
+        _runner()._build_execution_contract(
+            project_identity=_runner()._project_identity(),
+        )
+    )
     persisted["execution_semantics"]["decomposition_mode"] = "preflight"
 
     with pytest.raises(OrchestratorError, match="invalid legacy preflight contract"):
@@ -913,7 +993,11 @@ def test_legacy_preflight_migration_rejects_unsealed_semantics() -> None:
 def test_current_runtime_effect_capabilities_require_complete_exact_population(
     field: str,
 ) -> None:
-    persisted = copy.deepcopy(_runner()._build_execution_contract())
+    persisted = copy.deepcopy(
+        _runner()._build_execution_contract(
+            project_identity=_runner()._project_identity(),
+        )
+    )
     del persisted["execution_semantics"]["runtime_effect_capabilities"][field]
     persisted["frugality_proof"]["execution_semantics_fingerprint"] = (
         OrchestratorRunner._execution_semantics_fingerprint(persisted["execution_semantics"])
@@ -927,7 +1011,11 @@ def test_current_runtime_effect_capabilities_require_complete_exact_population(
 def test_current_execution_semantics_rejects_unbounded_pause_policy(
     pause_seconds: object,
 ) -> None:
-    persisted = copy.deepcopy(_runner()._build_execution_contract())
+    persisted = copy.deepcopy(
+        _runner()._build_execution_contract(
+            project_identity=_runner()._project_identity(),
+        )
+    )
     persisted["execution_semantics"]["usage_limit_pause_seconds"] = pause_seconds
     persisted["frugality_proof"]["execution_semantics_fingerprint"] = (
         OrchestratorRunner._execution_semantics_fingerprint(persisted["execution_semantics"])
@@ -942,7 +1030,11 @@ def test_current_contract_missing_admission_field_is_not_treated_as_legacy(
     missing: str,
 ) -> None:
     original = _runner()
-    persisted = copy.deepcopy(original._build_execution_contract())
+    persisted = copy.deepcopy(
+        original._build_execution_contract(
+            project_identity=original._project_identity(),
+        )
+    )
     routing = persisted["model_routing"]
     del routing[missing]
     persisted["frugality_proof"]["routing_fingerprint"] = OrchestratorRunner._routing_fingerprint(
@@ -972,7 +1064,9 @@ def test_unbounded_economics_contract_is_json_safe_and_round_trips() -> None:
     original._model_router = router
     original._requested_model_tier = "frontier"
 
-    persisted = original._build_execution_contract()
+    persisted = original._build_execution_contract(
+        project_identity=original._project_identity(),
+    )
     encoded = json.dumps(persisted, sort_keys=True)
     assert isinstance(encoded, str)
     routing = persisted["model_routing"]
@@ -1008,7 +1102,9 @@ def test_contract_serialization_ignores_constrained_python_digit_limit() -> None
         runner._model_router = router
         runner._requested_model_tier = "frontier"
 
-        contract = runner._build_execution_contract()
+        contract = runner._build_execution_contract(
+            project_identity=runner._project_identity(),
+        )
 
         assert json.dumps(contract, sort_keys=True)
         assert contract["model_routing"]["router"]["escalation_retry_threshold"] == (
@@ -1023,7 +1119,9 @@ def test_resume_without_argument_preserves_persisted_non_default_tier(
     requested_tier: str,
 ) -> None:
     original = _runner(base_model_tier=requested_tier)
-    persisted = original._build_execution_contract()
+    persisted = original._build_execution_contract(
+        project_identity=original._project_identity(),
+    )
     assert persisted["model_routing"]["requested_model_tier"] == requested_tier
 
     resumed = _runner()
@@ -1045,7 +1143,9 @@ def test_resume_rejects_base_reasoning_effort_transition(
 ) -> None:
     original = _runner()
     original._reasoning_effort = persisted_effort
-    persisted = original._build_execution_contract()
+    persisted = original._build_execution_contract(
+        project_identity=original._project_identity(),
+    )
     route_compat = persisted["model_routing"]["route_compat"]
     assert route_compat["projection"]["effort"] == persisted_effort
 
@@ -1059,7 +1159,9 @@ def test_resume_rejects_base_reasoning_effort_transition(
 def test_resume_restores_persisted_kill_switch() -> None:
     original = _runner()
     original._model_router = None
-    persisted = original._build_execution_contract()
+    persisted = original._build_execution_contract(
+        project_identity=original._project_identity(),
+    )
 
     resumed = _runner()
     assert resumed._model_router is not None
@@ -1073,7 +1175,9 @@ def test_dormant_model_routing_still_rejects_reasoning_effort_drift() -> None:
     original = _runner()
     original._model_router = None
     original._reasoning_effort = "low"
-    persisted = original._build_execution_contract()
+    persisted = original._build_execution_contract(
+        project_identity=original._project_identity(),
+    )
     routing = persisted["model_routing"]
     assert routing["route_compat"] == {"version": 1, "enabled": False}
     assert routing["reasoning_effort"] == "low"
@@ -1091,7 +1195,9 @@ def test_resume_rejects_changed_base_reasoning_effort(
     """The effort used to form each dispatch is part of resume identity."""
     monkeypatch.setattr("ouroboros.config.get_agent_reasoning_effort", lambda: "low")
     original = _runner()
-    persisted = original._build_execution_contract()
+    persisted = original._build_execution_contract(
+        project_identity=original._project_identity(),
+    )
 
     assert persisted["model_routing"]["base_reasoning_effort"] == "low"
 
@@ -1104,7 +1210,9 @@ def test_resume_rejects_changed_base_reasoning_effort(
 def test_legacy_contract_without_base_effort_migrates_dormant_effort() -> None:
     """A missing base effort can be recovered from the persisted routing effort."""
     original = _runner()
-    persisted = original._build_execution_contract()
+    persisted = original._build_execution_contract(
+        project_identity=original._project_identity(),
+    )
     legacy_routing = dict(persisted["model_routing"])
     legacy_routing.pop("base_reasoning_effort")
     legacy_contract = {
@@ -1130,7 +1238,9 @@ def test_legacy_contract_without_base_effort_migrates_enabled_effort() -> None:
     """An old contract's routing effort is the historical base effort."""
     original = _runner()
     original._reasoning_effort = "high"
-    persisted = original._build_execution_contract()
+    persisted = original._build_execution_contract(
+        project_identity=original._project_identity(),
+    )
     legacy_routing = dict(persisted["model_routing"])
     legacy_routing.pop("base_reasoning_effort")
     legacy_contract = {
@@ -1159,7 +1269,9 @@ def test_legacy_contract_missing_base_effort_rejects_historical_high_to_none(
     """The migrated historical effort still protects against current drift."""
     original = _runner()
     original._reasoning_effort = "high"
-    persisted = original._build_execution_contract()
+    persisted = original._build_execution_contract(
+        project_identity=original._project_identity(),
+    )
     legacy_routing = dict(persisted["model_routing"])
     legacy_routing.pop("base_reasoning_effort")
     legacy_contract = {
@@ -1181,7 +1293,9 @@ def test_legacy_contract_missing_base_effort_rejects_historical_high_to_none(
 def test_explicit_resume_tier_override_replaces_persisted_contract() -> None:
     original = _runner()
     _use_frontier_custom_routing(original)
-    persisted = original._build_execution_contract()
+    persisted = original._build_execution_contract(
+        project_identity=original._project_identity(),
+    )
 
     resumed = _runner(base_model_tier="standard")
     resumed._route_economics = _frontier_custom_economics()
@@ -1203,7 +1317,9 @@ def test_explicit_override_preserves_legacy_workspace_across_two_resumes(
     _init_git_repo(repo_root)
     original = _runner(cwd=str(workspace))
     _use_frontier_custom_routing(original)
-    persisted = original._build_execution_contract(seed=_seed())
+    persisted = original._build_execution_contract(
+        project_identity=original._project_identity(), seed=_seed()
+    )
     persisted["frugality_proof"]["project_root"] = str(workspace.resolve())
     persisted["frugality_proof"]["workspace_path"] = "."
     legacy_start = {
@@ -1248,7 +1364,9 @@ def test_explicit_override_preserves_legacy_workspace_across_two_resumes(
 def test_explicit_resume_tier_override_replaces_changed_catalog() -> None:
     original = _runner()
     _use_frontier_custom_routing(original)
-    persisted = original._build_execution_contract()
+    persisted = original._build_execution_contract(
+        project_identity=original._project_identity(),
+    )
 
     resumed = _runner(base_model_tier="standard")
     changed_economics = _frontier_custom_economics()
@@ -1275,7 +1393,11 @@ def test_explicit_resume_tier_override_replaces_changed_catalog() -> None:
 
 def test_enabled_router_rejects_dormant_route_compat_on_resume() -> None:
     original = _runner()
-    persisted = copy.deepcopy(original._build_execution_contract())
+    persisted = copy.deepcopy(
+        original._build_execution_contract(
+            project_identity=original._project_identity(),
+        )
+    )
     routing = persisted["model_routing"]
     routing["route_compat"] = {"version": 1, "enabled": False}
     persisted["frugality_proof"]["routing_fingerprint"] = OrchestratorRunner._routing_fingerprint(
@@ -1289,7 +1411,11 @@ def test_enabled_router_rejects_dormant_route_compat_on_resume() -> None:
 def test_dormant_current_contract_requires_explicit_route_compat() -> None:
     original = _runner()
     original._model_router = None
-    persisted = copy.deepcopy(original._build_execution_contract())
+    persisted = copy.deepcopy(
+        original._build_execution_contract(
+            project_identity=original._project_identity(),
+        )
+    )
     routing = persisted["model_routing"]
     del routing["route_compat"]
     persisted["frugality_proof"]["routing_fingerprint"] = OrchestratorRunner._routing_fingerprint(
@@ -1317,7 +1443,9 @@ def test_present_malformed_resume_contract_fails_closed() -> None:
 
 def test_empty_observed_runtime_identity_is_rejected() -> None:
     original = _runner()
-    persisted = original._build_execution_contract(seed=_seed())
+    persisted = original._build_execution_contract(
+        project_identity=original._project_identity(), seed=_seed()
+    )
     malformed_routing = {
         **persisted["model_routing"],
         "runtime_execution": {
@@ -1345,7 +1473,9 @@ def test_empty_observed_runtime_identity_is_rejected() -> None:
 def test_cross_backend_resume_is_rejected_before_dispatch() -> None:
     original = _runner()
     original._model_router = _frontier_custom_router()
-    persisted = original._build_execution_contract()
+    persisted = original._build_execution_contract(
+        project_identity=original._project_identity(),
+    )
 
     resumed = _runner()
     resumed._adapter.runtime_backend = "codex_cli"
@@ -1356,7 +1486,9 @@ def test_cross_backend_resume_is_rejected_before_dispatch() -> None:
 
 def test_explicit_tier_does_not_authorize_cross_backend_resume() -> None:
     original = _runner()
-    persisted = original._build_execution_contract(seed=_seed())
+    persisted = original._build_execution_contract(
+        project_identity=original._project_identity(), seed=_seed()
+    )
 
     resumed = _runner(base_model_tier="standard")
     resumed._adapter.runtime_backend = "codex_cli"
@@ -1370,7 +1502,9 @@ def test_explicit_tier_does_not_authorize_cross_backend_resume() -> None:
 
 def test_explicit_tier_does_not_bypass_malformed_persisted_router() -> None:
     original = _runner()
-    persisted = original._build_execution_contract(seed=_seed())
+    persisted = original._build_execution_contract(
+        project_identity=original._project_identity(), seed=_seed()
+    )
     persisted_routing = persisted["model_routing"]
     assert isinstance(persisted_routing.get("router"), dict)
     malformed_routing = {
@@ -1399,7 +1533,9 @@ def test_explicit_tier_does_not_bypass_malformed_persisted_router() -> None:
 
 def test_explicit_tier_does_not_bypass_nested_backend_mismatch() -> None:
     original = _runner()
-    persisted = original._build_execution_contract(seed=_seed())
+    persisted = original._build_execution_contract(
+        project_identity=original._project_identity(), seed=_seed()
+    )
     persisted_routing = persisted["model_routing"]
     assert isinstance(persisted_routing.get("router"), dict)
     inconsistent_routing = {
@@ -1428,7 +1564,9 @@ def test_explicit_tier_does_not_bypass_nested_backend_mismatch() -> None:
 
 def test_constructor_model_pin_is_persisted_and_mismatch_is_rejected() -> None:
     original = _runner(constructor_model="claude-sonnet-original")
-    persisted = original._build_execution_contract(seed=_seed())
+    persisted = original._build_execution_contract(
+        project_identity=original._project_identity(), seed=_seed()
+    )
 
     assert persisted["model_routing"]["runtime_backend"] == "claude"
     assert persisted["model_routing"]["constructor_model"] == {
@@ -1455,7 +1593,9 @@ def test_codex_dynamic_profiles_do_not_create_a_portable_resume_identity() -> No
     original_runtime._resolved_fallback_model = "resolved-fallback-model"
     original_runtime._resolved_fallback_profile = None
     original = OrchestratorRunner(original_runtime, AsyncMock(), MagicMock())
-    original_contract = original._build_execution_contract(seed=_seed())
+    original_contract = original._build_execution_contract(
+        project_identity=original._project_identity(), seed=_seed()
+    )
 
     resumed_runtime = CodexCliRuntime(
         cli_path="/bin/echo",
@@ -1470,7 +1610,14 @@ def test_codex_dynamic_profiles_do_not_create_a_portable_resume_identity() -> No
         resumed_runtime,
         AsyncMock(),
         MagicMock(),
-    )._build_execution_contract(seed=_seed())
+    )._build_execution_contract(
+        project_identity=OrchestratorRunner(
+            resumed_runtime,
+            AsyncMock(),
+            MagicMock(),
+        )._project_identity(),
+        seed=_seed(),
+    )
 
     _assert_runtime_identity_observed(original_contract)
     _assert_runtime_identity_observed(resumed_contract)
@@ -1550,7 +1697,14 @@ def test_codex_resolved_fallback_state_stays_out_of_durable_runtime_identity() -
         original_runtime,
         AsyncMock(),
         MagicMock(),
-    )._build_execution_contract(seed=_seed())
+    )._build_execution_contract(
+        project_identity=OrchestratorRunner(
+            original_runtime,
+            AsyncMock(),
+            MagicMock(),
+        )._project_identity(),
+        seed=_seed(),
+    )
 
     resumed_runtime = CodexCliRuntime(
         cli_path="/bin/echo",
@@ -1563,7 +1717,14 @@ def test_codex_resolved_fallback_state_stays_out_of_durable_runtime_identity() -
         resumed_runtime,
         AsyncMock(),
         MagicMock(),
-    )._build_execution_contract(seed=_seed())
+    )._build_execution_contract(
+        project_identity=OrchestratorRunner(
+            resumed_runtime,
+            AsyncMock(),
+            MagicMock(),
+        )._project_identity(),
+        seed=_seed(),
+    )
 
     _assert_runtime_identity_observed(original_contract)
     _assert_runtime_identity_observed(resumed_contract)
@@ -1582,7 +1743,9 @@ def test_codex_profile_name_alone_stays_process_local(
     runtime._resolved_fallback_model = None
     runtime._resolved_fallback_profile = "same-name-mutable-profile"
     runner = OrchestratorRunner(runtime, AsyncMock(), MagicMock())
-    persisted = runner._build_execution_contract(seed=_seed())
+    persisted = runner._build_execution_contract(
+        project_identity=runner._project_identity(), seed=_seed()
+    )
 
     _assert_runtime_identity_observed(persisted)
 
@@ -1602,7 +1765,9 @@ def test_automatic_codex_default_resume_requires_observed_model(
     original_runtime._resolved_fallback_model = None
     original_runtime._resolved_fallback_profile = None
     original = OrchestratorRunner(original_runtime, AsyncMock(), MagicMock())
-    persisted = original._build_execution_contract(seed=_seed())
+    persisted = original._build_execution_contract(
+        project_identity=original._project_identity(), seed=_seed()
+    )
 
     assert original._model_router is None
     assert persisted["model_routing"]["constructor_model"] == {
@@ -1651,7 +1816,12 @@ def test_automatic_codex_default_resume_rejects_a_different_executable_path(
     original_runtime._resolved_fallback_profile = None
     persisted = OrchestratorRunner(
         original_runtime, AsyncMock(), MagicMock()
-    )._build_execution_contract(seed=_seed())
+    )._build_execution_contract(
+        project_identity=OrchestratorRunner(
+            original_runtime, AsyncMock(), MagicMock()
+        )._project_identity(),
+        seed=_seed(),
+    )
 
     persisted_identity = persisted["model_routing"]["runtime_execution"]["identity"]
     assert persisted_identity["cli_executable_path"] == str(first_cli.absolute())
@@ -1687,7 +1857,12 @@ def test_automatic_codex_default_resume_rejects_in_place_cli_upgrade(
     original_runtime._resolved_fallback_profile = None
     persisted = OrchestratorRunner(
         original_runtime, AsyncMock(), MagicMock()
-    )._build_execution_contract(seed=_seed())
+    )._build_execution_contract(
+        project_identity=OrchestratorRunner(
+            original_runtime, AsyncMock(), MagicMock()
+        )._project_identity(),
+        seed=_seed(),
+    )
 
     cli.write_text("#!/bin/sh\necho codex 2.0\n", encoding="utf-8")
     resumed_runtime = CodexCliRuntime(cli_path=cli, model=None, cwd="/tmp/project")
@@ -1720,7 +1895,12 @@ def test_automatic_codex_default_resume_rejects_same_version_changed_executable(
     original_runtime._resolved_fallback_profile = None
     persisted = OrchestratorRunner(
         original_runtime, AsyncMock(), MagicMock()
-    )._build_execution_contract(seed=_seed())
+    )._build_execution_contract(
+        project_identity=OrchestratorRunner(
+            original_runtime, AsyncMock(), MagicMock()
+        )._project_identity(),
+        seed=_seed(),
+    )
 
     cli.write_text("#!/bin/sh\n# two\necho codex 1.0\n", encoding="utf-8")
     resumed_runtime = CodexCliRuntime(cli_path=cli, model=None, cwd="/tmp/project")
@@ -1748,7 +1928,9 @@ def test_non_codex_subclass_does_not_inherit_codex_profile_as_model_identity(
     runtime._codex_profile = "irrelevant-codex-profile"
     runtime._resolved_fallback_model = "irrelevant-codex-model"
     runner = OrchestratorRunner(runtime, AsyncMock(), MagicMock())
-    persisted = runner._build_execution_contract(seed=_seed())
+    persisted = runner._build_execution_contract(
+        project_identity=runner._project_identity(), seed=_seed()
+    )
 
     identity = _assert_runtime_identity_observed(persisted)
     assert identity["kind"] == "goose_v1"
@@ -1820,7 +2002,9 @@ def test_runtime_model_sentinel_is_not_persisted_as_a_constructor_pin(
         cwd="/tmp/project",
     )
     runner = OrchestratorRunner(runtime, AsyncMock(), MagicMock())
-    persisted = runner._build_execution_contract(seed=_seed())
+    persisted = runner._build_execution_contract(
+        project_identity=runner._project_identity(), seed=_seed()
+    )
 
     assert persisted["model_routing"]["constructor_model"] == {
         "observed": True,
@@ -1858,7 +2042,9 @@ def test_codex_profile_file_changes_do_not_create_a_portable_runtime_identity(
     )
     original_runtime._codex_profile = "stable-name"
     original = OrchestratorRunner(original_runtime, AsyncMock(), MagicMock())
-    original_contract = original._build_execution_contract(seed=_seed())
+    original_contract = original._build_execution_contract(
+        project_identity=original._project_identity(), seed=_seed()
+    )
 
     profile_path.write_text('model_provider = "proxy-b"\n', encoding="utf-8")
     resumed_runtime = CodexCliRuntime(
@@ -1871,7 +2057,14 @@ def test_codex_profile_file_changes_do_not_create_a_portable_runtime_identity(
         resumed_runtime,
         AsyncMock(),
         MagicMock(),
-    )._build_execution_contract(seed=_seed())
+    )._build_execution_contract(
+        project_identity=OrchestratorRunner(
+            resumed_runtime,
+            AsyncMock(),
+            MagicMock(),
+        )._project_identity(),
+        seed=_seed(),
+    )
 
     _assert_runtime_identity_observed(original_contract)
     _assert_runtime_identity_observed(resumed_contract)
@@ -1895,7 +2088,14 @@ def test_codex_home_changes_do_not_create_a_portable_runtime_identity(
         original_runtime,
         AsyncMock(),
         MagicMock(),
-    )._build_execution_contract(seed=_seed())
+    )._build_execution_contract(
+        project_identity=OrchestratorRunner(
+            original_runtime,
+            AsyncMock(),
+            MagicMock(),
+        )._project_identity(),
+        seed=_seed(),
+    )
 
     monkeypatch.setenv("CODEX_HOME", str(second_home))
     resumed_runtime = CodexCliRuntime(
@@ -1907,7 +2107,14 @@ def test_codex_home_changes_do_not_create_a_portable_runtime_identity(
         resumed_runtime,
         AsyncMock(),
         MagicMock(),
-    )._build_execution_contract(seed=_seed())
+    )._build_execution_contract(
+        project_identity=OrchestratorRunner(
+            resumed_runtime,
+            AsyncMock(),
+            MagicMock(),
+        )._project_identity(),
+        seed=_seed(),
+    )
 
     _assert_runtime_identity_observed(original_contract)
     _assert_runtime_identity_observed(resumed_contract)
@@ -1924,7 +2131,14 @@ def test_contract_build_records_codex_runtime_execution_identity() -> None:
         runtime,
         AsyncMock(),
         MagicMock(),
-    )._build_execution_contract(seed=_seed())
+    )._build_execution_contract(
+        project_identity=OrchestratorRunner(
+            runtime,
+            AsyncMock(),
+            MagicMock(),
+        )._project_identity(),
+        seed=_seed(),
+    )
 
     identity = _assert_runtime_identity_observed(contract)
     assert identity["kind"] == "codex_cli_v1"
@@ -1939,7 +2153,9 @@ def test_resume_rejects_unobserved_runtime_identity_for_pinned_codex_v9() -> Non
         cwd="/tmp/project",
     )
     original = OrchestratorRunner(runtime, AsyncMock(), MagicMock())
-    persisted = original._build_execution_contract(seed=_seed())
+    persisted = original._build_execution_contract(
+        project_identity=original._project_identity(), seed=_seed()
+    )
     legacy_routing = {
         **persisted["model_routing"],
         "runtime_execution": {"version": 1, "observed": False},
@@ -2041,7 +2257,14 @@ def test_factory_codex_runtime_records_portable_dispatcher_identity() -> None:
         runtime,
         AsyncMock(),
         MagicMock(),
-    )._build_execution_contract(seed=_seed())
+    )._build_execution_contract(
+        project_identity=OrchestratorRunner(
+            runtime,
+            AsyncMock(),
+            MagicMock(),
+        )._project_identity(),
+        seed=_seed(),
+    )
 
     identity = _assert_runtime_identity_observed(contract)
     assert identity["kind"] == "codex_cli_v1"
@@ -2238,7 +2461,9 @@ def test_runtime_selector_validation_rejects_changed_resume_handle(
         cwd="/tmp/project",
     )
     runner = OrchestratorRunner(runtime, AsyncMock(), MagicMock())
-    runner._execution_contract = runner._build_execution_contract(seed=_seed())
+    runner._execution_contract = runner._build_execution_contract(
+        project_identity=runner._project_identity(), seed=_seed()
+    )
 
     with pytest.raises(OrchestratorError, match="different runtime handle selector"):
         runner._validate_resume_handle_execution_identity(runtime_handle)
@@ -2251,7 +2476,9 @@ def test_runtime_selector_validation_accepts_default_handle() -> None:
         cwd="/tmp/project",
     )
     runner = OrchestratorRunner(runtime, AsyncMock(), MagicMock())
-    runner._execution_contract = runner._build_execution_contract(seed=_seed())
+    runner._execution_contract = runner._build_execution_contract(
+        project_identity=runner._project_identity(), seed=_seed()
+    )
 
     runner._validate_resume_handle_execution_identity(
         RuntimeHandle(
@@ -2278,7 +2505,15 @@ def test_contract_build_binds_inherited_runtime_handle_selector() -> None:
         runtime,
         AsyncMock(),
         MagicMock(),
-    )._build_execution_contract(seed=_seed(), runtime_handle=handle)
+    )._build_execution_contract(
+        project_identity=OrchestratorRunner(
+            runtime,
+            AsyncMock(),
+            MagicMock(),
+        )._project_identity(),
+        seed=_seed(),
+        runtime_handle=handle,
+    )
 
     identity = _assert_runtime_identity_observed(contract)
     assert identity["resume_handle_selector"] == {
@@ -2301,7 +2536,9 @@ def test_restore_accepts_same_bound_runtime_handle_selector() -> None:
         metadata={"llm_role": "agent_runtime_implementation"},
     )
     original = OrchestratorRunner(runtime, AsyncMock(), MagicMock())
-    contract = original._build_execution_contract(seed=_seed(), runtime_handle=handle)
+    contract = original._build_execution_contract(
+        project_identity=original._project_identity(), seed=_seed(), runtime_handle=handle
+    )
 
     resumed = OrchestratorRunner(runtime, AsyncMock(), MagicMock())
 
@@ -2329,7 +2566,9 @@ def test_restore_rejects_different_bound_runtime_handle_selector() -> None:
         metadata={"llm_role": "agent_runtime_review"},
     )
     original = OrchestratorRunner(runtime, AsyncMock(), MagicMock())
-    contract = original._build_execution_contract(seed=_seed(), runtime_handle=original_handle)
+    contract = original._build_execution_contract(
+        project_identity=original._project_identity(), seed=_seed(), runtime_handle=original_handle
+    )
 
     resumed = OrchestratorRunner(runtime, AsyncMock(), MagicMock())
     with pytest.raises(OrchestratorError, match="different runtime execution profile"):
@@ -2433,7 +2672,9 @@ def test_kill_switched_resume_cannot_drift_to_a_new_constructor_model(
     monkeypatch.setenv("OUROBOROS_MODEL_TIER_ROUTING", "off")
     original = _runner(constructor_model="claude-sonnet-original")
     assert original._model_router is None
-    persisted = original._build_execution_contract(seed=_seed())
+    persisted = original._build_execution_contract(
+        project_identity=original._project_identity(), seed=_seed()
+    )
 
     monkeypatch.delenv("OUROBOROS_MODEL_TIER_ROUTING")
     resumed = _runner(constructor_model="claude-sonnet-changed")
@@ -2450,7 +2691,9 @@ def test_unpinned_kill_switched_runtime_is_limited_to_process_local_resume(
 ) -> None:
     monkeypatch.setenv("OUROBOROS_MODEL_TIER_ROUTING", "off")
     original = _runner(constructor_model=None)
-    persisted = original._build_execution_contract(seed=_seed())
+    persisted = original._build_execution_contract(
+        project_identity=original._project_identity(), seed=_seed()
+    )
 
     assert persisted["model_routing"]["constructor_model"] == {
         "observed": True,
@@ -2470,7 +2713,9 @@ def test_kill_switched_contract_still_rejects_cross_backend_resume(
     monkeypatch.setenv("OUROBOROS_MODEL_TIER_ROUTING", "off")
     original = _runner(constructor_model="shared-model-pin")
     assert original._model_router is None
-    persisted = original._build_execution_contract(seed=_seed())
+    persisted = original._build_execution_contract(
+        project_identity=original._project_identity(), seed=_seed()
+    )
 
     monkeypatch.delenv("OUROBOROS_MODEL_TIER_ROUTING")
     resumed = _runner(constructor_model="shared-model-pin")
@@ -2487,7 +2732,9 @@ def test_explicit_constructor_model_change_requires_a_new_session(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     original = _runner(constructor_model="claude-sonnet-original")
-    persisted = original._build_execution_contract(seed=_seed())
+    persisted = original._build_execution_contract(
+        project_identity=original._project_identity(), seed=_seed()
+    )
 
     monkeypatch.setenv("OUROBOROS_EXECUTION_MODEL", "claude-sonnet-intentional")
     resumed = _runner(constructor_model="claude-sonnet-intentional")
@@ -2505,7 +2752,9 @@ def test_cross_workspace_resume_is_rejected_before_dispatch(tmp_path: Path) -> N
     project_a.mkdir()
     project_b.mkdir()
     original = _runner(cwd=str(project_a))
-    persisted = original._build_execution_contract(seed=_seed())
+    persisted = original._build_execution_contract(
+        project_identity=original._project_identity(), seed=_seed()
+    )
     resumed = _runner(cwd=str(project_b))
 
     with pytest.raises(OrchestratorError, match="different project workspace"):
@@ -2524,7 +2773,9 @@ def test_same_repo_different_managed_worktree_cannot_resume(tmp_path: Path) -> N
             repo_root=repo_root,
         )
     )
-    persisted = original._build_execution_contract(seed=_seed())
+    persisted = original._build_execution_contract(
+        project_identity=original._project_identity(), seed=_seed()
+    )
     resumed = _runner(
         task_workspace=_workspace(
             durable_id="run-different",
@@ -2543,7 +2794,9 @@ def test_same_repo_different_managed_worktree_cannot_resume(tmp_path: Path) -> N
 
 def test_current_contract_rejects_llm_backend_drift() -> None:
     original = _runner()
-    persisted = original._build_execution_contract(seed=_seed())
+    persisted = original._build_execution_contract(
+        project_identity=original._project_identity(), seed=_seed()
+    )
     resumed = _runner()
     resumed._adapter.llm_backend = "openai"
 
@@ -2556,7 +2809,9 @@ def test_current_contract_rejects_llm_backend_drift() -> None:
 
 def test_current_contract_always_binds_bypass_permission_mode() -> None:
     original = _runner()
-    persisted = original._build_execution_contract(seed=_seed())
+    persisted = original._build_execution_contract(
+        project_identity=original._project_identity(), seed=_seed()
+    )
     resumed = _runner()
     resumed._adapter.permission_mode = "acceptEdits"
 
@@ -2575,7 +2830,9 @@ def test_current_contract_always_binds_bypass_permission_mode() -> None:
 
 def test_modified_seed_is_rejected_on_resume() -> None:
     original = _runner()
-    persisted = original._build_execution_contract(seed=_seed())
+    persisted = original._build_execution_contract(
+        project_identity=original._project_identity(), seed=_seed()
+    )
 
     with pytest.raises(OrchestratorError, match="modified Seed"):
         _runner()._restore_execution_contract(
@@ -2787,10 +3044,18 @@ def test_managed_worktrees_share_canonical_source_workspace_identity(tmp_path: P
         )
     )
 
-    first_proof = first._build_execution_contract(seed=_seed())["frugality_proof"]
-    second_proof = second._build_execution_contract(seed=_seed())["frugality_proof"]
-    first_resume = first._build_execution_contract(seed=_seed())["resume"]
-    second_resume = second._build_execution_contract(seed=_seed())["resume"]
+    first_proof = first._build_execution_contract(
+        project_identity=first._project_identity(), seed=_seed()
+    )["frugality_proof"]
+    second_proof = second._build_execution_contract(
+        project_identity=second._project_identity(), seed=_seed()
+    )["frugality_proof"]
+    first_resume = first._build_execution_contract(
+        project_identity=first._project_identity(), seed=_seed()
+    )["resume"]
+    second_resume = second._build_execution_contract(
+        project_identity=second._project_identity(), seed=_seed()
+    )["resume"]
 
     assert first_proof == second_proof
     assert first_resume != second_resume
@@ -3206,7 +3471,9 @@ def test_pre_anchor_managed_linked_override_survives_two_resumes(tmp_path: Path)
     )
     original = _runner(task_workspace=task_workspace)
     _use_frontier_custom_routing(original)
-    persisted = original._build_execution_contract(seed=_seed())
+    persisted = original._build_execution_contract(
+        project_identity=original._project_identity(), seed=_seed()
+    )
     persisted["frugality_proof"]["project_root"] = str(linked.resolve())
     persisted["frugality_proof"]["workspace_path"] = "packages/app"
     legacy_start = {
@@ -3274,7 +3541,9 @@ def test_pre_anchor_nested_contract_resumes_with_legacy_cwd_identity(tmp_path: P
     workspace.mkdir(parents=True)
     _init_git_repo(repo_root)
     original = _runner(cwd=str(workspace))
-    persisted = original._build_execution_contract(seed=_seed())
+    persisted = original._build_execution_contract(
+        project_identity=original._project_identity(), seed=_seed()
+    )
     persisted["frugality_proof"]["project_root"] = str(workspace.resolve())
     persisted["frugality_proof"]["workspace_path"] = "."
     resumed = _runner(cwd=str(workspace))
@@ -3337,7 +3606,9 @@ def test_project_anchor_rejects_partial_or_invalid_identity(
     start_identity: dict[str, str],
 ) -> None:
     runner = _runner()
-    persisted = runner._build_execution_contract(seed=_seed())
+    persisted = runner._build_execution_contract(
+        project_identity=runner._project_identity(), seed=_seed()
+    )
 
     with pytest.raises(OrchestratorError, match="project identity anchor"):
         runner._restore_execution_contract(
@@ -3421,7 +3692,9 @@ def test_project_anchor_rejects_deleted_current_workspace(tmp_path: Path) -> Non
 @pytest.mark.asyncio
 async def test_start_event_contract_is_resume_fallback_without_progress_row() -> None:
     runner = _runner()
-    contract = runner._build_execution_contract(seed=_seed())
+    contract = runner._build_execution_contract(
+        project_identity=runner._project_identity(), seed=_seed()
+    )
     start = BaseEvent(
         type="orchestrator.session.started",
         aggregate_type="session",
@@ -3625,7 +3898,9 @@ async def test_malformed_start_contract_is_preserved_and_rejected(
 @pytest.mark.asyncio
 async def test_progress_omission_preserves_start_event_execution_contract() -> None:
     runner = _runner()
-    contract = runner._build_execution_contract(seed=_seed())
+    contract = runner._build_execution_contract(
+        project_identity=runner._project_identity(), seed=_seed()
+    )
     start = BaseEvent(
         type="orchestrator.session.started",
         aggregate_type="session",
@@ -3655,7 +3930,9 @@ async def test_progress_omission_preserves_start_event_execution_contract() -> N
 @pytest.mark.asyncio
 async def test_corrupt_progress_contract_does_not_downgrade_to_legacy_resume() -> None:
     runner = _runner()
-    contract = runner._build_execution_contract(seed=_seed())
+    contract = runner._build_execution_contract(
+        project_identity=runner._project_identity(), seed=_seed()
+    )
     start = BaseEvent(
         type="orchestrator.session.started",
         aggregate_type="session",

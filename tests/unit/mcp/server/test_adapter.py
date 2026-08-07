@@ -2638,7 +2638,11 @@ class TestCreateOuroborosServerOpenCodeMode:
         for name in gated_handlers:
             assert captured_modes.get(name), f"{name} was not constructed"
             assert all(backend == "opencode" for backend, _mode in captured_modes[name])
-            assert all(mode == "plugin" for _backend, mode in captured_modes[name])
+            modes = {mode for _backend, mode in captured_modes[name]}
+            if name in {"ouroboros_evolve_step", "ouroboros_start_ralph"}:
+                assert modes == {"plugin", None}
+            else:
+                assert modes == {"plugin"}
 
 
 class TestCreateOuroborosServerBrownfieldStore:

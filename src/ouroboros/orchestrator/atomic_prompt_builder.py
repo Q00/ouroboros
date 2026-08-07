@@ -32,32 +32,26 @@ if TYPE_CHECKING:
 
 
 def _build_success_contract_block(spec: AcceptanceCriterionSpec | None) -> str:
-    """Render the worker-facing SUCCESS CONTRACT block for an AC, or ``""``.
+    """Render the assertion-safe worker-facing success contract, or ``""``.
 
-    The parallel leaf dispatch builds its own prompt (it does not go through the
-    host ``build_execute_subagent`` VERIFY section, nor does the repo-level context
-    pack carry a *per-AC* contract), so a worker was never told the exact
-    verify_command / expected_artifacts / output_assertion the harness will grade
-    it against. When the AC's spec carries a contract, surface it verbatim so the
-    worker runs and reports the same evidence the verify gate checks. Contract-less
-    ACs return ``""`` — the prompt stays byte-identical to before.
+    Artifact names are part of the work contract, but the harness-owned
+    ``verify_command`` and ``output_assertion`` are deliberately hidden.  The
+    worker must satisfy the requested outcome without receiving the grader's
+    answer key. Contract-less ACs return ``""``.
     """
     if spec is None or not spec.has_success_contract:
         return ""
     lines = ["SUCCESS CONTRACT for this AC:"]
-    if spec.verify_command:
-        lines.append(
-            f"- Run locally before completion: {spec.verify_command}. "
-            "The verify gate re-runs it and records authoritative evidence."
-        )
     if spec.expected_artifacts:
         lines.append(
             "- Expected artifacts: "
             + ", ".join(spec.expected_artifacts)
             + " — ensure they exist in the workspace"
         )
-    if spec.output_assertion:
-        lines.append(f"- Expected output: {spec.output_assertion}")
+    lines.append(
+        "- The harness independently verifies this contract; complete the work "
+        "from the AC requirements and provide truthful evidence."
+    )
     return "\n".join(lines)
 
 
@@ -128,9 +122,8 @@ class AtomicPromptBuilder:
             level_contexts=level_contexts,
             sibling_acs=sibling_acs,
         )
-        # Surface this AC's success contract to the worker so it runs and reports
-        # the exact evidence the verify gate will grade. Empty for contract-less
-        # ACs → the prompt stays byte-identical to before.
+        # Surface only the worker-owned portion of the success contract. Harness
+        # commands and assertions remain hidden grading inputs.
         contract_block = _build_success_contract_block(ac_spec)
         if contract_block:
             task_section = f"{task_section}\n\n{contract_block}"

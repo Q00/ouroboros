@@ -1230,7 +1230,13 @@ class CodexCliRuntime:
     def _fingerprint_builtin_mcp_handler_registry(self) -> str | None:
         """Fingerprint effectful built-in MCP handler authority."""
         try:
-            handlers = self._get_builtin_mcp_handlers()
+            handlers = self._builtin_mcp_handlers
+            if handlers is None:
+                from ouroboros.mcp.tools import runtime_tool_composition
+
+                handlers = runtime_tool_composition.lightweight_runtime_tool_map(
+                    runtime_backend=self._runtime_backend, llm_backend=self._llm_backend
+                )
         except Exception:
             return None
         payload: list[dict[str, Any]] = []
@@ -1662,6 +1668,7 @@ class CodexCliRuntime:
                 for handler in get_ouroboros_tools(
                     runtime_backend=self._runtime_backend,
                     llm_backend=self._llm_backend,
+                    runtime_adapter=self,
                 )
             }
 

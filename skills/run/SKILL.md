@@ -27,8 +27,9 @@ Execute a Seed specification through the Ouroboros workflow engine.
 3. **Execution**: The orchestrator runs the workflow with PAL routing
 4. **Progress**: Real-time progress updates via session tracking
 5. **Result**: Execution summary with pass/fail status
-6. **Verification status**: Run-only results are `executed_unverified` until
-   `ooo evaluate <session_id>` performs formal 3-stage verification
+6. **Convergence**: completed runs enqueue formal evaluation by default. An
+   explicit rejection continues through a bounded Ralph loop until approved or
+   the configured evolution budget/stop condition is reached.
 
 ## Instructions
 
@@ -444,10 +445,10 @@ fallback instead of retrying the failing call.
    - Show execution summary
 
 10. **Post-execution QA and formal evaluation** (automatic):
-   `ouroboros_start_execute_seed` automatically runs QA after successful execution.
+   `ouroboros_start_execute_seed` automatically runs QA after execution.
    The QA verdict is included in the final job result text. This QA check is
    **not** the formal 3-stage evaluator. On servers that return
-   `chained_evaluate_job_id`, the successful run has already enqueued the formal
+   `chained_evaluate_job_id`, the run has already enqueued the formal
    evaluator as a separate bounded background job.
    To skip: pass `skip_qa: true` to the tool.
 
@@ -456,6 +457,10 @@ fallback instead of retrying the failing call.
    - Fetch its verdict with `ouroboros_job_result` after terminal status
    - Render **APPROVED** when `final_approved: true`; otherwise render not approved and list failed ACs or the failure reason from the evaluation result
    - If the evaluate job failed or timed out, keep the run success intact and show `Next: ooo evaluate <session_id>` as the manual retry
+   - If the evaluation result contains `chained_ralph_job_id`, continue observing
+     that job before presenting the final outcome. Report approval/convergence or
+     the bounded Ralph stop reason; do not call the run blocked merely because
+     its first evaluation was rejected.
 
    If `chained_evaluate_job_id` is absent, keep the legacy path verbatim:
    - **PASS**: `Next: ooo evaluate <session_id> for formal 3-stage verification`

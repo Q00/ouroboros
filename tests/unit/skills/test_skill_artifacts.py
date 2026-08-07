@@ -625,7 +625,7 @@ def test_multitool_deferred_schema_guards_name_each_discovery_query() -> None:
             ('"+ouroboros lateral"', "ouroboros_lateral_think"),
         ],
         "evaluate": [
-            ('"+ouroboros evaluate"', "ouroboros_evaluate"),
+            ('"+ouroboros evaluate"', "ouroboros_start_evaluate"),
         ],
         "evolve": [
             ('"+ouroboros evolve"', "ouroboros_evolve_step"),
