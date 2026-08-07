@@ -20,6 +20,7 @@ import pytest
 from ouroboros.mcp.tools.subagent import (
     SubagentPayload,
     build_evaluate_subagent,
+    build_evolve_subagent,
     build_execute_subagent,
     build_generate_seed_subagent,
     build_interview_question_advisory_subagents,
@@ -232,6 +233,18 @@ class TestBuildSubagentResult:
         assert result.value.is_error is False
 
 
+class TestBuildEvolveSubagent:
+    def test_ontology_only_prompt_never_claims_verified_convergence(self) -> None:
+        payload = build_evolve_subagent(
+            lineage_id="lin-single-ontology",
+            execute=False,
+        )
+
+        assert "return ontology_stable, never converged" in payload.prompt
+        assert "rerun the same lineage with execute=true" in payload.prompt
+        assert "ontology-only stability is ontology_stable" in payload.prompt
+
+
 class TestBuildRalphSubagent:
     """Ralph plugin dispatch payload preserves the full-loop contract."""
 
@@ -253,11 +266,8 @@ class TestBuildRalphSubagent:
         assert "delegation_depth: 1" in payload.prompt
         assert "allow_nested_ouroboros_ralph: false" in payload.prompt
         assert "Do not call ouroboros_ralph" in payload.prompt
-        # Without per_iteration_timeout_seconds, the timeout block is omitted.
         assert "Per-Iteration Timeout" not in payload.prompt
-        # Likewise the progress-stop block is omitted when no windows supplied.
         assert "Progress Stop Conditions" not in payload.prompt
-        # Without max_total_seconds, the wall-clock budget block is omitted.
         assert "Total Wall-Clock Budget" not in payload.prompt
         assert payload.context == {
             "lineage_id": "lin-ralph",
@@ -272,6 +282,17 @@ class TestBuildRalphSubagent:
         }
         assert "per_iteration_timeout_seconds" not in payload.context
         assert "max_total_seconds" not in payload.context
+
+    def test_ontology_only_prompt_requires_verified_same_lineage_handoff(self) -> None:
+        payload = build_ralph_subagent(
+            lineage_id="lin-ontology-only",
+            execute=False,
+            max_generations=3,
+        )
+
+        assert "On ontology_stable" in payload.prompt
+        assert "rerun the same lineage with execute=true" in payload.prompt
+        assert "ontology_stable must first rerun" in payload.prompt
 
     def test_forwards_per_iteration_timeout_to_prompt_and_context(self) -> None:
         payload = build_ralph_subagent(
@@ -949,6 +970,7 @@ class TestBuildExecuteSubagent:
         assert "Run QA evaluation" in p.prompt
         assert "formal 3-stage evaluation" in p.prompt
         assert "ouroboros_start_evaluate" in p.prompt
+        assert "chained_ralph_job_id" in p.prompt
 
     def test_skip_qa_changes_the_verify_line(self) -> None:
         p = build_execute_subagent(
@@ -969,6 +991,78 @@ class TestBuildExecuteSubagent:
         assert "Formal evaluation auto-chain is disabled" in p.prompt
         assert "ooo evaluate <session_id>" in p.prompt
         assert "ouroboros_start_evaluate" not in p.prompt
+
+    def test_harness_owned_seed_fields_are_removed_recursively(self) -> None:
+        seed = """goal: Build safely
+acceptance_criteria:
+  - description: Keep this obligation
+    artifacts: [result.json]
+    verifier:
+      verify_command: run SECRET_COMMAND
+      output_assertion: SECRET_ASSERTION
+"""
+        payload = build_execute_subagent(
+            seed_content=seed,
+            session_id="sess-hidden",
+            auto_evolve=False,
+            seed_handoff_id="seed_handoff_opaque",
+        )
+
+        visible = payload.prompt + str(payload.context)
+        assert "SECRET_COMMAND" not in visible
+        assert "SECRET_ASSERTION" not in visible
+        assert "verify_command" not in visible
+        assert "output_assertion" not in visible
+        assert "Keep this obligation" in visible
+        assert "result.json" in visible
+        assert payload.context["auto_evolve"] is False
+        assert payload.context["seed_handoff_id"] == "seed_handoff_opaque"
+
+    def test_auto_evolve_false_uses_terminal_plugin_handoff_without_polling(self) -> None:
+        payload = build_execute_subagent(
+            seed_content="goal: evaluate once",
+            session_id="sess-passive-eval",
+            auto_evaluate=True,
+            auto_evolve=False,
+            seed_handoff_id="seed_handoff_opaque",
+        )
+
+        assert "status `delegated_to_plugin` with no job_id" in payload.prompt
+        assert "do not poll job tools" in payload.prompt
+        assert "Task pane" in payload.prompt
+        assert "poll the returned job" not in payload.prompt
+
+    def test_hidden_command_is_redacted_from_detected_project_commands(self, tmp_path) -> None:
+        command = "uv run pytest --token TOP_SECRET"
+        (tmp_path / "pyproject.toml").write_text(
+            '[project]\nname = "fixture"\nversion = "0.0.1"\ndependencies = ["pytest"]\n',
+            encoding="utf-8",
+        )
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        (config_dir / "mechanical.toml").write_text(f'test = "{command}"\n', encoding="utf-8")
+        seed = (
+            "goal: Build safely\n"
+            "acceptance_criteria:\n"
+            "  - description: Produce output.json\n"
+            f"    verify_command: {command}\n"
+            "ontology_schema:\n"
+            "  name: Artifact\n"
+            "  description: Safe artifact\n"
+            "metadata:\n"
+            "  ambiguity_score: 0.0\n"
+        )
+
+        payload = build_execute_subagent(
+            seed_content=seed,
+            session_id="sess-project-command",
+            cwd=str(tmp_path),
+        )
+
+        visible = payload.prompt + str(payload.context)
+        assert "Project verify commands" in visible
+        assert "--token" not in visible
+        assert "TOP_SECRET" not in visible
 
 
 # ---------------------------------------------------------------------------

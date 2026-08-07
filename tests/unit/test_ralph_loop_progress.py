@@ -666,6 +666,28 @@ async def test_converged_without_any_qa_attempt_keeps_completing() -> None:
 
 
 @pytest.mark.asyncio
+async def test_ontology_stable_promotes_same_lineage_to_execute_and_evaluate() -> None:
+    evolve = _ScriptedEvolveHandler(metas=[{"action": "ontology_stable"}, {"action": "converged"}])
+    runner = RalphLoopRunner(evolve)
+
+    result = await runner.run(
+        RalphLoopConfig(
+            lineage_id="lin_ontology_handoff",
+            seed_content="goal: stable ontology",
+            execute=False,
+            max_generations=2,
+        )
+    )
+
+    assert result.status == "completed"
+    assert result.stop_reason == "converged"
+    assert [item.action for item in result.iterations] == ["ontology_stable", "converged"]
+    assert [call["execute"] for call in evolve.seen_arguments] == [False, True]
+    assert evolve.seen_arguments[0]["seed_content"] == "goal: stable ontology"
+    assert "seed_content" not in evolve.seen_arguments[1]
+
+
+@pytest.mark.asyncio
 async def test_exhaustion_fails_when_qa_ran_but_returned_no_verdict() -> None:
     """Absent QA evidence must fail closed when QA was actually attempted.
 

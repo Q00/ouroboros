@@ -1,10 +1,10 @@
 """Unit tests for backend-aware fan-out concurrency planning.
 
-Ouroboros must plan delivery fan-out to comply with the connected backend's
+Ouroboros must plan the initial delivery fan-out from the connected backend's
 concurrency/rate constraints rather than relying on the agent runtime to manage
 it. Backends whose underlying LLM limits Ouroboros cannot know (the CLI
-runtimes — hermes, codex, gemini, ...) are serialized by default and raised
-only by explicit override. See ``docs`` RCA (P1 / R3).
+runtimes — hermes, codex, gemini, ...) start serialized before live feedback
+adapts the dispatch window. See ``docs`` RCA (P1 / R3).
 """
 
 from __future__ import annotations

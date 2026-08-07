@@ -512,6 +512,7 @@ class TestBackgroundJobPath:
             "job_id",
             "ralph_job_id",
             "chained_evaluate_job_id",
+            "chained_ralph_job_id",
         ]
         assert captured["links"].session_id == auto_session_id
         assert store.path_for(auto_session_id).exists()

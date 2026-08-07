@@ -72,6 +72,7 @@ from ouroboros.cli.formatters.panels import (
 )
 from ouroboros.config import get_opencode_mode
 from ouroboros.mcp.job_manager import JobManager, JobSnapshot, JobStatus
+from ouroboros.mcp.tools._dashboard import resolve_dashboard_base_url
 from ouroboros.mcp.tools.authoring_handlers import GenerateSeedHandler, InterviewHandler
 from ouroboros.mcp.tools.evaluation_handlers import LateralThinkHandler
 from ouroboros.mcp.tools.execution_handlers import ExecuteSeedHandler, StartExecuteSeedHandler
@@ -658,6 +659,12 @@ async def _run_auto(
     ralph_resumer = HandlerRalphPoller(ralph_handler) if ralph_handler is not None else None
     watchdog_event_store = EventStore()
     await watchdog_event_store.initialize()
+    # Auto does not have an execution id until interview/Seed handoff finishes.
+    # Publish the picker now; it polls until the eventual run appears, and the
+    # selected row supplies the pinned ?run=<execution_id> detail URL.
+    dashboard_url = await resolve_dashboard_base_url(watchdog_event_store)
+    if dashboard_url:
+        console.print(f"Live Dashboard (all runs): {dashboard_url}")
     watchdog = Watchdog(
         controls=load_runtime_controls(None),
         event_appender=watchdog_event_store,

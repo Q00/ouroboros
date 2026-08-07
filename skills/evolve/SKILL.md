@@ -11,10 +11,11 @@ refines the ontology and acceptance criteria across generations until convergenc
 
 ## Flow
 ```
-Gen 1: Interview → Seed(O₁) → Execute → Evaluate
-Gen 2: Wonder → Reflect → Seed(O₂) → Execute → Evaluate
-Gen 3: Wonder → Reflect → Seed(O₃) → Execute → Evaluate
-...until ontology converges (similarity ≥ 0.95) or max 30 generations
+Gen 1: Seed(O₁) → Execute(all nodes) → Judge → Gate
+Gen 2: Wonder(failed nodes) → Reflect(active nodes only) → Execute(active) → Gate(all)
+Gen 3: Repeat with a smaller active set; frozen PASS nodes are reverified, not regenerated
+...until the outcome gate passes, the working set stagnates, ontology converges,
+or max 30 generations is reached
 ```
 
 ## Usage
@@ -33,6 +34,12 @@ ooo evolve "build a task management CLI" --no-execute
 ```
 ooo evolve --status <lineage_id>
 ```
+
+### Record an isolated full-graph benchmark control
+Call `ouroboros_evolve_step` for an existing Gen 2+ lineage with
+`benchmark_control: true`, `execute: true`, and an explicit clean Git
+`project_dir`. Use a distinct clean worktree at the treatment commit. Normal
+evolve calls keep `benchmark_control` false and never launch a control arm.
 
 ### Rewind to a previous generation
 ```
@@ -81,15 +88,29 @@ documented fallback / Path B instead of retrying the failing call.
    - `seed_content`: the generated seed YAML
    - `execute`: `true` (default) for full Execute→Evaluate pipeline,
      `false` for fast ontology-only evolution (no seed execution)
+   - `benchmark_control`: `false` (default). Set `true` only for a deliberate
+     Gen 2+ full-graph control in an explicit clean Git project/worktree.
 6. Check the `action` in the response:
-   - `continue` → Call `ouroboros_evolve_step` again with just `lineage_id`
+   - `continue` → Inspect `active_ac_indices`, then call `ouroboros_evolve_step`
+     again with just `lineage_id`. Only active failed/reopened nodes evolve;
+     frozen PASS nodes stay immutable and are boundary-reverified.
+   - `ontology_stable` → This is not success. Call `ouroboros_evolve_step`
+     again for the same `lineage_id` with `execute: true` so the stable Seed
+     goes through Execute→Evaluate. Do not call standalone evaluate or report
+     convergence before that step returns `converged`.
    - `converged` → Evolution complete! Display final ontology
    - `stagnated` → Ontology unchanged for 3+ gens. Consider `ouroboros_lateral_think`
    - `exhausted` → Max 30 generations reached. Display best result
-   - `failed` → Check error, possibly retry
-7. **Repeat step 6** until action ≠ `continue`
+   - `failed` → Check error, possibly retry. If the error reports an expired
+     lineage owner, first confirm that the prior owner process is dead, then
+     make one explicit recovery call with `recover_expired_claim: true`.
+     Never set this flag for a merely slow or still-running owner.
+7. **Repeat step 6** while action is `continue`. Treat `ontology_stable` as the
+   explicit transition above, then process the `execute: true` response using
+   step 6. Stop only on `converged`, `stagnated`, `exhausted`, or `failed`.
 8. When the loop terminates, display a result summary with next step:
    - `converged`: `◆ Current state → next: Ontology converged! Run ooo evaluate for formal verification`
+   - `ontology_stable`: `◆ Current state → next: Run the same lineage with execute=true for Execute→Evaluate; this is not verified convergence yet`
    - `stagnated`: `◆ Current state → next: ooo unstuck to break through, then ooo evolve --status <lineage_id> to resume`
    - `exhausted`: `◆ Current state → next: ooo evaluate to check best result — or ooo unstuck to try a new approach`
    - `failed`: `◆ Current state → next: Check the error above. ooo status to inspect session, or ooo unstuck if blocked`
@@ -121,15 +142,67 @@ Then add to your runtime's MCP configuration (e.g., `~/.claude/mcp.json` for Cla
   to identify ontological gaps and hidden assumptions
 - **Reflect**: "How should the ontology evolve?" - proposes specific
   mutations to fields, acceptance criteria, and constraints
-- **Convergence**: Loop stops when ontology similarity ≥ 0.95 between
-  consecutive generations, or after 30 generations max
+- **Convergence**: Verified success requires the independently evaluated
+  outcome to pass. In ontology-only mode, similarity ≥ 0.95 returns the
+  non-success `ontology_stable` handoff and the same lineage must run once with
+  `execute: true`. Judge-score plateau and the 30-generation cap are also
+  non-success stops.
+- **Focused evolution**: Gen 1 establishes the baseline. Gen 2+ derives an
+  active node set from failed/regressed verifier results. Only those nodes are
+  open to Wonder, Reflect, and execution; PASS nodes are frozen. The active
+  output should shrink toward zero rather than feeding the full graph back.
+- **Frugality proof**: A smaller active-node count is a working-set observation,
+  not a savings claim. Gen 2+ records measured total-generation runtime tokens
+  (Wonder, all Reflect attempts, validator/evaluator providers, executor AC
+  attempts, dependency analysis, decomposition policy/attestation/repair,
+  coordinator review, and shadow replay when enabled), wall time, calls, retries,
+  and quality evidence. A PASS requires a paired full-graph control and
+  focused treatment from distinct clean worktrees at the same Git commit, at
+  least 10% fewer total-generation runtime tokens, and no final-gate,
+  evaluation score/stage, drift, reward-hacking, per-AC verdict/score, lineage
+  regression, or TraceGuard degradation. The comparison key covers the complete semantic Seed
+  and previous evaluation. Every expected primary attempt needs exactly one
+  runtime-token receipt and TraceGuard verdict bound to the exact session,
+  primary dispatch, and root identity; every active root must be dispatched;
+  every other generation provider call needs runtime usage; normalized
+  backend/model/tier/mode/effort/permission and provider request configurations
+  must be complete and match
+  the same root AC or auxiliary phase role and preserve per-unit call multiplicity
+  across the paired arms. Shared-unit sequences must be exactly equal; only whole
+  control-only units may be removed. Blank/unknown phase roles are incomplete
+  evidence. Full-graph controls must execute every Seed root; treatment
+  active/frozen sets must exactly partition the Seed. Auxiliary tools,
+  system-prompt identity, request kwargs, and fresh/scoped session mode are
+  configuration-bound. Completion profiles are resolved once into a sealed
+  dispatch config; only registered exact-key, single-attempt, secret-safe adapter
+  attestations whose in-memory endpoint/credential authority reaches the actual
+  call boundary unchanged are proof-eligible. Global or post-attestation mutable
+  routing is ineligible. Malformed attestations invalidate the proof,
+  not evolution. True resumed contexts without semantic identity and
+  unknown/conflicting effective models or unreconciled usage counters are
+  incomplete. Every current
+  Seed AC needs exactly one final verdict against the same final semantic Seed
+  contract. Missing, duplicate, malformed, partial, or opaque evidence is
+  `insufficient_data`. Evidence reads and provider-call capture are capped;
+  oversized or non-finite individual/subtotal/combined usage, cap overflow, and
+  Wonder-only early stops also produce non-PASS durable receipts.
+  Evolve never launches the control automatically because doing so would consume
+  the production savings being measured.
+- **Judge/Gate split**: Evaluation records score and evidence; deterministic
+  convergence logic decides accept/continue/stagnate. A passing Gen 1 may end
+  immediately—minimum-generation churn is not required after the gate passes.
+- **No-drift stop**: If rejected evaluation scores move by less than 0.01 for
+  the 3-generation window, stop as `stagnated` and hand off to `ooo unstuck`
+  instead of spending the 30-generation cap.
 - **Rewind**: Each generation is a snapshot. You can rewind to any
   generation and branch evolution from there
 - **evolve_step**: Runs exactly ONE generation per call. Designed for
   Ralph integration — state is fully reconstructed from events between calls
 - **execute flag**: `true` (default) runs full Execute→Evaluate each generation.
   `false` skips execution for fast ontology exploration. Previous generation's
-  execution output is fed into Wonder/Reflect for informed evolution
+  execution output is fed into Wonder/Reflect for informed evolution. An
+  `ontology_stable` response from `execute: false` must be followed by the same
+  lineage with `execute: true`; ontology stability alone is never convergence.
 - **QA verdict**: Each generation's response includes a QA Verdict section
   (when `execute=true` and `skip_qa` is not set). Use the QA score to track
   quality progression across generations. Pass `skip_qa: true` to disable

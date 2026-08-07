@@ -1882,6 +1882,7 @@ class TestOuroborosTools:
         "ouroboros_lineage_status",
         "ouroboros_measure_drift",
         "ouroboros_pm_interview",
+        "ouroboros_project_status",
         "ouroboros_qa",
         "ouroboros_query_projection",
         "ouroboros_query_events",
@@ -2044,7 +2045,10 @@ class TestAsyncJobHandlers:
         assert observer["relay"]["mode"] == "event_driven"
         assert observer["parent_session"]["availability"] == "available_after_handoff"
         assert observer["host_lifecycle"]["codex_parent_relay"]["wait_tool"] == "wait_agent"
-        assert observer["follow_result_job_keys"] == ["chained_evaluate_job_id"]
+        assert observer["follow_result_job_keys"] == [
+            "chained_evaluate_job_id",
+            "chained_ralph_job_id",
+        ]
         assert "Verification Status: executed_unverified" in result.value.text_content
         assert "Formal Evaluation: NOT evaluated" in result.value.text_content
         assert "Next: ooo evaluate orch_" in result.value.text_content
@@ -2390,6 +2394,22 @@ class TestAsyncJobHandlers:
         assert "YAML-formatted string" in start_seed.description
         assert "not JSON-shaped text or an object literal" in start_seed.description
         assert "before Ouroboros receives it" in start_seed.description
+
+    def test_evolve_step_exposes_isolation_gated_benchmark_control(self) -> None:
+        evolve_params = {
+            parameter.name: parameter for parameter in EvolveStepHandler().definition.parameters
+        }
+        start_params = {
+            parameter.name: parameter
+            for parameter in StartEvolveStepHandler().definition.parameters
+        }
+
+        benchmark = evolve_params["benchmark_control"]
+        assert benchmark.type == ToolInputType.BOOLEAN
+        assert benchmark.default is False
+        assert "Gen 2+" in benchmark.description
+        assert "clean baseline" in benchmark.description
+        assert start_params["benchmark_control"] == benchmark
 
     def test_evolve_step_has_no_fixed_mcp_timeout_by_default(self) -> None:
         """evolve_step uses progress-aware controls rather than a hard 2h wall clock."""

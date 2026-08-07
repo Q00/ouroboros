@@ -12,6 +12,7 @@ from typing import Annotated
 
 import click
 from rich.prompt import Confirm, Prompt
+import structlog
 import typer
 import yaml
 
@@ -49,6 +50,8 @@ from ouroboros.events.hitl import (
 from ouroboros.observability import LoggingConfig, configure_logging
 from ouroboros.providers import create_llm_adapter, resolve_llm_backend
 from ouroboros.providers.base import LLMAdapter
+
+log = structlog.get_logger(__name__)
 
 
 class SeedGenerationResult(Enum):
@@ -486,7 +489,9 @@ async def _run_interview(
                 return
 
             # Generate Seed
-            seed_path, result = await _generate_seed_from_interview(state, llm_adapter, llm_backend)
+            seed_path, result = await _generate_seed_from_interview(
+                state, llm_adapter, llm_backend, engine=engine
+            )
 
             if result == SeedGenerationResult.CONTINUE_INTERVIEW:
                 # Re-open interview for more questions
@@ -541,12 +546,15 @@ async def _generate_seed_from_interview(
     state: InterviewState,
     llm_adapter: LLMAdapter,
     llm_backend: str | None = None,
+    *,
+    engine: InterviewEngine,
 ) -> tuple[Path | None, SeedGenerationResult]:
     """Generate Seed from completed interview.
 
     Args:
         state: Completed interview state.
         llm_adapter: LLM adapter for scoring and generation.
+        engine: Interview engine that owns durable state persistence.
 
     Returns:
         Tuple of (path to generated seed file or None, result status).
@@ -569,6 +577,21 @@ async def _generate_seed_from_interview(
     ambiguity_score = score_result.value
     console.print(f"[muted]Ambiguity score: {ambiguity_score.overall_score:.2f}[/]")
 
+    # Persist the evaluation like the MCP path does (#1901): without this the
+    # state file reads ambiguity_score: null and the score only survives in
+    # rotating logs. A save failure must never block seed generation.
+    state.store_ambiguity(
+        score=ambiguity_score.overall_score,
+        breakdown=ambiguity_score.breakdown.model_dump(mode="json"),
+    )
+    save_result = await engine.save_state(state)
+    if save_result.is_err:
+        log.warning(
+            "cli.init.persist_ambiguity_failed",
+            interview_id=state.interview_id,
+            error=str(save_result.error),
+        )
+
     if not ambiguity_score.is_ready_for_seed:
         print_warning(
             f"Ambiguity score ({ambiguity_score.overall_score:.2f}) is too high. "
@@ -588,6 +611,17 @@ async def _generate_seed_from_interview(
         )
 
         if choice == "1":
+            # Reopening bypasses record_response's reopen contract, so the
+            # snapshot persisted above must be invalidated here: an in-progress
+            # interview must never carry a live score.
+            state.clear_stored_ambiguity()
+            clear_result = await engine.save_state(state)
+            if clear_result.is_err:
+                log.warning(
+                    "cli.init.clear_ambiguity_failed",
+                    interview_id=state.interview_id,
+                    error=str(clear_result.error),
+                )
             return None, SeedGenerationResult.CONTINUE_INTERVIEW
         elif choice == "3":
             return None, SeedGenerationResult.CANCELLED

@@ -379,6 +379,8 @@ class TestLoadConfig:
         assert config.execution.max_iterations_per_ac == 10
         assert config.execution.tui_autolaunch is False
         assert config.execution.auto_evaluate is True
+        assert config.execution.auto_evolve is True
+        assert config.execution.auto_evolve_max_generations == 3
 
     def test_load_config_execution_tui_autolaunch(self, tmp_path: Path) -> None:
         """load_config accepts the execution TUI auto-launch toggle."""
@@ -407,6 +409,22 @@ class TestLoadConfig:
 
         config = load_config(config_path)
         assert config.execution.auto_evaluate is False
+
+    def test_load_config_execution_auto_evolve(self, tmp_path: Path) -> None:
+        """load_config accepts the bounded rejected-evaluation evolution chain."""
+        config_path = tmp_path / "config.yaml"
+        config_content = {
+            "execution": {
+                "auto_evolve": False,
+                "auto_evolve_max_generations": 99,
+            }
+        }
+        with config_path.open("w") as f:
+            yaml.dump(config_content, f)
+
+        config = load_config(config_path)
+        assert config.execution.auto_evolve is False
+        assert config.execution.auto_evolve_max_generations == 10
 
 
 class TestLoadCredentials:

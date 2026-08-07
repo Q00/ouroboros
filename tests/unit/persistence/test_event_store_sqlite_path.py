@@ -28,8 +28,10 @@ class TestSqlitePath:
     def test_memory_backend_has_no_file(self) -> None:
         assert EventStore("sqlite+aiosqlite:///:memory:").sqlite_path() is None
 
-    def test_non_sqlite_backend_has_no_local_file(self) -> None:
-        assert EventStore("postgresql+asyncpg://host/db").sqlite_path() is None
+    def test_non_sqlite_url_yields_no_local_file(self) -> None:
+        # Construction refuses non-SQLite URLs outright (#1832); the path
+        # helper's contract for such URLs is still pinned directly.
+        assert EventStore._sqlite_path_from_url("postgresql+asyncpg://host/db") is None
 
     def test_read_only_uri_form_is_decoded_back_to_a_path(self) -> None:
         # read_only=True rewrites the URL into the ``file:...?mode=ro&uri=true``

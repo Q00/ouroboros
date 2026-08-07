@@ -811,7 +811,7 @@ See [UNINSTALL.md](../UNINSTALL.md) for the full guide.
 
 Check Ouroboros system status.
 
-> **Current state:** all status subcommands are read-only. `status executions` and `status execution` read the configured EventStore when it exists, falling back to the default runtime store at `~/.ouroboros/ouroboros.db`; `status run` provides the richer Run/Stage/Step projection.
+> **Current state:** all status subcommands are read-only. `status executions` and `status execution` read the configured EventStore when it exists, falling back to the default runtime store at `~/.ouroboros/ouroboros.db`; `status run` provides the richer Run/Stage/Step projection, and `status project` rebuilds complete cross-run Project Map status.
 
 ### `status auto`
 
@@ -863,6 +863,27 @@ ouroboros status run [RUN_ID] [--session-id TEXT] [--execution-id TEXT] [OPTIONS
 | `1` | Generic projection failure surfaced by the MCP handler |
 | `2` | Unknown run anchor — no events match the requested `RUN_ID` / selectors |
 | `64` | Malformed input — missing selectors or conflicting `RUN_ID` / option combination |
+
+### `status project`
+
+Rebuild complete run status for the project containing `PROJECT_DIR` (or the
+current directory when omitted). This command and the read-only
+`ouroboros_project_status` MCP tool use the same handler. `--json` therefore
+emits the exact MCP `structuredContent` ProjectRecord.
+
+```bash
+ouroboros status project [PROJECT_DIR] [--workspace PATH] [--limit N] [--json]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--workspace PATH` | Filter to one canonical project-relative workspace after validating all project identity candidates |
+| `--limit N` | Complete-run safety cap (default `100`); an undersized limit fails instead of truncating |
+| `--json` | Emit deterministic ProjectRecord JSON identical to the MCP structured result |
+
+The command performs no writes or schema creation. Identity conflicts,
+projection failures, and undersized limits return exit code `1` with no partial
+record; malformed CLI limits or workspace values return exit code `64`.
 
 ### `status health`
 
@@ -1128,6 +1149,7 @@ ouroboros mcp info [OPTIONS]
 |------|-------------|
 | `ouroboros_execute_seed` | Execute a seed specification |
 | `ouroboros_session_status` | Get the status of a session |
+| `ouroboros_project_status` | Rebuild complete read-only cross-run project status |
 | `ouroboros_query_events` | Query event history |
 
 ---

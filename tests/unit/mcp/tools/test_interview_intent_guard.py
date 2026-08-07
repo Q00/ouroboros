@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 from ouroboros.bigbang.interview import InterviewRound, InterviewState
 from ouroboros.core.types import Result
+from ouroboros.mcp.tools.advisory_dispatch import QUESTION_ADVISORY_DISPATCH_MARKER
 from ouroboros.mcp.tools.definitions import InterviewHandler
 
 VIDEO_GOAL = (
@@ -119,6 +120,13 @@ async def test_interview_handler_resume_without_answer_omits_intent_guard() -> N
     assert result.is_ok
     assert result.value.meta["session_id"] == state.interview_id
     assert "intent_guard" not in result.value.meta
-    assert result.value.content[0].text.endswith("What clip length?")
+    # The question is intact and comes first; the advisory fan-out directive
+    # that follows it is addressed to the host, not part of the question.
+    assert (
+        result.value.content[0]
+        .text.split(QUESTION_ADVISORY_DISPATCH_MARKER, 1)[0]
+        .strip()
+        .endswith("What clip length?")
+    )
     mock_engine.record_response.assert_not_called()
     mock_engine.ask_next_question.assert_awaited_once()

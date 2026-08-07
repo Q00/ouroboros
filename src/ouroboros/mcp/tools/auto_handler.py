@@ -111,6 +111,7 @@ from ouroboros.runtime.controls import load_runtime_controls
 from ouroboros.runtime.watchdog import Watchdog
 
 _START_AUTO_PENDING_LEASE_SECONDS = 60.0
+_FOLLOW_JOBS = ("job_id", "ralph_job_id", "chained_evaluate_job_id", "chained_ralph_job_id")
 
 
 @dataclass(slots=True)
@@ -1007,11 +1008,7 @@ class StartAutoHandler:
                 job_id=snapshot.job_id,
                 cursor=getattr(snapshot, "cursor", 0),
                 session_id=auto_session_id,
-                follow_result_job_keys=(
-                    "job_id",
-                    "ralph_job_id",
-                    "chained_evaluate_job_id",
-                ),
+                follow_result_job_keys=_FOLLOW_JOBS,
             ),
         }
         return Result.ok(

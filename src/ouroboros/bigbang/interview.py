@@ -652,16 +652,14 @@ def _parse_question_candidate(persona: str, response: str) -> QuestionCandidate 
     candidate never breaks the panel (the others still select).
     """
     import json
-    import re
 
-    text = response.strip()
-    match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
-    if match:
-        text = match.group(1)
-    else:
-        match = re.search(r"\{.*\}", text, re.DOTALL)
-        if match:
-            text = match.group(0)
+    from ouroboros.core.json_utils import extract_json_payload
+
+    # One authoritative payload or nothing: an echoed schema example must
+    # not become a panel candidate (#1838).
+    text = extract_json_payload(response.strip())
+    if text is None:
+        return None
     try:
         data = json.loads(text)
     except json.JSONDecodeError:

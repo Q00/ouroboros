@@ -14,7 +14,7 @@ The V1 delivery is intentionally split:
    `orchestrator.session.started` fields.
 2. **Projection (implemented)** — complete EventStore history plus frozen
    `ProjectRunSummary` and `ProjectRecord` values.
-3. **Query surfaces (planned)** — read-only MCP/CLI output with JSON parity.
+3. **Query surfaces (implemented)** — read-only MCP/CLI output with JSON parity.
 
 This document fixes the identity decision that previously blocked #1389. A
 project is a deterministic label over run events, not a writable first-class
@@ -244,6 +244,24 @@ Project identity is an indexing and attribution contract only:
 6. an explicit limit below the attributable population raises a typed error
    instead of returning an unmarked recent window; and
 7. projection performs no EventStore write and grants no execution authority.
+
+## V1 query surfaces
+
+`ouroboros_project_status` and `ouroboros status project` share the same
+read-only handler. Both resolve the canonical Project Map identity from an
+explicit project/workspace directory or the caller directory, optionally filter
+by one canonical repository-relative workspace, and apply a positive complete-run
+safety limit. A limit below the attributable population, an identity conflict,
+or any reconstruction/storage failure returns an error with no partial
+`ProjectRecord`.
+
+The MCP tool publishes the serialized `ProjectRecord` as `structuredContent`;
+`ouroboros status project --json` emits that exact object with deterministic key
+ordering. Handler-owned EventStores are opened with SQLite `mode=ro` and
+`initialize(create_schema=False)`. The composition root may inject its shared
+EventStore, but the handler invokes only read methods and still skips schema
+creation. Neither surface writes materialized project state, controls execution,
+or contributes acceptance evidence.
 
 ## V1 non-goals
 

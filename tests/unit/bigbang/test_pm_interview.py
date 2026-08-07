@@ -1446,6 +1446,30 @@ class TestPMSeedGeneration:
         assert seed.interview_id == "test_001"
 
     @pytest.mark.asyncio
+    async def test_generate_pm_seed_fenced_array_returns_err(self, tmp_path: Path) -> None:
+        """A fenced top-level array must stay inside the Result contract (#1838)."""
+        adapter = _make_adapter()
+        engine = _make_engine(adapter, tmp_path)
+        adapter.complete = AsyncMock(return_value=Result.ok(_mock_completion("```json\n[]\n```")))
+
+        state = InterviewState(
+            interview_id="test_array",
+            initial_context="Plan a product",
+            status=InterviewStatus.COMPLETED,
+            rounds=[
+                InterviewRound(
+                    round_number=1,
+                    question="What is the goal?",
+                    user_response="Manage tasks",
+                ),
+            ],
+        )
+
+        result = await engine.generate_pm_seed(state)
+
+        assert result.is_err, "a non-object payload escaped the Result contract"
+
+    @pytest.mark.asyncio
     async def test_uncertain_answer_is_preserved_as_assumption_and_decide_later(
         self, tmp_path: Path
     ) -> None:

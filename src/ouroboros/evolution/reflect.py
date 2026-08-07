@@ -16,18 +16,19 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 import json
 import logging
-from typing import Literal
+from typing import ClassVar, Literal
 
-from pydantic import BaseModel, Field, ValidationError, field_validator
+from pydantic import BaseModel, Field, PrivateAttr, ValidationError, field_validator
 
 from ouroboros.config import get_llm_backend_for_role, get_llm_model_for_role
 from ouroboros.core.conductor import ConductorDirective
 from ouroboros.core.errors import ProviderError
 from ouroboros.core.json_utils import extract_json_payload
 from ouroboros.core.lineage import EvaluationSummary, MutationAction, OntologyDelta, OntologyLineage
-from ouroboros.core.seed import Seed, ac_texts
+from ouroboros.core.seed import AcceptanceCriterionSpec, Seed, ac_texts
 from ouroboros.core.text import truncate_head_tail
 from ouroboros.core.types import Result
+from ouroboros.evolution.provider_usage import tracked_complete
 from ouroboros.evolution.regression import RegressionDetector, RegressionReport
 from ouroboros.evolution.wonder import WonderOutput
 from ouroboros.providers.base import (
@@ -76,6 +77,14 @@ class ACPatch(BaseModel, frozen=True):
     content: str | None = None
     reason: str = ""
 
+    @field_validator("index", mode="before")
+    @classmethod
+    def _normalize_index(cls, value: object) -> int | None:
+        """Match persisted patch coercion to the strict fresh-response parser."""
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value
+        return None
+
 
 class ReflectOutput(BaseModel, frozen=True):
     """Output of the Reflect phase -- feeds directly into SeedGenerator.
@@ -91,12 +100,59 @@ class ReflectOutput(BaseModel, frozen=True):
     settled_ac_indices: tuple[int, ...] = Field(default_factory=tuple)
     ontology_mutations: tuple[OntologyMutation, ...] = Field(default_factory=tuple)
     reasoning: str = ""
+    _ac_patch_provenance: tuple[tuple[str, ...], tuple[ACPatch, ...]] | None = PrivateAttr(
+        default=None
+    )
+
+    @property
+    def ac_patch_identity_explicit(self) -> bool:
+        """Whether this output carries parser-issued, non-serialized patch provenance."""
+        return self._ac_patch_provenance == (self.refined_acs, self.ac_patches)
+
+    def restore_durable_patch_identity(self, parent_seed: Seed) -> None:
+        """Restore explicit identity from a complete, trusted phase checkpoint.
+
+        Generic model serialization intentionally cannot manufacture parser
+        provenance.  The evolution checkpoint boundary persists that provenance
+        separately and calls this method only after replay.  Revalidate the
+        complete patch mapping against the durable parent Seed before restoring
+        it so corrupt or mismatched checkpoint data still fails closed.
+        """
+        raw_patches = [patch.model_dump(mode="python") for patch in self.ac_patches]
+        parent_acs = ac_texts(parent_seed.acceptance_criteria)
+        _validate_explicit_ac_patch_identity(raw_patches, len(parent_acs))
+
+        parent_patches = {
+            patch.index: patch for patch in self.ac_patches if patch.op in {"keep", "revise"}
+        }
+        restored_acs = list(parent_acs)
+        for index in range(len(parent_acs)):
+            patch = parent_patches[index]
+            if patch.op == "revise":
+                assert patch.content is not None
+                restored_acs[index] = patch.content
+        restored_acs.extend(patch.content or "" for patch in self.ac_patches if patch.op == "add")
+        if tuple(restored_acs) != self.refined_acs:
+            raise ValueError("Durable ac_patches conflict with refined_acs")
+        self._ac_patch_provenance = (self.refined_acs, self.ac_patches)
 
     @field_validator("refined_acs", mode="before")
     @classmethod
     def _coerce_refined_acs(cls, value: object) -> object:
         if isinstance(value, list | tuple):
-            return ac_texts(value)
+            if any(not isinstance(item, str | AcceptanceCriterionSpec) for item in value):
+                raise TypeError("Expected refined acceptance criteria to contain strings")
+            descriptions = tuple(
+                _clean_required_text(description, "refined acceptance criterion")
+                for description in ac_texts(value)
+            )
+            if any(
+                ord(character) < 32 or ord(character) == 127
+                for description in descriptions
+                for character in description
+            ):
+                raise TypeError("Expected refined acceptance criteria without control characters")
+            return descriptions
         return value
 
 
@@ -184,17 +240,63 @@ def _parse_ac_patches(raw_patches: object) -> list[ACPatch]:
     return patches
 
 
+def _validate_explicit_ac_patch_identity(raw_patches: object, parent_count: int) -> None:
+    """Require a complete, unique parent-index map before trusting patch provenance."""
+    if not isinstance(raw_patches, list):
+        raise TypeError("Expected ac_patches to be a list")
+
+    seen_parent_indices: set[int] = set()
+    for item in raw_patches:
+        if not isinstance(item, dict):
+            raise TypeError("Expected each ac_patch to be an object")
+        op = item.get("op")
+        if op in ("keep", "revise"):
+            index = item.get("index")
+            if isinstance(index, bool) or not isinstance(index, int):
+                raise TypeError("Expected keep/revise ac_patch index to be an integer")
+            if index < 0 or index >= parent_count:
+                raise ValueError("Explicit ac_patch index is outside the parent AC range")
+            if index in seen_parent_indices:
+                raise ValueError("Explicit ac_patches contain a duplicate parent AC index")
+            seen_parent_indices.add(index)
+            if op == "keep":
+                if item.get("content") is not None:
+                    raise ValueError("Explicit keep ac_patch cannot carry replacement content")
+            else:
+                content = item.get("content")
+                if not isinstance(content, str):
+                    raise TypeError("Expected revise ac_patch content to be a string")
+                _clean_required_text(content, "acceptance criterion patch content")
+            continue
+        if op == "add":
+            if item.get("index") is not None:
+                raise ValueError("Explicit add ac_patch cannot carry a parent AC index")
+            content = item.get("content")
+            if not isinstance(content, str):
+                raise TypeError("Expected add ac_patch content to be a string")
+            _clean_required_text(content, "acceptance criterion patch content")
+            continue
+        raise ValueError("Explicit ac_patch op must be keep, revise, or add")
+
+    if seen_parent_indices != set(range(parent_count)):
+        raise ValueError("Explicit ac_patches must identify every parent AC exactly once")
+
+
 def _derive_legacy_patches(
     refined_acs: tuple[str, ...], parent_acs: tuple[str, ...]
 ) -> list[ACPatch] | None:
     """Derive patches from a full refined-AC list (old JSON shape).
 
     Verbatim positional diff: identical text → keep, different → revise, extra
-    tail entries → add. A *shorter* list returns None to signal full-rewrite
-    semantics (the caller uses ``refined_acs`` as-is with no settled indices)
-    rather than guessing at deletions.
+    tail entries → add. A shorter list or an entry moved from another parent
+    position returns None because positional identity would be ambiguous.
     """
     if len(refined_acs) < len(parent_acs):
+        return None
+    if any(
+        new_text != parent_acs[index] and new_text in parent_acs
+        for index, new_text in enumerate(refined_acs[: len(parent_acs)])
+    ) or any(new_text in parent_acs for new_text in refined_acs[len(parent_acs) :]):
         return None
     patches: list[ACPatch] = []
     for i, parent_text in enumerate(parent_acs):
@@ -213,6 +315,9 @@ def _apply_satisficing_backstop(
     patches: list[ACPatch],
     protected: set[int],
     passed_indices: set[int],
+    *,
+    allow_additions: bool = True,
+    reject_ambiguous_identity: bool = False,
 ) -> tuple[tuple[str, ...], tuple[ACPatch, ...], tuple[int, ...]]:
     """Deterministically enforce the satisficing invariant.
 
@@ -220,7 +325,10 @@ def _apply_satisficing_backstop(
     challenged AND not regressed) are forced to verbatim keep. Missing indices
     keep implicitly. Malformed/duplicate/out-of-range patches are dropped so the
     composed list holds every parent index exactly once (keeps/revises in place,
-    adds appended in order), preserving positional AC identity.
+    adds appended in order), preserving positional AC identity. Fresh Reflect
+    output rejects patches that reuse a parent identity so the provider retry
+    boundary can recover. Persisted legacy output instead drops those unsafe
+    patches and falls back to an implicit keep, preserving replayability.
 
     Returns ``(refined_acs, final_patches, settled_ac_indices)``.
     """
@@ -230,9 +338,29 @@ def _apply_satisficing_backstop(
 
     for patch in patches:
         if patch.op == "add":
+            if not allow_additions:
+                logger.info(
+                    "reflect.patch.dropped",
+                    extra={"reason": "focused_evolution_disallows_new_node"},
+                )
+                continue
             if not patch.content:
                 logger.warning("reflect.patch.dropped", extra={"reason": "add_without_content"})
                 continue
+            if patch.content in parent_acs:
+                if reject_ambiguous_identity:
+                    raise ValueError("acceptance criterion patch reuses another parent identity")
+                logger.warning(
+                    "reflect.patch.dropped",
+                    extra={"reason": "add_reuses_parent_identity"},
+                )
+                continue
+            if patch.index is not None:
+                logger.info(
+                    "reflect.patch.normalized",
+                    extra={"reason": "add_index_removed", "index": patch.index},
+                )
+                patch = patch.model_copy(update={"index": None})
             adds.append(patch)
             continue
         # keep / revise must target a valid, not-yet-seen parent index.
@@ -246,6 +374,18 @@ def _apply_satisficing_backstop(
             logger.warning(
                 "reflect.patch.dropped",
                 extra={"reason": "revise_without_content", "index": patch.index},
+            )
+            continue
+        if (
+            patch.op == "revise"
+            and patch.content != parent_acs[patch.index]
+            and patch.content in parent_acs
+        ):
+            if reject_ambiguous_identity:
+                raise ValueError("acceptance criterion patch reuses another parent identity")
+            logger.warning(
+                "reflect.patch.dropped",
+                extra={"reason": "revise_reuses_parent_identity", "index": patch.index},
             )
             continue
         if patch.index in keep_revise:
@@ -311,6 +451,8 @@ class ReflectEngine:
         captured adapter (preserving today's behavior for tests and direct
         consumers).
     """
+
+    frugality_provider_tracking: ClassVar[bool] = True
 
     llm_adapter: LLMAdapter
     model: str | None = None
@@ -409,18 +551,21 @@ class ReflectEngine:
         self,
         current_seed: Seed,
         execution_output: str,
-        evaluation_summary: EvaluationSummary,
+        evaluation_summary: EvaluationSummary | None,
         wonder_output: WonderOutput,
         lineage: OntologyLineage,
         regression_report: RegressionReport | None = None,
         conductor_directive: ConductorDirective | None = None,
+        active_ac_indices: tuple[int, ...] | None = None,
     ) -> Result[ReflectOutput, ProviderError]:
         """Reflect on execution results and propose evolution.
 
         Args:
             current_seed: The seed that was executed.
             execution_output: What was actually produced.
-            evaluation_summary: How the execution was evaluated.
+            evaluation_summary: How the execution was evaluated, or ``None``
+                during ontology-only exploration. Missing evaluation never
+                creates PASS, protection, or settling authority.
             wonder_output: What we still don't know (from WonderEngine).
             lineage: Full lineage for cross-generation context.
             regression_report: Precomputed regressions (from the loop). When
@@ -441,6 +586,7 @@ class ReflectEngine:
             lineage,
             regression_report,
             conductor_directive,
+            active_ac_indices,
         )
 
         messages = [
@@ -457,7 +603,7 @@ class ReflectEngine:
             max_tokens=3000,
         )
 
-        result = await adapter.complete(messages, config)
+        result = await tracked_complete(adapter, messages, config)
 
         if result.is_err:
             logger.error("ReflectEngine LLM call failed: %s", result.error)
@@ -478,6 +624,7 @@ class ReflectEngine:
             evaluation_summary,
             wonder_output,
             regression_report,
+            active_ac_indices,
         )
         if parsed is None:
             return Result.err(
@@ -530,10 +677,15 @@ SATISFICING DELTA — patch the AC list, do NOT rewrite it:
 
 Guidelines:
 - If Wonder questions exist, you MUST propose at least one ontology_mutation that addresses them
+- If Evaluation Results says "Not evaluated", do not infer PASS, protection, or
+  settlement for any AC; evolve only from Wonder questions and ontology context.
 - If evaluation score >= 0.8 and approved, keep changes focused but still evolve the ontology based on Wonder insights
 - If evaluation score < 0.8 or not approved, propose more aggressive mutations to address failures
 - Each mutation must have a clear reason tied to evaluation findings or wonder questions
 - Patches should address the wonder questions and ontology tensions
+- When an "Evolution Focus" is present, only ACTIVE AC indices may be revised.
+  Keep every frozen node verbatim, do not add ACs, and do not rewrite the goal
+  or constraints. The next generation's working set must not expand.
 - Do NOT change things that are working well -- only evolve what needs evolution
 - action must be exactly one of: "add", "modify", "remove"
 - An empty ontology_mutations list is ONLY acceptable when there are no Wonder questions
@@ -543,16 +695,29 @@ Guidelines:
         self,
         seed: Seed,
         execution_output: str,
-        eval_summary: EvaluationSummary,
+        eval_summary: EvaluationSummary | None,
         wonder: WonderOutput,
         lineage: OntologyLineage,
         regression_report: RegressionReport,
         conductor_directive: ConductorDirective | None = None,
+        active_ac_indices: tuple[int, ...] | None = None,
     ) -> str:
         parts = ["## Current Seed"]
         parts.append(f"Goal: {seed.goal}")
         parts.append(f"Constraints: {list(seed.constraints)}")
-        parts.append(f"Acceptance Criteria: {list(ac_texts(seed.acceptance_criteria))}")
+        seed_acs = ac_texts(seed.acceptance_criteria)
+        focused = active_ac_indices is not None
+        active = set(active_ac_indices or ())
+        if focused:
+            parts.append(
+                f"Evolution Focus: {len(active)} active / {len(seed_acs) - len(active)} frozen"
+            )
+            parts.append("Only these nodes may change; all omitted nodes are immutable:")
+            for index in sorted(active):
+                if 0 <= index < len(seed_acs):
+                    parts.append(f"  ACTIVE AC {index + 1}: {seed_acs[index]}")
+        else:
+            parts.append(f"Acceptance Criteria: {list(seed_acs)}")
 
         if conductor_directive is not None:
             parts.append("\n## Active Conductor Successor Directive")
@@ -579,36 +744,46 @@ Guidelines:
             parts.append(f"  - {f.name} ({f.field_type}): {f.description}")
 
         parts.append("\n## Evaluation Results")
-        parts.append(f"  Approved: {eval_summary.final_approved}")
-        parts.append(f"  Score: {eval_summary.score}")
-        parts.append(f"  Drift: {eval_summary.drift_score}")
-        if eval_summary.failure_reason:
-            parts.append(f"  Failure: {eval_summary.failure_reason}")
-        if eval_summary.feedback_metadata:
-            parts.append("  Feedback Signals:")
-            for feedback in eval_summary.feedback_metadata:
-                details: list[str] = []
-                max_depth = feedback.details.get("max_depth")
-                if isinstance(max_depth, int):
-                    details.append(f"max_depth={max_depth}")
-                affected_count = feedback.details.get("affected_count")
-                if isinstance(affected_count, int):
-                    details.append(f"affected_count={affected_count}")
-                detail_suffix = f" ({', '.join(details)})" if details else ""
-                parts.append(
-                    f"    - [{feedback.severity.upper()}] {feedback.code}: "
-                    f"{feedback.message}{detail_suffix}"
-                )
-        if eval_summary.ac_results:
-            parts.append("\n  Per-AC Breakdown:")
-            for ac in eval_summary.ac_results:
-                status = "PASS" if ac.passed else "FAIL"
-                parts.append(f"    AC {ac.ac_index + 1} [{status}]: {ac.ac_content}")
-            failed_acs = [ac for ac in eval_summary.ac_results if not ac.passed]
-            if failed_acs:
-                parts.append(
-                    f"\n  PRIORITY: Fix {len(failed_acs)} failing AC(s) while preserving passing ones."
-                )
+        if eval_summary is None:
+            parts.append("  Not evaluated (ontology-only exploration).")
+            parts.append(
+                "  No AC has PASS, protection, or settling authority; use only "
+                "the Wonder questions and ontology context."
+            )
+        else:
+            parts.append(f"  Approved: {eval_summary.final_approved}")
+            parts.append(f"  Score: {eval_summary.score}")
+            parts.append(f"  Drift: {eval_summary.drift_score}")
+            if eval_summary.failure_reason:
+                parts.append(f"  Failure: {eval_summary.failure_reason}")
+            if eval_summary.feedback_metadata:
+                parts.append("  Feedback Signals:")
+                for feedback in eval_summary.feedback_metadata:
+                    details: list[str] = []
+                    max_depth = feedback.details.get("max_depth")
+                    if isinstance(max_depth, int):
+                        details.append(f"max_depth={max_depth}")
+                    affected_count = feedback.details.get("affected_count")
+                    if isinstance(affected_count, int):
+                        details.append(f"affected_count={affected_count}")
+                    detail_suffix = f" ({', '.join(details)})" if details else ""
+                    parts.append(
+                        f"    - [{feedback.severity.upper()}] {feedback.code}: "
+                        f"{feedback.message}{detail_suffix}"
+                    )
+            if eval_summary.ac_results:
+                parts.append("\n  Per-AC Breakdown:")
+                visible_results = [
+                    ac for ac in eval_summary.ac_results if not focused or ac.ac_index in active
+                ]
+                for ac in visible_results:
+                    status = ac.authority_state.upper()
+                    parts.append(f"    AC {ac.ac_index + 1} [{status}]: {ac.ac_content}")
+                unresolved_acs = [ac for ac in visible_results if ac.unresolved]
+                if unresolved_acs:
+                    parts.append(
+                        f"\n  PRIORITY: Resolve {len(unresolved_acs)} open AC(s) while preserving passing ones."
+                    )
 
         # Regression context (precomputed once by the caller and reused here).
         if regression_report.has_regressions:
@@ -641,7 +816,22 @@ Guidelines:
             for t in wonder.ontology_tensions:
                 parts.append(f"  - {t}")
 
-        truncated = truncate_head_tail(execution_output)
+        evidence = []
+        if focused and eval_summary is not None:
+            evidence = [
+                f"AC {result.ac_index + 1}: {result.evidence}"
+                for result in eval_summary.ac_results
+                if result.ac_index in active and result.evidence
+            ]
+        truncated = (
+            "\n".join(evidence)
+            if evidence
+            else truncate_head_tail(
+                execution_output,
+                head=200 if focused else 500,
+                tail=800 if focused else 2000,
+            )
+        )
         parts.append(f"\n## Execution Output (truncated)\n{truncated}")
 
         if len(lineage.generations) > 1:
@@ -688,9 +878,10 @@ Guidelines:
         self,
         content: str,
         current_seed: Seed,
-        evaluation_summary: EvaluationSummary,
+        evaluation_summary: EvaluationSummary | None,
         wonder_output: WonderOutput,
         regression_report: RegressionReport,
+        active_ac_indices: tuple[int, ...] | None = None,
     ) -> ReflectOutput | None:
         """Parse LLM response into ReflectOutput.
 
@@ -712,13 +903,29 @@ Guidelines:
             mutations = _parse_ontology_mutations(data)
 
             parent_acs = ac_texts(current_seed.acceptance_criteria)
+            explicit_patch_identity = "ac_patches" in data
+            if explicit_patch_identity:
+                _validate_explicit_ac_patch_identity(data["ac_patches"], len(parent_acs))
             refined_acs, ac_patches, settled = self._compose_acs(
                 data,
                 parent_acs,
                 evaluation_summary,
                 wonder_output,
                 regression_report,
+                active_ac_indices,
             )
+            if explicit_patch_identity and "refined_acs" in data:
+                raw_refined_acs = data["refined_acs"]
+                if not isinstance(raw_refined_acs, list | tuple) or not all(
+                    isinstance(criterion, str) for criterion in raw_refined_acs
+                ):
+                    raise TypeError("Expected refined_acs to be a list of strings")
+                supplied_refined_acs = tuple(
+                    _clean_required_text(criterion, "refined acceptance criterion")
+                    for criterion in raw_refined_acs
+                )
+                if supplied_refined_acs != refined_acs:
+                    raise ValueError("Explicit ac_patches conflict with refined_acs")
             refined_goal = data.get("refined_goal", current_seed.goal)
             if not isinstance(refined_goal, str):
                 raise TypeError("Expected refined_goal to be a string")
@@ -735,11 +942,16 @@ Guidelines:
                 _clean_required_text(constraint, "refined constraint")
                 for constraint in raw_refined_constraints
             )
+            if active_ac_indices is not None:
+                # Node-focused evolution cannot drift global direction while
+                # repairing a bounded AC working set.
+                refined_goal = current_seed.goal
+                refined_constraints = current_seed.constraints
             reasoning = data.get("reasoning", "")
             if not isinstance(reasoning, str):
                 raise TypeError("Expected reasoning to be a string")
 
-            return ReflectOutput(
+            output = ReflectOutput(
                 refined_goal=refined_goal,
                 refined_constraints=refined_constraints,
                 refined_acs=refined_acs,
@@ -748,6 +960,9 @@ Guidelines:
                 ontology_mutations=tuple(mutations),
                 reasoning=reasoning,
             )
+            if explicit_patch_identity:
+                output._ac_patch_provenance = (output.refined_acs, output.ac_patches)
+            return output
         except (ValueError, KeyError, TypeError, ValidationError) as e:
             logger.warning(
                 "reflect.parse_failed",
@@ -762,12 +977,17 @@ Guidelines:
     def _compose_acs(
         data: dict[str, object],
         parent_acs: tuple[str, ...],
-        evaluation_summary: EvaluationSummary,
+        evaluation_summary: EvaluationSummary | None,
         wonder_output: WonderOutput,
         regression_report: RegressionReport,
+        active_ac_indices: tuple[int, ...] | None = None,
     ) -> tuple[tuple[str, ...], tuple[ACPatch, ...], tuple[int, ...]]:
         """Compose the next AC list from LLM patches under the satisficing backstop."""
-        passed_indices = {ac.ac_index for ac in evaluation_summary.ac_results if ac.passed}
+        passed_indices = (
+            {ac.ac_index for ac in evaluation_summary.ac_results if ac.authoritative_pass}
+            if evaluation_summary is not None
+            else set()
+        )
         challenged: set[int] = set()
         for gq in wonder_output.grounded_questions:
             if gq.kind == "challenge":
@@ -780,12 +1000,22 @@ Guidelines:
         }
         # Invariant: a regressed AC is never settled, even if kept — subtract it
         # from the settleable set before the backstop decides settling.
-        settleable = passed_indices - regressed
+        settleable = passed_indices - regressed - challenged
+        if active_ac_indices is not None:
+            active = {index for index in active_ac_indices if 0 <= index < len(parent_acs)}
+            protected.update(set(range(len(parent_acs))) - active)
 
         if "ac_patches" in data:
             raw_patches = data["ac_patches"]
             patches = _parse_ac_patches(raw_patches)
-            return _apply_satisficing_backstop(parent_acs, patches, protected, settleable)
+            return _apply_satisficing_backstop(
+                parent_acs,
+                patches,
+                protected,
+                settleable,
+                allow_additions=active_ac_indices is None,
+                reject_ambiguous_identity=True,
+            )
 
         # Legacy full-list shape: derive patches by positional diff.
         raw_refined_acs = data.get("refined_acs", list(parent_acs))
@@ -798,10 +1028,16 @@ Guidelines:
         )
         legacy_patches = _derive_legacy_patches(llm_refined_acs, parent_acs)
         if legacy_patches is None:
-            # Shorter list → full-rewrite semantics: use the LLM list as-is with
-            # no settled indices and no patches (do not guess at deletions).
-            return llm_refined_acs, (), ()
-        return _apply_satisficing_backstop(parent_acs, legacy_patches, protected, settleable)
+            raise ValueError(
+                "legacy refined_acs cannot delete or reorder parent criteria; use ac_patches"
+            )
+        return _apply_satisficing_backstop(
+            parent_acs,
+            legacy_patches,
+            protected,
+            settleable,
+            allow_additions=active_ac_indices is None,
+        )
 
 
 def _adapter_rebuild_kwargs(adapter: LLMAdapter) -> dict[str, object]:

@@ -2,8 +2,8 @@
 
 Covers PR-J:
 - ``build_fanout_subagents`` generic builder,
-- ``stamp_fanout_meta`` 3-mode stamping (byte-identical to the legacy inline
-  producers),
+- ``stamp_fanout_meta`` 3-mode stamping (the cue is host-only; the
+  correlation key is written on all three),
 - ``FanoutRegistry`` persist/load,
 - ``submit_fanout_results`` routing (complete / partial / unknown / mismatch),
 - end-to-end producer -> registry -> submit for both revived synthesizer kinds.
@@ -12,11 +12,13 @@ Covers PR-J:
 from __future__ import annotations
 
 from collections.abc import Mapping
+import json
 from typing import Any
 
 import pytest
 
 from ouroboros.backends.capabilities import SubagentDispatchMode
+from ouroboros.mcp.tools import fanout as fanout_module
 from ouroboros.mcp.tools.authoring_handlers import (
     InterviewHandler,
     _attach_question_assist_requests,
@@ -67,7 +69,7 @@ def test_build_fanout_subagents_rejects_empty_inputs() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# stamp_fanout_meta (byte-identical 3-mode contract)
+# stamp_fanout_meta (3-mode contract)
 # --------------------------------------------------------------------------- #
 
 
@@ -107,7 +109,15 @@ def test_stamp_fanout_meta_sequential_bare() -> None:
     }
 
 
-def test_stamp_fanout_meta_plugin_passive_stamps_nothing() -> None:
+def test_stamp_fanout_meta_plugin_passive_stamps_only_the_correlation_key() -> None:
+    """No host-action cue there, but the submission still has to be keyed.
+
+    This asserted an empty dict, which read as "the bridge transport needs
+    nothing from this stamp". It needed one thing: the bridge lifts
+    ``result_correlation_key`` by name with no fallback, so omitting it did not
+    leave re-entry undegraded — it left every submission answering
+    ``correlation_mismatch``. The cue is what is host-only, not the key.
+    """
     meta: dict[str, Any] = {}
     stamp_fanout_meta(
         meta,
@@ -116,7 +126,7 @@ def test_stamp_fanout_meta_plugin_passive_stamps_nothing() -> None:
         payloads=_payloads(),
         correlation_key="context.lane_id",
     )
-    assert meta == {}
+    assert meta == {"question_advisory_result_correlation_key": "context.lane_id"}
 
 
 def test_stamp_fanout_meta_empty_payloads_is_noop() -> None:
@@ -152,7 +162,13 @@ def _advisory_meta(dispatch_mode: SubagentDispatchMode, **kwargs: Any) -> dict[s
 
 
 def test_advisory_producer_byte_identical_without_registry() -> None:
-    """No registry -> emitted fan-out meta is the exact pre-registry contract."""
+    """No registry -> the pre-registry contract, on the two modes built here.
+
+    Scoped deliberately. ``PLUGIN_PASSIVE`` is the mode that stopped being
+    byte-identical — it gained the correlation key it had always needed — and
+    it is the one this test does not construct, which is why an unqualified
+    claim here would have outlived its own coverage.
+    """
     host = _advisory_meta(SubagentDispatchMode.HOST_DRIVEN)
     assert host["question_advisory_contract_id"] == "interview_question_advisory_fanout.v1"
     assert host["question_advisory_dispatch_mode"] == "host_driven"
@@ -269,6 +285,77 @@ def test_submit_correlation_mismatch(tmp_path: Any) -> None:
     assert out["status"] == "correlation_mismatch"
 
 
+def test_an_omitted_envelope_field_does_not_redeem_a_bound_fanout(tmp_path: Any) -> None:
+    """An absent value is a mismatch, not a waiver.
+
+    The MCP handler turns a missing `session_id` / `correlation_key` argument
+    into `""`, so a caller that left it out used to skip these checks entirely
+    and redeem a fan-out registered under someone else's session. That matters
+    more than it reads: contracted lane answers carry no session of their own
+    *because* this envelope settles it, so the guarantee they lean on has to
+    hold for a caller who asserts nothing (Q00/ouroboros#1754).
+    """
+    registry = FanoutRegistry(tmp_path)
+    payloads = [
+        build_subagent_payload(
+            tool_name="ouroboros_lateral_think",
+            title="L (researcher)",
+            prompt="x",
+            agent="researcher",
+            context={"persona": "researcher"},
+        )
+    ]
+    fanout_id = register_lateral_persona_fanout(registry, session_id="s1", payloads=payloads)
+    results = [{"key": "researcher", "content": "x"}]
+
+    def submit(session_id: str, correlation_key: str) -> dict[str, Any]:
+        return submit_fanout_results(
+            registry,
+            session_id=session_id,
+            correlation_key=correlation_key,
+            results=results,
+            fanout_id=fanout_id,
+        )
+
+    # The same submission under its own envelope still completes: the checks bind
+    # the owner, they do not make the envelope harder to satisfy correctly.
+    assert submit("s1", "context.persona")["status"] == "complete"
+    assert submit("", "context.persona")["status"] == "correlation_mismatch"
+    assert submit("s2", "context.persona")["status"] == "correlation_mismatch"
+    assert submit("s1", "")["status"] == "correlation_mismatch"
+    assert submit("s1", "code_facts")["status"] == "correlation_mismatch"
+
+
+def test_a_record_that_bound_nothing_has_nothing_to_demand(tmp_path: Any) -> None:
+    """A producer that ran without a session keeps today's behavior.
+
+    The record decides what must be proven. Demanding a session the producer
+    never recorded would reject correct submissions to prove a binding that was
+    never made — over-blocking in the name of a guarantee.
+    """
+    registry = FanoutRegistry(tmp_path)
+    payloads = [
+        build_subagent_payload(
+            tool_name="ouroboros_lateral_think",
+            title="L (researcher)",
+            prompt="x",
+            agent="researcher",
+            context={"persona": "researcher"},
+        )
+    ]
+    fanout_id = register_lateral_persona_fanout(registry, session_id="", payloads=payloads)
+
+    out = submit_fanout_results(
+        registry,
+        session_id="",
+        correlation_key="context.persona",
+        results=[{"key": "researcher", "content": "x"}],
+        fanout_id=fanout_id,
+    )
+
+    assert out["status"] == "complete"
+
+
 def test_submit_complete_lateral_panel_routes_to_synthesizer(tmp_path: Any) -> None:
     registry = FanoutRegistry(tmp_path)
     personas = ("researcher", "contrarian", "simplifier")
@@ -373,7 +460,7 @@ def _resolve_correlated_key(payload: Mapping[str, Any], dotted_key: str) -> str:
 
 def _emitted_advisory_contract(
     registry: FanoutRegistry, session_id: str
-) -> tuple[str, str, list[str]]:
+) -> tuple[str, str, list[str], dict[str, Any]]:
     """Emit an advisory response and read the re-entry contract FROM its meta.
 
     Returns ``(fanout_id, correlation_key, lane_keys)`` exactly as a
@@ -399,7 +486,45 @@ def _emitted_advisory_contract(
         for payload in meta["question_advisory_subagents"]
     ]
     assert lane_keys, "advisory fan-out emitted no lanes"
-    return fanout_id, correlation_key, lane_keys
+    return fanout_id, correlation_key, lane_keys, meta
+
+
+def _advisory_lane_outputs(meta: Mapping[str, Any], lane_keys: list[str]) -> dict[str, Any]:
+    """Return one contract-satisfying output per emitted lane.
+
+    Only ``data_context`` carries an answer contract, and it is satisfied here
+    with its no-op answer — the response a child gives when the question's
+    honest answer is not a measurement. Every other lane completes on the
+    generic advisory shape, so a plain string stands in for its advice.
+    """
+    identity = ""
+    for payload in meta["question_advisory_subagents"]:
+        context = payload.get("context") or {}
+        if context.get("lane_id") == "data_context":
+            identity = str(context.get("question_identity") or "")
+    outputs: dict[str, Any] = {key: f"{key}-advice" for key in lane_keys}
+    if "data_context" in outputs:
+        outputs["data_context"] = {
+            "question_identity": identity,
+            "lane_id": "data_context",
+            "data_needed": False,
+            "read_requests": [],
+            "no_evidence_reason": "not_a_measurement",
+        }
+    return outputs
+
+
+def _required_advisory_lanes() -> list[str]:
+    """Return the lane ids whose absence must block advisory completion."""
+    from ouroboros.orchestrator.capabilities.interview_schemas import (
+        _interview_question_advisory_fanout_metadata,
+    )
+
+    return [
+        str(lane["lane_id"])
+        for lane in _interview_question_advisory_fanout_metadata()["lanes"]
+        if lane.get("required")
+    ]
 
 
 @pytest.mark.asyncio
@@ -414,7 +539,8 @@ async def test_advisory_reentry_follows_stamped_meta_contract(tmp_path: Any) -> 
     """
     registry = FanoutRegistry(tmp_path)
     session_id = "sess-advisory-contract"
-    fanout_id, correlation_key, lane_keys = _emitted_advisory_contract(registry, session_id)
+    fanout_id, correlation_key, lane_keys, meta = _emitted_advisory_contract(registry, session_id)
+    outputs = _advisory_lane_outputs(meta, lane_keys)
 
     submit = SubmitFanoutResultsHandler(fanout_registry=registry)
     submit_result = await submit.handle(
@@ -422,7 +548,7 @@ async def test_advisory_reentry_follows_stamped_meta_contract(tmp_path: Any) -> 
             "session_id": session_id,
             "fanout_id": fanout_id,
             "correlation_key": correlation_key,
-            "results": [{"key": key, "content": f"{key}-advice"} for key in lane_keys],
+            "results": [{"key": key, "content": outputs[key]} for key in lane_keys],
         }
     )
     assert submit_result.is_ok, submit_result
@@ -430,18 +556,27 @@ async def test_advisory_reentry_follows_stamped_meta_contract(tmp_path: Any) -> 
     assert out["status"] == "complete"
     assert out["kind"] == FANOUT_KIND_QUESTION_ADVISORY
     assert out["correlation_key"] == correlation_key
+    assert out["contract_violations"] == {}
     aggregated = out["result"]["aggregated_outputs"]
     assert [item["lane_id"] for item in aggregated] == lane_keys
-    assert [item["output"] for item in aggregated] == [f"{key}-advice" for key in lane_keys]
+    assert [item["output"] for item in aggregated] == [outputs[key] for key in lane_keys]
 
 
 @pytest.mark.asyncio
-async def test_advisory_reentry_partial_set_lists_missing_lane_ids(tmp_path: Any) -> None:
-    """Submitting a subset of the emitted lanes reports the missing lane ids."""
+async def test_advisory_reentry_partial_set_lists_missing_required_lane_ids(
+    tmp_path: Any,
+) -> None:
+    """A subset submission reports the REQUIRED lanes still outstanding.
+
+    Optional lanes are not listed as missing here: their absence does not block
+    completion, so naming them would tell the host to chase output it was never
+    obliged to produce.
+    """
     registry = FanoutRegistry(tmp_path)
     session_id = "sess-advisory-partial"
-    fanout_id, correlation_key, lane_keys = _emitted_advisory_contract(registry, session_id)
+    fanout_id, correlation_key, lane_keys, _meta = _emitted_advisory_contract(registry, session_id)
     assert len(lane_keys) > 1, "partial-set case needs multiple advisory lanes"
+    optional_first = next(key for key in lane_keys if key not in _required_advisory_lanes())
 
     submit = SubmitFanoutResultsHandler(fanout_registry=registry)
     submit_result = await submit.handle(
@@ -449,14 +584,15 @@ async def test_advisory_reentry_partial_set_lists_missing_lane_ids(tmp_path: Any
             "session_id": session_id,
             "fanout_id": fanout_id,
             "correlation_key": correlation_key,
-            "results": [{"key": lane_keys[0], "content": f"{lane_keys[0]}-advice"}],
+            "results": [{"key": optional_first, "content": f"{optional_first}-advice"}],
         }
     )
     assert submit_result.is_ok, submit_result
     out = submit_result.unwrap().meta
     assert out["status"] == "partial"
-    assert out["missing_keys"] == lane_keys[1:]
-    assert out["received_keys"] == [lane_keys[0]]
+    assert out["missing_required_keys"] == _required_advisory_lanes()
+    assert out["missing_keys"] == out["missing_required_keys"]
+    assert out["received_keys"] == [optional_first]
 
 
 # --------------------------------------------------------------------------- #
@@ -475,6 +611,38 @@ def test_registry_rebase_default_moves_default_location_only(tmp_path: Any) -> N
     explicit = FanoutRegistry(tmp_path / "explicit")
     explicit.rebase_default(tmp_path / "fanout")
     assert explicit.directory == tmp_path / "explicit"
+
+
+def test_registry_never_moves_out_from_under_an_issued_fanout_id(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """An issued fan-out id must stay redeemable.
+
+    Reachable ordering: a lateral panel registers before the first interview
+    turn, and the interview then resolves a custom ``state_dir`` and re-roots
+    the SHARED registry. The record stays at the old path while lookups move to
+    the new one, so a valid submission comes back ``unknown_fanout_id`` — the
+    id was a promise the move quietly broke.
+    """
+    # The default location is the whole subject here, so it is redirected
+    # rather than used: a test must never write into the developer's own
+    # ``~/.ouroboros``.
+    monkeypatch.setattr(fanout_module, "_DEFAULT_FANOUT_DIR", tmp_path / "home-default")
+    registry = FanoutRegistry()
+    fanout_id = registry.register(
+        kind=FANOUT_KIND_LATERAL_PERSONA_PANEL,
+        session_id="sess-lateral-first",
+        correlation_key="context.persona",
+        expected_keys=["researcher"],
+        synthesizer_input={"entries": []},
+    )
+    issued_dir = registry.directory
+    assert registry.load(fanout_id) is not None
+
+    registry.rebase_default(tmp_path / "fanout")
+
+    assert registry.directory == issued_dir
+    assert registry.load(fanout_id) is not None
 
 
 def test_interview_handler_threads_state_dir_into_registry(tmp_path: Any) -> None:
@@ -540,7 +708,318 @@ async def test_lateral_handler_without_registry_stamps_no_fanout_id() -> None:
 
 
 @pytest.mark.asyncio
+async def test_submit_tool_omitting_the_envelope_does_not_redeem_a_bound_fanout(
+    tmp_path: Any,
+) -> None:
+    """The public path is where omission is cheapest, so it is pinned there too.
+
+    `SubmitFanoutResultsHandler` declares both envelope arguments optional and
+    converts an omission to `""`. A host that sends only `fanout_id` and results
+    must not redeem a record that bound a session — the core check above is the
+    same one, but only this test covers the arguments a real host actually omits.
+    """
+    registry = FanoutRegistry(tmp_path)
+    handler = LateralThinkHandler(agent_runtime_backend="gemini", fanout_registry=registry)
+    personas = ["researcher", "contrarian"]
+    produced = await handler.handle(
+        {
+            "problem_context": "stuck on a milestone question",
+            "current_approach": "keep asking the same thing",
+            "personas": personas,
+            "session_id": "sess-envelope",
+        }
+    )
+    assert produced.is_ok, produced
+    fanout_id = produced.unwrap().meta["fanout_id"]
+    results = [{"key": persona, "content": f"{persona}-out"} for persona in personas]
+
+    submit = SubmitFanoutResultsHandler(fanout_registry=registry)
+    omitted = await submit.handle({"fanout_id": fanout_id, "results": results})
+
+    assert omitted.is_ok, omitted
+    assert omitted.unwrap().meta["status"] == "correlation_mismatch"
+
+    honored = await submit.handle(
+        {
+            "session_id": "sess-envelope",
+            "correlation_key": "context.persona",
+            "fanout_id": fanout_id,
+            "results": results,
+        }
+    )
+
+    assert honored.is_ok, honored
+    assert honored.unwrap().meta["status"] == "complete"
+
+
+def test_an_id_that_is_not_a_registry_filename_redeems_nothing(tmp_path: Any) -> None:
+    """The id is a filename, so a path is what it must not be able to spell.
+
+    `Path(directory) / "/tmp/forged.json"` is `/tmp/forged.json` — the join
+    silently discards the directory — so an absolute id turned a caller-chosen
+    file into an authoritative persisted record. The alphabet is what closes it:
+    a separator, a parent segment and a drive letter are unspellable, so this is
+    not detection over an open space (Q00/ouroboros#1754).
+    """
+    outside = tmp_path / "forged.json"
+    outside.write_text(
+        json.dumps(
+            {
+                "fanout_id": "forged",
+                "kind": FANOUT_KIND_LATERAL_PERSONA_PANEL,
+                "session_id": "",
+                "correlation_key": "context.persona",
+                "expected_keys": ["researcher"],
+                "synthesizer_input": {"entries": []},
+            }
+        ),
+        encoding="utf-8",
+    )
+    registry = FanoutRegistry(tmp_path / "fanout")
+
+    forged_ids = [
+        str(tmp_path / "forged"),  # absolute
+        "../forged",  # traversal
+        "..",
+        "sub/forged",  # separator
+        "",
+    ]
+
+    for forged in forged_ids:
+        assert registry.load(forged) is None, forged
+        out = submit_fanout_results(
+            registry,
+            session_id="",
+            correlation_key="context.persona",
+            results=[{"key": "researcher", "content": "x"}],
+            fanout_id=forged,
+        )
+        assert out["status"] == "unknown_fanout_id", forged
+
+
+def test_a_producer_cannot_issue_an_id_it_could_never_redeem(tmp_path: Any) -> None:
+    """Refused where it was written, not where it fails to load."""
+    registry = FanoutRegistry(tmp_path)
+
+    with pytest.raises(ValueError, match="fanout_id"):
+        register_lateral_persona_fanout(
+            registry,
+            session_id="s1",
+            payloads=[
+                build_subagent_payload(
+                    tool_name="ouroboros_lateral_think",
+                    title="L (researcher)",
+                    prompt="x",
+                    agent="researcher",
+                    context={"persona": "researcher"},
+                )
+            ],
+            fanout_id="../escape",
+        )
+
+
+@pytest.mark.asyncio
+async def test_submit_tool_rejects_forged_ids_and_still_redeems_issued_ones(
+    tmp_path: Any,
+) -> None:
+    """Through the public tool, which is what made the id caller-controlled.
+
+    Registering the re-entry tool on the shipped server is what turned
+    `fanout_id` into hostile input; before that it never crossed a transport.
+    So the boundary is pinned where a real caller reaches it.
+    """
+    state_dir = tmp_path / "state"
+    registry = FanoutRegistry(state_dir / "fanout")
+    handler = LateralThinkHandler(agent_runtime_backend="gemini", fanout_registry=registry)
+    personas = ["researcher", "contrarian"]
+    produced = await handler.handle(
+        {
+            "problem_context": "stuck",
+            "current_approach": "same",
+            "personas": personas,
+            "session_id": "sess-forge",
+        }
+    )
+    assert produced.is_ok, produced
+    issued_id = produced.unwrap().meta["fanout_id"]
+
+    outside = tmp_path / "forged.json"
+    outside.write_text((state_dir / "fanout" / f"{issued_id}.json").read_text(), encoding="utf-8")
+
+    submit = SubmitFanoutResultsHandler(fanout_registry=registry)
+    results = [{"key": persona, "content": f"{persona}-out"} for persona in personas]
+
+    for forged in (str(tmp_path / "forged"), "../forged", "sub/forged"):
+        refused = await submit.handle(
+            {
+                "session_id": "sess-forge",
+                "correlation_key": "context.persona",
+                "fanout_id": forged,
+                "results": results,
+            }
+        )
+        assert refused.is_err, forged
+
+    honored = await submit.handle(
+        {
+            "session_id": "sess-forge",
+            "correlation_key": "context.persona",
+            "fanout_id": issued_id,
+            "results": results,
+        }
+    )
+
+    assert honored.is_ok, honored
+    assert honored.unwrap().meta["status"] == "complete"
+
+
+@pytest.mark.asyncio
+async def test_submit_tool_partial_retry_is_judged_on_the_whole_set(tmp_path: Any) -> None:
+    """A retry carries every lane, and the docs say so in the same words.
+
+    `provided` is built from the current call alone; nothing an earlier call
+    carried is kept, because keeping it would put child-authored output in the
+    record — the durable result state RFC #1754 defers to a later slice with its
+    sanitization duties. The failure this pins is not the statelessness but the
+    instruction that contradicted it: a partial reply that reads as "send the
+    rest" traps a sequential host in a loop that never completes.
+    """
+    registry = FanoutRegistry(tmp_path)
+    handler = LateralThinkHandler(agent_runtime_backend="gemini", fanout_registry=registry)
+    personas = ["researcher", "contrarian"]
+    produced = await handler.handle(
+        {
+            "problem_context": "stuck",
+            "current_approach": "same",
+            "personas": personas,
+            "session_id": "sess-partial",
+        }
+    )
+    assert produced.is_ok, produced
+    fanout_id = produced.unwrap().meta["fanout_id"]
+    submit = SubmitFanoutResultsHandler(fanout_registry=registry)
+
+    async def send(*keys: str) -> dict[str, Any]:
+        result = await submit.handle(
+            {
+                "session_id": "sess-partial",
+                "correlation_key": "context.persona",
+                "fanout_id": fanout_id,
+                "results": [{"key": key, "content": f"{key}-out"} for key in keys],
+            }
+        )
+        assert result.is_ok, result
+        return dict(result.unwrap().meta)
+
+    first = await send("researcher")
+    assert first["status"] == "partial"
+    assert first["missing_keys"] == ["contrarian"]
+    # The reply is the one place a host is certainly reading, so it carries the
+    # contract rather than leaving a list of missing keys to be read as a list
+    # of what to send.
+    assert "not only the missing ones" in first["retry_contract"]
+
+    # The remaining-lanes-only retry the old wording invited: still partial, and
+    # now the lane the first call carried is the one reported missing.
+    remaining_only = await send("contrarian")
+    assert remaining_only["status"] == "partial"
+    assert remaining_only["missing_keys"] == ["researcher"]
+
+    whole = await send(*personas)
+    assert whole["status"] == "complete"
+    assert whole["result"]["ready_for_synthesis"] is True
+    # Both lanes reach synthesis from this one call — the retry is what carried
+    # them, not anything the registry remembered.
+    rendered = repr(whole["result"])
+    assert all(f"{persona}-out" in rendered for persona in personas)
+
+
+@pytest.mark.asyncio
 async def test_submit_tool_requires_fanout_id() -> None:
     submit = SubmitFanoutResultsHandler()
     result = await submit.handle({"results": []})
     assert result.is_err
+
+
+def _advisory_fanout(registry: FanoutRegistry) -> str:
+    fanout_id = registry.register(
+        kind=FANOUT_KIND_QUESTION_ADVISORY,
+        session_id="s1",
+        correlation_key="context.lane_id",
+        expected_keys=["data_context", "code_context"],
+        question_identity="",
+        synthesizer_input={"lane_ids": ["data_context", "code_context"]},
+        required_keys=[],
+    )
+    assert fanout_id is not None
+    return fanout_id
+
+
+@pytest.mark.parametrize(
+    ("label", "repeated"),
+    [
+        (
+            "two measurements for one lane",
+            [
+                {"key": "data_context", "content": {"value": 41}},
+                {"key": "data_context", "content": {"value": 999}},
+            ],
+        ),
+        (
+            "answered, then declared undispatched",
+            [
+                {"key": "data_context", "content": {"value": 41}},
+                {"key": "data_context", "undispatched": True},
+            ],
+        ),
+        (
+            "declared undispatched, then answered",
+            [
+                {"key": "data_context", "undispatched": True},
+                {"key": "data_context", "content": {"value": 41}},
+            ],
+        ),
+    ],
+)
+def test_a_repeated_correlation_key_is_refused_rather_than_ordered(
+    tmp_path: Any, label: str, repeated: list[Any]
+) -> None:
+    """One lane, one entry — nothing here may pick between two reports.
+
+    Two measurements for one lane went into a plain dict, so the later entry
+    won and the earlier vanished unreported: list position chose the number.
+    Answered *and* declared undispatched behaved differently — content won
+    whichever order it arrived in — which was deterministic but undeclared, a
+    precedence rule no contract states applied to a host that has said two
+    opposite things about one lane.
+
+    Both are refused now, because neither is a report this can rank.
+    """
+    registry = FanoutRegistry(tmp_path)
+    out = submit_fanout_results(
+        registry,
+        fanout_id=_advisory_fanout(registry),
+        session_id="s1",
+        correlation_key="context.lane_id",
+        results=[*repeated, {"key": "code_context", "content": {"value": 7}}],
+    )
+
+    assert out["status"] == "invalid_result_entry", label
+    assert out["invalid_keys"] == ["data_context"], label
+
+
+def test_distinct_correlation_keys_still_complete(tmp_path: Any) -> None:
+    """The control: refusing repeats must not refuse an ordinary submission."""
+    registry = FanoutRegistry(tmp_path)
+    out = submit_fanout_results(
+        registry,
+        fanout_id=_advisory_fanout(registry),
+        session_id="s1",
+        correlation_key="context.lane_id",
+        results=[
+            {"key": "data_context", "content": {"value": 41}},
+            {"key": "code_context", "content": {"value": 7}},
+        ],
+    )
+
+    assert out["status"] == "complete"

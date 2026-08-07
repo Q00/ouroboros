@@ -707,6 +707,7 @@ class TestCreateOuroborosServer:
         "ouroboros_lineage_status",
         "ouroboros_measure_drift",
         "ouroboros_pm_interview",
+        "ouroboros_project_status",
         "ouroboros_qa",
         "ouroboros_query_events",
         "ouroboros_query_projection",
@@ -720,6 +721,11 @@ class TestCreateOuroborosServer:
         "ouroboros_start_evolve_step",
         "ouroboros_start_execute_seed",
         "ouroboros_start_ralph",
+        # Added in #1754. This set held the re-entry tool's ABSENCE in place:
+        # `skills/interview/SKILL.md` documented the tool while this pin
+        # asserted the shipped server did not have it, so the wiring gap had a
+        # guardian rather than merely lacking a test.
+        "ouroboros_submit_fanout_results",
     }
 
     def test_creates_server_with_defaults(self) -> None:
@@ -867,9 +873,16 @@ class TestCreateOuroborosServer:
 
             create_ouroboros_server(runtime_backend="codex", llm_backend="codex")
 
-        mock_create_llm_adapter.assert_called_once()
-        assert mock_create_llm_adapter.call_args.kwargs["backend"] == "codex"
-        assert mock_create_llm_adapter.call_args.kwargs["max_turns"] == 15
+        assert len(mock_create_llm_adapter.call_args_list) == 3
+        assert [call.kwargs["backend"] for call in mock_create_llm_adapter.call_args_list] == [
+            "codex",
+            "codex",
+            "codex",
+        ]
+        assert [
+            call.kwargs["frugality_proof"] for call in mock_create_llm_adapter.call_args_list
+        ] == [False, True, True]
+        assert {call.kwargs["max_turns"] for call in mock_create_llm_adapter.call_args_list} == {15}
 
     def test_evolution_adapter_factory_resolves_live_backend_with_cwd(self) -> None:
         """Per-call evolution adapter factory must not freeze startup llm_backend."""
@@ -1049,8 +1062,15 @@ class TestCreateOuroborosServer:
 
             create_ouroboros_server(runtime_backend="opencode", llm_backend="opencode")
 
-        mock_create_llm_adapter.assert_called_once()
-        assert mock_create_llm_adapter.call_args.kwargs["backend"] == "opencode"
+        assert len(mock_create_llm_adapter.call_args_list) == 3
+        assert [call.kwargs["backend"] for call in mock_create_llm_adapter.call_args_list] == [
+            "opencode",
+            "opencode",
+            "opencode",
+        ]
+        assert [
+            call.kwargs["frugality_proof"] for call in mock_create_llm_adapter.call_args_list
+        ] == [False, True, True]
         mock_create_runtime.assert_called_once()
         assert mock_create_runtime.call_args.kwargs["backend"] == "opencode"
 

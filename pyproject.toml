@@ -16,7 +16,7 @@ dependencies = [
     "prompt-toolkit>=3.0.0,<4.0.0",
     # Ceiling is deliberately tighter than the major-version bounds around it:
     # this parses `.env`, a documented trust boundary (see
-    # `_UNTRUSTED_ENV_DENYLIST` in config/loader.py), so only patch releases
+    # `UNTRUSTED_ENV_DENYLIST` in config/untrusted_env.py), so only patch releases
     # flow without review. An exact pin would be tighter still, but
     # `test_runtime_and_optional_dependencies_have_upper_bounds` reserves
     # `==` for the optional extras; core runtime deps stay bounded ranges.
