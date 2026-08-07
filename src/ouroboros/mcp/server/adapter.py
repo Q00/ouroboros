@@ -43,6 +43,7 @@ from ouroboros.mcp.server.project_dir import (  # noqa: F401
 )
 from ouroboros.mcp.server.protocol import PromptHandler, ResourceHandler, ToolHandler
 from ouroboros.mcp.server.security import AuthConfig, AuthMethod, RateLimitConfig, SecurityLayer
+from ouroboros.mcp.telemetry_boundary import observe_adapter_tool_call
 from ouroboros.mcp.types import (
     MCPCapabilities,
     MCPPromptDefinition,
@@ -99,31 +100,9 @@ if _SDKMCPServer is not None:
             context: Any = None,
         ) -> Any:
             del context
-            from jsonschema import Draft202012Validator
+            from ouroboros.mcp.telemetry_boundary import call_sdk_tool
 
-            from ouroboros.mcp.sdk_mapping import tool_result_to_sdk
-
-            definition = next(
-                (item for item in await self._ouroboros_adapter.list_tools() if item.name == name),
-                None,
-            )
-            if definition is None:
-                raise RuntimeError(f"Tool not found: {name}")
-
-            # Accept the one historical wrapper shape at the application edge,
-            # but validate the normalized payload against the canonical schema.
-            if set(arguments) == {"kwargs"} and isinstance(arguments.get("kwargs"), dict):
-                arguments = arguments["kwargs"]
-            _validate_parameter_constraints(definition.parameters, arguments)
-            Draft202012Validator(definition.to_input_schema()).validate(arguments)
-
-            result = await self._ouroboros_adapter.call_tool(name, arguments)
-            if result.is_err:
-                raise RuntimeError(str(result.error))
-            value = result.value
-            if definition.output_schema is not None:
-                Draft202012Validator(definition.output_schema).validate(value.structured_content)
-            return tool_result_to_sdk(value)
+            return await call_sdk_tool(self._ouroboros_adapter, name, arguments)
 
         async def list_resources(self) -> list[Any]:
             from ouroboros.mcp.sdk_mapping import resource_to_sdk
@@ -947,6 +926,18 @@ class MCPServerAdapter:
         name: str,
         arguments: dict[str, Any],
         credentials: dict[str, str] | None = None,
+        *,
+        _capture_telemetry: bool = True,
+    ) -> Result[MCPToolResult, MCPServerError]:
+        """Call a registered tool through the complete request observer."""
+        operation = lambda: self._call_tool_impl(name, arguments, credentials)  # noqa: E731
+        return await observe_adapter_tool_call(name, operation, enabled=_capture_telemetry)
+
+    async def _call_tool_impl(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        credentials: dict[str, str] | None = None,
     ) -> Result[MCPToolResult, MCPServerError]:
         """Call a registered tool.
 
@@ -1023,26 +1014,11 @@ class MCPServerAdapter:
                 ok=result.is_ok,
                 error_type=type(result.error).__name__ if result.is_err else None,
             )
-            usage_telemetry.capture_tool_call(
-                name,
-                ok=result.is_ok,
-                duration_ms=_duration_ms(started_at),
-                error_type=type(result.error).__name__ if result.is_err else None,
-            )
             return result
         except MCPServerError as exc:
-            usage_telemetry.capture_tool_call(
-                name,
-                ok=False,
-                duration_ms=_duration_ms(started_at),
-                error_type=type(exc).__name__,
-            )
             return Result.err(exc)
         except TimeoutError:
             duration_ms = _duration_ms(started_at)
-            usage_telemetry.capture_tool_call(
-                name, ok=False, duration_ms=duration_ms, error_type="TimeoutError"
-            )
             log.error("mcp.server.tool_timeout", tool=name, duration_ms=duration_ms)
             log.error(
                 "mcp.server.call_tool.error",
@@ -1062,9 +1038,6 @@ class MCPServerAdapter:
             )
         except Exception as e:
             duration_ms = _duration_ms(started_at)
-            usage_telemetry.capture_tool_call(
-                name, ok=False, duration_ms=duration_ms, error_type=type(e).__name__
-            )
             log.error(
                 "mcp.server.tool_error",
                 tool=name,

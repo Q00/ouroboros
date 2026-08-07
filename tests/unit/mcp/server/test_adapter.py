@@ -1510,10 +1510,30 @@ class TestMCPServerAdapterTools:
         """call_tool returns error for unknown tool."""
         adapter = MCPServerAdapter()
 
-        result = await adapter.call_tool("unknown_tool", {})
+        with patch("ouroboros.mcp.telemetry_boundary.usage_telemetry.capture_tool_call") as capture:
+            result = await adapter.call_tool("ouroboros_unknown_tool", {})
 
         assert result.is_err
         assert isinstance(result.error, MCPResourceNotFoundError)
+        capture.assert_called_once()
+        assert capture.call_args.args[0] == "ouroboros_unknown_tool"
+        assert capture.call_args.kwargs["ok"] is False
+        assert capture.call_args.kwargs["error_type"] == "MCPResourceNotFoundError"
+
+    async def test_call_tool_security_denial_is_captured_once(self) -> None:
+        """A pre-handler security return is a visible failed invocation."""
+        adapter = MCPServerAdapter()
+        adapter.register_tool(MockToolHandler("ouroboros_secure_tool"))
+        denial = MCPServerError("denied")
+        adapter._security.check_request = AsyncMock(return_value=Result.err(denial))
+
+        with patch("ouroboros.mcp.telemetry_boundary.usage_telemetry.capture_tool_call") as capture:
+            result = await adapter.call_tool("ouroboros_secure_tool", {"input": "safe"})
+
+        assert result.is_err
+        capture.assert_called_once()
+        assert capture.call_args.kwargs["ok"] is False
+        assert capture.call_args.kwargs["error_type"] == "MCPServerError"
 
     async def test_call_tool_handler_error(self) -> None:
         """call_tool handles handler errors."""
@@ -1984,10 +2004,26 @@ class TestServeTransport:
         ):
             await adapter.serve(transport="stdio")
 
-        await adapter._mcp_server.call_tool(
-            "optional_tool",
-            {"required_input": "provided", "scores": [1.5]},
-        )
+        with patch("ouroboros.mcp.telemetry_boundary.usage_telemetry.capture_tool_call") as capture:
+            await adapter._mcp_server.call_tool(
+                "optional_tool",
+                {"required_input": "provided", "scores": [1.5]},
+            )
+
+            with pytest.raises(Exception, match="Invalid value for optional_mode"):
+                await adapter._mcp_server.call_tool(
+                    "optional_tool",
+                    {
+                        "required_input": "provided",
+                        "optional_mode": "unsafe",
+                        "scores": [1.5],
+                    },
+                )
+            with pytest.raises(Exception, match="Invalid items for scores"):
+                await adapter._mcp_server.call_tool(
+                    "optional_tool",
+                    {"required_input": "provided", "scores": [True]},
+                )
 
         handler.handle_mock.assert_awaited_once_with(
             {
@@ -1999,20 +2035,71 @@ class TestServeTransport:
         assert "optional_input" not in forwarded
         assert "optional_mode" not in forwarded
 
-        with pytest.raises(Exception, match="Invalid value for optional_mode"):
-            await adapter._mcp_server.call_tool(
-                "optional_tool",
-                {
-                    "required_input": "provided",
-                    "optional_mode": "unsafe",
-                    "scores": [1.5],
-                },
+        assert capture.call_count == 3
+        assert [call.kwargs["ok"] for call in capture.call_args_list] == [True, False, False]
+
+    async def test_sdk_failure_boundaries_are_captured_exactly_once(self) -> None:
+        """Adapter, output-validation, and conversion failures are not double-counted."""
+        pytest.importorskip("mcp.server")
+        from ouroboros.mcp.telemetry_boundary import call_sdk_tool
+
+        class OutputHandler(MockToolHandler):
+            @property
+            def definition(self) -> MCPToolDefinition:
+                return MCPToolDefinition(
+                    name="ouroboros_sdk_boundary",
+                    description="SDK telemetry boundary probe",
+                    parameters=(MCPToolParameter(name="input", type=ToolInputType.STRING),),
+                    output_schema={
+                        "type": "object",
+                        "properties": {"approved": {"type": "boolean"}},
+                        "required": ["approved"],
+                        "additionalProperties": False,
+                    },
+                )
+
+        adapter = MCPServerAdapter()
+        handler = OutputHandler(name="ouroboros_sdk_boundary")
+        adapter.register_tool(handler)
+        success = MCPToolResult(
+            content=(MCPContentItem(type=ContentType.TEXT, text="ok"),),
+            structured_content={"approved": True},
+        )
+
+        with patch("ouroboros.mcp.telemetry_boundary.usage_telemetry.capture_tool_call") as capture:
+            handler.handle_mock.return_value = Result.err(MCPServerError("adapter failed"))
+            with pytest.raises(RuntimeError, match="adapter failed"):
+                await call_sdk_tool(adapter, "ouroboros_sdk_boundary", {"input": "safe"})
+            capture.assert_called_once()
+            assert capture.call_args.kwargs["ok"] is False
+            assert capture.call_args.kwargs["error_type"] == "MCPServerError"
+
+            capture.reset_mock()
+            handler.handle_mock.return_value = Result.ok(
+                MCPToolResult(
+                    content=success.content,
+                    structured_content={"approved": "yes"},
+                )
             )
-        with pytest.raises(Exception, match="Invalid items for scores"):
-            await adapter._mcp_server.call_tool(
-                "optional_tool",
-                {"required_input": "provided", "scores": [True]},
-            )
+            with pytest.raises(Exception, match="is not of type 'boolean'"):
+                await call_sdk_tool(adapter, "ouroboros_sdk_boundary", {"input": "safe"})
+            capture.assert_called_once()
+            assert capture.call_args.kwargs["ok"] is False
+            assert capture.call_args.kwargs["error_type"] == "ValidationError"
+
+            capture.reset_mock()
+            handler.handle_mock.return_value = Result.ok(success)
+            with (
+                patch(
+                    "ouroboros.mcp.sdk_mapping.tool_result_to_sdk",
+                    side_effect=ValueError("conversion failed"),
+                ),
+                pytest.raises(ValueError, match="conversion failed"),
+            ):
+                await call_sdk_tool(adapter, "ouroboros_sdk_boundary", {"input": "safe"})
+            capture.assert_called_once()
+            assert capture.call_args.kwargs["ok"] is False
+            assert capture.call_args.kwargs["error_type"] == "ValueError"
 
     @pytest.mark.asyncio
     async def test_fastmcp_path_enforces_security(self):

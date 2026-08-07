@@ -6,6 +6,9 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import time
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 INSTALL_SH = REPO_ROOT / "scripts" / "install.sh"
@@ -131,6 +134,101 @@ def test_install_script_syntax_is_valid() -> None:
         ["bash", "-n", str(INSTALL_SH)], text=True, capture_output=True, check=False
     )
     assert result.returncode == 0, result.stderr
+
+
+def _telemetry_probe_curl(tmp_path: Path) -> str:
+    captures = tmp_path / "telemetry.log"
+    return f'''#!/bin/sh
+state="$HOME/.ouroboros/telemetry.json"
+if ! grep -q '"notice_shown"[[:space:]]*:[[:space:]]*true' "$state" 2>/dev/null; then
+  printf 'capture-before-notice\\n' >> "{captures!s}"
+  exit 0
+fi
+printf '%s\\n' "$*" >> "{captures!s}"
+exit 0
+'''
+
+
+def test_installer_persisted_opt_out_suppresses_all_collection(tmp_path: Path) -> None:
+    config = tmp_path / "home" / ".ouroboros" / "config.yaml"
+    config.parent.mkdir(parents=True)
+    config.write_text("telemetry:\n  enabled: false\n", encoding="utf-8")
+
+    result = _run_installer(
+        tmp_path,
+        env={"OUROBOROS_TELEMETRY": ""},
+        fake_commands={"curl": _telemetry_probe_curl(tmp_path)},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not (tmp_path / "telemetry.log").exists()
+    assert "Anonymous usage stats help improve Ouroboros" not in result.stdout
+
+
+def test_installer_malformed_config_fails_closed(tmp_path: Path) -> None:
+    config = tmp_path / "home" / ".ouroboros" / "config.yaml"
+    config.parent.mkdir(parents=True)
+    config.write_text("telemetry: [\n", encoding="utf-8")
+
+    result = _run_installer(
+        tmp_path,
+        env={"OUROBOROS_TELEMETRY": ""},
+        fake_commands={"curl": _telemetry_probe_curl(tmp_path)},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not (tmp_path / "telemetry.log").exists()
+
+
+def test_installer_unreadable_config_fails_closed(tmp_path: Path) -> None:
+    config = tmp_path / "home" / ".ouroboros" / "config.yaml"
+    config.parent.mkdir(parents=True)
+    config.write_text("telemetry:\n  enabled: true\n", encoding="utf-8")
+    config.chmod(0)
+    if os.access(config, os.R_OK):
+        config.chmod(0o600)
+        pytest.skip("current user can still read mode-000 files")
+
+    try:
+        result = _run_installer(
+            tmp_path,
+            env={"OUROBOROS_TELEMETRY": ""},
+            fake_commands={"curl": _telemetry_probe_curl(tmp_path)},
+        )
+    finally:
+        config.chmod(0o600)
+
+    assert result.returncode == 0, result.stderr
+    assert not (tmp_path / "telemetry.log").exists()
+
+
+def test_installer_notice_is_persisted_before_first_capture(tmp_path: Path) -> None:
+    config = tmp_path / "home" / ".ouroboros" / "config.yaml"
+    config.parent.mkdir(parents=True)
+    config.write_text("telemetry:\n  enabled: true\n", encoding="utf-8")
+
+    result = _run_installer(
+        tmp_path,
+        env={"OUROBOROS_TELEMETRY": ""},
+        fake_commands={"curl": _telemetry_probe_curl(tmp_path)},
+    )
+
+    assert result.returncode == 0, result.stderr
+    capture_path = tmp_path / "telemetry.log"
+    deadline = time.monotonic() + 2.0
+    captures = ""
+    while time.monotonic() < deadline:
+        if capture_path.exists():
+            captures = capture_path.read_text(encoding="utf-8")
+            if '"event":"install_completed"' in captures:
+                break
+        time.sleep(0.01)
+    assert "capture-before-notice" not in captures
+    assert '"event":"install_started"' in captures
+    assert '"event":"install_completed"' in captures
+    assert result.stdout.count("Anonymous usage stats help improve Ouroboros") == 1
+    state = (tmp_path / "home" / ".ouroboros" / "telemetry.json").read_text(encoding="utf-8")
+    assert '"notice_shown": true' in state
 
 
 def test_fresh_install_keeps_direct_model_settings_optional() -> None:

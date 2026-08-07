@@ -20,8 +20,9 @@ Both uses are declared here up front — there are no undisclosed uses:
    10 users is withheld.
 
 **Counting rule (fixed):** one "active user" = one distinct anonymous ID with
-at least one successful verified run that week. Installs, reinstalls, retries,
-and CI runs are not users. Published numbers follow this rule, verbatim.
+at least one `workflow_outcome` where `command=evaluate`, `verified=true`, and
+`ci!=true` that week. Submission receipts, installs, reinstalls, retries, and
+CI runs are not users. Published numbers follow this rule, verbatim.
 
 **Identity honesty:** the ID in `~/.ouroboros/telemetry.json` is a random UUID
 — pseudonymous, stable across sessions so retention can be measured, derived
@@ -55,6 +56,12 @@ telemetry:
 Deleting `~/.ouroboros/telemetry.json` resets your anonymous ID.
 `ouroboros uninstall` removes it entirely.
 
+Telemetry controls and destination overrides are operator-owned. The real
+process environment and `~/.ouroboros/.env` are trusted; a project-directory
+`.env` cannot set `OUROBOROS_TELEMETRY`, `OUROBOROS_POSTHOG_HOST`, or
+`OUROBOROS_POSTHOG_API_KEY`. Invalid or unreadable user configuration disables
+collection rather than silently restoring the default.
+
 ## What is sent
 
 Identity is a random UUID (`~/.ouroboros/telemetry.json`) generated on first
@@ -64,8 +71,9 @@ use — it is not derived from your machine, account, or network.
 |---|---|---|
 | `install_started` | `install.sh` begins | os, arch, version, is_local, pre |
 | `install_completed` | `install.sh` finishes | os, arch, method (uv/pipx/pip), runtime, detected_runtimes (count), version |
-| `command_run` (source=mcp) | An `ouroboros_*` MCP tool is invoked from any host CLI (Claude Code, Codex, OpenCode, …) | command (interview/seed/run/evolve/auto/evaluate/qa/…), tool, ok, duration_ms, error_type, runtime_backend, execute_runtime_backend, interview_llm_backend, evaluate_llm_backend, frontdoor, app_version, os, python_version |
+| `command_run` (source=mcp) | An `ouroboros_*` MCP tool is invoked from any host CLI (Claude Code, Codex, OpenCode, …) | command (interview/seed/run/evolve/auto/evaluate/qa/…), tool, phase (`submission` or `completion`), accepted (submission only), ok (completion only), duration_ms, error_type, runtime_backend, execute_runtime_backend, interview_llm_backend, evaluate_llm_backend, frontdoor, app_version, os, python_version |
 | `command_run` (source=cli) | A direct `ooo <subcommand>` invocation in a terminal | command, app_version, os, python_version |
+| `workflow_outcome` | A background MCP job reaches a durable terminal event | command, phase (`terminal`), terminal_status, ok, verified, final_approved, `$insert_id` (one-way event deduplication digest), runtime/LLM context, app_version, os, python_version |
 | `mcp_serve_started` | A host CLI attaches the Ouroboros MCP server for a session | transport, tool_count, frontdoor, app_version, os |
 
 Notes:
@@ -81,13 +89,28 @@ Notes:
   property so counts can be re-weighted; everything else is captured 1:1.
 - `error_type` is only the Python exception class name (e.g. `TimeoutError`),
   never a message or traceback.
+- Start-tool `command_run` events are submission receipts. They intentionally
+  have `accepted`, not `ok`; queue acceptance is never a completed or verified
+  run. `workflow_outcome` comes from the durable job-terminal boundary. Only a
+  completed formal evaluation with explicit `final_approved=true` sets
+  `verified=true`.
 - Events are sent to PostHog via a fire-and-forget background thread using a
   **public, write-only** project API key. Telemetry never blocks a command,
   never raises, and silently drops events when offline.
 
 ## Where the code lives
 
-All collection logic is in [`src/ouroboros/telemetry.py`](src/ouroboros/telemetry.py)
-(one file, stdlib only) and the `_telemetry_ping` function in
-[`scripts/install.sh`](scripts/install.sh). If it's not in those two places,
-it isn't collected.
+Serialization, allowlisted properties, identity, and transport live in
+[`src/ouroboros/telemetry.py`](src/ouroboros/telemetry.py) (stdlib only) and
+the installer helpers in [`scripts/install.sh`](scripts/install.sh).
+Collection is triggered only at these audited call sites:
+
+- [`src/ouroboros/cli/main.py`](src/ouroboros/cli/main.py) — direct CLI command
+  and first-run notice;
+- [`src/ouroboros/cli/commands/mcp.py`](src/ouroboros/cli/commands/mcp.py) — MCP
+  serve attachment;
+- [`src/ouroboros/mcp/server/adapter.py`](src/ouroboros/mcp/server/adapter.py) —
+  exactly one MCP request outcome, including validation and security failures;
+- [`src/ouroboros/mcp/job_manager.py`](src/ouroboros/mcp/job_manager.py) —
+  durable background-job terminal outcomes;
+- [`scripts/install.sh`](scripts/install.sh) — disclosed install start/completion.

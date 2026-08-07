@@ -1445,17 +1445,26 @@ def get_telemetry_enabled() -> bool:
         1. DO_NOT_TRACK environment variable (any truthy value disables)
         2. OUROBOROS_TELEMETRY environment variable (1/0, true/false, on/off)
         3. config.yaml telemetry.enabled
-        4. True (default: on, with first-run notice and TELEMETRY.md contract)
+        4. True when configuration is valid (default: on, with first-run
+           notice and TELEMETRY.md contract)
+
+    Invalid or unreadable configuration fails closed. A privacy preference
+    can be present in a file whose unrelated field no longer validates; it is
+    never safe to turn collection back on merely because the full application
+    config could not be constructed.
     """
     if os.environ.get("DO_NOT_TRACK", "").strip().lower() in ("1", "true", "on", "yes"):
         return False
     env = _env_flag("OUROBOROS_TELEMETRY")
     if env is not None:
         return env
-    try:
-        return load_config().telemetry.enabled
-    except ConfigError:
+    config_path = get_config_dir() / "config.yaml"
+    if not config_path.exists():
         return True
+    try:
+        return load_config(config_path).telemetry.enabled
+    except (ConfigError, OSError):
+        return False
 
 
 def get_gemini_cli_path() -> str | None:

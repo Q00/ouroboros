@@ -92,15 +92,62 @@ _prompt() {
 
 # --- Anonymous install telemetry (PostHog) ---------------------------------
 # Same privacy contract as the CLI (see TELEMETRY.md): random UUID, no PII,
-# no code/paths. Disable with DO_NOT_TRACK=1 or OUROBOROS_TELEMETRY=0.
+# no code/paths. Disable with DO_NOT_TRACK=1, OUROBOROS_TELEMETRY=0, or
+# telemetry.enabled: false in ~/.ouroboros/config.yaml.
 # The API key is a public write-only PostHog project key.
 PH_API_KEY="${OUROBOROS_POSTHOG_API_KEY:-phc_mSoetD4ExLDDCi3vNua635NhwRTgHfRaCG9WYNKmrvv5}"
 PH_HOST="${OUROBOROS_POSTHOG_HOST:-https://us.i.posthog.com}"
+
+_telemetry_config_allows() {
+  local f="$HOME/.ouroboros/config.yaml"
+  [ -e "$f" ] || return 0
+  [ -r "$f" ] || return 1
+
+  # The installer runs before the package (and PyYAML) is guaranteed to
+  # exist. Accept only an unambiguous explicit telemetry.enabled: true from
+  # an existing config; missing, duplicate, malformed, or false state fails
+  # closed. Fresh installs without a config retain the documented default-on
+  # behavior after the notice below.
+  awk '
+    BEGIN { in_telemetry=0; telemetry_blocks=0; enabled_values=0; enabled_true=0 }
+    /^[[:space:]]*#/ || /^[[:space:]]*$/ { next }
+    /^[^[:space:]][^:]*:/ {
+      in_telemetry=0
+      if ($0 ~ /^telemetry[[:space:]]*:/) {
+        telemetry_blocks++
+        in_telemetry=1
+        inline=$0
+        sub(/^[^:]*:[[:space:]]*/, "", inline)
+        lower=tolower(inline)
+        if (lower ~ /^\{[[:space:]]*enabled[[:space:]]*:[[:space:]]*(true|"true"|'"'"'true'"'"')[[:space:]]*\}[[:space:]]*(#.*)?$/) {
+          enabled_values++
+          enabled_true++
+        } else if (inline !~ /^[[:space:]]*(#.*)?$/) {
+          enabled_values++
+        }
+      }
+      next
+    }
+    in_telemetry && /^[[:space:]]+enabled[[:space:]]*:/ {
+      value=$0
+      sub(/^[[:space:]]*enabled[[:space:]]*:[[:space:]]*/, "", value)
+      sub(/[[:space:]]*#.*$/, "", value)
+      gsub(/^[[:space:]"'"'"']+|[[:space:]"'"'"']+$/, "", value)
+      enabled_values++
+      if (tolower(value) == "true") enabled_true++
+    }
+    END { exit !(telemetry_blocks == 1 && enabled_values == 1 && enabled_true == 1) }
+  ' "$f"
+}
 
 _telemetry_enabled() {
   [ -n "$PH_API_KEY" ] || return 1
   case "${DO_NOT_TRACK:-}" in 1|true|TRUE|True|on|yes) return 1 ;; esac
   case "${OUROBOROS_TELEMETRY:-}" in 0|false|FALSE|False|off|no) return 1 ;; esac
+  case "${OUROBOROS_TELEMETRY:-}" in
+    1|true|TRUE|True|on|yes) ;;
+    *) _telemetry_config_allows || return 1 ;;
+  esac
   command -v curl &>/dev/null || return 1
   return 0
 }
@@ -122,6 +169,29 @@ _telemetry_distinct_id() {
       "$id" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$f" 2>/dev/null || true
   fi
   printf '%s' "$id"
+}
+
+_telemetry_notice() {
+  _telemetry_enabled || return 0
+  local f="$HOME/.ouroboros/telemetry.json" tmp id
+  if [ -f "$f" ] && grep -q '"notice_shown"[[:space:]]*:[[:space:]]*true' "$f"; then
+    return 0
+  fi
+
+  _blank
+  _say "${BOLD}Anonymous usage stats help improve Ouroboros.${RESET}"
+  _info "Collects commands, versions, and success rates — never code, prompts, or paths."
+  _info "Opt out: export OUROBOROS_TELEMETRY=0  |  details: TELEMETRY.md"
+
+  # Persist the one-time notice before the first collection attempt. Failure
+  # is harmless: this run was disclosed and a later run will disclose again.
+  id=$(_telemetry_distinct_id) || return 0
+  [ -n "$id" ] || return 0
+  tmp="${f}.notice.$$"
+  if sed 's/"notice_shown"[[:space:]]*:[[:space:]]*false/"notice_shown": true/' "$f" > "$tmp" 2>/dev/null; then
+    mv "$tmp" "$f" 2>/dev/null || true
+  fi
+  rm -f "$tmp" 2>/dev/null || true
 }
 
 # _telemetry_ping <event> [key=value ...] — fire-and-forget, never fails.
@@ -188,6 +258,7 @@ fi
 
 _banner
 
+_telemetry_notice
 _telemetry_ping install_started "is_local=$IS_LOCAL" "pre=${PRE_FLAG:-no}" "version=${LATEST:-unknown}"
 
 # 1. Detect installer: uv > pipx > pip (determines Python requirement)
@@ -699,9 +770,6 @@ _telemetry_ping install_completed "method=${INSTALL_METHOD:-unknown}" "runtime=$
 
 _blank
 _say "${GREEN}${BOLD}Done! Ouroboros is ready.${RESET}"
-_blank
-_say "${BOLD}Anonymous usage stats help improve Ouroboros (no code or prompts collected).${RESET}"
-_info "Opt out: export OUROBOROS_TELEMETRY=0  |  details: TELEMETRY.md in the repo"
 _blank
 _say "${BOLD}Get started${RESET}"
 _info 'Open your AI coding agent and run: > ooo interview "your idea here"'

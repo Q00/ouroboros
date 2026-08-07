@@ -17,6 +17,7 @@ Privacy contract — see TELEMETRY.md at the repository root:
 from __future__ import annotations
 
 import atexit
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -55,6 +56,8 @@ _POLLING_TOOLS = frozenset(
         "ouroboros_ac_dashboard",
         "ouroboros_ac_tree_hud",
         "ouroboros_session_signal_targets",
+        "ouroboros_lineage_status",
+        "ouroboros_project_status",
     }
 )
 _POLL_SAMPLE_RATE = 50
@@ -87,6 +90,28 @@ _TOOL_FUNNEL: dict[str, str] = {
 # inflate direct-CLI usage. Serve boots emit `mcp_serve_started` instead.
 _CLI_SKIP = frozenset({"dispatch", "job", "mcp"})
 _CLI_FUNNEL = {"init": "interview"}
+
+# These handlers acknowledge durable background-job submission. Their return
+# value says only whether work was accepted, never whether the workflow later
+# completed or passed verification. Keeping them structurally separate avoids
+# turning queue acceptance into a successful run in analytics.
+_ASYNC_SUBMISSION_TOOLS = frozenset(
+    {
+        "ouroboros_start_execute_seed",
+        "ouroboros_start_evolve_step",
+        "ouroboros_start_auto",
+        "ouroboros_start_evaluate",
+        "ouroboros_start_ralph",
+    }
+)
+
+_JOB_FUNNEL: dict[str, str] = {
+    "execute_seed": "run",
+    "evolve_step": "evolve",
+    "auto": "auto",
+    "evaluate": "evaluate",
+    "ralph": "ralph",
+}
 
 _lock = threading.Lock()
 _queue: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=_QUEUE_MAX)
@@ -295,17 +320,57 @@ def capture_tool_call(
                 return
             sample_rate = _POLL_SAMPLE_RATE
         funnel = _TOOL_FUNNEL.get(name)
+        properties: dict[str, Any] = {
+            "command": funnel or name.removeprefix("ouroboros_"),
+            "tool": name,
+            "source": "mcp",
+            "is_funnel": funnel is not None,
+            "phase": "submission" if name in _ASYNC_SUBMISSION_TOOLS else "completion",
+            "duration_ms": round(duration_ms, 1) if duration_ms is not None else None,
+            "error_type": error_type,
+            "sample_rate": sample_rate if sample_rate > 1 else None,
+        }
+        if name in _ASYNC_SUBMISSION_TOOLS:
+            properties["accepted"] = ok
+        else:
+            properties["ok"] = ok
+        capture("command_run", properties)
+    except Exception:
+        pass
+
+
+def capture_job_outcome(
+    job_id: str,
+    job_type: str,
+    *,
+    terminal_status: str,
+    result_meta: dict[str, Any] | None = None,
+) -> None:
+    """Capture a durable background-job terminal transition.
+
+    ``command_run`` submission receipts and durable outcomes are deliberately
+    different events. Evaluation completion is also different from verified
+    success: only an explicit ``final_approved is True`` earns ``verified``.
+    The PostHog insert id is a one-way digest, so retries can be de-duplicated
+    without disclosing the internal job identifier.
+    """
+    try:
+        normalized_status = terminal_status.strip().lower()
+        meta = result_meta if isinstance(result_meta, dict) else {}
+        final_approved = meta.get("final_approved")
+        verified = job_type == "evaluate" and final_approved is True
         capture(
-            "command_run",
+            "workflow_outcome",
             {
-                "command": funnel or name.removeprefix("ouroboros_"),
-                "tool": name,
-                "source": "mcp",
-                "is_funnel": funnel is not None,
-                "ok": ok,
-                "duration_ms": round(duration_ms, 1) if duration_ms is not None else None,
-                "error_type": error_type,
-                "sample_rate": sample_rate if sample_rate > 1 else None,
+                "command": _JOB_FUNNEL.get(job_type, job_type),
+                "phase": "terminal",
+                "terminal_status": normalized_status,
+                "ok": normalized_status == "completed",
+                "verified": verified,
+                "final_approved": (final_approved if isinstance(final_approved, bool) else None),
+                "$insert_id": hashlib.sha256(
+                    f"ouroboros-job-outcome\0{job_id}".encode()
+                ).hexdigest(),
             },
         )
     except Exception:
@@ -366,6 +431,7 @@ def _reset_for_tests() -> None:
 __all__ = [
     "capture",
     "capture_cli_command",
+    "capture_job_outcome",
     "capture_tool_call",
     "distinct_id",
     "flush",
