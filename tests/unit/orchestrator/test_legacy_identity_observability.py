@@ -9,6 +9,7 @@ entry point and the byte-identical legacy representation behind it.
 
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -58,6 +59,18 @@ def _workspace(*, repo_root: str, original_cwd: str) -> TaskWorkspace:
 
 def _activations(logs: list[dict]) -> list[dict]:
     return [entry for entry in logs if entry["event"] == _EVENT]
+
+
+def _contract_and_resumed_runner(tmp_path: Path) -> tuple[dict, OrchestratorRunner]:
+    """Build a contract from an owned live project, as production does."""
+    project = tmp_path / "project"
+    project.mkdir()
+    original = _runner(cwd=str(project))
+    project_identity = original._project_identity()
+    return (
+        original._build_execution_contract(project_identity=project_identity),
+        _runner(cwd=str(project)),
+    )
 
 
 class TestLegacyTaskWorkspaceIdentity:
@@ -130,13 +143,12 @@ class TestActivationEvents:
         assert activations[0]["session_id"] == "sess-1"
         assert activations[0]["log_level"] == "info"
 
-    def test_durable_preanchor_resume_emits_workspace_comparison(self) -> None:
+    def test_durable_preanchor_resume_emits_workspace_comparison(self, tmp_path: Path) -> None:
         # A durable start-identity snapshot without the additive project anchor
         # is exactly the historical v9 shape: restoring it must take — and
         # record — the legacy workspace-comparison branch, then still restore
         # cleanly.
-        persisted = _runner()._build_execution_contract()
-        resumed = _runner()
+        persisted, resumed = _contract_and_resumed_runner(tmp_path)
         progress = {
             EXECUTION_CONTRACT_PROGRESS_KEY: persisted,
             SESSION_START_IDENTITY_PROGRESS_KEY: {"seed_id": "seed-legacy"},
@@ -150,13 +162,12 @@ class TestActivationEvents:
         assert [entry["entry_point"] for entry in activations] == ["resume_workspace_comparison"]
         assert activations[0]["prepared_live_execution"] is False
 
-    def test_prepared_live_restore_is_not_a_legacy_activation(self) -> None:
+    def test_prepared_live_restore_is_not_a_legacy_activation(self, tmp_path: Path) -> None:
         # The bot-probed false-positive shape: current prepared executions
         # restore an intentionally anchorless contract-only mapping with
         # prepared_live_execution=True. That is not a historical resume and
         # must not pollute the removal metric.
-        persisted = _runner()._build_execution_contract()
-        resumed = _runner()
+        persisted, resumed = _contract_and_resumed_runner(tmp_path)
 
         with capture_logs() as logs:
             resumed._restore_execution_contract(
@@ -166,12 +177,11 @@ class TestActivationEvents:
 
         assert _activations(logs) == []
 
-    def test_contract_only_restore_without_snapshot_does_not_count(self) -> None:
+    def test_contract_only_restore_without_snapshot_does_not_count(self, tmp_path: Path) -> None:
         # Without a durable start-identity snapshot there is no evidence the
         # session is historical, so no activation may be recorded even on the
         # non-prepared path.
-        persisted = _runner()._build_execution_contract()
-        resumed = _runner()
+        persisted, resumed = _contract_and_resumed_runner(tmp_path)
 
         with capture_logs() as logs:
             changed = resumed._restore_execution_contract(
