@@ -736,7 +736,9 @@ def test_resume_rejects_weaker_current_execution_semantics_before_dispatch() -> 
 
 def test_resume_fails_closed_for_pre_adaptive_v3_semantics() -> None:
     """A static-semaphore session cannot silently resume under AIMD effects."""
-    persisted = copy.deepcopy(_runner()._build_execution_contract(seed=_seed()))
+    persisted = copy.deepcopy(
+        _runner()._build_execution_contract(project_identity=None, seed=_seed())
+    )
     semantics = persisted["execution_semantics"]
     semantics["version"] = 3
     del semantics["adaptive_concurrency_policy"]
@@ -767,7 +769,9 @@ def test_resume_fails_closed_for_pre_adaptive_v3_semantics() -> None:
     ],
 )
 def test_resume_rejects_adaptive_policy_drift(field: str, value: object) -> None:
-    persisted = copy.deepcopy(_runner()._build_execution_contract(seed=_seed()))
+    persisted = copy.deepcopy(
+        _runner()._build_execution_contract(project_identity=None, seed=_seed())
+    )
     persisted["execution_semantics"]["adaptive_concurrency_policy"][field] = value
     persisted["frugality_proof"]["execution_semantics_fingerprint"] = (
         OrchestratorRunner._execution_semantics_fingerprint(persisted["execution_semantics"])
