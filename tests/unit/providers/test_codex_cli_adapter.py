@@ -409,12 +409,12 @@ class TestCodexCliLLMAdapter:
 
         assert "mcp_servers.ouroboros.enabled=false" not in command
 
-    def test_strict_legacy_profile_reads_selected_profile_table(
+    def test_strict_legacy_profile_ignores_nested_mcp_table(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Legacy --profile inspects its selected nested profile table."""
+        """Codex 0.133 does not promote nested profile MCP into the base namespace."""
         codex_home = tmp_path / "codex-home"
         codex_home.mkdir()
         (codex_home / "config.toml").write_text(
@@ -434,6 +434,42 @@ class TestCodexCliLLMAdapter:
                 profile="custom",
             )
 
+        assert command[1] == "exec"
+        assert command[-2:] == ["--profile", "custom"]
+        assert "mcp_servers.ouroboros.enabled=false" not in command
+
+    def test_strict_legacy_profile_disables_top_level_mcp_transport(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Codex 0.133 still loads base MCP while selecting legacy profile options."""
+        codex_home = tmp_path / "codex-home"
+        codex_home.mkdir()
+        (codex_home / "config.toml").write_text(
+            "\n".join(
+                (
+                    "[mcp_servers.ouroboros]",
+                    'command = "ouroboros"',
+                    "",
+                    "[profiles.custom]",
+                    'model = "gpt-5.4"',
+                    "",
+                )
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("CODEX_HOME", str(codex_home))
+        adapter = CodexCliLLMAdapter(cli_path="codex", strict_mcp_config=True)
+
+        command = adapter._build_command(
+            output_last_message_path="/tmp/out.txt",
+            output_schema_path=None,
+            model=None,
+            profile="custom",
+        )
+
+        assert command[-2:] == ["--profile", "custom"]
         assert "mcp_servers.ouroboros.enabled=false" in command
 
     @pytest.mark.parametrize(

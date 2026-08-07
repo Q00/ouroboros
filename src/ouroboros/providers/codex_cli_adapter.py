@@ -205,10 +205,11 @@ class CodexCliLLMAdapter(RuntimeStreamMixin):
         if not active_profile:
             return False
         if not codex_uses_profile_v2(self._cli_path):
-            profiles = base_config.get("profiles") if base_config is not None else None
-            if not isinstance(profiles, dict):
-                return False
-            return self._mapping_has_effective_ouroboros_mcp(profiles.get(active_profile))
+            # Split-mode Codex selects [profiles.<name>] for profile options,
+            # but it does not promote a nested mcp_servers table into the
+            # effective top-level MCP namespace. Only the base transport,
+            # checked above, is reachable in this mode.
+            return False
 
         profile_filename = f"{active_profile}.config.toml"
         if Path(profile_filename).name != profile_filename:
