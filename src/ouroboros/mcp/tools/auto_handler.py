@@ -104,7 +104,11 @@ from ouroboros.mcp.types import (
     ToolInputType,
 )
 from ouroboros.orchestrator import resolve_agent_runtime_backend
-from ouroboros.orchestrator.heartbeat import current_process_identity, is_process_identity_alive
+from ouroboros.orchestrator.heartbeat import (
+    current_persisted_process_identity,
+    current_process_identity,
+    persisted_process_identity_alive,
+)
 from ouroboros.persistence.event_store import EventStore
 from ouroboros.providers.factory import resolve_llm_backend
 from ouroboros.runtime.controls import load_runtime_controls
@@ -1499,10 +1503,14 @@ def _lease_is_expired(lease: dict[str, Any]) -> bool:
 
 def _current_lease_owner() -> dict[str, Any]:
     pid, start_time = current_process_identity()
-    return {
+    owner: dict[str, Any] = {
         "owner_pid": pid,
         "owner_start_time": start_time,
     }
+    identity = current_persisted_process_identity()
+    if identity is not None:
+        owner["owner_identity"] = identity
+    return owner
 
 
 def _lease_owner_is_alive(lease: dict[str, Any]) -> bool:
@@ -1516,8 +1524,15 @@ def _lease_owner_is_alive(lease: dict[str, Any]) -> bool:
     if start_time is not None and not isinstance(start_time, int | float):
         start_time = None
     if isinstance(start_time, int | float) and start_time <= 0:
-        return False
-    return is_process_identity_alive(pid, float(start_time) if start_time is not None else None)
+        start_time = None
+    alive = persisted_process_identity_alive(
+        lease.get("owner_identity"),
+        legacy_pid=pid,
+        legacy_start_time=float(start_time) if start_time is not None else None,
+    )
+    # Unknown, malformed, future-version, and legacy Linux identities cannot
+    # authorize releasing another process's durable lease.
+    return alive is not False
 
 
 def _lease_conflict_error(auto_session_id: str, lease: dict[str, Any]) -> MCPToolError:

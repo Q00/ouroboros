@@ -6194,6 +6194,7 @@ class TestZombieJobReconciliation:
         *,
         owner_pid: int | None,
         owner_start_time: float | None,
+        include_versioned_identity: bool = True,
         session_id: str | None = None,
         execution_id: str | None = None,
     ) -> JobManager:
@@ -6211,6 +6212,14 @@ class TestZombieJobReconciliation:
         if owner_pid is not None:
             data["owner_pid"] = owner_pid
             data["owner_start_time"] = owner_start_time
+            if include_versioned_identity:
+                data["owner_identity"] = {
+                    "version": 1,
+                    "platform": "linux",
+                    "pid": owner_pid,
+                    "boot_id": "11111111-2222-3333-4444-555555555555",
+                    "start_ticks": 111,
+                }
         await writer._append_event("mcp.job.created", job_id, data)
         return writer
 
@@ -6222,7 +6231,9 @@ class TestZombieJobReconciliation:
             )
             restarted = JobManager(store)
 
-            with patch.object(job_manager_module, "is_process_identity_alive", return_value=False):
+            with patch.object(
+                job_manager_module, "persisted_process_identity_alive", return_value=False
+            ):
                 snapshot = await restarted.get_snapshot("job_zombie")
 
             assert snapshot.status is JobStatus.INTERRUPTED
@@ -6263,7 +6274,9 @@ class TestZombieJobReconciliation:
             )
             restarted = JobManager(store)
 
-            with patch.object(job_manager_module, "is_process_identity_alive", return_value=False):
+            with patch.object(
+                job_manager_module, "persisted_process_identity_alive", return_value=False
+            ):
                 snapshot = await restarted.get_snapshot("job_linked_terminal_failed")
 
             assert snapshot.status is JobStatus.FAILED
@@ -6327,7 +6340,9 @@ class TestZombieJobReconciliation:
             )
 
             restarted = JobManager(store)
-            with patch.object(job_manager_module, "is_process_identity_alive", return_value=False):
+            with patch.object(
+                job_manager_module, "persisted_process_identity_alive", return_value=False
+            ):
                 snapshot = await restarted.get_snapshot("job_provisional_only")
 
             assert snapshot.status is JobStatus.INTERRUPTED
@@ -6380,7 +6395,9 @@ class TestZombieJobReconciliation:
             assert completed.is_ok and completed.value is True
 
             restarted = JobManager(store)
-            with patch.object(job_manager_module, "is_process_identity_alive", return_value=False):
+            with patch.object(
+                job_manager_module, "persisted_process_identity_alive", return_value=False
+            ):
                 snapshot = await restarted.get_snapshot("job_linked_terminal_completed")
 
             assert snapshot.status is JobStatus.COMPLETED
@@ -6679,7 +6696,7 @@ class TestZombieJobReconciliation:
             handler = JobWaitHandler(event_store=store, job_manager=manager)
             with patch.object(
                 job_manager_module,
-                "is_process_identity_alive",
+                "persisted_process_identity_alive",
                 return_value=False,
             ):
                 result = await handler.handle(
@@ -6707,7 +6724,9 @@ class TestZombieJobReconciliation:
             )
             restarted = JobManager(store)
 
-            with patch.object(job_manager_module, "is_process_identity_alive", return_value=True):
+            with patch.object(
+                job_manager_module, "persisted_process_identity_alive", return_value=True
+            ):
                 snapshot = await restarted.get_snapshot("job_live")
 
             assert snapshot.status is JobStatus.RUNNING
@@ -6734,7 +6753,9 @@ class TestZombieJobReconciliation:
             # holds a live heartbeat lock — it remains the progress authority,
             # so the job must not be terminalized.
             with (
-                patch.object(job_manager_module, "is_process_identity_alive", return_value=False),
+                patch.object(
+                    job_manager_module, "persisted_process_identity_alive", return_value=False
+                ),
                 patch.object(job_manager_module, "is_holder_alive", return_value=True) as holder,
             ):
                 snapshot = await restarted.get_snapshot("job_linked_live")
@@ -6763,7 +6784,9 @@ class TestZombieJobReconciliation:
             # Owner gone AND no live linked holder → genuinely orphaned, so the
             # session-liveness guard must not suppress reconciliation.
             with (
-                patch.object(job_manager_module, "is_process_identity_alive", return_value=False),
+                patch.object(
+                    job_manager_module, "persisted_process_identity_alive", return_value=False
+                ),
                 patch.object(job_manager_module, "is_holder_alive", return_value=False),
             ):
                 snapshot = await restarted.get_snapshot("job_linked_dead")
@@ -6785,14 +6808,42 @@ class TestZombieJobReconciliation:
             restarted = JobManager(store)
 
             with patch.object(
-                job_manager_module, "is_process_identity_alive", return_value=False
+                job_manager_module, "persisted_process_identity_alive", return_value=None
             ) as alive:
                 snapshot = await restarted.get_snapshot("job_legacy")
 
-            # Owner identity unknown → conservative: never consult liveness, never reconcile.
-            alive.assert_not_called()
+            # Owner identity unknown → conservative: resolver cannot prove
+            # death, so the reconciler leaves the durable job untouched.
+            alive.assert_called()
             assert snapshot.status is JobStatus.RUNNING
             events, _ = await store.get_events_after("job", "job_legacy", last_row_id=0)
+            assert [event.type for event in events] == ["mcp.job.created"]
+        finally:
+            await store.close()
+
+    async def test_legacy_linux_epoch_owner_is_fail_closed_after_cold_restart(
+        self, tmp_path
+    ) -> None:
+        """An old epoch record cannot authorize terminalization under btime drift."""
+        store = _build_store(tmp_path)
+        try:
+            await self._seed_running_job(
+                store,
+                "job_legacy_epoch",
+                owner_pid=4_242_424,
+                owner_start_time=111.0,
+                include_versioned_identity=False,
+            )
+            restarted = JobManager(store)
+
+            with patch.object(
+                job_manager_module, "persisted_process_identity_alive", return_value=None
+            ) as alive:
+                snapshot = await restarted.get_snapshot("job_legacy_epoch")
+
+            alive.assert_called()
+            assert snapshot.status is JobStatus.RUNNING
+            events, _ = await store.get_events_after("job", "job_legacy_epoch", last_row_id=0)
             assert [event.type for event in events] == ["mcp.job.created"]
         finally:
             await store.close()
@@ -6805,7 +6856,9 @@ class TestZombieJobReconciliation:
             )
             restarted = JobManager(store)
 
-            with patch.object(job_manager_module, "is_process_identity_alive", return_value=False):
+            with patch.object(
+                job_manager_module, "persisted_process_identity_alive", return_value=False
+            ):
                 first = await restarted.get_snapshot("job_idem")
                 second = await restarted.get_snapshot("job_idem")
 
@@ -6830,7 +6883,9 @@ class TestZombieJobReconciliation:
             await restarted._ensure_initialized()
             store._read_only = True
 
-            with patch.object(job_manager_module, "is_process_identity_alive", return_value=False):
+            with patch.object(
+                job_manager_module, "persisted_process_identity_alive", return_value=False
+            ):
                 snapshot = await restarted.get_snapshot("job_ro")
 
             assert snapshot.status is JobStatus.INTERRUPTED
@@ -6852,9 +6907,21 @@ class TestZombieJobReconciliation:
                     content=(MCPContentItem(type=ContentType.TEXT, text="done"),),
                 )
 
-            started = await manager.start_job(
-                job_type="qa", initial_message="Running qa", runner=_runner()
-            )
+            owner_identity = {
+                "version": 1,
+                "platform": "linux",
+                "pid": os.getpid(),
+                "boot_id": "11111111-2222-3333-4444-555555555555",
+                "start_ticks": 111,
+            }
+            with patch.object(
+                job_manager_module,
+                "current_persisted_process_identity",
+                return_value=owner_identity,
+            ):
+                started = await manager.start_job(
+                    job_type="qa", initial_message="Running qa", runner=_runner()
+                )
             await _wait_for_job_status(manager, started.job_id, JobStatus.COMPLETED)
 
             events, _ = await store.get_events_after("job", started.job_id, last_row_id=0)
@@ -6862,6 +6929,7 @@ class TestZombieJobReconciliation:
             assert created.type == "mcp.job.created"
             assert created.data["owner_pid"] == os.getpid()
             assert "owner_start_time" in created.data
+            assert created.data["owner_identity"] == owner_identity
         finally:
             await _cancel_manager_tasks(manager)
             await store.close()
