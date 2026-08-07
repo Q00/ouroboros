@@ -26,7 +26,60 @@ from ouroboros.core.lineage import (
 from ouroboros.core.seed import Seed
 from ouroboros.core.types import Result
 from ouroboros.events.lineage import lineage_generation_completed
+from ouroboros.evolution import loop_support
 from ouroboros.evolution.projector import LineageProjector
+
+
+def prepare_existing_step(
+    events: list[Any],
+    *,
+    initial_seed: Seed | None,
+    execute: bool,
+) -> Result[
+    tuple[OntologyLineage, int, GenerationPhase, str | None, Seed, GenerationRecord | None],
+    OuroborosError,
+]:
+    """Project current main's recovery state without weakening lease replay."""
+    projected = project_step_state(events)
+    if projected.is_err:
+        return Result.err(projected.error)
+    lineage, _projected_generation, last_phase, interrupted_at_phase = projected.value
+    last_generation, _, _ = LineageProjector().find_resume_point(events)
+    try:
+        generation_number, recovered_seed = loop_support.recovery_plan(
+            lineage, last_generation, last_phase
+        )
+    except ValueError as exc:
+        return Result.err(OuroborosError(str(exc)))
+    hard_crash_record, recovery_error = loop_support.hard_crash_recovery(
+        lineage, generation_number, last_phase, execute=execute
+    )
+    if recovery_error is not None:
+        return Result.err(OuroborosError(recovery_error))
+    if recovered_seed is not None:
+        current_seed = recovered_seed
+    elif initial_seed is not None and not lineage.verification_handoff_pending:
+        current_seed = initial_seed
+    else:
+        reconstructed = reconstruct_step_seed(
+            initial_seed=None,
+            last_phase=last_phase,
+            lineage=lineage,
+            interrupted_at_phase=interrupted_at_phase,
+        )
+        if reconstructed.is_err:
+            return Result.err(reconstructed.error)
+        current_seed, interrupted_at_phase = reconstructed.value
+    return Result.ok(
+        (
+            lineage,
+            generation_number,
+            last_phase,
+            interrupted_at_phase,
+            current_seed,
+            hard_crash_record,
+        )
+    )
 
 
 def reconstruct_step_seed(

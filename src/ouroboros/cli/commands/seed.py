@@ -89,7 +89,9 @@ async def _run_seed_generation(
         )
         raise typer.Exit(code=1)
 
-    seed_path, result = await _generate_seed_from_interview(state, llm_adapter, llm_backend)
+    seed_path, result = await _generate_seed_from_interview(
+        state, llm_adapter, llm_backend, engine=engine
+    )
     if seed_path is None:
         raise typer.Exit(code=1)
 

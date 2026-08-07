@@ -1,8 +1,7 @@
 """AI-driven mechanical command detector.
 
-Replaces per-language hardcoded presets with a single LLM call that inspects
-the project and proposes lint/build/test/static/coverage commands, which are
-persisted to ``.ouroboros/mechanical.toml`` and consumed by
+Replaces per-language hardcoded presets with one LLM call that proposes
+lint/build/test/static/coverage commands, persisted to ``.ouroboros/mechanical.toml`` and consumed by
 ``build_mechanical_config``.
 
 The contract is deliberately minimal: every AI proposal is validated against
@@ -30,6 +29,7 @@ import structlog
 
 from ouroboros.core.json_utils import extract_json_payload
 from ouroboros.evaluation.languages import _ALLOWED_EXECUTABLES
+from ouroboros.evolution.provider_usage import tracked_complete
 from ouroboros.providers.base import (
     CompletionConfig,
     LLMAdapter,
@@ -393,7 +393,7 @@ async def _ask_llm(
         max_tokens=512,
         response_format={"type": "json_object"},
     )
-    result = await adapter.complete(messages, config)
+    result = await tracked_complete(adapter, messages, config)
     if result.is_err:
         log.warning("detector.llm_failed", error=str(result.error))
         return None

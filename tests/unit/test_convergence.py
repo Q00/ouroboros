@@ -2,17 +2,29 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
+from ouroboros.core.directive import Directive
 from ouroboros.core.lineage import (
+    ACResult,
     EvaluationSummary,
     GenerationPhase,
     GenerationRecord,
+    LineageStatus,
     OntologyDelta,
     OntologyLineage,
 )
-from ouroboros.core.seed import OntologyField, OntologySchema
+from ouroboros.core.seed import (
+    AcceptanceCriterionSpec,
+    OntologyField,
+    OntologySchema,
+    Seed,
+    SeedMetadata,
+)
 from ouroboros.evolution.convergence import ConvergenceCriteria
+from ouroboros.evolution.evaluation_coverage import validate_seed_ac_coverage
 from ouroboros.evolution.wonder import WonderOutput
 
 # -- Helpers --
@@ -33,6 +45,32 @@ SCHEMA_A = _schema(("alpha", "beta"))
 SCHEMA_B = _schema(("gamma", "delta"))
 SCHEMA_C = _schema(("epsilon", "zeta"))
 SCHEMA_D = _schema(("eta", "theta"))
+
+
+def _seed(*acs: str | AcceptanceCriterionSpec) -> Seed:
+    return Seed(
+        metadata=SeedMetadata(ambiguity_score=0.1),
+        goal="test goal",
+        constraints=("stay deterministic",),
+        acceptance_criteria=acs,
+        ontology_schema=SCHEMA_A,
+    )
+
+
+def _approved_evaluation(seed: Seed, *, score: float | None = 0.9) -> EvaluationSummary:
+    return EvaluationSummary(
+        final_approved=True,
+        highest_stage_passed=2,
+        score=score,
+        ac_results=tuple(
+            ACResult(
+                ac_index=index,
+                ac_content=criterion.description,
+                passed=True,
+            )
+            for index, criterion in enumerate(seed.acceptance_criteria)
+        ),
+    )
 
 
 def _lineage_with_schemas(*schemas: OntologySchema) -> OntologyLineage:
@@ -89,7 +127,8 @@ class TestOscillationDetection:
             max_generations=30,
         )
         signal = criteria.evaluate(lineage)
-        assert signal.converged
+        assert signal.should_stop
+        assert not signal.converged
         assert "Oscillation" in signal.reason
 
     def test_oscillation_period2_partial_3gens(self) -> None:
@@ -101,7 +140,8 @@ class TestOscillationDetection:
             max_generations=30,
         )
         signal = criteria.evaluate(lineage)
-        assert signal.converged
+        assert signal.should_stop
+        assert not signal.converged
         assert "Oscillation" in signal.reason
 
     def test_oscillation_not_detected_different(self) -> None:
@@ -153,7 +193,8 @@ class TestOscillationDetection:
             max_generations=30,
         )
         signal = criteria.evaluate(lineage)
-        assert signal.converged
+        assert signal.should_stop
+        assert not signal.converged
         assert "Oscillation" in signal.reason
 
     def test_oscillation_no_indexerror_3gens(self) -> None:
@@ -263,6 +304,7 @@ class TestOscillationLoopRouting:
                 max_generations=30,
                 convergence_threshold=0.95,
                 min_generations=2,
+                outcome_gate_enabled=False,
             ),
         )
         loop._run_generation = AsyncMock(return_value=Result.ok(gen_result))
@@ -365,22 +407,195 @@ class TestConvergenceGating:
         """
         return _lineage_with_schemas(SCHEMA_B, SCHEMA_A, SCHEMA_A)
 
-    def test_gate_disabled_explicitly(self) -> None:
-        """Explicitly disabled gate: convergence proceeds despite bad eval."""
+    def test_optional_gate_disabled_cannot_authorize_rejected_evaluation(self) -> None:
+        """Disabling score policy cannot bypass approval or all-AC authority."""
         lineage = self._converging_lineage()
+        seed = _seed("AC zero")
         criteria = ConvergenceCriteria(
             convergence_threshold=0.95,
             min_generations=2,
             eval_gate_enabled=False,
+            outcome_gate_enabled=False,
         )
         signal = criteria.evaluate(
             lineage,
             latest_evaluation=EvaluationSummary(
-                final_approved=False, highest_stage_passed=1, score=0.3
+                final_approved=False,
+                highest_stage_passed=1,
+                score=0.3,
+                ac_results=(ACResult(ac_index=0, ac_content="AC zero", passed=False),),
+            ),
+            latest_seed=seed,
+        )
+        assert not signal.converged
+        assert signal.failed_acs == (0,)
+        assert "Per-AC authority" in signal.reason
+
+    def test_optional_gate_disabled_allows_low_score_with_authoritative_pass(self) -> None:
+        """The optional gate still controls only the configured score threshold."""
+        lineage = self._converging_lineage()
+        seed = _seed("AC zero")
+
+        signal = ConvergenceCriteria(
+            convergence_threshold=0.95,
+            min_generations=2,
+            eval_gate_enabled=False,
+            eval_min_score=0.7,
+        ).evaluate(
+            lineage,
+            latest_evaluation=_approved_evaluation(seed, score=0.1),
+            latest_seed=seed,
+        )
+
+        assert signal.converged
+
+    def test_outcome_gate_runs_when_optional_eval_policy_is_disabled(self) -> None:
+        """A verified Gen 1 outcome must not wait for ontology convergence."""
+        seed = _seed("AC zero")
+        evaluation = _approved_evaluation(seed, score=0.1)
+        lineage = _lineage_with_generations(
+            GenerationRecord(
+                generation_number=1,
+                seed_id="seed_1",
+                ontology_snapshot=SCHEMA_A,
+                evaluation_summary=evaluation,
+                phase=GenerationPhase.COMPLETED,
+            )
+        )
+
+        signal = ConvergenceCriteria(
+            min_generations=3,
+            eval_gate_enabled=False,
+            eval_min_score=0.7,
+            outcome_gate_enabled=True,
+        ).evaluate(
+            lineage,
+            latest_evaluation=evaluation,
+            latest_seed=seed,
+        )
+
+        assert signal.should_stop
+        assert signal.converged
+        assert "Outcome gate passed" in signal.reason
+
+    def test_all_ac_pass_authority_cannot_be_disabled(self) -> None:
+        """Neither the optional eval gate nor ac_gate_mode can admit a failed AC."""
+        lineage = self._converging_lineage()
+        seed = _seed("AC zero", "AC one")
+        evaluation = EvaluationSummary(
+            final_approved=False,
+            highest_stage_passed=2,
+            score=1.0,
+            ac_results=(
+                ACResult(ac_index=0, ac_content="AC zero", passed=True),
+                ACResult(ac_index=1, ac_content="AC one", passed=False),
+            ),
+            latest_seed=seed,
+        )
+
+        signal = ConvergenceCriteria(
+            convergence_threshold=0.95,
+            min_generations=2,
+            eval_gate_enabled=False,
+            ac_gate_mode="off",
+        ).evaluate(
+            lineage,
+            latest_evaluation=evaluation,
+            latest_seed=seed,
+        )
+
+        assert not signal.converged
+        assert signal.failed_acs == (1,)
+        assert "Per-AC authority" in signal.reason
+
+    def test_not_evaluated_pass_cannot_authorize_convergence(self) -> None:
+        """Exact indices and PASS labels are insufficient without verdict authority."""
+        lineage = self._converging_lineage()
+        seed = _seed("AC zero", "AC one")
+        evaluation = EvaluationSummary(
+            final_approved=True,
+            highest_stage_passed=2,
+            score=1.0,
+            ac_results=tuple(
+                ACResult(
+                    ac_index=index,
+                    ac_content=criterion.description,
+                    passed=True,
+                    ac_verdict_state="not_evaluated",
+                    verification_method="unknown",
+                )
+                for index, criterion in enumerate(seed.acceptance_criteria)
             ),
         )
-        # Gate disabled -> converges despite bad result
-        assert signal.converged
+
+        coverage = validate_seed_ac_coverage(seed, evaluation)
+        signal = ConvergenceCriteria(
+            convergence_threshold=0.95,
+            min_generations=2,
+            eval_gate_enabled=False,
+            ac_gate_mode="off",
+        ).evaluate(
+            lineage,
+            latest_evaluation=evaluation,
+            latest_seed=seed,
+        )
+
+        assert not coverage.complete
+        assert "non-authoritative" in coverage.reason
+        assert not evaluation.final_approved
+        assert not signal.converged
+
+    def test_opaque_override_pass_cannot_authorize_convergence(self) -> None:
+        seed = _seed("AC zero")
+        evaluation = EvaluationSummary(
+            final_approved=True,
+            highest_stage_passed=2,
+            ac_results=(
+                ACResult(
+                    ac_index=0,
+                    ac_content="AC zero",
+                    passed=True,
+                    ac_verdict_state="overridden",
+                    verification_method="unknown",
+                    evidence="",
+                ),
+            ),
+        )
+
+        signal = ConvergenceCriteria(eval_gate_enabled=False).evaluate(
+            self._converging_lineage(),
+            latest_evaluation=evaluation,
+            latest_seed=seed,
+        )
+
+        assert not evaluation.final_approved
+        assert not signal.converged
+
+    def test_explicit_final_rejection_cannot_be_upgraded_to_convergence(self) -> None:
+        seed = _seed("AC zero")
+        evaluation = EvaluationSummary(
+            final_approved=False,
+            approval_status="rejected",
+            highest_stage_passed=3,
+            failure_reason="Stage 3 consensus rejected the artifact",
+            ac_results=(
+                ACResult(
+                    ac_index=0,
+                    ac_content="AC zero",
+                    passed=True,
+                    verification_method="semantic",
+                ),
+            ),
+        )
+
+        signal = ConvergenceCriteria(eval_gate_enabled=False).evaluate(
+            self._converging_lineage(),
+            latest_evaluation=evaluation,
+            latest_seed=seed,
+        )
+
+        assert not evaluation.final_approved
+        assert not signal.converged
 
     def test_gate_blocks_when_not_approved(self) -> None:
         """Gate enabled + approved=False -> converged=False."""
@@ -421,6 +636,7 @@ class TestConvergenceGating:
     def test_gate_passes_when_satisfactory(self) -> None:
         """Gate enabled + approved=True + score >= min -> converged=True."""
         lineage = self._converging_lineage()
+        seed = _seed("AC zero")
         criteria = ConvergenceCriteria(
             convergence_threshold=0.95,
             min_generations=2,
@@ -430,21 +646,30 @@ class TestConvergenceGating:
         signal = criteria.evaluate(
             lineage,
             latest_evaluation=EvaluationSummary(
-                final_approved=True, highest_stage_passed=2, score=0.9
+                final_approved=True,
+                highest_stage_passed=2,
+                score=0.9,
+                ac_results=(ACResult(ac_index=0, ac_content="AC zero", passed=True),),
             ),
+            latest_seed=seed,
         )
         assert signal.converged
 
-    def test_gate_ignores_when_no_result(self) -> None:
-        """Gate enabled but no result provided -> converges normally."""
+    def test_gate_blocks_when_no_result(self) -> None:
+        """Gate enabled but no result provided -> fail closed."""
         lineage = self._converging_lineage()
         criteria = ConvergenceCriteria(
             convergence_threshold=0.95,
             min_generations=2,
             eval_gate_enabled=True,
         )
-        signal = criteria.evaluate(lineage, latest_evaluation=None)
-        assert signal.converged
+        signal = criteria.evaluate(
+            lineage,
+            latest_evaluation=None,
+            evaluation_expected=True,
+        )
+        assert not signal.converged
+        assert "evaluation unavailable" in signal.reason
 
     def test_gate_does_not_affect_max_generations(self) -> None:
         """Hard cap (max_generations) still works even with gate."""
@@ -463,12 +688,33 @@ class TestConvergenceGating:
                 final_approved=False, highest_stage_passed=1, score=0.1
             ),
         )
-        assert signal.converged
+        assert signal.should_stop
+        assert not signal.converged
         assert "Max generations" in signal.reason
+
+    def test_verified_outcome_wins_on_final_generation(self) -> None:
+        lineage = _lineage_with_schemas(SCHEMA_A, SCHEMA_B, SCHEMA_C)
+        seed = _seed("AC zero")
+
+        signal = ConvergenceCriteria(
+            min_generations=2,
+            max_generations=3,
+            eval_gate_enabled=True,
+        ).evaluate(
+            lineage,
+            latest_evaluation=_approved_evaluation(seed),
+            latest_seed=seed,
+            validation_output="Validation passed (attempt 1/3)",
+        )
+
+        assert signal.should_stop
+        assert signal.converged
+        assert "Outcome gate passed" in signal.reason
 
     def test_gate_approved_true_score_none(self) -> None:
         """approved=True + score=None -> convergence allowed (no score to block)."""
         lineage = self._converging_lineage()
+        seed = _seed("AC zero")
         criteria = ConvergenceCriteria(
             convergence_threshold=0.95,
             min_generations=2,
@@ -478,10 +724,32 @@ class TestConvergenceGating:
         signal = criteria.evaluate(
             lineage,
             latest_evaluation=EvaluationSummary(
-                final_approved=True, highest_stage_passed=2, score=None
+                final_approved=True,
+                highest_stage_passed=2,
+                score=None,
+                ac_results=(ACResult(ac_index=0, ac_content="AC zero", passed=True),),
             ),
+            latest_seed=seed,
         )
         assert signal.converged
+
+    def test_gate_blocks_when_current_seed_is_unavailable(self) -> None:
+        lineage = self._converging_lineage()
+        evaluation = EvaluationSummary(
+            final_approved=True,
+            highest_stage_passed=2,
+            score=0.9,
+            ac_results=(ACResult(ac_index=0, ac_content="AC zero", passed=True),),
+        )
+
+        signal = ConvergenceCriteria(
+            convergence_threshold=0.95,
+            min_generations=2,
+            eval_gate_enabled=True,
+        ).evaluate(lineage, latest_evaluation=evaluation)
+
+        assert not signal.converged
+        assert signal.reason == "Per-AC gate: current Seed unavailable for coverage validation"
 
     def test_gate_approved_false_score_none(self) -> None:
         """approved=False + score=None -> convergence blocked."""
@@ -502,6 +770,388 @@ class TestConvergenceGating:
         assert "unsatisfactory" in signal.reason
 
 
+class TestLoopEngineeringExitSignals:
+    """Outcome PASS and no-drift are bounded loop exit gates."""
+
+    @staticmethod
+    def _scored_lineage(*scores: float) -> OntologyLineage:
+        schemas = (SCHEMA_A, SCHEMA_B, SCHEMA_C, SCHEMA_D)
+        generations = tuple(
+            GenerationRecord(
+                generation_number=index + 1,
+                seed_id=f"seed_{index + 1}",
+                ontology_snapshot=schemas[index],
+                evaluation_summary=EvaluationSummary(
+                    final_approved=False,
+                    highest_stage_passed=2,
+                    score=score,
+                ),
+                phase=GenerationPhase.COMPLETED,
+            )
+            for index, score in enumerate(scores)
+        )
+        return _lineage_with_generations(*generations)
+
+    def test_outcome_pass_stops_after_first_generation(self) -> None:
+        seed = _seed("AC zero", "AC one")
+        evaluation = EvaluationSummary(
+            final_approved=True,
+            highest_stage_passed=2,
+            score=0.9,
+            ac_results=(
+                ACResult(ac_index=0, ac_content="AC zero", passed=True),
+                ACResult(ac_index=1, ac_content="AC one", passed=True),
+            ),
+        )
+        lineage = _lineage_with_generations(
+            GenerationRecord(
+                generation_number=1,
+                seed_id="seed_1",
+                ontology_snapshot=SCHEMA_A,
+                evaluation_summary=evaluation,
+                phase=GenerationPhase.COMPLETED,
+                seed_json=json.dumps(seed.to_dict()),
+            )
+        )
+        criteria = ConvergenceCriteria(
+            min_generations=3,
+            eval_gate_enabled=True,
+            outcome_gate_enabled=True,
+        )
+
+        signal = criteria.evaluate(
+            lineage,
+            latest_evaluation=evaluation,
+            validation_output="Validation passed (attempt 1/3)",
+            latest_seed=seed,
+        )
+
+        assert signal.converged
+        assert "Outcome gate passed" in signal.reason
+        assert signal.generation == 1
+
+    @pytest.mark.asyncio
+    async def test_ontology_only_evolve_step_converges_after_real_change(self) -> None:
+        from unittest.mock import AsyncMock
+
+        from ouroboros.core.types import Result
+        from ouroboros.events.lineage import lineage_created, lineage_generation_completed
+        from ouroboros.evolution.loop import (
+            EvolutionaryLoop,
+            EvolutionaryLoopConfig,
+            GenerationResult,
+            StepAction,
+        )
+        from ouroboros.persistence.event_store import EventStore
+
+        def ontology_seed(
+            seed_id: str,
+            parent_seed_id: str | None,
+            schema: OntologySchema,
+        ) -> Seed:
+            return Seed(
+                metadata=SeedMetadata(
+                    seed_id=seed_id,
+                    parent_seed_id=parent_seed_id,
+                    ambiguity_score=0.1,
+                ),
+                goal="test goal",
+                constraints=("stay deterministic",),
+                acceptance_criteria=("AC zero",),
+                ontology_schema=schema,
+            )
+
+        store = EventStore("sqlite+aiosqlite:///:memory:")
+        await store.initialize()
+        seed_1 = ontology_seed("seed_1", None, SCHEMA_B)
+        seed_2 = ontology_seed("seed_2", "seed_1", SCHEMA_A)
+        seed_3 = ontology_seed("seed_3", "seed_2", SCHEMA_A)
+
+        await store.append(lineage_created("lin_ontology_only", "test goal"))
+        for generation_number, seed in enumerate((seed_1, seed_2), start=1):
+            await store.append(
+                lineage_generation_completed(
+                    "lin_ontology_only",
+                    generation_number,
+                    seed.metadata.seed_id,
+                    seed.ontology_schema.model_dump(mode="json"),
+                    None,
+                    [f"question {generation_number}"],
+                    seed_json=json.dumps(seed.to_dict()),
+                )
+            )
+
+        generation = GenerationResult(
+            generation_number=3,
+            seed=seed_3,
+            ontology_delta=OntologyDelta.compute(SCHEMA_A, SCHEMA_A),
+            phase=GenerationPhase.COMPLETED,
+            success=True,
+        )
+        validator = AsyncMock()
+        loop = EvolutionaryLoop(
+            event_store=store,
+            config=EvolutionaryLoopConfig(
+                min_generations=2,
+                convergence_threshold=0.95,
+                eval_gate_enabled=True,
+            ),
+            validator=validator,
+        )
+        run_generation = AsyncMock(return_value=Result.ok(generation))
+        loop._run_generation = run_generation
+
+        result = await loop.evolve_step("lin_ontology_only", execute=False)
+
+        assert result.is_ok
+        assert result.value.action == StepAction.ONTOLOGY_STABLE
+        assert result.value.convergence_signal.converged is False
+        assert result.value.convergence_signal.ontology_stable is True
+        assert result.value.convergence_signal.ontology_similarity == pytest.approx(1.0)
+        assert result.value.lineage.status == LineageStatus.ACTIVE
+        assert run_generation.await_args.kwargs["execute"] is False
+        validator.assert_not_awaited()
+
+        events = await store.replay_lineage("lin_ontology_only")
+        assert not any(event.type == "lineage.converged" for event in events)
+        directive = [event for event in events if event.type == "control.directive.emitted"][-1]
+        assert directive.data["directive"] == Directive.EVALUATE.value
+        assert directive.data["is_terminal"] is False
+
+    @pytest.mark.parametrize(
+        "results",
+        [
+            (ACResult(ac_index=0, ac_content="AC zero", passed=True),),
+            (
+                ACResult(ac_index=0, ac_content="AC zero", passed=True),
+                ACResult(ac_index=0, ac_content="AC zero", passed=True),
+            ),
+            (
+                ACResult(ac_index=0, ac_content="AC zero", passed=True),
+                ACResult(ac_index=2, ac_content="outside", passed=True),
+            ),
+            (
+                ACResult(ac_index=0, ac_content="not AC zero", passed=True),
+                ACResult(ac_index=1, ac_content="AC one", passed=True),
+            ),
+        ],
+        ids=("missing", "duplicate", "out-of-range", "content-mismatch"),
+    )
+    def test_outcome_gate_requires_exact_seed_wide_verdict_coverage(
+        self,
+        results: tuple[ACResult, ...],
+    ) -> None:
+        seed = _seed("AC zero", "AC one")
+        evaluation = EvaluationSummary(
+            final_approved=True,
+            highest_stage_passed=2,
+            score=0.9,
+            ac_results=results,
+        )
+        lineage = _lineage_with_generations(
+            GenerationRecord(
+                generation_number=1,
+                seed_id="seed_1",
+                ontology_snapshot=SCHEMA_A,
+                evaluation_summary=evaluation,
+                seed_json=json.dumps(seed.to_dict()),
+                phase=GenerationPhase.COMPLETED,
+            )
+        )
+
+        signal = ConvergenceCriteria(
+            min_generations=3,
+            eval_gate_enabled=True,
+            outcome_gate_enabled=True,
+        ).evaluate(
+            lineage,
+            latest_evaluation=evaluation,
+            latest_seed=seed,
+            validation_output="Validation passed (attempt 1/3)",
+        )
+
+        assert not signal.converged
+        assert "Below minimum generations" in signal.reason
+
+    def test_structured_coverage_rejects_stale_semantic_identity(self) -> None:
+        prior_seed = _seed(
+            AcceptanceCriterionSpec(
+                description="Artifact exists",
+                verify_command="test -f artifact.txt",
+            )
+        )
+        current_seed = _seed(
+            AcceptanceCriterionSpec(
+                description="Artifact exists",
+                verify_command="python scripts/verify_artifact.py",
+            )
+        )
+        stale_evaluation = EvaluationSummary(
+            final_approved=True,
+            highest_stage_passed=2,
+            score=1.0,
+            ac_results=(
+                ACResult(
+                    ac_index=0,
+                    ac_content="Artifact exists",
+                    semantic_ac_key=prior_seed.acceptance_criteria[0].semantic_ac_key,
+                    passed=True,
+                ),
+            ),
+        )
+
+        coverage = validate_seed_ac_coverage(current_seed, stale_evaluation)
+
+        assert not coverage.complete
+        assert "semantic identity differs" in coverage.reason
+
+    @pytest.mark.parametrize("ac_gate_mode", ("all", "off"))
+    def test_stability_gate_rejects_empty_verdict_coverage_for_current_seed(
+        self,
+        ac_gate_mode: str,
+    ) -> None:
+        seed = _seed("AC zero", "AC one")
+        evaluation = EvaluationSummary(
+            final_approved=True,
+            highest_stage_passed=2,
+            score=0.9,
+        )
+        lineage = _lineage_with_generations(
+            GenerationRecord(
+                generation_number=1,
+                seed_id="seed_1",
+                ontology_snapshot=SCHEMA_B,
+                evaluation_summary=evaluation,
+                phase=GenerationPhase.COMPLETED,
+            ),
+            GenerationRecord(
+                generation_number=2,
+                seed_id="seed_2",
+                ontology_snapshot=SCHEMA_A,
+                evaluation_summary=evaluation,
+                phase=GenerationPhase.COMPLETED,
+            ),
+            GenerationRecord(
+                generation_number=3,
+                seed_id="seed_3",
+                ontology_snapshot=SCHEMA_A,
+                evaluation_summary=evaluation,
+                phase=GenerationPhase.COMPLETED,
+            ),
+        )
+
+        signal = ConvergenceCriteria(
+            min_generations=2,
+            eval_gate_enabled=True,
+            outcome_gate_enabled=False,
+            ac_gate_mode=ac_gate_mode,
+        ).evaluate(
+            lineage,
+            latest_evaluation=evaluation,
+            latest_seed=seed,
+            evaluation_expected=True,
+        )
+
+        assert not signal.converged
+        assert signal.reason == "Per-AC gate: missing per-AC verdict indices: [0, 1]"
+
+    def test_validation_failure_blocks_first_generation_outcome_gate(self) -> None:
+        evaluation = EvaluationSummary(
+            final_approved=True,
+            highest_stage_passed=2,
+            score=0.9,
+        )
+        lineage = _lineage_with_generations(
+            GenerationRecord(
+                generation_number=1,
+                seed_id="seed_1",
+                ontology_snapshot=SCHEMA_A,
+                evaluation_summary=evaluation,
+                phase=GenerationPhase.COMPLETED,
+            )
+        )
+        criteria = ConvergenceCriteria(
+            min_generations=3,
+            eval_gate_enabled=True,
+            outcome_gate_enabled=True,
+        )
+
+        signal = criteria.evaluate(
+            lineage,
+            latest_evaluation=evaluation,
+            validation_output="Validation error: tests did not collect",
+        )
+
+        assert not signal.converged
+        assert "Below minimum generations" in signal.reason
+
+    def test_rejected_score_plateau_stops_after_window(self) -> None:
+        lineage = self._scored_lineage(0.50, 0.505, 0.504)
+        latest = lineage.generations[-1].evaluation_summary
+        criteria = ConvergenceCriteria(
+            min_generations=2,
+            stagnation_window=3,
+            evaluation_plateau_epsilon=0.01,
+        )
+
+        signal = criteria.evaluate(lineage, latest_evaluation=latest)
+
+        assert signal.should_stop
+        assert not signal.converged
+        assert "evaluation score plateau" in signal.reason
+
+    def test_meaningful_score_improvement_keeps_running(self) -> None:
+        lineage = self._scored_lineage(0.4, 0.5, 0.6)
+        latest = lineage.generations[-1].evaluation_summary
+        criteria = ConvergenceCriteria(
+            min_generations=2,
+            stagnation_window=3,
+            evaluation_plateau_epsilon=0.01,
+        )
+
+        signal = criteria.evaluate(lineage, latest_evaluation=latest)
+
+        assert not signal.converged
+        assert "Continuing" in signal.reason
+
+    def test_repetitive_feedback_is_an_explicit_non_success_stop(self) -> None:
+        seed = _seed("AC zero", "AC one")
+        partial_evaluation = EvaluationSummary(
+            final_approved=True,
+            highest_stage_passed=2,
+            score=1.0,
+            ac_results=(ACResult(ac_index=0, ac_content="AC zero", passed=True),),
+        )
+        lineage = _lineage_with_generations(
+            *(
+                GenerationRecord(
+                    generation_number=index,
+                    seed_id=f"seed_{index}",
+                    ontology_snapshot=schema,
+                    wonder_questions=("same unresolved question",),
+                    phase=GenerationPhase.COMPLETED,
+                )
+                for index, schema in enumerate((SCHEMA_A, SCHEMA_B, SCHEMA_C), start=1)
+            )
+        )
+
+        signal = ConvergenceCriteria(min_generations=2, eval_gate_enabled=True).evaluate(
+            lineage,
+            latest_wonder=WonderOutput(
+                questions=("same unresolved question",),
+                ontology_tensions=(),
+                should_continue=True,
+                reasoning="still unresolved",
+            ),
+            latest_evaluation=partial_evaluation,
+            latest_seed=seed,
+        )
+
+        assert signal.should_stop
+        assert not signal.converged
+        assert signal.reason.startswith("Stagnation detected:")
+
+
 class TestEvolutionGateDetection:
     """Tests for evolution gate detection (P1-5).
 
@@ -509,41 +1159,72 @@ class TestEvolutionGateDetection:
     block convergence — whether due to conservative Reflect or errors.
     """
 
-    def test_blocks_when_ontology_never_evolved(self) -> None:
-        """Identical ontology across all generations -> convergence withheld."""
+    def test_stops_when_ontology_never_evolved_for_full_window(self) -> None:
+        """Identical ontology for the full window stops instead of running to 30."""
         lineage = _lineage_with_schemas(SCHEMA_A, SCHEMA_A, SCHEMA_A)
         criteria = ConvergenceCriteria(
             convergence_threshold=0.95,
             min_generations=2,
             eval_gate_enabled=False,
+            outcome_gate_enabled=False,
         )
         signal = criteria.evaluate(lineage)
+        assert signal.should_stop
         assert not signal.converged
-        assert "Convergence withheld" in signal.reason
+        assert "Stagnation" in signal.reason
 
     def test_allows_when_ontology_evolved_at_least_once(self) -> None:
         """Ontology evolved once then stabilized -> genuine convergence."""
         lineage = _lineage_with_schemas(SCHEMA_B, SCHEMA_A, SCHEMA_A)
+        seed = _seed("AC zero")
         criteria = ConvergenceCriteria(
             convergence_threshold=0.95,
             min_generations=2,
             eval_gate_enabled=False,
+            outcome_gate_enabled=False,
         )
-        signal = criteria.evaluate(lineage)
+        signal = criteria.evaluate(
+            lineage,
+            latest_evaluation=_approved_evaluation(seed),
+            latest_seed=seed,
+        )
         assert signal.converged
         assert "converged" in signal.reason.lower()
 
     def test_blocks_two_gen_identical(self) -> None:
         """Two identical generations with no evolution -> blocked."""
         lineage = _lineage_with_schemas(SCHEMA_A, SCHEMA_A)
+        seed = _seed("AC zero")
         criteria = ConvergenceCriteria(
             convergence_threshold=0.95,
             min_generations=2,
             eval_gate_enabled=False,
+            outcome_gate_enabled=False,
         )
-        signal = criteria.evaluate(lineage)
+        signal = criteria.evaluate(
+            lineage,
+            latest_evaluation=_approved_evaluation(seed),
+            latest_seed=seed,
+        )
         assert not signal.converged
         assert "Convergence withheld" in signal.reason
+
+    def test_ontology_only_identical_generations_handoff_for_verification(self) -> None:
+        """Stability needs verification, not a fake mutation, in ontology-only mode."""
+        lineage = _lineage_with_schemas(SCHEMA_A, SCHEMA_A)
+        criteria = ConvergenceCriteria(
+            convergence_threshold=0.95,
+            min_generations=2,
+            eval_gate_enabled=False,
+            outcome_gate_enabled=False,
+        )
+
+        signal = criteria.evaluate(lineage, evaluation_expected=False)
+
+        assert signal.should_stop
+        assert signal.ontology_stable
+        assert not signal.converged
+        assert "evaluation are required" in signal.reason
 
     def test_max_generations_overrides_withheld_convergence(self) -> None:
         """Hard cap still terminates even with withheld convergence."""
@@ -555,7 +1236,8 @@ class TestEvolutionGateDetection:
             eval_gate_enabled=False,
         )
         signal = criteria.evaluate(lineage)
-        assert signal.converged
+        assert signal.should_stop
+        assert not signal.converged
         assert "Max generations" in signal.reason
 
 
@@ -569,6 +1251,7 @@ class TestValidationGate:
     def test_blocks_when_validation_skipped(self) -> None:
         """Validation gate blocks convergence when validation was skipped."""
         lineage = self._converging_lineage()
+        seed = _seed("AC zero")
         criteria = ConvergenceCriteria(
             convergence_threshold=0.95,
             min_generations=2,
@@ -577,6 +1260,8 @@ class TestValidationGate:
         signal = criteria.evaluate(
             lineage,
             validation_output="Validation skipped: no project directory found",
+            latest_evaluation=_approved_evaluation(seed),
+            latest_seed=seed,
         )
         assert not signal.converged
         assert "Validation gate blocked" in signal.reason
@@ -584,6 +1269,7 @@ class TestValidationGate:
     def test_blocks_when_validation_error(self) -> None:
         """Validation gate blocks convergence when validation had an error."""
         lineage = self._converging_lineage()
+        seed = _seed("AC zero")
         criteria = ConvergenceCriteria(
             convergence_threshold=0.95,
             min_generations=2,
@@ -592,6 +1278,8 @@ class TestValidationGate:
         signal = criteria.evaluate(
             lineage,
             validation_output="Validation error: subprocess failed",
+            latest_evaluation=_approved_evaluation(seed),
+            latest_seed=seed,
         )
         assert not signal.converged
         assert "Validation gate blocked" in signal.reason
@@ -599,6 +1287,7 @@ class TestValidationGate:
     def test_passes_when_validation_succeeded(self) -> None:
         """Validation gate allows convergence when validation passed."""
         lineage = self._converging_lineage()
+        seed = _seed("AC zero")
         criteria = ConvergenceCriteria(
             convergence_threshold=0.95,
             min_generations=2,
@@ -606,24 +1295,92 @@ class TestValidationGate:
         )
         signal = criteria.evaluate(
             lineage,
-            validation_output="Validation passed: all checks green",
+            validation_output="Validation passed (attempt 1/3)",
+            latest_evaluation=_approved_evaluation(seed),
+            latest_seed=seed,
         )
         assert signal.converged
 
     def test_passes_when_validation_output_none(self) -> None:
         """Validation gate allows convergence when no validation output."""
         lineage = self._converging_lineage()
+        seed = _seed("AC zero")
         criteria = ConvergenceCriteria(
             convergence_threshold=0.95,
             min_generations=2,
             validation_gate_enabled=True,
         )
-        signal = criteria.evaluate(lineage, validation_output=None)
+        signal = criteria.evaluate(
+            lineage,
+            validation_output=None,
+            latest_evaluation=_approved_evaluation(seed),
+            latest_seed=seed,
+        )
         assert signal.converged
+
+    @pytest.mark.parametrize("validation_output", (None, "", "   "))
+    def test_blocks_when_configured_validator_returns_no_result(
+        self,
+        validation_output: str | None,
+    ) -> None:
+        lineage = self._converging_lineage()
+        seed = _seed("AC zero")
+        criteria = ConvergenceCriteria(
+            convergence_threshold=0.95,
+            min_generations=2,
+            validation_gate_enabled=True,
+        )
+
+        signal = criteria.evaluate(
+            lineage,
+            validation_output=validation_output,
+            validation_expected=True,
+            latest_evaluation=_approved_evaluation(seed),
+            latest_seed=seed,
+        )
+
+        assert not signal.converged
+        assert not signal.should_stop
+        assert signal.reason == "Validation gate blocked: configured validator returned no result"
+
+    @pytest.mark.parametrize(
+        "validation_output",
+        (
+            "Validation fix failed (attempt 1): timeout",
+            "Validation: no fixable errors detected (exit code 2)",
+            "False",
+            "Validation passed: false",
+            "Validation passed but 3 errors remain",
+            "Validation passed\nValidation error: tests failed",
+        ),
+    )
+    def test_blocks_configured_validator_without_explicit_pass(
+        self,
+        validation_output: str,
+    ) -> None:
+        lineage = self._converging_lineage()
+        seed = _seed("AC zero")
+
+        signal = ConvergenceCriteria(
+            convergence_threshold=0.95,
+            min_generations=2,
+            validation_gate_enabled=True,
+        ).evaluate(
+            lineage,
+            validation_output=validation_output,
+            validation_expected=True,
+            latest_evaluation=_approved_evaluation(seed),
+            latest_seed=seed,
+        )
+
+        assert not signal.converged
+        assert not signal.should_stop
+        assert signal.reason == f"Validation gate blocked: {validation_output}"
 
     def test_disabled_allows_skipped_validation(self) -> None:
         """Disabled validation gate allows convergence even with skipped validation."""
         lineage = self._converging_lineage()
+        seed = _seed("AC zero")
         criteria = ConvergenceCriteria(
             convergence_threshold=0.95,
             min_generations=2,
@@ -632,5 +1389,7 @@ class TestValidationGate:
         signal = criteria.evaluate(
             lineage,
             validation_output="Validation skipped: no project directory",
+            latest_evaluation=_approved_evaluation(seed),
+            latest_seed=seed,
         )
         assert signal.converged

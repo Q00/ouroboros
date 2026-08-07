@@ -194,6 +194,21 @@ class TestCreateLLMAdapter:
         adapter = create_llm_adapter(backend="litellm")
         assert isinstance(adapter, LiteLLMAdapter)
 
+    def test_litellm_frugality_proof_is_task_local(self) -> None:
+        """Proof construction must not change ordinary LiteLLM policies."""
+        if LiteLLMAdapter is None:
+            pytest.skip("litellm not installed")
+
+        ordinary = create_llm_adapter(backend="litellm")
+        proof = create_llm_adapter(backend="litellm", frugality_proof=True)
+
+        assert isinstance(ordinary, LiteLLMAdapter)
+        assert ordinary._max_retries == 3
+        assert ordinary._timeout is None
+        assert isinstance(proof, LiteLLMAdapter)
+        assert proof._max_retries == 1
+        assert proof._timeout == 60.0
+
     def test_forwards_io_recorder_to_litellm_adapter(self) -> None:
         """LiteLLM factory path preserves explicit recorder wiring."""
         if LiteLLMAdapter is None:

@@ -199,7 +199,8 @@ class TestEvolutionBackendDrift:
             "fresh",
             content=(
                 '{"refined_goal": "Build a login system", "refined_constraints": [], '
-                '"refined_acs": [], "ontology_mutations": [], "reasoning": "ok"}'
+                '"refined_acs": ["User can log in"], '
+                '"ontology_mutations": [], "reasoning": "ok"}'
             ),
         )
         engine = ReflectEngine(
@@ -374,7 +375,8 @@ class TestEvolutionExplicitModelOverride:
             "fresh",
             content=(
                 '{"refined_goal": "Build a login system", "refined_constraints": [], '
-                '"refined_acs": [], "ontology_mutations": [], "reasoning": "ok"}'
+                '"refined_acs": ["User can log in"], '
+                '"ontology_mutations": [], "reasoning": "ok"}'
             ),
         )
         engine = ReflectEngine(

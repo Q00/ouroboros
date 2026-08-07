@@ -13,8 +13,8 @@ with the fenced owner's in-flight work aborted if it is still alive.
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Any
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -23,8 +23,9 @@ from ouroboros.core.lineage import (
     GenerationPhase,
     OntologySchema,
 )
-from ouroboros.core.seed import Seed
+from ouroboros.core.seed import Seed, SeedMetadata
 from ouroboros.core.types import Result
+from ouroboros.evolution.convergence import ConvergenceSignal
 from ouroboros.evolution.generation_claims import (
     DurableStepClaims,
     LocalStepClaims,
@@ -36,6 +37,7 @@ from ouroboros.evolution.loop import (
     EvolutionaryLoopConfig,
     GenerationResult,
 )
+from ouroboros.evolution.wonder import WonderOutput
 from ouroboros.persistence.event_store import EventStore
 
 
@@ -59,19 +61,14 @@ async def _rewind_claim(
 
 def _make_seed(seed_id: str = "seed-1") -> Seed:
     ontology = OntologySchema(name="test", description="test ontology", fields=[])
-    seed = MagicMock(spec=Seed)
-    seed.goal = "test goal"
-    seed.metadata = MagicMock()
-    seed.metadata.seed_id = seed_id
-    seed.metadata.parent_seed_id = None
-    seed.ontology_schema = ontology
-    seed.to_dict.return_value = {"seed_id": seed_id}
-    return seed
+    return Seed(
+        goal="test goal",
+        ontology_schema=ontology,
+        metadata=SeedMetadata(seed_id=seed_id),
+    )
 
 
 def _completed_result(generation_number: int, seed: Seed) -> GenerationResult:
-    wonder_output = MagicMock()
-    wonder_output.questions = ()
     return GenerationResult(
         generation_number=generation_number,
         seed=seed,
@@ -81,7 +78,7 @@ def _completed_result(generation_number: int, seed: Seed) -> GenerationResult:
             final_approved=True,
             highest_stage_passed=1,
         ),
-        wonder_output=wonder_output,
+        wonder_output=WonderOutput(),
         phase=GenerationPhase.COMPLETED,
         success=True,
     )
@@ -97,9 +94,15 @@ def _build_loop(
     config = EvolutionaryLoopConfig(
         max_generations=10,
         convergence_threshold=0.95,
-        min_generations=1,
+        min_generations=3,
     )
     loop = EvolutionaryLoop(event_store=store, config=config)
+    loop._convergence.evaluate = lambda *_args, **_kwargs: ConvergenceSignal(  # type: ignore[method-assign]
+        converged=False,
+        reason="continue ownership regression",
+        ontology_similarity=0.0,
+        generation=1,
+    )
 
     async def _counting_run(**kwargs: Any) -> Result[GenerationResult, Any]:
         executions.append(kwargs["generation_number"])
@@ -170,8 +173,7 @@ async def test_released_lease_hands_the_next_caller_a_fresh_replay(tmp_path) -> 
         )
         assert first.is_ok, str(first.error) if first.is_err else ""
 
-        # An explicit seed keeps this test about the lease contract, not
-        # about reconstructing a MagicMock seed from persisted JSON.
+        # An explicit seed keeps this test about the lease contract.
         second = await _build_loop(store, executions).evolve_step(
             "lineage-seq", initial_seed=_make_seed()
         )
@@ -369,7 +371,7 @@ async def test_wall_clock_jump_cannot_steal_a_fresh_lease(tmp_path, monkeypatch)
 
 @pytest.mark.asyncio
 async def test_abandoned_nonterminal_generation_is_resumed_not_skipped(tmp_path) -> None:
-    """A crash mid-phase leaves EXECUTING history; reclaim retries that generation.
+    """A crash at a replay-safe phase retries the same generation.
 
     The resume branch used to advance past any phase other than FAILED or
     INTERRUPTED, so an expired EXECUTING claim skipped its unfinished work.
@@ -379,12 +381,21 @@ async def test_abandoned_nonterminal_generation_is_resumed_not_skipped(tmp_path)
     store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'evolve-abandoned.db'}")
     await store.initialize()
     try:
+        seed = _make_seed()
         await store.append(lineage_created("lineage-abandoned", "goal"))
-        await store.append(lineage_generation_started("lineage-abandoned", 1, "executing"))
+        await store.append(
+            lineage_generation_started(
+                "lineage-abandoned",
+                1,
+                "wondering",
+                seed.metadata.seed_id,
+                json.dumps(seed.to_dict()),
+            )
+        )
 
         executions: list[int] = []
         result = await _build_loop(store, executions).evolve_step(
-            "lineage-abandoned", initial_seed=_make_seed()
+            "lineage-abandoned", initial_seed=seed
         )
         assert result.is_ok, str(result.error) if result.is_err else ""
         assert executions == [1], (

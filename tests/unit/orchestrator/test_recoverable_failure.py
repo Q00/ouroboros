@@ -8,7 +8,10 @@ from datetime import UTC, datetime
 import pytest
 
 from ouroboros.orchestrator.adapter import AgentMessage
-from ouroboros.orchestrator.recoverable_failure import is_usage_limit_pause_message
+from ouroboros.orchestrator.recoverable_failure import (
+    is_usage_limit_pause_message,
+    retry_duration_seconds_from_message,
+)
 
 _STATUS_FIELDS = (
     "http_status",
@@ -83,6 +86,64 @@ def test_short_window_429_population_remains_an_ordinary_retryable_failure(
     )
 
     assert is_usage_limit_pause_message(message) is False
+
+
+def test_explicit_concurrency_cap_is_not_misclassified_as_quota() -> None:
+    message = AgentMessage(
+        type="result",
+        content="Interface request concurrency exceeded",
+        data={
+            "subtype": "error",
+            "http_status": 429,
+            "kind": "concurrency_limit",
+            "retry_after_seconds": 7_200,
+        },
+    )
+
+    assert is_usage_limit_pause_message(message) is False
+
+
+def test_retry_after_header_is_projected_from_nested_headers() -> None:
+    message = AgentMessage(
+        type="result",
+        content="Provider request failed.",
+        data={
+            "subtype": "error",
+            "http_status": 429,
+            "headers": {"Retry-After": "7200"},
+        },
+    )
+
+    assert is_usage_limit_pause_message(message) is True
+
+
+def test_retry_after_header_name_is_case_insensitive() -> None:
+    message = AgentMessage(
+        type="result",
+        content="Provider request failed.",
+        data={
+            "subtype": "error",
+            "http_status": 429,
+            "headers": {"rEtRy-AfTeR": "7200"},
+        },
+    )
+
+    assert is_usage_limit_pause_message(message) is True
+
+
+def test_retry_after_header_accepts_standard_http_date() -> None:
+    now = datetime(2026, 8, 5, 8, 59, 55, tzinfo=UTC)
+    message = AgentMessage(
+        type="result",
+        content="Provider request failed.",
+        data={
+            "subtype": "error",
+            "http_status": 429,
+            "headers": {"retry-after": "Wed, 05 Aug 2026 09:00:00 GMT"},
+        },
+    )
+
+    assert retry_duration_seconds_from_message(message, now=now) == 5
 
 
 @pytest.mark.parametrize(

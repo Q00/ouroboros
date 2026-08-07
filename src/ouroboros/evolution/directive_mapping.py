@@ -71,6 +71,7 @@ def step_action_to_directive(
     ============================  ==================================
     ``CONTINUE``                  ``None`` (no emission)
     ``CONVERGED``                 ``CONVERGE``
+    ``ONTOLOGY_STABLE``           ``EVALUATE``
     ``STAGNATED``                 ``UNSTUCK``
     ``EXHAUSTED``                 ``CANCEL``
     ``FAILED`` (budget > 0)       ``RETRY``
@@ -83,6 +84,8 @@ def step_action_to_directive(
         return None
     if value == "converged":
         return Directive.CONVERGE
+    if value == "ontology_stable":
+        return Directive.EVALUATE
     if value == "stagnated":
         return Directive.UNSTUCK
     if value == "exhausted":

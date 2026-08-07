@@ -36,6 +36,7 @@ disappear when this vocabulary lands. The first reference migration maps
 
     StepAction.STAGNATED  -> Directive.UNSTUCK
     StepAction.CONVERGED  -> Directive.CONVERGE
+    StepAction.ONTOLOGY_STABLE -> Directive.EVALUATE
     StepAction.FAILED     -> Directive.RETRY  or Directive.CANCEL   (budget-dependent)
 
 Later migrations follow the same pattern so callers can be converted one

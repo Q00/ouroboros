@@ -321,10 +321,12 @@ class _EmitterHarness:
             token_spend=spend,
             usage_breakdown={"input_tokens": spend},
             model="haiku-x",
+            effective_model="haiku-x",
             model_tier="frugal",
             model_mode="enforced",
             effort_level="high",
             runtime_backend="claude",
+            request_authority_digest="sha256:" + "f" * 64,
         )
         await self.emitter.emit_deliver_verdict(
             runtime_identity=identity,

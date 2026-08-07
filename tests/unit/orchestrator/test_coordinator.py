@@ -12,6 +12,7 @@ Tests cover:
 from __future__ import annotations
 
 from collections.abc import Iterator, Mapping
+from datetime import UTC, datetime
 
 import pytest
 
@@ -38,6 +39,7 @@ from ouroboros.orchestrator.level_context import (
     build_context_prompt,
 )
 from ouroboros.orchestrator.parallel_executor import ACExecutionResult
+from ouroboros.orchestrator.recoverable_failure import UsageLimitPauseConsequence
 
 # =============================================================================
 # Data Model Tests
@@ -169,6 +171,15 @@ class TestCoordinatorReview:
             session_scope_id="exec:l0:coord",
             session_state_path="execution/exec/level-0/coordinator.json",
             final_output="coordinator final output",
+            recoverable_quota_pause=UsageLimitPauseConsequence(
+                reason="Usage limit reached. Please try again in 5 hours.",
+                resume_hint=(
+                    "Provider usage/quota window reached. Resume after "
+                    "2026-01-01T05:00:00+00:00 (wait at least 5 hours)."
+                ),
+                pause_seconds=18_000,
+                resume_after=datetime(2026, 1, 1, 5, tzinfo=UTC),
+            ),
         )
         return (
             review.to_completed_event_payload(
@@ -193,6 +204,50 @@ class TestCoordinatorReview:
 
         assert restored.review_summary == "Reconciled shared.py"
         assert restored.conflicts_detected == (conflict,)
+        assert restored.recoverable_quota_pause == UsageLimitPauseConsequence(
+            reason="Usage limit reached. Please try again in 5 hours.",
+            resume_hint=(
+                "Provider usage/quota window reached. Resume after "
+                "2026-01-01T05:00:00+00:00 (wait at least 5 hours)."
+            ),
+            pause_seconds=18_000,
+            resume_after=datetime(2026, 1, 1, 5, tzinfo=UTC),
+        )
+
+    @pytest.mark.parametrize("invalid", (0, 1, "true", {}, {"schema_version": 1}))
+    def test_completed_artifact_rejects_invalid_quota_pause_consequence(
+        self,
+        invalid: object,
+    ) -> None:
+        payload, conflict = self._completed_payload()
+        payload["recoverable_quota_pause"] = invalid
+
+        with pytest.raises(ValueError, match="recoverable quota consequence"):
+            CoordinatorReview.from_artifact_payload(
+                payload,
+                level_number=1,
+                expected_conflicts=(conflict,),
+                execution_id="exec",
+                session_id="session",
+                session_scope_id="exec:l0:coord",
+                session_state_path="execution/exec/level-0/coordinator.json",
+            )
+
+    def test_completed_artifact_rejects_legacy_schema_without_quota_state(self) -> None:
+        payload, conflict = self._completed_payload()
+        payload["schema_version"] = 1
+        del payload["recoverable_quota_pause"]
+
+        with pytest.raises(ValueError, match="schema v3"):
+            CoordinatorReview.from_artifact_payload(
+                payload,
+                level_number=1,
+                expected_conflicts=(conflict,),
+                execution_id="exec",
+                session_id="session",
+                session_scope_id="exec:l0:coord",
+                session_state_path="execution/exec/level-0/coordinator.json",
+            )
 
     @pytest.mark.parametrize(
         ("field", "oversized"),
@@ -554,6 +609,17 @@ class _StubCoordinatorRuntime:
     def permission_mode(self) -> str | None:
         return self._permission_mode
 
+    def frugality_runtime_attestation(self) -> Mapping[str, object]:
+        implementation = f"{type(self).__module__}.{type(self).__qualname__}"
+        return {
+            "schema_version": 1,
+            "schema_id": "test.coordinator_runtime.v1",
+            "implementation": implementation,
+            "runtime_backend": "opencode",
+            "runtime_handle_backend": "opencode",
+            "settings": {"fixture": "coordinator"},
+        }
+
     async def execute_task(
         self,
         prompt: str,
@@ -890,6 +956,58 @@ class TestParseReviewResponse:
 
 class TestRunReview:
     """Tests for LevelCoordinator.run_review()."""
+
+    @pytest.mark.asyncio
+    async def test_review_usage_is_included_in_generation_total(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        from ouroboros.evolution import provider_usage as provider_usage_module
+        from ouroboros.evolution.provider_usage import capture_generation_provider_usage
+
+        runtime_class = (
+            f"{_StubCoordinatorRuntime.__module__}.{_StubCoordinatorRuntime.__qualname__}"
+        )
+        monkeypatch.setitem(
+            provider_usage_module._AGENT_RUNTIME_SCHEMAS,
+            runtime_class,
+            provider_usage_module._AgentRuntimeSchema(
+                schema_id="test.coordinator_runtime.v1",
+                runtime_backend="opencode",
+                runtime_handle_backend="opencode",
+                setting_kinds={"fixture": "text"},
+            ),
+        )
+
+        runtime = _StubCoordinatorRuntime(
+            (
+                AgentMessage(
+                    type="result",
+                    content='{"review_summary":"Reviewed","fixes_applied":[],"warnings_for_next_level":[],"conflicts_resolved":[]}',
+                    data={
+                        "subtype": "success",
+                        "model_observation": {"effective_model": "test-model"},
+                        "usage": {"total_tokens": 80},
+                    },
+                ),
+            )
+        )
+        runtime.llm_backend = "test-provider"
+        runtime._model = "test-model"
+        coordinator = LevelCoordinator(runtime)
+
+        with capture_generation_provider_usage() as capture:
+            await coordinator.run_review(
+                execution_id="exec_measured",
+                conflicts=[FileConflict(file_path="src/app.py", ac_indices=(0, 1))],
+                level_context=LevelContext(level_number=1, completed_acs=()),
+                level_number=1,
+            )
+
+        summary = capture.summary()
+        assert summary.complete is True
+        assert summary.call_count == 1
+        assert summary.token_spend == 80
 
     @pytest.mark.asyncio
     async def test_run_review_announces_param_degradation(self):

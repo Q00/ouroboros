@@ -873,9 +873,16 @@ class TestCreateOuroborosServer:
 
             create_ouroboros_server(runtime_backend="codex", llm_backend="codex")
 
-        mock_create_llm_adapter.assert_called_once()
-        assert mock_create_llm_adapter.call_args.kwargs["backend"] == "codex"
-        assert mock_create_llm_adapter.call_args.kwargs["max_turns"] == 15
+        assert len(mock_create_llm_adapter.call_args_list) == 3
+        assert [call.kwargs["backend"] for call in mock_create_llm_adapter.call_args_list] == [
+            "codex",
+            "codex",
+            "codex",
+        ]
+        assert [
+            call.kwargs["frugality_proof"] for call in mock_create_llm_adapter.call_args_list
+        ] == [False, True, True]
+        assert {call.kwargs["max_turns"] for call in mock_create_llm_adapter.call_args_list} == {15}
 
     def test_evolution_adapter_factory_resolves_live_backend_with_cwd(self) -> None:
         """Per-call evolution adapter factory must not freeze startup llm_backend."""
@@ -1055,8 +1062,15 @@ class TestCreateOuroborosServer:
 
             create_ouroboros_server(runtime_backend="opencode", llm_backend="opencode")
 
-        mock_create_llm_adapter.assert_called_once()
-        assert mock_create_llm_adapter.call_args.kwargs["backend"] == "opencode"
+        assert len(mock_create_llm_adapter.call_args_list) == 3
+        assert [call.kwargs["backend"] for call in mock_create_llm_adapter.call_args_list] == [
+            "opencode",
+            "opencode",
+            "opencode",
+        ]
+        assert [
+            call.kwargs["frugality_proof"] for call in mock_create_llm_adapter.call_args_list
+        ] == [False, True, True]
         mock_create_runtime.assert_called_once()
         assert mock_create_runtime.call_args.kwargs["backend"] == "opencode"
 

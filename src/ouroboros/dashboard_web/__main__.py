@@ -45,7 +45,10 @@ def main() -> None:
         return
     print("Recent runs:")
     for item in recent:
-        print(f"  {info.run_url(item['execution_id'])}   ({item['node_count']} nodes)")
+        goal = item.get("goal") or "(goal unavailable)"
+        status = item.get("status", "running")
+        progress = f"{item.get('completed_count', 0)}/{item.get('total_count', item.get('node_count', 0))} ACs"
+        print(f"  {info.run_url(item['execution_id'])}   [{status}] {progress}  {goal}")
 
 
 if __name__ == "__main__":

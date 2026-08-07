@@ -18,9 +18,11 @@ from ouroboros.core.types import Result
 from ouroboros.evaluation.models import (
     CheckResult,
     CheckType,
+    ConsensusResult,
     EvaluationResult,
     MechanicalResult,
     SemanticResult,
+    Vote,
 )
 from ouroboros.mcp.tools.evaluation_handlers import EvaluateHandler, _resolve_evaluate_working_dir
 from ouroboros.mcp.types import ToolInputType
@@ -69,6 +71,38 @@ def _failing_eval(execution_id: str, *, reason: str) -> EvaluationResult:
             ac_compliance=False,
             score=0.3,
             reasoning=reason,
+        ),
+        final_approved=False,
+    )
+
+
+def _stage1_failing_eval(execution_id: str) -> EvaluationResult:
+    return EvaluationResult(
+        execution_id=execution_id,
+        stage1_result=MechanicalResult(
+            passed=False,
+            checks=(CheckResult(check_type=CheckType.TEST, passed=False, message="failed"),),
+        ),
+        final_approved=False,
+    )
+
+
+def _stage3_failing_eval(execution_id: str) -> EvaluationResult:
+    return EvaluationResult(
+        execution_id=execution_id,
+        stage1_result=MechanicalResult(
+            passed=True,
+            checks=(CheckResult(check_type=CheckType.TEST, passed=True, message="ok"),),
+        ),
+        stage2_result=_semantic_result(
+            ac_compliance=True,
+            score=0.9,
+            reasoning="AC met before consensus",
+        ),
+        stage3_result=ConsensusResult(
+            approved=False,
+            votes=(Vote(model="reviewer", approved=False, confidence=0.9, reasoning="no"),),
+            majority_ratio=0.0,
         ),
         final_approved=False,
     )
@@ -404,6 +438,14 @@ class TestMultiACRoutingBoundary:
         assert meta["run_feedback"] == []
         assert len(meta["checklist"]) == 2
         assert all(item["passed"] for item in meta["checklist"])
+        assert set(meta["checklist"][0]) == {
+            "ac_text",
+            "passed",
+            "reasoning",
+            "evidence",
+            "questions_used",
+            "failure_reason",
+        }
         assert "ALL PASSED" in result.value.text_content
 
     async def test_seed_acceptance_criteria_used_when_explicit_ac_absent(self) -> None:
@@ -480,10 +522,42 @@ class TestMultiACRoutingBoundary:
         assert meta["ac_count"] == 2
         assert meta["passed_count"] == 1
         assert meta["final_approved"] is False
+        assert meta["highest_stage"] == 2
         assert len(meta["run_feedback"]) == 1
         assert "Webhook validated" in meta["run_feedback"][0]
         assert "INCOMPLETE" in result.value.text_content
         assert "[ ] 2. Webhook validated" in result.value.text_content
+
+    @pytest.mark.parametrize(
+        ("evaluation", "expected_stage"),
+        [(_stage1_failing_eval("stage1"), 1), (_stage3_failing_eval("stage3"), 3)],
+    )
+    async def test_multi_ac_meta_preserves_rejected_pipeline_stage(
+        self,
+        evaluation: EvaluationResult,
+        expected_stage: int,
+    ) -> None:
+        mock_pipeline = self._install_pipeline_mock([evaluation, evaluation])
+
+        with (
+            patch("ouroboros.evaluation.EvaluationPipeline") as MockPipeline,
+            patch(
+                "ouroboros.persistence.event_store.EventStore",
+                return_value=AsyncMock(initialize=AsyncMock()),
+            ),
+        ):
+            MockPipeline.return_value = mock_pipeline
+            result = await EvaluateHandler().handle(
+                {
+                    "session_id": f"s-stage-{expected_stage}",
+                    "artifact": "artifact",
+                    "acceptance_criteria": ["AC one", "AC two"],
+                }
+            )
+
+        assert result.is_ok
+        assert result.value.meta["final_approved"] is False
+        assert result.value.meta["highest_stage"] == expected_stage
 
     async def test_empty_strings_in_list_are_filtered(self) -> None:
         """Whitespace/empty entries in acceptance_criteria are ignored.

@@ -116,6 +116,34 @@ def test_evolve_checkpoint_does_not_retry_attempted_pass_without_diff(tmp_path) 
     assert _git(repo, "rev-list", "--count", "HEAD") == "1"
 
 
+def test_evolve_checkpoint_never_commits_non_authoritative_pass(tmp_path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    (repo / "feature.py").write_text("print('unverified')\n", encoding="utf-8")
+    summary = EvaluationSummary(
+        final_approved=True,
+        highest_stage_passed=2,
+        ac_results=(
+            ACResult(
+                ac_index=0,
+                ac_content="Command prints stable output",
+                passed=True,
+                ac_verdict_state="not_evaluated",
+            ),
+        ),
+    )
+
+    commits, attempts = _checkpoint_passed_generation_acs(
+        {"commit_policy": "ac_checkpoint", "auto_session_id": "auto_test123"},
+        summary,
+        repo,
+    )
+
+    assert commits == []
+    assert attempts == []
+    assert _git(repo, "rev-list", "--count", "HEAD") == "1"
+
+
 def test_evolve_checkpoint_accepts_plugin_null_checkpoint_arrays(tmp_path) -> None:
     """Plugin MCP clients may send optional array parameters as explicit null."""
     repo = tmp_path / "repo"
