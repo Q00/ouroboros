@@ -1630,10 +1630,15 @@ class StartEvolveStepHandler:
         # Fall-through: real background job path. The shared pipeline owns the
         # ``should_cancel()`` pre-work guard, so the runner only does the work.
         await self._event_store.initialize()
-        generation_number = await loop_support.planned_evolve_generation(
-            self._event_store,
-            str(lineage_id),
-            execute=bool(arguments.get("execute", True)),
+        replay_lineage = getattr(self._event_store, "replay_lineage", None)
+        generation_number = (
+            await loop_support.planned_evolve_generation(
+                self._event_store,
+                str(lineage_id),
+                execute=bool(arguments.get("execute", True)),
+            )
+            if callable(replay_lineage)
+            else 1
         )
         # Generation execution IDs are deterministic. Publishing the same ID
         # in the durable job link and observer lets the caller discover the

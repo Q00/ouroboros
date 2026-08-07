@@ -36,6 +36,7 @@ from ouroboros.events.session_signal import (
     create_session_signal_requested_event,
 )
 from ouroboros.persistence.event_store import EventStore
+from ouroboros.persistence.session_signal_store import admit_if_target_active
 
 _ACTIVE_RUNTIME_EVENTS = frozenset(
     {
@@ -744,7 +745,29 @@ class SessionSignalMailbox:
             runtime_backend=target.runtime_backend,
             orchestrator_session_id=target.orchestrator_session_id,
         )
-        await self.event_store.append_batch([accepted, queued])
+        ended = create_session_signal_rejected_event(
+            signal,
+            rejection_code="target_ended_before_admission",
+            detail="The exact runtime attempt ended before durable queue admission.",
+            effective_mode=effective_mode,
+            runtime_backend=target.runtime_backend,
+            orchestrator_session_id=target.orchestrator_session_id,
+        )
+        admitted = await admit_if_target_active(
+            self.event_store,
+            identity=(
+                target.execution_id,
+                target.session_scope_id,
+                target.session_attempt_id,
+            ),
+            accepted=accepted,
+            queued=queued,
+            rejected=ended,
+        )
+        if admitted is None:
+            await self.event_store.append_batch([accepted, queued])
+        elif not admitted:
+            return project_session_signal([*existing_events, ended])
         queued_events = [*existing_events, accepted, queued]
         if self.delivery_queue is not None:
             try:

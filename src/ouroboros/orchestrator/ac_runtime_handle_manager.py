@@ -41,6 +41,7 @@ from ouroboros.orchestrator.policy import (
     PolicySessionRole,
     evaluate_capability_policy,
 )
+from ouroboros.persistence.session_signal_store import append_runtime_lifecycle
 
 if TYPE_CHECKING:
     from ouroboros.mcp.types import MCPToolDefinition
@@ -1458,7 +1459,8 @@ class ACRuntimeHandleManager:
         tool_catalog = runtime_handle_tool_catalog(runtime_handle)
         if tool_catalog is not None:
             event.data["tool_catalog"] = tool_catalog
-        await self._event_store.append(event)
+        if not await append_runtime_lifecycle(self._event_store, event):
+            await self._event_store.append(event)
         if success is True and execution_id:
             try:
                 await self._event_store.append(
