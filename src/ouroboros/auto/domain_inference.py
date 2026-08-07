@@ -224,7 +224,29 @@ _DENIED_PP_TAIL_RE = re.compile(r"\b(?:for|about)\b.*$")
 _DENIED_PIECE_SPLIT_RE = re.compile(r"\s*(?:,|/|\bor\b|\band\b|\bnor\b)\s*")
 
 
+# Broad clause strip for the web-app guard: any for/with/about/that/which
+# clause is subject matter FROM THE WEB APP'S PERSPECTIVE — it cannot
+# surrender web ownership (#1813 R16/R18).
 _SUBJECT_CLAUSE_RE = re.compile(r"\b(?:for|with|about)\s+[^,.;]*|\b(?:that|which)\s+[^,.;]*")
+# Narrow strip for the library matcher's own evidence (#1813 R19): only
+# clauses whose verb marks displayed/managed CONTENT are subject matter
+# ("that displays SDK documentation"); clauses that define the artifact
+# ("which exposes an SDK", "with an importable public API", "that is
+# importable") keep their library shape.
+_LIBRARY_SUBJECT_CLAUSE_RE = re.compile(
+    r"\b(?:for|about)\s+[^,.;]*"
+    r"|\b(?:that|which)\s+"
+    r"(?:displays?|shows?|renders?|tracks?|manages?|lists?|visualizes?|monitors?|documents?)"
+    r"\b[^,.;]*"
+)
+
+
+# Prefix denials parsed through the artifact head noun (#1813 R19):
+# "non-browser user interface" denies an interface, not just "browser".
+_WEB_APP_PREFIX_DENIAL_RE = re.compile(
+    rf"\bnon[\s\-]?{_WEB_APP_GOAL_SIGNAL_FRAGMENT}"
+    r"(?:[\s\-](?!(?:or|and|nor|but|rather|instead)\b)\w+){0,3}"
+)
 
 
 def _goal_denies_web_app_artifact(goal_text: str) -> bool:
@@ -242,7 +264,11 @@ def _goal_denies_web_app_artifact(goal_text: str) -> bool:
         for match in negated.finditer(goal_text)
         if not _AFFIRMATIVE_FLIP_RE.search(match.group("path") or "")
     ]
+    # A prefix denial is analyzed both bare ("non-web-app" denies an app)
+    # and extended through trailing words ("non-browser user interface"
+    # denies an interface) — either head noun dominates (#1813 R19).
     spans.extend(match.group(0) for match in prefix.finditer(goal_text))
+    spans.extend(match.group(0) for match in _WEB_APP_PREFIX_DENIAL_RE.finditer(goal_text))
     for span in spans:
         core = _DENIED_PP_TAIL_RE.sub(" ", span)
         for piece in _DENIED_PIECE_SPLIT_RE.split(core):
@@ -505,7 +531,7 @@ def _matches_game_2d(ledger: SeedDraftLedger) -> bool:
     # "frame" and would accept similar embeddings for the other terms.
     if _GAME_CORE_RE.search(visible):
         return True
-    if not _GAME_SHARED_SHAPE_RE.search(outputs + " " + goal):
+    if not _GAME_SHARED_SHAPE_RE.search(visible):
         return False
     if _GAME_DOMAIN_RE.search(visible):
         return True
@@ -625,10 +651,10 @@ _LIBRARY_INTENT_FRAGMENT = (
 
 
 def _library_visible_goal(ledger: SeedDraftLedger) -> str:
-    """Goal text for library ownership: subject/relative clauses name what
-    the artifact is about ("that displays SDK documentation"), not its
-    shape (#1813 R18), and denials are stripped (#1813 R12)."""
-    goal = _SUBJECT_CLAUSE_RE.sub(" ", _goal_text(ledger))
+    """Goal text for the library matcher's own evidence: content-verb
+    clauses are subject matter (#1813 R18/R19), denials are stripped
+    (#1813 R12), and artifact-defining clauses survive."""
+    goal = _LIBRARY_SUBJECT_CLAUSE_RE.sub(" ", _goal_text(ledger))
     return _strip_negated_signals(goal, _LIBRARY_INTENT_FRAGMENT)
 
 
@@ -655,7 +681,10 @@ def _matches_web_app(ledger: SeedDraftLedger) -> bool:
     # outputs enumerate every deliverable, so an API/SDK co-produced next
     # to an affirmative browser UI stays an honest multi-class question
     # for _matches_library rather than a web_app veto.
-    intent_text = _MANIFEST_TOKEN_RE.sub(" ", _library_visible_goal(ledger))
+    guard_goal = _SUBJECT_CLAUSE_RE.sub(" ", _goal_text(ledger))
+    intent_text = _MANIFEST_TOKEN_RE.sub(
+        " ", _strip_negated_signals(guard_goal, _LIBRARY_INTENT_FRAGMENT)
+    )
     if _LIBRARY_INTENT_RE.search(intent_text):
         return False
     # Game vocabulary suppresses web_app only when the game predicate has

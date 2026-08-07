@@ -1556,3 +1556,48 @@ def test_package_delivery_subject_does_not_own_the_web_app() -> None:
     result = derive_domain_from_ledger(ledger)
     assert result.is_single
     assert result.single is TaskClass.WEB_APP
+
+
+def test_negated_canvas_does_not_fire_game_for_cli() -> None:
+    """R19 probe: the shared-shape gate must read the negation-filtered
+    text — "without a canvas" is not game shape."""
+    ledger = _bare_ledger("Build a CLI without a canvas")
+    _seed_section(ledger, "outputs", value="Deterministic stdout and exit code 0")
+    _seed_section(ledger, "runtime_context", value="Local shell / terminal")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.CLI
+
+
+def test_negated_canvas_does_not_fire_game_without_browser() -> None:
+    ledger = _bare_ledger("Build a local report generator without a canvas")
+    _seed_section(ledger, "outputs", value="Plain text summary written to a file")
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.GAME_2D not in result.classes
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
+        "Build a tool with an importable public API",
+        "Build a toolkit which exposes an SDK",
+        "Build a tool that is importable",
+    ],
+)
+def test_artifact_defining_clauses_keep_library_ownership(goal: str) -> None:
+    """R19 probe: relative/prepositional clauses can define the artifact
+    shape — blanket clause removal must not erase library ownership."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value="A well-documented module")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.LIBRARY
+
+
+def test_prefix_denial_head_noun_dominates_subject_mentions() -> None:
+    """R19 probe: "non-browser user interface" denies the artifact through
+    its head noun; later browser subject mentions cannot resurrect it."""
+    ledger = _bare_ledger("Build a non-browser user interface for browser accessibility audits")
+    _seed_section(ledger, "outputs", value="Login dashboard with account pages")
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes
