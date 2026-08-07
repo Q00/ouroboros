@@ -244,6 +244,76 @@ requirements = [
         assert identity.profile == "ouroboros-ai[mcp,tui] (with click>=8.1,<9)"
         assert identity.manager_home == environment.parent.resolve()
 
+    def test_uv_pypi_registry_receipt_is_accepted(self, tmp_path: Path) -> None:
+        environment = tmp_path / "tools" / "ouroboros-ai"
+        _write_console(environment)
+        (environment / "uv-receipt.toml").write_text(
+            """[tool]
+requirements = [{ name = "ouroboros-ai", extras = ["tui"], specifier = ">=0.50" }]
+entrypoints = [
+  { name = "ouroboros", install-path = "/usr/local/bin/ouroboros", from = "ouroboros-ai" },
+]
+""",
+            encoding="utf-8",
+        )
+
+        with patch("ouroboros.cli.commands.update.shutil.which", return_value="/opt/bin/uv"):
+            identity = _detect_installation_identity(environment)
+
+        assert identity.profile == "ouroboros-ai[tui]>=0.50"
+
+    def test_real_shaped_uv_editable_receipt_fails_closed(self, tmp_path: Path) -> None:
+        environment = tmp_path / "tools" / "ouroboros-ai"
+        _write_console(environment)
+        (environment / "uv-receipt.toml").write_text(
+            f"""[tool]
+requirements = [{{ name = "ouroboros-ai", editable = "{tmp_path.as_posix()}" }}]
+entrypoints = [
+  {{ name = "ouroboros", install-path = "{environment / "bin" / "ouroboros"}", from = "ouroboros-ai" }},
+]
+""",
+            encoding="utf-8",
+        )
+
+        with (
+            patch("ouroboros.cli.commands.update.shutil.which", return_value="/opt/bin/uv"),
+            pytest.raises(InstallationIdentityError, match=r"not a PyPI registry source.*editable"),
+        ):
+            _detect_installation_identity(environment)
+
+    @pytest.mark.parametrize(
+        ("source_field", "source_value"),
+        [
+            ("git", "https://github.com/Q00/ouroboros"),
+            ("path", "/tmp/ouroboros-ai.whl"),
+            ("url", "https://example.invalid/ouroboros-ai.whl"),
+            ("directory", "/tmp/ouroboros-ai"),
+            ("virtual", "/tmp/ouroboros-ai"),
+        ],
+    )
+    def test_uv_non_pypi_source_receipts_fail_closed(
+        self,
+        tmp_path: Path,
+        source_field: str,
+        source_value: str,
+    ) -> None:
+        environment = tmp_path / "tools" / "ouroboros-ai"
+        _write_console(environment)
+        (environment / "uv-receipt.toml").write_text(
+            "[tool]\n"
+            f'requirements = [{{ name = "ouroboros-ai", {source_field} = "{source_value}" }}]\n',
+            encoding="utf-8",
+        )
+
+        with (
+            patch("ouroboros.cli.commands.update.shutil.which", return_value="/opt/bin/uv"),
+            pytest.raises(
+                InstallationIdentityError,
+                match=rf"not a PyPI registry source.*{source_field}",
+            ),
+        ):
+            _detect_installation_identity(environment)
+
     def test_pipx_receipt_preserves_original_profile(self, tmp_path: Path) -> None:
         environment = tmp_path / "custom-pipx-home" / "venvs" / "ouroboros-ai"
         console = _write_console(environment)

@@ -217,6 +217,19 @@ def _format_uv_requirement(requirement: object) -> str | None:
     return label
 
 
+_UV_REGISTRY_REQUIREMENT_FIELDS = frozenset(
+    {
+        "name",
+        "extras",
+        "groups",
+        "marker",
+        "specifier",
+        "index",
+        "conflict",
+    }
+)
+
+
 def _uv_profile(receipt_path: Path) -> str:
     try:
         with receipt_path.open("rb") as receipt_file:
@@ -228,6 +241,16 @@ def _uv_profile(receipt_path: Path) -> str:
         raise InstallationIdentityError(f"uv receipt {receipt_path} has no requirements list")
     rendered: list[tuple[dict[object, object], str]] = []
     for requirement in requirements:
+        if isinstance(requirement, dict):
+            unsupported_fields = sorted(
+                str(field) for field in requirement if field not in _UV_REGISTRY_REQUIREMENT_FIELDS
+            )
+            if unsupported_fields:
+                fields = ", ".join(unsupported_fields)
+                raise InstallationIdentityError(
+                    f"uv receipt {receipt_path} requirement is not a PyPI registry source "
+                    f"(unsupported fields: {fields})"
+                )
         label = _format_uv_requirement(requirement)
         if not isinstance(requirement, dict) or label is None:
             raise InstallationIdentityError(
