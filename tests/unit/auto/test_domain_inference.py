@@ -2100,6 +2100,26 @@ def test_inspection_subject_vocabulary_does_not_veto_browser_product(goal: str) 
 
 
 @pytest.mark.parametrize(
+    "goal",
+    [
+        "Build a browser dashboard showing test results",
+        "Build a browser dashboard with monitoring charts",
+        "Build a browser app for test results",
+        "Build a browser testing dashboard showing pass and fail trends",
+        "Build a browser app displaying monitoring charts",
+    ],
+)
+def test_inspection_subject_clauses_follow_browser_product_head(goal: str) -> None:
+    """R37 probe: inspection vocabulary after or before the UI head can
+    describe product content without changing the produced artifact."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value="Interactive charts and navigation")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP
+
+
+@pytest.mark.parametrize(
     "outputs",
     [
         "Login form and panels showing HTTP responses from the API",
@@ -2114,6 +2134,29 @@ def test_displayed_service_responses_do_not_create_service_ownership(outputs: st
     result = derive_domain_from_ledger(ledger)
     assert result.is_single
     assert result.single is TaskClass.WEB_APP
+
+
+def test_prenominal_api_client_is_a_consumed_dependency() -> None:
+    """R37 probe: REST API modifies client; it is not a produced service."""
+    ledger = _bare_ledger("Build a frontend REST API client")
+    _seed_section(
+        ledger,
+        "outputs",
+        value="Login panels displaying HTTP responses received from upstream",
+    )
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP
+
+
+def test_server_produced_response_shape_is_web_service_evidence() -> None:
+    """R37 probe: response vocabulary still owns a service when a server
+    artifact explicitly produces it."""
+    ledger = _bare_ledger("Build a backend")
+    _seed_section(ledger, "outputs", value="Server returns HTTP responses with JSON bodies")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_SERVICE
 
 
 @pytest.mark.parametrize(

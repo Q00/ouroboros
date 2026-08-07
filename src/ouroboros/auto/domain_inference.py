@@ -476,7 +476,7 @@ def _matches_cli(ledger: SeedDraftLedger) -> bool:
     # both classes route through `_goal_has_unnegated_cli_signal`.
     # Consumed tooling ("using a command-line image converter") is a
     # dependency, not the produced artifact (#1813 R28).
-    goal_text = _CONSUMED_DEPENDENCY_RE.sub(" ", _goal_text(ledger))
+    goal_text = _strip_consumed_dependencies(_goal_text(ledger))
     goal_signal = _goal_has_unnegated_cli_signal(goal_text)
     # Each of the three signals is independently sufficient once the
     # ledger-evidence gate above is satisfied. The earlier form
@@ -510,6 +510,11 @@ _PRODUCED_SERVICE_RE = re.compile(
     r"implement\w+|deliver\w+)\b[^,.;]*\b"
     r"(?:rest\s+apis?|apis?|endpoints?|web\s+services?|https?\s+servers?)"
 )
+_PRODUCED_SERVICE_RESPONSE_RE = re.compile(
+    r"\b(?:servers?|backends?|services?|apis?|endpoints?)\b[^,.;]*?\b"
+    r"(?:returns?|responds?(?:\s+with)?|sends?|emits?|serves?|produces?)\b"
+    r"[^,.;]*?\b(?:https?\s+responses?|json\s+(?:bodies?|responses?))\b"
+)
 _WEB_SERVICE_SIGNAL_FRAGMENT = (
     r"(?:rest\s+apis?|rest\s+endpoints?|web\s+services?|web\s+servers?|"
     r"https?\s+servers?|apis?|endpoints?)"
@@ -528,8 +533,15 @@ def _matches_web_service(ledger: SeedDraftLedger) -> bool:
     # REST API") keeps it produced even through via/through (#1813 W1).
     if _PRODUCED_SERVICE_RE.search(service_goal):
         return True
+    visible = _strip_consumed_dependencies(outputs + " " + service_goal)
+    # Response nouns describe service ownership only when a server-like
+    # artifact governs a production verb (#1813 R37).  Browser clients also
+    # display HTTP responses / JSON bodies, so those detached payload nouns
+    # cannot establish a service by themselves.
+    if _PRODUCED_SERVICE_RESPONSE_RE.search(visible):
+        return True
     api_signal = _any_of(
-        _CONSUMED_DEPENDENCY_RE.sub(" ", outputs + " " + service_goal),
+        visible,
         (
             "rest endpoint",
             "rest api",
@@ -750,7 +762,7 @@ def _goal_artifact_head_is_web_app(goal_text: str) -> bool:
     # otherwise behead a coordinated denial at its first comma and leave
     # the surviving alternatives looking affirmative.
     core = _strip_negated_signals(goal_text, _WEB_APP_GOAL_SIGNAL_FRAGMENT)
-    core = _CONSUMED_DEPENDENCY_RE.sub(" ", _SUBJECT_CLAUSE_RE.sub(" ", core))
+    core = _strip_consumed_dependencies(_SUBJECT_CLAUSE_RE.sub(" ", core))
     # "to test/analyze/deploy a web app" names the target of another
     # artifact, not the produced one (#1813 R28), and participial
     # relations ("SDK targeting web apps", "package used by web apps")
@@ -852,7 +864,7 @@ def _library_visible_goal(ledger: SeedDraftLedger) -> str:
     (#1813 R12), consumed dependencies are not produced shape (#1813
     R25), and artifact-defining clauses survive."""
     goal = _LIBRARY_SUBJECT_CLAUSE_RE.sub(" ", _goal_text(ledger))
-    goal = _CONSUMED_DEPENDENCY_RE.sub(" ", goal)
+    goal = _strip_consumed_dependencies(goal)
     return _strip_negated_signals(goal, _LIBRARY_INTENT_FRAGMENT)
 
 
@@ -865,7 +877,11 @@ _INSPECTION_TOOL_GOAL_RE = re.compile(
 
 
 _BROWSER_UI_PRODUCT_HEAD_RE = re.compile(
-    r"\b(?:dashboards?|pages?|websites?|web\s+uis?|user\s+interfaces?|frontends?)\b"
+    r"\b(?:apps?|applications?|dashboards?|pages?|websites?|web\s+uis?|"
+    r"user\s+interfaces?|frontends?)\b"
+)
+_PRODUCT_CONTENT_CLAUSE_RE = re.compile(
+    r"\b(?:for|with|about|that|which|showing|displaying|containing|presenting)\b.*$"
 )
 
 
@@ -873,16 +889,16 @@ def _goal_has_browser_ui_product_head(goal_text: str) -> bool:
     """True when browser context modifies the produced UI artifact.
 
     Inspection vocabulary can describe the product's subject rather than a
-    separate tool ("browser monitoring dashboard", "dashboard for test
-    results").  After content clauses are removed, a final UI head preserves
-    that product ownership; inspection-suite/CLI/report heads still take the
-    target-widget exclusion below.
+    separate tool ("browser monitoring dashboard", "dashboard showing test
+    results").  The declaration ends before content/feature clauses, so its
+    final UI head preserves product ownership across natural word order;
+    inspection-suite/CLI/report heads still take the target-widget exclusion.
     """
-    core = _CONTENT_CLAUSE_RE.sub(" ", goal_text)
+    core = _PRODUCT_CONTENT_CLAUSE_RE.sub(" ", goal_text)
     matches = list(_BROWSER_UI_PRODUCT_HEAD_RE.finditer(core))
     if not matches or re.search(r"\w", core[matches[-1].end() :]):
         return False
-    return _goal_has_unnegated_web_app_signal(goal_text)
+    return _goal_has_unnegated_web_app_signal(core)
 
 
 _MANIPULATED_TARGET_RE = re.compile(
@@ -941,7 +957,7 @@ def _matches_web_app(ledger: SeedDraftLedger) -> bool:
     # explicitly requests a web app in its own conjunct ("... and a
     # separate admin web app") keeps independent web ownership, and the
     # overlap becomes an honest ambiguity instead of a veto.
-    guard_goal = _CONSUMED_DEPENDENCY_RE.sub(" ", _SUBJECT_CLAUSE_RE.sub(" ", _goal_text(ledger)))
+    guard_goal = _strip_consumed_dependencies(_SUBJECT_CLAUSE_RE.sub(" ", _goal_text(ledger)))
     intent_text = _MANIFEST_TOKEN_RE.sub(
         " ", _strip_negated_signals(guard_goal, _LIBRARY_INTENT_FRAGMENT)
     )
@@ -995,6 +1011,16 @@ _CONSUMED_DEPENDENCY_RE = re.compile(
     r"(?:an?\s+|the\s+)?(?:[\w\-'’]+\s+){0,2}?"
     r"(?:public\s+api|rest\s+apis?|apis?|sdks?|clis?|command[\s\-]line(?:\s+(?!(?:or|and|nor|but)\b)[\w\-'’]+){0,2}|web\s+services?)\b"
 )
+_PRENOMINAL_DEPENDENCY_CLIENT_RE = re.compile(
+    r"\b(?:public\s+api|rest\s+apis?|apis?|sdks?|clis?|"
+    r"command[\s\-]line|web\s+services?)\s+clients?\b"
+)
+
+
+def _strip_consumed_dependencies(text: str) -> str:
+    """Remove relational and prenominal dependency/client declarations."""
+    text = _CONSUMED_DEPENDENCY_RE.sub(" ", text)
+    return _PRENOMINAL_DEPENDENCY_CLIENT_RE.sub(" ", text)
 
 
 def _matches_library(ledger: SeedDraftLedger) -> bool:
@@ -1020,7 +1046,7 @@ def _matches_library(ledger: SeedDraftLedger) -> bool:
     # An API/SDK the artifact CONSUMES ("submits credentials to a public
     # API", "tokens from the payments SDK") is a dependency, not produced
     # library shape (#1813 R23).
-    produced_outputs = _CONSUMED_DEPENDENCY_RE.sub(" ", outputs)
+    produced_outputs = _strip_consumed_dependencies(outputs)
     text = _MANIFEST_TOKEN_RE.sub(" ", produced_outputs + " " + goal_evidence)
     return bool(_LIBRARY_PACKAGE_WORD_RE.search(text)) or _any_of(
         text,
