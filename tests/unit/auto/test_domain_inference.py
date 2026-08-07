@@ -1787,3 +1787,38 @@ def test_consumed_apis_are_not_library_artifacts(outputs: str) -> None:
     result = derive_domain_from_ledger(ledger)
     assert result.is_single
     assert result.single is TaskClass.WEB_APP
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
+        "Build a server-rendered web app, not a single-page application",
+        "Build a multi-page website rather than a single-page app",
+    ],
+)
+def test_subtype_denial_does_not_deny_the_web_class(goal: str) -> None:
+    """R24 probe: denying the single-page subtype affirms, not denies,
+    the web application class."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value="Login form rendered with validation feedback")
+    _seed_section(ledger, "runtime_context", value="Browser runtime")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP
+
+
+def test_widget_data_nouns_before_report_verbs_are_not_ui() -> None:
+    """R24 probe: "form errors printed to stdout" is audit data."""
+    ledger = _bare_ledger("Build a CLI to audit browser form errors")
+    _seed_section(ledger, "outputs", value="Login form errors printed to stdout")
+    _seed_section(ledger, "runtime_context", value="Local shell / terminal")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.CLI
+
+
+def test_widget_failure_data_is_not_ui() -> None:
+    ledger = _bare_ledger("Build a browser audit report")
+    _seed_section(ledger, "outputs", value="Signup form failures listed in JSON")
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes

@@ -259,6 +259,9 @@ _WEB_APP_PREFIX_DENIAL_RE = re.compile(
 )
 
 
+_WEB_SUBTYPE_RE = re.compile(r"single[\s\-]page")
+
+
 def _goal_denies_web_app_artifact(goal_text: str) -> bool:
     """True when a denial rejects the app/UI artifact type itself.
 
@@ -287,6 +290,11 @@ def _goal_denies_web_app_artifact(goal_text: str) -> bool:
     for span in spans:
         core = _DENIED_PP_TAIL_RE.sub(" ", span)
         for piece in _DENIED_PIECE_SPLIT_RE.split(core):
+            # Denying a narrower subtype ("not a single-page application")
+            # rejects that subtype, not the web class (#1813 R24) — the
+            # strip removes the span and survival semantics decide.
+            if _WEB_SUBTYPE_RE.search(piece):
+                continue
             words = re.findall(r"[a-z]+", piece)
             if words and words[-1] in _ARTIFACT_HEAD_NOUNS:
                 return True
@@ -603,6 +611,7 @@ _UI_ARTIFACT_TAIL = (
     r"(?!\s+(?:helpers?|templates?|utils?|utilities|apis?|parsers?|"
     r"library|libraries|sdks?|packages?|validation|reference|"
     r"documentation|docs|examples?|objects?|fixtures?|locators?|models?|"
+    r"errors?|failures?|warnings?|issues?|bugs?|urls?|findings?|counts?|"
     r"listed|returned|printed|logged|reported|exported|emitted|dumped))"
 )
 # The front position is a denylist, not an allowlist (#1813 R9): a finite
