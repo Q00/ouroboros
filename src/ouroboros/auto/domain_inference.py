@@ -645,15 +645,20 @@ def _matches_web_app(ledger: SeedDraftLedger) -> bool:
     # Subject/secondary clauses in the goal ("for game leaderboards",
     # "with a public API") name what the app is about or co-produces, not
     # its artifact shape — they do not surrender ownership (#1813 R16).
+    # Library intent is authoritative on the goal side only (#1813 R17):
+    # outputs enumerate every deliverable, so an API/SDK co-produced next
+    # to an affirmative browser UI stays an honest multi-class question
+    # for _matches_library rather than a web_app veto.
     ownership_goal = _SUBJECT_CLAUSE_RE.sub(" ", _goal_text(ledger))
     intent_text = _MANIFEST_TOKEN_RE.sub(
-        " ",
-        outputs + " " + _strip_negated_signals(ownership_goal, _LIBRARY_INTENT_FRAGMENT),
+        " ", _strip_negated_signals(ownership_goal, _LIBRARY_INTENT_FRAGMENT)
     )
     if _LIBRARY_INTENT_RE.search(intent_text):
         return False
-    game_text = outputs + " " + _strip_negated_signals(ownership_goal, _GAME_GOAL_SIGNAL_FRAGMENT)
-    if _GAME_DOMAIN_RE.search(game_text):
+    # Game vocabulary suppresses web_app only when the game predicate has
+    # artifact-shape evidence of its own (#1813 R17) — subject words like
+    # "game leaderboard" in outputs are not a rendered game.
+    if _matches_game_2d(ledger):
         return False
     # Two-signal AND (the webhook shape): browser context plus UI
     # composition. Goal-side browser mentions route through the negation

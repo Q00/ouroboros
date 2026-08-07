@@ -1486,3 +1486,30 @@ def test_co_produced_api_does_not_erase_requested_web_app() -> None:
     _seed_section(ledger, "outputs", value="Login forms and settings panels")
     result = derive_domain_from_ledger(ledger)
     assert TaskClass.WEB_APP in result.classes
+
+
+def test_output_game_vocabulary_without_game_shape_keeps_web_app() -> None:
+    """R17 probe: output-side game subject vocabulary suppresses web_app
+    only when the game predicate itself has artifact-shape evidence."""
+    ledger = _bare_ledger("Build a web app for game leaderboards")
+    _seed_section(ledger, "outputs", value="Game leaderboard page with a filters panel")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP
+
+
+@pytest.mark.parametrize(
+    "outputs",
+    [
+        "Browser dashboard with login forms and a public API",
+        "Browser dashboard with login forms and a companion SDK",
+    ],
+)
+def test_co_produced_api_in_outputs_keeps_web_app_ownership(outputs: str) -> None:
+    """R17 probe: outputs enumerate all deliverables — an API/SDK produced
+    alongside an affirmative browser UI must not convert the result into
+    library-only semantics."""
+    ledger = _bare_ledger("Build a web application with a public API")
+    _seed_section(ledger, "outputs", value=outputs)
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP in result.classes
