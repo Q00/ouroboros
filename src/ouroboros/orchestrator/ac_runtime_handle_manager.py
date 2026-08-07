@@ -41,7 +41,10 @@ from ouroboros.orchestrator.policy import (
     PolicySessionRole,
     evaluate_capability_policy,
 )
-from ouroboros.persistence.session_signal_store import append_runtime_lifecycle
+from ouroboros.persistence.session_signal_store import (
+    append_runtime_lifecycle,
+    runtime_attempt_is_active,
+)
 
 if TYPE_CHECKING:
     from ouroboros.mcp.types import MCPToolDefinition
@@ -91,6 +94,25 @@ class ACRuntimeHandleManager:
     def is_dispatch_non_replayable(self, dispatch_id: str | None) -> bool:
         """Return whether this process has observed an unsafe seal boundary."""
         return isinstance(dispatch_id, str) and dispatch_id in self._non_replayable_dispatch_ids
+
+    async def runtime_lifecycle_is_active(
+        self,
+        identity: ACRuntimeIdentity,
+        execution_id: str,
+        *,
+        observed: bool = False,
+    ) -> bool:
+        """Read the exact-attempt durable lifecycle projection."""
+        if observed:
+            return True
+        return await runtime_attempt_is_active(
+            self._event_store,
+            identity=(
+                execution_id,
+                identity.session_scope_id,
+                identity.session_attempt_id,
+            ),
+        )
 
     @staticmethod
     def cancellation_seal_policy(provider_effect_entered: bool) -> tuple[str, bool]:

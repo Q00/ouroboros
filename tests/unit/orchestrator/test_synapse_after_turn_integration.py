@@ -21,6 +21,7 @@ from ouroboros.core.session_signal import (
     derive_session_signal_id,
 )
 from ouroboros.core.session_signal_projection import project_session_signal
+from ouroboros.events.base import BaseEvent
 from ouroboros.orchestrator.adapter import FULL_CAPABILITIES, AgentMessage, RuntimeHandle
 from ouroboros.orchestrator.model_routing import ModelRouter
 from ouroboros.orchestrator.parallel_executor import (
@@ -34,6 +35,7 @@ from ouroboros.orchestrator.synapse import (
     SessionSignalMailbox,
 )
 from ouroboros.persistence.event_store import EventStore
+from ouroboros.persistence.session_signal_store import append_runtime_lifecycle
 
 
 class _TwoTurnRuntime:
@@ -139,6 +141,19 @@ class _StallingRuntime(_TwoTurnRuntime):
             resume_handle=handle,
         )
         await asyncio.Event().wait()
+
+
+class _SilentCancellationRuntime(_TwoTurnRuntime):
+    def __init__(self, cwd: Path) -> None:
+        super().__init__(cwd)
+        self.provider_entered = asyncio.Event()
+
+    async def execute_task(self, **kwargs: Any):
+        self.prompts.append(str(kwargs["prompt"]))
+        self.provider_entered.set()
+        await asyncio.Event().wait()
+        if False:  # pragma: no cover - keeps this an async generator
+            yield AgentMessage(type="assistant", content="unreachable")
 
 
 class _ErrorEnvelopeResumeRuntime(_TwoTurnRuntime):
@@ -484,6 +499,92 @@ async def test_stalled_runtime_terminalizes_cross_process_signal(
         assert signal_events[-1].data["rejection_code"] == "target_ended_before_boundary"
         assert not await resolver.list_targets(execution_id=execution_id)
         assert "execution.session.failed" in {event.type for event in execution_events}
+    finally:
+        if not execution_task.done():
+            execution_task.cancel()
+        await runtime_store.close()
+        await mailbox_store.close()
+
+
+@pytest.mark.asyncio
+async def test_resume_cancellation_terminalizes_persisted_active_target(tmp_path: Path) -> None:
+    database_url = f"sqlite+aiosqlite:///{tmp_path / 'resume-cancel-signal.db'}"
+    runtime_store = EventStore(database_url)
+    mailbox_store = EventStore(database_url)
+    await runtime_store.initialize()
+    await mailbox_store.initialize()
+    execution_id = "exec_resume_cancel"
+    scope_id = f"{execution_id}_ac_1"
+    attempt_id = f"{scope_id}_attempt_1"
+    runtime = _SilentCancellationRuntime(tmp_path)
+    await append_runtime_lifecycle(
+        runtime_store,
+        BaseEvent(
+            type="execution.session.started",
+            aggregate_type="execution",
+            aggregate_id=scope_id,
+            data={
+                "execution_id": execution_id,
+                "session_scope_id": scope_id,
+                "session_attempt_id": attempt_id,
+                "runtime_backend": runtime.runtime_backend,
+                "ac_index": 0,
+                "acceptance_criterion": "Resume then cancel silently",
+            },
+        ),
+    )
+    hub = SessionSignalHub(event_store=runtime_store)
+    executor = ParallelACExecutor(
+        adapter=runtime,
+        event_store=runtime_store,
+        console=MagicMock(),
+        enable_decomposition=False,
+        session_signal_hub=hub,
+    )
+    resolver = EventStoreSessionSignalTargetResolver(
+        event_store=mailbox_store,
+        capabilities_by_backend={
+            runtime.runtime_backend: runtime.capabilities.session_signals,
+        },
+    )
+    mailbox = SessionSignalMailbox(event_store=mailbox_store, target_resolver=resolver)
+    signal = SessionSignal(
+        signal_id="sig_resume_cancel",
+        target_session_scope_id=scope_id,
+        target_session_attempt_id=attempt_id,
+        expected_execution_id=execution_id,
+        mode=SessionSignalMode.AFTER_TURN,
+        message="This queued signal must terminalize on resumed cancellation.",
+        source=SessionSignalSource.USER,
+        reason="Exercise persisted lifecycle authority.",
+        idempotency_key="resume_cancel_1",
+    )
+    execution_task = asyncio.create_task(
+        executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content="Resume then cancel silently",
+            session_id="orch_resume_cancel",
+            execution_id=execution_id,
+            tools=[],
+            system_prompt="test",
+            seed_goal="Terminalize persisted Synapse ownership",
+            depth=0,
+            start_time=datetime.now(UTC),
+        )
+    )
+    try:
+        await asyncio.wait_for(runtime.provider_entered.wait(), timeout=2)
+        assert (await mailbox.request(signal)).state is SessionSignalState.QUEUED
+        execution_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await execution_task
+
+        signal_events = await mailbox_store.replay("session_signal", signal.signal_id)
+        execution_events = await runtime_store.replay("execution", scope_id)
+        assert project_session_signal(signal_events).state is SessionSignalState.REJECTED
+        assert signal_events[-1].data["rejection_code"] == "target_ended_before_boundary"
+        assert not await resolver.list_targets(execution_id=execution_id)
+        assert execution_events[-1].type == "execution.session.failed"
     finally:
         if not execution_task.done():
             execution_task.cancel()

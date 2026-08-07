@@ -8804,8 +8804,7 @@ Respond with either ATOMIC or the structured JSON object only.
                     route_candidate=observed_route_candidate,
                 )
 
-            # Quota is a hard pause boundary, so it must be recognized before
-            # queued SessionSignals are allowed to open another provider turn.
+            # A quota pause must be recognized before queued signals open another turn.
             # Preserve the exact primary handle and let the outer ``finally``
             # reject any still-pending signals as target-ended; PAUSED must
             # imply that no effect happened after the quota-ending message.
@@ -9394,7 +9393,11 @@ Respond with either ATOMIC or the structured JSON object only.
                         reason=reason,
                         replayable=replayable,
                     )
-                    if dispatch_state.lifecycle_event_count:
+                    if await self._ac_runtime_handle_manager.runtime_lifecycle_is_active(
+                        runtime_identity,
+                        execution_context_id,
+                        observed=bool(dispatch_state.lifecycle_event_count),
+                    ):
                         await self._emit_ac_runtime_event(
                             event_type="execution.session.failed",
                             runtime_identity=runtime_identity,
@@ -9407,9 +9410,6 @@ Respond with either ATOMIC or the structured JSON object only.
                             error="Runtime attempt cancelled or interrupted.",
                         )
             except Exception as seal_error:
-                # A cancellation seal is the last durable protection against
-                # replay.  Hiding its failure would leave an entered provider
-                # boundary looking resumable, so surface a fail-closed error.
                 raise RuntimeError(
                     "AC dispatch cancellation seal failed; refusing replayable recovery"
                 ) from seal_error

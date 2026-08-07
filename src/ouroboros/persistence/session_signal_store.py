@@ -81,6 +81,26 @@ async def append_runtime_lifecycle(event_store: object, event: BaseEvent) -> boo
     return True
 
 
+async def runtime_attempt_is_active(
+    event_store: object,
+    *,
+    identity: tuple[str, str, str],
+) -> bool:
+    """Project whether one exact durable runtime attempt still owns delivery."""
+    engine = _engine(event_store)
+    if engine is None:
+        return False
+    async with engine.connect() as connection:
+        active = await connection.scalar(
+            select(session_signal_target_guards_table.c.active).where(
+                session_signal_target_guards_table.c.execution_id == identity[0],
+                session_signal_target_guards_table.c.session_scope_id == identity[1],
+                session_signal_target_guards_table.c.session_attempt_id == identity[2],
+            )
+        )
+    return active is True
+
+
 async def _append_runtime_lifecycle(
     engine: AsyncEngine,
     event: BaseEvent,
