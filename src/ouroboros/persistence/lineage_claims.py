@@ -309,6 +309,33 @@ async def renew(
     return bool(result.rowcount)
 
 
+async def rebind_generation(
+    event_store: EventStore,
+    *,
+    scope: str,
+    lineage_id: str,
+    owner_id: str,
+    generation_number: int,
+) -> bool:
+    """Bind an unfinished outer receipt to the generation its core claim owns."""
+    engine = _engine(event_store)
+    if engine is None:
+        return False
+    async with engine.begin() as connection:
+        result = await connection.execute(
+            update(lineage_advancement_claims_table)
+            .where(
+                lineage_advancement_claims_table.c.scope == scope,
+                lineage_advancement_claims_table.c.lineage_id == lineage_id,
+                lineage_advancement_claims_table.c.owner_id == owner_id,
+                lineage_advancement_claims_table.c.completed.is_(False),
+                lineage_advancement_claims_table.c.lease_expires_at_ms > _now_ms(),
+            )
+            .values(generation_number=generation_number)
+        )
+    return bool(result.rowcount)
+
+
 async def observe(
     event_store: EventStore,
     *,

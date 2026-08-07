@@ -667,6 +667,9 @@ async def run_durable_lineage_single_flight[T](
     scope: str = "evolve-core",
     on_claimed: Callable[[int], Awaitable[None]] | None = None,
     operation_for_generation: Callable[[int], Awaitable[T]] | None = None,
+    operation_with_claim: (
+        Callable[[int, Callable[[int], Awaitable[None]]], Awaitable[T]] | None
+    ) = None,
 ) -> T:
     """Coordinate one lineage writer across EventStore instances and processes."""
     from ouroboros.persistence import lineage_claims
@@ -713,11 +716,26 @@ async def run_durable_lineage_single_flight[T](
             try:
                 if on_claimed is not None:
                     await on_claimed(claimed_generation)
-                result = await (
-                    operation_for_generation(claimed_generation)
-                    if operation_for_generation is not None
-                    else operation()
-                )
+
+                async def rebind_generation(authoritative_generation: int) -> None:
+                    rebound = await lineage_claims.rebind_generation(
+                        event_store,
+                        scope=scope,
+                        lineage_id=lineage_id,
+                        owner_id=owner_id,
+                        generation_number=authoritative_generation,
+                    )
+                    if not rebound:
+                        raise RuntimeError(
+                            "Lost durable lineage advancement claim before generation binding"
+                        )
+
+                if operation_with_claim is not None:
+                    result = await operation_with_claim(claimed_generation, rebind_generation)
+                elif operation_for_generation is not None:
+                    result = await operation_for_generation(claimed_generation)
+                else:
+                    result = await operation()
                 if heartbeat.done():
                     heartbeat_error = None if heartbeat.cancelled() else heartbeat.exception()
                     if heartbeat_error is not None:

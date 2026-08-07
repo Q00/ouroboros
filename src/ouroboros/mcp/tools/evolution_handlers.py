@@ -642,8 +642,9 @@ class EvolveStepHandler(BridgeAwareMixin):
                 encode_evolve_handler_result,
             )
 
-            async def run_bounded_handler() -> Result[MCPToolResult, MCPServerError]:
-                claimed_callback = on_generation_claimed
+            async def run_bounded_handler(
+                claimed_callback: Callable[[int], Awaitable[None]] | None,
+            ) -> Result[MCPToolResult, MCPServerError]:
                 if recovered_evolve_result is not None and claimed_callback is not None:
                     assert recovered_generation is not None
                     await claimed_callback(recovered_generation)
@@ -654,6 +655,17 @@ class EvolveStepHandler(BridgeAwareMixin):
                     on_generation_claimed=claimed_callback,
                 )
                 return decode_evolve_handler_result(encode_evolve_handler_result(raw_result))
+
+            async def run_bound_handler_claim(
+                _projected_generation: int,
+                rebind_generation: Callable[[int], Awaitable[None]],
+            ) -> Result[MCPToolResult, MCPServerError]:
+                async def publish_authoritative_generation(generation_number: int) -> None:
+                    await rebind_generation(generation_number)
+                    if on_generation_claimed is not None:
+                        await on_generation_claimed(generation_number)
+
+                return await run_bounded_handler(publish_authoritative_generation)
 
             while True:
                 generation_number = recovered_generation
@@ -668,11 +680,12 @@ class EvolveStepHandler(BridgeAwareMixin):
                         event_store,
                         str(lineage_id),
                         request_key,
-                        run_bounded_handler,
+                        lambda: run_bounded_handler(on_generation_claimed),
                         generation_number=generation_number,
                         encode=encode_evolve_handler_result,
                         decode=decode_evolve_handler_result,
                         scope="evolve-handler",
+                        operation_with_claim=run_bound_handler_claim,
                     )
                 except loop_support.LineageWinnerAdvanced:
                     continue

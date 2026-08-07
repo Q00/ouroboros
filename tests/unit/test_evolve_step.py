@@ -63,6 +63,7 @@ from ouroboros.mcp.server.adapter import _extract_feedback_metadata_from_artifac
 from ouroboros.mcp.tools.evolution_handlers import EvolveStepHandler, StartEvolveStepHandler
 from ouroboros.mcp.tools.synapse_handler import SynapseTargetsHandler
 from ouroboros.orchestrator.synapse import EventStoreSessionSignalTargetResolver
+from ouroboros.persistence import lineage_claims
 from ouroboros.persistence.event_store import EventStore
 
 # -- Helpers --
@@ -361,6 +362,20 @@ async def test_start_evolve_links_generation_selected_after_interleaving(
         created = next(event for event in job_events if event.type == "mcp.job.created")
         assert created.data["links"]["execution_id"] == expected
         assert stale not in json.dumps(created.data)
+
+        handler_receipt = await lineage_claims.observe(
+            store,
+            scope="evolve-handler",
+            lineage_id=lineage_id,
+        )
+        core_receipt = await lineage_claims.observe(
+            store,
+            scope="evolve-core",
+            lineage_id=lineage_id,
+        )
+        assert handler_receipt is not None and handler_receipt.completed
+        assert core_receipt is not None and core_receipt.completed
+        assert handler_receipt.generation_number == core_receipt.generation_number == 2
     finally:
         release_core_planning.set()
         release_generation.set()

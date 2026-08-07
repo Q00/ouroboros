@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 import json
 import multiprocessing
 from pathlib import Path
@@ -910,6 +911,54 @@ async def test_generation_claim_callback_holds_operation_until_released(tmp_path
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await task
+        await writer.close()
+        await reader.close()
+
+
+@pytest.mark.asyncio
+async def test_outer_claim_rebinds_before_nested_generation_effects(tmp_path: Path) -> None:
+    """A nested core claim makes its generation durable on the outer receipt first."""
+    writer, reader = await _stores(tmp_path / "claim-rebind.db")
+    observed_generations: list[int] = []
+
+    async def operation_with_claim(
+        projected_generation: int,
+        rebind_generation: Callable[[int], Awaitable[None]],
+    ) -> str:
+        assert projected_generation == 1
+        await rebind_generation(2)
+        rebound = await lineage_claims.observe(
+            reader,
+            scope="evolve-handler",
+            lineage_id="claim-rebind-lineage",
+        )
+        assert rebound is not None
+        observed_generations.append(rebound.generation_number)
+        return "generation-2-result"
+
+    try:
+        result = await run_durable_lineage_single_flight(
+            writer,
+            "claim-rebind-lineage",
+            "claim-rebind-request",
+            lambda: asyncio.sleep(0, result="must-not-run"),
+            generation_number=1,
+            encode=lambda value: {"value": value},
+            decode=lambda payload: str(payload["value"]),
+            scope="evolve-handler",
+            operation_with_claim=operation_with_claim,
+        )
+
+        receipt = await lineage_claims.observe(
+            reader,
+            scope="evolve-handler",
+            lineage_id="claim-rebind-lineage",
+        )
+        assert result == "generation-2-result"
+        assert observed_generations == [2]
+        assert receipt is not None and receipt.completed
+        assert receipt.generation_number == 2
+    finally:
         await writer.close()
         await reader.close()
 

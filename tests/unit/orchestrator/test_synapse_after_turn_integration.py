@@ -123,6 +123,24 @@ class _QuotaEndingRuntime(_TwoTurnRuntime):
         )
 
 
+class _StallingRuntime(_TwoTurnRuntime):
+    async def execute_task(self, **kwargs: Any):
+        self.prompts.append(str(kwargs["prompt"]))
+        handle = RuntimeHandle(
+            backend="codex_mcp",
+            kind="agent_runtime",
+            native_session_id="thread_stall",
+            cwd=self.working_directory,
+        )
+        self.first_turn_started.set()
+        yield AgentMessage(
+            type="assistant",
+            content="Provider emitted one message before stalling.",
+            resume_handle=handle,
+        )
+        await asyncio.Event().wait()
+
+
 class _ErrorEnvelopeResumeRuntime(_TwoTurnRuntime):
     async def execute_task(self, **kwargs: Any):
         if not self.prompts:
@@ -205,6 +223,19 @@ def test_bounded_reply_prefers_explicit_completion_over_prior_chunks() -> None:
     ]
 
     assert _bounded_session_signal_runtime_reply(messages) == "Complete bounded reply"
+
+
+async def _wait_for_durable_target(
+    store: EventStore,
+    execution_id: str,
+) -> None:
+    """Wait for the public durable target boundary, not provider-entry timing."""
+    resolver = EventStoreSessionSignalTargetResolver(event_store=store)
+    for _attempt in range(100):
+        if await resolver.list_targets(execution_id=execution_id):
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError(f"Durable Synapse target did not become active for {execution_id}")
 
 
 @pytest.mark.asyncio
@@ -360,6 +391,7 @@ async def test_cancelled_runtime_terminalizes_queued_signal(tmp_path: Path) -> N
     )
     try:
         await asyncio.wait_for(runtime.first_turn_started.wait(), timeout=2)
+        await _wait_for_durable_target(store, "exec_cancelled_runtime")
         assert (await mailbox.request(signal)).state is SessionSignalState.QUEUED
         execution_task.cancel()
         with pytest.raises(asyncio.CancelledError):
@@ -373,6 +405,90 @@ async def test_cancelled_runtime_terminalizes_queued_signal(tmp_path: Path) -> N
         if not execution_task.done():
             execution_task.cancel()
         await store.close()
+
+
+@pytest.mark.asyncio
+async def test_stalled_runtime_terminalizes_cross_process_signal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database_url = f"sqlite+aiosqlite:///{tmp_path / 'stall-signal.db'}"
+    runtime_store = EventStore(database_url)
+    mailbox_store = EventStore(database_url)
+    await runtime_store.initialize()
+    await mailbox_store.initialize()
+    hub = SessionSignalHub(event_store=runtime_store)
+    runtime = _StallingRuntime(tmp_path)
+    executor = ParallelACExecutor(
+        adapter=runtime,
+        event_store=runtime_store,
+        console=MagicMock(),
+        enable_decomposition=False,
+        session_signal_hub=hub,
+    )
+    resolver = EventStoreSessionSignalTargetResolver(
+        event_store=mailbox_store,
+        capabilities_by_backend={
+            runtime.runtime_backend: runtime.capabilities.session_signals,
+        },
+    )
+    mailbox = SessionSignalMailbox(event_store=mailbox_store, target_resolver=resolver)
+    execution_id = "exec_stalled_runtime"
+    scope_id = f"{execution_id}_ac_1"
+    attempt_id = f"{scope_id}_attempt_1"
+    signal = SessionSignal(
+        signal_id="sig_stalled_runtime",
+        target_session_scope_id=scope_id,
+        target_session_attempt_id=attempt_id,
+        expected_execution_id=execution_id,
+        mode=SessionSignalMode.AFTER_TURN,
+        message="This durable signal must terminalize when the provider stalls.",
+        source=SessionSignalSource.USER,
+        reason="Exercise the cross-process stall fence.",
+        idempotency_key="stalled_runtime_1",
+    )
+    monkeypatch.setattr(
+        "ouroboros.orchestrator.parallel_executor.STALL_TIMEOUT_SECONDS",
+        0.2,
+    )
+    monkeypatch.setattr(
+        "ouroboros.orchestrator.leaf_dispatcher.STALL_TIMEOUT_SECONDS",
+        0.2,
+    )
+    execution_task = asyncio.create_task(
+        executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content="Stall after one provider message",
+            session_id="orch_stalled_runtime",
+            execution_id=execution_id,
+            tools=[],
+            system_prompt="test",
+            seed_goal="Terminalize stalled Synapse ownership",
+            depth=0,
+            start_time=datetime.now(UTC),
+        )
+    )
+    try:
+        await asyncio.wait_for(runtime.first_turn_started.wait(), timeout=2)
+        await _wait_for_durable_target(mailbox_store, execution_id)
+        assert (await mailbox.request(signal)).state is SessionSignalState.QUEUED
+
+        result = await asyncio.wait_for(execution_task, timeout=2)
+        signal_events = await mailbox_store.replay("session_signal", signal.signal_id)
+        projection = project_session_signal(signal_events)
+        execution_events = await runtime_store.replay("execution", scope_id)
+
+        assert result.success is False
+        assert result.error == "__STALL_DETECTED__"
+        assert projection.state is SessionSignalState.REJECTED
+        assert signal_events[-1].data["rejection_code"] == "target_ended_before_boundary"
+        assert not await resolver.list_targets(execution_id=execution_id)
+        assert "execution.session.failed" in {event.type for event in execution_events}
+    finally:
+        if not execution_task.done():
+            execution_task.cancel()
+        await runtime_store.close()
+        await mailbox_store.close()
 
 
 @pytest.mark.asyncio
@@ -417,6 +533,7 @@ async def test_quota_ending_turn_rejects_queued_signal_before_follow_up_provider
     )
     try:
         await asyncio.wait_for(runtime.first_turn_started.wait(), timeout=2)
+        await _wait_for_durable_target(store, "exec_quota_boundary")
         assert (await mailbox.request(signal)).state is SessionSignalState.QUEUED
         runtime.release_first_turn.set()
 
@@ -519,6 +636,7 @@ async def test_follow_up_route_drift_is_durably_terminal_before_provider(
     )
     try:
         await asyncio.wait_for(runtime.first_turn_started.wait(), timeout=2)
+        await _wait_for_durable_target(store, execution_id)
         queued = await mailbox.request(signal)
         assert queued.state is SessionSignalState.QUEUED
         runtime.release_first_turn.set()
@@ -613,6 +731,7 @@ async def test_follow_up_dispatch_append_failure_keeps_last_durable_runtime_hand
     )
     try:
         await asyncio.wait_for(runtime.first_turn_started.wait(), timeout=2)
+        await _wait_for_durable_target(store, execution_id)
         queued = await mailbox.request(signal)
         assert queued.state is SessionSignalState.QUEUED
         runtime.release_first_turn.set()
@@ -687,6 +806,7 @@ async def test_error_only_resume_is_delivery_uncertain_not_applied(tmp_path: Pat
     )
     try:
         await asyncio.wait_for(runtime.first_turn_started.wait(), timeout=2)
+        await _wait_for_durable_target(store, "exec_error_envelope")
         queued = await mailbox.request(signal)
         assert queued.state is SessionSignalState.QUEUED
         runtime.release_first_turn.set()
@@ -752,6 +872,7 @@ async def test_inform_uses_no_tools_returns_bounded_reply_and_preserves_primary_
     )
     try:
         await asyncio.wait_for(runtime.first_turn_started.wait(), timeout=2)
+        await _wait_for_durable_target(store, "exec_inform")
         assert (await mailbox.request(signal)).state is SessionSignalState.QUEUED
         runtime.release_first_turn.set()
 
@@ -799,6 +920,7 @@ async def test_signal_expiry_is_rechecked_at_runtime_consumption(tmp_path: Path)
     )
     try:
         await asyncio.wait_for(runtime.first_turn_started.wait(), timeout=2)
+        await _wait_for_durable_target(store, "exec_expire")
         expires_at = datetime.now(UTC) + timedelta(seconds=1)
         signal = SessionSignal(
             signal_id="sig_expire_at_boundary",

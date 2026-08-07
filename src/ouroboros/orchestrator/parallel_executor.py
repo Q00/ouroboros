@@ -8652,15 +8652,7 @@ Respond with either ATOMIC or the structured JSON object only.
             )
             sealed_dispatch_ids.add(sealed_id)
 
-        async def _terminalize_route_drift(dispatch_id_to_terminalize: str) -> ACExecutionResult:
-            """Close durable recovery state when live admission becomes stale."""
-
-            nonlocal clear_cached_runtime_handle
-            clear_cached_runtime_handle = True
-            await _seal_dispatch(
-                dispatch_id_to_terminalize,
-                reason="live route authority changed before provider entry",
-            )
+        async def _emit_runtime_failure(error: str) -> None:
             await self._emit_ac_runtime_event(
                 event_type="execution.session.failed",
                 runtime_identity=runtime_identity,
@@ -8670,7 +8662,20 @@ Respond with either ATOMIC or the structured JSON object only.
                 session_id=dispatch_state.ac_session_id,
                 orchestrator_session_id=session_id,
                 success=False,
-                error="route admission blocked: live route state changed before provider entry",
+                error=error,
+            )
+
+        async def _terminalize_route_drift(dispatch_id_to_terminalize: str) -> ACExecutionResult:
+            """Close durable recovery state when live admission becomes stale."""
+
+            nonlocal clear_cached_runtime_handle
+            clear_cached_runtime_handle = True
+            await _seal_dispatch(
+                dispatch_id_to_terminalize,
+                reason="live route authority changed before provider entry",
+            )
+            await _emit_runtime_failure(
+                "route admission blocked: live route state changed before provider entry"
             )
             return _route_drift_blocked_result()
 
@@ -8694,10 +8699,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 try:
                     if before_provider_entry is not None:
                         await before_provider_entry()
-                    # Durable SessionSignal bookkeeping is not an external
-                    # provider effect.  Keep the task replayable until that
-                    # bookkeeping completes and the batch gate admits the
-                    # actual adapter boundary.
+                    # Bookkeeping stays replayable until the admitted provider boundary.
                     provider_effect_scope.enter()
                     provider_effect_active = True
                     await self._authority_leaf_dispatcher_stream(
@@ -8775,7 +8777,6 @@ Respond with either ATOMIC or the structured JSON object only.
             final_message = dispatch_state.final_message
             success = dispatch_state.success
 
-            # Check if stall was detected (CancelScope ate the Cancelled)
             if dispatch_state.stalled:
                 duration = (datetime.now(UTC) - start_time).total_seconds()
                 log.warning(
@@ -8790,6 +8791,7 @@ Respond with either ATOMIC or the structured JSON object only.
                     active_dispatch_id,
                     reason="provider stall crossed an uncertain external-effect boundary",
                 )
+                await _emit_runtime_failure(_STALL_SENTINEL)
                 return ACExecutionResult(
                     ac_index=ac_index,
                     ac_content=ac_content,
