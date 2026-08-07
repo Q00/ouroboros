@@ -272,7 +272,12 @@ def _goal_denies_web_app_artifact(goal_text: str) -> bool:
     spans = [
         match.group(0)
         for match in negated.finditer(goal_text)
-        if not _AFFIRMATIVE_FLIP_RE.search(match.group("path") or "")
+        # Same keep-rules as the strip (#1813 R23): affirmative flips and
+        # quality statements ("no errors in the web UI") are not denials.
+        if not (
+            _AFFIRMATIVE_FLIP_RE.search(match.group("path") or "")
+            or _QUALITY_NOUN_RE.search(match.group("path") or "")
+        )
     ]
     # A prefix denial is analyzed both bare ("non-web-app" denies an app)
     # and extended through trailing words ("non-browser user interface"
@@ -672,21 +677,13 @@ def _ledger_has_browser_context(ledger: SeedDraftLedger) -> bool:
     matcher and by game_2d's ceding rule for render/screen vocabulary."""
     outputs = _section_text(ledger, "outputs")
     runtime = _section_text(ledger, "runtime_context")
-    return _any_of(
-        outputs + " " + runtime,
-        (
-            "browser",
-            "web app",
-            "webapp",
-            "web application",
-            "frontend",
-            "front-end",
-            "website",
-            "web ui",
-            "single-page app",
-            "single page app",
-        ),
-    ) or _goal_has_unnegated_web_app_signal(_goal_text(ledger))
+    # Token- and negation-aware (#1813 R23): "Non-browser desktop runtime"
+    # and "No browser; local desktop runtime" are denials, not evidence.
+    # The goal signal fragment already names every browser-context form.
+    context_text = _strip_negated_signals(outputs + " " + runtime, _WEB_APP_GOAL_SIGNAL_FRAGMENT)
+    return bool(_WEB_APP_GOAL_SIGNAL_RE.search(context_text)) or (
+        _goal_has_unnegated_web_app_signal(_goal_text(ledger))
+    )
 
 
 # Artifact-intent vocabulary — exactly the signals _matches_library treats
@@ -772,6 +769,12 @@ def _matches_web_app(ledger: SeedDraftLedger) -> bool:
     return _ledger_has_browser_context(ledger) and bool(_UI_COMPOSITION_RE.search(ui_text))
 
 
+_CONSUMED_DEPENDENCY_RE = re.compile(
+    r"\b(?:to|from|against|via|using|through|consumes?|consuming|calls?|calling)\s+"
+    r"(?:an?\s+|the\s+)?(?:[\w\-]+\s+){0,2}?(?:public\s+api|apis?|sdks?)\b"
+)
+
+
 def _matches_library(ledger: SeedDraftLedger) -> bool:
     outputs = _section_text(ledger, "outputs")
     goal = _goal_text(ledger)
@@ -792,7 +795,11 @@ def _matches_library(ledger: SeedDraftLedger) -> bool:
     # Goal tokens contribute no library ownership when the goal's artifact
     # head is a web app (#1813 R21) — they are attributive subject words.
     goal_evidence = "" if _goal_artifact_head_is_web_app(goal) else _library_visible_goal(ledger)
-    text = _MANIFEST_TOKEN_RE.sub(" ", outputs + " " + goal_evidence)
+    # An API/SDK the artifact CONSUMES ("submits credentials to a public
+    # API", "tokens from the payments SDK") is a dependency, not produced
+    # library shape (#1813 R23).
+    produced_outputs = _CONSUMED_DEPENDENCY_RE.sub(" ", outputs)
+    text = _MANIFEST_TOKEN_RE.sub(" ", produced_outputs + " " + goal_evidence)
     return bool(_LIBRARY_PACKAGE_WORD_RE.search(text)) or _any_of(
         text,
         (

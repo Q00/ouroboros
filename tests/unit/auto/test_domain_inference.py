@@ -1746,3 +1746,44 @@ def test_website_and_web_ui_are_browser_context(goal: str, outputs: str) -> None
     result = derive_domain_from_ledger(ledger)
     assert result.is_single
     assert result.single is TaskClass.WEB_APP
+
+
+def test_goal_quality_statement_is_not_artifact_denial() -> None:
+    """R23 probe: "no errors in the web UI" targets the errors — the
+    artifact-denial path needs the same quality rule as the strip."""
+    ledger = _bare_ledger("Build a dashboard with no errors in the web UI")
+    _seed_section(ledger, "outputs", value="Login page with settings panel and navigation")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP
+
+
+@pytest.mark.parametrize(
+    "runtime",
+    ["Non-browser desktop runtime", "No browser; local desktop runtime"],
+)
+def test_non_browser_runtime_context_is_not_browser_evidence(runtime: str) -> None:
+    """R23 probe: runtime/output browser context must be token- and
+    negation-aware — a desktop app is not a web app."""
+    ledger = _bare_ledger("Build a desktop account manager")
+    _seed_section(ledger, "outputs", value="Login form with a settings panel")
+    _seed_section(ledger, "runtime_context", value=runtime)
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes
+
+
+@pytest.mark.parametrize(
+    "outputs",
+    [
+        "Login form submits credentials to a public API and shows validation errors",
+        "Account page showing tokens from the payments SDK",
+    ],
+)
+def test_consumed_apis_are_not_library_artifacts(outputs: str) -> None:
+    """R23 probe: an API/SDK the UI consumes is a dependency, not a
+    produced library artifact."""
+    ledger = _bare_ledger("Build a website for account management")
+    _seed_section(ledger, "outputs", value=outputs)
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP
