@@ -344,8 +344,11 @@ class TestLoadPackagedCodexSkills:
     def test_resolves_repo_packaged_skill_path_by_default(self) -> None:
         """Default skill lookup should resolve the packaged Codex skill bundle."""
         with resolve_packaged_codex_skill_path("run") as skill_md_path:
+            assert skill_md_path.parent.name == "run"
             assert skill_md_path.name == "SKILL.md"
-            assert skill_md_path.read_text(encoding="utf-8").startswith("---\nname: run\n")
+            assert skill_md_path.read_text(encoding="utf-8").startswith(
+                "---\nname: ouroboros-run\n"
+            )
 
     def test_packaged_auto_skill_forbids_manual_fallback(self) -> None:
         """The auto skill body must not allow silent manual emulation."""

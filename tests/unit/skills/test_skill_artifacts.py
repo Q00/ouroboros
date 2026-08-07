@@ -7,7 +7,149 @@ from pathlib import Path
 import subprocess
 import sys
 
+import yaml
+
 from ouroboros.skills.artifacts import resolve_packaged_skills_dir
+
+# Current built-in and bundled commands from https://code.claude.com/docs/en/commands.
+# Keep aliases in this inventory too: Claude resolves them through the same command
+# palette, so a skill alias can shadow a host command just as a primary name can.
+_CLAUDE_RESERVED_SKILL_NAMES = frozenset(
+    {
+        "add-dir",
+        "agents",
+        "allowed-tools",
+        "android",
+        "app",
+        "background",
+        "bashes",
+        "batch",
+        "bg",
+        "branch",
+        "btw",
+        "bug",
+        "cd",
+        "checkpoint",
+        "checkup",
+        "chrome",
+        "clear",
+        "code-review",
+        "compact",
+        "config",
+        "context",
+        "continue",
+        "cost",
+        "debug",
+        "design-login",
+        "design-sync",
+        "desktop",
+        "diff",
+        "doctor",
+        "effort",
+        "exit",
+        "extra-usage",
+        "fast",
+        "feedback",
+        "fewer-permission-prompts",
+        "focus",
+        "fork",
+        "heapdump",
+        "help",
+        "hooks",
+        "ide",
+        "init",
+        "insights",
+        "install-github-app",
+        "install-slack-app",
+        "ios",
+        "keybindings",
+        "login",
+        "logout",
+        "mcp",
+        "memory",
+        "mobile",
+        "model",
+        "new",
+        "passes",
+        "permissions",
+        "plan",
+        "powerup",
+        "privacy-settings",
+        "proactive",
+        "quit",
+        "radio",
+        "rc",
+        "recap",
+        "release-notes",
+        "reload-plugins",
+        "reload-skills",
+        "remote-control",
+        "remote-env",
+        "reset",
+        "resume",
+        "review",
+        "rewind",
+        "routines",
+        "run",
+        "run-skill-generator",
+        "sandbox",
+        "schedule",
+        "scroll-speed",
+        "security-review",
+        "settings",
+        "setup-bedrock",
+        "setup-vertex",
+        "share",
+        "simplify",
+        "skills",
+        "stats",
+        "status",
+        "statusline",
+        "stickers",
+        "stop",
+        "subtask",
+        "tasks",
+        "team-onboarding",
+        "teleport",
+        "terminal-setup",
+        "theme",
+        "tp",
+        "ultrareview",
+        "undo",
+        "upgrade",
+        "usage",
+        "usage-credits",
+        "verify",
+        "vim",
+        "web-setup",
+        "workflows",
+    }
+)
+_SKILL_ALIAS_FIELDS = ("alias", "aliases", "command_aliases", "skill_aliases", "commands")
+
+
+def _skill_frontmatter(skill_path: Path) -> dict[str, object]:
+    """Read the YAML metadata Claude Code uses to register one skill."""
+    contents = skill_path.read_text(encoding="utf-8")
+    _, frontmatter, _ = contents.split("---", 2)
+    parsed = yaml.safe_load(frontmatter)
+    assert isinstance(parsed, dict), f"invalid skill frontmatter: {skill_path}"
+    return parsed
+
+
+def _claimed_skill_names(frontmatter: dict[str, object]) -> set[str]:
+    """Return primary and alias names that can enter Claude's command palette."""
+    claimed = {str(frontmatter.get("name", "")).strip().lower()}
+    for field in _SKILL_ALIAS_FIELDS:
+        raw = frontmatter.get(field)
+        if isinstance(raw, str):
+            values = raw.split(",")
+        elif isinstance(raw, list | tuple):
+            values = raw
+        else:
+            values = ()
+        claimed.update(str(value).strip().lower() for value in values)
+    return {name for name in claimed if name}
 
 
 def test_codex_plugin_manifest_starts_a_codex_composed_mcp_server() -> None:
@@ -54,6 +196,33 @@ def test_codex_plugin_manifest_starts_a_codex_composed_mcp_server() -> None:
     assert (repo_root / "skills" / "config" / "SKILL.md").is_file()
     assert (repo_root / "skills" / "ooo" / "SKILL.md").is_file()
     assert (repo_root / ".claude-plugin" / "skills" / "config" / "SKILL.md").is_file()
+
+
+def test_shipped_skill_metadata_never_claims_claude_reserved_command_names() -> None:
+    """Primary names and aliases must leave Claude's built-in commands reachable."""
+    repo_root = Path(__file__).resolve().parents[3]
+    expected_primary_names = {
+        "config": "ouroboros-config",
+        "help": "ouroboros-help",
+        "run": "ouroboros-run",
+        "status": "ouroboros-status",
+    }
+
+    for skill_root in (repo_root / "skills", repo_root / ".claude-plugin" / "skills"):
+        for skill_path in sorted(skill_root.glob("*/SKILL.md")):
+            frontmatter = _skill_frontmatter(skill_path)
+            claimed = _claimed_skill_names(frontmatter)
+            collisions = claimed & _CLAUDE_RESERVED_SKILL_NAMES
+            assert not collisions, (
+                f"{skill_path} claims Claude Code reserved names: {sorted(collisions)}"
+            )
+
+        for directory, expected_name in expected_primary_names.items():
+            frontmatter = _skill_frontmatter(skill_root / directory / "SKILL.md")
+            assert frontmatter["name"] == expected_name
+
+        status_frontmatter = _skill_frontmatter(skill_root / "status" / "SKILL.md")
+        assert status_frontmatter["aliases"] == ["drift"]
 
 
 def test_first_use_onboarding_has_host_specific_model_settings_handoffs() -> None:

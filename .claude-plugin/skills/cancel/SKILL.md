@@ -79,7 +79,7 @@ If the event store database does not exist:
 
 ```
 No Ouroboros database found at ~/.ouroboros/ouroboros.db.
-Run an execution first with: /ouroboros:run
+Run an execution first with: /ouroboros:ouroboros-run
 ```
 
 ## Example
