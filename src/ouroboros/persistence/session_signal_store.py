@@ -120,6 +120,7 @@ async def _append_runtime_lifecycle(
     finally:
         await conn.close()
 
+
 async def _pending_terminal_events(conn, identity, lifecycle_event: BaseEvent) -> list[BaseEvent]:
     execution_id, scope_id, attempt_id = identity
     result = await conn.execute(

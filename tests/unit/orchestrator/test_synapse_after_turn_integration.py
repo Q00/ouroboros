@@ -321,6 +321,61 @@ async def test_cross_process_after_turn_signal_is_applied_and_completed(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_cancelled_runtime_terminalizes_queued_signal(tmp_path: Path) -> None:
+    store = EventStore("sqlite+aiosqlite:///:memory:")
+    await store.initialize()
+    hub = SessionSignalHub(event_store=store)
+    runtime = _TwoTurnRuntime(tmp_path)
+    executor = ParallelACExecutor(
+        adapter=runtime,
+        event_store=store,
+        console=MagicMock(),
+        enable_decomposition=False,
+        session_signal_hub=hub,
+    )
+    mailbox = SessionSignalMailbox(store, hub, delivery_queue=hub)
+    signal = SessionSignal(
+        signal_id="sig_cancelled_runtime",
+        target_session_scope_id="exec_cancelled_runtime_ac_1",
+        target_session_attempt_id="exec_cancelled_runtime_ac_1_attempt_1",
+        expected_execution_id="exec_cancelled_runtime",
+        mode=SessionSignalMode.AFTER_TURN,
+        message="This signal must not remain queued after cancellation.",
+        source=SessionSignalSource.USER,
+        reason="Exercise cancellation terminalization.",
+        idempotency_key="cancelled_runtime_1",
+    )
+    execution_task = asyncio.create_task(
+        executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content="Wait for cancellation",
+            session_id="orch_cancelled_runtime",
+            execution_id="exec_cancelled_runtime",
+            tools=[],
+            system_prompt="test",
+            seed_goal="Terminalize cancelled Synapse ownership",
+            depth=0,
+            start_time=datetime.now(UTC),
+        )
+    )
+    try:
+        await asyncio.wait_for(runtime.first_turn_started.wait(), timeout=2)
+        assert (await mailbox.request(signal)).state is SessionSignalState.QUEUED
+        execution_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await execution_task
+
+        signal_events = await store.replay("session_signal", signal.signal_id)
+        execution_events = await store.replay("execution", "exec_cancelled_runtime_ac_1")
+        assert project_session_signal(signal_events).state is SessionSignalState.REJECTED
+        assert "execution.session.failed" in {event.type for event in execution_events}
+    finally:
+        if not execution_task.done():
+            execution_task.cancel()
+        await store.close()
+
+
+@pytest.mark.asyncio
 async def test_quota_ending_turn_rejects_queued_signal_before_follow_up_provider(
     tmp_path: Path,
 ) -> None:

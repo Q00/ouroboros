@@ -62,7 +62,9 @@ def _signal(index: int) -> SessionSignal:
 
 
 class _ResolvedTarget:
-    def __init__(self, *, entered: asyncio.Event | None = None, release: asyncio.Event | None = None):
+    def __init__(
+        self, *, entered: asyncio.Event | None = None, release: asyncio.Event | None = None
+    ):
         self.entered = entered
         self.release = release
 

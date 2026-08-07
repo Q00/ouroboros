@@ -2284,10 +2284,7 @@ def create_ouroboros_server(
         SessionSignalMailbox(
             event_store=event_store,
             target_resolver=session_signal_target_resolver,
-            # Detached workers own distinct process-local hubs. Persist the
-            # accepted signal here; the owning worker imports it at a safe
-            # execution boundary through SessionSignalHub.refresh_pending().
-            delivery_queue=None,
+            delivery_queue=None,  # Detached worker imports at its safe boundary.
         )
     )
     evolve_step = EvolveStepHandler(
