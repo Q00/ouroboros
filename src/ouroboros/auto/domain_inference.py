@@ -248,6 +248,8 @@ _DENIED_PP_TAIL_RE = re.compile(r"\b(?:for|about|because|since|due\s+to|owing\s+
 _DENIED_PIECE_SPLIT_RE = re.compile(r"\s*(?:,|/|\bor\b|\band\b|\bnor\b)\s*")
 
 
+# Subject-matter clauses name the topic, never the artifact (#1813 R66).
+_ABOUT_CLAUSE_RE = re.compile(r"\b(?:about|regarding|concerning)\s+[^,.;]*")
 # Broad clause strip for the web-app guard: any for/with/about/that/which
 # clause is subject matter FROM THE WEB APP'S PERSPECTIVE — it cannot
 # surrender web ownership (#1813 R16/R18).
@@ -1174,7 +1176,14 @@ def _ledger_has_browser_context(ledger: SeedDraftLedger) -> bool:
     (#1813 R58): a re-headed or embedded browser phrase is a component
     of another artifact, whichever branch consults it.
     """
+    # Goal-side evidence is scoped to affirmative declarations (#1813
+    # R66): a browser mention that is the object of a manipulation verb
+    # ("opens browser pages") or lives in a subject-matter clause
+    # ("about browser performance") names a target or topic, not the
+    # artifact's environment.
     goal_for_context = _strip_consumer_relations(_goal_text(ledger))
+    goal_for_context = _MANIPULATED_TARGET_RE.sub(" ", goal_for_context)
+    goal_for_context = _ABOUT_CLAUSE_RE.sub(" ", goal_for_context)
     return bool(_SECTION_BROWSER_ENV_RE.search(_section_browser_context_text(ledger))) or (
         _goal_has_unnegated_web_app_signal(goal_for_context)
     )
@@ -1224,6 +1233,19 @@ _INSPECTION_TOOL_GOAL_RE = re.compile(
     r"scanners?|spiders?|auditors?|audits?|audit\s+tools?|monitor(?:s|ing)?|"
     r"checkers?|linters?|analyzers?|validators?|profilers?|"
     r"end[\s\-]to[\s\-]end|e2e)\b"
+)
+
+
+# A UI surface declared FOR a component belongs to that component
+# (#1813 R66) — the postfix mirror of the first-NP component rule. The
+# trailing rejection keeps audiences ("for extension developers")
+# outside the veto.
+_GOAL_COMPONENT_TARGET_RE = re.compile(
+    r"\b(?:for|of|in|inside|within|into)\s+(?:an?\s+|the\s+)?(?:[\w\-]+\s+){0,2}?"
+    r"(?:extensions?|plugins?|add[\s\-]?ons?|addons?|sidebars?|popups?|"
+    r"toolbars?|overlays?|devtools?)\b"
+    r"(?!\s+(?!(?:and|or|nor|but|without|with|for|on|in|at|by|from|via|"
+    r"through|to|so|that|which)\b)[\w'’\-]+)"
 )
 
 
@@ -1714,6 +1736,12 @@ def _matches_web_app(ledger: SeedDraftLedger) -> bool:
     # A goal declaring an inspection/automation artifact marks output
     # widgets as its targets (#1813 R30) — clause-level ownership, not
     # another noun list.
+    # A UI surface declared FOR a component belongs to that component
+    # (#1813 R66), whatever the runtime wording — the postfix mirror of
+    # the first-NP component rule, guarding the composition and semantic
+    # fallbacks after the affirmative grants have had their say.
+    if _GOAL_COMPONENT_TARGET_RE.search(re.split(r"[.;:!?]", _goal_text(ledger))[0]):
+        return False
     # The product-head exception accepts standardized runtime evidence
     # (#1813 R61): "webhook monitoring dashboard" with a browser
     # execution environment is a dashboard whose subject is monitoring,

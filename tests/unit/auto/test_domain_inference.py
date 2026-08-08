@@ -3764,6 +3764,33 @@ def test_one_word_product_declarations_reach_their_np() -> None:
 
 
 @pytest.mark.parametrize(
+    ("goal", "outputs"),
+    [
+        ("Build a desktop app that opens browser pages", "Settings panel with recent files list"),
+        ("Build a dashboard about browser performance", "Interactive charts with a filters panel"),
+    ],
+)
+def test_manipulated_and_subject_browser_mentions_are_not_context(goal: str, outputs: str) -> None:
+    """R66 guard: a browser mention that is a manipulation target or a
+    subject-matter topic is not the artifact's environment."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value=outputs)
+    _seed_section(ledger, "runtime_context", value="Desktop")
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes
+
+
+def test_postfix_component_targets_own_their_surfaces() -> None:
+    """R66 guard: a UI surface declared FOR a component belongs to that
+    component even under a legitimate generic browser runtime."""
+    ledger = _bare_ledger("Build a settings dashboard for a browser extension")
+    _seed_section(ledger, "outputs", value="Settings panel with save button")
+    _seed_section(ledger, "runtime_context", value="Browser")
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes
+
+
+@pytest.mark.parametrize(
     "goal",
     [
         "The product is an admin portal that runs in browsers",
