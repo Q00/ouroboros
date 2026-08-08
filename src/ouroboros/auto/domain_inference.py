@@ -359,6 +359,9 @@ def _goal_has_unnegated_web_app_signal(goal_text: str) -> bool:
     independent affirmative web-app statement intact, and affirmative-flip
     spans ("not just a browser page") are preserved by the strip.
     """
+    # Postpositive denials apply to the goal surface too (#1813 R40):
+    # "web apps are unsupported" negates from behind on any surface.
+    goal_text = _POSTPOSITIVE_BROWSER_DENIAL_RE.sub(" ", goal_text)
     if not _WEB_APP_GOAL_SIGNAL_RE.search(goal_text):
         return False
     if _goal_denies_web_app_artifact(goal_text):
@@ -749,7 +752,8 @@ _RELATIONAL_TARGET_RE = re.compile(
     r"served\s+(?:from|on)|published\s+(?:on|to)|"
     r"designed\s+for|intended\s+for(?:\s+use\s+(?:with|in|by))?|"
     r"meant\s+for|built\s+for|made\s+for|usable\s+by|"
-    r"for\s+use\s+(?:with|in|by))\s+"
+    r"available\s+to|accessible\s+to|open\s+to|exposed\s+to|"
+    r"for\s+use\s+(?:with|in|by)|for)\s+"
     # Coordinated consumer lists are consumed whole (#1813 R37): the web
     # item may sit anywhere in "mobile apps and web apps".
     r"(?:(?:an?|the|my|our|your)\s+)?(?:[\w\-'’]+(?:\s+[\w\-'’]+){0,2}?\s*(?:,|\band\b|\bor\b|\bas\s+well\s+as\b|\balong\s+with\b|\bplus\b|/)\s*){0,3}?"
@@ -850,8 +854,10 @@ _POSTPOSITIVE_BROWSER_DENIAL_RE = re.compile(
     rf"\b{_WEB_APP_GOAL_SIGNAL_FRAGMENT}(?:\s+[\w\-]+){{0,2}}?\s+"
     r"(?:is\s+|are\s+|was\s+|were\s+|has\s+been\s+|have\s+been\s+|"
     r"had\s+been\s+|will\s+be\s+)?"
+    r"(?:\w+ly\s+)?"
     r"(?:not\s+supported|unsupported|disabled|unavailable|dropped|excluded|"
-    r"turned\s+off|removed|prohibited|forbidden|banned|blocked|stripped)\b"
+    r"turned\s+off|removed|prohibited|forbidden|banned|blocked|stripped|"
+    r"denied|denylisted|off[\s\-]limits)\b"
 )
 
 

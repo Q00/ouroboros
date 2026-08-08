@@ -2723,3 +2723,38 @@ def test_uses_and_dependent_on_are_consumed_dependencies(goal: str) -> None:
     result = derive_domain_from_ledger(ledger)
     assert result.is_single
     assert result.single is TaskClass.WEB_APP
+
+
+@pytest.mark.parametrize(
+    ("goal", "runtime"),
+    [
+        ("Build a desktop tool; web apps are unsupported", "Native desktop runtime"),
+        ("Build a desktop tool", "Browser support is explicitly disabled; native desktop runtime"),
+        ("Build a desktop tool", "Browser access is denied; native desktop runtime"),
+    ],
+)
+def test_postpositive_denials_cover_goal_and_predicates(goal: str, runtime: str) -> None:
+    """R40 probe: postpositive denial normalization applies to the goal
+    surface too, and covers adverbs and denial predicates."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value="Settings panel for local files")
+    _seed_section(ledger, "runtime_context", value=runtime)
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
+        "Build a native desktop settings tool for web apps",
+        "Build a native desktop settings tool for browsers",
+        "Build a plugin available to web apps",
+    ],
+)
+def test_plain_audience_targets_are_consumer_relations(goal: str) -> None:
+    """R40 probe: a bare for/available-to web target names the audience."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value="Settings panel for local files")
+    _seed_section(ledger, "runtime_context", value="Native desktop runtime")
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes
