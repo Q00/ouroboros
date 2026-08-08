@@ -30,9 +30,17 @@ from ouroboros.core.disposable_memory import (
 )
 from ouroboros.persistence.artifact_binding import (
     BINDING_MAX_BYTES,
+    authority_path,
+    authority_prefix,
     binding_path,
-    encode_binding,
+    binding_record,
+    completion_path,
+    completion_payload,
+    encode_record,
+    manifest_from_authority,
+    validate_authority,
     validate_binding,
+    validate_manifest_authority,
 )
 from ouroboros.persistence.artifact_errors import (
     ArtifactContractConflictError,
@@ -51,15 +59,26 @@ from ouroboros.persistence.artifact_lock import (
     validate_pinned_directory as _validate_pinned_directory,
 )
 import ouroboros.persistence.artifact_schema as _artifact_schema
-from ouroboros.persistence.artifact_schema import MANIFEST_MAX_BYTES, require_fields
+from ouroboros.persistence.artifact_schema import MANIFEST_MAX_BYTES
+from ouroboros.persistence.artifact_validation import (
+    canonical_artifact_bytes,
+    validate_project_boundary,
+)
 from ouroboros.persistence.artifact_validation import (
     envelope_from_event as _envelope_from_event,
 )
-from ouroboros.persistence.artifact_validation import event_artifact_ref as _event_artifact_ref
+from ouroboros.persistence.artifact_validation import (
+    event_artifact_ref as _event_artifact_ref,
+)
 from ouroboros.persistence.artifact_validation import (
     latest_artifact_event as _latest_artifact_event,
 )
-from ouroboros.persistence.artifact_validation import validate_json_native as _validate_json_native
+from ouroboros.persistence.artifact_validation import (
+    manifest_retained as _manifest_retained,
+)
+from ouroboros.persistence.artifact_validation import (
+    validate_manifest as _validate_manifest,
+)
 
 _as_utc = _artifact_schema.as_utc
 _digest_from_ref = _artifact_schema.digest_from_ref
@@ -119,25 +138,6 @@ class ArtifactPruneReport:
     candidates: tuple[ArtifactPruneCandidate, ...]
     removed_refs: tuple[str, ...] = ()
     removed_bytes: int = 0
-
-
-def canonical_artifact_bytes(body: Any) -> bytes:
-    """Encode a JSON artifact deterministically for hashing and exact limits."""
-    _validate_json_native(body)
-    try:
-        rendered = json.dumps(
-            body,
-            ensure_ascii=False,
-            allow_nan=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-    except (TypeError, ValueError) as exc:
-        raise ArtifactStoreError(
-            f"Disposable artifact is not canonical JSON: {exc}",
-            operation="serialize",
-        ) from exc
-    return rendered.encode("utf-8")
 
 
 class ContentAddressedArtifactStore:
@@ -237,13 +237,7 @@ class ContentAddressedArtifactStore:
         precommit_check: Callable[[], None] | None = None,
         commit_check: Callable[[], None] | None = None,
     ) -> DisposableResultEnvelope:
-        """Publish a body, then durably bind its small envelope to a contract.
-
-        A contract may be retried idempotently with the same body.  Reusing it
-        for different content is rejected; intentional reruns need a new id.
-        ``commit_check`` claims the point of no return immediately before the
-        first publication mutation while the exclusive store lock is held.
-        """
+        """Publish a body and durably bind its bounded envelope to one contract."""
         self.initialize()
         contract_id = _validate_contract_id(contract_id)
         payload = canonical_artifact_bytes(body)
@@ -272,7 +266,11 @@ class ContentAddressedArtifactStore:
             if precommit_check is not None:
                 precommit_check()
             manifest = self._load_manifest_locked(contract_id, missing_ok=True)
-            self._validate_binding_locked(contract_id, manifest)
+            manifest = self._reconcile_binding_locked(
+                contract_id,
+                manifest,
+                authority_check=lock_authority.validate,
+            )
             existing = _latest_artifact_event(manifest)
             if existing is not None:
                 existing_ref = existing.get("artifact_ref")
@@ -316,14 +314,33 @@ class ContentAddressedArtifactStore:
                 "envelope": envelope.model_dump(mode="json"),
             }
             manifest["events"].append(event)
-            self._write_binding_locked(
-                contract_id,
+            record = binding_record(
                 event,
+                contract_id=contract_id,
+                active=bool(active),
+                retain_until=retention.isoformat(),
+            )
+            self._write_record_locked(
+                self._anchor_path(contract_id),
+                encode_record(record),
+                stable=True,
+                authority_check=lock_authority.validate,
+            )
+            self._write_record_locked(
+                self._binding_path(contract_id),
+                encode_record(record),
+                stable=False,
                 authority_check=lock_authority.validate,
             )
             self._write_manifest_locked(
                 contract_id,
                 manifest,
+                authority_check=lock_authority.validate,
+            )
+            self._write_record_locked(
+                completion_path(self._anchor_path(contract_id)),
+                completion_payload(record),
+                stable=True,
                 authority_check=lock_authority.validate,
             )
         return envelope
@@ -345,12 +362,17 @@ class ContentAddressedArtifactStore:
         if (
             not self._manifest_path(contract_id).exists()
             and not self._binding_path(contract_id).exists()
+            and not self._anchor_path(contract_id).exists()
         ):
             return None
         self.initialize()
-        with self._store_lock(exclusive=False):
+        with self._store_lock(exclusive=True) as lock_authority:
             manifest = self._load_manifest_locked(contract_id, missing_ok=True)
-            self._validate_binding_locked(contract_id, manifest)
+            manifest = self._reconcile_binding_locked(
+                contract_id,
+                manifest,
+                authority_check=lock_authority.validate,
+            )
             event = _latest_artifact_event(manifest)
             if event is None:
                 return None
@@ -373,12 +395,17 @@ class ContentAddressedArtifactStore:
         if (
             not self._manifest_path(contract_id).exists()
             and not self._binding_path(contract_id).exists()
+            and not self._anchor_path(contract_id).exists()
         ):
             return None
         self.initialize()
-        with self._store_lock(exclusive=False):
+        with self._store_lock(exclusive=True) as lock_authority:
             manifest = self._load_manifest_locked(contract_id, missing_ok=True)
-            self._validate_binding_locked(contract_id, manifest)
+            manifest = self._reconcile_binding_locked(
+                contract_id,
+                manifest,
+                authority_check=lock_authority.validate,
+            )
             event = _latest_artifact_event(manifest)
             if event is None:
                 return None
@@ -436,7 +463,11 @@ class ContentAddressedArtifactStore:
         timestamp = _as_utc(now or datetime.now(UTC))
         with self._store_lock(exclusive=True) as lock_authority:
             manifest = self._load_manifest_locked(contract_id, missing_ok=False)
-            self._validate_binding_locked(contract_id, manifest)
+            manifest = self._reconcile_binding_locked(
+                contract_id,
+                manifest,
+                authority_check=lock_authority.validate,
+            )
             manifest["active"] = bool(active)
             manifest["retain_until"] = _as_utc(retain_until).isoformat()
             manifest["updated_at"] = timestamp.isoformat()
@@ -460,7 +491,9 @@ class ContentAddressedArtifactStore:
         self.initialize()
         timestamp = _as_utc(now or datetime.now(UTC))
         with self._store_lock(exclusive=True) as lock_authority:
-            manifests = self._load_all_manifests_locked()
+            manifests = self._load_all_manifests_locked(
+                authority_check=lock_authority.validate,
+            )
             candidates = self._plan_prune_locked(
                 manifests,
                 ttl=ttl,
@@ -661,64 +694,150 @@ class ContentAddressedArtifactStore:
             )
         return path
 
-    def _validate_binding_locked(
-        self,
-        contract_id: str,
-        manifest: dict[str, Any],
-    ) -> None:
-        path = self._binding_path(contract_id)
-        references = [
-            event for event in manifest["events"] if event.get("type") == "artifact.referenced"
-        ]
-        if not references:
-            if path.exists():
-                raise ArtifactManifestError(
-                    "Durable binding exists without its contract manifest",
-                    operation="read",
-                    details={"contract_id": contract_id, "path": str(path)},
-                )
-            return
+    def _anchor_path(self, contract_id: str) -> Path:
+        parent = self.root.parent
+        path = authority_path(parent, self.root, contract_id)
+        _require_contained(path, root=parent, label="artifact authority")
+        if _is_link_like(parent) or _is_link_like(path):
+            raise ArtifactIntegrityError(
+                "Artifact authority path must remain in the trusted parent",
+                operation="path_resolution",
+                details={"path": str(path)},
+            )
+        return path
+
+    def _read_authority_locked(self, contract_id: str) -> dict[str, Any] | None:
+        path = self._anchor_path(contract_id)
         try:
             payload = _read_bounded_bytes(
                 path,
                 max_bytes=BINDING_MAX_BYTES,
-                root=self._bindings_root,
-                anchor=self._directory_anchor,
-                label="artifact binding",
+                root=self.root.parent,
+                anchor=self._lock_directory_anchor,
+                label="artifact authority",
             )
-            raw = json.loads(payload)
-            validate_binding(raw, manifest, contract_id=contract_id)
-        except FileNotFoundError as exc:
-            raise ArtifactManifestError(
-                "Artifact manifest is missing its durable binding",
-                operation="read",
-                details={"contract_id": contract_id, "path": str(path)},
-            ) from exc
+            return validate_authority(json.loads(payload), contract_id=contract_id)
+        except FileNotFoundError:
+            return None
         except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
             raise ArtifactManifestError(
-                "Artifact durable binding is invalid or does not match its manifest",
+                "Artifact authority is invalid",
                 operation="read",
                 details={"contract_id": contract_id, "path": str(path)},
             ) from exc
 
-    def _write_binding_locked(
+    def _write_record_locked(
         self,
-        contract_id: str,
-        event: dict[str, Any],
+        path: Path,
+        payload: bytes,
         *,
-        authority_check: Callable[[], None] | None = None,
+        stable: bool,
+        authority_check: Callable[[], None],
     ) -> None:
-        path = self._binding_path(contract_id)
-        payload = encode_binding(event, contract_id=contract_id)
+        root = self.root.parent if stable else self._bindings_root
         _atomic_write_bytes(
             path,
             payload,
-            root=self._bindings_root,
-            anchor=self._directory_anchor,
-            label="artifact binding",
+            root=root,
+            anchor=self._lock_directory_anchor if stable else self._directory_anchor,
+            label="artifact authority" if stable else "artifact binding",
             matching_existing=payload,
             authority_check=authority_check,
         )
+
+    def _reconcile_binding_locked(
+        self,
+        contract_id: str,
+        manifest: dict[str, Any],
+        *,
+        authority_check: Callable[[], None],
+    ) -> dict[str, Any]:
+        anchor = self._read_authority_locked(contract_id)
+        binding_path_value = self._binding_path(contract_id)
+        if anchor is None:
+            if manifest["events"] or binding_path_value.exists():
+                raise ArtifactManifestError(
+                    "Contract metadata is missing independently anchored authority",
+                    operation="read",
+                    details={"contract_id": contract_id},
+                )
+            return manifest
+        marker = completion_path(self._anchor_path(contract_id))
+        recovering = not manifest["events"]
+        if recovering:
+            if marker.exists():
+                raise ArtifactManifestError(
+                    "Committed contract manifest binding is missing; recovery refused",
+                    operation="read",
+                    details={"contract_id": contract_id},
+                )
+            manifest = _validate_manifest(
+                manifest_from_authority(anchor),
+                contract_id=contract_id,
+                path=self._manifest_path(contract_id),
+            )
+        else:
+            try:
+                validate_manifest_authority(manifest, anchor)
+            except ValueError as exc:
+                raise ArtifactManifestError(
+                    "Contract manifest binding does not match independently anchored authority",
+                    operation="read",
+                    details={"contract_id": contract_id},
+                ) from exc
+        try:
+            cached = json.loads(
+                _read_bounded_bytes(
+                    binding_path_value,
+                    max_bytes=BINDING_MAX_BYTES,
+                    root=self._bindings_root,
+                    anchor=self._directory_anchor,
+                    label="artifact binding",
+                )
+            )
+            validate_binding(cached, anchor)
+        except FileNotFoundError:
+            self._write_record_locked(
+                binding_path_value,
+                encode_record(anchor),
+                stable=False,
+                authority_check=authority_check,
+            )
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+            raise ArtifactManifestError(
+                "Artifact binding does not match independently anchored authority",
+                operation="read",
+                details={"contract_id": contract_id},
+            ) from exc
+        if recovering:
+            self._write_manifest_locked(
+                contract_id,
+                manifest,
+                authority_check=authority_check,
+            )
+        expected_marker = completion_payload(anchor)
+        if marker.exists():
+            actual_marker = _read_bounded_bytes(
+                marker,
+                max_bytes=len(expected_marker),
+                root=self.root.parent,
+                anchor=self._lock_directory_anchor,
+                label="artifact authority completion",
+            )
+            if actual_marker != expected_marker:
+                raise ArtifactManifestError(
+                    "Artifact authority completion marker is invalid",
+                    operation="read",
+                    details={"contract_id": contract_id},
+                )
+        else:
+            self._write_record_locked(
+                marker,
+                expected_marker,
+                stable=True,
+                authority_check=authority_check,
+            )
+        return manifest
 
     def _contract_execution_lock_target(self, contract_id: str) -> Path:
         self._validate_project_boundary()
@@ -765,14 +884,48 @@ class ContentAddressedArtifactStore:
             }
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise ArtifactManifestError(
-                "Artifact manifest is unreadable; pruning is unsafe",
+                "Artifact manifest is unreadable; pruning aborted fail-closed",
                 operation="read",
                 details={"contract_id": contract_id, "path": str(path)},
             ) from exc
         return _validate_manifest(raw, contract_id=contract_id, path=path)
 
-    def _load_all_manifests_locked(self) -> dict[str, dict[str, Any]]:
+    def _load_all_manifests_locked(
+        self,
+        *,
+        authority_check: Callable[[], None],
+    ) -> dict[str, dict[str, Any]]:
         manifests: dict[str, dict[str, Any]] = {}
+        for path in sorted(self.root.parent.glob(f"{authority_prefix(self.root)}*.json")):
+            try:
+                raw = json.loads(
+                    _read_bounded_bytes(
+                        path,
+                        max_bytes=BINDING_MAX_BYTES,
+                        root=self.root.parent,
+                        anchor=self._lock_directory_anchor,
+                        label="artifact authority",
+                    )
+                )
+                raw_contract_id = raw.get("contract_id") if isinstance(raw, dict) else None
+                if not isinstance(raw_contract_id, str):
+                    raise ValueError("authority contract_id must be a string")
+                contract_id = _validate_contract_id(raw_contract_id)
+                validate_authority(raw, contract_id=contract_id)
+                if path != self._anchor_path(contract_id):
+                    raise ValueError("authority path does not match contract identity")
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+                raise ArtifactManifestError(
+                    "Artifact authority set is invalid; pruning aborted fail-closed",
+                    operation="read",
+                    details={"path": str(path)},
+                ) from exc
+            manifest = self._load_manifest_locked(contract_id, missing_ok=True)
+            self._reconcile_binding_locked(
+                contract_id,
+                manifest,
+                authority_check=authority_check,
+            )
         if not self._contracts_root.exists():
             return manifests
         for path in sorted(self._contracts_root.glob(f"*/{_MANIFEST_FILENAME}")):
@@ -829,7 +982,11 @@ class ContentAddressedArtifactStore:
                 },
             )
         for contract_id, manifest in manifests.items():
-            self._validate_binding_locked(contract_id, manifest)
+            manifests[contract_id] = self._reconcile_binding_locked(
+                contract_id,
+                manifest,
+                authority_check=authority_check,
+            )
         return manifests
 
     def _read_manifest_json_locked(self, path: Path) -> Any:
@@ -883,12 +1040,7 @@ class ContentAddressedArtifactStore:
         return paths
 
     def _validate_blob_candidate_locked(self, path: Path) -> None:
-        """Fail closed unless one prune candidate is a local regular path.
-
-        ``Path.is_symlink`` does not identify Windows directory junctions. Both
-        the digest prefix and body are therefore checked with ``_is_link_like``
-        and resolved containment is repeated at each destructive boundary.
-        """
+        """Fail closed unless one prune candidate is a contained regular path."""
         self._validate_project_boundary()
         prefix = path.parent
         if _is_link_like(prefix):
@@ -921,152 +1073,13 @@ class ContentAddressedArtifactStore:
         _unlink_blob_candidate_guarded(candidate, root=self.root)
 
     def _validate_project_boundary(self) -> None:
-        project_root = self._project_root
-        if project_root is None:
-            return
-        try:
-            relative_root = self.root.relative_to(project_root)
-        except ValueError as exc:
-            raise ArtifactIntegrityError(
-                "Project artifact store path escapes the project root",
-                operation="path_resolution",
-                details={"path": str(self.root), "project_root": str(project_root)},
-            ) from exc
-
-        current = project_root
-        for component in relative_root.parts:
-            current /= component
-            if _is_link_like(current):
-                raise ArtifactIntegrityError(
-                    "Project artifact store path must not traverse a symlink",
-                    operation="path_resolution",
-                    details={"path": str(current), "project_root": str(project_root)},
-                )
-
-        if _is_link_like(self._contracts_root) or _is_link_like(self._bindings_root):
-            raise ArtifactIntegrityError(
-                "Project artifact metadata paths must not be symlinks",
-                operation="path_resolution",
-                details={"path": str(self.root), "project_root": str(project_root)},
-            )
-        try:
-            resolved_root = self.root.resolve()
-            resolved_contracts = self._contracts_root.resolve()
-            resolved_bindings = self._bindings_root.resolve()
-        except (OSError, RuntimeError) as exc:
-            raise ArtifactIntegrityError(
-                "Project artifact store path could not be resolved safely",
-                operation="path_resolution",
-                details={"path": str(self.root), "project_root": str(project_root)},
-            ) from exc
-        if (
-            not resolved_root.is_relative_to(project_root)
-            or not resolved_contracts.is_relative_to(resolved_root)
-            or not resolved_bindings.is_relative_to(resolved_root)
-        ):
-            raise ArtifactIntegrityError(
-                "Project artifact store path escapes the project-owned store",
-                operation="path_resolution",
-                details={
-                    "path": str(resolved_contracts),
-                    "root": str(resolved_root),
-                    "project_root": str(project_root),
-                },
-            )
-
-
-def _validate_manifest(
-    raw: Any,
-    *,
-    contract_id: str,
-    path: Path,
-) -> dict[str, Any]:
-    if not isinstance(raw, dict):
-        raise ArtifactManifestError(
-            "Artifact manifest must be a JSON object",
-            operation="read",
-            details={"path": str(path)},
+        validate_project_boundary(
+            root=self.root,
+            project_root=self._project_root,
+            contracts_root=self._contracts_root,
+            bindings_root=self._bindings_root,
+            is_link_like=_is_link_like,
         )
-    try:
-        require_fields(raw)
-    except ValueError as exc:
-        raise ArtifactManifestError(
-            "Artifact manifest fields do not match the exact versioned schema",
-            operation="read",
-            details={"path": str(path), "contract_id": contract_id},
-        ) from exc
-    if raw.get("schema_version") != _MANIFEST_VERSION or raw.get("contract_id") != contract_id:
-        raise ArtifactManifestError(
-            "Artifact manifest identity or schema version is invalid",
-            operation="read",
-            details={"path": str(path), "contract_id": contract_id},
-        )
-    if not isinstance(raw.get("active"), bool) or not isinstance(raw.get("events"), list):
-        raise ArtifactManifestError(
-            "Artifact manifest state is invalid",
-            operation="read",
-            details={"path": str(path), "contract_id": contract_id},
-        )
-    for event in raw["events"]:
-        if not isinstance(event, dict):
-            raise ArtifactManifestError(
-                "Artifact manifest events must be objects",
-                operation="read",
-                details={"path": str(path), "contract_id": contract_id},
-            )
-        event_type = event.get("type")
-        if event_type not in {"artifact.referenced", "artifact.tombstoned"}:
-            raise ArtifactManifestError(
-                "Artifact manifest contains an unknown event type",
-                operation="read",
-                details={"path": str(path), "event_type": event_type},
-            )
-        _event_artifact_ref(event, contract_id=contract_id)
-        _parse_datetime(event.get("timestamp"), field="event.timestamp", path=path)
-        if event_type == "artifact.referenced":
-            _envelope_from_event(event, contract_id=contract_id)
-    retain_until = raw.get("retain_until")
-    if retain_until is not None:
-        _parse_datetime(retain_until, field="retain_until", path=path)
-    return raw
-
-
-def _manifest_retained(manifest: dict[str, Any], *, now: datetime) -> bool:
-    retain_until = manifest.get("retain_until")
-    if retain_until is None:
-        return True
-    return (
-        _parse_datetime(
-            retain_until,
-            field="retain_until",
-            path=Path(f"contract:{manifest.get('contract_id', 'unknown')}"),
-        )
-        > now
-    )
-
-
-def _parse_datetime(value: Any, *, field: str, path: Path) -> datetime:
-    if not isinstance(value, str):
-        raise ArtifactManifestError(
-            f"Artifact manifest {field} must be an ISO-8601 string",
-            operation="read",
-            details={"path": str(path)},
-        )
-    try:
-        parsed = datetime.fromisoformat(value)
-    except ValueError as exc:
-        raise ArtifactManifestError(
-            f"Artifact manifest {field} is not valid ISO-8601",
-            operation="read",
-            details={"path": str(path)},
-        ) from exc
-    if parsed.tzinfo is None:
-        raise ArtifactManifestError(
-            f"Artifact manifest {field} must include a timezone",
-            operation="read",
-            details={"path": str(path)},
-        )
-    return parsed.astimezone(UTC)
 
 
 def _require_contained(path: Path, *, root: Path, label: str) -> None:

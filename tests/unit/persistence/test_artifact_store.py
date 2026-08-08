@@ -76,6 +76,7 @@ def _substitute_contract_artifact(
     *,
     victim: str = "CONTRACTA",
     source: str = "CONTRACTB",
+    replace_binding: bool = False,
 ) -> tuple[Path, Path, Path]:
     """Replace a victim's reference with another valid contract's artifact."""
     victim_envelope = _put(store, victim, {"owner": "a"})
@@ -88,6 +89,13 @@ def _substitute_contract_artifact(
     victim_event["size_bytes"] = source_event["size_bytes"]
     victim_event["envelope"]["artifact_ref"] = source_event["artifact_ref"]
     victim_path.write_text(json.dumps(victim_manifest), encoding="utf-8")
+    if replace_binding:
+        victim_binding = store._binding_path(victim)
+        binding = json.loads(victim_binding.read_text(encoding="utf-8"))
+        binding["artifact_ref"] = source_event["artifact_ref"]
+        binding["size_bytes"] = source_event["size_bytes"]
+        binding["envelope"]["artifact_ref"] = source_event["artifact_ref"]
+        victim_binding.write_text(json.dumps(binding), encoding="utf-8")
     return (
         victim_path,
         _blob_path(store, victim_envelope.artifact_ref),
@@ -760,16 +768,15 @@ def test_schema_valid_cross_contract_substitution_fails_closed(
     assert source_blob.exists()
 
 
-def test_existing_manifest_without_durable_binding_fails_closed(tmp_path: Path) -> None:
+def test_missing_binding_cache_is_recovered_from_independent_authority(tmp_path: Path) -> None:
     store = _store(tmp_path)
     envelope = _put(store, "CONTRACT1", {"safe": True})
     binding_path = store._binding_path("CONTRACT1")
     binding_path.unlink()
 
-    with pytest.raises(ArtifactManifestError, match="binding"):
-        store.fetch("CONTRACT1")
-    with pytest.raises(ArtifactManifestError, match="binding"):
-        store.prune(ttl=timedelta(0), apply=True, now=NOW)
+    assert store.fetch("CONTRACT1").envelope == envelope
+    assert binding_path.is_file()
+    assert store.prune(ttl=timedelta(0), apply=False, now=NOW).candidates == ()
     assert _blob_path(store, envelope.artifact_ref).exists()
 
 
@@ -781,7 +788,7 @@ def test_durable_binding_without_manifest_fails_closed(tmp_path: Path) -> None:
 
     with pytest.raises(ArtifactManifestError, match="binding"):
         store.envelope_if_exists("CONTRACT1")
-    with pytest.raises(ArtifactManifestError, match="bindings|authority"):
+    with pytest.raises(ArtifactManifestError, match="binding|authority"):
         store.prune(ttl=timedelta(0), apply=True, now=NOW)
     assert _blob_path(store, envelope.artifact_ref).exists()
 
@@ -798,6 +805,69 @@ def test_schema_valid_replaced_binding_fails_closed(tmp_path: Path) -> None:
 
     with pytest.raises(ArtifactManifestError, match="binding"):
         store.fetch("CONTRACTA")
+
+
+@pytest.mark.parametrize("operation", ["fetch", "replay", "envelope", "retention", "prune"])
+def test_coordinated_manifest_and_binding_substitution_fails_closed(
+    tmp_path: Path,
+    operation: str,
+) -> None:
+    store = _store(tmp_path)
+    manifest_path, victim_blob, source_blob = _substitute_contract_artifact(
+        store,
+        replace_binding=True,
+    )
+    tampered = manifest_path.read_bytes()
+
+    with pytest.raises(ArtifactManifestError, match="authority"):
+        if operation == "fetch":
+            store.fetch("CONTRACTA")
+        elif operation == "replay":
+            store.replay("CONTRACTA")
+        elif operation == "envelope":
+            store.envelope_if_exists("CONTRACTA")
+        elif operation == "retention":
+            store.set_contract_retention(
+                "CONTRACTA",
+                active=False,
+                retain_until=NOW + timedelta(days=1),
+                now=NOW,
+            )
+        else:
+            _age(victim_blob, days=100)
+            _age(source_blob, days=100)
+            store.prune(ttl=timedelta(days=90), apply=True, now=NOW)
+
+    assert manifest_path.read_bytes() == tampered
+    assert victim_blob.exists()
+    assert source_blob.exists()
+
+
+def test_binding_then_manifest_failure_recovers_on_identical_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _store(tmp_path)
+    original_write = store._write_manifest_locked
+    failures = 0
+
+    def fail_first_manifest(*args: Any, **kwargs: Any) -> None:
+        nonlocal failures
+        failures += 1
+        if failures == 1:
+            raise OSError("simulated manifest publication failure")
+        original_write(*args, **kwargs)
+
+    monkeypatch.setattr(store, "_write_manifest_locked", fail_first_manifest)
+    with pytest.raises(OSError, match="manifest publication failure"):
+        _put(store, "CONTRACT1", {"recoverable": True})
+
+    assert store._anchor_path("CONTRACT1").is_file()
+    assert store._binding_path("CONTRACT1").is_file()
+    assert not (store.root / "contracts" / "CONTRACT1" / "events.json").exists()
+
+    recovered = _put(store, "CONTRACT1", {"recoverable": True})
+    assert store.fetch("CONTRACT1").envelope == recovered
 
 
 def test_blob_survives_until_every_shared_contract_tombstone_is_durable(

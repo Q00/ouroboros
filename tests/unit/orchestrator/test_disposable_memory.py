@@ -613,6 +613,49 @@ async def test_retry_rejects_binding_without_manifest_without_execution(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_retry_recovers_binding_first_manifest_failure_without_execution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, _ = _service(tmp_path)
+    calls = 0
+    writes = 0
+    original_write = service.artifact_store._write_manifest_locked
+
+    async def child_work(_handle: AgentProcessHandle) -> dict[str, bool]:
+        nonlocal calls
+        calls += 1
+        return {"recoverable": True}
+
+    def fail_first_manifest(*args: Any, **kwargs: Any) -> None:
+        nonlocal writes
+        writes += 1
+        if writes == 1:
+            raise OSError("simulated manifest publication failure")
+        original_write(*args, **kwargs)
+
+    monkeypatch.setattr(service.artifact_store, "_write_manifest_locked", fail_first_manifest)
+    contract_id = "01K1DISPOSABLEMEMORY00024"
+    with pytest.raises(OSError, match="manifest publication failure"):
+        await service.run(
+            intent="partial-publication",
+            runtime_id="fixture-runtime",
+            work_fn=child_work,
+            contract_id=contract_id,
+        )
+
+    recovered = await service.run(
+        intent="partial-publication-retry",
+        runtime_id="fixture-runtime",
+        work_fn=child_work,
+        contract_id=contract_id,
+    )
+    assert recovered.contract_id == contract_id
+    assert calls == 1
+    assert service.fetch(contract_id).body == {"recoverable": True}
+
+
+@pytest.mark.asyncio
 async def test_large_retry_recovers_envelope_without_reading_body(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
