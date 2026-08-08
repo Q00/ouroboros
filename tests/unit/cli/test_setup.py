@@ -37,6 +37,74 @@ from ouroboros.providers.profiles import resolve_completion_profile
 # ── Codex setup tests ────────────────────────────────────────────
 
 
+@pytest.mark.parametrize(
+    ("runtime", "env_key"),
+    [
+        ("claude", "OUROBOROS_CLI_PATH"),
+        ("opencode", "OUROBOROS_OPENCODE_CLI_PATH"),
+        ("hermes", "OUROBOROS_HERMES_CLI_PATH"),
+    ],
+)
+def test_detect_runtimes_prefers_exact_override_over_stale_path(
+    tmp_path: Path,
+    runtime: str,
+    env_key: str,
+) -> None:
+    configured = tmp_path / "configured" / f"{runtime}-wrapper"
+    configured.parent.mkdir()
+    configured.write_text("#!/bin/sh\n", encoding="utf-8")
+    configured.chmod(0o755)
+
+    def which(candidate: str) -> str | None:
+        if candidate == str(configured):
+            return str(configured)
+        if candidate == runtime:
+            return f"/stale/path/{runtime}"
+        return None
+
+    with (
+        patch.dict(os.environ, {env_key: str(configured)}, clear=True),
+        patch("ouroboros.cli.commands.setup.shutil.which", side_effect=which),
+        patch("ouroboros.config.get_codex_cli_path", return_value=None),
+        patch("ouroboros.cli.commands.setup._CODEX_APP_CLI_PATH", tmp_path / "missing-codex"),
+    ):
+        detected = setup_cmd._detect_runtimes()
+
+    assert detected[runtime] == str(configured.resolve())
+
+
+@pytest.mark.parametrize(
+    ("runtime", "env_key"),
+    [
+        ("claude", "OUROBOROS_CLI_PATH"),
+        ("opencode", "OUROBOROS_OPENCODE_CLI_PATH"),
+        ("hermes", "OUROBOROS_HERMES_CLI_PATH"),
+    ],
+)
+def test_detect_runtimes_invalid_override_does_not_use_stale_path(
+    tmp_path: Path,
+    runtime: str,
+    env_key: str,
+) -> None:
+    missing = tmp_path / "missing" / f"{runtime}-wrapper"
+    probes: list[str] = []
+
+    def which(candidate: str) -> str | None:
+        probes.append(candidate)
+        return f"/stale/path/{runtime}" if candidate == runtime else None
+
+    with (
+        patch.dict(os.environ, {env_key: str(missing)}, clear=True),
+        patch("ouroboros.cli.commands.setup.shutil.which", side_effect=which),
+        patch("ouroboros.config.get_codex_cli_path", return_value=None),
+        patch("ouroboros.cli.commands.setup._CODEX_APP_CLI_PATH", tmp_path / "missing-codex"),
+    ):
+        detected = setup_cmd._detect_runtimes()
+
+    assert detected[runtime] is None
+    assert runtime not in probes
+
+
 class TestCodexSetup:
     """Tests for Codex-specific setup behavior."""
 

@@ -734,13 +734,13 @@ class EventStore:
         shared database with normal connection-scoped transactions, and a
         keepalive connection anchors the database's lifetime.
         """
-        # Mutually exclusive with close() in BOTH orders (review rounds
-        # seven and eight): initialization during an in-flight close waits for
-        # the full drain/checkpoint/dispose sequence, and a close started
-        # during initialization waits for initialization to finish.
+        # Serialize with close; once work starts, settle it before surfacing cancellation.
         async with self._lifecycle_lock:
             self._closing = False
-            await self._initialize_locked(create_schema=create_schema)
+            await _run_to_settlement(
+                self._initialize_locked(create_schema=create_schema),
+                operation="initialize",
+            )
 
     async def _initialize_locked(self, *, create_schema: bool | None = None) -> None:
         if self._configuration_error is not None:

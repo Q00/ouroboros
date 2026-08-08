@@ -229,6 +229,16 @@ def _resolve_setup_codex_cli_path(
     ).cli_path
 
 
+def _runtime_cli_from_env(env_key: str, command_name: str) -> str | None:
+    """Resolve an explicit runtime executable before consulting PATH."""
+    configured = os.environ.get(env_key, "").strip()
+    if configured:
+        resolved = shutil.which(str(Path(configured).expanduser()))
+        return str(Path(resolved).absolute()) if resolved is not None else None
+    resolved = shutil.which(command_name)
+    return str(Path(resolved).absolute()) if resolved is not None else None
+
+
 def _detect_runtimes() -> dict[str, str | None]:
     """Detect available runtime CLIs in PATH.
 
@@ -236,10 +246,12 @@ def _detect_runtimes() -> dict[str, str | None]:
     and persisted orchestrator ``*_cli_path`` settings so users with non-PATH
     installs are still detected.
     """
-    runtimes: dict[str, str | None] = {}
-    for name in ("claude", "codex", "opencode", "hermes"):
-        path = shutil.which(name)
-        runtimes[name] = path
+    runtimes: dict[str, str | None] = {
+        "claude": _runtime_cli_from_env("OUROBOROS_CLI_PATH", "claude"),
+        "codex": shutil.which("codex"),
+        "opencode": _runtime_cli_from_env("OUROBOROS_OPENCODE_CLI_PATH", "opencode"),
+        "hermes": _runtime_cli_from_env("OUROBOROS_HERMES_CLI_PATH", "hermes"),
+    }
 
     # Codex: mirror the shared runtime launch resolver so setup persists the
     # executable that nested execution will actually use.

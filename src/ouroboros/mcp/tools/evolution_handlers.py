@@ -1714,7 +1714,7 @@ class StartEvolveStepHandler:
         background_acceptance = BackgroundJobAcceptanceState()
 
         async def _abort_unaccepted_claim(error: BaseException) -> None:
-            if not background_acceptance.cancellation_may_have_accepted():
+            if not background_acceptance.may_have_accepted(error):
                 await prepared_claim.abort_on_failure(error)
 
         try:

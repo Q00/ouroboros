@@ -582,6 +582,7 @@ async def test_start_evolve_preacceptance_cancellation_aborts_prepared_claim(
     manager = JobManager(store)
     claim_prepared = asyncio.Event()
     claim_cancelled = asyncio.Event()
+    release_claim_cleanup = asyncio.Event()
     enqueue_started = asyncio.Event()
 
     class ControlledEvolveHandler:
@@ -595,6 +596,7 @@ async def test_start_evolve_preacceptance_cancellation_aborts_prepared_claim(
                 raise AssertionError("unaccepted prepared claim must not run")
             except asyncio.CancelledError:
                 claim_cancelled.set()
+                await release_claim_cleanup.wait()
                 raise
 
     async def block_before_acceptance(**_kwargs):  # type: ignore[no-untyped-def]
@@ -614,16 +616,21 @@ async def test_start_evolve_preacceptance_cancellation_aborts_prepared_claim(
         await asyncio.wait_for(claim_prepared.wait(), timeout=1.0)
         await asyncio.wait_for(enqueue_started.wait(), timeout=1.0)
         pending.cancel()
+        await asyncio.wait_for(claim_cancelled.wait(), timeout=1.0)
+        pending.cancel()
+        await asyncio.sleep(0)
+        assert not pending.done()
+        release_claim_cleanup.set()
 
         with pytest.raises(asyncio.CancelledError):
             await pending
 
-        await asyncio.wait_for(claim_cancelled.wait(), timeout=1.0)
         assert manager._started_job_ids == set()
         assert manager._tasks == {}
         assert manager._runner_tasks == {}
         assert await store.query_events(event_type="mcp.job.created") == []
     finally:
+        release_claim_cleanup.set()
         if not pending.done():
             pending.cancel()
             with pytest.raises(asyncio.CancelledError):

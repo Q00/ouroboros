@@ -56,27 +56,26 @@ class SeedHandoffRedemption:
         operation: Awaitable[Any],
         *,
         require_ok: bool = False,
-        cancellation_may_have_accepted: bool | Callable[[], bool] = True,
+        acceptance_may_have_occurred: bool | Callable[[BaseException], bool] = True,
     ) -> Any:
         """Commit redemption once the selected transport accepts ownership.
 
-        Detached transports may spawn an external owner before cancellation is
-        observed, so their cancellation remains ambiguous.  Plugin dispatch is
-        different: no owner exists until the ``_subagent`` envelope is returned,
-        and its caller therefore opts into compensation on pre-envelope cancel.
+        The transport callback classifies every exceptional exit against its
+        authoritative acceptance phase. Detached transports can become
+        ambiguous before an exception is observed; local transports can prove
+        acceptance through JobManager even if their receipt read then fails.
+        Plugin dispatch is different: no owner exists until the ``_subagent``
+        envelope is returned, so every pre-envelope exception is compensable.
         """
         try:
             result = await operation
         except BaseException as exc:
-            cancellation_is_ambiguous = (
-                cancellation_may_have_accepted()
-                if callable(cancellation_may_have_accepted)
-                else cancellation_may_have_accepted
+            acceptance_is_authoritative_or_ambiguous = (
+                acceptance_may_have_occurred(exc)
+                if callable(acceptance_may_have_occurred)
+                else acceptance_may_have_occurred
             )
-            acceptance_unknown = (
-                isinstance(exc, asyncio.CancelledError) and cancellation_is_ambiguous
-            ) or (getattr(exc, "error_code", None) == "detached_job_acceptance_pending")
-            if not acceptance_unknown:
+            if not acceptance_is_authoritative_or_ambiguous:
                 self.rollback()
             raise
         if require_ok and result.is_err:

@@ -111,8 +111,24 @@ class PreparedEvolveClaim:
         if self._task is None or self._task.done():
             return
         self._task.cancel()
+        cleanup_cancellation: asyncio.CancelledError | None = None
+        owner = asyncio.current_task()
+        initial_cancels = owner.cancelling() if owner is not None else 0
+        while not self._task.done():
+            try:
+                await asyncio.shield(self._task)
+            except asyncio.CancelledError as exc:
+                # The held handler is expected to finish cancelled. A separate
+                # cancellation of this cleanup owner must not be forwarded as
+                # a second cancellation into the handler while its durable
+                # claim transaction is still settling.
+                if owner is not None and owner.cancelling() > initial_cancels:
+                    cleanup_cancellation = exc
+                continue
         with suppress(asyncio.CancelledError):
-            await self._task
+            self._task.result()
+        if cleanup_cancellation is not None:
+            raise cleanup_cancellation
 
     async def abort_on_failure(self, _error: BaseException) -> None:
         """Adapt abort cleanup to the background enqueue-failure hook."""
