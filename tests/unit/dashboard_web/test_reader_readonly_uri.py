@@ -1193,16 +1193,25 @@ def test_picker_bounds_selected_workflow_progress_history(tmp_path, monkeypatch)
     monkeypatch.setattr(reader_module, "_decode_payload", original_decode)
     statements: list[str] = []
     vm_steps = 0
+    current_statement = "<connection setup>"
+    statement_vm_steps: dict[str, int] = {}
 
     def traced_connect(db_path):
         traced = original_connect(db_path)
 
+        def trace_statement(statement):
+            nonlocal current_statement
+            statements.append(statement)
+            current_statement = statement
+            statement_vm_steps.setdefault(statement, 0)
+
         def count_step():
             nonlocal vm_steps
             vm_steps += 1
+            statement_vm_steps[current_statement] = statement_vm_steps.get(current_statement, 0) + 1
             return 0
 
-        traced.set_trace_callback(statements.append)
+        traced.set_trace_callback(trace_statement)
         traced.set_progress_handler(count_step, 1)
         return traced
 
@@ -1272,7 +1281,10 @@ def test_picker_bounds_selected_workflow_progress_history(tmp_path, monkeypatch)
     assert runs[0]["last_row"] == 100_001
     assert median(cpu_samples) < 0.5
     assert max(wall_samples) < 5.0
-    assert vm_steps < 5_000
+    top_vm_statements = sorted(statement_vm_steps.items(), key=lambda item: item[1], reverse=True)[
+        :10
+    ]
+    assert vm_steps < 5_000, top_vm_statements
     assert len(unbounded_rows) == 100_000
     assert unbounded_progress_callbacks >= 100
     assert max(decode_samples) <= 4
@@ -1323,19 +1335,22 @@ def test_picker_bounds_large_start_history(tmp_path, monkeypatch) -> None:
     original_connect = reader_module._connect_readonly
     statements: list[str] = []
     start_vm_steps = 0
-    counting_start = False
+    current_statement = "<connection setup>"
+    statement_vm_steps: dict[str, int] = {}
 
     def traced_connect(db_path):
         traced = original_connect(db_path)
 
         def trace_statement(statement):
-            nonlocal counting_start
+            nonlocal current_statement
             statements.append(statement)
-            counting_start = f"INDEXED BY {START_EVENT_INDEX}" in statement
+            current_statement = statement
+            statement_vm_steps.setdefault(statement, 0)
 
         def count_step():
             nonlocal start_vm_steps
-            if counting_start:
+            statement_vm_steps[current_statement] = statement_vm_steps.get(current_statement, 0) + 1
+            if f"INDEXED BY {START_EVENT_INDEX}" in current_statement:
                 start_vm_steps += 1
             return 0
 
@@ -1358,7 +1373,10 @@ def test_picker_bounds_large_start_history(tmp_path, monkeypatch) -> None:
 
     assert [(run["execution_id"], run["provider"]) for run in runs] == [("exec_target", "codex")]
     assert runs[0]["last_row"] == 100_000
-    assert start_vm_steps < 500
+    top_vm_statements = sorted(statement_vm_steps.items(), key=lambda item: item[1], reverse=True)[
+        :10
+    ]
+    assert start_vm_steps < 500, (top_vm_statements, start_plans)
     assert len(start_queries) == 1
     assert all("TEMP B-TREE" not in str(row[3]) for plan in start_plans for row in plan)
     assert any(START_EVENT_INDEX in str(row[3]) for plan in start_plans for row in plan)
