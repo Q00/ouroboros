@@ -753,6 +753,8 @@ _RELATIONAL_TARGET_RE = re.compile(
     r"designed\s+for|intended\s+for(?:\s+use\s+(?:with|in|by))?|"
     r"meant\s+for|built\s+for|made\s+for|usable\s+by|"
     r"available\s+to|accessible\s+to|open\s+to|exposed\s+to|"
+    r"syncs?\s+with|synchroniz\w*\s+with|connects?\s+(?:to|with)|"
+    r"links?\s+(?:to|with)|talks?\s+to|communicates?\s+with|"
     r"for\s+use\s+(?:with|in|by)|for)\s+"
     # Coordinated consumer lists are consumed whole (#1813 R37): the web
     # item may sit anywhere in "mobile apps and web apps".
@@ -855,7 +857,10 @@ _POSTPOSITIVE_BROWSER_DENIAL_RE = re.compile(
     r"(?:is\s+|are\s+|was\s+|were\s+|has\s+been\s+|have\s+been\s+|"
     r"had\s+been\s+|will\s+be\s+)?"
     r"(?:\w+ly\s+)?"
-    r"(?:not\s+(?:supported|available|allowed|permitted|enabled|possible|"
+    r"(?:(?:isn[’']?t|aren[’']?t|wasn[’']?t|weren[’']?t)\s+(?:\w+ly\s+)?"
+    r"(?:supported|available|allowed|permitted|enabled|possible|"
+    r"offered|provided|present|included)|"
+    r"not\s+(?:supported|available|allowed|permitted|enabled|possible|"
     r"offered|provided|present|included)|"
     r"unsupported|disabled|unavailable|dropped|excluded|"
     r"turned\s+off|removed|prohibited|forbidden|banned|blocked|stripped|"
@@ -866,7 +871,16 @@ _POSTPOSITIVE_BROWSER_DENIAL_RE = re.compile(
 # A for-phrase whose object carries a human relative clause ("for
 # developers who build web apps") is audience end to end (#1813 R41) —
 # structural, not another token window.
-_AUDIENCE_CLAUSE_RE = re.compile(r"\bfor\s+[^,.;]*?\b(?:who|whose|whom)\b[^,.;]*")
+_AUDIENCE_CLAUSE_RE = re.compile(
+    r"\bfor\s+[^,.;]*?\b(?:who|whose|whom)\b[^,.;]*"
+    # "for teams that use web apps": a that-clause counts as audience only
+    # with an activity verb, so content clauses keep product ownership
+    # (#1813 R42).
+    r"|\bfor\s+[^,.;]*?\bthat\s+"
+    r"(?:use|uses|build|builds|develop|develops|run|runs|manage|manages|"
+    r"maintain|maintains|deploy|deploys|ship|ships|operate|operates|"
+    r"create|creates|work\s+(?:with|on))\b[^,.;]*"
+)
 
 
 def _strip_consumer_relations(text: str) -> str:

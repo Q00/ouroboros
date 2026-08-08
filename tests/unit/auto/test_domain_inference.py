@@ -2778,3 +2778,34 @@ def test_compositional_not_available_denial() -> None:
     _seed_section(ledger, "runtime_context", value="Native desktop runtime")
     result = derive_domain_from_ledger(ledger)
     assert TaskClass.WEB_APP not in result.classes
+
+
+def test_contracted_postpositive_denials() -> None:
+    """R42 probe: "aren't supported" composes like "are not supported"."""
+    ledger = _bare_ledger("Build a native desktop settings tool; browser apps aren't supported")
+    _seed_section(ledger, "outputs", value="Settings panel for local files")
+    _seed_section(ledger, "runtime_context", value="Native desktop runtime")
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes
+
+
+def test_that_clause_audiences_with_activity_verbs() -> None:
+    """R42 probe: "for teams that use web apps" is audience activity."""
+    ledger = _bare_ledger("Build a native desktop settings tool for teams that use web apps")
+    _seed_section(ledger, "outputs", value="Settings panel for local files")
+    _seed_section(ledger, "runtime_context", value="Native desktop runtime")
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes
+
+
+@pytest.mark.parametrize(
+    "outputs",
+    ["Settings panel syncs with web apps", "Settings panel connects to web apps"],
+)
+def test_sync_and_connect_relations_are_integration_targets(outputs: str) -> None:
+    """R42 probe: sync/connect name integration targets."""
+    ledger = _bare_ledger("Build a native desktop settings tool")
+    _seed_section(ledger, "outputs", value=outputs)
+    _seed_section(ledger, "runtime_context", value="Native desktop runtime")
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes
