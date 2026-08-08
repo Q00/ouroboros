@@ -517,12 +517,39 @@ class TestResolveRuntime:
 
 
 class TestConfiguredRuntimeTopology:
-    def test_missing_config_keeps_path_fallback_available(self) -> None:
-        with patch(
-            "ouroboros.cli.commands.update.load_config",
-            side_effect=ConfigError("missing config"),
-        ):
+    def test_missing_config_keeps_path_fallback_available(self, tmp_path: Path) -> None:
+        with patch("ouroboros.cli.commands.update.get_config_dir", return_value=tmp_path):
             assert _configured_runtime_topology() == RuntimeRefreshTopology()
+
+    def test_existing_config_with_unrelated_validation_error_fails_closed(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        (tmp_path / "config.yaml").write_text(
+            """orchestrator:
+  runtime_backend: opencode
+  opencode_mode: subprocess
+  default_max_turns: 0
+""",
+            encoding="utf-8",
+        )
+
+        with (
+            patch("ouroboros.cli.commands.update.get_config_dir", return_value=tmp_path),
+            pytest.raises(ConfigError) as exc_info,
+        ):
+            _configured_runtime_topology()
+
+        assert exc_info.value.config_key == "orchestrator.default_max_turns"
+
+    def test_existing_malformed_config_fails_closed(self, tmp_path: Path) -> None:
+        (tmp_path / "config.yaml").write_text("orchestrator: [", encoding="utf-8")
+
+        with (
+            patch("ouroboros.cli.commands.update.get_config_dir", return_value=tmp_path),
+            pytest.raises(ConfigError),
+        ):
+            _configured_runtime_topology()
 
     def test_reads_backend_and_opencode_mode_from_valid_config(self) -> None:
         config = MagicMock()
@@ -865,6 +892,74 @@ class TestUpdateFlow:
         upgrade_call, version_call = run.call_args_list
         assert upgrade_call.kwargs["env"]["PIPX_HOME"] == "/managed/pipx"
         assert version_call.args[0][0] == "/managed/pipx/venvs/ouroboros-ai/bin/ouroboros"
+
+    def test_invalid_existing_config_aborts_runtime_refresh_after_verified_upgrade(
+        self,
+    ) -> None:
+        upgrade = MagicMock(returncode=0)
+        version_probe = MagicMock(returncode=0, stdout="Ouroboros version 99.0.0\n")
+        config_error = ConfigError(
+            "Configuration validation failed",
+            config_key="orchestrator.default_max_turns",
+        )
+
+        with (
+            patch("ouroboros.cli.commands.update.__version__", "0.1.0"),
+            patch(
+                "ouroboros.cli.commands.update._latest_pypi_version",
+                return_value="99.0.0",
+            ),
+            patch(
+                "ouroboros.cli.commands.update._detect_installation_identity",
+                return_value=_mock_identity("uv"),
+            ),
+            patch(
+                "ouroboros.cli.commands.update._configured_runtime_topology",
+                side_effect=config_error,
+            ),
+            patch("ouroboros.cli.commands.update.shutil.which") as which,
+            patch(
+                "ouroboros.cli.commands.update.subprocess.run",
+                side_effect=[upgrade, version_probe],
+            ) as run,
+        ):
+            result = runner.invoke(app, ["--yes"])
+
+        assert result.exit_code == 1
+        output = _plain(result.output)
+        assert "Package updated, but the existing runtime configuration" in output
+        assert "Ouroboros partially updated" in output
+        assert "runtime config refresh (existing config is invalid)" in output
+        assert run.call_count == 2
+        which.assert_not_called()
+
+    def test_runtime_none_does_not_read_invalid_config(self) -> None:
+        upgrade = MagicMock(returncode=0)
+        version_probe = MagicMock(returncode=0, stdout="Ouroboros version 99.0.0\n")
+
+        with (
+            patch("ouroboros.cli.commands.update.__version__", "0.1.0"),
+            patch(
+                "ouroboros.cli.commands.update._latest_pypi_version",
+                return_value="99.0.0",
+            ),
+            patch(
+                "ouroboros.cli.commands.update._detect_installation_identity",
+                return_value=_mock_identity("uv"),
+            ),
+            patch("ouroboros.cli.commands.update._configured_runtime_topology") as topology,
+            patch(
+                "ouroboros.cli.commands.update.subprocess.run",
+                side_effect=[upgrade, version_probe],
+            ) as run,
+        ):
+            result = runner.invoke(app, ["--yes", "--runtime", "none"])
+
+        assert result.exit_code == 0
+        assert "Runtime refresh skipped" in result.output
+        assert "Updated to v99.0.0" in _plain(result.output)
+        assert run.call_count == 2
+        topology.assert_not_called()
 
     def test_failed_package_upgrade_aborts_with_exit_code_one(self) -> None:
         failed_step = MagicMock(returncode=1)

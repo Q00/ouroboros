@@ -36,6 +36,7 @@ from ouroboros.cli.formatters.panels import (
     print_warning,
 )
 from ouroboros.config.loader import load_config
+from ouroboros.config.models import get_config_dir
 from ouroboros.core.errors import ConfigError
 
 app = typer.Typer(
@@ -493,10 +494,18 @@ def _refresh_runtime_config(
 
 def _configured_runtime_topology() -> RuntimeRefreshTopology:
     """Read the persisted runtime topology without inferring it from PATH."""
+    config_path = get_config_dir() / "config.yaml"
+    config_existed = config_path.exists()
     try:
-        config = load_config()
+        config = load_config(config_path)
     except ConfigError:
-        return RuntimeRefreshTopology()
+        # A genuinely unconfigured installation may still use PATH discovery.
+        # An existing malformed/invalid config is different: treating it as
+        # absent could refresh a different runtime after the package mutation.
+        # Check both sides of the load to fail closed across create/delete races.
+        if not config_existed and not config_path.exists():
+            return RuntimeRefreshTopology()
+        raise
     runtime_backend = config.orchestrator.runtime_backend
     opencode_mode = config.orchestrator.opencode_mode
     # Legacy OpenCode configs predate the explicit mode field. Their effective
@@ -663,19 +672,42 @@ def update(
             raise typer.Exit(1)
 
     failed: list[str] = []
-    configured_topology = _configured_runtime_topology()
-    resolved_runtime = _resolve_runtime(
-        runtime,
-        configured_backend=configured_topology.runtime_backend,
-    )
-    opencode_mode = (
-        configured_topology.opencode_mode
-        if resolved_runtime in {"opencode", "opencode_cli"}
-        else None
-    )
-    if resolved_runtime == "none":
+    topology_error: ConfigError | None = None
+    configured_topology = RuntimeRefreshTopology()
+    if runtime != "none":
+        try:
+            configured_topology = _configured_runtime_topology()
+        except ConfigError as exc:
+            topology_error = exc
+
+    resolved_runtime = "none"
+    opencode_mode: Literal["plugin", "subprocess"] | None = None
+    if topology_error is not None:
+        print_warning(
+            (
+                "Runtime refresh would be skipped because the existing configuration "
+                "could not be read safely: "
+                if dry_run
+                else "Package updated, but the existing runtime configuration could not be "
+                "read safely: "
+            )
+            + str(topology_error)
+        )
+        failed.append("runtime config refresh (existing config is invalid)")
+    else:
+        resolved_runtime = _resolve_runtime(
+            runtime,
+            configured_backend=configured_topology.runtime_backend,
+        )
+        opencode_mode = (
+            configured_topology.opencode_mode
+            if resolved_runtime in {"opencode", "opencode_cli"}
+            else None
+        )
+
+    if topology_error is None and resolved_runtime == "none":
         print_info("Runtime refresh skipped — package upgrade only.")
-    elif resolved_runtime == "claude":
+    elif topology_error is None and resolved_runtime == "claude":
         plugin_refreshed = _refresh_claude_plugin(dry_run)
         if plugin_refreshed is None:
             # claude CLI absent: a notice, not a failure — setup would also
@@ -689,7 +721,7 @@ def update(
                 failed.append("Claude Code plugin refresh")
             if not _refresh_runtime_config("claude", dry_run, identity):
                 failed.append("claude runtime config refresh")
-    else:
+    elif topology_error is None:
         # Codex and the other setup-supported runtimes: setup re-installs
         # the packaged rules/skills, so no separate plugin step is needed.
         if not _refresh_runtime_config(
