@@ -58,8 +58,7 @@ from ouroboros.orchestrator.cli_version_attestation import (
     probe_cli_executable_version_attestation,
     read_cli_executable_content_identity,
     read_cli_executable_filesystem_identity,
-    read_cli_executable_generation_identity,
-    read_cli_executable_symlink_generation_identity,
+    read_cli_executable_resolution_chain_identity,
     read_cli_executable_symlink_identity,
     require_unchanged_cli_version_attestation,
 )
@@ -540,18 +539,17 @@ class CodexCliRuntime:
         return probe_cli_executable_version_attestation(
             self._cli_executable_identity(),
             filesystem_identity=self._cli_executable_filesystem_identity,
-            filesystem_generation_identity=self._cli_executable_generation_identity,
+            resolution_chain_identity=self._cli_executable_resolution_chain_identity,
             content_identity=self._cli_executable_content_identity,
             symlink_identity=self._cli_executable_symlink_identity,
-            symlink_generation_identity=self._cli_executable_symlink_generation_identity,
             hash_payload=self._hash_json_payload,
         )
 
     def _cli_executable_filesystem_identity(self) -> tuple[int, int] | None:
         return read_cli_executable_filesystem_identity(self._cli_executable_identity())
 
-    def _cli_executable_generation_identity(self) -> tuple[int, ...] | None:
-        return read_cli_executable_generation_identity(self._cli_executable_identity())
+    def _cli_executable_resolution_chain_identity(self) -> tuple[tuple[object, ...], ...] | None:
+        return read_cli_executable_resolution_chain_identity(self._cli_executable_identity())
 
     _compare_cli_executable_version_attestations = staticmethod(
         compare_cli_executable_version_attestations
@@ -559,11 +557,6 @@ class CodexCliRuntime:
 
     def _cli_executable_symlink_identity(self) -> dict[str, str] | None:
         return read_cli_executable_symlink_identity(self._cli_executable_identity())
-
-    def _cli_executable_symlink_generation_identity(
-        self,
-    ) -> tuple[int, int, int, int, int] | None:
-        return read_cli_executable_symlink_generation_identity(self._cli_executable_identity())
 
     def _cli_executable_content_identity(self) -> str | None:
         return read_cli_executable_content_identity(self._cli_executable_identity())

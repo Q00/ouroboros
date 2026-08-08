@@ -20,6 +20,9 @@ from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPToolError
 from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
 from ouroboros.orchestrator.adapter import AgentMessage, ParamSupport, RuntimeHandle
+from ouroboros.orchestrator.cli_version_attestation import (
+    read_cli_executable_resolution_chain_identity,
+)
 import ouroboros.orchestrator.codex_cli_runtime as codex_cli_runtime_module
 from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime
 from ouroboros.orchestrator.copilot_cli_runtime import CopilotCliRuntime
@@ -349,6 +352,22 @@ def test_missing_attestations_never_compare_as_positive_identity_evidence() -> N
     )
 
 
+def test_resolution_chain_symlink_loop_fails_closed(tmp_path: Path) -> None:
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    first.symlink_to(second.name)
+    second.symlink_to(first.name)
+
+    assert read_cli_executable_resolution_chain_identity(str(first)) is None
+
+
+def test_resolution_chain_broken_symlink_fails_closed(tmp_path: Path) -> None:
+    broken = tmp_path / "broken"
+    broken.symlink_to("missing")
+
+    assert read_cli_executable_resolution_chain_identity(str(broken)) is None
+
+
 def test_initialization_timeout_blocks_without_claiming_executable_drift(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -533,6 +552,96 @@ def test_atomic_aba_during_version_probe_is_not_authorized(
     assert "executable changed" not in str(excinfo.value)
     assert cli_path.stat().st_ino == original_inode
     assert cli_path.read_text(encoding="utf-8") == original
+
+
+def test_intermediate_symlink_atomic_aba_during_probe_is_not_authorized(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    launch_dir = tmp_path / "launch"
+    middle_dir = tmp_path / "middle"
+    targets_dir = tmp_path / "targets"
+    launch_dir.mkdir()
+    middle_dir.mkdir()
+    targets_dir.mkdir()
+    good_target = targets_dir / "good"
+    bad_target = targets_dir / "bad"
+    script = "#!/bin/sh\necho codex 1.0\n"
+    good_target.write_text(script, encoding="utf-8")
+    bad_target.write_text(script, encoding="utf-8")
+    good_target.chmod(0o755)
+    bad_target.chmod(0o755)
+
+    launch_path = launch_dir / "codex"
+    intermediate_hop = middle_dir / "hop"
+    launch_path.symlink_to("../middle/hop")
+    intermediate_hop.symlink_to("../targets/good")
+    runtime = CodexCliRuntime(cli_path=launch_path, cwd=tmp_path, model="gpt-5")
+    initialized = runtime._cli_executable_version_attestation_snapshot
+    assert initialized is not None
+    assert runtime._build_command(str(tmp_path / "stable-last-message"))
+    original_hop_inode = intermediate_hop.lstat().st_ino
+
+    bad_hop = middle_dir / "bad-hop"
+    parked_hop = middle_dir / "parked-hop"
+    bad_hop.symlink_to("../targets/bad")
+
+    def swap_and_restore_intermediate_hop(
+        args: list[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        os.replace(intermediate_hop, parked_hop)
+        os.replace(bad_hop, intermediate_hop)
+        os.replace(intermediate_hop, bad_hop)
+        os.replace(parked_hop, intermediate_hop)
+        return subprocess.CompletedProcess(args, 0, stdout="codex 1.0\n", stderr="")
+
+    monkeypatch.setattr(
+        codex_cli_runtime_module.subprocess,
+        "run",
+        swap_and_restore_intermediate_hop,
+    )
+    with pytest.raises(RuntimeError, match="failed while verifying") as excinfo:
+        runtime._build_command(str(tmp_path / "last-message"))
+
+    assert "executable changed" not in str(excinfo.value)
+    assert intermediate_hop.lstat().st_ino == original_hop_inode
+    assert intermediate_hop.readlink() == Path("../targets/good")
+
+
+def test_sibling_churn_between_attestations_does_not_claim_executable_drift(
+    tmp_path: Path,
+) -> None:
+    cli_path = tmp_path / "codex"
+    cli_path.write_text("#!/bin/sh\necho codex 1.0\n", encoding="utf-8")
+    cli_path.chmod(0o755)
+    runtime = CodexCliRuntime(cli_path=cli_path, cwd=tmp_path, model="gpt-5")
+
+    (tmp_path / "unrelated-sibling").write_text("unrelated", encoding="utf-8")
+
+    assert runtime._build_command(str(tmp_path / "last-message"))
+
+
+def test_sibling_churn_during_probe_fails_closed_but_is_retryable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cli_path = tmp_path / "codex"
+    cli_path.write_text("#!/bin/sh\necho codex 1.0\n", encoding="utf-8")
+    cli_path.chmod(0o755)
+    runtime = CodexCliRuntime(cli_path=cli_path, cwd=tmp_path, model="gpt-5")
+    successful_run = codex_cli_runtime_module.subprocess.run
+
+    def churn_sibling(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        (tmp_path / "unrelated-sibling").write_text("unrelated", encoding="utf-8")
+        return subprocess.CompletedProcess(args, 0, stdout="codex 1.0\n", stderr="")
+
+    monkeypatch.setattr(codex_cli_runtime_module.subprocess, "run", churn_sibling)
+    with pytest.raises(RuntimeError, match="failed while verifying") as excinfo:
+        runtime._build_command(str(tmp_path / "last-message"))
+    assert "executable changed" not in str(excinfo.value)
+
+    monkeypatch.setattr(codex_cli_runtime_module.subprocess, "run", successful_run)
+    assert runtime._build_command(str(tmp_path / "last-message"))
 
 
 def test_repeated_probe_timeouts_never_converge_to_false_drift(

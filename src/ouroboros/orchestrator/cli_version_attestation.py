@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
 import hashlib
 import os
 from pathlib import Path
+import stat
 import subprocess
 
 
@@ -53,34 +55,79 @@ def read_cli_executable_filesystem_identity(
     return value.st_dev, value.st_ino
 
 
-def read_cli_executable_generation_identity(
+def _stat_generation(value: os.stat_result) -> tuple[int, int, int, int, int, int]:
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_mode,
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+    )
+
+
+def read_cli_executable_resolution_chain_identity(
     executable_path: str | None,
-) -> tuple[int, ...] | None:
-    """Return target and directory metadata that exposes probe-window ABA."""
+) -> tuple[tuple[object, ...], ...] | None:
+    """Resolve every path/symlink hop with generation-bearing evidence.
+
+    The terminal executable and every visited symlink are paired with their
+    containing directory generation. That makes an atomic swap-and-restore of
+    an authority-bearing entry visible even when its original inode is put
+    back unchanged, without treating unrelated churn in ordinary ancestors as
+    executable churn. Resolution is lexical and bounded to 40 symlink
+    traversals; loops and read errors fail closed.
+    """
     if executable_path is None:
         return None
-    path = Path(executable_path)
+    absolute_path = Path(os.path.abspath(os.path.expanduser(executable_path)))
+    pending = deque(absolute_path.parts[1:])
+    resolved_parent = Path(absolute_path.anchor)
+    evidence: list[tuple[object, ...]] = []
+    symlink_count = 0
+
     try:
-        target = path.stat()
-        launch_parent = path.parent.stat()
-        resolved_parent = path.resolve(strict=True).parent.stat()
-    except (OSError, RuntimeError):
+        while pending:
+            component = pending.popleft()
+            if component in {"", "."}:
+                continue
+            if component == "..":
+                resolved_parent = resolved_parent.parent
+                continue
+
+            candidate = resolved_parent / component
+            parent_generation = _stat_generation(resolved_parent.stat())
+            node_stat = candidate.lstat()
+            raw_target: str | None = None
+            if stat.S_ISLNK(node_stat.st_mode):
+                symlink_count += 1
+                if symlink_count > 40:
+                    return None
+                raw_target = os.readlink(candidate)
+            if raw_target is not None or not pending:
+                evidence.append(
+                    (
+                        str(candidate),
+                        raw_target,
+                        parent_generation,
+                        _stat_generation(node_stat),
+                    )
+                )
+
+            if raw_target is None:
+                resolved_parent = candidate
+                continue
+
+            target = Path(raw_target)
+            if target.is_absolute():
+                resolved_parent = Path(target.anchor)
+                target_parts = target.parts[1:]
+            else:
+                target_parts = target.parts
+            pending.extendleft(reversed(target_parts))
+    except OSError:
         return None
-    return (
-        target.st_dev,
-        target.st_ino,
-        target.st_size,
-        target.st_mtime_ns,
-        target.st_ctime_ns,
-        launch_parent.st_dev,
-        launch_parent.st_ino,
-        launch_parent.st_mtime_ns,
-        launch_parent.st_ctime_ns,
-        resolved_parent.st_dev,
-        resolved_parent.st_ino,
-        resolved_parent.st_mtime_ns,
-        resolved_parent.st_ctime_ns,
-    )
+    return tuple(evidence)
 
 
 def read_cli_executable_symlink_identity(executable_path: str | None) -> dict[str, str] | None:
@@ -103,22 +150,6 @@ def read_cli_executable_symlink_identity(executable_path: str | None) -> dict[st
     }
 
 
-def read_cli_executable_symlink_generation_identity(
-    executable_path: str | None,
-) -> tuple[int, int, int, int, int] | None:
-    """Return launch-symlink metadata, or ``None`` for a direct path."""
-    if executable_path is None:
-        return None
-    path = Path(executable_path)
-    try:
-        if not path.is_symlink():
-            return None
-        value = path.lstat()
-    except OSError:
-        return None
-    return value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns, value.st_ctime_ns
-
-
 def read_cli_executable_content_identity(executable_path: str | None) -> str | None:
     """Return the selected CLI byte digest without executing it."""
     if executable_path is None:
@@ -134,35 +165,28 @@ def probe_cli_executable_version_attestation(
     executable_path: str | None,
     *,
     filesystem_identity: FilesystemIdentityReader,
-    filesystem_generation_identity: IdentityReader,
+    resolution_chain_identity: IdentityReader,
     content_identity: IdentityReader,
     symlink_identity: IdentityReader,
-    symlink_generation_identity: IdentityReader,
     hash_payload: HashPayload,
 ) -> CliExecutableVersionAttestation:
     """Probe one executable generation and reject mixed or ABA evidence.
 
     The version process spans multiple syscalls. Positive evidence is emitted
-    only when the effective target, bytes, and launch symlink are unchanged
-    before and after the process. Generation identities include ctime, which
-    makes an in-probe mutate-and-restore (ABA) visible even when the final
-    bytes, symlink text, device, and inode equal their initial values.
+    only when the effective target, bytes, and complete symlink chain are
+    unchanged before and after the process. Generation identities include
+    ctime and containing-directory state, making an in-probe swap-and-restore
+    visible even when final bytes, symlink text, device, and inode match.
     """
     failed = CliExecutableVersionAttestation(CliExecutableVersionState.EXECUTION_FAILED)
     if executable_path is None:
         return failed
 
     before_filesystem = filesystem_identity()
-    before_generation = filesystem_generation_identity()
+    before_resolution_chain = resolution_chain_identity()
     before_content = content_identity()
     before_symlink = symlink_identity()
-    before_symlink_generation = symlink_generation_identity()
-    if (
-        before_filesystem is None
-        or before_generation is None
-        or before_content is None
-        or (before_symlink is None) != (before_symlink_generation is None)
-    ):
+    if before_filesystem is None or before_resolution_chain is None or before_content is None:
         return failed
 
     try:
@@ -182,24 +206,25 @@ def probe_cli_executable_version_attestation(
     if result.returncode != 0 or not version_output:
         return failed
 
-    # Sample in reverse order after the process so every component is bounded
-    # by generation checks. This rejects same-inode writes, symlink retargets,
-    # atomic replacement, and mutate/restore ABA during the probe window.
-    after_symlink_generation = symlink_generation_identity()
+    # Sample in reverse order after the process so authority-bearing entries
+    # are bounded by generation checks. This rejects same-inode writes,
+    # symlink retargets, atomic replacement, and probe-window ABA.
     after_symlink = symlink_identity()
     after_content = content_identity()
-    after_generation = filesystem_generation_identity()
+    after_resolution_chain = resolution_chain_identity()
     after_filesystem = filesystem_identity()
     if (
         after_filesystem != before_filesystem
-        or after_generation != before_generation
+        or after_resolution_chain != before_resolution_chain
         or after_content != before_content
         or after_symlink != before_symlink
-        or after_symlink_generation != before_symlink_generation
     ):
         return failed
 
     device, inode = before_filesystem
+    semantic_symlink_chain = tuple(
+        (entry[0], entry[1]) for entry in before_resolution_chain if entry[1] is not None
+    )
     return CliExecutableVersionAttestation(
         CliExecutableVersionState.VERIFIED,
         hash_payload(
@@ -207,6 +232,7 @@ def probe_cli_executable_version_attestation(
                 "content_sha256": before_content,
                 "filesystem": {"device": device, "inode": inode},
                 "symlink": before_symlink,
+                "symlink_chain": semantic_symlink_chain,
                 "version_output": version_output,
             }
         ),
