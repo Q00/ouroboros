@@ -37,10 +37,10 @@ from ouroboros.persistence.artifact_binding import (
     completion_path,
     completion_payload,
     encode_record,
-    manifest_from_authority,
+    reconcile_contract_authority,
+    tombstone_path,
+    tombstone_record,
     validate_authority,
-    validate_binding,
-    validate_manifest_authority,
 )
 from ouroboros.persistence.artifact_errors import (
     ArtifactContractConflictError,
@@ -363,6 +363,7 @@ class ContentAddressedArtifactStore:
             not self._manifest_path(contract_id).exists()
             and not self._binding_path(contract_id).exists()
             and not self._anchor_path(contract_id).exists()
+            and not tombstone_path(self._anchor_path(contract_id)).exists()
         ):
             return None
         self.initialize()
@@ -396,6 +397,7 @@ class ContentAddressedArtifactStore:
             not self._manifest_path(contract_id).exists()
             and not self._binding_path(contract_id).exists()
             and not self._anchor_path(contract_id).exists()
+            and not tombstone_path(self._anchor_path(contract_id)).exists()
         ):
             return None
         self.initialize()
@@ -468,6 +470,13 @@ class ContentAddressedArtifactStore:
                 manifest,
                 authority_check=lock_authority.validate,
             )
+            latest = _latest_artifact_event(manifest)
+            if latest is not None and latest.get("type") == "artifact.tombstoned":
+                raise ArtifactTombstonedError(
+                    "Artifact was pruned; retention can no longer be changed",
+                    operation="write",
+                    details={"contract_id": contract_id},
+                )
             manifest["active"] = bool(active)
             manifest["retain_until"] = _as_utc(retain_until).isoformat()
             manifest["updated_at"] = timestamp.isoformat()
@@ -513,14 +522,26 @@ class ContentAddressedArtifactStore:
                         continue
                     if latest.get("artifact_ref") != candidate.artifact_ref:
                         continue
-                    manifest["events"].append(
-                        {
-                            "type": "artifact.tombstoned",
-                            "timestamp": timestamp.isoformat(),
-                            "artifact_ref": candidate.artifact_ref,
-                            "reason": candidate.reason,
-                        }
+                    event = {
+                        "type": "artifact.tombstoned",
+                        "timestamp": timestamp.isoformat(),
+                        "artifact_ref": candidate.artifact_ref,
+                        "reason": candidate.reason,
+                    }
+                    anchor = self._read_authority_locked(contract_id)
+                    if anchor is None:
+                        raise ArtifactManifestError(
+                            "Tombstone publication requires initial contract authority",
+                            operation="write",
+                            details={"contract_id": contract_id},
+                        )
+                    self._write_record_locked(
+                        tombstone_path(self._anchor_path(contract_id)),
+                        encode_record(tombstone_record(event, anchor)),
+                        stable=True,
+                        authority_check=lock_authority.validate,
                     )
+                    manifest["events"].append(event)
                     manifest["updated_at"] = timestamp.isoformat()
                     self._write_manifest_locked(
                         contract_id,
@@ -752,92 +773,13 @@ class ContentAddressedArtifactStore:
         *,
         authority_check: Callable[[], None],
     ) -> dict[str, Any]:
-        anchor = self._read_authority_locked(contract_id)
-        binding_path_value = self._binding_path(contract_id)
-        if anchor is None:
-            if manifest["events"] or binding_path_value.exists():
-                raise ArtifactManifestError(
-                    "Contract metadata is missing independently anchored authority",
-                    operation="read",
-                    details={"contract_id": contract_id},
-                )
-            return manifest
-        marker = completion_path(self._anchor_path(contract_id))
-        recovering = not manifest["events"]
-        if recovering:
-            if marker.exists():
-                raise ArtifactManifestError(
-                    "Committed contract manifest binding is missing; recovery refused",
-                    operation="read",
-                    details={"contract_id": contract_id},
-                )
-            manifest = _validate_manifest(
-                manifest_from_authority(anchor),
-                contract_id=contract_id,
-                path=self._manifest_path(contract_id),
-            )
-        else:
-            try:
-                validate_manifest_authority(manifest, anchor)
-            except ValueError as exc:
-                raise ArtifactManifestError(
-                    "Contract manifest binding does not match independently anchored authority",
-                    operation="read",
-                    details={"contract_id": contract_id},
-                ) from exc
-        try:
-            cached = json.loads(
-                _read_bounded_bytes(
-                    binding_path_value,
-                    max_bytes=BINDING_MAX_BYTES,
-                    root=self._bindings_root,
-                    anchor=self._directory_anchor,
-                    label="artifact binding",
-                )
-            )
-            validate_binding(cached, anchor)
-        except FileNotFoundError:
-            self._write_record_locked(
-                binding_path_value,
-                encode_record(anchor),
-                stable=False,
-                authority_check=authority_check,
-            )
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
-            raise ArtifactManifestError(
-                "Artifact binding does not match independently anchored authority",
-                operation="read",
-                details={"contract_id": contract_id},
-            ) from exc
-        if recovering:
-            self._write_manifest_locked(
-                contract_id,
-                manifest,
-                authority_check=authority_check,
-            )
-        expected_marker = completion_payload(anchor)
-        if marker.exists():
-            actual_marker = _read_bounded_bytes(
-                marker,
-                max_bytes=len(expected_marker),
-                root=self.root.parent,
-                anchor=self._lock_directory_anchor,
-                label="artifact authority completion",
-            )
-            if actual_marker != expected_marker:
-                raise ArtifactManifestError(
-                    "Artifact authority completion marker is invalid",
-                    operation="read",
-                    details={"contract_id": contract_id},
-                )
-        else:
-            self._write_record_locked(
-                marker,
-                expected_marker,
-                stable=True,
-                authority_check=authority_check,
-            )
-        return manifest
+        return reconcile_contract_authority(
+            self,
+            contract_id,
+            manifest,
+            authority_check=authority_check,
+            read_bounded=_read_bounded_bytes,
+        )
 
     def _contract_execution_lock_target(self, contract_id: str) -> Path:
         self._validate_project_boundary()

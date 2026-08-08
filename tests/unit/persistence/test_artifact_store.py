@@ -915,6 +915,167 @@ def test_blob_survives_until_every_shared_contract_tombstone_is_durable(
     assert path.exists()
     assert _manifest(store, "CONTRACT1")["events"][-1]["type"] == "artifact.tombstoned"
     assert _manifest(store, "CONTRACT2")["events"][-1]["type"] == "artifact.referenced"
+    for contract_id in ("CONTRACT1", "CONTRACT2"):
+        assert store._anchor_path(contract_id).with_suffix(".tombstoned").is_file()
+    monkeypatch.undo()
+    for contract_id in ("CONTRACT1", "CONTRACT2"):
+        with pytest.raises(ArtifactTombstonedError, match="force-rerun"):
+            store.envelope_if_exists(contract_id)
+        assert _manifest(store, contract_id)["events"][-1]["type"] == "artifact.tombstoned"
+    assert path.exists()
+
+
+@pytest.mark.parametrize("operation", ["fetch", "replay", "envelope", "retention", "prune"])
+def test_committed_tombstone_survives_unlink_failure_and_manifest_rollback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    store = _store(tmp_path)
+    envelope = _put(
+        store,
+        "CONTRACT1",
+        {"terminal": "must remain durable"},
+        retain_until=NOW - timedelta(days=1),
+    )
+    manifest_path = store.root / "contracts" / "CONTRACT1" / "events.json"
+    referenced_manifest = manifest_path.read_bytes()
+    blob_path = _blob_path(store, envelope.artifact_ref)
+    _age(blob_path, days=100)
+
+    def fail_unlink(_candidate: object) -> None:
+        raise OSError("simulated blob unlink failure")
+
+    monkeypatch.setattr(store, "_unlink_blob_candidate_locked", fail_unlink)
+    with pytest.raises(OSError, match="unlink failure"):
+        store.prune(ttl=timedelta(days=90), apply=True, now=NOW)
+
+    assert blob_path.exists()
+    assert _manifest(store, "CONTRACT1")["events"][-1]["type"] == "artifact.tombstoned"
+    terminal_path = store._anchor_path("CONTRACT1").with_suffix(".tombstoned")
+    terminal_bytes = terminal_path.read_bytes()
+    manifest_path.write_bytes(referenced_manifest)
+    monkeypatch.undo()
+
+    if operation == "prune":
+        report = store.prune(ttl=timedelta(days=90), apply=True, now=NOW)
+        assert report.removed_refs == (envelope.artifact_ref,)
+        assert not blob_path.exists()
+    else:
+        with pytest.raises(ArtifactTombstonedError, match="pruned|retention"):
+            if operation == "fetch":
+                store.fetch("CONTRACT1")
+            elif operation == "replay":
+                store.replay("CONTRACT1")
+            elif operation == "envelope":
+                store.envelope_if_exists("CONTRACT1")
+            else:
+                store.set_contract_retention(
+                    "CONTRACT1",
+                    active=True,
+                    retain_until=NOW + timedelta(days=1),
+                    now=NOW,
+                )
+        assert blob_path.exists()
+    assert _manifest(store, "CONTRACT1")["events"][-1]["type"] == "artifact.tombstoned"
+    assert terminal_path.read_bytes() == terminal_bytes
+
+
+def test_tombstone_authority_recovers_manifest_write_failure_on_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _store(tmp_path)
+    envelope = _put(
+        store,
+        "CONTRACT1",
+        {"terminal": "crash recoverable"},
+        retain_until=NOW - timedelta(days=1),
+    )
+    blob_path = _blob_path(store, envelope.artifact_ref)
+    manifest_path = store.root / "contracts" / "CONTRACT1" / "events.json"
+    referenced_manifest = manifest_path.read_bytes()
+    _age(blob_path, days=100)
+    original_write = store._write_manifest_locked
+
+    def fail_tombstone_manifest(
+        contract_id: str,
+        manifest: dict,
+        *,
+        authority_check: Any = None,
+    ) -> None:
+        if manifest["events"][-1]["type"] == "artifact.tombstoned":
+            raise OSError("simulated tombstone manifest failure")
+        original_write(contract_id, manifest, authority_check=authority_check)
+
+    monkeypatch.setattr(store, "_write_manifest_locked", fail_tombstone_manifest)
+    with pytest.raises(OSError, match="tombstone manifest failure"):
+        store.prune(ttl=timedelta(days=90), apply=True, now=NOW)
+
+    terminal_path = store._anchor_path("CONTRACT1").with_suffix(".tombstoned")
+    terminal_bytes = terminal_path.read_bytes()
+    assert blob_path.exists()
+    assert manifest_path.read_bytes() == referenced_manifest
+    monkeypatch.undo()
+
+    with pytest.raises(ArtifactTombstonedError, match="force-rerun"):
+        store.envelope_if_exists("CONTRACT1")
+    assert _manifest(store, "CONTRACT1")["events"][-1]["type"] == "artifact.tombstoned"
+    assert terminal_path.read_bytes() == terminal_bytes
+    assert blob_path.exists()
+
+
+@pytest.mark.parametrize("operation", ["fetch", "replay", "envelope", "retention", "prune"])
+def test_tombstone_event_substitution_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    store = _store(tmp_path)
+    envelope = _put(
+        store,
+        "CONTRACT1",
+        {"terminal": "substitution protected"},
+        retain_until=NOW - timedelta(days=1),
+    )
+    blob_path = _blob_path(store, envelope.artifact_ref)
+    _age(blob_path, days=100)
+    monkeypatch.setattr(
+        store,
+        "_unlink_blob_candidate_locked",
+        lambda _candidate: (_ for _ in ()).throw(OSError("keep body")),
+    )
+    with pytest.raises(OSError, match="keep body"):
+        store.prune(ttl=timedelta(days=90), apply=True, now=NOW)
+    monkeypatch.undo()
+
+    manifest_path = store.root / "contracts" / "CONTRACT1" / "events.json"
+    manifest = _manifest(store, "CONTRACT1")
+    manifest["events"][-1]["reason"] = "attacker substituted terminal metadata"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    tampered = manifest_path.read_bytes()
+    terminal_path = store._anchor_path("CONTRACT1").with_suffix(".tombstoned")
+    terminal_bytes = terminal_path.read_bytes()
+
+    with pytest.raises(ArtifactManifestError, match="terminal authority"):
+        if operation == "fetch":
+            store.fetch("CONTRACT1")
+        elif operation == "replay":
+            store.replay("CONTRACT1")
+        elif operation == "envelope":
+            store.envelope_if_exists("CONTRACT1")
+        elif operation == "retention":
+            store.set_contract_retention(
+                "CONTRACT1",
+                active=True,
+                retain_until=NOW + timedelta(days=1),
+                now=NOW,
+            )
+        else:
+            store.prune(ttl=timedelta(days=90), apply=True, now=NOW)
+    assert manifest_path.read_bytes() == tampered
+    assert terminal_path.read_bytes() == terminal_bytes
+    assert blob_path.exists()
 
 
 @pytest.mark.parametrize("junction_component", ["digest_prefix", "body"])
