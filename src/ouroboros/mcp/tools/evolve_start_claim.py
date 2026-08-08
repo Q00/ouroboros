@@ -87,7 +87,7 @@ class PreparedEvolveClaim:
         if self._task in done and not claimed.done():
             result = self._task.result()
             if result.is_err:
-                raise RuntimeError(str(result.error))
+                raise result.error
             raise RuntimeError("evolve_step completed before claiming a generation")
 
         execution_id = loop_support.generation_execution_id(

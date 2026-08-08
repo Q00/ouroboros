@@ -58,6 +58,7 @@ from ouroboros.evolution.projector import LineageProjector
 from ouroboros.evolution.reflect import ACPatch, ReflectOutput
 from ouroboros.evolution.watchdog import GenerationWatchdogTimeout
 from ouroboros.evolution.wonder import WonderOutput
+from ouroboros.mcp.errors import MCPToolError
 from ouroboros.mcp.job_manager import JobManager, JobStatus
 from ouroboros.mcp.server.adapter import _extract_feedback_metadata_from_artifact
 from ouroboros.mcp.tools.evolution_handlers import EvolveStepHandler, StartEvolveStepHandler
@@ -383,6 +384,55 @@ async def test_start_evolve_links_generation_selected_after_interleaving(
             start_task.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await start_task
+        await manager.drain(grace_seconds=0.1)
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_start_evolve_malformed_seed_preserves_typed_preclaim_error() -> None:
+    """A pre-claim validation error stays typed and leaves no active job or claim."""
+    store = await create_event_store()
+    lineage_id = "lin_start_malformed_seed"
+    loop = make_loop(store)
+    loop.evolve_step = AsyncMock(side_effect=AssertionError("malformed seed must not execute"))
+    evolve = EvolveStepHandler(evolutionary_loop=loop, event_store=store)
+    manager = JobManager(store)
+    start = StartEvolveStepHandler(
+        evolve_handler=evolve,
+        event_store=store,
+        job_manager=manager,
+    )
+
+    try:
+        result = await start.handle(
+            {
+                "lineage_id": lineage_id,
+                "seed_content": "goal: [unterminated",
+                "execute": False,
+            }
+        )
+
+        assert result.is_err
+        assert isinstance(result.error, MCPToolError)
+        assert result.error.tool_name == "ouroboros_evolve_step"
+        assert result.error.message.startswith("Failed to parse seed_content:")
+        loop.evolve_step.assert_not_awaited()
+        assert manager._reserved_job_ids == set()
+        assert await store.query_events(event_type="mcp.job.created") == []
+
+        handler_claim = await lineage_claims.observe(
+            store,
+            scope="evolve-handler",
+            lineage_id=lineage_id,
+        )
+        core_claim = await lineage_claims.observe(
+            store,
+            scope="evolve-core",
+            lineage_id=lineage_id,
+        )
+        assert handler_claim is not None and handler_claim.completed
+        assert core_claim is None
+    finally:
         await manager.drain(grace_seconds=0.1)
         await store.close()
 

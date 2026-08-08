@@ -28,6 +28,7 @@ from ouroboros.core.session_signal_projection import (
     can_supersede_session_signal,
     project_session_signal,
 )
+from ouroboros.events.base import BaseEvent
 from ouroboros.events.session_signal import (
     create_session_signal_accepted_event,
     create_session_signal_delivery_uncertain_event,
@@ -150,6 +151,29 @@ class QueuedSessionSignal:
 
     signal: SessionSignal
     effective_mode: SessionSignalMode
+
+
+async def target_ended_rejection_event(
+    event_store: EventStore,
+    queued_signal: QueuedSessionSignal,
+    *,
+    runtime_backend: str,
+) -> BaseEvent | None:
+    """Reject only a signal still durably queued when its runtime target ends."""
+    durable_signal = project_session_signal(
+        await event_store.replay("session_signal", queued_signal.signal.signal_id)
+    )
+    if durable_signal.state is not SessionSignalState.QUEUED:
+        return None
+    return create_session_signal_rejected_event(
+        queued_signal.signal,
+        rejection_code="target_ended_before_boundary",
+        detail=(
+            "The runtime attempt ended before the queued signal reached its delivery boundary."
+        ),
+        effective_mode=queued_signal.effective_mode,
+        runtime_backend=runtime_backend,
+    )
 
 
 class SessionSignalQueue(Protocol):
@@ -874,4 +898,5 @@ __all__ = [
     "SessionSignalTargetResolver",
     "render_after_turn_signal_prompt",
     "render_inform_signal_prompt",
+    "target_ended_rejection_event",
 ]

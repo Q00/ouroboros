@@ -57,11 +57,7 @@ from ouroboros.core.seed import (
     derive_semantic_ac_key,
     expected_artifact_workspace_path_error,
 )
-from ouroboros.core.session_signal import (
-    SessionSignalMode,
-    SessionSignalState,
-)
-from ouroboros.core.session_signal_projection import project_session_signal
+from ouroboros.core.session_signal import SessionSignalMode
 from ouroboros.events.session_signal import (
     create_session_signal_applied_event,
     create_session_signal_completed_event,
@@ -412,6 +408,7 @@ from ouroboros.orchestrator.synapse import (
     SessionSignalTarget,
     render_after_turn_signal_prompt,
     render_inform_signal_prompt,
+    target_ended_rejection_event,
 )
 from ouroboros.orchestrator.verifier import (
     RetryAdmission,
@@ -9496,25 +9493,13 @@ Respond with either ATOMIC or the structured JSON object only.
                     pending_signals = self._session_signal_hub.unregister(signal_target)
                     signal_target_registered = False
                     for pending_signal in pending_signals:
-                        durable_signal = project_session_signal(
-                            await self._event_store.replay(
-                                "session_signal", pending_signal.signal.signal_id
-                            )
+                        rejection = await target_ended_rejection_event(
+                            self._event_store,
+                            pending_signal,
+                            runtime_backend=signal_target.runtime_backend,
                         )
-                        if durable_signal.state is not SessionSignalState.QUEUED:
-                            continue
-                        await self._safe_emit_event(
-                            create_session_signal_rejected_event(
-                                pending_signal.signal,
-                                rejection_code="target_ended_before_boundary",
-                                detail=(
-                                    "The runtime attempt ended before the queued signal "
-                                    "reached its delivery boundary."
-                                ),
-                                effective_mode=pending_signal.effective_mode,
-                                runtime_backend=signal_target.runtime_backend,
-                            )
-                        )
+                        if rejection is not None:
+                            await self._safe_emit_event(rejection)
                 # Frugality-proof token axis (seed AC2). Attribute this leaf's real
                 # runtime-measured spend on EVERY exit — success, stall, and the
                 # mid-stream exception path all consumed tokens, and spend is spend.
