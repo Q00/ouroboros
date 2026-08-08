@@ -2809,3 +2809,54 @@ def test_sync_and_connect_relations_are_integration_targets(outputs: str) -> Non
     _seed_section(ledger, "runtime_context", value="Native desktop runtime")
     result = derive_domain_from_ledger(ledger)
     assert TaskClass.WEB_APP not in result.classes
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
+        "Build a native desktop settings tool; browser apps won't be supported",
+        "Build a native desktop settings tool; browser apps should not be supported",
+    ],
+)
+def test_modal_postpositive_denials(goal: str) -> None:
+    """R43 probe: modal denial forms compose like copular ones."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value="Settings panel for local files")
+    _seed_section(ledger, "runtime_context", value="Native desktop runtime")
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
+        "Build a native desktop settings tool for people interested in web apps",
+        "Build a native desktop settings tool whose users build web apps",
+        "Build a native desktop settings tool marketed to web app developers",
+    ],
+)
+def test_indirect_audience_descriptions(goal: str) -> None:
+    """R43 probe: interest, possessive-user, and marketing forms all
+    describe the audience."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value="Settings panel for local files")
+    _seed_section(ledger, "runtime_context", value="Native desktop runtime")
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
+        "Build a native desktop companion used alongside web apps",
+        "Build a native desktop companion installed into web apps",
+    ],
+)
+def test_companion_and_installation_relations(goal: str) -> None:
+    """R43 probe: alongside/installation targets are deployment
+    compatibility."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value="Settings panel for local files")
+    _seed_section(ledger, "runtime_context", value="Native desktop runtime")
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes

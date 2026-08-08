@@ -755,6 +755,10 @@ _RELATIONAL_TARGET_RE = re.compile(
     r"available\s+to|accessible\s+to|open\s+to|exposed\s+to|"
     r"syncs?\s+with|synchroniz\w*\s+with|connects?\s+(?:to|with)|"
     r"links?\s+(?:to|with)|talks?\s+to|communicates?\s+with|"
+    r"marketed\s+to|sold\s+to|advertised\s+to|promoted\s+to|pitched\s+to|"
+    r"used\s+alongside|installed\s+(?:into|in|on)|embedded\s+into|"
+    r"bundled\s+(?:with|into)|packaged\s+(?:with|into)|shipped\s+(?:with|into)|"
+    r"plugged\s+into|mounted\s+(?:in|on)|"
     r"for\s+use\s+(?:with|in|by)|for)\s+"
     # Coordinated consumer lists are consumed whole (#1813 R37): the web
     # item may sit anywhere in "mobile apps and web apps".
@@ -857,10 +861,12 @@ _POSTPOSITIVE_BROWSER_DENIAL_RE = re.compile(
     r"(?:is\s+|are\s+|was\s+|were\s+|has\s+been\s+|have\s+been\s+|"
     r"had\s+been\s+|will\s+be\s+)?"
     r"(?:\w+ly\s+)?"
-    r"(?:(?:isn[’']?t|aren[’']?t|wasn[’']?t|weren[’']?t)\s+(?:\w+ly\s+)?"
+    r"(?:(?:isn[’']?t|aren[’']?t|wasn[’']?t|weren[’']?t|"
+    r"won[’']?t\s+be|wouldn[’']?t\s+be|shouldn[’']?t\s+be|"
+    r"can[’']?t\s+be|cannot\s+be|mustn[’']?t\s+be)\s+(?:\w+ly\s+)?"
     r"(?:supported|available|allowed|permitted|enabled|possible|"
     r"offered|provided|present|included)|"
-    r"not\s+(?:supported|available|allowed|permitted|enabled|possible|"
+    r"not\s+(?:be\s+)?(?:supported|available|allowed|permitted|enabled|possible|"
     r"offered|provided|present|included)|"
     r"unsupported|disabled|unavailable|dropped|excluded|"
     r"turned\s+off|removed|prohibited|forbidden|banned|blocked|stripped|"
@@ -872,7 +878,9 @@ _POSTPOSITIVE_BROWSER_DENIAL_RE = re.compile(
 # developers who build web apps") is audience end to end (#1813 R41) —
 # structural, not another token window.
 _AUDIENCE_CLAUSE_RE = re.compile(
-    r"\bfor\s+[^,.;]*?\b(?:who|whose|whom)\b[^,.;]*"
+    r"\bfor\s+[^,.;]*?\b(?:who|whose|whom|interested\s+in|"
+    r"working\s+(?:with|on)|familiar\s+with)\b[^,.;]*"
+    r"|\bwhose\s+(?:users?|customers?|teams?|developers?|audiences?)\b[^,.;]*"
     # "for teams that use web apps": a that-clause counts as audience only
     # with an activity verb, so content clauses keep product ownership
     # (#1813 R42).
