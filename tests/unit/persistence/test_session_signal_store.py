@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from ouroboros.core.errors import PersistenceError
 from ouroboros.core.session_signal import (
     SessionSignal,
     SessionSignalCapabilities,
@@ -16,6 +17,11 @@ from ouroboros.core.session_signal import (
 )
 from ouroboros.core.session_signal_projection import project_session_signal
 from ouroboros.events.base import BaseEvent
+from ouroboros.events.session_signal import (
+    create_session_signal_accepted_event,
+    create_session_signal_queued_event,
+    create_session_signal_rejected_event,
+)
 from ouroboros.orchestrator.synapse import (
     EventStoreSessionSignalTargetResolver,
     SessionSignalHub,
@@ -23,7 +29,9 @@ from ouroboros.orchestrator.synapse import (
     SessionSignalTarget,
 )
 from ouroboros.persistence.event_store import EventStore, sqlite_database_url
+import ouroboros.persistence.session_signal_store as signal_store_module
 from ouroboros.persistence.session_signal_store import (
+    admit_if_target_active,
     append_runtime_lifecycle,
     runtime_attempt_is_active,
 )
@@ -69,6 +77,30 @@ def _signal(index: int, *, target: SessionSignalTarget | None = None) -> Session
     )
 
 
+def _admission_events(index: int) -> tuple[BaseEvent, BaseEvent, BaseEvent]:
+    target = _target()
+    signal = _signal(index, target=target)
+    accepted = create_session_signal_accepted_event(
+        signal,
+        effective_mode=SessionSignalMode.AFTER_TURN,
+        capabilities=target.capabilities,
+        runtime_backend=target.runtime_backend,
+    )
+    queued = create_session_signal_queued_event(
+        signal,
+        effective_mode=SessionSignalMode.AFTER_TURN,
+        runtime_backend=target.runtime_backend,
+    )
+    rejected = create_session_signal_rejected_event(
+        signal,
+        rejection_code="target_ended_before_admission",
+        detail="The exact runtime attempt ended before durable queue admission.",
+        effective_mode=SessionSignalMode.AFTER_TURN,
+        runtime_backend=target.runtime_backend,
+    )
+    return accepted, queued, rejected
+
+
 class _ResolvedTarget:
     def __init__(
         self, *, entered: asyncio.Event | None = None, release: asyncio.Event | None = None
@@ -83,6 +115,115 @@ class _ResolvedTarget:
         if self.release is not None:
             await self.release.wait()
         return _target()
+
+
+@pytest.mark.asyncio
+async def test_close_drains_runtime_lifecycle_transaction_and_refuses_late_write(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    db_path = tmp_path / "runtime-lifecycle-close.db"
+    store = EventStore(sqlite_database_url(db_path))
+    await store.initialize()
+    await append_runtime_lifecycle(store, _lifecycle("execution.session.started"))
+    entered, release = asyncio.Event(), asyncio.Event()
+    original_begin = signal_store_module._begin
+
+    async def gated_begin(engine):
+        connection = await original_begin(engine)
+        entered.set()
+        await release.wait()
+        return connection
+
+    monkeypatch.setattr(signal_store_module, "_begin", gated_begin)
+    terminal = _lifecycle("execution.session.completed")
+    write_task = asyncio.create_task(append_runtime_lifecycle(store, terminal))
+    await asyncio.wait_for(entered.wait(), timeout=5)
+    close_task = asyncio.create_task(store.close())
+    await asyncio.sleep(0)
+    assert not close_task.done()
+
+    release.set()
+    assert await asyncio.wait_for(write_task, timeout=5)
+    await asyncio.wait_for(close_task, timeout=10)
+
+    with pytest.raises(PersistenceError, match="closing"):
+        await append_runtime_lifecycle(
+            store,
+            _lifecycle("execution.session.failed", target=_target(attempt_id="late")),
+        )
+
+    reopened = EventStore(sqlite_database_url(db_path))
+    await reopened.initialize()
+    try:
+        persisted = await reopened.replay("execution", terminal.aggregate_id)
+        assert terminal.id in {event.id for event in persisted}
+        assert not await runtime_attempt_is_active(
+            reopened,
+            identity=("exec_race", "scope_race", "attempt_race"),
+        )
+    finally:
+        await reopened.close()
+
+
+@pytest.mark.asyncio
+async def test_close_drains_signal_admission_transaction_and_refuses_late_admission(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    db_path = tmp_path / "signal-admission-close.db"
+    store = EventStore(sqlite_database_url(db_path))
+    await store.initialize()
+    await append_runtime_lifecycle(store, _lifecycle("execution.session.started"))
+    entered, release = asyncio.Event(), asyncio.Event()
+    original_begin = signal_store_module._begin
+
+    async def gated_begin(engine):
+        connection = await original_begin(engine)
+        entered.set()
+        await release.wait()
+        return connection
+
+    monkeypatch.setattr(signal_store_module, "_begin", gated_begin)
+    accepted, queued, rejected = _admission_events(120)
+    admission_task = asyncio.create_task(
+        admit_if_target_active(
+            store,
+            identity=("exec_race", "scope_race", "attempt_race"),
+            accepted=accepted,
+            queued=queued,
+            rejected=rejected,
+        )
+    )
+    await asyncio.wait_for(entered.wait(), timeout=5)
+    close_task = asyncio.create_task(store.close())
+    await asyncio.sleep(0)
+    assert not close_task.done()
+
+    release.set()
+    assert await asyncio.wait_for(admission_task, timeout=5) is True
+    await asyncio.wait_for(close_task, timeout=10)
+
+    late_events = _admission_events(121)
+    with pytest.raises(PersistenceError, match="closing"):
+        await admit_if_target_active(
+            store,
+            identity=("exec_race", "scope_race", "attempt_race"),
+            accepted=late_events[0],
+            queued=late_events[1],
+            rejected=late_events[2],
+        )
+
+    reopened = EventStore(sqlite_database_url(db_path))
+    await reopened.initialize()
+    try:
+        assert [
+            event.type for event in await reopened.replay("session_signal", "sig_race_120")
+        ] == [
+            "control.session.signal.accepted",
+            "control.session.signal.queued",
+        ]
+        assert await reopened.replay("session_signal", "sig_race_121") == []
+    finally:
+        await reopened.close()
 
 
 @pytest.mark.asyncio

@@ -2,11 +2,8 @@
 
 from __future__ import annotations
 
-import asyncio
 from collections import defaultdict
-from collections.abc import Coroutine
 from datetime import UTC, datetime
-from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -49,24 +46,6 @@ def _identity(event: BaseEvent) -> tuple[str, str, str] | None:
     return tuple(str(value).strip() for value in values)  # type: ignore[return-value]
 
 
-async def _settle[T](operation: Coroutine[Any, Any, T]) -> T:
-    """Let a BEGIN IMMEDIATE transaction settle before propagating cancellation."""
-    task = asyncio.create_task(operation)
-    try:
-        return await asyncio.shield(task)
-    except asyncio.CancelledError as cancellation:
-        while not task.done():
-            try:
-                await asyncio.shield(task)
-            except asyncio.CancelledError:
-                continue
-            except Exception:
-                break
-        if not task.cancelled() and (error := task.exception()) is not None:
-            raise cancellation from error
-        raise
-
-
 async def _begin(engine: AsyncEngine):
     conn = await engine.connect()
     await conn.exec_driver_sql("BEGIN IMMEDIATE")
@@ -79,11 +58,18 @@ async def append_runtime_lifecycle(event_store: object, event: BaseEvent) -> boo
     Returns False for lightweight test doubles so callers can retain their
     ordinary append contract.
     """
-    engine = _engine(event_store)
     identity = _identity(event)
-    if engine is None or identity is None or event.type not in _ACTIVE_EVENTS | _TERMINAL_EVENTS:
+    settle = getattr(event_store, "settle_transactional_write", None)
+    if (
+        not callable(settle)
+        or identity is None
+        or event.type not in _ACTIVE_EVENTS | _TERMINAL_EVENTS
+    ):
         return False
-    await _settle(_append_runtime_lifecycle(engine, event, identity))
+    await settle(
+        lambda engine: _append_runtime_lifecycle(engine, event, identity),
+        operation="append_runtime_lifecycle",
+    )
     return True
 
 
@@ -227,18 +213,14 @@ async def admit_if_target_active(
     ownership is admitted only while the guard row is absent; an explicit
     inactive guard always wins and prevents a stale hub from reopening it.
     """
-    engine = _engine(event_store)
-    if engine is None:
+    settle = getattr(event_store, "settle_transactional_write", None)
+    if not callable(settle):
         return None
-    return await _settle(
-        _admit_if_target_active(
-            engine,
-            identity,
-            accepted,
-            queued,
-            rejected,
-            locally_owned=locally_owned,
-        )
+    return await settle(
+        lambda engine: _admit_if_target_active(
+            engine, identity, accepted, queued, rejected, locally_owned=locally_owned
+        ),
+        operation="admit_session_signal_if_target_active",
     )
 
 
