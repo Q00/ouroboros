@@ -3831,6 +3831,45 @@ def test_possessive_component_targets_own_their_surfaces(goal: str) -> None:
 @pytest.mark.parametrize(
     "goal",
     [
+        "Build an extension settings page",
+        "Build a plugin options page",
+        "Build our extension's settings dashboard",
+    ],
+)
+def test_component_first_surfaces_are_component_owned(goal: str) -> None:
+    """R68 guard: component ownership is word-order independent — a
+    component followed by anything but an activity noun owns its
+    surface, and possessives own outright."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value="Settings panel with save button")
+    _seed_section(ledger, "runtime_context", value="Runs in browsers")
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
+        "Build a desktop dashboard tracking browser usage",
+        "Build a desktop dashboard comparing browser performance",
+        "Build a desktop dashboard showing web app uptime",
+        "Build a desktop dashboard analyzing frontend bundle sizes",
+    ],
+)
+def test_participial_content_clauses_are_not_browser_context(goal: str) -> None:
+    """R68 guard: a participle taking an object names the artifact's
+    data; one followed by a preposition declares its environment and
+    keeps its signal."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value="Interactive charts with a filters panel")
+    _seed_section(ledger, "runtime_context", value="Desktop application")
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
         "The product is an admin portal that runs in browsers",
         "The deliverable is an admin portal available in browsers",
     ],

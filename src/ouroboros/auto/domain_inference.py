@@ -1197,6 +1197,17 @@ def _ledger_has_browser_context(ledger: SeedDraftLedger) -> bool:
         " ",
         goal_for_context,
     )
+    # A participle taking an object names the artifact's data ("tracking
+    # browser usage", "showing web app uptime"); one followed by a
+    # preposition declares its environment ("running in browsers") and
+    # stays (#1813 R68). Nominal gerund compounds ("landing page") are
+    # product vocabulary, not clauses.
+    goal_for_context = re.sub(
+        rf"\b(?!{_NOMINAL_GERUND_FRAGMENT}\b)"
+        r"[a-z'’\-]+ing\s+(?!(?:in|on|at|inside|within|across)\b)[^,.;]*",
+        " ",
+        goal_for_context,
+    )
     return bool(_SECTION_BROWSER_ENV_RE.search(_section_browser_context_text(ledger))) or (
         _goal_has_unnegated_web_app_signal(goal_for_context)
     )
@@ -1416,6 +1427,40 @@ _COMPONENT_NOUN_WORDS = frozenset(
         "menus",
     ]
 )
+# An activity noun after a component word marks the component as the
+# SUBJECT of the artifact's function (#1813 R62/R68): "plugin management
+# dashboard" manages plugins; "extension settings page" belongs to the
+# extension.
+_COMPONENT_ACTIVITY_WORDS = frozenset(
+    [
+        "management",
+        "monitoring",
+        "reporting",
+        "analytics",
+        "administration",
+        "tracking",
+        "inventory",
+        "catalog",
+        "marketplace",
+        "registry",
+        "store",
+        "listing",
+        "listings",
+        "usage",
+        "statistics",
+        "stats",
+        "metrics",
+        "insights",
+        "overview",
+        "comparison",
+        "audit",
+        "audits",
+        "review",
+        "reviews",
+        "discovery",
+        "search",
+    ]
+)
 # A lone leading token is a product NP only when it is a noun (#1813
 # R65): "Spreadsheet in the browser" declares a product, "Migrate from
 # ..." is a bare imperative. The action verbs form the closed set.
@@ -1595,16 +1640,21 @@ def _goal_first_np_head(goal_text: str) -> str | None:
     seen_determiner = False
     content_since_determiner = 0
     first_segment = re.split(r"[.;:!?,]", goal_text)[0]
-    for token in re.findall(r"[\w'’\-]+", first_segment):
-        lowered = token.lower()
-        # Component ownership is positional (#1813 R62/R63): a QUALIFIED
-        # component — one with a preceding content token, whether
-        # "browser extension" or the brand-qualified "Chrome extension" —
-        # is the produced artifact and its surfaces belong to it, while a
-        # phrase-initial component is the subject of what follows
-        # ("plugin management dashboard").
-        if lowered in _COMPONENT_NOUN_WORDS and content_since_determiner > 0:
-            return None
+    segment_tokens = [token.lower() for token in re.findall(r"[\w'’\-]+", first_segment)]
+    for position, lowered in enumerate(segment_tokens):
+        # Component ownership is word-order independent (#1813 R62/R68):
+        # a component noun owns its surfaces — "extension settings page",
+        # "Chrome plugin popup page", possessive "extension's" — UNLESS
+        # the following token is an ACTIVITY noun, in which case the
+        # component is the subject of what the artifact does ("plugin
+        # management dashboard").
+        possessive_base = re.sub(r"[’']s$", "", lowered)
+        if possessive_base in _COMPONENT_NOUN_WORDS:
+            if possessive_base != lowered:
+                return None
+            following = segment_tokens[position + 1] if position + 1 < len(segment_tokens) else ""
+            if following not in _COMPONENT_ACTIVITY_WORDS:
+                return None
         if lowered in _NP_CHAIN_STOP_WORDS:
             break
         if lowered in _NP_DETERMINER_WORDS:
@@ -1633,11 +1683,6 @@ def _goal_first_np_head(goal_text: str) -> str | None:
     if not np_tokens:
         return None
     if not seen_determiner and len(np_tokens) < 2 and np_tokens[0] in _BARE_ACTION_VERB_WORDS:
-        return None
-    # A component noun in HEAD position is component-owned regardless of
-    # qualifier order (#1813 R65): "a sidebar for Firefox" is the same
-    # surface as "a Firefox sidebar".
-    if np_tokens[-1] in _COMPONENT_NOUN_WORDS:
         return None
     return np_tokens[-1]
 
