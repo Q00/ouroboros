@@ -3938,6 +3938,43 @@ def test_participial_component_relations_own_their_surfaces(goal: str) -> None:
 @pytest.mark.parametrize(
     "goal",
     [
+        "Build a desktop dashboard on browser crash reports",
+        "Build a desktop dashboard concerned with browser crash reports",
+    ],
+)
+def test_bare_on_topics_are_not_browser_context(goal: str) -> None:
+    """R71 guard: a bare on-phrase is topical unless its object ends at
+    a browser token — "on browser crash reports" is subject matter,
+    "runs on browsers" stays the environment."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value="Interactive charts with a filters panel")
+    _seed_section(ledger, "runtime_context", value="Local desktop runtime")
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
+        "Build a settings page hosted on a browser extension",
+        "Build an options page mounted on a browser extension",
+        "Build a preferences UI running under a browser extension",
+    ],
+)
+def test_hosting_prepositions_reach_the_component(goal: str) -> None:
+    """R71 guard: hosted/mounted ON and running/nested UNDER reach the
+    component through their participle, while a bare topical "on" stays
+    outside the veto."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value="Settings panel with save button")
+    _seed_section(ledger, "runtime_context", value="Runs in browsers")
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
         "The product is an admin portal that runs in browsers",
         "The deliverable is an admin portal available in browsers",
     ],

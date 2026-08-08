@@ -1208,7 +1208,16 @@ def _ledger_has_browser_context(ledger: SeedDraftLedger) -> bool:
         r"\b(?:focused|focusing|centered|centering|centred|centring|"
         r"devoted|dedicated|sourced|based|oriented|concentrated|"
         r"concentrating|specialized|specializing|specialised|"
-        r"specialising|revolving)\s+(?:on|around|to|from|upon|in)\b[^,.;]*",
+        r"specialising|revolving|concerned|dealing)\s+"
+        r"(?:on|around|to|from|upon|in|with)\b[^,.;]*",
+        " ",
+        goal_for_context,
+    )
+    # A bare "on"-phrase is topical unless its object ENDS at a browser
+    # token (#1813 R71): "on browser crash reports" names subject
+    # matter, "runs on browsers" declares the environment.
+    goal_for_context = re.sub(
+        r"\b(?:on|upon)\s+(?![^,.;]*\bbrowsers?\b\s*(?:[,.;]|$))[^,.;]*",
         " ",
         goal_for_context,
     )
@@ -1296,7 +1305,11 @@ _GOAL_COMPONENT_TARGET_RE = re.compile(
     # bare "with" stays outside so a co-produced component is not
     # swallowed.
     r"\b(?:(?:[\w\-'’]+(?:ed|ing)\s+)?(?:for|of|in|inside|within|into|to|"
-    r"by|alongside|beside)|[\w\-'’]+(?:ed|ing)\s+(?:through|with|from))\s+"
+    r"by|alongside|beside)|[\w\-'’]+(?:ed|ing)\s+"
+    # "hosted/mounted ON", "running/nested UNDER" (#1813 R71) — these
+    # prepositions require the participle so a bare topical "on"
+    # ("a dashboard on browser extensions") stays outside the veto.
+    r"(?:through|with|from|on|onto|under|beneath|atop))\s+"
     r"(?:(?:an?|the|our|my|your|their|its)\s+)?(?:[\w\-'’]+\s+){0,3}?"
     r"(?:extensions?|plugins?|add[\s\-]?ons?|addons?|sidebars?|popups?|"
     r"toolbars?|overlays?|devtools?)\b"
