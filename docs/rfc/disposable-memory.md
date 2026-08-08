@@ -23,7 +23,12 @@ The accepted C2-C5 contract is implemented by these production surfaces:
   `.ouroboros/artifacts/<sha256-prefix>/<sha256>.json`, binds them to durable
   per-contract manifests, verifies hashes on every explicit fetch, rejects
   Python values that cannot round-trip as JSON, and refuses contract reuse for
-  different content.
+  different content. Per-contract manifests, binding files, and
+  `.tombstoned` files are recoverable projections. Initial contract records
+  and immutable lifecycle genesis/epoch records live in the stable parent;
+  retention and terminal transitions are content-addressed and hash chained,
+  so projection rollback, substitution, or a crash between authority and
+  projection publication is repaired or rejected before replay or GC.
 - `orchestrator/disposable_memory.py` runs child work through `AgentProcess`,
   serializes each contract's effects with a cross-process lock, persists the
   body before completion, and returns only the bounded envelope. Ordinary retry
@@ -53,6 +58,13 @@ restores the prior file through the pinned directory handle before reporting
 failure. Applied prune pins the digest directory, revalidates the planned body
 inode and size through that handle, and performs a directory-relative unlink.
 Malformed manifests abort GC fail-closed.
+
+The authority boundary follows the RFC's cooperative local trust model.
+Manifest and cache corruption is untrusted and must fail closed or recover from
+the stable authority. An actor able to coherently delete or replace the stable
+authority itself—and every matching projection—or restore the whole project to
+an older filesystem snapshot is outside this local store's security contract;
+detecting that requires an external rollback-resistant counter or journal.
 
 ## Scope
 

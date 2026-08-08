@@ -30,6 +30,7 @@ from ouroboros.core.disposable_memory import (
 )
 from ouroboros.persistence.artifact_binding import (
     BINDING_MAX_BYTES,
+    append_lifecycle_epoch,
     authority_path,
     authority_prefix,
     binding_path,
@@ -37,6 +38,9 @@ from ouroboros.persistence.artifact_binding import (
     completion_path,
     completion_payload,
     encode_record,
+    lifecycle_genesis_record,
+    lifecycle_path,
+    read_lifecycle_state,
     reconcile_contract_authority,
     tombstone_path,
     tombstone_record,
@@ -327,6 +331,12 @@ class ContentAddressedArtifactStore:
                 authority_check=lock_authority.validate,
             )
             self._write_record_locked(
+                lifecycle_path(self._anchor_path(contract_id)),
+                encode_record(lifecycle_genesis_record(record)),
+                stable=True,
+                authority_check=lock_authority.validate,
+            )
+            self._write_record_locked(
                 self._binding_path(contract_id),
                 encode_record(record),
                 stable=False,
@@ -363,6 +373,7 @@ class ContentAddressedArtifactStore:
             not self._manifest_path(contract_id).exists()
             and not self._binding_path(contract_id).exists()
             and not self._anchor_path(contract_id).exists()
+            and not lifecycle_path(self._anchor_path(contract_id)).exists()
             and not tombstone_path(self._anchor_path(contract_id)).exists()
         ):
             return None
@@ -397,6 +408,7 @@ class ContentAddressedArtifactStore:
             not self._manifest_path(contract_id).exists()
             and not self._binding_path(contract_id).exists()
             and not self._anchor_path(contract_id).exists()
+            and not lifecycle_path(self._anchor_path(contract_id)).exists()
             and not tombstone_path(self._anchor_path(contract_id)).exists()
         ):
             return None
@@ -477,6 +489,23 @@ class ContentAddressedArtifactStore:
                     operation="write",
                     details={"contract_id": contract_id},
                 )
+            anchor = self._read_authority_locked(contract_id)
+            if anchor is None:
+                raise ArtifactManifestError(
+                    "Retention publication requires initial contract authority",
+                    operation="write",
+                    details={"contract_id": contract_id},
+                )
+            state = read_lifecycle_state(self, anchor, read_bounded=_read_bounded_bytes)
+            append_lifecycle_epoch(
+                self,
+                anchor,
+                state,
+                timestamp=timestamp.isoformat(),
+                active=bool(active),
+                retain_until=_as_utc(retain_until).isoformat(),
+                authority_check=lock_authority.validate,
+            )
             manifest["active"] = bool(active)
             manifest["retain_until"] = _as_utc(retain_until).isoformat()
             manifest["updated_at"] = timestamp.isoformat()
@@ -535,9 +564,23 @@ class ContentAddressedArtifactStore:
                             operation="write",
                             details={"contract_id": contract_id},
                         )
+                    terminal = tombstone_record(event, anchor)
+                    state = read_lifecycle_state(
+                        self,
+                        anchor,
+                        read_bounded=_read_bounded_bytes,
+                    )
+                    append_lifecycle_epoch(
+                        self,
+                        anchor,
+                        state,
+                        timestamp=timestamp.isoformat(),
+                        terminal=terminal,
+                        authority_check=lock_authority.validate,
+                    )
                     self._write_record_locked(
                         tombstone_path(self._anchor_path(contract_id)),
-                        encode_record(tombstone_record(event, anchor)),
+                        encode_record(terminal),
                         stable=True,
                         authority_check=lock_authority.validate,
                     )
