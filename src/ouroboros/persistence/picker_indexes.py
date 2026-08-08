@@ -11,7 +11,6 @@ from __future__ import annotations
 import sqlite3
 
 PICKER_DIRECT_EVENT_TYPES: tuple[str, ...] = (
-    "orchestrator.session.started",
     "orchestrator.session.completed",
     "orchestrator.session.failed",
     "orchestrator.session.paused",
@@ -36,6 +35,13 @@ def _event_type_scope(event_types: tuple[str, ...]) -> str:
 
 
 PICKER_PROGRESS_SCOPE_SQL = _event_type_scope(PICKER_PROGRESS_EVENT_TYPES)
+PICKER_DIRECT_SCOPE_SQL = _event_type_scope(PICKER_DIRECT_EVENT_TYPES)
+PICKER_START_SCOPE_SQL = "event_type = 'orchestrator.session.started'"
+PICKER_DIRECT_INDEX_SCOPE_SQL = (
+    "((event_type >= 'execution.' AND event_type < 'execution/') "
+    "OR (event_type >= 'orchestrator.session.' AND event_type < 'orchestrator.session/')) "
+    "AND event_type != 'orchestrator.session.started'"
+)
 WORKFLOW_PROGRESS_SCOPE_SQL = "event_type = 'workflow.progress.updated'"
 
 SAFE_EXECUTION_ID_SQL = (
@@ -69,16 +75,26 @@ RUNNING_PROGRESS_SQL = (
     "= 'running')"
 )
 
+DIRECT_EVENT_INDEX = "ix_events_picker_direct_aggregate_event_v1"
+START_EVENT_INDEX = "ix_events_picker_session_start_v1"
 AGGREGATE_EVENT_INDEX = "ix_events_picker_aggregate_event_valid_v1"
 RUNNING_PROGRESS_INDEX = "ix_events_picker_running_progress_v1"
 WORKFLOW_SNAPSHOT_INDEX = "ix_events_picker_workflow_snapshot_v1"
 PICKER_INDEX_NAMES: tuple[str, ...] = (
+    DIRECT_EVENT_INDEX,
+    START_EVENT_INDEX,
     AGGREGATE_EVENT_INDEX,
     RUNNING_PROGRESS_INDEX,
     WORKFLOW_SNAPSHOT_INDEX,
 )
 
 PICKER_INDEX_DDL: tuple[str, ...] = (
+    f"CREATE INDEX IF NOT EXISTS {DIRECT_EVENT_INDEX} "
+    "ON events (event_type, aggregate_id) "
+    f"WHERE {PICKER_DIRECT_INDEX_SCOPE_SQL}",
+    f"CREATE INDEX IF NOT EXISTS {START_EVENT_INDEX} "
+    "ON events (event_type) "
+    f"WHERE {PICKER_START_SCOPE_SQL}",
     f"CREATE INDEX IF NOT EXISTS {AGGREGATE_EVENT_INDEX} "
     "ON events (aggregate_id, event_type, json_valid(payload)) "
     f"WHERE {PICKER_PROGRESS_SCOPE_SQL}",
@@ -92,6 +108,8 @@ PICKER_INDEX_DDL: tuple[str, ...] = (
 )
 PICKER_INDEX_DDL_BY_NAME = dict(zip(PICKER_INDEX_NAMES, PICKER_INDEX_DDL, strict=True))
 _PICKER_INDEX_KEY_COLUMNS: dict[str, tuple[str | None, ...]] = {
+    DIRECT_EVENT_INDEX: ("event_type", "aggregate_id"),
+    START_EVENT_INDEX: ("event_type",),
     AGGREGATE_EVENT_INDEX: ("aggregate_id", "event_type", None),
     RUNNING_PROGRESS_INDEX: ("aggregate_id", "event_type"),
     WORKFLOW_SNAPSHOT_INDEX: ("aggregate_id",),
@@ -140,7 +158,12 @@ __all__ = [
     "PICKER_INDEX_NAMES",
     "PICKER_DIRECT_EVENT_TYPES",
     "PICKER_PROGRESS_EVENT_TYPES",
+    "PICKER_DIRECT_INDEX_SCOPE_SQL",
+    "PICKER_DIRECT_SCOPE_SQL",
+    "PICKER_START_SCOPE_SQL",
     "PICKER_PROGRESS_SCOPE_SQL",
+    "DIRECT_EVENT_INDEX",
+    "START_EVENT_INDEX",
     "AGGREGATE_EVENT_INDEX",
     "RUNNING_PROGRESS_INDEX",
     "RUNNING_PROGRESS_SQL",

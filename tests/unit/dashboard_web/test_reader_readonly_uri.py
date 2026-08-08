@@ -21,8 +21,10 @@ from ouroboros.dashboard_web.reader import (
 from ouroboros.orchestrator.events import create_workflow_progress_event
 from ouroboros.persistence.picker_indexes import (
     AGGREGATE_EVENT_INDEX,
+    DIRECT_EVENT_INDEX,
     PICKER_INDEX_DDL,
     RUNNING_PROGRESS_INDEX,
+    START_EVENT_INDEX,
     WORKFLOW_SNAPSHOT_INDEX,
 )
 
@@ -1212,10 +1214,24 @@ def test_picker_bounds_selected_workflow_progress_history(tmp_path, monkeypatch)
         for statement in statements
         if "event_type = 'workflow.progress.updated'" in statement
     ]
+    direct_queries = [
+        statement
+        for statement in statements
+        if f"INDEXED BY {DIRECT_EVENT_INDEX}" in statement and "aggregate_id =" in statement
+    ]
+    start_queries = [
+        statement for statement in statements if f"INDEXED BY {START_EVENT_INDEX}" in statement
+    ]
     conn = sqlite3.connect(db)
     try:
         plans = [
             conn.execute("EXPLAIN QUERY PLAN " + query).fetchall() for query in workflow_queries
+        ]
+        plans.extend(
+            conn.execute("EXPLAIN QUERY PLAN " + query).fetchall() for query in direct_queries
+        )
+        start_plans = [
+            conn.execute("EXPLAIN QUERY PLAN " + query).fetchall() for query in start_queries
         ]
     finally:
         conn.close()
@@ -1253,11 +1269,90 @@ def test_picker_bounds_selected_workflow_progress_history(tmp_path, monkeypatch)
     assert unbounded_progress_callbacks >= 100
     assert max(decode_samples) <= 4
     assert len(workflow_queries) == 6
-    assert all("TEMP B-TREE" not in str(row[3]) for plan in plans for row in plan)
-    used_indexes = {str(row[3]) for plan in plans for row in plan}
+    assert len(direct_queries) == 18
+    assert len(start_queries) == 1
+    assert all("TEMP B-TREE" not in str(row[3]) for plan in (*plans, *start_plans) for row in plan)
+    used_indexes = {str(row[3]) for plan in (*plans, *start_plans) for row in plan}
     assert any(AGGREGATE_EVENT_INDEX in value for value in used_indexes)
+    assert any(DIRECT_EVENT_INDEX in value for value in used_indexes)
+    assert any(START_EVENT_INDEX in value for value in used_indexes)
     assert any(RUNNING_PROGRESS_INDEX in value for value in used_indexes)
     assert any(WORKFLOW_SNAPSHOT_INDEX in value for value in used_indexes)
+
+
+def test_picker_bounds_large_start_history(tmp_path, monkeypatch) -> None:
+    db = tmp_path / "large-start-history.db"
+    conn = sqlite3.connect(db)
+    try:
+        conn.execute("CREATE TABLE events (aggregate_id TEXT, event_type TEXT, payload TEXT)")
+        conn.execute("CREATE INDEX ix_events_event_type ON events (event_type)")
+        _install_picker_indexes(conn)
+        conn.executemany(
+            "INSERT INTO events (aggregate_id, event_type, payload) VALUES (?, ?, ?)",
+            (
+                (
+                    f"orch_old_{index}",
+                    "orchestrator.session.started",
+                    json.dumps({"execution_id": f"exec_old_{index}"}),
+                )
+                for index in range(99_999)
+            ),
+        )
+        conn.execute(
+            "INSERT INTO events (aggregate_id, event_type, payload) VALUES (?, ?, ?)",
+            (
+                "orch_target",
+                "orchestrator.session.started",
+                json.dumps({"execution_id": "exec_target", "runtime_backend": "codex"}),
+            ),
+        )
+        conn.commit()
+        conn.execute("ANALYZE")
+    finally:
+        conn.close()
+
+    original_connect = reader_module._connect_readonly
+    statements: list[str] = []
+    start_vm_steps = 0
+    counting_start = False
+
+    def traced_connect(db_path):
+        traced = original_connect(db_path)
+
+        def trace_statement(statement):
+            nonlocal counting_start
+            statements.append(statement)
+            counting_start = f"INDEXED BY {START_EVENT_INDEX}" in statement
+
+        def count_step():
+            nonlocal start_vm_steps
+            if counting_start:
+                start_vm_steps += 1
+            return 0
+
+        traced.set_trace_callback(trace_statement)
+        traced.set_progress_handler(count_step, 1)
+        return traced
+
+    monkeypatch.setattr(reader_module, "_connect_readonly", traced_connect)
+    runs = list_recent_executions(db, limit=1)
+    start_queries = [
+        statement for statement in statements if f"INDEXED BY {START_EVENT_INDEX}" in statement
+    ]
+    conn = sqlite3.connect(db)
+    try:
+        start_plans = [
+            conn.execute("EXPLAIN QUERY PLAN " + query).fetchall() for query in start_queries
+        ]
+    finally:
+        conn.close()
+
+    assert [(run["execution_id"], run["provider"]) for run in runs] == [("exec_target", "codex")]
+    assert runs[0]["last_row"] == 100_000
+    assert start_vm_steps < 500
+    assert len(start_queries) == 1
+    assert all("TEMP B-TREE" not in str(row[3]) for plan in start_plans for row in plan)
+    assert any(START_EVENT_INDEX in str(row[3]) for plan in start_plans for row in plan)
 
 
 @pytest.mark.parametrize(

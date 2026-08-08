@@ -22,15 +22,20 @@ from ouroboros.config.models import resolve_event_store_path
 from ouroboros.dashboard.board import reduce_board
 from ouroboros.persistence.picker_indexes import (
     AGGREGATE_EVENT_INDEX,
+    DIRECT_EVENT_INDEX,
     PICKER_DIRECT_EVENT_TYPES,
+    PICKER_DIRECT_INDEX_SCOPE_SQL,
+    PICKER_DIRECT_SCOPE_SQL,
     PICKER_INDEX_NAMES,
     PICKER_PROGRESS_EVENT_TYPES,
     PICKER_PROGRESS_SCOPE_SQL,
+    PICKER_START_SCOPE_SQL,
     RUNNING_PROGRESS_INDEX,
     RUNNING_PROGRESS_SQL,
     RUNTIME_STATUS_ASCII_WHITESPACE,
     SAFE_EXECUTION_ID_SQL,
     SAFE_SESSION_ID_SQL,
+    START_EVENT_INDEX,
     VALID_JSON_SQL,
     WORKFLOW_PROGRESS_SCOPE_SQL,
     WORKFLOW_SNAPSHOT_INDEX,
@@ -390,13 +395,14 @@ def _fetch_direct_rows(
     rows: list[sqlite3.Row] = []
     for aggregate_id in ids:
         for event_type in event_types:
-            rows.extend(
-                conn.execute(
-                    "SELECT rowid, aggregate_id, event_type, payload FROM events "
-                    "WHERE aggregate_id = ? AND event_type = ?",
-                    [aggregate_id, event_type],
-                ).fetchall()
+            sql = (
+                "SELECT rowid, aggregate_id, event_type, payload FROM events "
+                f"INDEXED BY {DIRECT_EVENT_INDEX} "
+                "WHERE aggregate_id = ? AND event_type = ? "
+                f"AND {PICKER_DIRECT_INDEX_SCOPE_SQL} "
+                f"AND {PICKER_DIRECT_SCOPE_SQL}"
             )
+            rows.extend(conn.execute(sql, [aggregate_id, event_type]).fetchall())
     return rows
 
 
@@ -488,8 +494,9 @@ def list_recent_executions(db_path: str | Path, *, limit: int = 10) -> list[dict
     if not path.exists():
         return []
     start_sql = (
-        "SELECT rowid, aggregate_id, payload "
-        "FROM events WHERE event_type = 'orchestrator.session.started' "
+        "SELECT rowid, aggregate_id, event_type, payload "
+        f"FROM events INDEXED BY {START_EVENT_INDEX} "
+        f"WHERE {PICKER_START_SCOPE_SQL} "
         "ORDER BY rowid DESC"
     )
     conn = _connect_readonly(path)
@@ -536,6 +543,7 @@ def list_recent_executions(db_path: str | Path, *, limit: int = 10) -> list[dict
             all_ids,
             _PICKER_EVENT_TYPES,
         )
+        event_rows.extend(spec[0] for spec in run_specs)
         if all_ids:
             event_rows.extend(
                 _fetch_payload_linked_rows(

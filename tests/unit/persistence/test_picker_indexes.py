@@ -7,6 +7,7 @@ import json
 import logging
 from pathlib import Path
 import sqlite3
+from statistics import median
 import time
 
 import pytest
@@ -16,9 +17,11 @@ from ouroboros.events.base import BaseEvent
 from ouroboros.persistence.event_store import EventStore
 from ouroboros.persistence.picker_indexes import (
     AGGREGATE_EVENT_INDEX,
+    DIRECT_EVENT_INDEX,
     PICKER_INDEX_DDL_BY_NAME,
     PICKER_INDEX_NAMES,
     PICKER_PROGRESS_SCOPE_SQL,
+    START_EVENT_INDEX,
     matching_picker_indexes,
     normalize_index_ddl,
 )
@@ -123,6 +126,25 @@ def test_contract_checker_rejects_column_order_drift_with_same_predicate(tmp_pat
         conn.close()
 
 
+def test_contract_checker_rejects_direct_index_column_order_drift(tmp_path) -> None:
+    db = tmp_path / "direct-column-drift.db"
+    _create_legacy_events_table(db)
+    conn = sqlite3.connect(db)
+    try:
+        for statement in PICKER_INDEX_DDL_BY_NAME.values():
+            conn.execute(statement)
+        expected = PICKER_INDEX_DDL_BY_NAME[DIRECT_EVENT_INDEX]
+        conn.execute(f'DROP INDEX "{DIRECT_EVENT_INDEX}"')
+        conn.execute(expected.replace("(event_type, aggregate_id)", "(aggregate_id, event_type)"))
+
+        matching = matching_picker_indexes(conn)
+
+        assert DIRECT_EVENT_INDEX not in matching
+        assert matching == frozenset(PICKER_INDEX_NAMES) - {DIRECT_EVENT_INDEX}
+    finally:
+        conn.close()
+
+
 @pytest.mark.parametrize(
     "replacements",
     [
@@ -145,7 +167,7 @@ async def test_contract_rejects_and_repairs_changed_string_literals(tmp_path, re
                 changed = changed.replace(canonical, case_changed)
             conn.execute(changed)
 
-        assert matching_picker_indexes(conn) == frozenset()
+        assert matching_picker_indexes(conn) == frozenset({DIRECT_EVENT_INDEX, START_EVENT_INDEX})
     finally:
         conn.close()
 
@@ -242,7 +264,7 @@ def _measure_bulk_append(path: Path, event_type: str, *, indexed: bool) -> tuple
                 "acceptance_criteria": [{"node_id": "n", "status": "completed"}],
             }
         )
-        started = time.perf_counter()
+        started = time.process_time()
         conn.executemany(
             "INSERT INTO events "
             "(id, aggregate_type, aggregate_id, event_type, payload, timestamp) "
@@ -253,7 +275,7 @@ def _measure_bulk_append(path: Path, event_type: str, *, indexed: bool) -> tuple
             ),
         )
         conn.commit()
-        elapsed = time.perf_counter() - started
+        elapsed = time.process_time() - started
         page_count = int(conn.execute("PRAGMA page_count").fetchone()[0])
         page_size = int(conn.execute("PRAGMA page_size").fetchone()[0])
         return elapsed, page_count * page_size
@@ -265,18 +287,33 @@ def _measure_bulk_append(path: Path, event_type: str, *, indexed: bool) -> tuple
     ("event_type", "max_time_ratio", "max_size_ratio"),
     [
         ("telemetry.unrelated", 1.25, 1.02),
+        ("orchestrator.session.started", 1.75, 1.25),
+        ("execution.node.updated", 1.75, 1.25),
         ("workflow.progress.updated", 2.1, 1.35),
     ],
 )
 def test_picker_index_write_and_disk_budgets(
     tmp_path, event_type: str, max_time_ratio: float, max_size_ratio: float
 ) -> None:
-    baseline_time, baseline_size = _measure_bulk_append(
-        tmp_path / f"baseline-{event_type}.db", event_type, indexed=False
-    )
-    indexed_time, indexed_size = _measure_bulk_append(
-        tmp_path / f"indexed-{event_type}.db", event_type, indexed=True
-    )
+    time_ratios: list[float] = []
+    size_ratios: list[float] = []
+    for trial in range(3):
+        baseline_path = tmp_path / f"baseline-{event_type}-{trial}.db"
+        indexed_path = tmp_path / f"indexed-{event_type}-{trial}.db"
+        try:
+            baseline_time, baseline_size = _measure_bulk_append(
+                baseline_path, event_type, indexed=False
+            )
+            indexed_time, indexed_size = _measure_bulk_append(
+                indexed_path, event_type, indexed=True
+            )
+            time_ratios.append(indexed_time / baseline_time)
+            size_ratios.append(indexed_size / baseline_size)
+        finally:
+            baseline_path.unlink(missing_ok=True)
+            indexed_path.unlink(missing_ok=True)
 
-    assert indexed_time / baseline_time < max_time_ratio
-    assert indexed_size / baseline_size < max_size_ratio
+    # Process CPU isolates index-maintenance cost from fsync and scheduler wait.
+    # Keep the same budget and require the median of three 100k-append trials.
+    assert median(time_ratios) < max_time_ratio
+    assert max(size_ratios) < max_size_ratio
