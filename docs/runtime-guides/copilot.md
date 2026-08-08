@@ -157,7 +157,12 @@ Before launching that command, the runtime applies the same executable
 version-attestation policy as Codex: initialization-time probe failure blocks
 the runtime because no positive baseline exists; a later timeout or execution
 failure blocks only the current attempt and is not reported as executable
-drift; only two successful, different attestations confirm a version change.
+drift; only a version-output change requires two successful, different
+attestations.
+The runtime rejects non-executing path/content/device/inode/symlink evidence
+that differs from initialization before running `copilot --version`, and it
+post-samples every started probe so mutation takes precedence over a concurrent
+timeout or execution failure.
 Path, content, symlink, device/inode, or probe-window generation drift can fail
 closed before a second successful version probe. This ensures that two missing
 `copilot --version` results never authorize a launch under load.

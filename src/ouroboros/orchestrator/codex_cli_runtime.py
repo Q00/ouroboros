@@ -59,7 +59,6 @@ from ouroboros.orchestrator.cli_version_attestation import (
     read_cli_executable_content_identity,
     read_cli_executable_filesystem_identity,
     read_cli_executable_resolution_chain_identity,
-    read_cli_executable_symlink_identity,
     require_unchanged_cli_version_attestation,
 )
 from ouroboros.orchestrator.frugality_runtime_attestation import (
@@ -534,14 +533,17 @@ class CodexCliRuntime:
         """
         return self._cli_executable_version_attestation().identity
 
-    def _cli_executable_version_attestation(self) -> _CliExecutableVersionAttestation:
+    def _cli_executable_version_attestation(
+        self,
+        initialized: _CliExecutableVersionAttestation | None = None,
+    ) -> _CliExecutableVersionAttestation:
         """Return bounded evidence for one stable executable generation."""
         return probe_cli_executable_version_attestation(
             self._cli_executable_identity(),
+            initialized=initialized,
             filesystem_identity=self._cli_executable_filesystem_identity,
             resolution_chain_identity=self._cli_executable_resolution_chain_identity,
             content_identity=self._cli_executable_content_identity,
-            symlink_identity=self._cli_executable_symlink_identity,
             hash_payload=self._hash_json_payload,
         )
 
@@ -554,9 +556,6 @@ class CodexCliRuntime:
     _compare_cli_executable_version_attestations = staticmethod(
         compare_cli_executable_version_attestations
     )
-
-    def _cli_executable_symlink_identity(self) -> dict[str, str] | None:
-        return read_cli_executable_symlink_identity(self._cli_executable_identity())
 
     def _cli_executable_content_identity(self) -> str | None:
         return read_cli_executable_content_identity(self._cli_executable_identity())
@@ -1120,16 +1119,20 @@ class CodexCliRuntime:
                         "Codex CLI executable was unresolved at runtime initialization; "
                         "start a new execution session"
                     )
-                return
-            if cli_candidate.exists():
+            elif cli_candidate.exists():
                 raise RuntimeError(
-                    "Codex CLI executable appeared after runtime initialization; "
+                    f"{self._display_name} executable appeared after runtime initialization; "
                     "start a new execution session"
                 )
+            require_unchanged_cli_version_attestation(
+                self._display_name,
+                self._cli_executable_version_attestation_snapshot,
+                self._cli_executable_version_attestation,
+            )
             return
         if self._cli_executable_identity() != self._cli_executable_path_identity:
             raise RuntimeError(
-                "Codex CLI executable changed after runtime initialization; "
+                f"{self._display_name} executable changed after runtime initialization; "
                 "start a new execution session"
             )
         if (
@@ -1137,13 +1140,15 @@ class CodexCliRuntime:
             != self._cli_executable_content_identity_snapshot
         ):
             raise RuntimeError(
-                "Codex CLI executable changed after runtime initialization; "
+                f"{self._display_name} executable changed after runtime initialization; "
                 "start a new execution session"
             )
         require_unchanged_cli_version_attestation(
             self._display_name,
             self._cli_executable_version_attestation_snapshot,
-            self._cli_executable_version_attestation,
+            lambda: self._cli_executable_version_attestation(
+                self._cli_executable_version_attestation_snapshot
+            ),
         )
 
     def _fingerprint_skill_dispatch_registry(self) -> str | None:

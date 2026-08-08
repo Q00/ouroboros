@@ -35,6 +35,7 @@ class CliExecutableVersionAttestation:
     state: CliExecutableVersionState
     identity: str | None = None
     filesystem_identity: tuple[int, int] | None = None
+    nonexecuting_identity: str | None = None
 
 
 type IdentityReader = Callable[[], object]
@@ -164,10 +165,10 @@ def read_cli_executable_content_identity(executable_path: str | None) -> str | N
 def probe_cli_executable_version_attestation(
     executable_path: str | None,
     *,
+    initialized: CliExecutableVersionAttestation | None,
     filesystem_identity: FilesystemIdentityReader,
     resolution_chain_identity: IdentityReader,
     content_identity: IdentityReader,
-    symlink_identity: IdentityReader,
     hash_payload: HashPayload,
 ) -> CliExecutableVersionAttestation:
     """Probe one executable generation and reject mixed or ABA evidence.
@@ -185,10 +186,39 @@ def probe_cli_executable_version_attestation(
     before_filesystem = filesystem_identity()
     before_resolution_chain = resolution_chain_identity()
     before_content = content_identity()
-    before_symlink = symlink_identity()
+    before_symlink = read_cli_executable_symlink_identity(executable_path)
     if before_filesystem is None or before_resolution_chain is None or before_content is None:
         return failed
 
+    device, inode = before_filesystem
+    semantic_symlink_chain = tuple(
+        (entry[0], entry[1]) for entry in before_resolution_chain if entry[1] is not None
+    )
+    nonexecuting_chain = tuple((entry[0], entry[1], entry[3]) for entry in before_resolution_chain)
+    nonexecuting_identity = hash_payload(
+        {
+            "content_sha256": before_content,
+            "executable_path": executable_path,
+            "filesystem": {"device": device, "inode": inode},
+            "resolution_chain": nonexecuting_chain,
+            "symlink_chain": semantic_symlink_chain,
+        }
+    )
+    if initialized is not None:
+        if (
+            initialized.state is not CliExecutableVersionState.VERIFIED
+            or initialized.nonexecuting_identity is None
+        ):
+            return failed
+        if initialized.nonexecuting_identity != nonexecuting_identity:
+            return CliExecutableVersionAttestation(
+                CliExecutableVersionState.CHANGED,
+                filesystem_identity=before_filesystem,
+                nonexecuting_identity=nonexecuting_identity,
+            )
+
+    probe_state = CliExecutableVersionState.VERIFIED
+    version_output: str | None = None
     try:
         result = subprocess.run(
             [executable_path, "--version"],
@@ -198,18 +228,18 @@ def probe_cli_executable_version_attestation(
             check=False,
         )
     except subprocess.TimeoutExpired:
-        return CliExecutableVersionAttestation(CliExecutableVersionState.TIMED_OUT)
+        probe_state = CliExecutableVersionState.TIMED_OUT
     except (OSError, UnicodeError):
-        return failed
-
-    version_output = (result.stdout or result.stderr).strip()
-    if result.returncode != 0 or not version_output:
-        return failed
+        probe_state = CliExecutableVersionState.EXECUTION_FAILED
+    else:
+        version_output = (result.stdout or result.stderr).strip()
+        if result.returncode != 0 or not version_output:
+            probe_state = CliExecutableVersionState.EXECUTION_FAILED
 
     # Sample in reverse order after the process so authority-bearing entries
     # are bounded by generation checks. This rejects same-inode writes,
     # symlink retargets, atomic replacement, and probe-window ABA.
-    after_symlink = symlink_identity()
+    after_symlink = read_cli_executable_symlink_identity(executable_path)
     after_content = content_identity()
     after_resolution_chain = resolution_chain_identity()
     after_filesystem = filesystem_identity()
@@ -219,12 +249,19 @@ def probe_cli_executable_version_attestation(
         or after_content != before_content
         or after_symlink != before_symlink
     ):
-        return failed
+        return CliExecutableVersionAttestation(
+            CliExecutableVersionState.CHANGED,
+            filesystem_identity=before_filesystem,
+            nonexecuting_identity=nonexecuting_identity,
+        )
+    if probe_state is not CliExecutableVersionState.VERIFIED:
+        return CliExecutableVersionAttestation(
+            probe_state,
+            filesystem_identity=before_filesystem,
+            nonexecuting_identity=nonexecuting_identity,
+        )
 
-    device, inode = before_filesystem
-    semantic_symlink_chain = tuple(
-        (entry[0], entry[1]) for entry in before_resolution_chain if entry[1] is not None
-    )
+    assert version_output is not None
     return CliExecutableVersionAttestation(
         CliExecutableVersionState.VERIFIED,
         hash_payload(
@@ -237,6 +274,7 @@ def probe_cli_executable_version_attestation(
             }
         ),
         (device, inode),
+        nonexecuting_identity,
     )
 
 
@@ -254,9 +292,13 @@ def compare_cli_executable_version_attestations(
         or current.identity is None
         or initialized.filesystem_identity is None
         or current.filesystem_identity is None
+        or initialized.nonexecuting_identity is None
+        or current.nonexecuting_identity is None
     ):
         return CliExecutableVersionState.EXECUTION_FAILED
     if initialized.filesystem_identity != current.filesystem_identity:
+        return CliExecutableVersionState.CHANGED
+    if initialized.nonexecuting_identity != current.nonexecuting_identity:
         return CliExecutableVersionState.CHANGED
     if initialized.identity == current.identity:
         return CliExecutableVersionState.VERIFIED
@@ -284,6 +326,11 @@ def require_unchanged_cli_version_attestation(
         raise RuntimeError(
             f"{display_name} version attestation failed during runtime "
             "initialization; execution is blocked without claiming executable drift; "
+            "start a new execution session"
+        )
+    if initialized.state is CliExecutableVersionState.CHANGED:
+        raise RuntimeError(
+            f"{display_name} executable changed during runtime initialization; "
             "start a new execution session"
         )
 

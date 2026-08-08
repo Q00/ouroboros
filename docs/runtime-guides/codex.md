@@ -229,6 +229,13 @@ evidence with confirmed drift:
 - A timeout or execution failure during a later check blocks that attempt but
   is reported as unavailable attestation evidence; the same runtime may be
   retried.
+- Before running the selected executable for `--version`, the adapter compares
+  its non-executing path, content, device/inode, and complete semantic symlink
+  evidence with the verified initialization baseline. Known drift is rejected
+  without executing the changed candidate.
+- Every started probe is post-sampled even when it times out or fails. If that
+  evidence proves probe-window mutation, mutation takes precedence over the
+  transient probe outcome.
 - Version drift is reported only when two successful version attestations
   differ. Path, content, symlink, device/inode, or probe-window generation
   drift can fail closed before a second successful version probe. Two missing
