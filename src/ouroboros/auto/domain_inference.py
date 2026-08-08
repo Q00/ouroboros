@@ -762,6 +762,17 @@ _UI_PRODUCT_HEAD_FRAGMENT = (
     r"frontends?|sites?|websites?|dashboards?|consoles?|portals?|"
     r"players?|editors?|viewers?|clients?|panels?|forms?)"
 )
+# A browser/web token re-headed by a subject/event or measurement noun
+# is topic vocabulary, not an execution qualifier (#1813 R69/R73):
+# "browser crash dashboard" reports on crashes, "browser admin console"
+# is a console.
+_SUBJECT_COMPOUND_NOUN_FRAGMENT = (
+    r"(?:crash(?:es)?|security|incidents?|errors?|bugs?|outages?|"
+    r"vulnerabilit(?:y|ies)|compatibility|latency|usage|adoption|"
+    r"traffic|statistics|stats|metrics|performance|behaviors?|"
+    r"behaviours?|trends?|share|history|activity|analytics|telemetry|"
+    r"logs?|findings?|events?|data)"
+)
 # Shared first-noun-phrase grammar (#1813 R50/R52/R55): routine intent
 # wrappers, an optional specificational copula ("the product is ..."),
 # at most two lead tokens, ONE determiner, then modifiers. A determiner
@@ -824,7 +835,10 @@ _BROWSER_QUALIFIED_UI_HEAD_RE = re.compile(
     # modifying a UI product head ("web dashboard", #1813 R60); it stays
     # out of the general signal vocabulary.
     + rf"(?:{_WEB_APP_GOAL_SIGNAL_FRAGMENT}|web[\s\-]based|in[\s\-]browser|web)"
-    + rf"(?:[\s\-]+{_NP_MODIFIER_TOKEN}){{0,3}}?"
+    # A subject/event noun after the qualifier re-heads it into topic
+    # vocabulary (#1813 R73): "browser crash dashboard" reports on
+    # crashes; "browser admin console" stays a console.
+    + rf"(?:[\s\-]+(?!{_SUBJECT_COMPOUND_NOUN_FRAGMENT}\b){_NP_MODIFIER_TOKEN}){{0,3}}?"
     + rf"(?:[\s\-]+{_NOMINAL_GERUND_FRAGMENT})?"
     + rf"[\s\-]+{_UI_PRODUCT_HEAD_FRAGMENT}[\s.!?]*$"
 )
@@ -1224,13 +1238,12 @@ def _ledger_has_browser_context(ledger: SeedDraftLedger) -> bool:
         " ",
         goal_for_context,
     )
-    # A browser word re-headed by a data/measurement noun is subject
-    # matter (#1813 R69): "browser usage metrics", "browser adoption
-    # trends" describe what the artifact reports on.
+    # A browser/web token re-headed by a subject/event or measurement
+    # noun is subject matter (#1813 R69/R73): "browser usage metrics",
+    # "browser crash reports", "web app incident dashboards" describe
+    # what the artifact reports on.
     goal_for_context = re.sub(
-        r"\b(?:browsers?|web)\s+(?:usage|adoption|traffic|statistics|stats|"
-        r"metrics|performance|behaviors?|behaviours?|trends?|share|history|"
-        r"activity|analytics)\b",
+        rf"\b{_WEB_APP_GOAL_SIGNAL_FRAGMENT}\s+{_SUBJECT_COMPOUND_NOUN_FRAGMENT}\b",
         " ",
         goal_for_context,
     )

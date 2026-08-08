@@ -4011,6 +4011,25 @@ def test_determined_host_prepositions_reach_the_component(goal: str) -> None:
 @pytest.mark.parametrize(
     "goal",
     [
+        "Build a browser crash dashboard",
+        "Build a browser security dashboard",
+        "Build a web app incident dashboard",
+    ],
+)
+def test_prenominal_subject_compounds_are_not_execution_qualifiers(goal: str) -> None:
+    """R73 guard: a subject/event noun after the browser qualifier
+    re-heads it into topic vocabulary — "browser crash dashboard"
+    reports on crashes while "browser admin console" stays a console."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value="Interactive charts with a filters panel")
+    _seed_section(ledger, "runtime_context", value="Local desktop runtime")
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
         "The product is an admin portal that runs in browsers",
         "The deliverable is an admin portal available in browsers",
     ],
