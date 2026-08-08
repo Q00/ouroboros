@@ -42,9 +42,10 @@ from ouroboros.persistence.sqlite_memory import (
     configure_anonymous_memory_engine,
     configure_named_memory_engine,
     is_anonymous_in_memory_sqlite_url,
-    is_canonical_named_memdb_url,
     is_named_memory_sqlite_url,
+    sqlite_uri_is_enabled,
     validate_canonical_named_memdb_sqlite_url,
+    validate_external_named_memory_sqlite_url,
     validate_standard_shared_memory_sqlite_url,
 )
 from ouroboros.persistence.write_lifecycle import run_with_write_lifecycle
@@ -618,6 +619,7 @@ class EventStore:
         self._lifecycle_lock = asyncio.Lock()
         validate_standard_shared_memory_sqlite_url(database_url)
         validate_canonical_named_memdb_sqlite_url(database_url)
+        validate_external_named_memory_sqlite_url(database_url)
         if read_only:
             if is_named_memory_sqlite_url(database_url):
                 raise ValueError(
@@ -650,8 +652,16 @@ class EventStore:
 
         path_part = database_url[len(prefix) :]
         if path_part.startswith("file:"):
-            raw_uri_path = path_part[len("file:") :]
-            path_part = unquote(raw_uri_path.split("?", 1)[0].split("#", 1)[0])
+            raw_path, _separator, _raw_query = path_part.partition("?")
+            if sqlite_uri_is_enabled(database_url):
+                raw_path = raw_path[len("file:") :]
+                path_part = unquote(raw_path.split("#", 1)[0])
+            else:
+                # With URI processing disabled, ``file:`` is part of the literal
+                # filename.  Preserve it when rebuilding a true read-only URI;
+                # otherwise ``file:ordinary?uri=false`` silently targets
+                # ``ordinary`` instead of the durable ``file:ordinary`` database.
+                path_part = raw_path
 
         # ``:memory:`` has no filesystem and cannot be opened read-only
         # meaningfully; leave it alone.
@@ -674,13 +684,11 @@ class EventStore:
             parsed = make_url(database_url)
         except Exception:
             return None
-        is_memory_mode = str(parsed.query.get("mode", "")) == "memory" or (
-            is_canonical_named_memdb_url(database_url)
-        )
+        is_memory_mode = is_named_memory_sqlite_url(database_url)
         if parsed.get_backend_name() != "sqlite" or is_memory_mode:
             return None
         database = parsed.database or ""
-        if database.startswith("file:"):
+        if database.startswith("file:") and sqlite_uri_is_enabled(database_url):
             database = unquote(database[len("file:") :])
         return None if database in (":memory:", "") else database
 

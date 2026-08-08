@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from sqlalchemy.engine import make_url
 from sqlalchemy.pool import AsyncAdaptedQueuePool
+from sqlalchemy.util import asbool
 
 from ouroboros.core.errors import PersistenceError
 
@@ -17,34 +18,79 @@ _STANDARD_SHARED_MEMORY_TARGET = "file::memory:"
 _STANDARD_SHARED_MEMORY_QUERIES = frozenset({"cache=shared&uri=true", "uri=true&cache=shared"})
 _CANONICAL_NAMED_MEMDB_PREFIX = "file:/ouroboros-named-"
 _CANONICAL_NAMED_MEMDB_QUERIES = frozenset({"uri=true&vfs=memdb", "vfs=memdb&uri=true"})
+_EXTERNAL_MODE_MEMORY_QUERY_PARTS = frozenset({"mode=memory", "cache=shared", "uri=true"})
+_EXTERNAL_MEMDB_QUERY_PARTS = frozenset({"vfs=memdb", "uri=true"})
 _MAX_RESERVED_NAME_DECODE_DEPTH = 8
 
 
-def _has_exact_standard_shared_memory_spelling(database_url: str) -> bool:
+def _raw_sqlite_target(database_url: str) -> tuple[str, str | None]:
     prefix = "sqlite+aiosqlite:///"
     if not database_url.startswith(prefix):
-        return False
+        return "", None
     raw_target = database_url[len(prefix) :]
     raw_database, separator, raw_query = raw_target.partition("?")
+    return raw_database, raw_query if separator else None
+
+
+def _has_exact_query_parts(raw_query: str | None, expected: frozenset[str]) -> bool:
+    if raw_query is None:
+        return False
+    parts = raw_query.split("&")
+    return len(parts) == len(expected) and frozenset(parts) == expected
+
+
+def _has_named_memory_query_intent(raw_query: str | None) -> bool:
+    """Recognize encoded/case-drifted memory intent so it can fail closed."""
+    if raw_query is None:
+        return False
+    for part in raw_query.split("&"):
+        raw_key, separator, raw_value = part.partition("=")
+        if not separator:
+            continue
+        key = unquote_to_bytes(raw_key)
+        value = unquote_to_bytes(raw_value)
+        # Every successful percent-decoding pass shortens at least one
+        # component, so the combined input length is a finite upper bound that
+        # reaches a stable spelling without a fixed-depth alias bypass.
+        for _ in range(len(key) + len(value) + 1):
+            decoded_key = unquote_to_bytes(key)
+            decoded_value = unquote_to_bytes(value)
+            if decoded_key == key and decoded_value == value:
+                break
+            key, value = decoded_key, decoded_value
+        else:
+            # Defensive fail-closed fallback if a future decoder ever violates
+            # the strictly shrinking invariant above.
+            return True
+        if (key.lower(), value.lower()) in ((b"mode", b"memory"), (b"vfs", b"memdb")):
+            return True
+    return False
+
+
+def _has_exact_external_named_memory_spelling(database_url: str) -> bool:
+    raw_database, raw_query = _raw_sqlite_target(database_url)
+    if not raw_database.startswith("file:") or raw_database == "file:":
+        return False
+    return _has_exact_query_parts(
+        raw_query, _EXTERNAL_MODE_MEMORY_QUERY_PARTS
+    ) or _has_exact_query_parts(raw_query, _EXTERNAL_MEMDB_QUERY_PARTS)
+
+
+def _has_exact_standard_shared_memory_spelling(database_url: str) -> bool:
+    raw_database, raw_query = _raw_sqlite_target(database_url)
     return (
         raw_database == _STANDARD_SHARED_MEMORY_TARGET
-        and separator == "?"
         and raw_query in _STANDARD_SHARED_MEMORY_QUERIES
     )
 
 
 def _has_exact_canonical_named_memdb_spelling(database_url: str) -> bool:
-    prefix = "sqlite+aiosqlite:///"
-    if not database_url.startswith(prefix):
-        return False
-    raw_target = database_url[len(prefix) :]
-    raw_database, separator, raw_query = raw_target.partition("?")
+    raw_database, raw_query = _raw_sqlite_target(database_url)
     identity = raw_database.removeprefix(_CANONICAL_NAMED_MEMDB_PREFIX)
     return (
         raw_database.startswith(_CANONICAL_NAMED_MEMDB_PREFIX)
         and len(identity) == 64
         and all(character in "0123456789abcdef" for character in identity)
-        and separator == "?"
         and raw_query in _CANONICAL_NAMED_MEMDB_QUERIES
     )
 
@@ -114,10 +160,30 @@ def validate_canonical_named_memdb_sqlite_url(database_url: str) -> None:
         )
 
 
+def validate_external_named_memory_sqlite_url(database_url: str) -> None:
+    """Reject named-memory intent that would change meaning during canonicalization."""
+    _, raw_query = _raw_sqlite_target(database_url)
+    if _has_named_memory_query_intent(raw_query) and not (
+        _has_exact_external_named_memory_spelling(database_url)
+        or _has_exact_canonical_named_memdb_spelling(database_url)
+    ):
+        raise ValueError(
+            "Unsupported named-memory SQLite URI; use exactly "
+            "'mode=memory&cache=shared&uri=true' or 'vfs=memdb&uri=true'."
+        )
+
+
 def is_anonymous_in_memory_sqlite_url(database_url: str) -> bool:
     """Return whether a SQLite URL names an anonymous in-memory database."""
     parsed = make_url(database_url)
     return parsed.database in (None, "", ":memory:")
+
+
+def sqlite_uri_is_enabled(database_url: str) -> bool:
+    """Match SQLAlchemy's boolean coercion for the DBAPI ``uri`` argument."""
+    parsed = make_url(database_url)
+    value = parsed.query.get("uri", False)
+    return bool(asbool(value))
 
 
 def is_named_memory_sqlite_url(database_url: str) -> bool:
@@ -125,8 +191,8 @@ def is_named_memory_sqlite_url(database_url: str) -> bool:
     parsed = make_url(database_url)
     return parsed.database not in (None, "", ":memory:") and (
         _is_standard_shared_memory_uri(database_url, parsed)
-        or str(parsed.query.get("mode", "")) == "memory"
-        or str(parsed.query.get("vfs", "")) == "memdb"
+        or _is_canonical_named_memdb_uri(database_url, parsed)
+        or _has_exact_external_named_memory_spelling(database_url)
     )
 
 
@@ -140,15 +206,10 @@ def canonicalize_named_memory_sqlite_url(database_url: str) -> str:
     """Map a logical named-memory identity to a deterministic memdb VFS URI."""
     validate_standard_shared_memory_sqlite_url(database_url)
     validate_canonical_named_memdb_sqlite_url(database_url)
+    validate_external_named_memory_sqlite_url(database_url)
     parsed = make_url(database_url)
     database = parsed.database or ""
-    mode = str(parsed.query.get("mode", ""))
-    vfs = str(parsed.query.get("vfs", ""))
-    if database in ("", ":memory:") or (
-        not _is_standard_shared_memory_uri(database_url, parsed)
-        and mode != "memory"
-        and vfs != "memdb"
-    ):
+    if database in ("", ":memory:") or not is_named_memory_sqlite_url(database_url):
         return database_url
     if not is_canonical_named_memdb_url(database_url):
         logical_name = unquote_to_bytes(database.removeprefix("file:"))
@@ -226,6 +287,8 @@ __all__ = [
     "is_canonical_named_memdb_url",
     "is_named_memory_sqlite_url",
     "named_memory_keepalive_uri",
+    "sqlite_uri_is_enabled",
     "validate_canonical_named_memdb_sqlite_url",
+    "validate_external_named_memory_sqlite_url",
     "validate_standard_shared_memory_sqlite_url",
 ]

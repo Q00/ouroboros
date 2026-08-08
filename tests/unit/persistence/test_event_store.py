@@ -457,28 +457,149 @@ class TestEventStoreInitialization:
     ) -> None:
         """Ancient SQLite must fail explicitly instead of using shared-cache fallback."""
         monkeypatch.setattr("sqlite3.sqlite_version_info", (3, 35, 5))
-        store = EventStore("sqlite+aiosqlite:///file:old?mode=memory")
+        store = EventStore("sqlite+aiosqlite:///file:old?mode=memory&cache=shared&uri=true")
         with pytest.raises(PersistenceError, match="SQLite 3.36 or newer"):
             await store.initialize()
 
-    async def test_named_memdb_without_file_prefix_creates_no_disk_file(
+    async def test_external_memdb_uri_is_canonicalized_without_disk_file(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """An external memdb URL is canonicalized before SQLite can create a file."""
         monkeypatch.chdir(tmp_path)
-        store = EventStore("sqlite+aiosqlite:///no-file-prefix?vfs=memdb&uri=true")
+        store = EventStore("sqlite+aiosqlite:///file:external-memdb?vfs=memdb&uri=true")
         await store.initialize()
         await store.close()
         assert list(tmp_path.iterdir()) == []
+
+    @pytest.mark.parametrize(
+        "database_url",
+        (
+            "sqlite+aiosqlite:///file:logical?mode=memory&cache=shared&uri=false",
+            "sqlite+aiosqlite:///file:logical?mode=memory&cache=shared",
+            "sqlite+aiosqlite:///file:logical?mode=memory&cache=shared&URI=true",
+            "sqlite+aiosqlite:///file:logical?mode=memory&cache=shared&uri=True",
+            "sqlite+aiosqlite:///file:logical?mode=memory&uri=true",
+            "sqlite+aiosqlite:///file:logical?mode=memory&cache=private&uri=true",
+            "sqlite+aiosqlite:///file:logical?mode=memory&cache=shared&uri=true&timeout=1",
+            "sqlite+aiosqlite:///file:logical?mode=memory&cache=shared&uri=true&mode=ro",
+            "sqlite+aiosqlite:///file:logical?mode=memory&cache=shared&uri=true&immutable=1",
+            "sqlite+aiosqlite:///file:logical?mode=memory&cache=shared&uri=true&nolock=1",
+            "sqlite+aiosqlite:///file:logical?mode=memory&mode=memory&cache=shared&uri=true",
+            "sqlite+aiosqlite:///file:logical?%6dode=memory&cache=shared&uri=true",
+            "sqlite+aiosqlite:///file:logical?mode=%6demory&cache=shared&uri=true",
+            "sqlite+aiosqlite:///file:logical?%252525252525252525256dode=memory"
+            "&cache=shared&uri=true",
+            "sqlite+aiosqlite:///file:logical?mode=%252525252525252525256demory"
+            "&cache=shared&uri=true",
+            "sqlite+aiosqlite:///logical?mode=memory&cache=shared&uri=true",
+            "sqlite+aiosqlite:///file:logical?mode=MEMORY&cache=shared&uri=true",
+            "sqlite+aiosqlite:///file:logical?vfs=memdb&uri=false",
+            "sqlite+aiosqlite:///file:logical?vfs=memdb",
+            "sqlite+aiosqlite:///file:logical?vfs=memdb&URI=true",
+            "sqlite+aiosqlite:///file:logical?vfs=memdb&uri=True",
+            "sqlite+aiosqlite:///file:logical?vfs=memdb&uri=true&timeout=1",
+            "sqlite+aiosqlite:///file:logical?vfs=memdb&vfs=memdb&uri=true",
+            "sqlite+aiosqlite:///file:logical?%76fs=memdb&uri=true",
+            "sqlite+aiosqlite:///file:logical?vfs=%6demdb&uri=true",
+            "sqlite+aiosqlite:///logical?vfs=memdb&uri=true",
+            "sqlite+aiosqlite:///file:logical?vfs=MEMDB&uri=true",
+        ),
+    )
+    def test_named_memory_noncanonical_queries_fail_closed_without_artifacts(
+        self,
+        database_url: str,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Memory intent is never reclassified by enabling URI mode or dropping options."""
+        monkeypatch.chdir(tmp_path)
+        for read_only in (False, True):
+            with pytest.raises(ValueError, match="Unsupported named-memory SQLite URI"):
+                EventStore(database_url, read_only=read_only)
+        assert list(tmp_path.iterdir()) == []
+
+    async def test_non_memory_uri_false_remains_a_durable_file(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Ordinary URI text is not rejected or silently converted into volatile memory."""
+        monkeypatch.chdir(tmp_path)
+        database_url = "sqlite+aiosqlite:///file:ordinary?uri=false"
+        first = EventStore(database_url)
+        assert first.database_url == database_url
+        assert first.sqlite_path() == "file:ordinary"
+        assert first.supports_cross_process_workers is True
+        await first.initialize()
+        await first.append(
+            BaseEvent(
+                type="test.event.created",
+                aggregate_type="test",
+                aggregate_id="ordinary-uri-false",
+                data={},
+            )
+        )
+        await first.close()
+
+        reopened = EventStore(database_url)
+        await reopened.initialize()
+        try:
+            assert len(await reopened.replay("test", "ordinary-uri-false")) == 1
+        finally:
+            await reopened.close()
+
+        read_only = EventStore(database_url, read_only=True)
+        assert read_only.sqlite_path() == "file:ordinary"
+        await read_only.initialize()
+        try:
+            assert len(await read_only.replay("test", "ordinary-uri-false")) == 1
+        finally:
+            await read_only.close()
+        assert (tmp_path / "file:ordinary").is_file()
+
+    def test_deep_encoded_ordinary_query_is_not_memory_intent(self, tmp_path: Path) -> None:
+        database_url = f"sqlite+aiosqlite:///{tmp_path / 'ordinary.db'}?tag=%2525252525252525252561"
+        store = EventStore(database_url)
+        assert store.database_url == database_url
+        assert store.sqlite_path() == str(tmp_path / "ordinary.db")
+
+    @pytest.mark.parametrize("uri_value", ("1", "True", "yes", "on"))
+    async def test_noncanonical_true_uri_values_preserve_read_only_target(
+        self,
+        uri_value: str,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        database_url = f"sqlite+aiosqlite:///file:ordinary-{uri_value}?uri={uri_value}"
+        writer = EventStore(database_url)
+        await writer.initialize()
+        await writer.append(
+            BaseEvent(
+                type="test.event.created",
+                aggregate_type="test",
+                aggregate_id=uri_value,
+                data={},
+            )
+        )
+        await writer.close()
+
+        reader = EventStore(database_url, read_only=True)
+        await reader.initialize()
+        try:
+            assert len(await reader.replay("test", uri_value)) == 1
+        finally:
+            await reader.close()
+        assert (tmp_path / f"ordinary-{uri_value}").is_file()
 
     def test_named_memory_rejects_read_only_target_swap(self, tmp_path: Path) -> None:
         """Read-only named memory must never become an unrelated disk database."""
         monkeypatch_target = tmp_path / "named-ro"
         with pytest.raises(ValueError, match="Read-only named in-memory"):
             EventStore(
-                f"sqlite+aiosqlite:///file:{monkeypatch_target}?mode=memory&uri=true",
+                f"sqlite+aiosqlite:///file:{monkeypatch_target}?mode=memory&cache=shared&uri=true",
                 read_only=True,
             )
         assert not monkeypatch_target.exists()
@@ -532,18 +653,6 @@ class TestEventStoreInitialization:
             assert len(await reader.replay("test", "readonly-query")) == 1
         finally:
             await reader.close()
-
-    async def test_named_memory_parameter_values_remain_case_sensitive(self) -> None:
-        """Invalid SQLite URI parameter casing must not be silently normalized."""
-        from sqlalchemy.exc import OperationalError
-
-        for database_url in (
-            "sqlite+aiosqlite:///file:bad-mode?mode=MEMORY&uri=true",
-            "sqlite+aiosqlite:///file:bad-vfs?vfs=MEMDB&uri=true",
-        ):
-            store = EventStore(database_url)
-            with pytest.raises(OperationalError):
-                await store.initialize()
 
     async def test_memory_store_concurrent_rollback_cannot_void_append(self, monkeypatch) -> None:
         """The #1566/#1576 CI append-void, reproduced deterministically.
