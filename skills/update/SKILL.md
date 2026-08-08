@@ -75,6 +75,10 @@ When the user invokes this skill:
 - Automatic runtime refresh preserves the configured backend and the existing
   OpenCode `plugin`/`subprocess` topology instead of inferring a replacement
   from PATH.
+- Runtime executable identity follows the supported environment override,
+  then the persisted `orchestrator.*_cli_path`, then PATH. The chosen exact
+  executable is validated and reused for plugin/setup refresh so a stale PATH
+  binary cannot replace an operator-selected runtime.
 - `ouroboros update` supports `--check`, `--yes`, `--dry-run`,
   `--prerelease`, and `--runtime`; see `ouroboros update --help`.
 

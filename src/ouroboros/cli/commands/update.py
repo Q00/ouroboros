@@ -47,6 +47,29 @@ app = typer.Typer(
 PYPI_JSON_URL = "https://pypi.org/pypi/ouroboros-ai/json"
 PACKAGE_NAME = "ouroboros-ai"
 
+_RUNTIME_CLI_IDENTITIES: dict[str, tuple[str, str, str]] = {
+    "claude": ("OUROBOROS_CLI_PATH", "cli_path", "claude"),
+    "codex": ("OUROBOROS_CODEX_CLI_PATH", "codex_cli_path", "codex"),
+    "opencode": ("OUROBOROS_OPENCODE_CLI_PATH", "opencode_cli_path", "opencode"),
+    "hermes": ("OUROBOROS_HERMES_CLI_PATH", "hermes_cli_path", "hermes"),
+    "gemini": ("OUROBOROS_GEMINI_CLI_PATH", "gemini_cli_path", "gemini"),
+    "kiro": ("OUROBOROS_KIRO_CLI_PATH", "kiro_cli_path", "kiro-cli"),
+    "copilot": ("OUROBOROS_COPILOT_CLI_PATH", "copilot_cli_path", "copilot"),
+    "goose": ("OUROBOROS_GOOSE_CLI_PATH", "goose_cli_path", "goose"),
+    "pi": ("OUROBOROS_PI_CLI_PATH", "pi_cli_path", "pi"),
+    "gjc": ("OUROBOROS_GJC_CLI_PATH", "gjc_cli_path", "gjc"),
+    "antigravity": ("OUROBOROS_ANTIGRAVITY_CLI_PATH", "antigravity_cli_path", "agy"),
+    "grok": ("OUROBOROS_GROK_CLI_PATH", "grok_cli_path", "grok"),
+    "zcode": ("OUROBOROS_ZCODE_CLI_PATH", "zcode_cli_path", "zcode"),
+}
+
+_RUNTIME_ALIASES = {
+    "claude_code": "claude",
+    "codex_cli": "codex",
+    "opencode_cli": "opencode",
+    "hermes_cli": "hermes",
+}
+
 
 # ── Version helpers ──────────────────────────────────────────────
 
@@ -168,6 +191,8 @@ class RuntimeRefreshTopology:
 
     runtime_backend: str | None = None
     opencode_mode: Literal["plugin", "subprocess"] | None = None
+    runtime_executable: str | None = None
+    runtime_executable_env_key: str | None = None
 
 
 def _normalise_distribution_name(name: str) -> str:
@@ -445,19 +470,19 @@ def _run_step(
 # ── Runtime integration refresh ──────────────────────────────────
 
 
-def _refresh_claude_plugin(dry_run: bool) -> bool | None:
+def _refresh_claude_plugin(dry_run: bool, claude_executable: str | None) -> bool | None:
     """Refresh the Claude Code plugin. Returns None when the claude CLI is absent."""
-    if shutil.which("claude") is None:
+    if claude_executable is None:
         print_info("claude CLI not found — skipping Claude Code plugin refresh.")
         return None
     # Best effort: a missing marketplace entry must not block the install step.
     _run_step(
-        ["claude", "plugin", "marketplace", "update", "ouroboros"],
+        [claude_executable, "plugin", "marketplace", "update", "ouroboros"],
         description="Refreshed ouroboros marketplace",
         dry_run=dry_run,
     )
     installed = _run_step(
-        ["claude", "plugin", "install", "ouroboros@ouroboros"],
+        [claude_executable, "plugin", "install", "ouroboros@ouroboros"],
         description="Installed Claude Code plugin",
         dry_run=dry_run,
     )
@@ -467,7 +492,7 @@ def _refresh_claude_plugin(dry_run: bool) -> bool | None:
     # update is what advances an existing installation to the marketplace's
     # refreshed version.
     return _run_step(
-        ["claude", "plugin", "update", "ouroboros@ouroboros"],
+        [claude_executable, "plugin", "update", "ouroboros@ouroboros"],
         description="Updated Claude Code plugin",
         dry_run=dry_run,
     )
@@ -479,6 +504,8 @@ def _refresh_runtime_config(
     identity: InstallationIdentity,
     *,
     opencode_mode: Literal["plugin", "subprocess"] | None = None,
+    runtime_executable: str | None = None,
+    runtime_executable_env_key: str | None = None,
 ) -> bool:
     """Re-run setup through the proven installation's refreshed console script."""
     command = [str(identity.console_path), "setup", "--runtime", runtime]
@@ -489,13 +516,60 @@ def _refresh_runtime_config(
         command,
         description=f"Refreshed {runtime} runtime config",
         dry_run=dry_run,
+        env_overrides=(
+            {runtime_executable_env_key: runtime_executable}
+            if runtime_executable is not None and runtime_executable_env_key is not None
+            else None
+        ),
     )
 
 
-def _configured_runtime_topology() -> RuntimeRefreshTopology:
-    """Read the persisted runtime topology without inferring it from PATH."""
+def _canonical_runtime_backend(runtime: str) -> str:
+    return _RUNTIME_ALIASES.get(runtime.strip().lower(), runtime.strip().lower())
+
+
+def _runtime_executable_identity(
+    runtime: str,
+    config: object | None,
+) -> tuple[str | None, str | None]:
+    """Resolve env > config > PATH executable identity for one runtime."""
+    backend = _canonical_runtime_backend(runtime)
+    identity = _RUNTIME_CLI_IDENTITIES.get(backend)
+    if identity is None:
+        return None, None
+    env_key, config_field, command_name = identity
+    env_value = os.environ.get(env_key, "").strip()
+    configured_value: str | None = None
+    configured_key: str | None = None
+    if env_value:
+        configured_value = env_value
+        configured_key = env_key
+    elif config is not None:
+        orchestrator = getattr(config, "orchestrator", None)
+        raw_value = getattr(orchestrator, config_field, None)
+        if isinstance(raw_value, str) and raw_value.strip():
+            configured_value = raw_value.strip()
+            configured_key = f"orchestrator.{config_field}"
+
+    candidate = (
+        str(Path(configured_value).expanduser()) if configured_value is not None else command_name
+    )
+    resolved = shutil.which(candidate)
+    if resolved is None:
+        if configured_value is not None:
+            raise ConfigError(
+                f"Configured {backend} executable is not runnable: {candidate}",
+                config_key=configured_key,
+            )
+        return None, None
+    return str(Path(resolved).absolute()), env_key
+
+
+def _configured_runtime_topology(requested_runtime: str = "auto") -> RuntimeRefreshTopology:
+    """Resolve backend, mode, and exact runtime executable without identity drift."""
     config_path = get_config_dir() / "config.yaml"
     config_existed = config_path.exists()
+    config = None
     try:
         config = load_config(config_path)
     except ConfigError:
@@ -504,10 +578,46 @@ def _configured_runtime_topology() -> RuntimeRefreshTopology:
         # absent could refresh a different runtime after the package mutation.
         # Check both sides of the load to fail closed across create/delete races.
         if not config_existed and not config_path.exists():
-            return RuntimeRefreshTopology()
-        raise
-    runtime_backend = config.orchestrator.runtime_backend
-    opencode_mode = config.orchestrator.opencode_mode
+            config = None
+        else:
+            raise
+
+    configured_backend = config.orchestrator.runtime_backend if config is not None else None
+    env_backend = (
+        os.environ.get("OUROBOROS_AGENT_RUNTIME", "").strip()
+        or os.environ.get("OUROBOROS_RUNTIME", "").strip()
+    )
+    if requested_runtime != "auto":
+        runtime_backend = _canonical_runtime_backend(requested_runtime)
+    elif env_backend:
+        runtime_backend = _canonical_runtime_backend(env_backend)
+        if runtime_backend not in _RUNTIME_CLI_IDENTITIES:
+            raise ConfigError(
+                f"Configured runtime backend is unsupported: {env_backend}",
+                config_key="OUROBOROS_AGENT_RUNTIME",
+            )
+    else:
+        runtime_backend = configured_backend
+
+    runtime_executable: str | None = None
+    runtime_executable_env_key: str | None = None
+    if runtime_backend is not None:
+        runtime_executable, runtime_executable_env_key = _runtime_executable_identity(
+            runtime_backend,
+            config,
+        )
+    elif requested_runtime == "auto":
+        # Preserve the historic unconfigured auto order, but include supported
+        # executable overrides that intentionally live outside PATH.
+        for candidate_backend in ("claude", "codex"):
+            candidate, env_key = _runtime_executable_identity(candidate_backend, None)
+            if candidate is not None:
+                runtime_backend = candidate_backend
+                runtime_executable = candidate
+                runtime_executable_env_key = env_key
+                break
+
+    opencode_mode = config.orchestrator.opencode_mode if config is not None else None
     # Legacy OpenCode configs predate the explicit mode field. Their effective
     # topology is non-plugin/subprocess because the dispatch gate requires an
     # explicit ``plugin`` value; preserve that behavior during refresh.
@@ -516,6 +626,8 @@ def _configured_runtime_topology() -> RuntimeRefreshTopology:
     return RuntimeRefreshTopology(
         runtime_backend=runtime_backend,
         opencode_mode=opencode_mode,
+        runtime_executable=runtime_executable,
+        runtime_executable_env_key=runtime_executable_env_key,
     )
 
 
@@ -676,7 +788,7 @@ def update(
     configured_topology = RuntimeRefreshTopology()
     if runtime != "none":
         try:
-            configured_topology = _configured_runtime_topology()
+            configured_topology = _configured_runtime_topology(runtime)
         except ConfigError as exc:
             topology_error = exc
 
@@ -708,7 +820,10 @@ def update(
     if topology_error is None and resolved_runtime == "none":
         print_info("Runtime refresh skipped — package upgrade only.")
     elif topology_error is None and resolved_runtime == "claude":
-        plugin_refreshed = _refresh_claude_plugin(dry_run)
+        plugin_refreshed = _refresh_claude_plugin(
+            dry_run,
+            configured_topology.runtime_executable,
+        )
         if plugin_refreshed is None:
             # claude CLI absent: a notice, not a failure — setup would also
             # fail without claude on PATH, so skip the config refresh too.
@@ -719,7 +834,13 @@ def update(
         else:
             if plugin_refreshed is False:
                 failed.append("Claude Code plugin refresh")
-            if not _refresh_runtime_config("claude", dry_run, identity):
+            if not _refresh_runtime_config(
+                "claude",
+                dry_run,
+                identity,
+                runtime_executable=configured_topology.runtime_executable,
+                runtime_executable_env_key=(configured_topology.runtime_executable_env_key),
+            ):
                 failed.append("claude runtime config refresh")
     elif topology_error is None:
         # Codex and the other setup-supported runtimes: setup re-installs
@@ -729,6 +850,8 @@ def update(
             dry_run,
             identity,
             opencode_mode=opencode_mode,
+            runtime_executable=configured_topology.runtime_executable,
+            runtime_executable_env_key=configured_topology.runtime_executable_env_key,
         ):
             failed.append(f"{resolved_runtime} runtime config refresh")
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 import json
+import os
 from pathlib import Path
 import re
 from typing import Literal
@@ -41,7 +42,10 @@ def _isolate_runtime_topology() -> Iterator[None]:
     """Keep CLI-flow tests independent of the developer's real config file."""
     with patch(
         "ouroboros.cli.commands.update._configured_runtime_topology",
-        return_value=RuntimeRefreshTopology(),
+        return_value=RuntimeRefreshTopology(
+            runtime_executable="/usr/bin/claude",
+            runtime_executable_env_key="OUROBOROS_CLI_PATH",
+        ),
     ):
         yield
 
@@ -518,7 +522,10 @@ class TestResolveRuntime:
 
 class TestConfiguredRuntimeTopology:
     def test_missing_config_keeps_path_fallback_available(self, tmp_path: Path) -> None:
-        with patch("ouroboros.cli.commands.update.get_config_dir", return_value=tmp_path):
+        with (
+            patch("ouroboros.cli.commands.update.get_config_dir", return_value=tmp_path),
+            patch("ouroboros.cli.commands.update.shutil.which", return_value=None),
+        ):
             assert _configured_runtime_topology() == RuntimeRefreshTopology()
 
     def test_existing_config_with_unrelated_validation_error_fails_closed(
@@ -551,11 +558,142 @@ class TestConfiguredRuntimeTopology:
         ):
             _configured_runtime_topology()
 
+    @pytest.mark.parametrize(
+        ("backend", "env_key", "config_field", "command_name"),
+        [
+            ("claude", "OUROBOROS_CLI_PATH", "cli_path", "claude"),
+            (
+                "opencode",
+                "OUROBOROS_OPENCODE_CLI_PATH",
+                "opencode_cli_path",
+                "opencode",
+            ),
+            ("hermes", "OUROBOROS_HERMES_CLI_PATH", "hermes_cli_path", "hermes"),
+        ],
+    )
+    def test_configured_executable_outside_path_beats_stale_path(
+        self,
+        tmp_path: Path,
+        backend: str,
+        env_key: str,
+        config_field: str,
+        command_name: str,
+    ) -> None:
+        configured = tmp_path / "configured" / f"{command_name}-wrapper"
+        configured.parent.mkdir()
+        configured.write_text("#!/bin/sh\n", encoding="utf-8")
+        configured.chmod(0o755)
+        config = MagicMock()
+        config.orchestrator.runtime_backend = backend
+        config.orchestrator.opencode_mode = "subprocess" if backend == "opencode" else None
+        setattr(config.orchestrator, config_field, str(configured))
+
+        def which(candidate: str) -> str | None:
+            if candidate == str(configured):
+                return str(configured)
+            if candidate == command_name:
+                return f"/stale/path/{command_name}"
+            return None
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("ouroboros.cli.commands.update.load_config", return_value=config),
+            patch("ouroboros.cli.commands.update.shutil.which", side_effect=which),
+        ):
+            topology = _configured_runtime_topology()
+
+        assert topology.runtime_backend == backend
+        assert topology.runtime_executable == str(configured.resolve())
+        assert topology.runtime_executable_env_key == env_key
+
+    @pytest.mark.parametrize(
+        ("backend", "env_key", "config_field"),
+        [
+            ("claude", "OUROBOROS_CLI_PATH", "cli_path"),
+            ("opencode", "OUROBOROS_OPENCODE_CLI_PATH", "opencode_cli_path"),
+            ("hermes", "OUROBOROS_HERMES_CLI_PATH", "hermes_cli_path"),
+        ],
+    )
+    def test_executable_env_override_beats_config(
+        self,
+        tmp_path: Path,
+        backend: str,
+        env_key: str,
+        config_field: str,
+    ) -> None:
+        env_executable = tmp_path / "env" / "runtime"
+        config_executable = tmp_path / "config" / "runtime"
+        env_executable.parent.mkdir()
+        config_executable.parent.mkdir()
+        for executable in (env_executable, config_executable):
+            executable.write_text("#!/bin/sh\n", encoding="utf-8")
+            executable.chmod(0o755)
+        config = MagicMock()
+        config.orchestrator.runtime_backend = backend
+        config.orchestrator.opencode_mode = None
+        setattr(config.orchestrator, config_field, str(config_executable))
+
+        with (
+            patch.dict(os.environ, {env_key: str(env_executable)}, clear=True),
+            patch("ouroboros.cli.commands.update.load_config", return_value=config),
+            patch(
+                "ouroboros.cli.commands.update.shutil.which",
+                side_effect=lambda candidate: (
+                    str(env_executable) if candidate == str(env_executable) else None
+                ),
+            ),
+        ):
+            topology = _configured_runtime_topology()
+
+        assert topology.runtime_executable == str(env_executable.resolve())
+        assert topology.runtime_executable_env_key == env_key
+
+    @pytest.mark.parametrize(
+        ("backend", "config_field", "command_name"),
+        [
+            ("claude", "cli_path", "claude"),
+            ("opencode", "opencode_cli_path", "opencode"),
+            ("hermes", "hermes_cli_path", "hermes"),
+        ],
+    )
+    def test_invalid_configured_executable_does_not_fall_back_to_stale_path(
+        self,
+        tmp_path: Path,
+        backend: str,
+        config_field: str,
+        command_name: str,
+    ) -> None:
+        missing = tmp_path / "missing" / f"{command_name}-wrapper"
+        config = MagicMock()
+        config.orchestrator.runtime_backend = backend
+        config.orchestrator.opencode_mode = None
+        setattr(config.orchestrator, config_field, str(missing))
+        probes: list[str] = []
+
+        def which(candidate: str) -> str | None:
+            probes.append(candidate)
+            return f"/stale/path/{command_name}" if candidate == command_name else None
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("ouroboros.cli.commands.update.load_config", return_value=config),
+            patch("ouroboros.cli.commands.update.shutil.which", side_effect=which),
+            pytest.raises(ConfigError) as exc_info,
+        ):
+            _configured_runtime_topology()
+
+        assert exc_info.value.config_key == f"orchestrator.{config_field}"
+        assert probes == [str(missing)]
+
     def test_reads_backend_and_opencode_mode_from_valid_config(self) -> None:
         config = MagicMock()
         config.orchestrator.runtime_backend = "opencode"
         config.orchestrator.opencode_mode = "subprocess"
-        with patch("ouroboros.cli.commands.update.load_config", return_value=config):
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("ouroboros.cli.commands.update.load_config", return_value=config),
+            patch("ouroboros.cli.commands.update.shutil.which", return_value=None),
+        ):
             assert _configured_runtime_topology() == RuntimeRefreshTopology(
                 runtime_backend="opencode",
                 opencode_mode="subprocess",
@@ -565,7 +703,11 @@ class TestConfiguredRuntimeTopology:
         config = MagicMock()
         config.orchestrator.runtime_backend = "opencode"
         config.orchestrator.opencode_mode = None
-        with patch("ouroboros.cli.commands.update.load_config", return_value=config):
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("ouroboros.cli.commands.update.load_config", return_value=config),
+            patch("ouroboros.cli.commands.update.shutil.which", return_value=None),
+        ):
             assert _configured_runtime_topology() == RuntimeRefreshTopology(
                 runtime_backend="opencode",
                 opencode_mode="subprocess",
@@ -588,6 +730,8 @@ class TestConfiguredRuntimeTopology:
                 False,
                 _mock_identity("uv"),
                 opencode_mode=opencode_mode,
+                runtime_executable="/configured/opencode",
+                runtime_executable_env_key="OUROBOROS_OPENCODE_CLI_PATH",
             )
 
         assert run.call_args.args[0] == [
@@ -599,6 +743,9 @@ class TestConfiguredRuntimeTopology:
             opencode_mode,
             "--non-interactive",
         ]
+        assert run.call_args.kwargs["env_overrides"] == {
+            "OUROBOROS_OPENCODE_CLI_PATH": "/configured/opencode"
+        }
         assert should_dispatch_via_plugin("opencode", opencode_mode) is plugin_dispatch
 
 
@@ -611,13 +758,13 @@ class TestClaudePluginRefresh:
                 side_effect=[False, True, True],
             ) as run,
         ):
-            assert _refresh_claude_plugin(dry_run=False) is True
+            assert _refresh_claude_plugin(False, "/configured/claude") is True
 
         commands = [call.args[0] for call in run.call_args_list]
         assert commands == [
-            ["claude", "plugin", "marketplace", "update", "ouroboros"],
-            ["claude", "plugin", "install", "ouroboros@ouroboros"],
-            ["claude", "plugin", "update", "ouroboros@ouroboros"],
+            ["/configured/claude", "plugin", "marketplace", "update", "ouroboros"],
+            ["/configured/claude", "plugin", "install", "ouroboros@ouroboros"],
+            ["/configured/claude", "plugin", "update", "ouroboros@ouroboros"],
         ]
 
     def test_failed_install_does_not_attempt_plugin_update(self) -> None:
@@ -628,7 +775,7 @@ class TestClaudePluginRefresh:
                 side_effect=[True, False],
             ) as run,
         ):
-            assert _refresh_claude_plugin(dry_run=False) is False
+            assert _refresh_claude_plugin(False, "/configured/claude") is False
 
         assert run.call_count == 2
 
@@ -770,7 +917,15 @@ class TestUpdateFlow:
             ),
             patch(
                 "ouroboros.cli.commands.update._configured_runtime_topology",
-                return_value=RuntimeRefreshTopology(configured_backend),
+                return_value=RuntimeRefreshTopology(
+                    configured_backend,
+                    runtime_executable=f"/configured/{configured_backend}",
+                    runtime_executable_env_key=(
+                        "OUROBOROS_CLI_PATH"
+                        if configured_backend == "claude"
+                        else f"OUROBOROS_{configured_backend.upper()}_CLI_PATH"
+                    ),
+                ),
             ),
             patch(
                 "ouroboros.cli.commands.update.shutil.which",
@@ -783,6 +938,12 @@ class TestUpdateFlow:
         assert result.exit_code == 0
         output = _plain(result.output)
         assert f"setup --runtime {configured_backend} --non-interactive" in output
+        expected_env_key = (
+            "OUROBOROS_CLI_PATH"
+            if configured_backend == "claude"
+            else f"OUROBOROS_{configured_backend.upper()}_CLI_PATH"
+        )
+        assert f"{expected_env_key}=/configured/{configured_backend}" in output
         if configured_backend != "claude":
             assert "claude plugin" not in output
         run.assert_not_called()
@@ -808,7 +969,12 @@ class TestUpdateFlow:
             ),
             patch(
                 "ouroboros.cli.commands.update._configured_runtime_topology",
-                return_value=RuntimeRefreshTopology("opencode", "subprocess"),
+                return_value=RuntimeRefreshTopology(
+                    "opencode",
+                    "subprocess",
+                    "/configured/opencode",
+                    "OUROBOROS_OPENCODE_CLI_PATH",
+                ),
             ),
             patch(
                 "ouroboros.cli.commands.update.shutil.which",
@@ -821,6 +987,7 @@ class TestUpdateFlow:
         assert result.exit_code == 0
         output = _plain(result.output)
         assert "setup --runtime opencode --opencode-mode subprocess --non-interactive" in output
+        assert "OUROBOROS_OPENCODE_CLI_PATH=/configured/opencode" in output
         assert "claude plugin" not in output
         run.assert_not_called()
 
@@ -839,6 +1006,10 @@ class TestUpdateFlow:
             patch(
                 "ouroboros.cli.commands.update._detect_installation_identity",
                 return_value=_mock_identity("uv"),
+            ),
+            patch(
+                "ouroboros.cli.commands.update._configured_runtime_topology",
+                return_value=RuntimeRefreshTopology("claude"),
             ),
             patch("ouroboros.cli.commands.update.shutil.which", side_effect=which),
             patch("ouroboros.cli.commands.update.subprocess.run") as run,
@@ -872,6 +1043,10 @@ class TestUpdateFlow:
             patch(
                 "ouroboros.cli.commands.update._detect_installation_identity",
                 return_value=_mock_identity("pipx"),
+            ),
+            patch(
+                "ouroboros.cli.commands.update._configured_runtime_topology",
+                return_value=RuntimeRefreshTopology("claude"),
             ),
             patch("ouroboros.cli.commands.update.shutil.which", side_effect=which),
             patch(
