@@ -776,6 +776,7 @@ _BROWSER_QUALIFIED_UI_HEAD_RE = re.compile(
 _POSTNOMINAL_PREDICATE_TOKEN = (
     r"(?:[\w\-]+ly|also|only|still|already|now|and|or|"
     r"is|are|was|were|be|being|been|will|would|can|could|may|might|must|"
+    r"should|shall|"
     r"runs?|running|operates?|operating|works?|working|loads?|loading|"
     r"opens?|opening|renders?|rendered|rendering|serves?|served|serving|"
     r"delivers?|delivered|displayed|shown|hosted|lives?|living|"
@@ -785,8 +786,12 @@ _POSTNOMINAL_PREDICATE_TOKEN = (
     r"offered|provided)"
 )
 _POSTNOMINAL_BROWSER_QUALIFIER_RE = re.compile(
+    # Subject relationships block the chain like structural prepositions
+    # (#1813 R49): in "documentation about an admin portal" the portal is
+    # what the documentation is ABOUT, not the produced artifact.
     r"^(?:(?!(?:that|which|who|to|for|of|from|with|without|via|through|by|on|in|at|"
-    r"and|or|nor|but)\b)[\w'’\-]+\s+){0,5}?"
+    r"and|or|nor|but|about|regarding|concerning|covering|describing|"
+    r"explaining|documenting)\b)[\w'’\-]+\s+){0,5}?"
     rf"{_UI_PRODUCT_HEAD_FRAGMENT}"
     # A comma may introduce a dependent qualifier ("an admin portal,
     # accessible in the browser") — a coordinator after it is real
@@ -796,10 +801,14 @@ _POSTNOMINAL_BROWSER_QUALIFIER_RE = re.compile(
     rf"(?:{_POSTNOMINAL_PREDICATE_TOKEN}\s+){{0,4}}?"
     # Routine infinitival and "for use in" qualifiers declare the same
     # environment (#1813 R48): "designed to run in browsers", "for use in
-    # browsers". The infinitive verb comes from the same closed runtime
-    # set, so "to test/audit" action targets stay outside the grammar.
-    r"(?:to\s+(?:run|operate|work|load|render|execute|function|display|"
-    r"open|serve|live)\s+)?"
+    # browsers". The infinitive complement comes from the same closed
+    # runtime/availability sets — active, passive ("to be used"), and
+    # adjectival ("to be accessible") alike (#1813 R49) — so "to
+    # test/audit" action targets stay outside the grammar.
+    r"(?:to\s+(?:be\s+)?(?:run|operate|work|load|render|execute|function|"
+    r"display|open|serve|live|used|accessed|opened|served|rendered|"
+    r"displayed|delivered|operated|executed|loaded|viewed|reached|hosted|"
+    r"accessible|available|usable|useable|reachable|viewable)\s+)?"
     r"(?:for\s+use\s+)?"
     r"(?:in|inside|within|for|from|through|via|on)\s+"
     # Ordinary spelling variants are equivalent environments (#1813 R46):

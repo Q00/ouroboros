@@ -3106,3 +3106,39 @@ def test_infinitival_qualifiers_still_respect_reheading(
     _seed_section(ledger, "runtime_context", value=runtime)
     result = derive_domain_from_ledger(ledger)
     assert TaskClass.WEB_APP not in result.classes
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
+        "Build documentation about an admin portal that runs in browsers",
+        "Build a guide about a dashboard for browsers",
+    ],
+)
+def test_subject_relationships_block_postnominal_ownership(goal: str) -> None:
+    """R49 guard: "about" marks the UI noun as subject matter of another
+    artifact — documentation about a portal is not the portal."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value="Reference pages and usage guides")
+    _seed_section(ledger, "runtime_context", value="Local documentation build")
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
+        "Build an admin portal that should run in browsers",
+        "Build an admin portal designed to be used in browsers",
+        "Build an admin portal intended to be accessible in browsers",
+    ],
+)
+def test_modal_and_passive_infinitive_qualifiers_own_the_artifact(goal: str) -> None:
+    """R49 probe: modal and passive-infinitive equivalents of the runtime
+    qualifier are the same environment declaration."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value="Role management and account administration")
+    _seed_section(ledger, "runtime_context", value="Browser")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP
