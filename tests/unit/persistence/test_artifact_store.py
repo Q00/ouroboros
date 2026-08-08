@@ -71,6 +71,30 @@ def _manifest(store: ContentAddressedArtifactStore, contract_id: str) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def _substitute_contract_artifact(
+    store: ContentAddressedArtifactStore,
+    *,
+    victim: str = "CONTRACTA",
+    source: str = "CONTRACTB",
+) -> tuple[Path, Path, Path]:
+    """Replace a victim's reference with another valid contract's artifact."""
+    victim_envelope = _put(store, victim, {"owner": "a"})
+    source_envelope = _put(store, source, {"owner": "b", "payload": "different"})
+    victim_path = store.root / "contracts" / victim / "events.json"
+    victim_manifest = _manifest(store, victim)
+    source_event = _manifest(store, source)["events"][0]
+    victim_event = victim_manifest["events"][0]
+    victim_event["artifact_ref"] = source_event["artifact_ref"]
+    victim_event["size_bytes"] = source_event["size_bytes"]
+    victim_event["envelope"]["artifact_ref"] = source_event["artifact_ref"]
+    victim_path.write_text(json.dumps(victim_manifest), encoding="utf-8")
+    return (
+        victim_path,
+        _blob_path(store, victim_envelope.artifact_ref),
+        _blob_path(store, source_envelope.artifact_ref),
+    )
+
+
 def _try_replaced_artifact_lock(
     artifact_root: str,
     contract_id: str | None,
@@ -562,10 +586,12 @@ def test_active_and_retained_contracts_are_protected(tmp_path: Path) -> None:
 
 def test_unreferenced_old_blob_is_collectable_without_tombstone(tmp_path: Path) -> None:
     store = _store(tmp_path)
-    envelope = _put(store, "CONTRACT1", {"orphan": True})
-    path = _blob_path(store, envelope.artifact_ref)
-    manifest_path = store.root / "contracts" / "CONTRACT1" / "events.json"
-    manifest_path.unlink()
+    store.initialize()
+    payload = canonical_artifact_bytes({"orphan": True})
+    digest = hashlib.sha256(payload).hexdigest()
+    path = store.root / digest[:2] / f"{digest}.json"
+    path.parent.mkdir()
+    path.write_bytes(payload)
     _age(path, days=100)
 
     report = store.prune(ttl=timedelta(days=90), apply=True, now=NOW)
@@ -701,6 +727,79 @@ def test_manifest_envelope_must_match_contract_and_artifact_ref(tmp_path: Path) 
         store.fetch("CONTRACT1")
 
 
+@pytest.mark.parametrize("operation", ["fetch", "replay", "envelope", "retention", "prune"])
+def test_schema_valid_cross_contract_substitution_fails_closed(
+    tmp_path: Path,
+    operation: str,
+) -> None:
+    store = _store(tmp_path)
+    manifest_path, victim_blob, source_blob = _substitute_contract_artifact(store)
+    tampered = manifest_path.read_bytes()
+
+    with pytest.raises(ArtifactManifestError, match="binding"):
+        if operation == "fetch":
+            store.fetch("CONTRACTA")
+        elif operation == "replay":
+            store.replay("CONTRACTA")
+        elif operation == "envelope":
+            store.envelope_if_exists("CONTRACTA")
+        elif operation == "retention":
+            store.set_contract_retention(
+                "CONTRACTA",
+                active=False,
+                retain_until=NOW + timedelta(days=1),
+                now=NOW,
+            )
+        else:
+            _age(victim_blob, days=100)
+            _age(source_blob, days=100)
+            store.prune(ttl=timedelta(days=90), apply=True, now=NOW)
+
+    assert manifest_path.read_bytes() == tampered
+    assert victim_blob.exists()
+    assert source_blob.exists()
+
+
+def test_existing_manifest_without_durable_binding_fails_closed(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    envelope = _put(store, "CONTRACT1", {"safe": True})
+    binding_path = store._binding_path("CONTRACT1")
+    binding_path.unlink()
+
+    with pytest.raises(ArtifactManifestError, match="binding"):
+        store.fetch("CONTRACT1")
+    with pytest.raises(ArtifactManifestError, match="binding"):
+        store.prune(ttl=timedelta(0), apply=True, now=NOW)
+    assert _blob_path(store, envelope.artifact_ref).exists()
+
+
+def test_durable_binding_without_manifest_fails_closed(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    envelope = _put(store, "CONTRACT1", {"safe": True})
+    manifest_path = store.root / "contracts" / "CONTRACT1" / "events.json"
+    manifest_path.unlink()
+
+    with pytest.raises(ArtifactManifestError, match="binding"):
+        store.envelope_if_exists("CONTRACT1")
+    with pytest.raises(ArtifactManifestError, match="bindings|authority"):
+        store.prune(ttl=timedelta(0), apply=True, now=NOW)
+    assert _blob_path(store, envelope.artifact_ref).exists()
+
+
+def test_schema_valid_replaced_binding_fails_closed(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    _put(store, "CONTRACTA", {"owner": "a"})
+    _put(store, "CONTRACTB", {"owner": "b"})
+    victim_binding = store._binding_path("CONTRACTA")
+    source_binding = store._binding_path("CONTRACTB")
+    replacement = json.loads(source_binding.read_text(encoding="utf-8"))
+    replacement["contract_id"] = "CONTRACTA"
+    victim_binding.write_text(json.dumps(replacement), encoding="utf-8")
+
+    with pytest.raises(ArtifactManifestError, match="binding"):
+        store.fetch("CONTRACTA")
+
+
 def test_blob_survives_until_every_shared_contract_tombstone_is_durable(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -756,10 +855,14 @@ def test_prune_revalidates_modeled_windows_junction_before_unlink(
 ) -> None:
     """A post-plan junction replacement can never delete an external body."""
     store = _store(tmp_path)
-    envelope = _put(store, "CONTRACT1", {"external": "must survive"})
+    envelope = _put(
+        store,
+        "CONTRACT1",
+        {"external": "must survive"},
+        retain_until=NOW - timedelta(days=1),
+    )
     path = _blob_path(store, envelope.artifact_ref)
     prefix = path.parent
-    (store.root / "contracts" / "CONTRACT1" / "events.json").unlink()
     _age(path, days=100)
 
     external_dir = tmp_path / "external"
@@ -817,10 +920,14 @@ def test_prune_final_unlink_never_follows_digest_parent_swap(
         pytest.skip("directory-relative unlink is unavailable on this platform")
 
     store = _store(tmp_path)
-    envelope = _put(store, "CONTRACT1", {"external": "must survive final unlink"})
+    envelope = _put(
+        store,
+        "CONTRACT1",
+        {"external": "must survive final unlink"},
+        retain_until=NOW - timedelta(days=1),
+    )
     path = _blob_path(store, envelope.artifact_ref)
     prefix = path.parent
-    (store.root / "contracts" / "CONTRACT1" / "events.json").unlink()
     _age(path, days=100)
 
     external = tmp_path / "unlink-external"
@@ -864,9 +971,13 @@ def test_prune_rejects_same_size_body_replacement_after_planning(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     store = _store(tmp_path)
-    envelope = _put(store, "CONTRACT1", {"planned": "identity"})
+    envelope = _put(
+        store,
+        "CONTRACT1",
+        {"planned": "identity"},
+        retain_until=NOW - timedelta(days=1),
+    )
     path = _blob_path(store, envelope.artifact_ref)
-    (store.root / "contracts" / "CONTRACT1" / "events.json").unlink()
     _age(path, days=100)
     original_plan = store._plan_prune_locked
     replacement = b"x" * path.stat().st_size
@@ -1046,7 +1157,7 @@ def test_publication_revalidates_parent_handle_at_replace_boundary(
 
     monkeypatch.setattr(os, "rename", swap_parent_then_replace)
 
-    with pytest.raises(ArtifactIntegrityError, match="link|junction|changed"):
+    with pytest.raises(ArtifactIntegrityError, match="link|junction|changed|escapes"):
         _put(store, "CONTRACT2", body)
 
     assert swapped

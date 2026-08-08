@@ -15,7 +15,6 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 import hashlib
 import json
-import math
 import os
 from pathlib import Path
 import re
@@ -24,13 +23,26 @@ import tempfile
 from typing import Any, Final
 
 from ouroboros.core.disposable_memory import (
-    ARTIFACT_REF_PATTERN,
     MAX_DISPOSABLE_ARTIFACT_BYTES,
     DisposableResultEnvelope,
     DisposableResultStatus,
     DisposableResultSummary,
 )
-from ouroboros.core.errors import PersistenceError
+from ouroboros.persistence.artifact_binding import (
+    BINDING_MAX_BYTES,
+    binding_path,
+    encode_binding,
+    validate_binding,
+)
+from ouroboros.persistence.artifact_errors import (
+    ArtifactContractConflictError,
+    ArtifactIntegrityError,
+    ArtifactManifestError,
+    ArtifactNotFoundError,
+    ArtifactStoreError,
+    ArtifactTombstonedError,
+    ArtifactTooLargeError,
+)
 from ouroboros.persistence.artifact_io import read_fd_bounded as _read_fd_bounded
 from ouroboros.persistence.artifact_lock import (
     nearest_existing_directory as _nearest_existing_directory,
@@ -40,6 +52,14 @@ from ouroboros.persistence.artifact_lock import (
 )
 import ouroboros.persistence.artifact_schema as _artifact_schema
 from ouroboros.persistence.artifact_schema import MANIFEST_MAX_BYTES, require_fields
+from ouroboros.persistence.artifact_validation import (
+    envelope_from_event as _envelope_from_event,
+)
+from ouroboros.persistence.artifact_validation import event_artifact_ref as _event_artifact_ref
+from ouroboros.persistence.artifact_validation import (
+    latest_artifact_event as _latest_artifact_event,
+)
+from ouroboros.persistence.artifact_validation import validate_json_native as _validate_json_native
 
 _as_utc = _artifact_schema.as_utc
 _digest_from_ref = _artifact_schema.digest_from_ref
@@ -67,34 +87,6 @@ _DIRECTORY_FD_UNLINK_SUPPORTED: Final[bool] = bool(
     and os.stat in os.supports_follow_symlinks
     and os.unlink in os.supports_dir_fd
 )
-
-
-class ArtifactStoreError(PersistenceError):
-    """Base error for deterministic artifact-store failures."""
-
-
-class ArtifactNotFoundError(ArtifactStoreError):
-    """Raised when a contract or content-addressed body does not exist."""
-
-
-class ArtifactTombstonedError(ArtifactStoreError):
-    """Raised when deterministic replay points at an intentionally pruned body."""
-
-
-class ArtifactIntegrityError(ArtifactStoreError):
-    """Raised when stored bytes do not match their content address."""
-
-
-class ArtifactManifestError(ArtifactStoreError):
-    """Raised when reachability cannot be established from a durable manifest."""
-
-
-class ArtifactContractConflictError(ArtifactStoreError):
-    """Raised when one contract id is reused for a different artifact."""
-
-
-class ArtifactTooLargeError(ArtifactStoreError):
-    """Raised when the encoded artifact exceeds the disposable output cap."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,6 +162,7 @@ class ContentAddressedArtifactStore:
         )
         self.max_artifact_bytes = max_artifact_bytes
         self._contracts_root = self.root / "contracts"
+        self._bindings_root = self.root / "bindings"
         self._lock_target = self.root / ".artifact-store"
         self._validate_project_boundary()
 
@@ -195,6 +188,13 @@ class ContentAddressedArtifactStore:
             anchor=self._directory_anchor,
             root=self.root,
             label="artifact store",
+        ):
+            pass
+        with _pinned_directory_tree(
+            self._bindings_root,
+            anchor=self._directory_anchor,
+            root=self.root,
+            label="artifact bindings",
         ):
             pass
         self._validate_project_boundary()
@@ -272,6 +272,7 @@ class ContentAddressedArtifactStore:
             if precommit_check is not None:
                 precommit_check()
             manifest = self._load_manifest_locked(contract_id, missing_ok=True)
+            self._validate_binding_locked(contract_id, manifest)
             existing = _latest_artifact_event(manifest)
             if existing is not None:
                 existing_ref = existing.get("artifact_ref")
@@ -307,14 +308,18 @@ class ContentAddressedArtifactStore:
             manifest["active"] = bool(active)
             manifest["retain_until"] = retention.isoformat()
             manifest["updated_at"] = timestamp.isoformat()
-            manifest["events"].append(
-                {
-                    "type": "artifact.referenced",
-                    "timestamp": timestamp.isoformat(),
-                    "artifact_ref": artifact_ref,
-                    "size_bytes": len(payload),
-                    "envelope": envelope.model_dump(mode="json"),
-                }
+            event = {
+                "type": "artifact.referenced",
+                "timestamp": timestamp.isoformat(),
+                "artifact_ref": artifact_ref,
+                "size_bytes": len(payload),
+                "envelope": envelope.model_dump(mode="json"),
+            }
+            manifest["events"].append(event)
+            self._write_binding_locked(
+                contract_id,
+                event,
+                authority_check=lock_authority.validate,
             )
             self._write_manifest_locked(
                 contract_id,
@@ -337,11 +342,15 @@ class ContentAddressedArtifactStore:
     def envelope_if_exists(self, contract_id: str) -> DisposableResultEnvelope | None:
         """Read only a contract's bounded envelope, never its artifact body."""
         contract_id = _validate_contract_id(contract_id)
-        if not self._manifest_path(contract_id).exists():
+        if (
+            not self._manifest_path(contract_id).exists()
+            and not self._binding_path(contract_id).exists()
+        ):
             return None
         self.initialize()
         with self._store_lock(exclusive=False):
             manifest = self._load_manifest_locked(contract_id, missing_ok=True)
+            self._validate_binding_locked(contract_id, manifest)
             event = _latest_artifact_event(manifest)
             if event is None:
                 return None
@@ -361,11 +370,15 @@ class ContentAddressedArtifactStore:
     def fetch_if_exists(self, contract_id: str) -> FetchedArtifact | None:
         """Fetch a durable contract, returning ``None`` only when no binding exists."""
         contract_id = _validate_contract_id(contract_id)
-        if not self._manifest_path(contract_id).exists():
+        if (
+            not self._manifest_path(contract_id).exists()
+            and not self._binding_path(contract_id).exists()
+        ):
             return None
         self.initialize()
         with self._store_lock(exclusive=False):
             manifest = self._load_manifest_locked(contract_id, missing_ok=True)
+            self._validate_binding_locked(contract_id, manifest)
             event = _latest_artifact_event(manifest)
             if event is None:
                 return None
@@ -423,6 +436,7 @@ class ContentAddressedArtifactStore:
         timestamp = _as_utc(now or datetime.now(UTC))
         with self._store_lock(exclusive=True) as lock_authority:
             manifest = self._load_manifest_locked(contract_id, missing_ok=False)
+            self._validate_binding_locked(contract_id, manifest)
             manifest["active"] = bool(active)
             manifest["retain_until"] = _as_utc(retain_until).isoformat()
             manifest["updated_at"] = timestamp.isoformat()
@@ -635,6 +649,77 @@ class ContentAddressedArtifactStore:
             )
         return path
 
+    def _binding_path(self, contract_id: str) -> Path:
+        self._validate_project_boundary()
+        path = binding_path(self._bindings_root, contract_id)
+        _require_contained(path, root=self._bindings_root, label="artifact binding")
+        if _is_link_like(self._bindings_root) or _is_link_like(path):
+            raise ArtifactIntegrityError(
+                "Artifact binding path must not traverse a link or junction",
+                operation="path_resolution",
+                details={"path": str(path)},
+            )
+        return path
+
+    def _validate_binding_locked(
+        self,
+        contract_id: str,
+        manifest: dict[str, Any],
+    ) -> None:
+        path = self._binding_path(contract_id)
+        references = [
+            event for event in manifest["events"] if event.get("type") == "artifact.referenced"
+        ]
+        if not references:
+            if path.exists():
+                raise ArtifactManifestError(
+                    "Durable binding exists without its contract manifest",
+                    operation="read",
+                    details={"contract_id": contract_id, "path": str(path)},
+                )
+            return
+        try:
+            payload = _read_bounded_bytes(
+                path,
+                max_bytes=BINDING_MAX_BYTES,
+                root=self._bindings_root,
+                anchor=self._directory_anchor,
+                label="artifact binding",
+            )
+            raw = json.loads(payload)
+            validate_binding(raw, manifest, contract_id=contract_id)
+        except FileNotFoundError as exc:
+            raise ArtifactManifestError(
+                "Artifact manifest is missing its durable binding",
+                operation="read",
+                details={"contract_id": contract_id, "path": str(path)},
+            ) from exc
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+            raise ArtifactManifestError(
+                "Artifact durable binding is invalid or does not match its manifest",
+                operation="read",
+                details={"contract_id": contract_id, "path": str(path)},
+            ) from exc
+
+    def _write_binding_locked(
+        self,
+        contract_id: str,
+        event: dict[str, Any],
+        *,
+        authority_check: Callable[[], None] | None = None,
+    ) -> None:
+        path = self._binding_path(contract_id)
+        payload = encode_binding(event, contract_id=contract_id)
+        _atomic_write_bytes(
+            path,
+            payload,
+            root=self._bindings_root,
+            anchor=self._directory_anchor,
+            label="artifact binding",
+            matching_existing=payload,
+            authority_check=authority_check,
+        )
+
     def _contract_execution_lock_target(self, contract_id: str) -> Path:
         self._validate_project_boundary()
         contract_root = self._contracts_root / contract_id
@@ -732,6 +817,19 @@ class ContentAddressedArtifactStore:
                 contract_id=contract_id,
                 path=path,
             )
+        expected_bindings = {self._binding_path(contract_id) for contract_id in manifests}
+        actual_bindings = set(self._bindings_root.glob("*.json"))
+        if actual_bindings != expected_bindings:
+            raise ArtifactManifestError(
+                "Artifact bindings and contract manifests do not form a complete authority set",
+                operation="read",
+                details={
+                    "manifest_count": len(expected_bindings),
+                    "binding_count": len(actual_bindings),
+                },
+            )
+        for contract_id, manifest in manifests.items():
+            self._validate_binding_locked(contract_id, manifest)
         return manifests
 
     def _read_manifest_json_locked(self, path: Path) -> Any:
@@ -845,23 +943,26 @@ class ContentAddressedArtifactStore:
                     details={"path": str(current), "project_root": str(project_root)},
                 )
 
-        if _is_link_like(self._contracts_root):
+        if _is_link_like(self._contracts_root) or _is_link_like(self._bindings_root):
             raise ArtifactIntegrityError(
-                "Project artifact contracts path must not be a symlink",
+                "Project artifact metadata paths must not be symlinks",
                 operation="path_resolution",
-                details={"path": str(self._contracts_root), "project_root": str(project_root)},
+                details={"path": str(self.root), "project_root": str(project_root)},
             )
         try:
             resolved_root = self.root.resolve()
             resolved_contracts = self._contracts_root.resolve()
+            resolved_bindings = self._bindings_root.resolve()
         except (OSError, RuntimeError) as exc:
             raise ArtifactIntegrityError(
                 "Project artifact store path could not be resolved safely",
                 operation="path_resolution",
                 details={"path": str(self.root), "project_root": str(project_root)},
             ) from exc
-        if not resolved_root.is_relative_to(project_root) or not resolved_contracts.is_relative_to(
-            resolved_root
+        if (
+            not resolved_root.is_relative_to(project_root)
+            or not resolved_contracts.is_relative_to(resolved_root)
+            or not resolved_bindings.is_relative_to(resolved_root)
         ):
             raise ArtifactIntegrityError(
                 "Project artifact store path escapes the project-owned store",
@@ -872,111 +973,6 @@ class ContentAddressedArtifactStore:
                     "project_root": str(project_root),
                 },
             )
-
-
-def _validate_json_native(
-    value: Any,
-    *,
-    path: str = "$",
-    ancestors: set[int] | None = None,
-) -> None:
-    """Reject Python values that JSON cannot replay without normalization."""
-    value_type = type(value)
-    if value is None or value_type in {bool, int, str}:
-        return
-    if value_type is float:
-        if math.isfinite(value):
-            return
-        raise ArtifactStoreError(
-            "Disposable artifact contains a non-finite JSON number",
-            operation="serialize",
-            details={"path": path},
-        )
-
-    if value_type not in {dict, list}:
-        raise ArtifactStoreError(
-            "Disposable artifact values must use JSON-native types",
-            operation="serialize",
-            details={"path": path, "type": value_type.__name__},
-        )
-
-    active = ancestors if ancestors is not None else set()
-    marker = id(value)
-    if marker in active:
-        raise ArtifactStoreError(
-            "Disposable artifact contains a circular JSON value",
-            operation="serialize",
-            details={"path": path},
-        )
-    active.add(marker)
-    try:
-        if value_type is list:
-            for index, item in enumerate(value):
-                _validate_json_native(item, path=f"{path}[{index}]", ancestors=active)
-            return
-
-        for key, item in value.items():
-            if type(key) is not str:
-                raise ArtifactStoreError(
-                    "Disposable artifact object keys must be JSON strings",
-                    operation="serialize",
-                    details={"path": path, "key_type": type(key).__name__},
-                )
-            _validate_json_native(item, path=f"{path}.{key}", ancestors=active)
-    finally:
-        active.remove(marker)
-
-
-def _event_artifact_ref(event: dict[str, Any], *, contract_id: str) -> str:
-    artifact_ref = event.get("artifact_ref")
-    if not isinstance(artifact_ref, str) or not ARTIFACT_REF_PATTERN.fullmatch(artifact_ref):
-        raise ArtifactManifestError(
-            "Artifact manifest event has an invalid artifact_ref",
-            operation="read",
-            details={"contract_id": contract_id},
-        )
-    return artifact_ref
-
-
-def _latest_artifact_event(manifest: dict[str, Any]) -> dict[str, Any] | None:
-    for event in reversed(manifest["events"]):
-        if event.get("type") in {"artifact.referenced", "artifact.tombstoned"}:
-            return event
-    return None
-
-
-def _envelope_from_event(
-    event: dict[str, Any],
-    *,
-    contract_id: str,
-) -> DisposableResultEnvelope:
-    envelope = event.get("envelope")
-    try:
-        parsed = DisposableResultEnvelope.model_validate(envelope)
-    except (TypeError, ValueError) as exc:
-        raise ArtifactManifestError(
-            "Artifact reference event has an invalid bounded envelope",
-            operation="read",
-        ) from exc
-    artifact_ref = _event_artifact_ref(event, contract_id=contract_id)
-    if parsed.contract_id != contract_id or parsed.artifact_ref != artifact_ref:
-        raise ArtifactManifestError(
-            "Artifact reference envelope does not match its manifest event",
-            operation="read",
-            details={"contract_id": contract_id, "artifact_ref": artifact_ref},
-        )
-    size_bytes = event.get("size_bytes")
-    if (
-        isinstance(size_bytes, bool)
-        or not isinstance(size_bytes, int)
-        or not 0 <= size_bytes <= MAX_DISPOSABLE_ARTIFACT_BYTES
-    ):
-        raise ArtifactManifestError(
-            "Artifact reference event has an invalid size_bytes",
-            operation="read",
-            details={"contract_id": contract_id, "artifact_ref": artifact_ref},
-        )
-    return parsed
 
 
 def _validate_manifest(

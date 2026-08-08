@@ -23,6 +23,7 @@ import ouroboros.orchestrator.agent_process as agent_process_module
 from ouroboros.orchestrator.agent_process import AgentProcessHandle
 from ouroboros.orchestrator.disposable_memory import DisposableMemory
 from ouroboros.persistence.artifact_store import (
+    ArtifactManifestError,
     ArtifactNotFoundError,
     ContentAddressedArtifactStore,
     canonical_artifact_bytes,
@@ -533,6 +534,82 @@ async def test_retry_repairs_reference_without_reexecuting_durable_contract(
     assert calls == 1
     references = [event for event in event_store.appended if event.type == "artifact.referenced"]
     assert len(references) == 1
+
+
+@pytest.mark.asyncio
+async def test_retry_rejects_cross_contract_manifest_substitution_without_execution(
+    tmp_path: Path,
+) -> None:
+    service, _ = _service(tmp_path)
+    calls = 0
+
+    async def child_work(_handle: AgentProcessHandle) -> dict[str, str]:
+        nonlocal calls
+        calls += 1
+        return {"owner": "a"}
+
+    victim = "01K1DISPOSABLEMEMORY00021"
+    source = "01K1DISPOSABLEMEMORY00022"
+    await service.run(
+        intent="victim",
+        runtime_id="fixture-runtime",
+        work_fn=child_work,
+        contract_id=victim,
+    )
+    source_envelope = service.artifact_store.put_for_contract(
+        contract_id=source,
+        body={"owner": "b", "different": "payload"},
+        runtime_id="fixture-runtime",
+        duration_ms=1,
+        events_emitted_count=0,
+    )
+    manifest_path = service.artifact_store.root / "contracts" / victim / "events.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    source_path = service.artifact_store.root / "contracts" / source / "events.json"
+    source_event = json.loads(source_path.read_text(encoding="utf-8"))["events"][0]
+    manifest["events"][0]["artifact_ref"] = source_envelope.artifact_ref
+    manifest["events"][0]["size_bytes"] = source_event["size_bytes"]
+    manifest["events"][0]["envelope"]["artifact_ref"] = source_envelope.artifact_ref
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(ArtifactManifestError, match="binding"):
+        await service.run(
+            intent="victim-retry",
+            runtime_id="fixture-runtime",
+            work_fn=child_work,
+            contract_id=victim,
+        )
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_retry_rejects_binding_without_manifest_without_execution(tmp_path: Path) -> None:
+    service, _ = _service(tmp_path)
+    calls = 0
+
+    async def child_work(_handle: AgentProcessHandle) -> dict[str, bool]:
+        nonlocal calls
+        calls += 1
+        return {"durable": True}
+
+    contract_id = "01K1DISPOSABLEMEMORY00023"
+    await service.run(
+        intent="crash-window",
+        runtime_id="fixture-runtime",
+        work_fn=child_work,
+        contract_id=contract_id,
+    )
+    manifest_path = service.artifact_store.root / "contracts" / contract_id / "events.json"
+    manifest_path.unlink()
+
+    with pytest.raises(ArtifactManifestError, match="binding"):
+        await service.run(
+            intent="crash-window-retry",
+            runtime_id="fixture-runtime",
+            work_fn=child_work,
+            contract_id=contract_id,
+        )
+    assert calls == 1
 
 
 @pytest.mark.asyncio
