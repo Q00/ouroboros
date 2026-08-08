@@ -17,7 +17,7 @@ questions for classification and collects PM-specific metadata.
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 import json
 from pathlib import Path
 from typing import Any
@@ -29,7 +29,6 @@ from ouroboros.bigbang.answer_provenance import extraction_rounds
 from ouroboros.bigbang.brownfield import (
     load_brownfield_repos_as_dicts as _load_brownfield_dicts,
 )
-from ouroboros.bigbang.explore import CodebaseExplorer, format_explore_results
 from ouroboros.bigbang.inner_guidance import (
     compose_steered_prompt,
     reserve_steering_extension,
@@ -280,63 +279,31 @@ class PMInterviewEngine:
         self,
         repos: list[dict[str, str]] | None = None,
     ) -> str:
-        """Explore brownfield codebases exactly once.
+        """Return the empty codebase context. The engine no longer reads code.
 
-        Scans selected repositories and stores the context for sharing
-        between the interviewer and classifier. Subsequent calls return
-        the cached result.
+        Retained as a no-op rather than deleted because callers outside this
+        engine still invoke it, and because the empty string it returns is the
+        correct value now: RFC #1937 moved repository reading to the advisory
+        lanes in the host session, which is where the regular interview has
+        always had it -- that engine's prompt forbids exploring files or
+        repositories outright, and its brownfield marking says in a comment
+        that the main session, not MCP, does the exploring.
 
-        Args:
-            repos: Repos to explore. Defaults to registered brownfield repos.
+        What the summary used to do, and where it went:
 
-        Returns:
-            Formatted codebase context string.
+        * *Deciding brownfield.* It gated ``is_brownfield`` and
+          ``codebase_paths``, so a failed summarization silently produced a
+          greenfield Seed. The roster now decides that, which is what
+          registration always meant.
+        * *Priming the question generator and classifier.* Both received a
+          truncated whole-repo blob. The ``code_context`` lane answers the same
+          need per question, with evidence the PM can actually see.
+        * *Filling Seed extraction.* It never reached there from the regular
+          interview either -- that field is empty for every interview-originated
+          Seed -- so the branch reading it is one PM no longer takes.
         """
-        if self._explored:
-            return self.codebase_context
-
-        if repos is None:
-            repos = self.load_brownfield_repos()
-
-        if not repos:
-            self._explored = True
-            return ""
-
-        paths = [{"path": r["path"], "role": r.get("role", "primary")} for r in repos]
-
-        try:
-            explorer = CodebaseExplorer(
-                llm_adapter=self.llm_adapter,
-                model=self.model,
-            )
-            results = await explorer.explore(paths)
-
-            # Snapshot worktrees are scan locations only — present the
-            # durable source checkout in the injected context.
-            source_by_scan_path = {
-                r["path"]: r["source_path"] for r in repos if r.get("source_path")
-            }
-            if source_by_scan_path:
-                results = [
-                    replace(res, path=source_by_scan_path.get(res.path, res.path))
-                    for res in results
-                ]
-
-            self.codebase_context = format_explore_results(results)
-
-            # Share context with classifier
-            self.classifier.codebase_context = self.codebase_context
-
-            log.info(
-                "pm.explore_completed",
-                repos_explored=len(results),
-                context_length=len(self.codebase_context),
-            )
-        except (ProviderError, OSError) as e:
-            log.warning("pm.explore_failed", error=str(e), exc_info=e)
-
         self._explored = True
-        return self.codebase_context
+        return ""
 
     # ──────────────────────────────────────────────────────────────
     # Opening question — asked before the interview loop
@@ -426,27 +393,23 @@ class PMInterviewEngine:
         self.classifications = []
         self._reframe_map = {}
 
-        # Explore codebases if brownfield repos are provided.
-        # Redirect exploration to persistent snapshot worktrees pinned to
-        # the remote default branch (created once, then fetch + hard-reset)
-        # so a stale local checkout never leaks into PRD context. This hook
-        # covers every engine-driven entry point (MCP in-process and CLI).
+        # Redirect the repositories at persistent snapshot worktrees pinned to
+        # the remote default branch (created once, then fetch + hard-reset) so a
+        # stale local checkout never leaks into PRD context. The engine does not
+        # read them -- the advisory lanes do, in the host session (RFC #1937) --
+        # but where they read is still decided here, because the snapshot
+        # machinery is engine-side and the roster handed to the lanes is built
+        # from these records.
         if brownfield_repos:
             brownfield_repos = await asyncio.to_thread(
                 refresh_pm_snapshot_worktrees, list(brownfield_repos)
             )
             self._selected_brownfield_repos = list(brownfield_repos)
-            await self.explore_codebases(brownfield_repos)
 
         # Store the raw user context for extraction; PM steering goes
         # only into the interview system prompt, not into persisted state.
         self._initial_context = initial_context
         user_context = initial_context
-
-        if self.codebase_context:
-            user_context += (
-                f"\n\n## Existing Codebase Context (BROWNFIELD)\n{self.codebase_context}"
-            )
 
         # Keep PM steering prefix in memory for interview rounds but
         # do NOT persist it as initial_context so extraction sees only
@@ -462,11 +425,16 @@ class PMInterviewEngine:
         )
 
         if result.is_ok:
-            # Mark brownfield state on the returned InterviewState
+            # Mark brownfield state on the returned InterviewState.
+            #
+            # The roster is the whole condition. It used to be the roster *and*
+            # a non-empty engine summary, which made a fact the registration
+            # already states depend on a summarization step succeeding -- and
+            # that step failed silently, so one failed call turned a brownfield
+            # project into a greenfield Seed with nothing to notice.
             state = result.value
-            if brownfield_repos and self.codebase_context:
+            if brownfield_repos:
                 state.is_brownfield = True
-                state.codebase_context = self.codebase_context
                 # Persist the durable source checkout, not an ephemeral
                 # snapshot worktree path, into interview state.
                 state.codebase_paths = [
@@ -474,11 +442,10 @@ class PMInterviewEngine:
                     for r in brownfield_repos
                     if "path" in r
                 ]
-                state.explore_completed = True
             log.info(
                 "pm.interview_started",
                 interview_id=state.interview_id,
-                has_brownfield=bool(self.codebase_context),
+                is_brownfield=state.is_brownfield,
             )
 
         return result
@@ -992,12 +959,23 @@ class PMInterviewEngine:
             Dict with completion metadata if the interview should end,
             or ``None`` if the interview should continue.
         """
-        # Count only substantive answered rounds (exclude pending and synthetic
-        # initial-context summary recovery rounds).
+        # Count decisions, not rounds. Completion asks how many times the person
+        # has judged, and a round is not evidence of that: pending rounds have no
+        # answer yet, the initial-context summary is a recovery artefact, and a
+        # confirmed lane finding occupies a round while being a fact the person
+        # adopted rather than a judgment they made. Counting those would score
+        # readiness a turn early for every question the lanes reported on — and
+        # it is what lets a finding take a round of its own safely at all.
         answered_rounds = sum(
             1
             for r in state.rounds
-            if r.user_response is not None and r.question != INITIAL_CONTEXT_SUMMARY_QUESTION
+            if r.user_response is not None
+            and r.question != INITIAL_CONTEXT_SUMMARY_QUESTION
+            # ``r.provenance``, not the marker: consumers read the settled
+            # field, which is the rule ``answer_provenance`` exists to hold
+            # (#1755). They agree today and diverge on the historical envelopes
+            # ``_settle_provenance`` strips.
+            and r.provenance == "user"
         )
 
         # ── Ambiguity check (only after minimum rounds) ────────────────
@@ -1254,7 +1232,7 @@ class PMInterviewEngine:
         if withhold_observations:
             rendered = [(item.question, item.answer) for item in extraction_rounds(state)]
         else:
-            rendered = [(item.question, item.user_response) for item in state.rounds]
+            rendered = [(r.question, r.user_response) for r in state.rounds]
 
         for question, answer in rendered:
             if question == INITIAL_CONTEXT_SUMMARY_QUESTION:

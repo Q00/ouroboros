@@ -171,6 +171,12 @@ class InterviewRound(BaseModel):
             than re-reading the ``[from-*]`` marker, which is what drifted
             before (#1755).
         timestamp: When this round was created.
+
+    There is deliberately no ``evidence`` field. A lane finding the person
+    confirmed is an answer like any other and occupies its own round, marked by
+    ``provenance``; one they did not confirm is not recorded at all. A second
+    slot for the same material was tried and removed: it gave every caller two
+    places to put one payload, and the rules for the two never stayed in step.
     """
 
     round_number: int = Field(ge=1)  # No upper limit - user decides when to stop

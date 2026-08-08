@@ -186,7 +186,9 @@ _EXPECTED_OUROBOROS_REQUIRED_CONTEXT_KEYS = {
     ),
     "ouroboros_lineage_status": ("lineage_id",),
     "ouroboros_measure_drift": ("session_id", "current_output", "seed_content"),
-    "ouroboros_pm_interview": ("initial_context", "cwd", "session_id"),
+    # No ``evidence``: a confirmed lane finding arrives on ``answer`` like any
+    # other adopted fact, which is the one entrance the sibling tool has too.
+    "ouroboros_pm_interview": ("initial_context", "cwd", "session_id", "answer"),
     "ouroboros_project_status": (),
     "ouroboros_qa": (
         "artifact",
