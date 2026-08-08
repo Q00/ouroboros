@@ -3862,29 +3862,13 @@ def _setup_goose(goose_path: str) -> None:
     print_info(f"Config saved to: {config_path}")
 
 
-def _setup_claude(claude_path: str) -> None:
-    """Configure Ouroboros for the Claude Code runtime."""
-    from ouroboros.config.loader import create_default_config, ensure_config_dir
+def _setup_claude(claude_path: str) -> bool:
+    """Configure Ouroboros for the standalone Claude runtime."""
+    from ouroboros.cli.runtime_activation import activate_claude_runtime
 
-    config_dir = ensure_config_dir()
-    config_path = config_dir / "config.yaml"
-
-    if config_path.exists():
-        config_dict = yaml.safe_load(config_path.read_text()) or {}
-    else:
-        create_default_config(config_dir)
-        config_dict = yaml.safe_load(config_path.read_text()) or {}
-
-    # Set runtime and LLM backend to claude
-    config_dict.setdefault("orchestrator", {})
-    config_dict["orchestrator"]["runtime_backend"] = "claude"
-    config_dict["orchestrator"]["cli_path"] = claude_path
-
-    config_dict.setdefault("llm", {})
-    config_dict["llm"]["backend"] = "claude"
-
-    with config_path.open("w") as f:
-        yaml.dump(config_dict, f, default_flow_style=False, sort_keys=False)
+    config_path = activate_claude_runtime(claude_path)
+    if config_path is None:
+        return False
 
     # Do not register the isolated MCP 2 server with this Claude SDK profile.
     # The protocol server excludes ``claude-agent-sdk`` (it pins MCP 1.x), and
@@ -3901,6 +3885,7 @@ def _setup_claude(claude_path: str) -> None:
 
     print_success(f"Configured Claude Code runtime (CLI: {claude_path})")
     print_info(f"Config saved to: {config_path}")
+    return True
 
 
 def _strip_jsonc(text: str) -> str:
@@ -4777,7 +4762,8 @@ def setup(
         if not claude_path:
             print_error("Claude Code CLI not found in PATH.")
             raise typer.Exit(1)
-        _setup_claude(claude_path)
+        if not _setup_claude(claude_path):
+            raise typer.Exit(1)
     elif selected in ("codex", "codex_cli"):
         codex_path = available.get("codex")
         if not codex_path:
