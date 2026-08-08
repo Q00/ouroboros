@@ -4030,6 +4030,41 @@ def test_prenominal_subject_compounds_are_not_execution_qualifiers(goal: str) ->
 @pytest.mark.parametrize(
     "goal",
     [
+        "Build a local desktop browser cookie dashboard",
+        "Build a local desktop browser privacy dashboard",
+    ],
+)
+def test_runtime_is_the_authority_over_goal_prose(goal: str) -> None:
+    """R74 guard: a competing environment qualifier voids the browser
+    qualifier inside the NP, and an explicitly non-browser standardized
+    runtime bars goal prose from supplying browser context."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value="Interactive cookie charts with a filters panel")
+    _seed_section(ledger, "runtime_context", value="Local desktop application, no browser runtime")
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
+        "Build a settings page on Chrome browser extension",
+        "Build a settings page on Firefox browser extension",
+    ],
+)
+def test_brand_qualified_determinerless_hosts_reach_the_component(goal: str) -> None:
+    """R74 guard: a singular host object reaches the component with or
+    without a determiner; the topical plural stays outside the veto."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value="Settings panel with save button")
+    _seed_section(ledger, "runtime_context", value="Runs in browsers")
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
         "The product is an admin portal that runs in browsers",
         "The deliverable is an admin portal available in browsers",
     ],

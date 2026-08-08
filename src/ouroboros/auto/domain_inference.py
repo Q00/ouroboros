@@ -830,7 +830,10 @@ _FIRST_NP_PREFIX = (
 # first-NP prefix guards this rule as the postnominal one.
 _BROWSER_QUALIFIED_UI_HEAD_RE = re.compile(
     _FIRST_NP_PREFIX
-    + rf"(?:{_NP_MODIFIER_TOKEN}\s+){{0,4}}?"
+    # A competing environment qualifier in the same NP voids the browser
+    # qualifier (#1813 R74): "local desktop browser cookie dashboard" is
+    # a desktop artifact whose browser word modifies its topic.
+    + rf"(?:(?!(?:desktop|native|mobile|terminal|offline|embedded)\b){_NP_MODIFIER_TOKEN}\s+){{0,4}}?"
     # Bare "web" is a qualifier only in this bounded form — directly
     # modifying a UI product head ("web dashboard", #1813 R60); it stays
     # out of the general signal vocabulary.
@@ -1258,9 +1261,28 @@ def _ledger_has_browser_context(ledger: SeedDraftLedger) -> bool:
         " ",
         goal_for_context,
     )
-    return bool(_SECTION_BROWSER_ENV_RE.search(_section_browser_context_text(ledger))) or (
-        _goal_has_unnegated_web_app_signal(goal_for_context)
+    if _SECTION_BROWSER_ENV_RE.search(_section_browser_context_text(ledger)):
+        return True
+    # The standardized runtime is the authority on environment (#1813
+    # R74): when it declares a competing non-browser environment and no
+    # browser token survives its own normalization, goal prose cannot
+    # supply browser context — affirmative products still own through
+    # the grants before context is consulted.
+    runtime_env = _strip_negated_signals(
+        _POSTPOSITIVE_BROWSER_DENIAL_RE.sub(" ", _section_text(ledger, "runtime_context")),
+        _WEB_APP_GOAL_SIGNAL_FRAGMENT,
     )
+    if _NON_BROWSER_RUNTIME_RE.search(runtime_env) and not _SECTION_BROWSER_ENV_RE.search(
+        runtime_env
+    ):
+        return False
+    return _goal_has_unnegated_web_app_signal(goal_for_context)
+
+
+_NON_BROWSER_RUNTIME_RE = re.compile(
+    r"\b(?:desktop|native|terminal|shell|mobile|ios|android|electron|"
+    r"batch|cron|headless)\b"
+)
 
 
 # A browser token in the standardized sections counts as the execution
@@ -1324,10 +1346,14 @@ _GOAL_COMPONENT_TARGET_RE = re.compile(
     r"by|alongside|beside)|[\w\-'’]+(?:ed|ing)\s+"
     # "hosted/mounted ON", "running/nested UNDER" (#1813 R71).
     r"(?:through|with|from|on|onto|under|beneath|atop)"
-    # A bare host preposition reaches the component when a determiner
-    # marks a host INSTANCE ("on a browser extension", #1813 R72); the
-    # determinerless form stays topical ("on browser extensions").
-    r"|(?:on|onto|under|beneath|atop)(?=\s+(?:an?|the|our|my|your|their|its)\b))\s+"
+    # A bare host preposition reaches the component when its object is a
+    # SINGULAR instance — with a determiner ("on a browser extension",
+    # #1813 R72) or brand-qualified without one ("on Chrome browser
+    # extension", #1813 R74); the topical plural ("on browser
+    # extensions") stays outside the veto.
+    r"|(?:on|onto|under|beneath|atop)(?=\s+(?:(?:an?|the|our|my|your|their|its)\s+)?"
+    r"(?:[\w\-'’]+\s+){0,3}?"
+    r"(?:extension|plugin|add[\s\-]?on|addon|sidebar|popup|toolbar|overlay|devtool)\b(?!s)))\s+"
     r"(?:(?:an?|the|our|my|your|their|its)\s+)?(?:[\w\-'’]+\s+){0,3}?"
     r"(?:extensions?|plugins?|add[\s\-]?ons?|addons?|sidebars?|popups?|"
     r"toolbars?|overlays?|devtools?)\b"
