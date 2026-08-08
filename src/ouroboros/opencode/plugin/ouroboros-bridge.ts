@@ -31,32 +31,12 @@ export const ID_LEN = 26
 // skipped-only banners start with their own words.
 export const OUROBOROS_DISPATCH_MARKER = "<!-- ouroboros-question-advisory-dispatch-v1 -->"
 export const BRIDGE_NOTICE_OPENING = "> **Bridge dispatch — plugin_subagent:** "
-
-export const BYPASS_PERMISSION_RULESET = [
-  { permission: "*", pattern: "*", action: "allow" },
-] as const
-// The `read_data` child used to be created with `*:* deny`, because its answer
-// contract had no field for a fetched value and a call it made anyway was pure
-// cost before the user had confirmed anything. That reasoning was sound for the
-// contract it defended and the contract changed: the lane executes and carries
-// aggregates now (Q00/ouroboros#1825).
-//
-// So the denial is removed rather than narrowed. Leaving it would recreate the
-// defect it was part of, mirrored — a child told to take the measurement on a
-// transport where every call is refused, which cannot report "I was blocked"
-// because no `no_evidence_reason` means that, so it would have to pick one
-// that is false. Every reason the lane can give is a statement about itself,
-// which is exactly why none of them can carry "this transport refused me".
-//
-// What replaces it is what the sibling lanes already run on: the user
-// registered these tools, and registering one is the willingness to have it
-// called. The boundary that survives is downstream of every transport — a
-// number is material for the user's judgment and never the interview answer.
 export function num(v: string | undefined, d: number): number {
   const n = !v ? d : Number(v)
   return Number.isFinite(n) && n >= 0 ? n : d
 }
 export const CHILD_TIMEOUT_MS = num(process.env.OUROBOROS_CHILD_TIMEOUT_MS, 20 * 60 * 1000)
+const AUTHORITY_TIMEOUT_MS = 5_000
 const PATCH_RETRIES = 3
 const RESOLVE_RETRIES = 5
 const BACKOFF_MS = 100
@@ -461,6 +441,14 @@ export function base(client: unknown): Base | null {
   return b && typeof b.patch === "function" ? b : null
 }
 
+export type PermissionAction = "allow" | "deny" | "ask"
+export type PermissionRule = Readonly<{
+  permission: string
+  pattern: string
+  action: PermissionAction
+}>
+export type PermissionRuleset = ReadonlyArray<PermissionRule>
+
 type Cli = {
   session: {
     create: (a: {
@@ -470,14 +458,123 @@ type Cli = {
         permission?: ReadonlyArray<{
           permission: string
           pattern: string
-          action: "allow" | "deny" | "ask"
+          action: PermissionAction
         }>
       }
     }) => Promise<{ data?: { id: string } }>
+    get?: (a: { path: { id: string } }) => Promise<{ data?: unknown; error?: unknown }>
     prompt: (a: { path: { id: string }; body: { agent?: string; parts: Array<{ type: string; text: string }> }; signal?: AbortSignal }) => Promise<{ data?: { info?: unknown; parts?: Array<{ type: string; text?: string }> } }>
     abort: (a: { path: { id: string } }) => Promise<{ data?: unknown }>
     messages: (a: { path: { id: string } }) => Promise<{ data?: Array<{ info: { id: string; role: string }; parts: Array<{ type: string; callID?: string }> }> }>
   }
+  app?: {
+    agents?: () => Promise<{ data?: unknown; error?: unknown }>
+  }
+}
+
+function authorityError(reason: string): Error {
+  // Never include response bodies or permission patterns in user-visible
+  // dispatch failures. The reason is deliberately a closed vocabulary.
+  return new Error(`authority snapshot unavailable: ${reason}`)
+}
+
+async function authorityDeadline<T>(lookup: Promise<T>, timeoutMs: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => reject(authorityError("lookup timed out")), timeoutMs)
+  })
+  try {
+    return await Promise.race([lookup, timeout])
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
+  }
+}
+
+function record(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v)
+}
+
+function permissionRuleset(value: unknown, scope: "parent" | "agent"): PermissionRuleset {
+  if (!Array.isArray(value)) throw authorityError(`invalid ${scope} ruleset`)
+  return Object.freeze(value.map((raw) => {
+    if (!record(raw)) throw authorityError(`invalid ${scope} rule`)
+    const permission = raw.permission
+    const pattern = raw.pattern
+    const action = raw.action
+    if (typeof permission !== "string" || permission.length === 0)
+      throw authorityError(`invalid ${scope} permission`)
+    if (typeof pattern !== "string" || pattern.length === 0)
+      throw authorityError(`invalid ${scope} pattern`)
+    if (action !== "allow" && action !== "deny" && action !== "ask")
+      throw authorityError(`invalid ${scope} action`)
+    return Object.freeze({ permission, pattern, action })
+  }))
+}
+
+// Mirrors OpenCode's deriveSubagentSessionPermission(). Agent rules are only
+// inspected for exact recursive-tool declarations; they remain agent-owned and
+// are not copied into the child session ruleset.
+export function deriveSubagentSessionPermission(
+  parentPermission: PermissionRuleset,
+  agentPermission: PermissionRuleset,
+): PermissionRuleset {
+  const canTodo = agentPermission.some((rule) => rule.permission === "todowrite")
+  const canTask = agentPermission.some((rule) => rule.permission === "task")
+  return Object.freeze([
+    ...parentPermission.filter(
+      (rule) => rule.permission === "external_directory" || rule.action === "deny",
+    ),
+    ...(canTodo ? [] : [Object.freeze({ permission: "todowrite", pattern: "*", action: "deny" as const })]),
+    ...(canTask ? [] : [Object.freeze({ permission: "task", pattern: "*", action: "deny" as const })]),
+  ])
+}
+
+// Load one immutable authority snapshot for the complete fan-out. SDK v1 does
+// not type the permission fields but its runtime client forwards and returns
+// them; v2 types the same wire values. We therefore shape-check the wire data
+// instead of guessing from SDK types or local configuration.
+async function authoritySnapshot(
+  cli: Cli,
+  parentID: string,
+  targetAgents: ReadonlyArray<string>,
+  timeoutMs = AUTHORITY_TIMEOUT_MS,
+): Promise<ReadonlyMap<string, PermissionRuleset>> {
+  if (typeof cli?.session?.get !== "function" || typeof cli?.app?.agents !== "function")
+    throw authorityError("client API missing")
+
+  const lookup = Promise.all([
+    Promise.resolve().then(() => cli.session.get!({ path: { id: parentID } })).catch(() => null),
+    Promise.resolve().then(() => cli.app!.agents!()).catch(() => null),
+  ])
+  const [parentResult, agentsResult] = await authorityDeadline(lookup, timeoutMs)
+  if (!parentResult || parentResult.error || !record(parentResult.data))
+    throw authorityError("parent lookup failed")
+  if (parentResult.data.id !== parentID)
+    throw authorityError("parent mismatch")
+
+  // Native OpenCode treats an absent optional session permission as []. This
+  // is upstream's explicit derivation rule, not inferred authority.
+  const parentPermission = parentResult.data.permission === undefined
+    ? Object.freeze([]) as PermissionRuleset
+    : permissionRuleset(parentResult.data.permission, "parent")
+
+  if (!agentsResult || agentsResult.error || !Array.isArray(agentsResult.data))
+    throw authorityError("agent catalog lookup failed")
+  const catalog = new Map<string, PermissionRuleset>()
+  for (const rawAgent of agentsResult.data) {
+    if (!record(rawAgent) || typeof rawAgent.name !== "string" || rawAgent.name.length === 0)
+      throw authorityError("invalid agent catalog")
+    if (catalog.has(rawAgent.name)) throw authorityError("duplicate agent")
+    catalog.set(rawAgent.name, permissionRuleset(rawAgent.permission, "agent"))
+  }
+
+  const snapshot = new Map<string, PermissionRuleset>()
+  for (const name of new Set(targetAgents)) {
+    const agentPermission = catalog.get(name)
+    if (!agentPermission) throw authorityError("target agent missing")
+    snapshot.set(name, deriveSubagentSessionPermission(parentPermission, agentPermission))
+  }
+  return snapshot
 }
 
 // Walk parts for the last text entry — mirrors opencode src/tool/task.ts:158.
@@ -560,7 +657,14 @@ async function resolveMid(cli: Cli, pid: string, callID: string): Promise<string
 // Post-dispatch failures get PATCHed to error state — widget reflects it,
 // no silent loss. If the user wants retry-on-prompt-failure, that would
 // need a new dispatch call (same shape as a fresh invocation).
-async function dispatch(cli: Cli, b: Base, pid: string, mid: string, s: Sub): Promise<{ childID: string }> {
+async function dispatch(
+  cli: Cli,
+  b: Base,
+  pid: string,
+  mid: string,
+  s: Sub,
+  permission: PermissionRuleset,
+): Promise<{ childID: string }> {
   const partID = id("prt")
   const callID = id("tool")
   const start = Date.now()
@@ -572,7 +676,7 @@ async function dispatch(cli: Cli, b: Base, pid: string, mid: string, s: Sub): Pr
     body: {
       parentID: pid,
       title: s.title,
-      permission: BYPASS_PERMISSION_RULESET,
+      permission,
     },
   })
   const childID = created?.data?.id
@@ -740,7 +844,19 @@ export const OuroborosBridge: Plugin = async (ctx) => {
         // fire-and-forget. Promise.allSettled here resolves when each child
         // is registered (widget running), NOT when each child finishes.
         // Hook returns to opencode in ~100ms regardless of child runtime.
-        const results = await Promise.allSettled(subs.map((s) => dispatch(cli, b, pid, mid, s)))
+        let results: Array<PromiseSettledResult<{ childID: string }>>
+        try {
+          const authority = await authoritySnapshot(cli, pid, subs.map((s) => s.agent))
+          results = await Promise.allSettled(subs.map((s) => {
+            const permission = authority.get(s.agent)
+            // The snapshot loader proves every target exists. Keep this guard
+            // at the use site so a future refactor cannot silently omit policy.
+            if (!permission) return Promise.reject(authorityError("target authority missing"))
+            return dispatch(cli, b, pid, mid, s, permission)
+          }))
+        } catch (e) {
+          results = subs.map(() => ({ status: "rejected", reason: e }))
+        }
         const ok: OkResult[] = results.flatMap((r, i) => r.status === "fulfilled"
           ? [{ sub: subs[i], childID: r.value.childID }]
           : [])
@@ -782,4 +898,12 @@ export default {
 }
 
 // Test-only exports for mocked-client coverage.
-export { resolveMid as _resolveMid, dispatch as _dispatch, patch as _patch, sleep as _sleep, PATCH_RETRIES as _PATCH_RETRIES, RESOLVE_RETRIES as _RESOLVE_RETRIES }
+export {
+  resolveMid as _resolveMid,
+  dispatch as _dispatch,
+  authoritySnapshot as _authoritySnapshot,
+  patch as _patch,
+  sleep as _sleep,
+  PATCH_RETRIES as _PATCH_RETRIES,
+  RESOLVE_RETRIES as _RESOLVE_RETRIES,
+}
