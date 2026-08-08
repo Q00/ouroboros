@@ -1184,6 +1184,19 @@ def _ledger_has_browser_context(ledger: SeedDraftLedger) -> bool:
     goal_for_context = _strip_consumer_relations(_goal_text(ledger))
     goal_for_context = _MANIPULATED_TARGET_RE.sub(" ", goal_for_context)
     goal_for_context = _ABOUT_CLAUSE_RE.sub(" ", goal_for_context)
+    # Relative clauses describe what the artifact DOES to its content
+    # ("that lists websites"), not what it is (#1813 R67) — copular
+    # clauses ("that is not just a browser page") state identity and
+    # keep their signal; goals whose relative clause declares the
+    # environment ("that runs in browsers") already own through the
+    # postnominal grant before context is asked.
+    goal_for_context = re.sub(
+        r"\b(?:that|which)\s+"
+        r"(?!(?:is|are|was|were|becomes?|remains?|stays?|isn|aren|wasn|weren)\b)"
+        r"[^,.;]*",
+        " ",
+        goal_for_context,
+    )
     return bool(_SECTION_BROWSER_ENV_RE.search(_section_browser_context_text(ledger))) or (
         _goal_has_unnegated_web_app_signal(goal_for_context)
     )
@@ -1241,7 +1254,8 @@ _INSPECTION_TOOL_GOAL_RE = re.compile(
 # trailing rejection keeps audiences ("for extension developers")
 # outside the veto.
 _GOAL_COMPONENT_TARGET_RE = re.compile(
-    r"\b(?:for|of|in|inside|within|into)\s+(?:an?\s+|the\s+)?(?:[\w\-]+\s+){0,2}?"
+    r"\b(?:for|of|in|inside|within|into)\s+"
+    r"(?:(?:an?|the|our|my|your|their|its)\s+)?(?:[\w\-'’]+\s+){0,3}?"
     r"(?:extensions?|plugins?|add[\s\-]?ons?|addons?|sidebars?|popups?|"
     r"toolbars?|overlays?|devtools?)\b"
     r"(?!\s+(?!(?:and|or|nor|but|without|with|for|on|in|at|by|from|via|"

@@ -3791,6 +3791,44 @@ def test_postfix_component_targets_own_their_surfaces() -> None:
 
 
 @pytest.mark.parametrize(
+    ("goal", "outputs"),
+    [
+        ("Build a desktop dashboard that lists websites", "Interactive list with a filters panel"),
+        (
+            "Build a desktop bookmark manager that organizes websites",
+            "Folder tree with a settings panel",
+        ),
+    ],
+)
+def test_relative_clause_content_is_not_browser_context(goal: str, outputs: str) -> None:
+    """R67 guard: an action relative clause names the artifact's content
+    ("that lists websites"); copular clauses keep stating identity."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value=outputs)
+    _seed_section(ledger, "runtime_context", value="Desktop")
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
+        "Build a settings dashboard within our Chrome browser extension",
+        "Build a settings dashboard for Chrome's browser extension",
+        "Build a settings dashboard for our company browser extension",
+    ],
+)
+def test_possessive_component_targets_own_their_surfaces(goal: str) -> None:
+    """R67 guard: possessive and brand-qualified component phrases are
+    the same component target as the plain-article forms."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value="Settings panel with save button")
+    _seed_section(ledger, "runtime_context", value="Runs in browsers")
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes
+
+
+@pytest.mark.parametrize(
     "goal",
     [
         "The product is an admin portal that runs in browsers",
