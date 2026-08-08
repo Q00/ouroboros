@@ -2970,3 +2970,42 @@ def test_postnominal_qualifiers_respect_reheading_and_negation(goal: str, runtim
     _seed_section(ledger, "runtime_context", value=runtime)
     result = derive_domain_from_ledger(ledger)
     assert TaskClass.WEB_APP not in result.classes
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
+        "Build a web-based admin portal",
+        "Build an admin portal that runs in a web browser",
+        "Build an admin portal that runs in modern browsers",
+    ],
+)
+def test_equivalent_browser_spellings_own_the_artifact(goal: str) -> None:
+    """R46 probe: "web-based" and modified browser environments are the
+    same ownership as the bare-browser forms."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value="Role management and account administration")
+    _seed_section(ledger, "runtime_context", value="Browser")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP
+
+
+@pytest.mark.parametrize(
+    ("goal", "runtime"),
+    [
+        ("Build an admin portal for the browser extension", "Browser extension runtime"),
+        (
+            "Build a native admin console for the browser automation suite",
+            "Native desktop runtime",
+        ),
+    ],
+)
+def test_trailing_artifact_nouns_reject_the_environment_reading(goal: str, runtime: str) -> None:
+    """R46 guard: the environment phrase must end at the browser token —
+    a trailing noun re-heads it into a consumed artifact."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value="Role management and account administration")
+    _seed_section(ledger, "runtime_context", value=runtime)
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes

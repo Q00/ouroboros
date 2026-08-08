@@ -751,7 +751,7 @@ _UI_PRODUCT_HEAD_FRAGMENT = (
 # forms or pages") breaks the chain, and the head must end the goal core
 # (same finality rule as the artifact-phrase path).
 _BROWSER_QUALIFIED_UI_HEAD_RE = re.compile(
-    rf"\b{_WEB_APP_GOAL_SIGNAL_FRAGMENT}"
+    rf"\b(?:{_WEB_APP_GOAL_SIGNAL_FRAGMENT}|web[\s\-]based|in[\s\-]browser)"
     r"(?:[\s\-]+(?!(?:and|or|nor|but|without|with|for|about|that|which|not|no)\b)[\w'’]+){0,3}?"
     rf"[\s\-]+{_UI_PRODUCT_HEAD_FRAGMENT}[\s.!?]*$"
 )
@@ -779,7 +779,19 @@ _POSTNOMINAL_BROWSER_QUALIFIER_RE = re.compile(
     r"(?:(?:that|which)\s+)?"
     rf"(?:(?!(?:not|no|never|cannot|isn[’']?t|aren[’']?t|won[’']?t|can[’']?t|"
     rf"doesn[’']?t|don[’']?t|{_OTHER_ARTIFACT_NOUN_FRAGMENT})\b)[\w'’\-]+\s+){{0,4}}?"
-    r"(?:in|inside|within|for|from|through|via|on)\s+(?:an?\s+|the\s+)?browsers?\b"
+    r"(?:in|inside|within|for|from|through|via|on)\s+"
+    # Ordinary spelling variants are equivalent environments (#1813 R46):
+    # "a web browser", "modern browsers".
+    r"(?:(?:an?|the|any|all|every|most)\s+)?"
+    rf"(?:(?!(?:not|no|{_OTHER_ARTIFACT_NOUN_FRAGMENT})\b)[\w\-]+\s+){{0,2}}?"
+    r"browsers?\b"
+    # The environment phrase must END at the browser token (#1813 R46): a
+    # trailing noun re-heads it into an artifact ("the browser extension",
+    # "the browser automation suite"). Function words and the R45
+    # "browser use" idiom keep the environment reading.
+    r"(?!\s+(?!(?:and|or|nor|but|use|usage|without|with|for|on|in|at|by|"
+    r"from|via|through|to|so|that|which|because|since|while|when|where|"
+    r"using|during|after|before|only|instead|rather|too|as|alongside)\b)[\w'’\-]+)"
 )
 
 
