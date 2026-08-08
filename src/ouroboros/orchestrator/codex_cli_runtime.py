@@ -550,7 +550,7 @@ class CodexCliRuntime:
     def _cli_executable_filesystem_identity(self) -> tuple[int, int] | None:
         return read_cli_executable_filesystem_identity(self._cli_executable_identity())
 
-    def _cli_executable_generation_identity(self) -> tuple[int, int, int, int, int] | None:
+    def _cli_executable_generation_identity(self) -> tuple[int, ...] | None:
         return read_cli_executable_generation_identity(self._cli_executable_identity())
 
     _compare_cli_executable_version_attestations = staticmethod(

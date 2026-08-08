@@ -498,6 +498,43 @@ def test_in_place_aba_during_version_probe_is_not_authorized(
     assert cli_path.read_text(encoding="utf-8") == original
 
 
+def test_atomic_aba_during_version_probe_is_not_authorized(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cli_path = tmp_path / "codex"
+    original = "#!/bin/sh\necho codex 1.0\n"
+    cli_path.write_text(original, encoding="utf-8")
+    cli_path.chmod(0o755)
+    runtime = CodexCliRuntime(cli_path=cli_path, cwd=tmp_path, model="gpt-5")
+    original_inode = cli_path.stat().st_ino
+    replacement = tmp_path / "replacement"
+    replacement.write_text("#!/bin/sh\necho compromised\n", encoding="utf-8")
+    replacement.chmod(0o755)
+    parked_original = tmp_path / "parked-original"
+
+    def replace_and_restore_during_probe(
+        args: list[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        os.replace(cli_path, parked_original)
+        os.replace(replacement, cli_path)
+        os.replace(cli_path, replacement)
+        os.replace(parked_original, cli_path)
+        return subprocess.CompletedProcess(args, 0, stdout="codex 1.0\n", stderr="")
+
+    monkeypatch.setattr(
+        codex_cli_runtime_module.subprocess,
+        "run",
+        replace_and_restore_during_probe,
+    )
+    with pytest.raises(RuntimeError, match="failed while verifying") as excinfo:
+        runtime._build_command(str(tmp_path / "last-message"))
+
+    assert "executable changed" not in str(excinfo.value)
+    assert cli_path.stat().st_ino == original_inode
+    assert cli_path.read_text(encoding="utf-8") == original
+
+
 def test_repeated_probe_timeouts_never_converge_to_false_drift(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -55,15 +55,32 @@ def read_cli_executable_filesystem_identity(
 
 def read_cli_executable_generation_identity(
     executable_path: str | None,
-) -> tuple[int, int, int, int, int] | None:
-    """Return target metadata that exposes same-inode mutate/restore ABA."""
+) -> tuple[int, ...] | None:
+    """Return target and directory metadata that exposes probe-window ABA."""
     if executable_path is None:
         return None
+    path = Path(executable_path)
     try:
-        value = Path(executable_path).stat()
-    except OSError:
+        target = path.stat()
+        launch_parent = path.parent.stat()
+        resolved_parent = path.resolve(strict=True).parent.stat()
+    except (OSError, RuntimeError):
         return None
-    return value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns, value.st_ctime_ns
+    return (
+        target.st_dev,
+        target.st_ino,
+        target.st_size,
+        target.st_mtime_ns,
+        target.st_ctime_ns,
+        launch_parent.st_dev,
+        launch_parent.st_ino,
+        launch_parent.st_mtime_ns,
+        launch_parent.st_ctime_ns,
+        resolved_parent.st_dev,
+        resolved_parent.st_ino,
+        resolved_parent.st_mtime_ns,
+        resolved_parent.st_ctime_ns,
+    )
 
 
 def read_cli_executable_symlink_identity(executable_path: str | None) -> dict[str, str] | None:
@@ -140,7 +157,12 @@ def probe_cli_executable_version_attestation(
     before_content = content_identity()
     before_symlink = symlink_identity()
     before_symlink_generation = symlink_generation_identity()
-    if before_filesystem is None or before_generation is None or before_content is None:
+    if (
+        before_filesystem is None
+        or before_generation is None
+        or before_content is None
+        or (before_symlink is None) != (before_symlink_generation is None)
+    ):
         return failed
 
     try:
