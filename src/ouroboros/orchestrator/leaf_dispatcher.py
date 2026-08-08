@@ -20,9 +20,11 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
+import errno
 import os
 from pathlib import Path
 import stat
+import threading
 import time
 from typing import TYPE_CHECKING, Any
 
@@ -98,8 +100,68 @@ class _PendingBashTarget:
             return None
         return self.directory_chain.leaf_fd
 
+    @property
+    def descriptor_count(self) -> int:
+        """Return the descriptors held by this receiver lease."""
+        return self.directory_chain.descriptor_count if self.directory_chain is not None else 0
+
 
 _MAX_BASH_FILESYSTEM_EFFECTS = 128
+_MAX_BASH_PROVENANCE_FDS = 64
+_BASH_PROVENANCE_FD_LIMIT_DIVISOR = 4
+_MIN_RUNTIME_FD_HEADROOM = 16
+_BASH_PROVENANCE_FD_LOCK = threading.Lock()
+
+
+class _BashProvenanceFDBudgetExceeded(Exception):
+    """Signal that a command capture must be abandoned as one unit."""
+
+
+def _bash_soft_fd_limit() -> int | None:
+    """Return the process soft fd limit when it is safely observable."""
+    try:
+        soft_limit = os.sysconf("SC_OPEN_MAX")
+    except (AttributeError, OSError, ValueError):
+        return None
+    if not isinstance(soft_limit, int) or soft_limit <= 0:
+        return None
+    return soft_limit
+
+
+def _bash_provenance_fd_budget() -> int:
+    """Return one conservative per-tracker cap below the process soft limit."""
+    soft_limit = _bash_soft_fd_limit()
+    if soft_limit is None:
+        return 0
+    return min(_MAX_BASH_PROVENANCE_FDS, soft_limit // _BASH_PROVENANCE_FD_LIMIT_DIVISOR)
+
+
+def _bash_open_fd_count() -> int | None:
+    """Count process descriptors without retaining the enumeration handle."""
+    for candidate in (Path("/proc/self/fd"), Path("/dev/fd")):
+        if not candidate.exists():
+            continue
+        try:
+            with os.scandir(candidate) as entries:
+                return sum(1 for _entry in entries)
+        except OSError:
+            continue
+    return None
+
+
+def _bash_provenance_headroom_available(required_fds: int) -> bool:
+    """Keep at least half the process limit free for runtime and pipe I/O."""
+    soft_limit = _bash_soft_fd_limit()
+    open_fds = _bash_open_fd_count()
+    if soft_limit is None or open_fds is None or required_fds < 0:
+        return False
+    reserved_headroom = max(_MIN_RUNTIME_FD_HEADROOM, soft_limit // 2)
+    return open_fds + required_fds <= soft_limit - reserved_headroom
+
+
+def _absolute_directory_fd_count(path: str | os.PathLike[str]) -> int:
+    """Return descriptors required for a root-anchored absolute directory walk."""
+    return len(Path(os.path.abspath(path)).parts)
 
 
 def _pending_bash_filesystem_targets(
@@ -107,8 +169,26 @@ def _pending_bash_filesystem_targets(
     *,
     task_cwd: str | None,
     workspace_chain: NoFollowDirectoryChain | None = None,
+    target_fd_budget: int | None = None,
 ) -> tuple[_PendingBashTarget, ...]:
     """Lease Bash receiver parents and capture pre-execution file identity."""
+    with _BASH_PROVENANCE_FD_LOCK:
+        return _pending_bash_filesystem_targets_locked(
+            message,
+            task_cwd=task_cwd,
+            workspace_chain=workspace_chain,
+            target_fd_budget=target_fd_budget,
+        )
+
+
+def _pending_bash_filesystem_targets_locked(
+    message: AgentMessage,
+    *,
+    task_cwd: str | None,
+    workspace_chain: NoFollowDirectoryChain | None,
+    target_fd_budget: int | None,
+) -> tuple[_PendingBashTarget, ...]:
+    """Lease receivers while process-wide provenance admission is serialized."""
     if message.tool_name != "Bash" or _runtime_message_is_tool_completion(message):
         return ()
     effective_cwd = _runtime_message_effective_cwd(message, task_cwd=task_cwd)
@@ -116,23 +196,38 @@ def _pending_bash_filesystem_targets(
         return ()
     owned_workspace_chain: NoFollowDirectoryChain | None = None
     if workspace_chain is None:
+        total_budget = _bash_provenance_fd_budget()
+        workspace_fd_count = _absolute_directory_fd_count(task_cwd)
+        if workspace_fd_count > total_budget or not _bash_provenance_headroom_available(
+            workspace_fd_count
+        ):
+            return ()
         try:
             owned_workspace_chain = open_nofollow_directory_chain(Path(os.path.abspath(task_cwd)))
         except (OSError, RuntimeError, ValueError):
             return ()
         workspace_chain = owned_workspace_chain
+        target_fd_budget = total_budget - workspace_chain.descriptor_count
+    elif target_fd_budget is None:
+        target_fd_budget = _bash_provenance_fd_budget()
     targets: list[_PendingBashTarget] = []
     try:
         for command in _runtime_message_command_values(message):
             for target in _shell_command_mutation_targets(command):
-                pending = _lease_bash_target(
-                    target,
-                    task_cwd=task_cwd,
-                    effective_cwd=effective_cwd,
-                    workspace_chain=workspace_chain,
-                )
+                try:
+                    pending = _lease_bash_target(
+                        target,
+                        task_cwd=task_cwd,
+                        effective_cwd=effective_cwd,
+                        workspace_chain=workspace_chain,
+                        fd_budget=target_fd_budget,
+                    )
+                except _BashProvenanceFDBudgetExceeded:
+                    _close_pending_targets(tuple(targets))
+                    return ()
                 if pending is not None:
                     targets.append(pending)
+                    target_fd_budget -= pending.descriptor_count
                     if len(targets) > _MAX_BASH_FILESYSTEM_EFFECTS or len(
                         {item.workspace_relative_path for item in targets}
                     ) != len(targets):
@@ -150,6 +245,7 @@ def _lease_bash_target(
     task_cwd: str,
     effective_cwd: str,
     workspace_chain: NoFollowDirectoryChain,
+    fd_budget: int,
 ) -> _PendingBashTarget | None:
     """Open a no-follow dirfd chain that survives path-component replacement."""
     directory_chain: NoFollowDirectoryChain | None = None
@@ -166,6 +262,9 @@ def _lease_bash_target(
         relative = absolute.relative_to(workspace)
         if not relative.parts or relative.name in {"", ".", ".."}:
             return None
+        required_fds = workspace_chain.descriptor_count + len(relative.parts[:-1])
+        if required_fds > fd_budget or not _bash_provenance_headroom_available(required_fds):
+            raise _BashProvenanceFDBudgetExceeded
         directory_chain = open_nofollow_directory_chain(
             workspace,
             relative_components=relative.parts[:-1],
@@ -190,7 +289,11 @@ def _lease_bash_target(
         )
         directory_chain = None
         return pending
-    except (OSError, RuntimeError, ValueError):
+    except OSError as exc:
+        if exc.errno in {errno.EMFILE, errno.ENFILE}:
+            raise _BashProvenanceFDBudgetExceeded from exc
+        return None
+    except (RuntimeError, ValueError):
         return None
     finally:
         if directory_chain is not None:
@@ -351,6 +454,7 @@ class _BashFilesystemLeaseTracker:
 
     def __init__(self, *, task_cwd: str | None) -> None:
         self._task_cwd = task_cwd
+        self._provenance_fd_budget = _bash_provenance_fd_budget()
         self._workspace_chain: NoFollowDirectoryChain | None = None
         self._pending_by_id: dict[str, tuple[_PendingBashTarget, ...]] = {}
         self._seen_call_ids: set[str] = set()
@@ -362,12 +466,18 @@ class _BashFilesystemLeaseTracker:
 
     def __enter__(self) -> _BashFilesystemLeaseTracker:
         if self._task_cwd is not None and self._workspace_chain is None:
-            try:
-                self._workspace_chain = open_nofollow_directory_chain(
-                    Path(os.path.abspath(self._task_cwd))
-                )
-            except (OSError, RuntimeError, ValueError):
-                self._workspace_chain = None
+            workspace_fd_count = _absolute_directory_fd_count(self._task_cwd)
+            with _BASH_PROVENANCE_FD_LOCK:
+                if workspace_fd_count > self._provenance_fd_budget or not (
+                    _bash_provenance_headroom_available(workspace_fd_count)
+                ):
+                    return self
+                try:
+                    self._workspace_chain = open_nofollow_directory_chain(
+                        Path(os.path.abspath(self._task_cwd))
+                    )
+                except (OSError, RuntimeError, ValueError):
+                    self._workspace_chain = None
         return self
 
     def __exit__(self, *_exc_info: object) -> None:
@@ -380,6 +490,18 @@ class _BashFilesystemLeaseTracker:
             self._seen_call_ids.add(pending_id)
             self._pending_by_id[pending_id] = ()
         self._pending_bash_call_ids.clear()
+
+    def _held_provenance_fd_count(self) -> int:
+        """Count every workspace and receiver descriptor owned by this tracker."""
+        count = self._workspace_chain.descriptor_count if self._workspace_chain else 0
+        count += sum(
+            target.descriptor_count
+            for targets in self._pending_by_id.values()
+            for target in targets
+        )
+        if self._idless is not None:
+            count += sum(target.descriptor_count for target in self._idless)
+        return count
 
     def observe(self, message: AgentMessage) -> AgentMessage:
         """Lease calls, attach completion effects, and reject ambiguous pairing."""
@@ -418,6 +540,10 @@ class _BashFilesystemLeaseTracker:
                     message,
                     task_cwd=self._task_cwd,
                     workspace_chain=self._workspace_chain,
+                    target_fd_budget=max(
+                        0,
+                        self._provenance_fd_budget - self._held_provenance_fd_count(),
+                    ),
                 )
                 if tool_name == "Bash" and self._workspace_chain is not None
                 else ()

@@ -39,6 +39,11 @@ class NoFollowDirectoryChain:
             raise OSError(msg)
         return self._directory_fds[-1]
 
+    @property
+    def descriptor_count(self) -> int:
+        """Return the number of directory descriptors currently owned."""
+        return len(self._directory_fds)
+
     def matches_opened_directories(self, other: NoFollowDirectoryChain) -> bool:
         """Check that two held traversals opened the same directory identities."""
         if self._component_names != other._component_names or len(self._directory_fds) != len(

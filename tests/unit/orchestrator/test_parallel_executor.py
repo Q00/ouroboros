@@ -12,6 +12,7 @@ from pathlib import Path
 import shlex
 import subprocess
 import sys
+import textwrap
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -570,6 +571,7 @@ def test_files_touched_authenticates_every_stable_multi_receiver(
 
     with _BashFilesystemLeaseTracker(task_cwd=str(tmp_path)) as tracker:
         observed_call = tracker.observe(call)
+        assert len(tracker._pending_by_id["multi-receiver"]) == 2
         completed = subprocess.run(  # noqa: S602
             command,
             cwd=tmp_path,
@@ -1125,6 +1127,198 @@ def test_bash_receiver_lease_cleanup_is_idempotent(tmp_path) -> None:
     for fd in fds:
         with pytest.raises(OSError):
             os.fstat(fd)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="RLIMIT_NOFILE is POSIX-only")
+def test_bash_receiver_fd_budget_preserves_pipe_headroom_under_low_rlimit(tmp_path) -> None:
+    """A wide command abandons capture before it can starve subprocess pipes."""
+    child_script = textwrap.dedent(
+        r"""
+        import os
+        from pathlib import Path
+        import resource
+        import subprocess
+        import sys
+
+        from ouroboros.orchestrator.adapter import AgentMessage
+        from ouroboros.orchestrator.leaf_dispatcher import _BashFilesystemLeaseTracker
+
+        workspace = Path(sys.argv[1])
+        _soft_limit, hard_limit = resource.getrlimit(resource.RLIMIT_NOFILE)
+        limit = 256 if hard_limit == resource.RLIM_INFINITY else min(256, hard_limit)
+        if limit < 128:
+            raise SystemExit(77)
+        resource.setrlimit(resource.RLIMIT_NOFILE, (limit, hard_limit))
+
+        fd_directory = Path("/proc/self/fd")
+        if not fd_directory.exists():
+            fd_directory = Path("/dev/fd")
+        if not fd_directory.exists():
+            raise SystemExit(77)
+
+        def fd_count():
+            return len(os.listdir(fd_directory))
+
+        baseline = fd_count()
+        receivers = [f"claimed_{index}.txt" for index in range(64)]
+        command = "touch " + " ".join(receivers)
+        call = AgentMessage(
+            type="tool",
+            content=f"Bash: {command}",
+            tool_name="Bash",
+            data={"tool_input": {"command": command}, "tool_call_id": "fd-budget"},
+        )
+        completion = AgentMessage(
+            type="tool_result",
+            content="command completed with exit code 0",
+            tool_name="Bash",
+            data={"subtype": "tool_result", "exit_code": 0, "tool_call_id": "fd-budget"},
+        )
+
+        with _BashFilesystemLeaseTracker(task_cwd=str(workspace)) as tracker:
+            tracker.observe(call)
+            assert tracker._pending_by_id["fd-budget"] == ()
+            assert fd_count() < limit // 2
+            completed = subprocess.run(
+                ["/bin/sh", "-c", command],
+                cwd=workspace,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=True,
+            )
+            assert completed.stdout == ""
+            assert completed.stderr == ""
+            observed = tracker.observe(completion)
+            assert "filesystem_effects" not in observed.data
+            probe = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    "import sys; print('stdout-ok'); print('stderr-ok', file=sys.stderr)",
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=True,
+            )
+            assert probe.stdout == "stdout-ok\n"
+            assert probe.stderr == "stderr-ok\n"
+
+        assert fd_count() <= baseline + 1
+        print("fd-budget-ok")
+        """
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-c", child_script, str(tmp_path)],
+        cwd=Path.cwd(),
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    if result.returncode == 77:  # pragma: no cover - constrained host fallback
+        pytest.skip("host cannot provide the isolated RLIMIT_NOFILE regression")
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "fd-budget-ok\n"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="RLIMIT_NOFILE is POSIX-only")
+def test_bash_receiver_fd_budget_is_process_wide_across_trackers(tmp_path) -> None:
+    """Concurrent trackers share headroom and cannot collectively starve pipes."""
+    child_script = textwrap.dedent(
+        r"""
+        import os
+        from pathlib import Path
+        import resource
+        import subprocess
+        import sys
+
+        from ouroboros.orchestrator.adapter import AgentMessage
+        from ouroboros.orchestrator.leaf_dispatcher import _BashFilesystemLeaseTracker
+
+        workspace = Path(sys.argv[1])
+        _soft_limit, hard_limit = resource.getrlimit(resource.RLIMIT_NOFILE)
+        limit = 256 if hard_limit == resource.RLIM_INFINITY else min(256, hard_limit)
+        if limit < 128:
+            raise SystemExit(77)
+        resource.setrlimit(resource.RLIMIT_NOFILE, (limit, hard_limit))
+
+        fd_directory = Path("/proc/self/fd")
+        if not fd_directory.exists():
+            fd_directory = Path("/dev/fd")
+        if not fd_directory.exists():
+            raise SystemExit(77)
+
+        def fd_count():
+            return len(os.listdir(fd_directory))
+
+        baseline = fd_count()
+        trackers = [
+            _BashFilesystemLeaseTracker(task_cwd=str(workspace)) for _index in range(4)
+        ]
+        retained = 0
+        abandoned = 0
+        try:
+            for tracker_index, tracker in enumerate(trackers):
+                tracker.__enter__()
+                for call_index in range(20):
+                    receiver = f"tracker_{tracker_index}_{call_index}.txt"
+                    call_id = f"tracker-{tracker_index}-call-{call_index}"
+                    tracker.observe(
+                        AgentMessage(
+                            type="tool",
+                            content=f"Bash: touch {receiver}",
+                            tool_name="Bash",
+                            data={
+                                "tool_input": {"command": f"touch {receiver}"},
+                                "tool_call_id": call_id,
+                            },
+                        )
+                    )
+                    lease_count = len(tracker._pending_by_id[call_id])
+                    assert lease_count in {0, 1}
+                    retained += lease_count
+                    abandoned += lease_count == 0
+
+            assert retained > 0
+            assert abandoned > 0
+            assert fd_count() <= limit // 2
+            probe = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    "import sys; print('stdout-ok'); print('stderr-ok', file=sys.stderr)",
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=True,
+            )
+            assert probe.stdout == "stdout-ok\n"
+            assert probe.stderr == "stderr-ok\n"
+        finally:
+            for tracker in reversed(trackers):
+                tracker.close()
+
+        assert fd_count() <= baseline + 1
+        print("multi-fd-budget-ok")
+        """
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-c", child_script, str(tmp_path)],
+        cwd=Path.cwd(),
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    if result.returncode == 77:  # pragma: no cover - constrained host fallback
+        pytest.skip("host cannot provide the isolated RLIMIT_NOFILE regression")
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "multi-fd-budget-ok\n"
 
 
 def test_completed_receiver_lease_cannot_close_reused_fd(tmp_path) -> None:
