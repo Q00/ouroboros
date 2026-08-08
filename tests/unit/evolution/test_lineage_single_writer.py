@@ -11,6 +11,7 @@ import time
 from unittest.mock import AsyncMock
 
 import pytest
+from sqlalchemy import func, select
 
 from ouroboros.core.errors import PersistenceError
 from ouroboros.core.lineage import GenerationPhase
@@ -44,6 +45,7 @@ from ouroboros.evolution.step_receipt import (
 from ouroboros.evolution.wonder import GroundedQuestion, WonderOutput
 from ouroboros.persistence import lineage_claims
 from ouroboros.persistence.event_store import EventStore
+from ouroboros.persistence.schema import lineage_advancement_waiters_table
 
 
 def _seed() -> Seed:
@@ -982,6 +984,135 @@ async def test_outer_claim_rebinds_before_nested_generation_effects(tmp_path: Pa
     finally:
         await writer.close()
         await reader.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("existing_owner", [False, True])
+@pytest.mark.parametrize("close_during_cancel", [False, True])
+async def test_cancelled_claim_acquisition_settles_and_removes_participation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    existing_owner: bool,
+    close_during_cancel: bool,
+) -> None:
+    """Cancellation after commit releases owner/waiter state before close returns."""
+    writer, reader = await _stores(
+        tmp_path / f"cancelled-claim-{existing_owner}-{close_during_cancel}.db"
+    )
+    scope = "evolve-handler"
+    lineage_id = f"cancelled-claim-{existing_owner}"
+    winner_id = "existing-owner"
+    if existing_owner:
+        winner = await lineage_claims.try_acquire(
+            writer,
+            scope=scope,
+            lineage_id=lineage_id,
+            generation_number=1,
+            owner_id=winner_id,
+            request_key="existing-request",
+        )
+        assert winner is not None and winner.acquired
+
+    committed = asyncio.Event()
+    release_commit = asyncio.Event()
+    original_commit = lineage_claims._commit
+    gate_first_commit = True
+
+    async def gated_commit(*args, **kwargs):  # type: ignore[no-untyped-def]
+        nonlocal gate_first_commit
+        await original_commit(*args, **kwargs)
+        if gate_first_commit:
+            gate_first_commit = False
+            committed.set()
+            await release_commit.wait()
+
+    monkeypatch.setattr(lineage_claims, "_commit", gated_commit)
+    participant_id = "cancelled-participant"
+    acquisition = asyncio.create_task(
+        lineage_claims.try_acquire(
+            writer,
+            scope=scope,
+            lineage_id=lineage_id,
+            generation_number=1,
+            owner_id=participant_id,
+            request_key="cancelled-request",
+        )
+    )
+    close_task: asyncio.Task[None] | None = None
+    try:
+        await asyncio.wait_for(committed.wait(), timeout=5)
+        acquisition.cancel()
+        if close_during_cancel:
+            close_task = asyncio.create_task(writer.close())
+            await asyncio.sleep(0)
+            assert not close_task.done()
+        release_commit.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(acquisition, timeout=5)
+        if close_task is not None:
+            await asyncio.wait_for(close_task, timeout=10)
+
+        observed = await lineage_claims.observe(reader, scope=scope, lineage_id=lineage_id)
+        engine = reader._engine
+        assert engine is not None
+        async with engine.connect() as connection:
+            waiter_count = await connection.scalar(
+                select(func.count())
+                .select_from(lineage_advancement_waiters_table)
+                .where(
+                    lineage_advancement_waiters_table.c.scope == scope,
+                    lineage_advancement_waiters_table.c.lineage_id == lineage_id,
+                )
+            )
+        assert waiter_count == 0
+        if existing_owner:
+            assert observed is not None and observed.owner_id == winner_id
+            await asyncio.wait_for(
+                lineage_claims.release(
+                    reader if close_during_cancel else writer,
+                    scope=scope,
+                    lineage_id=lineage_id,
+                    owner_id=winner_id,
+                ),
+                timeout=1,
+            )
+        else:
+            assert observed is None
+    finally:
+        release_commit.set()
+        if not acquisition.done():
+            acquisition.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await acquisition
+        if close_task is not None and not close_task.done():
+            await close_task
+        await writer.close()
+        await reader.close()
+
+
+@pytest.mark.asyncio
+async def test_claim_acquisition_refuses_close_admission_without_hanging(tmp_path: Path) -> None:
+    """A close winner reaches the acquisition caller without orphaned task errors."""
+    store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'claim-close-refusal.db'}")
+    await store.initialize()
+    store._closing = True
+    try:
+        with pytest.raises(PersistenceError, match="closing"):
+            await asyncio.wait_for(
+                lineage_claims.try_acquire(
+                    store,
+                    scope="evolve-handler",
+                    lineage_id="claim-close-refusal",
+                    generation_number=1,
+                    owner_id="refused-owner",
+                    request_key="refused-request",
+                ),
+                timeout=1,
+            )
+    finally:
+        store._closing = False
+        await store.close()
 
 
 @pytest.mark.asyncio
