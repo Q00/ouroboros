@@ -245,7 +245,10 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
    `status="invalid_result_entry"` with `invalid_keys`, listing every bad entry
    at once so one resubmission fixes them all.
 
-   A complete set returns the correlated synthesis to continue with; a partial
+   A complete set returns a bounded artifact envelope. Call
+   `ouroboros_fetch_artifact` with its `contract_id`, then continue from the
+   correlated synthesis in the fetched `body`. This explicit MCP fetch is
+   required even when the host has no shell. A partial
    set returns `status="partial"` with `missing_required_keys`. **Retry with
    every lane you hold, not only the missing ones** — no submitted output is
    kept between calls, so each call is judged on what it carries. (The record
@@ -253,7 +256,7 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
    result state, deferred with its sanitization duties to a later slice.)
    Sequential hosts submit after processing payloads one-by-one — same tool,
    same contract, so accumulate the outputs on your side and send the growing
-   set. Continue the interview from the returned synthesis; keep the
+   set. Continue the interview from the fetched synthesis; keep the
    user-facing question visible throughout.
 
    Only lanes marked `required: true` in the request block completion. A lane

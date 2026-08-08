@@ -1873,6 +1873,7 @@ class TestOuroborosTools:
         "ouroboros_evolve_rewind",
         "ouroboros_evolve_step",
         "ouroboros_execute_seed",
+        "ouroboros_fetch_artifact",
         "ouroboros_generate_seed",
         "ouroboros_interview",
         "ouroboros_job_result",

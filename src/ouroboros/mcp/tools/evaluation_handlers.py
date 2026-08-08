@@ -31,7 +31,10 @@ from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.job_manager import JobLinks, JobManager
 from ouroboros.mcp.tools import background as background_jobs
 from ouroboros.mcp.tools.bridge_mixin import BridgeAwareMixin
-from ouroboros.mcp.tools.fanout_handler import SubmitFanoutResultsHandler  # noqa: F401
+from ouroboros.mcp.tools.fanout_handler import (  # noqa: F401
+    FetchArtifactHandler,
+    SubmitFanoutResultsHandler,
+)
 from ouroboros.mcp.tools.job_observer import build_job_observer_contract
 from ouroboros.mcp.tools.subagent import (
     DELEGATED_TO_SUBAGENT,
