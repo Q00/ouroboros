@@ -765,11 +765,17 @@ _QUALIFIER_WRAPPER_FRAGMENT = (
     r"wishes|to)\s+){0,6}?"
 )
 # A specificational copula declares the produced artifact directly
-# (#1813 R55): definite subject + copula + indefinite NP ("the product
-# is an admin portal that runs in browsers").
+# (#1813 R55/R58): a definite, possessive, or demonstrative subject plus
+# a (possibly modal) copula, optionally followed by an intent infinitive
+# — "the product is ...", "our deliverable should be ...", "this should
+# be ...", "the goal is to build ...".
+_COPULAR_VERB_FRAGMENT = (
+    r"(?:is|are|was|were|will\s+be|would\s+be|should\s+be|must\s+be|"
+    r"shall\s+be|becomes?|ought\s+to\s+be|needs?\s+to\s+be|has\s+to\s+be)"
+)
 _COPULAR_FRAME_FRAGMENT = (
-    r"(?:the\s+(?:[\w\-]+\s+){1,2}?(?:is|are|will\s+be|would\s+be|"
-    r"should\s+be|must\s+be|shall\s+be|becomes?)\s+)?"
+    rf"(?:(?:(?:the|our|my|your)\s+(?:[\w\-]+\s+){{1,2}}?|(?:this|that|it)\s+)"
+    rf"{_COPULAR_VERB_FRAGMENT}\s+(?:to\s+)?)?"
 )
 _NP_LEAD_FRAGMENT = rf"(?:(?!{_NP_CHAIN_STOP_FRAGMENT}\b)(?![\w'’\-]+ing\b)[\w'’\-]+\s+){{0,2}}?"
 _NP_DETERMINER_FRAGMENT = r"(?:(?:an?|the|one|this|our|my|your)\s+)?"
@@ -1131,18 +1137,27 @@ def _section_browser_context_text(ledger: SeedDraftLedger) -> str:
 def _ledger_has_browser_context(ledger: SeedDraftLedger) -> bool:
     """Affirmative browser context: standardized outputs/runtime keywords,
     or an unnegated goal-side web-app signal. Shared by the web_app
-    matcher and by game_2d's ceding rule for render/screen vocabulary."""
+    matcher and by game_2d's ceding rule for render/screen vocabulary.
+
+    Section evidence uses the strict environment reading on every path
+    (#1813 R58): a re-headed or embedded browser phrase is a component
+    of another artifact, whichever branch consults it.
+    """
     goal_for_context = _strip_consumer_relations(_goal_text(ledger))
-    return bool(_WEB_APP_GOAL_SIGNAL_RE.search(_section_browser_context_text(ledger))) or (
+    return bool(_SECTION_BROWSER_ENV_RE.search(_section_browser_context_text(ledger))) or (
         _goal_has_unnegated_web_app_signal(goal_for_context)
     )
 
 
 # A browser token in the standardized sections counts as the execution
-# environment only when nothing re-heads it (#1813 R57): "Browser" and
-# "Runs in browsers" qualify, "Browser extension runtime" names another
-# artifact. Environment/function words after the token keep the reading.
+# environment only when nothing re-heads it (#1813 R57/R58): "Browser"
+# and "Runs in browsers" qualify; "Browser extension runtime" names
+# another artifact, and an EMBEDDED browser ("Embedded browser runtime
+# in Electron") is a component of another host, not the environment.
+# Environment/function words after the token keep the reading.
 _SECTION_BROWSER_ENV_RE = re.compile(
+    r"(?<!embedded )(?<!headless )(?<!in-app )(?<!inline )(?<!internal )"
+    r"(?<!integrated )(?<!bundled )"
     rf"\b{_WEB_APP_GOAL_SIGNAL_FRAGMENT}\b"
     r"(?!\s+(?!(?:and|or|nor|but|use|usage|without|with|for|on|in|at|by|"
     r"from|via|through|to|so|that|which|because|since|while|when|where|"

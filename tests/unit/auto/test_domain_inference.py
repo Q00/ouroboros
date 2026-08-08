@@ -3463,6 +3463,47 @@ def test_ui_head_plus_browser_runtime_is_semantic_ui_evidence() -> None:
 
 
 @pytest.mark.parametrize(
+    ("goal", "runtime"),
+    [
+        ("Build an Electron desktop settings dashboard", "Embedded browser runtime in Electron"),
+        ("Build a form automation harness", "Browser automation suite runtime"),
+        ("Build a toolbar surface", "Browser plugin host"),
+    ],
+)
+def test_reheaded_and_embedded_browser_runtimes_are_not_environments(
+    goal: str, runtime: str
+) -> None:
+    """R58 guard: the strict environment reading applies on every
+    browser-context path — an embedded or re-headed browser phrase is a
+    component of another artifact even with UI-shaped outputs."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value="Settings panel with account form")
+    _seed_section(ledger, "runtime_context", value=runtime)
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
+        "Our deliverable should be an admin portal that runs in browsers",
+        "This should be an admin portal that runs in browsers",
+        "The goal is to build an admin portal that runs in browsers",
+    ],
+)
+def test_specificational_and_intent_frames_own_the_artifact(goal: str) -> None:
+    """R58 probe: possessive/demonstrative subjects and intent
+    infinitives are the same specificational declaration as the
+    "the product is" frame."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value="Role management and account administration")
+    _seed_section(ledger, "runtime_context", value="Browser")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP
+
+
+@pytest.mark.parametrize(
     "goal",
     [
         "The product is an admin portal that runs in browsers",
