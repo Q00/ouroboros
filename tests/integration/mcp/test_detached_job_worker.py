@@ -10,11 +10,15 @@ import subprocess
 import sys
 import textwrap
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from ouroboros.mcp.detached_jobs import DetachedJobAcceptanceTimeout
+from ouroboros.mcp.detached_jobs import (
+    DetachedJobAcceptanceTimeout,
+    DetachedJobRequest,
+    launch_detached_job,
+)
 from ouroboros.mcp.errors import MCPToolError
 from ouroboros.mcp.job_manager import JobLinks, JobManager, JobStatus
 from ouroboros.mcp.tools.background import start_background_tool_job
@@ -78,6 +82,165 @@ async def _wait_terminal(
         if asyncio.get_running_loop().time() >= deadline:
             raise AssertionError(f"job {job_id} did not become terminal")
         await asyncio.sleep(0.05)
+
+
+def test_reaper_registration_failure_does_not_reject_spawned_worker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Once Popen succeeds, local reaper setup cannot reopen acceptance."""
+    from ouroboros.mcp import detached_jobs
+
+    process = SimpleNamespace(pid=4242, wait=lambda: 0)
+    popen = MagicMock(return_value=process)
+    monkeypatch.setattr(detached_jobs.subprocess, "Popen", popen)
+
+    def fail_reaper_start(_thread) -> None:
+        raise RuntimeError("reaper unavailable")
+
+    monkeypatch.setattr(detached_jobs.threading.Thread, "start", fail_reaper_start)
+
+    spawned = detached_jobs._spawn_worker(tmp_path / "request.json", cwd=str(tmp_path))
+
+    assert spawned is process
+    popen.assert_called_once()
+
+
+class _AcceptanceProbeManager:
+    def __init__(self, outcomes: list[object]) -> None:
+        self.outcomes = outcomes
+        self.abandoned: list[str] = []
+
+    async def get_snapshot(self, _job_id: str):
+        outcome = self.outcomes.pop(0)
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+    def abandon_reserved_job_id(self, job_id: str) -> None:
+        self.abandoned.append(job_id)
+
+
+def _detached_request(tmp_path: Path) -> DetachedJobRequest:
+    return DetachedJobRequest(
+        job_id="job_acceptance_probe",
+        tool_name="ouroboros_start_evaluate",
+        arguments={"session_id": "orch_probe", "artifact": "partial"},
+        database_url="sqlite+aiosqlite:///acceptance-probe.db",
+        cwd=str(tmp_path),
+    )
+
+
+@pytest.mark.asyncio
+async def test_live_failed_status_waits_for_fallback_created_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A live child can publish failed status before its fallback job receipt."""
+    from ouroboros.mcp import detached_jobs
+
+    snapshot = SimpleNamespace(job_id="job_acceptance_probe")
+    manager = _AcceptanceProbeManager([ValueError("not yet"), snapshot])
+    process = SimpleNamespace(pid=4242, poll=lambda: None)
+    monkeypatch.setattr(detached_jobs, "write_private_json", MagicMock())
+    monkeypatch.setattr(detached_jobs, "_spawn_worker", MagicMock(return_value=process))
+    monkeypatch.setattr(
+        detached_jobs,
+        "read_status",
+        MagicMock(return_value={"state": "failed", "error": "worker fallback pending"}),
+    )
+    monkeypatch.setattr(detached_jobs.asyncio, "sleep", AsyncMock())
+
+    accepted = await launch_detached_job(
+        job_manager=manager,  # type: ignore[arg-type]
+        event_store=SimpleNamespace(database_url=_detached_request(tmp_path).database_url),  # type: ignore[arg-type]
+        request=_detached_request(tmp_path),
+    )
+
+    assert accepted is snapshot
+    assert manager.abandoned == []
+
+
+@pytest.mark.asyncio
+async def test_dead_child_gets_final_durable_read_before_abandon(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A created commit between the initial miss and exit remains accepted."""
+    from ouroboros.mcp import detached_jobs
+
+    snapshot = SimpleNamespace(job_id="job_acceptance_probe")
+    manager = _AcceptanceProbeManager([ValueError("stale miss"), snapshot])
+    process = SimpleNamespace(pid=4242, poll=lambda: 1)
+    monkeypatch.setattr(detached_jobs, "write_private_json", MagicMock())
+    monkeypatch.setattr(detached_jobs, "_spawn_worker", MagicMock(return_value=process))
+    cleanup = MagicMock()
+    monkeypatch.setattr(detached_jobs, "cleanup_worker_artifacts", cleanup)
+
+    accepted = await launch_detached_job(
+        job_manager=manager,  # type: ignore[arg-type]
+        event_store=SimpleNamespace(database_url=_detached_request(tmp_path).database_url),  # type: ignore[arg-type]
+        request=_detached_request(tmp_path),
+    )
+
+    assert accepted is snapshot
+    assert manager.abandoned == []
+    cleanup.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_dead_child_abandons_only_after_final_durable_absence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from ouroboros.mcp import detached_jobs
+
+    manager = _AcceptanceProbeManager([ValueError("stale miss"), ValueError("final absence")])
+    process = SimpleNamespace(pid=4242, poll=lambda: 1)
+    monkeypatch.setattr(detached_jobs, "write_private_json", MagicMock())
+    monkeypatch.setattr(detached_jobs, "_spawn_worker", MagicMock(return_value=process))
+    monkeypatch.setattr(
+        detached_jobs,
+        "read_status",
+        MagicMock(return_value={"state": "failed", "error": "worker rejected"}),
+    )
+
+    with pytest.raises(RuntimeError, match="worker rejected"):
+        await launch_detached_job(
+            job_manager=manager,  # type: ignore[arg-type]
+            event_store=SimpleNamespace(  # type: ignore[arg-type]
+                database_url=_detached_request(tmp_path).database_url
+            ),
+            request=_detached_request(tmp_path),
+        )
+
+    assert manager.abandoned == ["job_acceptance_probe"]
+
+
+@pytest.mark.asyncio
+async def test_dead_child_final_read_error_remains_fail_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from ouroboros.mcp import detached_jobs
+
+    manager = _AcceptanceProbeManager(
+        [ValueError("stale miss"), RuntimeError("final receipt unreadable")]
+    )
+    process = SimpleNamespace(pid=4242, poll=lambda: 1)
+    monkeypatch.setattr(detached_jobs, "write_private_json", MagicMock())
+    monkeypatch.setattr(detached_jobs, "_spawn_worker", MagicMock(return_value=process))
+
+    with pytest.raises(RuntimeError, match="final receipt unreadable"):
+        await launch_detached_job(
+            job_manager=manager,  # type: ignore[arg-type]
+            event_store=SimpleNamespace(  # type: ignore[arg-type]
+                database_url=_detached_request(tmp_path).database_url
+            ),
+            request=_detached_request(tmp_path),
+        )
+
+    assert manager.abandoned == []
 
 
 @pytest.mark.asyncio

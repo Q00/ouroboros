@@ -218,6 +218,7 @@ async def run_worker(request_path: Path) -> int:
             try:
                 await _record_start_failure(manager, request, error)
                 await _wait_for_terminal(manager, request.job_id)
+                cleanup_artifacts = True
             except Exception:
                 pass
         return 1

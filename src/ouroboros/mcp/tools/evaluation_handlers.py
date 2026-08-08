@@ -2163,7 +2163,22 @@ class StartEvaluateHandler:
                 )
             )
 
-        from ouroboros.mcp.tools.evaluation_job import restore_seed_handoff
+        from ouroboros.mcp.tools.evaluation_job import (
+            dispatch_plugin_evaluation,
+            resolve_auto_evolve_policy,
+            restore_seed_handoff,
+        )
+
+        try:
+            arguments, auto_evolve_enabled = resolve_auto_evolve_policy(
+                arguments, configured_enabled=get_auto_evolve_enabled()
+            )
+            plugin_dispatch = should_dispatch_via_plugin(
+                self.agent_runtime_backend, self.opencode_mode
+            )
+            background_acceptance = background_jobs.BackgroundJobAcceptanceState()
+        except ValueError as exc:
+            return Result.err(MCPToolError(str(exc), tool_name="ouroboros_start_evaluate"))
 
         try:
             arguments, seed_handoff = restore_seed_handoff(
@@ -2172,25 +2187,11 @@ class StartEvaluateHandler:
         except ValueError as exc:
             return Result.err(MCPToolError(str(exc), tool_name="ouroboros_start_evaluate"))
 
-        from ouroboros.mcp.tools.evaluation_job import resolve_auto_evolve_policy
-
-        try:
-            arguments, auto_evolve_enabled = resolve_auto_evolve_policy(
-                arguments, configured_enabled=get_auto_evolve_enabled()
-            )
-        except ValueError as exc:
-            seed_handoff.rollback()
-            return Result.err(MCPToolError(str(exc), tool_name="ouroboros_start_evaluate"))
-
-        # --- Subagent dispatch: gate on runtime + opencode_mode ---
         # Plugin mode is terminal only when no convergence successor is needed:
         # return the delegation envelope without enqueuing a background job,
         # matching StartExecuteSeedHandler / StartEvolveStepHandler. Polling a
         # fake job_id would break the ouroboros_job_status contract.
-        plugin_dispatch = should_dispatch_via_plugin(self.agent_runtime_backend, self.opencode_mode)
         if plugin_dispatch and not auto_evolve_enabled:
-            from ouroboros.mcp.tools.evaluation_job import dispatch_plugin_evaluation
-
             return await seed_handoff.accept(
                 dispatch_plugin_evaluation(
                     arguments=arguments,
@@ -2200,7 +2201,7 @@ class StartEvaluateHandler:
                     resolve_working_dir=_resolve_evaluate_working_dir,
                 ),
                 require_ok=True,
-                cancellation_may_have_accepted=False,
+                acceptance_may_have_occurred=False,
             )
 
         # The shared helper preserves job-scoped cancellation across restart.
@@ -2219,7 +2220,6 @@ class StartEvaluateHandler:
                 start_ralph_handler=self.start_ralph_handler,
             )
 
-        background_acceptance = background_jobs.BackgroundJobAcceptanceState()
         snapshot = await seed_handoff.accept(
             background_jobs.start_background_tool_job(
                 job_manager=self._job_manager,
@@ -2238,7 +2238,7 @@ class StartEvaluateHandler:
                 opencode_mode=self.opencode_mode,
                 acceptance_state=background_acceptance,
             ),
-            cancellation_may_have_accepted=(background_acceptance.cancellation_may_have_accepted),
+            acceptance_may_have_occurred=background_acceptance.may_have_accepted,
         )
 
         text = (

@@ -115,6 +115,9 @@ class TestDefinition:
             assert request.arguments["seed_content"].startswith("goal: parent only")
             assert request.arguments["auto_evolve"] is True
             assert request.arguments["_auto_evolve_max_generations"] >= 1
+            assert manager._reserved_job_ids == set()
+            assert manager._forced_inline_allocations == set()
+            assert manager._known_job_ids == {request.job_id}
         finally:
             await store.close()
 
@@ -133,11 +136,21 @@ class TestDefinition:
         )
         snapshot = MagicMock(job_id="job_handoff_retry", cursor=0)
         snapshot.status.value = "queued"
-        launch = AsyncMock(side_effect=[RuntimeError("not accepted"), snapshot])
+        manager = JobManager(store, durable_jobs=True)
+
+        async def launch_with_definitive_rejection(*, request, **_kwargs):
+            if not launch_with_definitive_rejection.rejected:
+                launch_with_definitive_rejection.rejected = True
+                manager.abandon_reserved_job_id(request.job_id)
+                raise RuntimeError("not accepted")
+            return snapshot
+
+        launch_with_definitive_rejection.rejected = False
+        launch = AsyncMock(side_effect=launch_with_definitive_rejection)
         handler = StartEvaluateHandler(
             evaluate_handler=fake_inner_handler,
             event_store=store,
-            job_manager=JobManager(store, durable_jobs=True),
+            job_manager=manager,
             seed_handoff_registry=registry,
         )
         arguments = {
@@ -160,6 +173,245 @@ class TestDefinition:
             await store.close()
 
     @pytest.mark.asyncio
+    async def test_detached_request_construction_failure_restores_without_reservation_leak(
+        self, tmp_path: Path, fake_inner_handler
+    ) -> None:
+        """Failure before worker launch is definitive non-acceptance."""
+        from ouroboros.mcp.tools.seed_handoff import SeedHandoffRegistry
+
+        store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'handoff-prespawn.db'}")
+        await store.initialize()
+        manager = JobManager(store, durable_jobs=True)
+        registry = SeedHandoffRegistry()
+        session_id = "orch_handoff_prespawn"
+        handoff_id = registry.register(
+            session_id=session_id,
+            seed_content="goal: retry after pre-spawn failure\n",
+        )
+        handler = StartEvaluateHandler(
+            evaluate_handler=fake_inner_handler,
+            event_store=store,
+            job_manager=manager,
+            seed_handoff_registry=registry,
+        )
+        arguments = {
+            "session_id": session_id,
+            "artifact": "partial artifact",
+            "seed_handoff_id": handoff_id,
+            "auto_evolve": True,
+        }
+
+        try:
+            with patch(
+                "ouroboros.mcp.tools.background.Path.cwd",
+                side_effect=FileNotFoundError("cwd vanished"),
+            ):
+                with pytest.raises(FileNotFoundError, match="cwd vanished"):
+                    await handler.handle(arguments)
+
+            assert registry.resolve(handoff_id, session_id=session_id) is not None
+            assert manager._known_job_ids == set()
+            assert manager._reserved_job_ids == set()
+            assert manager._started_job_ids == set()
+            assert manager._tasks == {}
+            assert manager._runner_tasks == {}
+            assert manager._monitors == {}
+            assert await store.query_events(aggregate_type="job") == []
+
+            snapshot = MagicMock(job_id="job_retry_after_prespawn", cursor=0)
+            snapshot.status.value = "queued"
+            with patch(
+                "ouroboros.mcp.tools.background.launch_detached_job",
+                new=AsyncMock(return_value=snapshot),
+            ):
+                retry = await handler.handle(arguments)
+
+            assert retry.is_ok
+            assert registry.resolve(handoff_id, session_id=session_id) is None
+        finally:
+            await store.close()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("path_method", "failure"),
+        (("mkdir", "state directory denied"), ("unlink", "stale cleanup denied")),
+    )
+    async def test_detached_prespawn_filesystem_failure_restores_without_reservation_leak(
+        self,
+        tmp_path: Path,
+        fake_inner_handler,
+        monkeypatch: pytest.MonkeyPatch,
+        path_method: str,
+        failure: str,
+    ) -> None:
+        """A failure before detached spawn abandons the reserved job id."""
+        from ouroboros.mcp.tools.seed_handoff import SeedHandoffRegistry
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'handoff-stale-cleanup.db'}")
+        await store.initialize()
+        manager = JobManager(store, durable_jobs=True)
+        registry = SeedHandoffRegistry()
+        session_id = "orch_handoff_stale_cleanup"
+        handoff_id = registry.register(
+            session_id=session_id,
+            seed_content="goal: retry after detached cleanup failure\n",
+        )
+        handler = StartEvaluateHandler(
+            evaluate_handler=fake_inner_handler,
+            event_store=store,
+            job_manager=manager,
+            seed_handoff_registry=registry,
+        )
+        arguments = {
+            "session_id": session_id,
+            "artifact": "partial artifact",
+            "seed_handoff_id": handoff_id,
+            "auto_evolve": True,
+        }
+
+        try:
+            with patch(
+                f"ouroboros.mcp.detached_jobs.Path.{path_method}",
+                side_effect=PermissionError(failure),
+            ):
+                with pytest.raises(PermissionError, match=failure):
+                    await handler.handle(arguments)
+
+            assert registry.resolve(handoff_id, session_id=session_id) is not None
+            assert manager._known_job_ids == set()
+            assert manager._reserved_job_ids == set()
+            assert manager._started_job_ids == set()
+            assert manager._tasks == {}
+            assert await store.query_events(aggregate_type="job") == []
+
+            snapshot = MagicMock(job_id="job_retry_after_cleanup", cursor=0)
+            snapshot.status.value = "queued"
+            with patch(
+                "ouroboros.mcp.tools.background.launch_detached_job",
+                new=AsyncMock(return_value=snapshot),
+            ):
+                retry = await handler.handle(arguments)
+
+            assert retry.is_ok
+            assert registry.resolve(handoff_id, session_id=session_id) is None
+        finally:
+            await store.close()
+
+    @pytest.mark.asyncio
+    async def test_ambiguous_detached_receipt_failure_keeps_handoff_consumed(
+        self, tmp_path: Path, fake_inner_handler
+    ) -> None:
+        """A non-abandoned detached reservation is fail-closed on receipt error."""
+        from ouroboros.mcp.tools.seed_handoff import SeedHandoffRegistry
+
+        store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'handoff-ambiguous.db'}")
+        await store.initialize()
+        registry = SeedHandoffRegistry()
+        handoff_id = registry.register(
+            session_id="orch_handoff_ambiguous",
+            seed_content="goal: do not duplicate an unresolved detached owner\n",
+        )
+        manager = JobManager(store, durable_jobs=True)
+        handler = StartEvaluateHandler(
+            evaluate_handler=fake_inner_handler,
+            event_store=store,
+            job_manager=manager,
+            seed_handoff_registry=registry,
+        )
+        arguments = {
+            "session_id": "orch_handoff_ambiguous",
+            "artifact": "partial artifact",
+            "seed_handoff_id": handoff_id,
+            "auto_evolve": True,
+        }
+
+        try:
+            with patch(
+                "ouroboros.mcp.tools.background.launch_detached_job",
+                new=AsyncMock(side_effect=RuntimeError("accepted receipt unreadable")),
+            ):
+                with pytest.raises(RuntimeError, match="accepted receipt unreadable"):
+                    await handler.handle(arguments)
+
+            assert registry.resolve(handoff_id, session_id="orch_handoff_ambiguous") is None
+            retry = await handler.handle(arguments)
+            assert retry.is_err
+            assert "unknown or does not belong" in retry.error.message
+            assert manager._reserved_job_ids == set()
+            assert len(manager._known_job_ids) == 1
+        finally:
+            await store.close()
+
+    @pytest.mark.asyncio
+    async def test_post_created_detached_snapshot_failure_keeps_handoff_consumed(
+        self, tmp_path: Path, fake_inner_handler
+    ) -> None:
+        """Snapshot reconstruction failure cannot erase durable acceptance."""
+        from ouroboros.mcp.tools.seed_handoff import SeedHandoffRegistry
+
+        class PostCreatedSnapshotFailureManager(JobManager):
+            async def get_snapshot(self, job_id: str):
+                await super().get_snapshot(job_id)
+                raise RuntimeError("post-created snapshot reconstruction failed")
+
+        store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'post-created-failure.db'}")
+        await store.initialize()
+        registry = SeedHandoffRegistry()
+        handoff_id = registry.register(
+            session_id="orch_post_created_failure",
+            seed_content="goal: preserve durable detached acceptance\n",
+        )
+        manager = PostCreatedSnapshotFailureManager(store, durable_jobs=True)
+        handler = StartEvaluateHandler(
+            evaluate_handler=fake_inner_handler,
+            event_store=store,
+            job_manager=manager,
+            seed_handoff_registry=registry,
+        )
+        arguments = {
+            "session_id": "orch_post_created_failure",
+            "artifact": "partial artifact",
+            "seed_handoff_id": handoff_id,
+            "auto_evolve": True,
+        }
+
+        async def persist_then_fail_snapshot(**kwargs):
+            job_manager = kwargs["job_manager"]
+            request = kwargs["request"]
+            await job_manager._append_event(
+                "mcp.job.created",
+                request.job_id,
+                {
+                    "job_type": "evaluate",
+                    "status": "queued",
+                    "message": "Queued evaluation",
+                    "links": {},
+                },
+            )
+            return await job_manager.get_snapshot(request.job_id)
+
+        try:
+            with patch(
+                "ouroboros.mcp.tools.background.launch_detached_job",
+                new=persist_then_fail_snapshot,
+            ):
+                with pytest.raises(
+                    RuntimeError, match="post-created snapshot reconstruction failed"
+                ):
+                    await handler.handle(arguments)
+
+            assert registry.resolve(handoff_id, session_id="orch_post_created_failure") is None
+            assert manager._reserved_job_ids == set()
+            assert len(manager._known_job_ids) == 1
+            assert len(await store.query_events(aggregate_type="job")) == 1
+            retry = await handler.handle(arguments)
+            assert retry.is_err
+            assert "unknown or does not belong" in retry.error.message
+        finally:
+            await store.close()
+
+    @pytest.mark.asyncio
     async def test_pending_detached_acceptance_keeps_handoff_consumed(
         self, tmp_path: Path, fake_inner_handler
     ) -> None:
@@ -173,10 +425,11 @@ class TestDefinition:
             session_id="orch_handoff_pending",
             seed_content="goal: do not duplicate\n",
         )
+        manager = JobManager(store, durable_jobs=True)
         handler = StartEvaluateHandler(
             evaluate_handler=fake_inner_handler,
             event_store=store,
-            job_manager=JobManager(store, durable_jobs=True),
+            job_manager=manager,
             seed_handoff_registry=registry,
         )
 
@@ -203,6 +456,8 @@ class TestDefinition:
 
             assert raised.value.error_code == "detached_job_acceptance_pending"
             assert registry.resolve(handoff_id, session_id="orch_handoff_pending") is None
+            assert manager._reserved_job_ids == set()
+            assert len(manager._known_job_ids) == 1
         finally:
             await store.close()
 
@@ -225,6 +480,70 @@ class TestRequiredArguments:
 
 class TestBackgroundJobPath:
     """Non-plugin runtime: a JobManager-backed job is enqueued."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("failure_target", "failure"),
+        (
+            (
+                "ouroboros.mcp.tools.evaluation_handlers.get_auto_evolve_enabled",
+                "config unavailable",
+            ),
+            (
+                "ouroboros.mcp.tools.evaluation_handlers.should_dispatch_via_plugin",
+                "routing unavailable",
+            ),
+        ),
+    )
+    async def test_preallocation_runtime_error_restores_handoff(
+        self,
+        event_store: EventStore,
+        fake_inner_handler,
+        failure_target: str,
+        failure: str,
+    ) -> None:
+        """Synchronous routing setup cannot consume an unaccepted handoff."""
+        from ouroboros.mcp.tools.seed_handoff import SeedHandoffRegistry
+
+        manager = JobManager(event_store, durable_jobs=False)
+        registry = SeedHandoffRegistry()
+        session_id = "orch_policy_failure"
+        handoff_id = registry.register(
+            session_id=session_id,
+            seed_content="goal: retry after policy failure\n",
+        )
+        handler = StartEvaluateHandler(
+            evaluate_handler=fake_inner_handler,
+            event_store=event_store,
+            job_manager=manager,
+            seed_handoff_registry=registry,
+        )
+        arguments = {
+            "session_id": session_id,
+            "artifact": "partial artifact",
+            "seed_handoff_id": handoff_id,
+            "auto_evolve": True,
+        }
+
+        with patch(
+            failure_target,
+            side_effect=RuntimeError(failure),
+        ):
+            with pytest.raises(RuntimeError, match=failure):
+                await handler.handle(arguments)
+
+        assert registry.resolve(handoff_id, session_id=session_id) is not None
+        assert manager._known_job_ids == set()
+        assert manager._reserved_job_ids == set()
+        assert manager._started_job_ids == set()
+        assert manager._tasks == {}
+        assert await event_store.query_events(aggregate_type="job") == []
+
+        retry = await handler.handle(arguments)
+
+        assert retry.is_ok
+        assert registry.resolve(handoff_id, session_id=session_id) is None
+        await manager.drain()
 
     @pytest.mark.asyncio
     async def test_preallocation_cancellation_restores_handoff_for_retry(
@@ -331,6 +650,9 @@ class TestBackgroundJobPath:
             await pending
 
         assert registry.resolve(handoff_id, session_id="orch_local_preenqueue_cancel") is not None
+        assert manager._known_job_ids == set()
+        assert manager._reserved_job_ids == set()
+        assert manager._forced_inline_allocations == set()
         assert manager._started_job_ids == set()
         assert manager._tasks == {}
         assert await event_store.query_events(aggregate_type="job") == []
@@ -341,6 +663,398 @@ class TestBackgroundJobPath:
         assert retry.is_ok
         assert registry.resolve(handoff_id, session_id="orch_local_preenqueue_cancel") is None
         await manager.drain()
+
+    @pytest.mark.asyncio
+    async def test_local_created_commit_cancellation_keeps_runner_and_handoff_consumed(
+        self,
+        event_store: EventStore,
+        fake_inner_handler,
+    ) -> None:
+        """A settled created receipt crosses local acceptance atomically."""
+        from ouroboros.mcp.tools.seed_handoff import SeedHandoffRegistry
+
+        class CreatedCommitBarrierJobManager(JobManager):
+            def __init__(self, store: EventStore) -> None:
+                super().__init__(store, durable_jobs=False)
+                self.created_committed = asyncio.Event()
+                self._blocked_created = False
+
+            async def _append_event(self, event_type, job_id, data, *, event_id=None):
+                await super()._append_event(
+                    event_type,
+                    job_id,
+                    data,
+                    event_id=event_id,
+                )
+                if event_type == "mcp.job.created" and not self._blocked_created:
+                    self._blocked_created = True
+                    self.created_committed.set()
+                    await asyncio.Event().wait()
+
+        work_started = asyncio.Event()
+        release_work = asyncio.Event()
+
+        async def finish_after_release(_arguments):
+            work_started.set()
+            await release_work.wait()
+            return Result.ok(
+                MCPToolResult(
+                    content=(MCPContentItem(type=ContentType.TEXT, text="evaluated"),),
+                    is_error=False,
+                    meta={"final_approved": True},
+                )
+            )
+
+        fake_inner_handler.handle = AsyncMock(side_effect=finish_after_release)
+        manager = CreatedCommitBarrierJobManager(event_store)
+        registry = SeedHandoffRegistry()
+        session_id = "orch_created_commit_cancel"
+        handoff_id = registry.register(
+            session_id=session_id,
+            seed_content="goal: preserve accepted created receipt\n",
+        )
+        handler = StartEvaluateHandler(
+            evaluate_handler=fake_inner_handler,
+            event_store=event_store,
+            job_manager=manager,
+            seed_handoff_registry=registry,
+        )
+        arguments = {
+            "session_id": session_id,
+            "artifact": "partial artifact",
+            "seed_handoff_id": handoff_id,
+            "auto_evolve": True,
+        }
+
+        pending = asyncio.create_task(handler.handle(arguments))
+        await manager.created_committed.wait()
+        pending.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+
+        await work_started.wait()
+        assert len(manager._started_job_ids) == 1
+        job_id = next(iter(manager._started_job_ids))
+        assert registry.resolve(handoff_id, session_id=session_id) is None
+        assert manager.has_live_job_task(job_id)
+
+        retry = await handler.handle(arguments)
+        assert retry.is_err
+        assert "unknown or does not belong" in retry.error.message
+        created_events = await event_store.query_events(
+            aggregate_type="job", event_type="mcp.job.created"
+        )
+        assert [event.aggregate_id for event in created_events] == [job_id]
+
+        release_work.set()
+        for _ in range(100):
+            snapshot = await manager.get_snapshot(job_id)
+            if snapshot.is_terminal:
+                break
+            await asyncio.sleep(0.01)
+        else:
+            raise AssertionError("accepted created-receipt job did not terminalize")
+
+        await manager.drain()
+        await asyncio.sleep(0)
+        assert not manager.has_live_job_task(job_id)
+        assert manager._tasks == {}
+        assert manager._runner_tasks == {}
+        assert manager._monitors == {}
+
+    @pytest.mark.asyncio
+    async def test_local_created_commit_confirmation_error_fails_closed(
+        self,
+        event_store: EventStore,
+        fake_inner_handler,
+    ) -> None:
+        """An unreadable committed receipt cannot reopen the Seed handoff."""
+        from ouroboros.mcp.tools.seed_handoff import SeedHandoffRegistry
+
+        class UnreadableCreatedReceiptJobManager(JobManager):
+            def __init__(self, store: EventStore) -> None:
+                super().__init__(store, durable_jobs=False)
+                self.fail_confirmation = False
+
+            async def _append_event(self, event_type, job_id, data, *, event_id=None):
+                await super()._append_event(
+                    event_type,
+                    job_id,
+                    data,
+                    event_id=event_id,
+                )
+                if event_type == "mcp.job.created":
+                    self.fail_confirmation = True
+                    raise RuntimeError("created receipt response lost")
+
+            async def _job_exists(self, job_id: str) -> bool:
+                if self.fail_confirmation:
+                    self.fail_confirmation = False
+                    raise RuntimeError("created receipt confirmation unavailable")
+                return await super()._job_exists(job_id)
+
+        manager = UnreadableCreatedReceiptJobManager(event_store)
+        registry = SeedHandoffRegistry()
+        session_id = "orch_created_confirmation_error"
+        handoff_id = registry.register(
+            session_id=session_id,
+            seed_content="goal: fail closed on unreadable created receipt\n",
+        )
+        handler = StartEvaluateHandler(
+            evaluate_handler=fake_inner_handler,
+            event_store=event_store,
+            job_manager=manager,
+            seed_handoff_registry=registry,
+        )
+        arguments = {
+            "session_id": session_id,
+            "artifact": "partial artifact",
+            "seed_handoff_id": handoff_id,
+            "auto_evolve": True,
+        }
+
+        with pytest.raises(RuntimeError, match="created receipt response lost"):
+            await handler.handle(arguments)
+
+        assert len(manager._started_job_ids) == 1
+        job_id = next(iter(manager._started_job_ids))
+        fake_inner_handler.handle.assert_not_called()
+        assert registry.resolve(handoff_id, session_id=session_id) is None
+        retry = await handler.handle(arguments)
+        assert retry.is_err
+        assert "unknown or does not belong" in retry.error.message
+
+        for _ in range(100):
+            snapshot = await manager.get_snapshot(job_id)
+            if snapshot.is_terminal:
+                break
+            await asyncio.sleep(0.01)
+        else:
+            raise AssertionError("fail-closed accepted job did not terminalize")
+
+        await manager.drain()
+        await asyncio.sleep(0)
+        assert not manager.has_live_job_task(job_id)
+        assert manager._tasks == {}
+        assert manager._runner_tasks == {}
+        assert manager._monitors == {}
+
+    @pytest.mark.asyncio
+    async def test_local_transient_confirmation_failure_restores_handoff(
+        self,
+        event_store: EventStore,
+        fake_inner_handler,
+    ) -> None:
+        """A retry that proves no receipt exists makes rejection definitive."""
+        from ouroboros.mcp.tools.seed_handoff import SeedHandoffRegistry
+
+        class UnconfirmedCreatedReceiptJobManager(JobManager):
+            def __init__(self, store: EventStore) -> None:
+                super().__init__(store, durable_jobs=False)
+                self.fail_confirmation = False
+
+            async def _append_event(self, event_type, job_id, data, *, event_id=None):
+                if event_type == "mcp.job.created":
+                    self.fail_confirmation = True
+                    raise RuntimeError("created append rejected")
+                await super()._append_event(
+                    event_type,
+                    job_id,
+                    data,
+                    event_id=event_id,
+                )
+
+            async def _job_exists(self, job_id: str) -> bool:
+                if self.fail_confirmation:
+                    self.fail_confirmation = False
+                    raise RuntimeError("created confirmation unavailable")
+                return await super()._job_exists(job_id)
+
+        manager = UnconfirmedCreatedReceiptJobManager(event_store)
+        registry = SeedHandoffRegistry()
+        session_id = "orch_unconfirmed_created"
+        handoff_id = registry.register(
+            session_id=session_id,
+            seed_content="goal: never run without a durable receipt\n",
+        )
+        handler = StartEvaluateHandler(
+            evaluate_handler=fake_inner_handler,
+            event_store=event_store,
+            job_manager=manager,
+            seed_handoff_registry=registry,
+        )
+        arguments = {
+            "session_id": session_id,
+            "artifact": "partial artifact",
+            "seed_handoff_id": handoff_id,
+            "auto_evolve": True,
+        }
+
+        with pytest.raises(RuntimeError, match="created append rejected"):
+            await handler.handle(arguments)
+
+        fake_inner_handler.handle.assert_not_called()
+        assert manager._started_job_ids == set()
+        assert manager._known_job_ids == set()
+        assert manager._reserved_job_ids == set()
+        assert registry.resolve(handoff_id, session_id=session_id) is not None
+        assert manager._tasks == {}
+        assert manager._runner_tasks == {}
+        assert manager._monitors == {}
+        assert await event_store.query_events(aggregate_type="job") == []
+
+    @pytest.mark.asyncio
+    async def test_local_persistently_unreadable_confirmation_stays_fail_closed(
+        self,
+        event_store: EventStore,
+        fake_inner_handler,
+    ) -> None:
+        """Persistent receipt ambiguity consumes the handoff without starting work."""
+        from ouroboros.mcp.tools.seed_handoff import SeedHandoffRegistry
+
+        class PersistentlyUnreadableReceiptJobManager(JobManager):
+            def __init__(self, store: EventStore) -> None:
+                super().__init__(store, durable_jobs=False)
+                self.fail_confirmation = False
+
+            async def _append_event(self, event_type, job_id, data, *, event_id=None):
+                if event_type == "mcp.job.created":
+                    self.fail_confirmation = True
+                    raise RuntimeError("created append outcome unknown")
+                await super()._append_event(event_type, job_id, data, event_id=event_id)
+
+            async def _job_exists(self, job_id: str) -> bool:
+                if self.fail_confirmation:
+                    raise RuntimeError("created confirmation unavailable")
+                return await super()._job_exists(job_id)
+
+        manager = PersistentlyUnreadableReceiptJobManager(event_store)
+        registry = SeedHandoffRegistry()
+        session_id = "orch_persistently_unreadable_created"
+        handoff_id = registry.register(
+            session_id=session_id,
+            seed_content="goal: fail closed while receipt state is unknowable\n",
+        )
+        handler = StartEvaluateHandler(
+            evaluate_handler=fake_inner_handler,
+            event_store=event_store,
+            job_manager=manager,
+            seed_handoff_registry=registry,
+        )
+        arguments = {
+            "session_id": session_id,
+            "artifact": "partial artifact",
+            "seed_handoff_id": handoff_id,
+            "auto_evolve": True,
+        }
+
+        with pytest.raises(RuntimeError, match="created append outcome unknown"):
+            await handler.handle(arguments)
+
+        fake_inner_handler.handle.assert_not_called()
+        assert len(manager._started_job_ids) == 1
+        assert registry.resolve(handoff_id, session_id=session_id) is None
+        assert manager._tasks == {}
+        assert manager._runner_tasks == {}
+        assert manager._monitors == {}
+        assert await event_store.query_events(aggregate_type="job") == []
+        retry = await handler.handle(arguments)
+        assert retry.is_err
+        assert "unknown or does not belong" in retry.error.message
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("failed_create_task_call", (1, 2, 3))
+    async def test_local_created_receipt_task_registration_failures_stay_owned(
+        self,
+        event_store: EventStore,
+        fake_inner_handler,
+        monkeypatch: pytest.MonkeyPatch,
+        failed_create_task_call: int,
+    ) -> None:
+        """Partial task setup cannot reopen a durable created receipt."""
+        from ouroboros.mcp import job_start
+        from ouroboros.mcp.tools.seed_handoff import SeedHandoffRegistry
+
+        manager = JobManager(event_store, durable_jobs=False)
+        registry = SeedHandoffRegistry()
+        session_id = f"orch_registration_failure_{failed_create_task_call}"
+        handoff_id = registry.register(
+            session_id=session_id,
+            seed_content="goal: keep durable receipt single-owner\n",
+        )
+        handler = StartEvaluateHandler(
+            evaluate_handler=fake_inner_handler,
+            event_store=event_store,
+            job_manager=manager,
+            seed_handoff_registry=registry,
+        )
+        arguments = {
+            "session_id": session_id,
+            "artifact": "partial artifact",
+            "seed_handoff_id": handoff_id,
+            "auto_evolve": True,
+        }
+        original_create_task = job_start._create_task
+        create_task_calls = 0
+
+        def fail_selected_create_task(coro):
+            nonlocal create_task_calls
+            create_task_calls += 1
+            if create_task_calls == failed_create_task_call:
+                raise RuntimeError(f"create_task {failed_create_task_call} failed")
+            return original_create_task(coro)
+
+        monkeypatch.setattr(job_start, "_create_task", fail_selected_create_task)
+        if failed_create_task_call < 3:
+            with pytest.raises(
+                RuntimeError,
+                match=rf"create_task {failed_create_task_call} failed",
+            ):
+                await handler.handle(arguments)
+        else:
+            started = await handler.handle(arguments)
+            assert started.is_ok
+        monkeypatch.setattr(job_start, "_create_task", original_create_task)
+
+        created_events = await event_store.query_events(
+            aggregate_type="job", event_type="mcp.job.created"
+        )
+        assert len(created_events) == 1
+        job_id = created_events[0].aggregate_id
+
+        if failed_create_task_call < 3:
+            assert registry.resolve(handoff_id, session_id=session_id) is not None
+            assert job_id not in manager._started_job_ids
+            assert not manager.has_live_job_task(job_id)
+            failed_snapshot = await manager.get_snapshot(job_id)
+            assert failed_snapshot.status.value == "interrupted"
+            retry = await handler.handle(arguments)
+            assert retry.is_ok
+            assert retry.value.meta["job_id"] != job_id
+            assert registry.resolve(handoff_id, session_id=session_id) is None
+            job_id = retry.value.meta["job_id"]
+        else:
+            assert manager._started_job_ids == {job_id}
+            assert registry.resolve(handoff_id, session_id=session_id) is None
+            retry = await handler.handle(arguments)
+            assert retry.is_err
+            assert "unknown or does not belong" in retry.error.message
+
+        for _ in range(100):
+            snapshot = await manager.get_snapshot(job_id)
+            if snapshot.is_terminal:
+                break
+            await asyncio.sleep(0.01)
+        else:
+            raise AssertionError("partially registered job did not terminalize")
+
+        await manager.drain()
+        await asyncio.sleep(0)
+        assert not manager.has_live_job_task(job_id)
+        assert manager._tasks == {}
+        assert manager._runner_tasks == {}
+        assert manager._monitors == {}
 
     @pytest.mark.asyncio
     async def test_local_postacceptance_cancellation_keeps_handoff_consumed(
@@ -410,6 +1124,130 @@ class TestBackgroundJobPath:
         await asyncio.wait_for(asyncio.shield(job_task), timeout=1.0)
         assert (await manager.get_snapshot(job_id)).is_terminal
         await manager.drain()
+
+    @pytest.mark.asyncio
+    async def test_local_postacceptance_receipt_failure_keeps_single_handoff_chain(
+        self,
+        event_store: EventStore,
+    ) -> None:
+        """An accepted runner survives an ordinary receipt-read failure (#1938)."""
+        from ouroboros.mcp.tools.seed_handoff import SeedHandoffRegistry
+
+        class ReceiptFailingJobManager(JobManager):
+            def __init__(self, store: EventStore) -> None:
+                super().__init__(store, durable_jobs=False)
+                self.receipt_owner: asyncio.Task[object] | None = None
+                self.accepted_receipt_read = asyncio.Event()
+                self.release_receipt_read = asyncio.Event()
+                self.receipt_failed = False
+
+            async def get_snapshot(self, job_id: str):
+                if (
+                    not self.receipt_failed
+                    and asyncio.current_task() is self.receipt_owner
+                    and self.has_accepted_job(job_id)
+                ):
+                    self.accepted_receipt_read.set()
+                    await self.release_receipt_read.wait()
+                    self.receipt_failed = True
+                    raise RuntimeError("accepted receipt snapshot failed")
+                return await super().get_snapshot(job_id)
+
+        evaluation_started = asyncio.Event()
+        release_evaluation = asyncio.Event()
+        evaluation_calls = 0
+
+        async def reject_after_release(_arguments):
+            nonlocal evaluation_calls
+            evaluation_calls += 1
+            evaluation_started.set()
+            await release_evaluation.wait()
+            return Result.ok(
+                MCPToolResult(
+                    content=(MCPContentItem(type=ContentType.TEXT, text="REJECTED"),),
+                    meta={"final_approved": False, "highest_stage": 2},
+                )
+            )
+
+        ralph_calls: list[dict[str, object]] = []
+
+        class FakeStartRalphHandler:
+            async def handle(self, arguments):
+                ralph_calls.append(arguments)
+                return Result.ok(MCPToolResult(meta={"job_id": "job_ralph_once"}))
+
+        manager = ReceiptFailingJobManager(event_store)
+        registry = SeedHandoffRegistry()
+        session_id = "orch_accepted_receipt_failure"
+        handoff_id = registry.register(
+            session_id=session_id,
+            seed_content=(
+                "goal: converge once\n"
+                "acceptance_criteria: [receipt ownership is safe]\n"
+                "ontology_schema:\n"
+                "  name: ReceiptOwnership\n"
+                "  description: Accepted background evaluation ownership\n"
+                "metadata:\n"
+                "  seed_id: seed-receipt-once\n"
+                "  ambiguity_score: 0.1\n"
+            ),
+        )
+        inner = MagicMock(spec=EvaluateHandler)
+        inner.handle = AsyncMock(side_effect=reject_after_release)
+        handler = StartEvaluateHandler(
+            evaluate_handler=inner,
+            event_store=event_store,
+            job_manager=manager,
+            start_ralph_handler=FakeStartRalphHandler(),  # type: ignore[arg-type]
+            seed_handoff_registry=registry,
+        )
+        arguments = {
+            "session_id": session_id,
+            "artifact": "partial artifact",
+            "seed_handoff_id": handoff_id,
+            "auto_evolve": True,
+        }
+
+        first = asyncio.create_task(handler.handle(arguments))
+        manager.receipt_owner = first
+        await manager.accepted_receipt_read.wait()
+        await evaluation_started.wait()
+
+        assert len(manager._started_job_ids) == 1
+        job_id = next(iter(manager._started_job_ids))
+        assert manager.has_live_job_task(job_id)
+
+        manager.release_receipt_read.set()
+        with pytest.raises(RuntimeError, match="accepted receipt snapshot failed"):
+            await first
+
+        assert registry.resolve(handoff_id, session_id=session_id) is None
+        retry = await handler.handle(arguments)
+        assert retry.is_err
+        assert "unknown or does not belong" in retry.error.message
+        assert manager._started_job_ids == {job_id}
+        assert evaluation_calls == 1
+
+        release_evaluation.set()
+        for _ in range(100):
+            snapshot = await manager.get_snapshot(job_id)
+            if snapshot.is_terminal:
+                break
+            await asyncio.sleep(0.01)
+        else:
+            raise AssertionError("accepted evaluation did not terminalize")
+
+        assert snapshot.result_meta["chained_ralph_job_id"] == "job_ralph_once"
+        assert len(ralph_calls) == 1
+        job_events = await event_store.query_events(aggregate_type="job")
+        assert {event.aggregate_id for event in job_events} == {job_id}
+
+        await manager.drain()
+        await asyncio.sleep(0)
+        assert not manager.has_live_job_task(job_id)
+        assert manager._tasks == {}
+        assert manager._runner_tasks == {}
+        assert manager._monitors == {}
 
     @pytest.mark.asyncio
     async def test_returns_job_id_immediately(self, event_store, fake_inner_handler) -> None:
