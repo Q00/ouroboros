@@ -29,7 +29,10 @@ from ouroboros.core.seed import AcceptanceCriterionSpec, Seed, ac_text
 from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.job_manager import JobLinks, JobManager
-from ouroboros.mcp.tools.background import start_background_tool_job
+from ouroboros.mcp.tools.background import (
+    BackgroundJobAcceptanceState,
+    start_background_tool_job,
+)
 from ouroboros.mcp.tools.bridge_mixin import BridgeAwareMixin
 from ouroboros.mcp.tools.job_observer import build_job_observer_contract
 from ouroboros.mcp.tools.subagent import (
@@ -2219,6 +2222,7 @@ class StartEvaluateHandler:
                 start_ralph_handler=self.start_ralph_handler,
             )
 
+        background_acceptance = BackgroundJobAcceptanceState()
         snapshot = await seed_handoff.accept(
             start_background_tool_job(
                 job_manager=self._job_manager,
@@ -2235,7 +2239,9 @@ class StartEvaluateHandler:
                 runtime_backend=self.agent_runtime_backend,
                 llm_backend=self.llm_backend,
                 opencode_mode=self.opencode_mode,
-            )
+                acceptance_state=background_acceptance,
+            ),
+            cancellation_may_have_accepted=(background_acceptance.cancellation_may_have_accepted),
         )
 
         text = (

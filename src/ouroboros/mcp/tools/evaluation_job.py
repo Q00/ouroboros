@@ -56,7 +56,7 @@ class SeedHandoffRedemption:
         operation: Awaitable[Any],
         *,
         require_ok: bool = False,
-        cancellation_may_have_accepted: bool = True,
+        cancellation_may_have_accepted: bool | Callable[[], bool] = True,
     ) -> Any:
         """Commit redemption once the selected transport accepts ownership.
 
@@ -68,8 +68,13 @@ class SeedHandoffRedemption:
         try:
             result = await operation
         except BaseException as exc:
+            cancellation_is_ambiguous = (
+                cancellation_may_have_accepted()
+                if callable(cancellation_may_have_accepted)
+                else cancellation_may_have_accepted
+            )
             acceptance_unknown = (
-                isinstance(exc, asyncio.CancelledError) and cancellation_may_have_accepted
+                isinstance(exc, asyncio.CancelledError) and cancellation_is_ambiguous
             ) or (getattr(exc, "error_code", None) == "detached_job_acceptance_pending")
             if not acceptance_unknown:
                 self.rollback()

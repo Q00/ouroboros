@@ -35,6 +35,7 @@ control of the receipt and of any compose-around bookkeeping.
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 import inspect
 import logging
 from pathlib import Path
@@ -60,6 +61,35 @@ if TYPE_CHECKING:
 # work can re-check cancellation mid-flight if it wants) and returns the
 # tool result.
 WorkFn = Callable[["AgentProcessHandle"], Awaitable[MCPToolResult]]
+
+
+@dataclass(slots=True)
+class BackgroundJobAcceptanceState:
+    """Track whether cancellation may race an accepted background owner."""
+
+    phase: str = "pre_acceptance"
+    job_manager: JobManager | None = None
+    job_id: str | None = None
+
+    def begin_detached_acceptance(self) -> None:
+        self.phase = "detached_pending"
+
+    def begin_local_acceptance(self, job_manager: JobManager, job_id: str) -> None:
+        self.phase = "local_pending"
+        self.job_manager = job_manager
+        self.job_id = job_id
+
+    def mark_accepted(self) -> None:
+        self.phase = "accepted"
+
+    def cancellation_may_have_accepted(self) -> bool:
+        """Return true only after a transport may own the requested job."""
+        if self.phase in {"detached_pending", "accepted"}:
+            return True
+        if self.phase != "local_pending" or self.job_manager is None or self.job_id is None:
+            return False
+        has_accepted_job = getattr(type(self.job_manager), "has_accepted_job", None)
+        return bool(callable(has_accepted_job) and has_accepted_job(self.job_manager, self.job_id))
 
 
 def make_cancelled_result(text: str) -> MCPToolResult:
@@ -97,6 +127,7 @@ async def start_background_tool_job(
     on_detaching: Callable[[], Awaitable[None]] | None = None,
     on_started: Callable[[JobSnapshot], Awaitable[None]] | None = None,
     on_enqueue_failure: Callable[[BaseException], Awaitable[None]] | None = None,
+    acceptance_state: BackgroundJobAcceptanceState | None = None,
 ) -> JobSnapshot:
     """Run the shared allocate -> guard -> agent-process -> start_job pipeline.
 
@@ -130,6 +161,9 @@ async def start_background_tool_job(
             raises, *before* the exception is re-raised — used by auto to
             release its start lease.  The helper always closes the pending
             runner coroutine on failure regardless of this hook.
+        acceptance_state: Optional caller-owned phase tracker used to classify
+            cancellation as definitive non-acceptance or potentially accepted
+            ownership without exposing transport internals to the caller.
 
     Returns:
         The :class:`JobSnapshot` from a successful enqueue.
@@ -138,6 +172,7 @@ async def start_background_tool_job(
         Re-raises any exception from ``start_job`` after running
         ``on_enqueue_failure`` and closing the runner coroutine.
     """
+    acceptance_state = acceptance_state or BackgroundJobAcceptanceState()
     job_id = await job_manager.allocate_job_id()
     claim_inline = getattr(job_manager, "claim_forced_inline_allocation", None)
     forced_inline = bool(claim_inline(job_id)) if callable(claim_inline) else False
@@ -155,6 +190,7 @@ async def start_background_tool_job(
         try:
             if on_detaching is not None:
                 await on_detaching()
+            acceptance_state.begin_detached_acceptance()
             snapshot = await launch_detached_job(
                 job_manager=job_manager,
                 event_store=event_store,
@@ -197,6 +233,7 @@ async def start_background_tool_job(
                         exc_info=True,
                     )
             raise
+        acceptance_state.mark_accepted()
         if on_started is not None:
             await on_started(snapshot)
         return snapshot
@@ -216,6 +253,7 @@ async def start_background_tool_job(
         cancel_key=f"mcp_job:{job_id}",
     )
 
+    acceptance_state.begin_local_acceptance(job_manager, job_id)
     try:
         snapshot = await job_manager.start_job(
             job_type=job_type,
@@ -228,7 +266,9 @@ async def start_background_tool_job(
         # Mirror the pre-extraction auto handler's failure path: close the
         # un-started runner coroutine so it is not left un-awaited, then let
         # the caller release any compose-around bookkeeping before we re-raise.
-        if inspect.iscoroutine(runner):
+        # Once ``start_job`` registers ownership it has wrapped this coroutine
+        # in a live Task; closing the same coroutine here would strand that job.
+        if inspect.iscoroutine(runner) and not acceptance_state.cancellation_may_have_accepted():
             runner.close()
         if on_enqueue_failure is not None:
             try:
@@ -243,6 +283,7 @@ async def start_background_tool_job(
                 )
         raise
 
+    acceptance_state.mark_accepted()
     if on_started is not None:
         await on_started(snapshot)
 

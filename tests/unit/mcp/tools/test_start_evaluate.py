@@ -227,6 +227,191 @@ class TestBackgroundJobPath:
     """Non-plugin runtime: a JobManager-backed job is enqueued."""
 
     @pytest.mark.asyncio
+    async def test_preallocation_cancellation_restores_handoff_for_retry(
+        self,
+        event_store: EventStore,
+        fake_inner_handler,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Cancellation before job allocation is definitive non-acceptance."""
+        from ouroboros.mcp.tools.seed_handoff import SeedHandoffRegistry
+
+        manager = JobManager(event_store, durable_jobs=False)
+        registry = SeedHandoffRegistry()
+        handoff_id = registry.register(
+            session_id="orch_preallocation_cancel",
+            seed_content="goal: retry after definitive cancellation\n",
+        )
+        handler = StartEvaluateHandler(
+            evaluate_handler=fake_inner_handler,
+            event_store=event_store,
+            job_manager=manager,
+            seed_handoff_registry=registry,
+        )
+        arguments = {
+            "session_id": "orch_preallocation_cancel",
+            "artifact": "partial artifact",
+            "seed_handoff_id": handoff_id,
+            "auto_evolve": True,
+        }
+        allocation_started = asyncio.Event()
+        original_allocate = manager.allocate_job_id
+
+        async def block_allocation() -> str:
+            allocation_started.set()
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+        monkeypatch.setattr(manager, "allocate_job_id", block_allocation)
+        pending = asyncio.create_task(handler.handle(arguments))
+        await allocation_started.wait()
+        pending.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+
+        assert registry.resolve(handoff_id, session_id="orch_preallocation_cancel") is not None
+        assert manager._known_job_ids == set()
+        assert manager._reserved_job_ids == set()
+        assert manager._tasks == {}
+        assert manager._runner_tasks == {}
+        assert manager._monitors == {}
+        assert await event_store.query_events(aggregate_type="job") == []
+
+        monkeypatch.setattr(manager, "allocate_job_id", original_allocate)
+        retry = await handler.handle(arguments)
+
+        assert retry.is_ok
+        assert retry.value.meta["job_id"]
+        assert registry.resolve(handoff_id, session_id="orch_preallocation_cancel") is None
+        await manager.drain()
+
+    @pytest.mark.asyncio
+    async def test_local_preenqueue_cancellation_restores_handoff_for_retry(
+        self,
+        event_store: EventStore,
+        fake_inner_handler,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Cancellation before local ownership is definitive non-acceptance."""
+        from ouroboros.mcp.tools.seed_handoff import SeedHandoffRegistry
+
+        manager = JobManager(event_store, durable_jobs=False)
+        registry = SeedHandoffRegistry()
+        handoff_id = registry.register(
+            session_id="orch_local_preenqueue_cancel",
+            seed_content="goal: retry before local ownership\n",
+        )
+        handler = StartEvaluateHandler(
+            evaluate_handler=fake_inner_handler,
+            event_store=event_store,
+            job_manager=manager,
+            seed_handoff_registry=registry,
+        )
+        arguments = {
+            "session_id": "orch_local_preenqueue_cancel",
+            "artifact": "partial artifact",
+            "seed_handoff_id": handoff_id,
+            "auto_evolve": True,
+        }
+        enqueue_started = asyncio.Event()
+        original_start_job = manager.start_job
+
+        async def block_enqueue(**_kwargs):
+            enqueue_started.set()
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+        monkeypatch.setattr(manager, "start_job", block_enqueue)
+        pending = asyncio.create_task(handler.handle(arguments))
+        await enqueue_started.wait()
+        pending.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+
+        assert registry.resolve(handoff_id, session_id="orch_local_preenqueue_cancel") is not None
+        assert manager._started_job_ids == set()
+        assert manager._tasks == {}
+        assert await event_store.query_events(aggregate_type="job") == []
+
+        monkeypatch.setattr(manager, "start_job", original_start_job)
+        retry = await handler.handle(arguments)
+
+        assert retry.is_ok
+        assert registry.resolve(handoff_id, session_id="orch_local_preenqueue_cancel") is None
+        await manager.drain()
+
+    @pytest.mark.asyncio
+    async def test_local_postacceptance_cancellation_keeps_handoff_consumed(
+        self,
+        event_store: EventStore,
+        fake_inner_handler,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Cancellation after local ownership must not permit a duplicate retry."""
+        from ouroboros.mcp.tools.seed_handoff import SeedHandoffRegistry
+
+        manager = JobManager(event_store, durable_jobs=False)
+        registry = SeedHandoffRegistry()
+        handoff_id = registry.register(
+            session_id="orch_local_accepted_cancel",
+            seed_content="goal: do not retry after local ownership\n",
+        )
+        handler = StartEvaluateHandler(
+            evaluate_handler=fake_inner_handler,
+            event_store=event_store,
+            job_manager=manager,
+            seed_handoff_registry=registry,
+        )
+        arguments = {
+            "session_id": "orch_local_accepted_cancel",
+            "artifact": "partial artifact",
+            "seed_handoff_id": handoff_id,
+            "auto_evolve": True,
+        }
+        accepted = asyncio.Event()
+        work_started = asyncio.Event()
+        release_work = asyncio.Event()
+        original_start_job = manager.start_job
+
+        async def finish_after_release(_arguments):
+            work_started.set()
+            await release_work.wait()
+            return Result.ok(
+                MCPToolResult(
+                    content=(MCPContentItem(type=ContentType.TEXT, text="evaluated"),),
+                    is_error=False,
+                    meta={"final_approved": True},
+                )
+            )
+
+        fake_inner_handler.handle = AsyncMock(side_effect=finish_after_release)
+
+        async def block_after_acceptance(**kwargs):
+            await original_start_job(**kwargs)
+            accepted.set()
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+        monkeypatch.setattr(manager, "start_job", block_after_acceptance)
+        pending = asyncio.create_task(handler.handle(arguments))
+        await accepted.wait()
+        await work_started.wait()
+        job_id = next(iter(manager._started_job_ids))
+        job_task = manager._tasks[job_id]
+        pending.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+
+        assert registry.resolve(handoff_id, session_id="orch_local_accepted_cancel") is None
+        release_work.set()
+        await asyncio.wait_for(asyncio.shield(job_task), timeout=1.0)
+        assert (await manager.get_snapshot(job_id)).is_terminal
+        await manager.drain()
+
+    @pytest.mark.asyncio
     async def test_returns_job_id_immediately(self, event_store, fake_inner_handler) -> None:
         job_manager = MagicMock()
         job_manager.allocate_job_id = AsyncMock(return_value="job_alloc")
