@@ -744,7 +744,8 @@ _WEB_APP_ARTIFACT_PHRASE_RE = re.compile(
 )
 _UI_PRODUCT_HEAD_FRAGMENT = (
     r"(?:apps?|applications?|webapps?|uis?|interfaces?|pages?|"
-    r"frontends?|sites?|websites?|dashboards?|consoles?|portals?)"
+    r"frontends?|sites?|websites?|dashboards?|consoles?|portals?|"
+    r"players?|editors?|viewers?)"
 )
 # Shared first-noun-phrase grammar (#1813 R50/R52/R55): routine intent
 # wrappers, an optional specificational copula ("the product is ..."),
@@ -1115,8 +1116,13 @@ def _ledger_has_browser_context(ledger: SeedDraftLedger) -> bool:
     # The goal signal fragment already names every browser-context form.
     # Relationship-aware like every other ownership surface (#1813 R36):
     # interop/compatibility targets in outputs are consumers of the
-    # artifact, not evidence that it IS a browser product.
-    context_text = _strip_consumer_relations(outputs + " " + runtime)
+    # artifact, not evidence that it IS a browser product. The
+    # runtime_context section is exempt from consumer normalization
+    # (#1813 R56): it declares the execution environment, so "Runs in
+    # browsers" IS the affirmative evidence the relation pattern would
+    # otherwise erase; denials still route through the negation and
+    # postpositive strips below.
+    context_text = _strip_consumer_relations(outputs) + " " + runtime
     # Postpositive denials ("the browser is not supported", "browser
     # support disabled") negate from behind (#1813 R37).
     context_text = _POSTPOSITIVE_BROWSER_DENIAL_RE.sub(" ", context_text)
@@ -1227,10 +1233,26 @@ _NOMINAL_GERUND_WORDS = frozenset(
         "polling",
     ]
 )
-_UI_SHAPE_VOCAB_RE = re.compile(
-    rf"\b(?:{_UI_PRODUCT_HEAD_FRAGMENT}|{_WEB_APP_GOAL_SIGNAL_FRAGMENT}|"
-    r"web[\s\-]based|in[\s\-]browser)\b"
-)
+# The gate WALK accepts more nominal gerunds than the ownership REs
+# (#1813 R56): "browser monitoring dashboard" is Q00's own product
+# example, and the walk only filters — it cannot grant — so activity
+# gerunds are safe here while they stay excluded from the granting
+# attributive slot (R51).
+_NP_WALK_GERUND_WORDS = _NOMINAL_GERUND_WORDS | {
+    "monitoring",
+    "testing",
+    "drawing",
+    "editing",
+    "tracking",
+    "auditing",
+    "scheduling",
+    "booking",
+}
+_UI_HEAD_NOUN_RE = re.compile(rf"^{_UI_PRODUCT_HEAD_FRAGMENT}$")
+# An explicit environment-qualifier modifier predicates the runtime
+# ("browser-based video player"); a bare browser word is a domain
+# attribute ("browser performance report") and is not shape (#1813 R56).
+_ENV_QUALIFIER_MODIFIER_RE = re.compile(r"\b(?:web|browser)[\s\-]based\b|\bin[\s\-]browser\b")
 
 
 def _goal_first_np_has_ui_shape(goal_text: str) -> bool:
@@ -1241,7 +1263,13 @@ def _goal_first_np_has_ui_shape(goal_text: str) -> bool:
     read. The walk mirrors the first-NP grammar: structural prepositions
     and relativizers end the phrase, a second determiner opens an
     embedded noun phrase, and participles are verbal outside the
-    nominal-gerund vocabulary."""
+    nominal-gerund vocabulary.
+
+    Ownership shape means the phrase's actual artifact HEAD is a UI
+    product noun, or the phrase carries a web ARTIFACT phrase ("web
+    app client") — a bare environment modifier is not shape (#1813
+    R56): in "browser performance report" the browser word modifies a
+    report."""
     np_tokens: list[str] = []
     seen_determiner = False
     for token in re.findall(r"[\w'’\-]+", goal_text):
@@ -1253,10 +1281,17 @@ def _goal_first_np_has_ui_shape(goal_text: str) -> bool:
                 break
             seen_determiner = True
             continue
-        if lowered.endswith("ing") and lowered not in _NOMINAL_GERUND_WORDS:
+        if lowered.endswith("ing") and lowered not in _NP_WALK_GERUND_WORDS:
             break
         np_tokens.append(lowered)
-    return bool(_UI_SHAPE_VOCAB_RE.search(" ".join(np_tokens)))
+    if not np_tokens:
+        return False
+    if _UI_HEAD_NOUN_RE.match(np_tokens[-1]):
+        return True
+    np_text = " ".join(np_tokens)
+    if _ENV_QUALIFIER_MODIFIER_RE.search(np_text):
+        return True
+    return bool(_WEB_APP_ARTIFACT_PHRASE_RE.search(np_text))
 
 
 _MANIPULATED_TARGET_RE = re.compile(

@@ -3399,6 +3399,30 @@ def test_report_artifacts_cannot_gain_ownership_from_outputs() -> None:
     assert TaskClass.WEB_APP not in result.classes
 
 
+def test_attributive_browser_modifiers_do_not_make_a_report_a_product() -> None:
+    """R56 guard: a bare browser modifier is a domain attribute — the
+    first NP's actual head decides, so "browser performance report"
+    stays a report while "browser-based" qualifiers keep predicating
+    the environment."""
+    ledger = _bare_ledger("Build a browser performance report")
+    _seed_section(ledger, "outputs", value="Login page timings and settings panel latency")
+    _seed_section(ledger, "runtime_context", value="Local batch job")
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes
+
+
+def test_runtime_context_environment_declarations_are_not_consumer_relations() -> None:
+    """R56 probe: runtime_context declares the execution environment, so
+    "Runs in browsers" is affirmative browser context and must not be
+    erased by the consumer-relation normalization."""
+    ledger = _bare_ledger("Create a customer dashboard")
+    _seed_section(ledger, "outputs", value="Interactive charts and settings panel")
+    _seed_section(ledger, "runtime_context", value="Runs in browsers")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP
+
+
 @pytest.mark.parametrize(
     "goal",
     [
