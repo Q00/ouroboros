@@ -881,7 +881,7 @@ def test_picker_limit_applies_after_malformed_start_rows_are_skipped(tmp_path) -
             "INSERT INTO events (aggregate_id, event_type, payload) VALUES (?, ?, ?)",
             [
                 (f"orch_malformed_{index}", "orchestrator.session.started", "{not-json")
-                for index in range(10)
+                for index in range(20)
             ],
         )
         conn.commit()
@@ -1219,6 +1219,11 @@ def test_picker_bounds_selected_workflow_progress_history(tmp_path, monkeypatch)
         for statement in statements
         if f"INDEXED BY {DIRECT_EVENT_INDEX}" in statement and "aggregate_id =" in statement
     ]
+    linked_queries = [
+        statement
+        for statement in statements
+        if f"INDEXED BY {DIRECT_EVENT_INDEX}" in statement and "aggregate_id NOT IN" in statement
+    ]
     start_queries = [
         statement for statement in statements if f"INDEXED BY {START_EVENT_INDEX}" in statement
     ]
@@ -1229,6 +1234,9 @@ def test_picker_bounds_selected_workflow_progress_history(tmp_path, monkeypatch)
         ]
         plans.extend(
             conn.execute("EXPLAIN QUERY PLAN " + query).fetchall() for query in direct_queries
+        )
+        plans.extend(
+            conn.execute("EXPLAIN QUERY PLAN " + query).fetchall() for query in linked_queries
         )
         start_plans = [
             conn.execute("EXPLAIN QUERY PLAN " + query).fetchall() for query in start_queries
@@ -1270,6 +1278,7 @@ def test_picker_bounds_selected_workflow_progress_history(tmp_path, monkeypatch)
     assert max(decode_samples) <= 4
     assert len(workflow_queries) == 6
     assert len(direct_queries) == 18
+    assert len(linked_queries) == 5
     assert len(start_queries) == 1
     assert all("TEMP B-TREE" not in str(row[3]) for plan in (*plans, *start_plans) for row in plan)
     used_indexes = {str(row[3]) for plan in (*plans, *start_plans) for row in plan}

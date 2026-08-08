@@ -420,7 +420,10 @@ def _fetch_payload_linked_rows(
         rows.extend(
             conn.execute(
                 "SELECT rowid, aggregate_id, event_type, payload FROM events "
+                f"INDEXED BY {DIRECT_EVENT_INDEX} "
                 "WHERE event_type = ? "
+                f"AND {PICKER_DIRECT_INDEX_SCOPE_SQL} "
+                f"AND {PICKER_DIRECT_SCOPE_SQL} "
                 f"AND aggregate_id NOT IN ({id_ph}) "
                 f"AND ({SAFE_EXECUTION_ID_SQL} IN ({id_ph}) "
                 f"     OR {SAFE_SESSION_ID_SQL} IN ({id_ph}))",
@@ -493,11 +496,11 @@ def list_recent_executions(db_path: str | Path, *, limit: int = 10) -> list[dict
     path = Path(db_path).expanduser()
     if not path.exists():
         return []
-    start_sql = (
+    start_page_sql = (
         "SELECT rowid, aggregate_id, event_type, payload "
         f"FROM events INDEXED BY {START_EVENT_INDEX} "
         f"WHERE {PICKER_START_SCOPE_SQL} "
-        "ORDER BY rowid DESC"
+        "AND rowid <= ? ORDER BY rowid DESC LIMIT ?"
     )
     conn = _connect_readonly(path)
     try:
@@ -509,24 +512,38 @@ def list_recent_executions(db_path: str | Path, *, limit: int = 10) -> list[dict
         missing_indexes = frozenset(PICKER_INDEX_NAMES) - matching_indexes
         if missing_indexes:
             raise PickerIndexContractError(missing_indexes)
-        starts = conn.execute(start_sql)
         run_specs: list[tuple[sqlite3.Row, dict[str, Any], str, str]] = []
         seen_execution_ids: set[str] = set()
         target_count = max(1, limit)
-        for start in starts:
-            start_payload = _decode_payload(start["payload"])
-            if not isinstance(start_payload, dict):
-                continue
-            execution_id = start_payload.get("execution_id")
-            if not isinstance(execution_id, str) or not execution_id:
-                continue
-            if execution_id in seen_execution_ids:
-                continue
-            seen_execution_ids.add(execution_id)
-            raw_session_id = start["aggregate_id"] or start_payload.get("session_id")
-            session_id = raw_session_id if isinstance(raw_session_id, str) else ""
-            run_specs.append((start, start_payload, execution_id, session_id))
-            if len(run_specs) >= target_count:
+        page_size = max(16, target_count * 2)
+        before_rowid = 2**63 - 1
+        while len(run_specs) < target_count:
+            start_page = conn.execute(
+                start_page_sql,
+                [before_rowid, page_size],
+            ).fetchall()
+            if not start_page:
+                break
+            oldest_rowid = min(int(start["rowid"]) for start in start_page)
+            exhausted_rowid_range = oldest_rowid == -(2**63)
+            if not exhausted_rowid_range:
+                before_rowid = oldest_rowid - 1
+            for start in start_page:
+                start_payload = _decode_payload(start["payload"])
+                if not isinstance(start_payload, dict):
+                    continue
+                execution_id = start_payload.get("execution_id")
+                if not isinstance(execution_id, str) or not execution_id:
+                    continue
+                if execution_id in seen_execution_ids:
+                    continue
+                seen_execution_ids.add(execution_id)
+                raw_session_id = start["aggregate_id"] or start_payload.get("session_id")
+                session_id = raw_session_id if isinstance(raw_session_id, str) else ""
+                run_specs.append((start, start_payload, execution_id, session_id))
+                if len(run_specs) >= target_count:
+                    break
+            if exhausted_rowid_range:
                 break
 
         all_ids = sorted(
