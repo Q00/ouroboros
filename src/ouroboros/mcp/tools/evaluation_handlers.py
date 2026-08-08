@@ -29,10 +29,7 @@ from ouroboros.core.seed import AcceptanceCriterionSpec, Seed, ac_text
 from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.job_manager import JobLinks, JobManager
-from ouroboros.mcp.tools.background import (
-    BackgroundJobAcceptanceState,
-    start_background_tool_job,
-)
+from ouroboros.mcp.tools import background as background_jobs
 from ouroboros.mcp.tools.bridge_mixin import BridgeAwareMixin
 from ouroboros.mcp.tools.job_observer import build_job_observer_contract
 from ouroboros.mcp.tools.subagent import (
@@ -2222,9 +2219,9 @@ class StartEvaluateHandler:
                 start_ralph_handler=self.start_ralph_handler,
             )
 
-        background_acceptance = BackgroundJobAcceptanceState()
+        background_acceptance = background_jobs.BackgroundJobAcceptanceState()
         snapshot = await seed_handoff.accept(
-            start_background_tool_job(
+            background_jobs.start_background_tool_job(
                 job_manager=self._job_manager,
                 event_store=self._event_store,
                 job_type="evaluate",
@@ -2245,11 +2242,9 @@ class StartEvaluateHandler:
         )
 
         text = (
-            f"Started background evaluation.\n\n"
-            f"Job ID: {snapshot.job_id}\n"
-            f"Session ID: {session_id}\n\n"
-            "Use ouroboros_job_status, ouroboros_job_wait, or ouroboros_job_result "
-            "to monitor it."
+            f"Started background evaluation.\n\nJob ID: {snapshot.job_id}\n"
+            f"Session ID: {session_id}\n\nUse ouroboros_job_status, ouroboros_job_wait, "
+            "or ouroboros_job_result to monitor it."
         )
         meta = {
             "job_id": snapshot.job_id,
