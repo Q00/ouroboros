@@ -54,6 +54,8 @@ class TestLivePage:
         assert "WAIT_POLL_MS" in INDEX_HTML
         assert "run-goal" in INDEX_HTML
         assert "white-space:pre-wrap" in INDEX_HTML
+        assert "status-paused" in INDEX_HTML
+        assert "run-status.paused" in INDEX_HTML
 
 
 class TestStaticSnapshot:

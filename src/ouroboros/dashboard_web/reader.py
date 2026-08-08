@@ -20,6 +20,28 @@ from urllib.parse import quote
 
 from ouroboros.config.models import resolve_event_store_path
 from ouroboros.dashboard.board import reduce_board
+from ouroboros.persistence.picker_indexes import (
+    AGGREGATE_EVENT_INDEX,
+    DIRECT_EVENT_INDEX,
+    PICKER_DIRECT_EVENT_TYPES,
+    PICKER_DIRECT_INDEX_SCOPE_SQL,
+    PICKER_DIRECT_SCOPE_SQL,
+    PICKER_INDEX_NAMES,
+    PICKER_PROGRESS_EVENT_TYPES,
+    PICKER_PROGRESS_SCOPE_SQL,
+    PICKER_START_SCOPE_SQL,
+    RUNNING_PROGRESS_INDEX,
+    RUNNING_PROGRESS_SQL,
+    RUNTIME_STATUS_ASCII_WHITESPACE,
+    SAFE_EXECUTION_ID_SQL,
+    SAFE_SESSION_ID_SQL,
+    START_EVENT_INDEX,
+    VALID_JSON_SQL,
+    WORKFLOW_PROGRESS_SCOPE_SQL,
+    WORKFLOW_SNAPSHOT_INDEX,
+    WORKFLOW_SNAPSHOT_SQL,
+    matching_picker_indexes,
+)
 
 # Events relevant to the execution Kanban. Filtering at the SQL layer keeps the
 # tail cheap even on a mult-hundred-MB DB shared by many runs.
@@ -32,10 +54,12 @@ _RELEVANT_EVENT_TYPES: tuple[str, ...] = (
     "execution.tool.started",
     "execution.coordinator.tool.started",
     "orchestrator.tool.called",
+    "orchestrator.progress.updated",
     "workflow.progress.updated",
     "execution.session.completed",
     "orchestrator.session.completed",
     "orchestrator.session.failed",
+    "orchestrator.session.paused",
     "orchestrator.session.cancelled",
     # Carries the run-level runtime_backend (provider) — lets the board tag the
     # provider on SIMPLE runs that emit no per-worker execution.session.started.
@@ -48,6 +72,49 @@ _RELEVANT_EVENT_TYPES: tuple[str, ...] = (
     "execution.frugality_proof.evaluated",
     "execution.frugality_retrospective.reported",
 )
+
+# Session lifecycle/progress rows are canonically stored under one of the run's
+# selected orchestrator/execution aggregates.  Do not include them in the
+# JSON-linked fallback query: progress is the highest-volume event family and
+# scanning every run's progress history to find a different execution made the
+# picker O(global history * visible runs).
+_SESSION_SCOPED_EVENT_TYPES = frozenset(
+    {
+        "orchestrator.session.started",
+        "orchestrator.session.completed",
+        "orchestrator.session.failed",
+        "orchestrator.session.paused",
+        "orchestrator.session.cancelled",
+        "orchestrator.progress.updated",
+        "workflow.progress.updated",
+    }
+)
+_PAYLOAD_LINKED_EVENT_TYPES: tuple[str, ...] = tuple(
+    event_type
+    for event_type in _RELEVANT_EVENT_TYPES
+    if event_type not in _SESSION_SCOPED_EVENT_TYPES
+)
+_PICKER_EVENT_TYPES = PICKER_DIRECT_EVENT_TYPES
+_PICKER_PROGRESS_EVENT_TYPES = PICKER_PROGRESS_EVENT_TYPES
+_PICKER_PAYLOAD_LINKED_EVENT_TYPES: tuple[str, ...] = tuple(
+    event_type
+    for event_type in _PICKER_EVENT_TYPES
+    if event_type not in _SESSION_SCOPED_EVENT_TYPES
+)
+_AC_STATE_EVENT_TYPES = frozenset(
+    {
+        "execution.node.created",
+        "execution.node.updated",
+        "execution.subtask.updated",
+        "execution.session.started",
+        "execution.ac.completed",
+        "workflow.progress.updated",
+    }
+)
+
+# SQLite evaluates json_extract before Python can apply _decode_payload.  The
+# shared picker-index expressions wrap extraction so one malformed row remains
+# local instead of aborting the whole picker/SSE request.
 
 
 def default_db_path() -> Path:
@@ -64,6 +131,143 @@ def _connect_readonly(db_path: str | Path) -> sqlite3.Connection:
     conn = sqlite3.connect(uri, uri=True, timeout=5.0)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+class PickerIndexContractError(RuntimeError):
+    """Raised when bounded picker reads cannot be guaranteed read-only."""
+
+    def __init__(self, missing: frozenset[str]) -> None:
+        self.missing = missing
+        joined = ", ".join(sorted(missing))
+        super().__init__(f"dashboard picker index contract unavailable: {joined}")
+
+
+_EXPLICIT_TERMINAL_PRECEDENCE = {
+    "completed": 1,
+    "cancelled": 2,
+    "failed": 3,
+}
+
+
+def _explicit_lifecycle_status(event: dict[str, Any]) -> str | None:
+    """Return status carried by an authoritative session lifecycle event."""
+    return {
+        "orchestrator.session.completed": "completed",
+        "orchestrator.session.failed": "failed",
+        "orchestrator.session.paused": "paused",
+        "orchestrator.session.cancelled": "cancelled",
+    }.get(event["event_type"])
+
+
+def _progress_acknowledges_running(event: dict[str, Any]) -> bool:
+    """Return whether progress durably acknowledges pause-to-running resume.
+
+    Runtime progress describes the latest agent turn, not the whole orchestration,
+    so terminal-looking values must not author a global run status.  ``running``
+    is the sole exception because no ``orchestrator.session.resumed`` event exists.
+    The two production producers place it under ``progress`` and ``last_update``;
+    top-level remains supported for legacy rows.  This mirrors the canonical TUI
+    lifecycle projection without coupling the dependency-free reader to the TUI.
+    """
+    if event["event_type"] not in {
+        "orchestrator.progress.updated",
+        "workflow.progress.updated",
+    }:
+        return False
+
+    payload = event.get("payload")
+    if not isinstance(payload, dict):
+        return False
+    candidates: list[object] = []
+    for container_key in ("progress", "last_update"):
+        container = payload.get(container_key)
+        if isinstance(container, dict):
+            candidates.append(container.get("runtime_status"))
+    candidates.append(payload.get("runtime_status"))
+    return any(
+        isinstance(candidate, str)
+        and candidate.strip(RUNTIME_STATUS_ASCII_WHITESPACE).lower() == "running"
+        for candidate in candidates
+    )
+
+
+def _advances_ac_state(event: dict[str, Any]) -> bool:
+    """Return whether an event carries a durable acceptance-criteria snapshot.
+
+    Workflow progress also carries per-turn runtime metadata.  A status-only
+    workflow row must not supersede an earlier running acknowledgement merely
+    because it shares the same event type as full AC snapshots.
+    """
+    if event["event_type"] != "workflow.progress.updated":
+        return event["event_type"] in _AC_STATE_EVENT_TYPES
+    payload = event.get("payload")
+    return isinstance(payload, dict) and isinstance(payload.get("acceptance_criteria"), list)
+
+
+def _summary_status(
+    events: list[dict[str, Any]],
+    counts: dict[str, int],
+) -> str:
+    """Project one truthful run status from durable terminal and AC evidence.
+
+    Explicit failure wins over every successful-looking recovery signal, and
+    cancellation remains its own terminal state. Pauses are resumable: a later
+    running progress checkpoint replaces them, while a true session terminal is
+    absorbing. Without lifecycle evidence, AC counts become authoritative only
+    after no work remains in flight; mixed recovery must never look successful.
+    """
+    explicit_terminal: str | None = None
+    active_status: str | None = None
+    active_status_row = 0
+    latest_ac_state_row = 0
+    for event in events:
+        event_type = event["event_type"]
+        rowid = int(event.get("rowid") or 0)
+        if _advances_ac_state(event):
+            latest_ac_state_row = max(latest_ac_state_row, rowid)
+        status = _explicit_lifecycle_status(event)
+        if event_type in {
+            "orchestrator.session.completed",
+            "orchestrator.session.failed",
+            "orchestrator.session.cancelled",
+        }:
+            assert status is not None
+            if (
+                explicit_terminal is None
+                or _EXPLICIT_TERMINAL_PRECEDENCE[status]
+                > _EXPLICIT_TERMINAL_PRECEDENCE[explicit_terminal]
+            ):
+                explicit_terminal = status
+            continue
+        if explicit_terminal is not None:
+            continue
+        if status == "paused":
+            active_status = status
+            active_status_row = rowid
+        elif _progress_acknowledges_running(event):
+            # A durable running checkpoint is meaningful even without a prior
+            # pause.  In particular, post-AC synthesis/recovery can continue
+            # after every card currently looks settled.  Only a newer AC-state
+            # row or an explicit terminal may supersede it.
+            active_status = "running"
+            active_status_row = rowid
+
+    if explicit_terminal in {"failed", "cancelled"}:
+        return explicit_terminal
+
+    no_work_in_flight = counts["executing"] == 0 and counts["pending"] == 0
+    projected_status = explicit_terminal or active_status
+    if counts["failed"] and projected_status == "completed":
+        return "failed"
+    if projected_status == "paused" or explicit_terminal is not None:
+        return projected_status
+    if projected_status == "running" and active_status_row >= latest_ac_state_row:
+        return "running"
+    if no_work_in_flight and counts["failed"]:
+        return "failed"
+    if no_work_in_flight and counts["completed"]:
+        return "completed"
+    return "running"
 
 
 class EventTail:
@@ -99,9 +303,9 @@ class EventTail:
             return self._ids
         ids = {self._run_id}
         rows = conn.execute(
-            "SELECT aggregate_id, json_extract(payload, '$.execution_id') AS eid "
+            f"SELECT aggregate_id, {SAFE_EXECUTION_ID_SQL} AS eid "
             "FROM events WHERE event_type = 'orchestrator.session.started' "
-            "AND (aggregate_id = ? OR json_extract(payload, '$.execution_id') = ?)",
+            f"AND (aggregate_id = ? OR {SAFE_EXECUTION_ID_SQL} = ?)",
             [self._run_id, self._run_id],
         ).fetchall()
         for row in rows:
@@ -121,31 +325,49 @@ class EventTail:
             ids = self._resolve_ids(conn)
             id_ph = ",".join("?" for _ in ids)
             type_ph = ",".join("?" for _ in _RELEVANT_EVENT_TYPES)
-            sql = (
+            direct_sql = (
                 "SELECT rowid, event_type, payload "
                 "FROM events "
                 "WHERE rowid > ? "
                 f"AND event_type IN ({type_ph}) "
-                f"AND (aggregate_id IN ({id_ph}) "
-                f"     OR json_extract(payload, '$.execution_id') IN ({id_ph}) "
-                f"     OR json_extract(payload, '$.session_id') IN ({id_ph})) "
+                "AND aggregate_id = ? "
                 "ORDER BY rowid "
                 "LIMIT ?"
             )
-            params: list[Any] = [
-                self._cursor,
-                *_RELEVANT_EVENT_TYPES,
-                *ids,
-                *ids,
-                *ids,
-                limit,
-            ]
-            rows = conn.execute(sql, params).fetchall()
+            direct_rows: list[sqlite3.Row] = []
+            for aggregate_id in ids:
+                direct_rows.extend(
+                    conn.execute(
+                        direct_sql,
+                        [self._cursor, *_RELEVANT_EVENT_TYPES, aggregate_id, limit],
+                    ).fetchall()
+                )
+            linked_sql = (
+                "SELECT rowid, event_type, payload "
+                "FROM events "
+                "WHERE rowid > ? "
+                "AND event_type = ? "
+                f"AND aggregate_id NOT IN ({id_ph}) "
+                f"AND ({SAFE_EXECUTION_ID_SQL} IN ({id_ph}) "
+                f"     OR {SAFE_SESSION_ID_SQL} IN ({id_ph})) "
+                "ORDER BY rowid "
+                "LIMIT ?"
+            )
+            linked_rows: list[sqlite3.Row] = []
+            for event_type in _PAYLOAD_LINKED_EVENT_TYPES:
+                linked_rows.extend(
+                    conn.execute(
+                        linked_sql,
+                        [self._cursor, event_type, *ids, *ids, *ids, limit],
+                    ).fetchall()
+                )
+            rows = sorted((*direct_rows, *linked_rows), key=lambda row: int(row["rowid"]))[:limit]
         finally:
             conn.close()
 
         events: list[dict[str, Any]] = []
         for row in rows:
+            self._cursor = max(self._cursor, int(row["rowid"]))
             payload = row["payload"]
             if isinstance(payload, str):
                 try:
@@ -159,8 +381,104 @@ class EventTail:
                     "payload": payload,
                 }
             )
-            self._cursor = max(self._cursor, int(row["rowid"]))
         return events
+
+
+def _fetch_direct_rows(
+    conn: sqlite3.Connection,
+    ids: list[str],
+    event_types: tuple[str, ...],
+) -> list[sqlite3.Row]:
+    """Fetch non-progress rows through the aggregate/event picker index."""
+    if not ids or not event_types:
+        return []
+    rows: list[sqlite3.Row] = []
+    for aggregate_id in ids:
+        for event_type in event_types:
+            sql = (
+                "SELECT rowid, aggregate_id, event_type, payload FROM events "
+                f"INDEXED BY {DIRECT_EVENT_INDEX} "
+                "WHERE aggregate_id = ? AND event_type = ? "
+                f"AND {PICKER_DIRECT_INDEX_SCOPE_SQL} "
+                f"AND {PICKER_DIRECT_SCOPE_SQL}"
+            )
+            rows.extend(conn.execute(sql, [aggregate_id, event_type]).fetchall())
+    return rows
+
+
+def _fetch_payload_linked_rows(
+    conn: sqlite3.Connection,
+    ids: list[str],
+    event_types: tuple[str, ...],
+) -> list[sqlite3.Row]:
+    """Seek payload-linked families, excluding already fetched aggregates."""
+    if not ids or not event_types:
+        return []
+    id_ph = ",".join("?" for _ in ids)
+    rows: list[sqlite3.Row] = []
+    for event_type in event_types:
+        rows.extend(
+            conn.execute(
+                "SELECT rowid, aggregate_id, event_type, payload FROM events "
+                "WHERE event_type = ? "
+                f"AND aggregate_id NOT IN ({id_ph}) "
+                f"AND ({SAFE_EXECUTION_ID_SQL} IN ({id_ph}) "
+                f"     OR {SAFE_SESSION_ID_SQL} IN ({id_ph}))",
+                [event_type, *ids, *ids, *ids],
+            ).fetchall()
+        )
+    return rows
+
+
+def _fetch_latest_progress_rows(
+    conn: sqlite3.Connection,
+    aggregate_ids: list[str],
+    event_types: tuple[str, ...] = _PICKER_PROGRESS_EVENT_TYPES,
+) -> list[sqlite3.Row]:
+    """Fetch only picker-relevant checkpoints from high-volume progress logs.
+
+    The latest valid progress row preserves truthful ``last_row`` ordering even
+    when its per-turn status is ignored.  The latest durable running row is also
+    kept so a subsequent completed/failed turn cannot erase resume evidence.
+    Writable EventStore initialization installs exact valid/running indexes, so
+    the lookups return at most three rows per family and selected aggregate
+    without scanning historical JSON payloads.
+    """
+    rows_by_rowid: dict[int, sqlite3.Row] = {}
+    for aggregate_id in aggregate_ids:
+        for event_type in event_types:
+            latest = conn.execute(
+                "SELECT rowid, aggregate_id, event_type, payload FROM events "
+                f"INDEXED BY {AGGREGATE_EVENT_INDEX} "
+                "WHERE aggregate_id = ? AND event_type = ? "
+                f"AND {PICKER_PROGRESS_SCOPE_SQL} AND {VALID_JSON_SQL} "
+                "ORDER BY rowid DESC LIMIT 1",
+                [aggregate_id, event_type],
+            ).fetchone()
+            if latest is not None:
+                rows_by_rowid[int(latest["rowid"])] = latest
+            latest_running = conn.execute(
+                "SELECT rowid, aggregate_id, event_type, payload FROM events "
+                f"INDEXED BY {RUNNING_PROGRESS_INDEX} "
+                "WHERE aggregate_id = ? AND event_type = ? "
+                f"AND {PICKER_PROGRESS_SCOPE_SQL} AND {VALID_JSON_SQL} "
+                f"AND {RUNNING_PROGRESS_SQL} ORDER BY rowid DESC LIMIT 1",
+                [aggregate_id, event_type],
+            ).fetchone()
+            if latest_running is not None:
+                rows_by_rowid[int(latest_running["rowid"])] = latest_running
+            if event_type == "workflow.progress.updated":
+                latest_snapshot = conn.execute(
+                    "SELECT rowid, aggregate_id, event_type, payload FROM events "
+                    f"INDEXED BY {WORKFLOW_SNAPSHOT_INDEX} "
+                    "WHERE aggregate_id = ? AND event_type = ? "
+                    f"AND {WORKFLOW_PROGRESS_SCOPE_SQL} AND {VALID_JSON_SQL} "
+                    f"AND {WORKFLOW_SNAPSHOT_SQL} ORDER BY rowid DESC LIMIT 1",
+                    [aggregate_id, event_type],
+                ).fetchone()
+                if latest_snapshot is not None:
+                    rows_by_rowid[int(latest_snapshot["rowid"])] = latest_snapshot
+    return list(rows_by_rowid.values())
 
 
 def list_recent_executions(db_path: str | Path, *, limit: int = 10) -> list[dict[str, Any]]:
@@ -176,28 +494,25 @@ def list_recent_executions(db_path: str | Path, *, limit: int = 10) -> list[dict
     if not path.exists():
         return []
     start_sql = (
-        "SELECT rowid, aggregate_id, payload "
-        "FROM events WHERE event_type = 'orchestrator.session.started' "
-        "ORDER BY rowid DESC LIMIT ?"
-    )
-    event_types = (
-        "orchestrator.session.started",
-        "orchestrator.session.completed",
-        "orchestrator.session.failed",
-        "orchestrator.session.cancelled",
-        "execution.node.created",
-        "execution.node.updated",
-        "execution.subtask.updated",
-        "execution.session.started",
-        "execution.ac.completed",
-        "workflow.progress.updated",
+        "SELECT rowid, aggregate_id, event_type, payload "
+        f"FROM events INDEXED BY {START_EVENT_INDEX} "
+        f"WHERE {PICKER_START_SCOPE_SQL} "
+        "ORDER BY rowid DESC"
     )
     conn = _connect_readonly(path)
     try:
-        starts = conn.execute(start_sql, [max(1, limit)]).fetchall()
-        summaries: list[dict[str, Any]] = []
+        # The checkpoint queries force these indexes because ANALYZE may prefer
+        # the broader legacy aggregate index and restore an O(history) scan.
+        # Validate full sqlite_master SQL plus index_xinfo first: a missing or
+        # stale same-name definition must fail before any EventStore read.
+        matching_indexes = matching_picker_indexes(conn)
+        missing_indexes = frozenset(PICKER_INDEX_NAMES) - matching_indexes
+        if missing_indexes:
+            raise PickerIndexContractError(missing_indexes)
+        starts = conn.execute(start_sql)
+        run_specs: list[tuple[sqlite3.Row, dict[str, Any], str, str]] = []
         seen_execution_ids: set[str] = set()
-        type_ph = ",".join("?" for _ in event_types)
+        target_count = max(1, limit)
         for start in starts:
             start_payload = _decode_payload(start["payload"])
             if not isinstance(start_payload, dict):
@@ -208,49 +523,90 @@ def list_recent_executions(db_path: str | Path, *, limit: int = 10) -> list[dict
             if execution_id in seen_execution_ids:
                 continue
             seen_execution_ids.add(execution_id)
-            session_id = start["aggregate_id"] or start_payload.get("session_id")
-            ids = [value for value in (execution_id, session_id) if value]
-            id_ph = ",".join("?" for _ in ids)
-            scope = (
-                f"(aggregate_id IN ({id_ph}) "
-                f"OR json_extract(payload, '$.execution_id') IN ({id_ph}) "
-                f"OR json_extract(payload, '$.session_id') IN ({id_ph}))"
+            raw_session_id = start["aggregate_id"] or start_payload.get("session_id")
+            session_id = raw_session_id if isinstance(raw_session_id, str) else ""
+            run_specs.append((start, start_payload, execution_id, session_id))
+            if len(run_specs) >= target_count:
+                break
+
+        all_ids = sorted(
+            {
+                value
+                for _start, _payload, execution_id, session_id in run_specs
+                for value in (execution_id, session_id)
+                if value
+            }
+        )
+        session_ids = sorted({spec[3] for spec in run_specs if spec[3]})
+        event_rows = _fetch_direct_rows(
+            conn,
+            all_ids,
+            _PICKER_EVENT_TYPES,
+        )
+        event_rows.extend(spec[0] for spec in run_specs)
+        if all_ids:
+            event_rows.extend(
+                _fetch_payload_linked_rows(
+                    conn,
+                    all_ids,
+                    _PICKER_PAYLOAD_LINKED_EVENT_TYPES,
+                )
             )
-            event_rows = conn.execute(
-                "SELECT rowid, event_type, payload FROM events "
-                f"WHERE event_type IN ({type_ph}) AND {scope} ORDER BY rowid",
-                [*event_types, *ids, *ids, *ids],
-            ).fetchall()
-            events = [
-                {
-                    "rowid": row["rowid"],
-                    "event_type": row["event_type"],
-                    "payload": payload,
-                }
-                for row in event_rows
-                if isinstance((payload := _decode_payload(row["payload"])), dict)
-            ]
+        event_rows.extend(
+            _fetch_latest_progress_rows(
+                conn,
+                session_ids,
+                ("orchestrator.progress.updated",),
+            )
+        )
+        event_rows.extend(
+            _fetch_latest_progress_rows(
+                conn,
+                all_ids,
+                ("workflow.progress.updated",),
+            )
+        )
+        event_rows.sort(key=lambda row: int(row["rowid"]))
+
+        events_by_execution: dict[str, list[dict[str, Any]]] = {
+            execution_id: [] for _start, _payload, execution_id, _session_id in run_specs
+        }
+        executions_by_id: dict[str, set[str]] = {}
+        for _start, _payload, execution_id, session_id in run_specs:
+            executions_by_id.setdefault(execution_id, set()).add(execution_id)
+            if session_id:
+                executions_by_id.setdefault(session_id, set()).add(execution_id)
+        for row in event_rows:
+            payload = _decode_payload(row["payload"])
+            if not isinstance(payload, dict):
+                continue
+            linked_ids = {row["aggregate_id"]}
+            for key in ("execution_id", "session_id"):
+                value = payload.get(key)
+                if isinstance(value, str) and value:
+                    linked_ids.add(value)
+            matched_executions: set[str] = set()
+            for linked_id in linked_ids:
+                if isinstance(linked_id, str):
+                    matched_executions.update(executions_by_id.get(linked_id, ()))
+            event = {
+                "rowid": row["rowid"],
+                "event_type": row["event_type"],
+                "payload": payload,
+            }
+            for execution_id in matched_executions:
+                events_by_execution[execution_id].append(event)
+
+        summaries: list[dict[str, Any]] = []
+        for start, start_payload, execution_id, session_id in run_specs:
+            events = events_by_execution[execution_id]
             board = reduce_board(events, execution_id=execution_id)
             columns = board["columns"]
             counts = {
                 key: len(columns.get(key, []))
                 for key in ("pending", "executing", "completed", "failed")
             }
-            status = "running"
-            for event in events:
-                event_type = event["event_type"]
-                if event_type == "orchestrator.session.completed":
-                    status = "completed"
-                elif event_type in {
-                    "orchestrator.session.failed",
-                    "orchestrator.session.cancelled",
-                }:
-                    status = "failed"
-            if status == "running" and counts["executing"] == 0 and counts["pending"] == 0:
-                if counts["completed"]:
-                    status = "completed"
-                elif counts["failed"]:
-                    status = "failed"
+            status = _summary_status(events, counts)
             meta = board["meta"]
             goal = start_payload.get("seed_goal")
             if not isinstance(goal, str):
@@ -292,4 +648,9 @@ def _decode_payload(payload: object) -> Any:
     return payload
 
 
-__all__ = ["EventTail", "default_db_path", "list_recent_executions"]
+__all__ = [
+    "EventTail",
+    "PickerIndexContractError",
+    "default_db_path",
+    "list_recent_executions",
+]
