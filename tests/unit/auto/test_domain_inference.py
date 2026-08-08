@@ -3424,6 +3424,45 @@ def test_runtime_context_environment_declarations_are_not_consumer_relations() -
 
 
 @pytest.mark.parametrize(
+    ("goal", "outputs"),
+    [
+        (
+            "Build a static website generator CLI",
+            "Generates a responsive landing page with a login form",
+        ),
+        (
+            "Build a landing page scaffolder CLI",
+            "Generates responsive landing pages with signup forms",
+        ),
+    ],
+)
+def test_generator_clis_keep_their_class_despite_widget_outputs(goal: str, outputs: str) -> None:
+    """R57 guard: the shape gate shares final-head semantics with the
+    direct grant — a generator/scaffolder CLI's widget-rich outputs
+    describe what it produces, not what it is."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value=outputs)
+    _seed_section(ledger, "runtime_context", value="Local shell / terminal")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.CLI
+
+
+def test_ui_head_plus_browser_runtime_is_semantic_ui_evidence() -> None:
+    """R57 probe: an affirmative UI-product head with a standardized
+    browser execution environment owns without widget vocabulary —
+    ordinary user-flow outputs suffice."""
+    ledger = _bare_ledger("Build an admin portal")
+    _seed_section(
+        ledger, "outputs", value="Users authenticate, manage roles, and update account settings"
+    )
+    _seed_section(ledger, "runtime_context", value="Runs in browsers")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP
+
+
+@pytest.mark.parametrize(
     "goal",
     [
         "The product is an admin portal that runs in browsers",

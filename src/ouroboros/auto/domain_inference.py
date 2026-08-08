@@ -745,7 +745,7 @@ _WEB_APP_ARTIFACT_PHRASE_RE = re.compile(
 _UI_PRODUCT_HEAD_FRAGMENT = (
     r"(?:apps?|applications?|webapps?|uis?|interfaces?|pages?|"
     r"frontends?|sites?|websites?|dashboards?|consoles?|portals?|"
-    r"players?|editors?|viewers?)"
+    r"players?|editors?|viewers?|clients?)"
 )
 # Shared first-noun-phrase grammar (#1813 R50/R52/R55): routine intent
 # wrappers, an optional specificational copula ("the product is ..."),
@@ -1105,32 +1105,50 @@ def _strip_consumer_relations(text: str) -> str:
     return _RELATIONAL_TARGET_RE.sub(" ", _AUDIENCE_CLAUSE_RE.sub(" ", text))
 
 
-def _ledger_has_browser_context(ledger: SeedDraftLedger) -> bool:
-    """Affirmative browser context: standardized outputs/runtime keywords,
-    or an unnegated goal-side web-app signal. Shared by the web_app
-    matcher and by game_2d's ceding rule for render/screen vocabulary."""
+def _section_browser_context_text(ledger: SeedDraftLedger) -> str:
+    """Normalized outputs/runtime text for browser-context decisions.
+
+    Token- and negation-aware (#1813 R23): "Non-browser desktop runtime"
+    and "No browser; local desktop runtime" are denials, not evidence.
+    Relationship-aware like every other ownership surface (#1813 R36):
+    interop/compatibility targets in outputs are consumers of the
+    artifact, not evidence that it IS a browser product. The
+    runtime_context section is exempt from consumer normalization
+    (#1813 R56): it declares the execution environment, so "Runs in
+    browsers" IS the affirmative evidence the relation pattern would
+    otherwise erase; denials still route through the negation and
+    postpositive strips.
+    """
     outputs = _section_text(ledger, "outputs")
     runtime = _section_text(ledger, "runtime_context")
-    # Token- and negation-aware (#1813 R23): "Non-browser desktop runtime"
-    # and "No browser; local desktop runtime" are denials, not evidence.
-    # The goal signal fragment already names every browser-context form.
-    # Relationship-aware like every other ownership surface (#1813 R36):
-    # interop/compatibility targets in outputs are consumers of the
-    # artifact, not evidence that it IS a browser product. The
-    # runtime_context section is exempt from consumer normalization
-    # (#1813 R56): it declares the execution environment, so "Runs in
-    # browsers" IS the affirmative evidence the relation pattern would
-    # otherwise erase; denials still route through the negation and
-    # postpositive strips below.
     context_text = _strip_consumer_relations(outputs) + " " + runtime
     # Postpositive denials ("the browser is not supported", "browser
     # support disabled") negate from behind (#1813 R37).
     context_text = _POSTPOSITIVE_BROWSER_DENIAL_RE.sub(" ", context_text)
-    context_text = _strip_negated_signals(context_text, _WEB_APP_GOAL_SIGNAL_FRAGMENT)
+    return _strip_negated_signals(context_text, _WEB_APP_GOAL_SIGNAL_FRAGMENT)
+
+
+def _ledger_has_browser_context(ledger: SeedDraftLedger) -> bool:
+    """Affirmative browser context: standardized outputs/runtime keywords,
+    or an unnegated goal-side web-app signal. Shared by the web_app
+    matcher and by game_2d's ceding rule for render/screen vocabulary."""
     goal_for_context = _strip_consumer_relations(_goal_text(ledger))
-    return bool(_WEB_APP_GOAL_SIGNAL_RE.search(context_text)) or (
+    return bool(_WEB_APP_GOAL_SIGNAL_RE.search(_section_browser_context_text(ledger))) or (
         _goal_has_unnegated_web_app_signal(goal_for_context)
     )
+
+
+# A browser token in the standardized sections counts as the execution
+# environment only when nothing re-heads it (#1813 R57): "Browser" and
+# "Runs in browsers" qualify, "Browser extension runtime" names another
+# artifact. Environment/function words after the token keep the reading.
+_SECTION_BROWSER_ENV_RE = re.compile(
+    rf"\b{_WEB_APP_GOAL_SIGNAL_FRAGMENT}\b"
+    r"(?!\s+(?!(?:and|or|nor|but|use|usage|without|with|for|on|in|at|by|"
+    r"from|via|through|to|so|that|which|because|since|while|when|where|"
+    r"using|during|after|before|only|instead|rather|too|as|alongside|"
+    r"runtime|context|execution|environment|sessions?|windows?|tabs?)\b)[\w'’\-]+)"
+)
 
 
 # Artifact-intent vocabulary — exactly the signals _matches_library treats
@@ -1190,6 +1208,54 @@ def _goal_has_browser_ui_product_head(goal_text: str) -> bool:
 
 _NP_CHAIN_STOP_WORDS = frozenset(
     [
+        # Predicative and adversative continuations end the phrase too
+        # (#1813 R57): in "a web app compatible with ..." or "a web app
+        # rather than ..." the head is already behind us.
+        "rather",
+        "than",
+        "instead",
+        "versus",
+        "vs",
+        "not",
+        "no",
+        "is",
+        "are",
+        "was",
+        "were",
+        "compatible",
+        "available",
+        "accessible",
+        "usable",
+        "useable",
+        "supported",
+        "reachable",
+        "viewable",
+        "intended",
+        "designed",
+        "meant",
+        "built",
+        "made",
+        "optimized",
+        "optimised",
+        "tailored",
+        "deployed",
+        "published",
+        "distributed",
+        "offered",
+        "provided",
+        "delivered",
+        "hosted",
+        "shown",
+        "displayed",
+        "served",
+        "used",
+        "expected",
+        "required",
+        "needed",
+        "supposed",
+        "planned",
+        "guaranteed",
+        "mandated",
         "that",
         "which",
         "who",
@@ -1249,10 +1315,6 @@ _NP_WALK_GERUND_WORDS = _NOMINAL_GERUND_WORDS | {
     "booking",
 }
 _UI_HEAD_NOUN_RE = re.compile(rf"^{_UI_PRODUCT_HEAD_FRAGMENT}$")
-# An explicit environment-qualifier modifier predicates the runtime
-# ("browser-based video player"); a bare browser word is a domain
-# attribute ("browser performance report") and is not shape (#1813 R56).
-_ENV_QUALIFIER_MODIFIER_RE = re.compile(r"\b(?:web|browser)[\s\-]based\b|\bin[\s\-]browser\b")
 
 
 def _goal_first_np_has_ui_shape(goal_text: str) -> bool:
@@ -1265,14 +1327,14 @@ def _goal_first_np_has_ui_shape(goal_text: str) -> bool:
     embedded noun phrase, and participles are verbal outside the
     nominal-gerund vocabulary.
 
-    Ownership shape means the phrase's actual artifact HEAD is a UI
-    product noun, or the phrase carries a web ARTIFACT phrase ("web
-    app client") — a bare environment modifier is not shape (#1813
-    R56): in "browser performance report" the browser word modifies a
-    report."""
+    Ownership shape is decided by the phrase's FINAL head alone (#1813
+    R56/R57): "browser performance report" is a report and "static
+    website generator CLI" is a CLI, no matter which web words modify
+    them — the same final-head semantics as the direct grant."""
     np_tokens: list[str] = []
     seen_determiner = False
-    for token in re.findall(r"[\w'’\-]+", goal_text):
+    first_segment = re.split(r"[.;:!?,]", goal_text)[0]
+    for token in re.findall(r"[\w'’\-]+", first_segment):
         lowered = token.lower()
         if lowered in _NP_CHAIN_STOP_WORDS:
             break
@@ -1286,12 +1348,7 @@ def _goal_first_np_has_ui_shape(goal_text: str) -> bool:
         np_tokens.append(lowered)
     if not np_tokens:
         return False
-    if _UI_HEAD_NOUN_RE.match(np_tokens[-1]):
-        return True
-    np_text = " ".join(np_tokens)
-    if _ENV_QUALIFIER_MODIFIER_RE.search(np_text):
-        return True
-    return bool(_WEB_APP_ARTIFACT_PHRASE_RE.search(np_text))
+    return bool(_UI_HEAD_NOUN_RE.match(np_tokens[-1]))
 
 
 _MANIPULATED_TARGET_RE = re.compile(
@@ -1394,7 +1451,15 @@ def _matches_web_app(ledger: SeedDraftLedger) -> bool:
         return False
     ui_text = _strip_negated_signals(outputs, _UI_SIGNAL_STRIP_FRAGMENT)
     ui_text = _MANIPULATED_TARGET_RE.sub(" ", ui_text)
-    return _ledger_has_browser_context(ledger) and bool(_UI_COMPOSITION_RE.search(ui_text))
+    if _ledger_has_browser_context(ledger) and _UI_COMPOSITION_RE.search(ui_text):
+        return True
+    # An affirmative UI-product head plus a standardized browser
+    # execution environment is semantic UI evidence (#1813 R57):
+    # ordinary user-flow outputs ("users authenticate, manage roles")
+    # need no widget vocabulary. The section token must be the
+    # environment itself — a re-headed browser artifact ("browser
+    # extension runtime") does not qualify.
+    return bool(_SECTION_BROWSER_ENV_RE.search(_section_browser_context_text(ledger)))
 
 
 _CONSUMED_DEPENDENCY_RE = re.compile(
