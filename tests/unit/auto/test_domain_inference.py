@@ -3975,6 +3975,42 @@ def test_hosting_prepositions_reach_the_component(goal: str) -> None:
 @pytest.mark.parametrize(
     "goal",
     [
+        "Build a desktop dashboard with browser crash analytics",
+        "Build a desktop dashboard with web app incident metrics",
+    ],
+)
+def test_with_phrase_topics_are_not_browser_context(goal: str) -> None:
+    """R72 guard: a with-phrase is topical unless its object ends at a
+    web signal — quality clauses ("with no errors in the web UI") and
+    compatibility targets keep their reading."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value="Interactive charts with a filters panel")
+    _seed_section(ledger, "runtime_context", value="Local desktop runtime")
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
+        "Build a settings page on a browser extension",
+        "Build a preferences UI under a browser extension",
+    ],
+)
+def test_determined_host_prepositions_reach_the_component(goal: str) -> None:
+    """R72 guard: a bare host preposition with a determiner marks a host
+    instance ("on a browser extension"); the determinerless form stays
+    topical."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value="Settings panel with save button")
+    _seed_section(ledger, "runtime_context", value="Runs in browsers")
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
         "The product is an admin portal that runs in browsers",
         "The deliverable is an admin portal available in browsers",
     ],

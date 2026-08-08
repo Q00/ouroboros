@@ -1213,11 +1213,14 @@ def _ledger_has_browser_context(ledger: SeedDraftLedger) -> bool:
         " ",
         goal_for_context,
     )
-    # A bare "on"-phrase is topical unless its object ENDS at a browser
-    # token (#1813 R71): "on browser crash reports" names subject
-    # matter, "runs on browsers" declares the environment.
+    # A bare on/with-phrase is topical unless its object ENDS at a web
+    # signal (#1813 R71/R72): "on browser crash reports" and "with
+    # browser crash analytics" name subject matter, while "runs on
+    # browsers", "compatible with modern browsers", and "with no errors
+    # in the web UI" keep their environment/quality reading.
     goal_for_context = re.sub(
-        r"\b(?:on|upon)\s+(?![^,.;]*\bbrowsers?\b\s*(?:[,.;]|$))[^,.;]*",
+        rf"\b(?:on|upon|with)\s+"
+        rf"(?![^,.;]*\b{_WEB_APP_GOAL_SIGNAL_FRAGMENT}\b\s*(?:[,.;]|$))[^,.;]*",
         " ",
         goal_for_context,
     )
@@ -1306,10 +1309,12 @@ _GOAL_COMPONENT_TARGET_RE = re.compile(
     # swallowed.
     r"\b(?:(?:[\w\-'’]+(?:ed|ing)\s+)?(?:for|of|in|inside|within|into|to|"
     r"by|alongside|beside)|[\w\-'’]+(?:ed|ing)\s+"
-    # "hosted/mounted ON", "running/nested UNDER" (#1813 R71) — these
-    # prepositions require the participle so a bare topical "on"
-    # ("a dashboard on browser extensions") stays outside the veto.
-    r"(?:through|with|from|on|onto|under|beneath|atop))\s+"
+    # "hosted/mounted ON", "running/nested UNDER" (#1813 R71).
+    r"(?:through|with|from|on|onto|under|beneath|atop)"
+    # A bare host preposition reaches the component when a determiner
+    # marks a host INSTANCE ("on a browser extension", #1813 R72); the
+    # determinerless form stays topical ("on browser extensions").
+    r"|(?:on|onto|under|beneath|atop)(?=\s+(?:an?|the|our|my|your|their|its)\b))\s+"
     r"(?:(?:an?|the|our|my|your|their|its)\s+)?(?:[\w\-'’]+\s+){0,3}?"
     r"(?:extensions?|plugins?|add[\s\-]?ons?|addons?|sidebars?|popups?|"
     r"toolbars?|overlays?|devtools?)\b"
