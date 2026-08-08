@@ -2588,7 +2588,12 @@ def _config_execute_runtime_backend(config_dict: dict) -> str:
     return "codex" if backend.strip().lower() in {"codex", "codex_cli"} else backend
 
 
-def _setup_codex(codex_path: str, *, mcp_mode: CodexMcpMode = "auto") -> bool:
+def _setup_codex(
+    codex_path: str,
+    *,
+    mcp_mode: CodexMcpMode = "auto",
+    preserve_existing_llm: bool = False,
+) -> bool:
     """Configure Ouroboros for the Codex runtime."""
     from ouroboros.config.loader import ensure_config_dir, get_default_config
     from ouroboros.config.models import get_config_dir, get_default_credentials
@@ -2638,13 +2643,16 @@ def _setup_codex(codex_path: str, *, mcp_mode: CodexMcpMode = "auto") -> bool:
 
     try:
         previous_execute_backend = _config_execute_runtime_backend(config_dict)
-        # Set runtime and LLM backend to codex
+        # Runtime integration and authoring/evaluation provider selection are
+        # independent. Interactive setup keeps its historical behavior, while
+        # updater-driven refreshes preserve an explicitly split LLM backend.
         orchestrator_config = _ensure_mapping_section(config_dict, "orchestrator")
         orchestrator_config["runtime_backend"] = "codex"
         orchestrator_config["codex_cli_path"] = codex_path
 
         llm_config = _ensure_mapping_section(config_dict, "llm")
-        llm_config["backend"] = "codex"
+        if not preserve_existing_llm or fresh_config or not llm_config.get("backend"):
+            llm_config["backend"] = "codex"
 
         if fresh_config:
             _neutralize_fresh_codex_model_defaults(config_dict)
@@ -4652,6 +4660,14 @@ def setup(
             help="Codex MCP config mode: auto preserves user-managed entries, preserve skips MCP changes, stdio replaces with the managed stdio entry.",
         ),
     ] = "auto",
+    preserve_existing_llm: Annotated[
+        bool,
+        typer.Option(
+            "--preserve-existing-llm",
+            help="Preserve an existing independent LLM backend during runtime refresh.",
+            hidden=True,
+        ),
+    ] = False,
 ) -> None:
     """Set up Ouroboros for your environment.
 
@@ -4774,7 +4790,11 @@ def setup(
             else:
                 print_error("Codex CLI not found in PATH or Codex App bundle.")
             raise typer.Exit(1)
-        if not _setup_codex(codex_path, mcp_mode=_normalize_codex_mcp_mode(mcp_mode)):
+        if not _setup_codex(
+            codex_path,
+            mcp_mode=_normalize_codex_mcp_mode(mcp_mode),
+            preserve_existing_llm=preserve_existing_llm,
+        ):
             raise typer.Exit(1)
     elif selected in ("opencode", "opencode_cli"):
         opencode_path = available.get("opencode")

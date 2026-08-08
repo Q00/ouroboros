@@ -188,6 +188,7 @@ def configured_runtime_tools(
         "ouroboros_checklist_verify",
         "ouroboros_lateral_think",
         "ouroboros_submit_fanout_results",
+        "ouroboros_fetch_artifact",
         "ouroboros_evolve_step",
         "ouroboros_start_evolve_step",
         "ouroboros_ralph",
