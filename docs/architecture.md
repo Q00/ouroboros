@@ -94,6 +94,9 @@ for the canonical meanings of `AgentRuntimeContext`, `ControlPlane`,
 - SQLite event store with append-only writes
 - Full replay capability
 - Checkpoint system with compression
+- Disposable Memory content-addressed artifact bodies under
+  `.ouroboros/artifacts/`; the EventStore keeps only the bounded
+  `contract_id + artifact_ref` envelope
 - 5 optimized indexes for performance
 
 ### 5. Orchestration Layer

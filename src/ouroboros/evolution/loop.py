@@ -583,6 +583,7 @@ class EvolutionaryLoop:
         parallel: bool = True,
         conductor_directive: ConductorDirective | None = None,
         benchmark_control: bool = False,
+        on_generation_claimed: loop_support.GenerationClaimCallback | None = None,
     ) -> Result[StepResult, OuroborosError]:
         """Advance one lineage once while a durable lease owns all effects."""
         from ouroboros.evolution.step_receipt import decode_step_result, encode_step_result
@@ -629,6 +630,7 @@ class EvolutionaryLoop:
                                     decode=lambda payload: decode_step_result(
                                         self.event_store, payload
                                     ),
+                                    on_claimed=on_generation_claimed,
                                 ),
                                 replan_on_different=True,
                             )

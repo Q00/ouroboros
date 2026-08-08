@@ -737,28 +737,57 @@ class TestCreateOuroborosServer:
         tool_names = {tool.name for tool in server.info.tools}
         assert tool_names == self.EXPECTED_OUROBOROS_SERVER_TOOLS
 
-    def test_synapse_tools_and_execute_paths_share_one_composition_root_hub(self) -> None:
-        """Public admission and active execution must use the same live queue."""
+    @pytest.mark.asyncio
+    async def test_synapse_control_and_execution_paths_use_durable_relay(self) -> None:
+        """Control persists remotely while each execution process owns its live queue."""
+        from ouroboros.mcp.tools.evolution_handlers import EvolveStepHandler
         from ouroboros.mcp.tools.execution_handlers import (
             ExecuteSeedHandler,
             StartExecuteSeedHandler,
         )
         from ouroboros.mcp.tools.synapse_handler import SynapseSignalHandler
+        from ouroboros.persistence.event_store import EventStore
 
-        server = create_ouroboros_server()
-        runtime_context = server._runtime_context
-        execute = server._tool_handlers["ouroboros_execute_seed"]
-        start_execute = server._tool_handlers["ouroboros_start_execute_seed"]
-        signal = server._tool_handlers["ouroboros_session_signal"]
+        captured_runner_kwargs: dict[str, object] = {}
 
-        assert runtime_context is not None
-        assert runtime_context.synapse is not None
-        assert isinstance(execute, ExecuteSeedHandler)
-        assert isinstance(start_execute, StartExecuteSeedHandler)
-        assert isinstance(signal, SynapseSignalHandler)
-        assert execute.session_signal_hub is runtime_context.synapse
-        assert start_execute._execute_handler.session_signal_hub is runtime_context.synapse
-        assert signal.mailbox.delivery_queue is runtime_context.synapse
+        class CapturingRunner:
+            def __init__(self, **kwargs: object) -> None:
+                captured_runner_kwargs.update(kwargs)
+
+            async def execute_seed(self, **_kwargs: object) -> str:
+                return "evolve execution completed"
+
+        store = EventStore("sqlite+aiosqlite:///:memory:")
+        with patch("ouroboros.orchestrator.runner.OrchestratorRunner", CapturingRunner):
+            server = create_ouroboros_server(event_store=store)
+
+        try:
+            runtime_context = server._runtime_context
+            execute = server._tool_handlers["ouroboros_execute_seed"]
+            start_execute = server._tool_handlers["ouroboros_start_execute_seed"]
+            evolve = server._tool_handlers["ouroboros_evolve_step"]
+            signal = server._tool_handlers["ouroboros_session_signal"]
+
+            assert runtime_context is not None
+            assert runtime_context.synapse is not None
+            assert isinstance(execute, ExecuteSeedHandler)
+            assert isinstance(start_execute, StartExecuteSeedHandler)
+            assert isinstance(evolve, EvolveStepHandler)
+            assert isinstance(signal, SynapseSignalHandler)
+            assert execute.session_signal_hub is runtime_context.synapse
+            assert start_execute._execute_handler.session_signal_hub is runtime_context.synapse
+            assert signal.mailbox.delivery_queue is None
+
+            assert evolve.evolutionary_loop is not None
+            result = await evolve.evolutionary_loop.executor(
+                MagicMock(),
+                execution_id="evolve:lin_test:generation:1",
+            )
+
+            assert result == "evolve execution completed"
+            assert captured_runner_kwargs["session_signal_hub"] is runtime_context.synapse
+        finally:
+            await server.shutdown()
 
     def test_create_server_forwards_bridge_context_to_auto_handler(self) -> None:
         """Auto resume rebuilds should retain bridge access from server wiring."""

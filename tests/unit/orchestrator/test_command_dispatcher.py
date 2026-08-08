@@ -25,6 +25,23 @@ from ouroboros.router.types import Resolved
 class TestCodexCommandDispatcher:
     """Tests for the in-process dispatcher used by Codex runtimes."""
 
+    def test_server_receives_the_dispatchers_resolved_runtime_workspace(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        project = tmp_path / "runtime-project"
+        project.mkdir()
+        dispatcher = CodexCommandDispatcher(cwd=project)
+        server = object()
+
+        with patch(
+            "ouroboros.mcp.server.adapter.create_ouroboros_server",
+            return_value=server,
+        ) as create_server:
+            assert dispatcher._get_server() is server
+
+        assert create_server.call_args.kwargs["project_dir"] == str(project.resolve())
+
     def test_stable_identity_tracks_dispatch_helper_implementation_drift(
         self,
         monkeypatch: pytest.MonkeyPatch,

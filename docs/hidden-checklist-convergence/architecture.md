@@ -24,7 +24,7 @@ start_execute_seed
 | Evaluation terminal hook | Enqueue or reconnect Ralph after explicit rejection | `src/ouroboros/mcp/tools/evaluation_handlers.py` |
 | Execution chain | Evaluate completed success/failure runs | `src/ouroboros/mcp/tools/execution_handlers.py` |
 | Plugin Seed vault | Keep the raw Seed parent-owned and give workers only an opaque, session-bound handle | `src/ouroboros/mcp/tools/seed_handoff.py` |
-| Runtime composition adapter | Reuse the production handler graph for builtin runtime interception | `src/ouroboros/mcp/tools/runtime_tool_composition.py` |
+| Runtime composition adapter | Reuse the production handler graph for builtin runtime interception and retain its explicit resource owner | `src/ouroboros/mcp/tools/runtime_tool_composition.py` |
 
 ## Key Decisions
 
@@ -39,3 +39,5 @@ start_execute_seed
 | Terminal successor recovery | Retries reconnect to both active and terminal Ralph jobs, closing the enqueue/result crash gap. |
 | Single-AC checklist absence yields no fabricated AC result | Existing full-graph focus fallback remains honest and safe. |
 | Raw Seed handoff is process-local | Persisting hidden verifier material in worker-queryable events would defeat the boundary. A server restart invalidates the opaque handle and evaluation fails closed instead of exposing the Seed. |
+| Runtime owns the full embedded composition | Handler registries retain their MCP server owner and expose deterministic shutdown, so EventStore, ControlBus, and bridge lifetimes match the builtin runtime instead of an abandoned factory local. |
+| Confidentiality is a transport boundary | Worker prompts, contexts, events, artifacts, and retries are sanitized. Filesystem isolation is an operator/runtime sandbox responsibility when raw Seed files are stored in worker-accessible locations. |

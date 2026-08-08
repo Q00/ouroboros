@@ -22,6 +22,7 @@ Handler modules:
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ouroboros.mcp.tools.ac_tree_hud_handler import ACTreeHUDHandler
@@ -47,6 +48,7 @@ from ouroboros.mcp.tools.execution_handlers import (
     ExecuteSeedHandler,
     StartExecuteSeedHandler,
 )
+from ouroboros.mcp.tools.fanout_handler import create_fanout_handler  # noqa: F401
 from ouroboros.mcp.tools.job_handlers import (
     CancelExecutionHandler,
     CancelJobHandler,
@@ -448,6 +450,7 @@ def get_ouroboros_tools(
     *,
     runtime_backend: str | None = None,
     llm_backend: str | None = None,
+    project_dir: str | Path | None = None,
     mcp_manager: object | None = None,
     mcp_tool_prefix: str = "",
     opencode_mode: str | None = None,
@@ -464,6 +467,11 @@ def get_ouroboros_tools(
     falls through to its real in-process path. See
     ``ouroboros.mcp.tools.subagent.should_dispatch_via_plugin``.
 
+    ``project_dir`` is the effective runtime workspace for project-local
+    disposable artifacts.  Callers that only inspect definitions may omit it;
+    executable runtime surfaces must pass their already-resolved workspace so
+    artifact placement never depends on the launcher process CWD.
+
     When ``context`` is provided and carries an ``mcp_bridge``, the
     bridge supersedes the explicit ``mcp_manager`` / ``mcp_tool_prefix``
     kwargs (see :func:`_resolve_bridge_fields`). This is the migration
@@ -476,9 +484,10 @@ def get_ouroboros_tools(
     resolved_manager, resolved_prefix = _resolve_bridge_fields(
         context, mcp_manager, mcp_tool_prefix
     )
-    needs_configured_runtime_graph = (
-        runtime_adapter is not None and runtime_backend in {"codex", "hermes"}
-    ) or (runtime_backend == "opencode" and opencode_mode == "plugin")
+    needs_configured_runtime_graph = runtime_adapter is not None and (
+        runtime_backend in {"codex", "hermes"}
+        or (runtime_backend == "opencode" and opencode_mode == "plugin")
+    )
     if needs_configured_runtime_graph and (
         resolved_manager is None or (context is not None and context.mcp_bridge is not None)
     ):
@@ -491,6 +500,7 @@ def get_ouroboros_tools(
             include_auto=include_auto,
             mcp_bridge=(context.mcp_bridge if context is not None else None),
             runtime_adapter=runtime_adapter,
+            project_dir=project_dir,
         )
         if configured_tools is not None:
             return configured_tools
@@ -498,6 +508,18 @@ def get_ouroboros_tools(
     # One shared fan-out registry: interview/lateral producers register pending
     # fan-outs into it, and the submit tool reads them back for synthesis.
     fanout_registry = FanoutRegistry()
+    from ouroboros.orchestrator.disposable_memory import DisposableMemory
+    from ouroboros.persistence.artifact_store import ContentAddressedArtifactStore
+    from ouroboros.persistence.event_store import EventStore
+
+    fanout_disposable_memory = (
+        DisposableMemory(
+            artifact_store=ContentAddressedArtifactStore.for_project(Path(project_dir)),
+            event_store=context.event_store if context is not None else EventStore(),
+        )
+        if project_dir is not None
+        else None
+    )
     seed_handoff_registry = SeedHandoffRegistry()
     execute_seed = ExecuteSeedHandler(
         agent_runtime_backend=runtime_backend,
@@ -584,7 +606,10 @@ def get_ouroboros_tools(
             opencode_mode=opencode_mode,
             fanout_registry=fanout_registry,
         ),
-        SubmitFanoutResultsHandler(fanout_registry=fanout_registry),
+        SubmitFanoutResultsHandler(
+            fanout_registry=fanout_registry,
+            disposable_memory=fanout_disposable_memory,
+        ),
         EvolveStepHandler(
             agent_runtime_backend=runtime_backend,
             opencode_mode=opencode_mode,

@@ -8,7 +8,7 @@ without requiring an API key.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 import contextlib
 import json
 import os
@@ -16,6 +16,7 @@ from pathlib import Path
 import re
 import subprocess
 import tempfile
+import tomllib
 from typing import Any
 
 import structlog
@@ -26,7 +27,8 @@ from ouroboros.codex.cli_policy import (
     build_codex_child_env,
     resolve_codex_cli_path,
 )
-from ouroboros.codex.runtime_profile import resolve_codex_profile
+from ouroboros.codex.home import resolve_codex_home
+from ouroboros.codex.runtime_profile import codex_uses_profile_v2, resolve_codex_profile
 from ouroboros.codex_permissions import (
     build_codex_exec_permission_args,
     resolve_codex_permission_mode,
@@ -82,6 +84,29 @@ _CODEX_PROVIDER_MARKERS = (
 _OPENAI_RESPONSES_ENDPOINT = "api.openai.com/v1/responses"
 
 
+def _deep_merge_config_mappings(
+    base: Mapping[str, object] | None,
+    overlay: Mapping[str, object] | None,
+) -> dict[str, object]:
+    """Merge one Codex config layer onto another without mutating either.
+
+    Codex profile-v2 files layer nested tables recursively over ``config.toml``.
+    Reproducing that behavior here is necessary because MCP transport fields can
+    be split across the base and selected profile files.
+    """
+    merged = dict(base or {})
+    if overlay is None:
+        return merged
+
+    for key, overlay_value in overlay.items():
+        base_value = merged.get(key)
+        if isinstance(base_value, dict) and isinstance(overlay_value, dict):
+            merged[key] = _deep_merge_config_mappings(base_value, overlay_value)
+        else:
+            merged[key] = overlay_value
+    return merged
+
+
 class CodexCliLLMAdapter(RuntimeStreamMixin):
     """LLM adapter backed by local Codex CLI execution.
 
@@ -133,6 +158,7 @@ class CodexCliLLMAdapter(RuntimeStreamMixin):
         ephemeral: bool = True,
         timeout: float | None = None,
         runtime_profile: str | None = None,
+        strict_mcp_config: bool = False,
     ) -> None:
         self._cli_path = self._resolve_cli_path(cli_path)
         self._cwd = str(Path(cwd).expanduser()) if cwd is not None else os.getcwd()
@@ -144,6 +170,7 @@ class CodexCliLLMAdapter(RuntimeStreamMixin):
         self._ephemeral = ephemeral
         self._timeout = timeout if timeout and timeout > 0 else None
         self._runtime_profile = runtime_profile
+        self._strict_mcp_config = bool(strict_mcp_config)
         self._codex_profile = resolve_codex_profile(
             runtime_profile,
             logger=log,
@@ -161,6 +188,78 @@ class CodexCliLLMAdapter(RuntimeStreamMixin):
             default_mode="default",
             source=f"{self._log_namespace}.llm_adapter",
         )
+
+    @staticmethod
+    def _mapping_has_effective_ouroboros_mcp(config: object) -> bool:
+        """Return whether parsed Codex config declares a usable enabled transport."""
+        if not isinstance(config, dict):
+            return False
+        mcp_servers = config.get("mcp_servers")
+        if not isinstance(mcp_servers, dict):
+            return False
+        ouroboros = mcp_servers.get("ouroboros")
+        if not isinstance(ouroboros, dict):
+            return False
+
+        enabled = ouroboros.get("enabled", True)
+        if not isinstance(enabled, bool) or not enabled:
+            return False
+        return any(
+            isinstance(ouroboros.get(key), str) and bool(ouroboros[key].strip())
+            for key in ("command", "url")
+        )
+
+    @staticmethod
+    def _read_config_mapping(path: Path) -> dict[str, object] | None:
+        """Read one Codex config layer without treating malformed state as effective."""
+        try:
+            parsed = tomllib.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+            return None
+        return parsed
+
+    def _has_effective_ouroboros_mcp(self, *, active_profile: str | None) -> bool:
+        """Inspect only config layers reachable by this exact Codex child command."""
+        codex_home = resolve_codex_home()
+        base_config = self._read_config_mapping(codex_home / "config.toml")
+        base_has_mcp = self._mapping_has_effective_ouroboros_mcp(base_config)
+
+        if not active_profile:
+            return base_has_mcp
+        uses_profile_v2 = codex_uses_profile_v2(self._cli_path)
+        if uses_profile_v2 is False:
+            # Split-mode Codex selects [profiles.<name>] for profile options,
+            # but it does not promote a nested mcp_servers table into the
+            # effective top-level MCP namespace. Only the base transport,
+            # checked above, is reachable in this mode.
+            return base_has_mcp
+
+        profile_filename = f"{active_profile}.config.toml"
+        if Path(profile_filename).name != profile_filename:
+            return base_has_mcp
+        profile_config = self._read_config_mapping(codex_home / profile_filename)
+        effective_profile_config = _deep_merge_config_mappings(base_config, profile_config)
+        profile_v2_has_mcp = self._mapping_has_effective_ouroboros_mcp(effective_profile_config)
+        if uses_profile_v2 is None and profile_v2_has_mcp and not base_has_mcp:
+            raise ProviderError(
+                message=(
+                    "Cannot guarantee strict MCP isolation because the Codex "
+                    "--profile contract could not be detected"
+                ),
+                provider=self._provider_name,
+                details={
+                    "cli_path": self._cli_path,
+                    "profile": active_profile,
+                    "profile_config": str(codex_home / profile_filename),
+                },
+            )
+        if uses_profile_v2 is None:
+            # If the base transport is already effective, the transient
+            # ``enabled=false`` override is safe in either selector mode. A
+            # profile-v2 layer may disable it, but the redundant override does
+            # not synthesize a new transport or mutate user configuration.
+            return base_has_mcp
+        return profile_v2_has_mcp
 
     def _get_configured_cli_path(self) -> str | None:
         """Resolve an explicit CLI path from config helpers when available."""
@@ -416,6 +515,7 @@ class CodexCliLLMAdapter(RuntimeStreamMixin):
         The prompt is always fed via stdin to avoid ARG_MAX limits.
         """
         command = [self._cli_path, "exec"]
+        active_profile = self._codex_profile or profile
         # Codex has one --profile selector. Runtime-profile worker isolation
         # owns that flag when configured; task-profile resolution may still
         # contribute a --model fallback, but must not emit a competing profile.
@@ -433,6 +533,11 @@ class CodexCliLLMAdapter(RuntimeStreamMixin):
         )
 
         command.extend(self._build_permission_args())
+
+        if self._strict_mcp_config and self._has_effective_ouroboros_mcp(
+            active_profile=active_profile
+        ):
+            command.extend(["-c", "mcp_servers.ouroboros.enabled=false"])
 
         if self._ephemeral:
             command.append("--ephemeral")
@@ -917,23 +1022,29 @@ class CodexCliLLMAdapter(RuntimeStreamMixin):
         # Goose and Pi reuse this completion flow but expose no Codex-style
         # per-invocation effort flag. Pass it only to Codex's command builder;
         # their narrower overrides intentionally do not accept this argument.
-        if self._completion_profile_backend == "codex":
-            command = self._build_command(
-                output_last_message_path=str(output_path),
-                output_schema_path=str(schema_path) if schema_path else None,
-                model=normalized_model,
-                profile=resolved.backend_profile,
-                reasoning_effort=effective_config.reasoning_effort,
-                prompt=prompt,
-            )
-        else:
-            command = self._build_command(
-                output_last_message_path=str(output_path),
-                output_schema_path=str(schema_path) if schema_path else None,
-                model=normalized_model,
-                profile=resolved.backend_profile,
-                prompt=prompt,
-            )
+        try:
+            if self._completion_profile_backend == "codex":
+                command = self._build_command(
+                    output_last_message_path=str(output_path),
+                    output_schema_path=str(schema_path) if schema_path else None,
+                    model=normalized_model,
+                    profile=resolved.backend_profile,
+                    reasoning_effort=effective_config.reasoning_effort,
+                    prompt=prompt,
+                )
+            else:
+                command = self._build_command(
+                    output_last_message_path=str(output_path),
+                    output_schema_path=str(schema_path) if schema_path else None,
+                    model=normalized_model,
+                    profile=resolved.backend_profile,
+                    prompt=prompt,
+                )
+        except ProviderError as exc:
+            output_path.unlink(missing_ok=True)
+            if schema_path:
+                schema_path.unlink(missing_ok=True)
+            return Result.err(exc)
 
         prompt_stdin_bytes = self._prompt_stdin_bytes(prompt)
 

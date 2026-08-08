@@ -149,6 +149,37 @@ Emitted when a background MCP job is cancelled.
 | `status` | `string` | Always `"cancelled"` |
 | `message` | `string` | Human-readable cancellation message |
 
+### artifact.referenced
+
+Bounded Disposable Memory projection emitted only after the content-addressed
+body and its per-contract manifest are durable. The aggregate is
+`contract/<contract_id>`. Raw child output and transcripts are forbidden from
+this event; consumers must call the explicit artifact fetch/replay API.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `schema_version` | `int` | Disposable envelope schema, currently `1` |
+| `contract_id` | `string` | Contract owning this result |
+| `artifact_ref` | `string` | `sha256:<64 lowercase hex>` content address |
+| `result.status` | `string` | `completed` or `failed` |
+| `runtime_id` | `string` | Runtime that produced the artifact |
+| `duration_ms` | `int` | Non-negative child duration |
+| `events_emitted_count` | `int` | Runtime-authored event count; never inline events |
+
+### artifact.tombstoned
+
+Contract-scoped proof that an artifact body was deliberately pruned. The
+durable per-contract manifest is authoritative for local GC and replay;
+EventStore producers may emit the same bounded projection when they own an
+active EventStore connection. Replay checks the tombstone before looking for a
+body and never silently reruns work.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `contract_id` | `string` | Contract whose replay body was pruned |
+| `artifact_ref` | `string` | Pruned content address |
+| `reason` | `string` | Retention/explicit-prune reason |
+
 ### orchestrator.progress.updated
 
 Emitted periodically during execution with runtime progress.

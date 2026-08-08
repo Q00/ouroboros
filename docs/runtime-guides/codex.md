@@ -168,7 +168,7 @@ After running `ouroboros setup --runtime codex`, the bundled `ooo` skills are in
 | `ooo unstuck` | Yes | *(MCP only)* |
 | `ooo tutorial` | Yes | *(MCP only)* |
 | `ooo welcome` | Yes | *(MCP only)* |
-| `ooo update` | Yes | `pip install --upgrade ouroboros-ai` |
+| `ooo update` | Yes | `ouroboros update` |
 | `ooo help` | Yes | `ouroboros --help` |
 | `ooo qa` | Yes | *(MCP only)* |
 | `ooo setup` | Yes | `ouroboros setup --runtime codex` |
