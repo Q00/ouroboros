@@ -1462,6 +1462,9 @@ class EvolutionaryLoop:
                 generation_number=generation_number,
                 phase=GenerationPhase.WONDERING.value,
                 seed=current_seed,
+                # Evaluation-scoped working set: observers report which ACs
+                # this generation is redoing vs. keeping frozen.
+                focus=generation_focus,
             )
 
             if self.wonder_engine and not _should_skip("wondering"):
@@ -1726,6 +1729,9 @@ class EvolutionaryLoop:
                 generation_number=generation_number,
                 phase=GenerationPhase.EXECUTING.value,
                 seed=current_seed,
+                # Gen 1 (or checkpoint-restored) working set — typically the
+                # full AC graph until evaluation evidence narrows it.
+                focus=generation_focus,
             )
 
         if prev_gen is not None and not (execute and lineage.verification_handoff_pending):
