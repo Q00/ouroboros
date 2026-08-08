@@ -3504,6 +3504,41 @@ def test_specificational_and_intent_frames_own_the_artifact(goal: str) -> None:
 
 
 @pytest.mark.parametrize(
+    ("goal", "runtime"),
+    [
+        ("Build a mobile app that embeds a web browser", "Native iOS runtime"),
+        ("Build a desktop shell that contains a browser", "Native desktop runtime"),
+    ],
+)
+def test_active_containment_of_a_browser_is_consumption(goal: str, runtime: str) -> None:
+    """R59 guard: an artifact that embeds or contains a browser hosts a
+    component — it is not the browser product."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value="Settings panel with login form")
+    _seed_section(ledger, "runtime_context", value=runtime)
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes
+
+
+@pytest.mark.parametrize(
+    ("goal", "outputs"),
+    [
+        ("Build a browser-based admin panel", "Login and role controls"),
+        ("Build a browser-based signup form", "Client-side validation messages"),
+    ],
+)
+def test_panel_and_form_heads_own_the_artifact(goal: str, outputs: str) -> None:
+    """R59 probe: panel and form are direct UI product heads like page
+    and dashboard."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value=outputs)
+    _seed_section(ledger, "runtime_context", value="Runs in browsers")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP
+
+
+@pytest.mark.parametrize(
     "goal",
     [
         "The product is an admin portal that runs in browsers",

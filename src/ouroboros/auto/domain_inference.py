@@ -745,7 +745,7 @@ _WEB_APP_ARTIFACT_PHRASE_RE = re.compile(
 _UI_PRODUCT_HEAD_FRAGMENT = (
     r"(?:apps?|applications?|webapps?|uis?|interfaces?|pages?|"
     r"frontends?|sites?|websites?|dashboards?|consoles?|portals?|"
-    r"players?|editors?|viewers?|clients?)"
+    r"players?|editors?|viewers?|clients?|panels?|forms?)"
 )
 # Shared first-noun-phrase grammar (#1813 R50/R52/R55): routine intent
 # wrappers, an optional specificational copula ("the product is ..."),
@@ -919,6 +919,10 @@ _RELATIONAL_TARGET_RE = re.compile(
     r"\b(?:targeting|supporting|serving|powering|backing|aimed\s+at|"
     r"used\s+by|consumed\s+by|embedded\s+(?:in|into|within|inside)|"
     r"nested\s+(?:in|within|inside)|contained\s+(?:in|within|inside)|"
+    # Active containment consumes its component (#1813 R59): an app that
+    # "embeds a web browser" hosts the browser, it is not one.
+    r"embeds?|embedding|contains?|containing|hosts?|hosting|"
+    r"includes?|including|incorporates?|incorporating|houses?|housing|"
     r"integrat\w*\s+with|"
     r"compatible\s+with|used\s+with|works?\s+with|interopera\w*\s+with|"
     r"paired\s+with|hosted\s+(?:on|in|within|inside)|deployed\s+(?:on|to)|"
