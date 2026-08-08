@@ -18,6 +18,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from ouroboros.core.types import Result
+from ouroboros.mcp.errors import MCPToolError
 from ouroboros.mcp.job_manager import JobManager
 from ouroboros.mcp.tools.evaluation_handlers import (
     EvaluateHandler,
@@ -117,6 +118,94 @@ class TestDefinition:
         finally:
             await store.close()
 
+    @pytest.mark.asyncio
+    async def test_failed_detached_acceptance_restores_handoff_for_retry(
+        self, tmp_path: Path, fake_inner_handler
+    ) -> None:
+        from ouroboros.mcp.tools.seed_handoff import SeedHandoffRegistry
+
+        store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'handoff-retry.db'}")
+        await store.initialize()
+        registry = SeedHandoffRegistry()
+        handoff_id = registry.register(
+            session_id="orch_handoff_retry",
+            seed_content="goal: retry safely\n",
+        )
+        snapshot = MagicMock(job_id="job_handoff_retry", cursor=0)
+        snapshot.status.value = "queued"
+        launch = AsyncMock(side_effect=[RuntimeError("not accepted"), snapshot])
+        handler = StartEvaluateHandler(
+            evaluate_handler=fake_inner_handler,
+            event_store=store,
+            job_manager=JobManager(store, durable_jobs=True),
+            seed_handoff_registry=registry,
+        )
+        arguments = {
+            "session_id": "orch_handoff_retry",
+            "artifact": "partial artifact",
+            "seed_handoff_id": handoff_id,
+            "auto_evolve": True,
+        }
+
+        try:
+            with patch("ouroboros.mcp.tools.background.launch_detached_job", new=launch):
+                with pytest.raises(RuntimeError, match="not accepted"):
+                    await handler.handle(arguments)
+                assert registry.resolve(handoff_id, session_id="orch_handoff_retry") is not None
+                result = await handler.handle(arguments)
+
+            assert result.is_ok
+            assert registry.resolve(handoff_id, session_id="orch_handoff_retry") is None
+        finally:
+            await store.close()
+
+    @pytest.mark.asyncio
+    async def test_pending_detached_acceptance_keeps_handoff_consumed(
+        self, tmp_path: Path, fake_inner_handler
+    ) -> None:
+        from ouroboros.mcp.detached_jobs import DetachedJobAcceptanceTimeout
+        from ouroboros.mcp.tools.seed_handoff import SeedHandoffRegistry
+
+        store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'handoff-pending.db'}")
+        await store.initialize()
+        registry = SeedHandoffRegistry()
+        handoff_id = registry.register(
+            session_id="orch_handoff_pending",
+            seed_content="goal: do not duplicate\n",
+        )
+        handler = StartEvaluateHandler(
+            evaluate_handler=fake_inner_handler,
+            event_store=store,
+            job_manager=JobManager(store, durable_jobs=True),
+            seed_handoff_registry=registry,
+        )
+
+        try:
+            with patch(
+                "ouroboros.mcp.tools.background.launch_detached_job",
+                new=AsyncMock(
+                    side_effect=DetachedJobAcceptanceTimeout(
+                        job_id="job_handoff_pending",
+                        worker_pid=4242,
+                        timeout_seconds=0.1,
+                    )
+                ),
+            ):
+                with pytest.raises(MCPToolError, match="acceptance is still pending") as raised:
+                    await handler.handle(
+                        {
+                            "session_id": "orch_handoff_pending",
+                            "artifact": "partial artifact",
+                            "seed_handoff_id": handoff_id,
+                            "auto_evolve": True,
+                        }
+                    )
+
+            assert raised.value.error_code == "detached_job_acceptance_pending"
+            assert registry.resolve(handoff_id, session_id="orch_handoff_pending") is None
+        finally:
+            await store.close()
+
 
 class TestRequiredArguments:
     @pytest.mark.asyncio
@@ -136,6 +225,191 @@ class TestRequiredArguments:
 
 class TestBackgroundJobPath:
     """Non-plugin runtime: a JobManager-backed job is enqueued."""
+
+    @pytest.mark.asyncio
+    async def test_preallocation_cancellation_restores_handoff_for_retry(
+        self,
+        event_store: EventStore,
+        fake_inner_handler,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Cancellation before job allocation is definitive non-acceptance."""
+        from ouroboros.mcp.tools.seed_handoff import SeedHandoffRegistry
+
+        manager = JobManager(event_store, durable_jobs=False)
+        registry = SeedHandoffRegistry()
+        handoff_id = registry.register(
+            session_id="orch_preallocation_cancel",
+            seed_content="goal: retry after definitive cancellation\n",
+        )
+        handler = StartEvaluateHandler(
+            evaluate_handler=fake_inner_handler,
+            event_store=event_store,
+            job_manager=manager,
+            seed_handoff_registry=registry,
+        )
+        arguments = {
+            "session_id": "orch_preallocation_cancel",
+            "artifact": "partial artifact",
+            "seed_handoff_id": handoff_id,
+            "auto_evolve": True,
+        }
+        allocation_started = asyncio.Event()
+        original_allocate = manager.allocate_job_id
+
+        async def block_allocation() -> str:
+            allocation_started.set()
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+        monkeypatch.setattr(manager, "allocate_job_id", block_allocation)
+        pending = asyncio.create_task(handler.handle(arguments))
+        await allocation_started.wait()
+        pending.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+
+        assert registry.resolve(handoff_id, session_id="orch_preallocation_cancel") is not None
+        assert manager._known_job_ids == set()
+        assert manager._reserved_job_ids == set()
+        assert manager._tasks == {}
+        assert manager._runner_tasks == {}
+        assert manager._monitors == {}
+        assert await event_store.query_events(aggregate_type="job") == []
+
+        monkeypatch.setattr(manager, "allocate_job_id", original_allocate)
+        retry = await handler.handle(arguments)
+
+        assert retry.is_ok
+        assert retry.value.meta["job_id"]
+        assert registry.resolve(handoff_id, session_id="orch_preallocation_cancel") is None
+        await manager.drain()
+
+    @pytest.mark.asyncio
+    async def test_local_preenqueue_cancellation_restores_handoff_for_retry(
+        self,
+        event_store: EventStore,
+        fake_inner_handler,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Cancellation before local ownership is definitive non-acceptance."""
+        from ouroboros.mcp.tools.seed_handoff import SeedHandoffRegistry
+
+        manager = JobManager(event_store, durable_jobs=False)
+        registry = SeedHandoffRegistry()
+        handoff_id = registry.register(
+            session_id="orch_local_preenqueue_cancel",
+            seed_content="goal: retry before local ownership\n",
+        )
+        handler = StartEvaluateHandler(
+            evaluate_handler=fake_inner_handler,
+            event_store=event_store,
+            job_manager=manager,
+            seed_handoff_registry=registry,
+        )
+        arguments = {
+            "session_id": "orch_local_preenqueue_cancel",
+            "artifact": "partial artifact",
+            "seed_handoff_id": handoff_id,
+            "auto_evolve": True,
+        }
+        enqueue_started = asyncio.Event()
+        original_start_job = manager.start_job
+
+        async def block_enqueue(**_kwargs):
+            enqueue_started.set()
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+        monkeypatch.setattr(manager, "start_job", block_enqueue)
+        pending = asyncio.create_task(handler.handle(arguments))
+        await enqueue_started.wait()
+        pending.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+
+        assert registry.resolve(handoff_id, session_id="orch_local_preenqueue_cancel") is not None
+        assert manager._started_job_ids == set()
+        assert manager._tasks == {}
+        assert await event_store.query_events(aggregate_type="job") == []
+
+        monkeypatch.setattr(manager, "start_job", original_start_job)
+        retry = await handler.handle(arguments)
+
+        assert retry.is_ok
+        assert registry.resolve(handoff_id, session_id="orch_local_preenqueue_cancel") is None
+        await manager.drain()
+
+    @pytest.mark.asyncio
+    async def test_local_postacceptance_cancellation_keeps_handoff_consumed(
+        self,
+        event_store: EventStore,
+        fake_inner_handler,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Cancellation after local ownership must not permit a duplicate retry."""
+        from ouroboros.mcp.tools.seed_handoff import SeedHandoffRegistry
+
+        manager = JobManager(event_store, durable_jobs=False)
+        registry = SeedHandoffRegistry()
+        handoff_id = registry.register(
+            session_id="orch_local_accepted_cancel",
+            seed_content="goal: do not retry after local ownership\n",
+        )
+        handler = StartEvaluateHandler(
+            evaluate_handler=fake_inner_handler,
+            event_store=event_store,
+            job_manager=manager,
+            seed_handoff_registry=registry,
+        )
+        arguments = {
+            "session_id": "orch_local_accepted_cancel",
+            "artifact": "partial artifact",
+            "seed_handoff_id": handoff_id,
+            "auto_evolve": True,
+        }
+        accepted = asyncio.Event()
+        work_started = asyncio.Event()
+        release_work = asyncio.Event()
+        original_start_job = manager.start_job
+
+        async def finish_after_release(_arguments):
+            work_started.set()
+            await release_work.wait()
+            return Result.ok(
+                MCPToolResult(
+                    content=(MCPContentItem(type=ContentType.TEXT, text="evaluated"),),
+                    is_error=False,
+                    meta={"final_approved": True},
+                )
+            )
+
+        fake_inner_handler.handle = AsyncMock(side_effect=finish_after_release)
+
+        async def block_after_acceptance(**kwargs):
+            await original_start_job(**kwargs)
+            accepted.set()
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+        monkeypatch.setattr(manager, "start_job", block_after_acceptance)
+        pending = asyncio.create_task(handler.handle(arguments))
+        await accepted.wait()
+        await work_started.wait()
+        job_id = next(iter(manager._started_job_ids))
+        job_task = manager._tasks[job_id]
+        pending.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+
+        assert registry.resolve(handoff_id, session_id="orch_local_accepted_cancel") is None
+        release_work.set()
+        await asyncio.wait_for(asyncio.shield(job_task), timeout=1.0)
+        assert (await manager.get_snapshot(job_id)).is_terminal
+        await manager.drain()
 
     @pytest.mark.asyncio
     async def test_returns_job_id_immediately(self, event_store, fake_inner_handler) -> None:
@@ -220,6 +494,55 @@ class TestPluginModeDispatch:
         result = await handler.handle({"session_id": "orch_xyz", "artifact": "code"})
         assert result.is_ok
         assert result.value.meta["job_id"] is None
+
+    @pytest.mark.asyncio
+    async def test_pre_envelope_cancellation_restores_handoff_for_retry(
+        self,
+        event_store: EventStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from ouroboros.mcp.tools.seed_handoff import SeedHandoffRegistry
+
+        registry = SeedHandoffRegistry()
+        handoff_id = registry.register(
+            session_id="orch_plugin_cancel",
+            seed_content="goal: retry plugin dispatch safely\n",
+        )
+        handler = StartEvaluateHandler(
+            event_store=event_store,
+            agent_runtime_backend="opencode",
+            opencode_mode="plugin",
+            seed_handoff_registry=registry,
+        )
+        arguments = {
+            "session_id": "orch_plugin_cancel",
+            "artifact": "partial artifact",
+            "seed_handoff_id": handoff_id,
+            "auto_evolve": False,
+        }
+        initialize_started = asyncio.Event()
+        original_initialize = event_store.initialize
+
+        async def blocking_initialize() -> None:
+            initialize_started.set()
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(event_store, "initialize", blocking_initialize)
+        dispatch = asyncio.create_task(handler.handle(arguments))
+        await initialize_started.wait()
+        dispatch.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await dispatch
+
+        assert registry.resolve(handoff_id, session_id="orch_plugin_cancel") is not None
+
+        monkeypatch.setattr(event_store, "initialize", original_initialize)
+        retry = await handler.handle(arguments)
+
+        assert retry.is_ok
+        assert retry.value.meta["status"] == "delegated_to_plugin"
+        assert registry.resolve(handoff_id, session_id="orch_plugin_cancel") is None
 
     @pytest.mark.asyncio
     async def test_status_delegated_to_plugin(self, handler) -> None:

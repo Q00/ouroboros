@@ -721,6 +721,13 @@ class TestOrchestratorRunner:
         _allow_mocked_precreated_durable_state(runner)
         return runner
 
+    async def test_close_adapter_awaits_runtime_lifecycle(self, runner) -> None:
+        runner._adapter.aclose = AsyncMock()
+
+        await runner._close_adapter()
+
+        runner._adapter.aclose.assert_awaited_once()
+
     def test_param_degradation_notice_surfaces_for_serial_runner(
         self,
         mock_adapter: MagicMock,
@@ -1922,6 +1929,7 @@ class TestOrchestratorRunner:
             mock_console,
             enable_decomposition=False,
         )
+        mock_adapter.aclose = AsyncMock()
         tracker = SessionTracker.create(
             "execution-external-resume",
             seed.metadata.seed_id,
@@ -1979,6 +1987,7 @@ class TestOrchestratorRunner:
 
         assert result.is_ok
         assert parallel_resume.await_args.kwargs["externally_satisfied_acs"] == external
+        mock_adapter.aclose.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_direct_bounded_paused_route_actually_resumes_same_provider_handle(
@@ -7499,6 +7508,7 @@ class TestOrchestratorRunner:
             mock_console,
             fat_harness_mode=True,
         )
+        mock_adapter.aclose = AsyncMock()
         tracker = SessionTracker.create("exec_parallel", sample_seed.metadata.seed_id)
         dependency_graph = DependencyGraph(
             nodes=(ACNode(index=0, content=sample_seed.acceptance_criteria[0]),),
@@ -7554,6 +7564,7 @@ class TestOrchestratorRunner:
 
         assert result.is_ok
         assert captured_init["fat_harness_mode"] is True
+        mock_adapter.aclose.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_fat_harness_uses_profile_backed_prompt_contract(
@@ -7570,6 +7581,7 @@ class TestOrchestratorRunner:
             mock_console,
             fat_harness_mode=True,
         )
+        mock_adapter.aclose = AsyncMock()
         tracker = SessionTracker.create("exec_profile_prompt", sample_seed.metadata.seed_id)
         tracker = _attach_live_process_local_contract(
             runner,
@@ -7613,6 +7625,7 @@ class TestOrchestratorRunner:
         assert "tests_passed" in system_prompt
         assert "evidence record as a receipt" in system_prompt
         assert "exact successful test command" in system_prompt
+        mock_adapter.aclose.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_fat_harness_single_ac_uses_ac_executor_path(

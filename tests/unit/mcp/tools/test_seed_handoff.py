@@ -82,14 +82,18 @@ def test_restore_consumes_process_local_handoff_handle() -> None:
     handoff_id = registry.register(session_id="orch-restore", seed_content="goal: private")
     original = {"session_id": "orch-restore", "seed_handoff_id": handoff_id}
 
-    restored = restore_seed_handoff(
+    restored, redemption = restore_seed_handoff(
         original,
         session_id="orch-restore",
         registry=registry,
     )
 
     assert restored == {"session_id": "orch-restore", "seed_content": "goal: private"}
+    assert redemption.handoff_id == handoff_id
     assert original["seed_handoff_id"] == handoff_id
+    assert registry.resolve(handoff_id, session_id="orch-restore") is None
+    with pytest.raises(ValueError, match="unknown or does not belong"):
+        restore_seed_handoff(original, session_id="orch-restore", registry=registry)
 
 
 def test_disabled_auto_evolve_snapshot_survives_enabled_config_on_reentry() -> None:

@@ -1750,14 +1750,14 @@ def create_ouroboros_server(
     # project root, so _safe_cwd() falls back to $HOME.
     effective_cwd = _safe_cwd()
 
-    # Materialize the default runtime once at server creation so backend wiring
-    # is validated up front and composition-root tests can assert the selected
-    # runtime backend without waiting for a tool invocation.
+    # Materialize the default runtime once so composition validates backend wiring.
     default_execute_runtime = runtime_adapter
-    if (
-        default_execute_runtime is None
-        or default_execute_runtime.runtime_backend != execute_runtime_backend
-    ):
+    runtime_adapter_backend = (
+        resolve_agent_runtime_backend(default_execute_runtime.runtime_backend)
+        if default_execute_runtime is not None
+        else None
+    )
+    if default_execute_runtime is None or runtime_adapter_backend != execute_runtime_backend:
         default_execute_runtime = create_agent_runtime(
             backend=execute_runtime_backend,
             model=None,

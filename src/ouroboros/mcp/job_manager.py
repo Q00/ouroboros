@@ -2367,6 +2367,10 @@ class JobManager:
             )
         )
 
+    def has_accepted_job(self, job_id: str) -> bool:
+        """Return whether this manager crossed the local enqueue boundary."""
+        return job_id in self._started_job_ids
+
     async def cancel_job(self, job_id: str) -> JobSnapshot:
         """Request cancellation for a running job."""
         snapshot = await self.get_snapshot(job_id)
