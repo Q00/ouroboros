@@ -2562,3 +2562,48 @@ def test_although_and_though_end_content_clauses(goal: str) -> None:
     result = derive_domain_from_ledger(ledger)
     assert result.is_single
     assert result.single is TaskClass.CLI
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
+        "Build a CLI, not a browser dashboard",
+        "Build a CLI, not a web app because of accessibility constraints",
+    ],
+)
+def test_denied_ui_product_heads_and_reason_clauses_dominate(goal: str) -> None:
+    """R36 probe: the denied artifact head is parsed independently of
+    trailing reason clauses, and supported UI product heads (dashboard)
+    count as artifact denials."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value="Login page and settings panel shown in the browser")
+    _seed_section(ledger, "runtime_context", value="Local shell / terminal")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.CLI
+
+
+@pytest.mark.parametrize(
+    ("goal", "outputs", "runtime"),
+    [
+        (
+            "Build a desktop settings tool",
+            "Settings panel interoperates with web apps",
+            "Native desktop runtime",
+        ),
+        (
+            "Build a sync CLI",
+            "Config summary compatible with web apps, printed to stdout",
+            "Local shell / terminal",
+        ),
+    ],
+)
+def test_output_side_consumer_relations_are_not_browser_context(goal, outputs, runtime) -> None:
+    """R36 probe: outputs/runtime browser evidence routes through the same
+    relationship-aware ownership rules — interop/compatibility targets are
+    consumers, not the produced artifact."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value=outputs)
+    _seed_section(ledger, "runtime_context", value=runtime)
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes

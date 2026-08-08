@@ -234,9 +234,17 @@ _ARTIFACT_HEAD_NOUNS = frozenset(
         "sites",
         "website",
         "websites",
+        "dashboard",
+        "dashboards",
+        "console",
+        "consoles",
+        "portal",
+        "portals",
     }
 )
-_DENIED_PP_TAIL_RE = re.compile(r"\b(?:for|about)\b.*$")
+# Reason/purpose tails do not change what is denied (#1813 R36): "not a
+# web app because of accessibility constraints" denies the web app.
+_DENIED_PP_TAIL_RE = re.compile(r"\b(?:for|about|because|since|due\s+to|owing\s+to)\b.*$")
 _DENIED_PIECE_SPLIT_RE = re.compile(r"\s*(?:,|/|\bor\b|\band\b|\bnor\b)\s*")
 
 
@@ -840,7 +848,11 @@ def _ledger_has_browser_context(ledger: SeedDraftLedger) -> bool:
     # Token- and negation-aware (#1813 R23): "Non-browser desktop runtime"
     # and "No browser; local desktop runtime" are denials, not evidence.
     # The goal signal fragment already names every browser-context form.
-    context_text = _strip_negated_signals(outputs + " " + runtime, _WEB_APP_GOAL_SIGNAL_FRAGMENT)
+    # Relationship-aware like every other ownership surface (#1813 R36):
+    # interop/compatibility targets in outputs are consumers of the
+    # artifact, not evidence that it IS a browser product.
+    context_text = _RELATIONAL_TARGET_RE.sub(" ", outputs + " " + runtime)
+    context_text = _strip_negated_signals(context_text, _WEB_APP_GOAL_SIGNAL_FRAGMENT)
     return bool(_WEB_APP_GOAL_SIGNAL_RE.search(context_text)) or (
         _goal_has_unnegated_web_app_signal(_goal_text(ledger))
     )
