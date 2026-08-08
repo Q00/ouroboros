@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from statistics import median
 import time
 
 import pytest
@@ -1156,11 +1157,40 @@ def test_picker_bounds_selected_workflow_progress_history(tmp_path, monkeypatch)
     finally:
         conn.close()
 
-    statements: list[str] = []
-    vm_steps = 0
-    decode_calls = 0
     original_connect = reader_module._connect_readonly
     original_decode = reader_module._decode_payload
+
+    # Warm filesystem and SQLite page caches before measuring the picker itself.
+    warmup_runs = list_recent_executions(db, limit=1)
+    assert [(run["status"], run["completed_count"]) for run in warmup_runs] == [("completed", 1)]
+
+    decode_calls = 0
+
+    def counted_decode(payload):
+        nonlocal decode_calls
+        decode_calls += 1
+        return original_decode(payload)
+
+    monkeypatch.setattr(reader_module, "_decode_payload", counted_decode)
+    cpu_samples: list[float] = []
+    wall_samples: list[float] = []
+    decode_samples: list[int] = []
+    runs = []
+    for _ in range(3):
+        decode_calls = 0
+        wall_started = time.perf_counter()
+        cpu_started = time.process_time()
+        runs = list_recent_executions(db, limit=1)
+        cpu_samples.append(time.process_time() - cpu_started)
+        wall_samples.append(time.perf_counter() - wall_started)
+        decode_samples.append(decode_calls)
+
+    # Count SQLite VM work separately. A Python callback on every opcode is
+    # intentionally excluded from the elapsed-time budget: under xdist+coverage
+    # that instrumentation measures scheduler/tracer overhead, not picker cost.
+    monkeypatch.setattr(reader_module, "_decode_payload", original_decode)
+    statements: list[str] = []
+    vm_steps = 0
 
     def traced_connect(db_path):
         traced = original_connect(db_path)
@@ -1174,16 +1204,8 @@ def test_picker_bounds_selected_workflow_progress_history(tmp_path, monkeypatch)
         traced.set_progress_handler(count_step, 1)
         return traced
 
-    def counted_decode(payload):
-        nonlocal decode_calls
-        decode_calls += 1
-        return original_decode(payload)
-
     monkeypatch.setattr(reader_module, "_connect_readonly", traced_connect)
-    monkeypatch.setattr(reader_module, "_decode_payload", counted_decode)
-    started = time.perf_counter()
-    runs = list_recent_executions(db, limit=1)
-    elapsed = time.perf_counter() - started
+    instrumented_runs = list_recent_executions(db, limit=1)
 
     workflow_queries = [
         statement
@@ -1198,11 +1220,38 @@ def test_picker_bounds_selected_workflow_progress_history(tmp_path, monkeypatch)
     finally:
         conn.close()
 
+    # Negative control: the removed direct-history shape really does perform
+    # work proportional to all 100k selected rows and would violate the bounded
+    # VM-step gate. Sample every 1,000 opcodes to avoid perturbing wall timing.
+    unbounded_progress_callbacks = 0
+
+    def count_unbounded_steps():
+        nonlocal unbounded_progress_callbacks
+        unbounded_progress_callbacks += 1
+        return 0
+
+    conn = sqlite3.connect(db)
+    try:
+        conn.set_progress_handler(count_unbounded_steps, 1_000)
+        unbounded_rows = conn.execute(
+            "SELECT rowid, aggregate_id, event_type, payload FROM events "
+            "WHERE aggregate_id = ? AND event_type = ?",
+            ("exec_target", "workflow.progress.updated"),
+        ).fetchall()
+    finally:
+        conn.close()
+
     assert [(run["status"], run["completed_count"]) for run in runs] == [("completed", 1)]
+    assert [(run["status"], run["completed_count"]) for run in instrumented_runs] == [
+        ("completed", 1)
+    ]
     assert runs[0]["last_row"] == 100_001
-    assert elapsed < 0.5
+    assert median(cpu_samples) < 0.5
+    assert max(wall_samples) < 5.0
     assert vm_steps < 5_000
-    assert decode_calls <= 4
+    assert len(unbounded_rows) == 100_000
+    assert unbounded_progress_callbacks >= 100
+    assert max(decode_samples) <= 4
     assert len(workflow_queries) == 6
     assert all("TEMP B-TREE" not in str(row[3]) for plan in plans for row in plan)
     used_indexes = {str(row[3]) for plan in plans for row in plan}
