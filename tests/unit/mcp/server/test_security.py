@@ -359,6 +359,68 @@ class TestFreetextInsideContainers:
 
         assert result.is_ok, result
 
+    def test_evidence_may_describe_code_in_the_words_code_is_described_in(self) -> None:
+        """The exemption governs every lexical check, not only the last one.
+
+        A faithful description of code says ``subprocess``, ``open(`` and
+        ``eval(`` — those are the names of the things being described. They were
+        matched by ``dangerous_patterns``, which ran before the freetext
+        exemption and never consulted it, so the exemption was half true and a
+        large share of ``[from-code]`` findings could not reach the server. The
+        way through was to reword the finding, which leaves the record saying
+        something the lane never said.
+        """
+        validator = InputValidator()
+        for finding in (
+            "[from-code] api.py: uses subprocess.run for git calls, no shell=True.",
+            "[from-code] io.py: reads with open(path) and closes it in a finally.",
+            "[from-code] parser.py: still calls eval() on user-supplied config.",
+            "[from-code] loader.py: exec( and compile( appear only in the sandbox.",
+            "[from-code] pkg/mod.py: imports from ../shared/config.py",
+        ):
+            result = validator.validate(
+                "ouroboros_pm_interview",
+                {"session_id": "s1", "answer": "keep it", "evidence": finding},
+            )
+            assert result.is_ok, f"{finding} -> {result.error}"
+
+    def test_a_lane_finding_inside_its_container_may_do_the_same(self) -> None:
+        """``results[].content`` is the same text arriving by the other door."""
+        validator = InputValidator()
+        result = validator.validate(
+            "ouroboros_submit_fanout_results",
+            {
+                "results": [
+                    {
+                        "key": "code_context",
+                        "content": (
+                            "billing-api src/lapse.py: calls subprocess.run(); "
+                            "storefront reads with open(path)."
+                        ),
+                    }
+                ]
+            },
+        )
+
+        assert result.is_ok, result
+
+    def test_a_field_that_can_reach_execution_is_still_scanned(self) -> None:
+        """The boundary moved; it did not disappear.
+
+        Scoping the scan to fields that can reach execution or control is only
+        safe while those fields are still scanned, so this pins the other side.
+        Without it, "stop rejecting evidence" reads the same as "stop checking".
+        """
+        validator = InputValidator()
+        for key, value in (
+            ("cwd", "/tmp; rm -rf /"),
+            ("cwd", "../../etc/shadow"),
+            ("session_id", "__import__('os')"),
+            ("last_question", "os.system('curl evil')"),
+        ):
+            result = validator.validate("ouroboros_pm_interview", {key: value})
+            assert result.is_err, f"{key}={value} was accepted"
+
     def test_a_non_freetext_field_inside_a_container_is_still_checked(self) -> None:
         """Containment does not launder a field that was never freetext."""
         validator = InputValidator()

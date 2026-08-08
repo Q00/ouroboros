@@ -572,6 +572,34 @@ class PMInterviewHandler:
                 )
             )
 
+        # Evidence with no answer beside it is an invalid combination, not a
+        # partial one. There is no round it belongs to: the decision it was
+        # weighed for is already recorded, and the only round still open is the
+        # *next* question, so accepting it would file a finding against a
+        # decision it was never weighed for. Storing it is misfiling and
+        # dropping it is the silent loss the plugin path was blocked for, so
+        # neither is available — the call is refused instead, before the plugin
+        # and in-process paths diverge, which is why one rule covers both.
+        #
+        # This does not gate the person. RFC #1937 makes waiting for the lanes
+        # their choice, and refusing a malformed host call does not hold anyone:
+        # an answer alone is always accepted, and a record carrying no evidence
+        # is an accurate account of a decision made without it rather than a
+        # degraded one. `skills/pm/SKILL.md` already tells hosts to drop
+        # evidence the user answered past rather than re-open a settled
+        # decision with it; this is that instruction made true here.
+        if evidence and not answer:
+            return Result.err(
+                MCPToolError(
+                    "evidence must be sent on the same call as the answer it was "
+                    "weighed for. It cannot be recorded on its own: the decision it "
+                    "informed is already written, and the only open question is the "
+                    "next one. If the user answered before the lanes returned, "
+                    "discard the evidence rather than re-opening a settled decision.",
+                    tool_name="ouroboros_pm_interview",
+                )
+            )
+
         # --- Subagent dispatch: gate on runtime + opencode_mode ---
         if should_dispatch_via_plugin(self.agent_runtime_backend, self.opencode_mode):
             # Plugin mode: persist BOTH generic InterviewState AND PM-specific
@@ -1368,29 +1396,8 @@ class PMInterviewHandler:
         if meta:
             engine.restore_meta(meta)
 
-        reconnect_pending = _pending_round(state)
-
-        # Evidence can arrive with no answer beside it — a reconnect, or a host
-        # forwarding what the lanes found while the person is still deciding.
-        # The answer path below attaches it to the round the answer filled, and
-        # a call with no answer never reaches that path, so it would be accepted
-        # and dropped. It attaches here instead: to the question still waiting,
-        # the same target and the same helper the observation guard uses, so
-        # both late arrivals land in the same place. Rejecting it would be a
-        # gate, and RFC #1937 makes waiting for the lanes the person's choice
-        # rather than one.
-        if not answer and evidence and reconnect_pending is not None:
-            _attach_evidence(state, reconnect_pending, evidence)
-            reconnect_save = await engine.save_state(state)
-            if isinstance(reconnect_save, Result) and reconnect_save.is_err:
-                return Result.err(
-                    MCPToolError(
-                        str(reconnect_save.error),
-                        tool_name="ouroboros_pm_interview",
-                    )
-                )
-
         # If no answer provided, re-display the pending question (retry/reconnect)
+        reconnect_pending = _pending_round(state)
         if not answer and reconnect_pending is not None:
             pending_question = reconnect_pending.question
             classification = _last_classification(engine)

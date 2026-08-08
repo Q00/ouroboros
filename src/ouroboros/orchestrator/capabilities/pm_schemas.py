@@ -104,6 +104,35 @@ def _pm_repo_id_property(description: str) -> dict[str, Any]:
     return {"type": "string", "pattern": _PM_REPO_ID_PATTERN, "description": description}
 
 
+#: A path inside a repository, as one or more ``/``-separated segments where no
+#: segment is ``.`` or ``..``.
+#:
+#: This says in the contract what the field's description used to say in prose,
+#: and the difference is not stylistic. ``repo_id`` is closed against the roster,
+#: so a citation's repository can be checked from the value alone; ``path`` was
+#: left open, so ``/etc/passwd``, ``C:\src\x.cs``, ``\\server\share\x`` and
+#: ``../../etc/shadow`` were all accepted and rendered to the PM underneath an
+#: in-roster ``repo_id``.
+#:
+#: The harm is the evidence contract's own purpose. An absolute path names the
+#: machine the lane ran on -- a CI checkout at ``/home/runner/work/...`` -- and
+#: the PM looking for it in their own clone finds nothing, so the field built to
+#: let them check the evidence is what stops them. A traversal is worse than
+#: unusable: it points outside the repository while being filed as that
+#: repository's file.
+#:
+#: The three rejected shapes fall out of the same requirement rather than being
+#: enumerated as a blocklist: a leading ``/`` and a leading ``\`` cannot start a
+#: segment, a drive letter is refused at the front, and ``.``/``..`` are refused
+#: as whole segments wherever they appear. Control characters are excluded so a
+#: newline cannot smuggle a second line into a rendered citation.
+_PM_EVIDENCE_PATH_PATTERN = (
+    r"^(?![A-Za-z]:)"
+    r"(?:(?!\.\.?(?:/|$))[^/\\\x00-\x1f]+)"
+    r"(?:/(?:(?!\.\.?(?:/|$))[^/\\\x00-\x1f]+))*$"
+)
+
+
 def _pm_policy_evidence_schema() -> dict[str, Any]:
     """Return the schema for one piece of code-policy evidence.
 
@@ -132,10 +161,14 @@ def _pm_policy_evidence_schema() -> dict[str, Any]:
                 "type": "string",
                 "minLength": 1,
                 "maxLength": 512,
+                "pattern": _PM_EVIDENCE_PATH_PATTERN,
                 "description": (
                     "Path within that repository, relative to its root. Relative "
                     "because an absolute path names the machine the lane ran on, "
-                    "which is not what the PM is being asked to check."
+                    "which is not what the PM is being asked to check. Enforced "
+                    "here rather than asked for: absolute paths, Windows drive "
+                    "and UNC paths, and any '.' or '..' segment are rejected at "
+                    "re-entry."
                 ),
             },
             "policy_claim": {
