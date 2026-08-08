@@ -816,6 +816,32 @@ class TestPMInterviewHandlerSubagentDispatch:
             ("When does the slot reopen?", "[from-data] 12,480 cancellations")
         ]
 
+    async def test_plugin_path_refuses_evidence_without_an_answer(
+        self, handler, monkeypatch
+    ) -> None:
+        """One rule covers both runtimes because it runs before they diverge.
+
+        The refusal lives in argument validation, ahead of the plugin/in-process
+        split, so there is no per-runtime branch to forget. Nothing is persisted
+        and no child is dispatched.
+        """
+        saved: list[InterviewState] = []
+
+        async def _capture_save(state_dir: Path, state: InterviewState) -> Result[Path, str]:
+            saved.append(state)
+            return await _noop_save(state_dir, state)
+
+        import ouroboros.mcp.tools.authoring_handlers as ah
+
+        monkeypatch.setattr(ah, "_plugin_save_state", _capture_save)
+
+        result = await handler.handle(
+            {"session_id": "sess-ev", "evidence": "[from-code] billing-api: period end"}
+        )
+
+        assert result.is_err
+        assert saved == []
+
     async def test_context_preserves_selected_repos(self, handler) -> None:
         result = await handler.handle(
             {

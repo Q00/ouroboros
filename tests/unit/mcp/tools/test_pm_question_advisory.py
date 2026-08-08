@@ -591,24 +591,44 @@ def test_evidence_reaches_question_generation_but_not_requirement_extraction() -
 
 
 @pytest.mark.asyncio
-async def test_evidence_without_an_answer_attaches_to_the_pending_question(
-    tmp_path: Path,
-) -> None:
-    """A call carrying only evidence must not be accepted and dropped.
+async def test_evidence_without_an_answer_is_refused(tmp_path: Path) -> None:
+    """There is no round evidence alone could belong to, so the call is refused.
 
-    Splitting ``evidence`` out of ``answer`` left one blind spot: with no answer
-    beside it the reconnect branch returns before the attach, so the value
-    vanished while the call still reported ``ok``. That is the same class the
-    plugin path was blocked for — advertised, accepted, discarded.
+    The decision it was weighed for is already recorded, and the only open round
+    is the *next* question — so storing it files a finding against a decision it
+    was never weighed for, and dropping it is the silent loss the plugin path was
+    blocked for. Neither is available, so the combination is invalid input.
+
+    This is not a gate on the person: an answer alone is always accepted, and
+    `skills/pm/SKILL.md` already tells hosts to discard evidence the user
+    answered past rather than re-open a settled decision with it.
+    """
+    from ouroboros.mcp.tools.pm_handler import PMInterviewHandler
+
+    handler = PMInterviewHandler(data_dir=tmp_path, agent_runtime_backend="claude")
+
+    result = await handler.handle(
+        {"session_id": "pm-late", "evidence": "[from-code] billing-api: period end"}
+    )
+
+    assert result.is_err
+    assert "same call as the answer" in str(result.error)
+
+
+@pytest.mark.asyncio
+async def test_a_reconnect_carrying_no_evidence_is_still_allowed(tmp_path: Path) -> None:
+    """The refusal is about the combination, not about a missing answer.
+
+    ``answer`` is optional: a bare reconnect re-shows the pending question and
+    must keep working, or the refusal above would have closed a normal path.
     """
     from ouroboros.bigbang.interview import InterviewRound, InterviewState
     from ouroboros.core.types import Result as CoreResult
     from ouroboros.mcp.tools.pm_handler import PMInterviewHandler
 
     handler = PMInterviewHandler(data_dir=tmp_path, agent_runtime_backend="claude")
-    state = InterviewState(interview_id="pm-late", initial_context="ctx")
-    state.rounds.append(InterviewRound(round_number=1, question="Q1", user_response="A1"))
-    state.rounds.append(InterviewRound(round_number=2, question="Q2", user_response=None))
+    state = InterviewState(interview_id="pm-rc2", initial_context="ctx")
+    state.rounds.append(InterviewRound(round_number=1, question="Q1", user_response=None))
 
     class _Engine:
         codebase_context = ""
@@ -632,21 +652,52 @@ async def test_evidence_without_an_answer_attaches_to_the_pending_question(
         def restore_meta(self, _m: Any) -> None:
             return None
 
-    result = await handler._handle_answer(
-        _Engine(),
-        "pm-late",
-        None,
-        str(tmp_path),
-        evidence="[from-code] billing-api: period end",
-    )
+    result = await handler._handle_answer(_Engine(), "pm-rc2", None, str(tmp_path))
 
     assert result.is_ok
-    # It landed on the question still waiting — the one it was weighed for.
-    assert state.rounds[1].evidence == "[from-code] billing-api: period end"
-    assert state.rounds[0].evidence is None
-    # No round was added, and that question is still the one being asked.
-    assert len(state.rounds) == 2
-    assert result.value.meta["question"] == "Q2"
+    assert result.value.meta["question"] == "Q1"
+
+
+def test_a_citation_path_that_is_not_repository_relative_is_rejected() -> None:
+    """The description asked for a relative path; the contract now requires one.
+
+    ``repo_id`` was closed against the roster while ``path`` was left to prose,
+    so a citation could name the machine the lane ran on — a CI checkout — or
+    escape the repository entirely, and still render to the PM under an
+    in-roster identifier. The field exists so the person can go and check the
+    evidence, and each of these is a path they cannot check.
+    """
+    from jsonschema import Draft202012Validator
+
+    from ouroboros.orchestrator.capabilities.pm_schemas import _pm_policy_evidence_schema
+
+    schema = _pm_policy_evidence_schema()
+    Draft202012Validator.check_schema(schema)
+    validator = Draft202012Validator(schema)
+
+    def accepted(path: str) -> bool:
+        item = {"repo_id": "api-12345678", "path": path, "policy_claim": "access ends"}
+        return not list(validator.iter_errors(item))
+
+    # What a lane is supposed to cite, including dotfiles and a literal '..'
+    # inside a segment, which is a filename rather than a traversal.
+    assert accepted("src/billing/lapse.py")
+    assert accepted(".github/workflows/ci.yml")
+    assert accepted("src/x..y/z.py")
+
+    # Unix absolute — names the machine the lane ran on, not the PM's clone.
+    assert not accepted("/etc/passwd")
+    assert not accepted("/Users/someone/.ssh/id_rsa")
+    # Windows drive and UNC — same, for a different runner.
+    assert not accepted("C:\\src\\x.cs")
+    assert not accepted("c:/src/x.cs")
+    assert not accepted("\\\\server\\share\\x")
+    # Traversal — points outside the repository while filed as its file.
+    assert not accepted("../../../../etc/shadow")
+    assert not accepted("a/../b")
+    assert not accepted("./x")
+    # A newline would smuggle a second line into a rendered citation.
+    assert not accepted("src/x.py\nrm -rf /")
 
 
 def test_reconnect_returns_the_unanswered_question_not_a_new_one() -> None:
