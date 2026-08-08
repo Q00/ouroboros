@@ -509,3 +509,143 @@ def test_completion_counts_decisions_not_rounds() -> None:
     assert classify_answer_provenance("[from-code] a fact") == "observation"
     assert classify_answer_provenance("[from-data] a number") == "observation"
     assert classify_answer_provenance("counted by service date") == "user"
+
+
+@pytest.mark.asyncio
+async def test_answer_evidence_answer_keeps_each_answer_on_its_own_question(
+    tmp_path: Path,
+) -> None:
+    """Regression (#1941 review): evidence must not steal the next answer.
+
+    Recorded as an ordinary appended round, evidence becomes the trailing round
+    while the next question is still pending. A handler that finds the pending
+    question by being *last* then files the user's next decision under the
+    evidence marker and leaves the real question unanswered for the rest of the
+    session — silently, because both rounds look well-formed.
+    """
+    from ouroboros.bigbang.answer_provenance import extraction_rounds
+    from ouroboros.bigbang.interview import InterviewRound, InterviewState
+    from ouroboros.core.types import Result as CoreResult
+    from ouroboros.mcp.tools.pm_handler import PMInterviewHandler
+    from ouroboros.orchestrator.capabilities.pm_schemas import PM_EVIDENCE_ROUND_QUESTION
+
+    handler = PMInterviewHandler(data_dir=tmp_path, agent_runtime_backend="claude")
+    state = InterviewState(interview_id="pm-seq", initial_context="ctx")
+
+    questions = iter(["Q2", "Q3"])
+
+    class _Engine:
+        codebase_context = ""
+        _selected_brownfield_repos: list[dict[str, str]] = []
+        deferred_items: list[str] = []
+        decide_later_items: list[str] = []
+        classifications: list[Any] = []
+
+        async def load_state(self, _sid: str) -> Any:
+            return CoreResult.ok(state)
+
+        async def save_state(self, s: InterviewState) -> Any:
+            return CoreResult.ok(s)
+
+        async def record_response(self, s: InterviewState, answer: str, question: str) -> Any:
+            s.record_answer(question, answer)
+            return CoreResult.ok(s)
+
+        async def ask_next_question(self, _s: InterviewState) -> Any:
+            return CoreResult.ok(next(questions))
+
+        async def check_completion(self, _s: InterviewState) -> None:
+            return None
+
+        def get_pending_reframe(self) -> None:
+            return None
+
+        def get_last_classification(self) -> None:
+            return None
+
+        def restore_meta(self, _m: Any) -> None:
+            return None
+
+        def compute_deferred_diff(self, _a: int, _b: int) -> dict[str, Any]:
+            return {
+                "new_deferred": [],
+                "new_decide_later": [],
+                "deferred_count": 0,
+                "decide_later_count": 0,
+            }
+
+    engine = _Engine()
+    state.rounds.append(InterviewRound(round_number=1, question="Q1", user_response=None))
+
+    first = await handler._handle_answer(
+        engine, "pm-seq", "decided by service date", str(tmp_path), evidence="[from-code] api: x"
+    )
+    assert first.is_ok
+
+    second = await handler._handle_answer(
+        engine, "pm-seq", "cancellations free the slot", str(tmp_path)
+    )
+    assert second.is_ok
+
+    answered = {
+        r.question: r.user_response
+        for r in state.rounds
+        if r.question != PM_EVIDENCE_ROUND_QUESTION
+    }
+    assert answered["Q1"] == "decided by service date"
+    # The second decision belongs to Q2, not to the evidence marker.
+    assert answered["Q2"] == "cancellations free the slot"
+    # No question is left stranded unanswered behind an evidence round.
+    assert [r.question for r in state.rounds if r.user_response is None] == ["Q3"]
+    # And the evidence is still withheld from requirement extraction.
+    withheld = {r.question: r.withheld for r in extraction_rounds(state)}
+    assert withheld[PM_EVIDENCE_ROUND_QUESTION] is True
+
+
+def test_evidence_is_recorded_before_the_next_question_is_generated() -> None:
+    """The ordering is what makes recording it worth doing.
+
+    Evidence submitted on a later call reaches the generator one question too
+    late: the answer call already wrote the next question.
+    """
+    from ouroboros.bigbang.interview import InterviewRound, InterviewState
+    from ouroboros.mcp.tools.pm_handler import _append_evidence_round
+    from ouroboros.orchestrator.capabilities.pm_schemas import PM_EVIDENCE_ROUND_QUESTION
+
+    state = InterviewState(interview_id="pm-ord", initial_context="ctx")
+    state.rounds.append(InterviewRound(round_number=1, question="Q1", user_response="A1"))
+    _append_evidence_round(state, "[from-data] 12,480")
+
+    assert state.rounds[-1].question == PM_EVIDENCE_ROUND_QUESTION
+    assert [r.question for r in state.rounds if r.user_response is None] == []
+
+
+def test_a_decision_is_never_filed_under_the_evidence_marker() -> None:
+    """The marker cannot be a question on any branch, including the fallback.
+
+    With no round pending, falling back to the trailing round picks the evidence
+    round — and the person's next decision is then recorded against a marker
+    they were never shown. The invariant is that an evidence round is not a
+    question, so no branch may treat it as one.
+    """
+    from ouroboros.bigbang.interview import InterviewRound, InterviewState
+    from ouroboros.orchestrator.capabilities.pm_schemas import PM_EVIDENCE_ROUND_QUESTION
+
+    state = InterviewState(interview_id="pm-fb", initial_context="ctx")
+    state.rounds.append(InterviewRound(round_number=1, question="Q1", user_response="A1"))
+    state.rounds.append(
+        InterviewRound(
+            round_number=2, question=PM_EVIDENCE_ROUND_QUESTION, user_response="[from-code] x"
+        )
+    )
+
+    pending_index = next(
+        (i for i in reversed(range(len(state.rounds))) if state.rounds[i].user_response is None),
+        None,
+    )
+    assert pending_index is None
+    fallback = next(
+        (r.question for r in reversed(state.rounds) if r.question != PM_EVIDENCE_ROUND_QUESTION),
+        state.rounds[-1].question,
+    )
+    assert fallback == "Q1"

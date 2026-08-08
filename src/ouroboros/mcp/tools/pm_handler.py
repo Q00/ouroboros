@@ -122,6 +122,23 @@ def _refresh_plugin_repo_paths(paths: list[Any]) -> list[Any]:
     return _plugin_repo_paths(_refresh_plugin_repo_records(paths))
 
 
+def _append_evidence_round(state: InterviewState, evidence: str) -> None:
+    """Append what a decision was weighed against, answering nothing.
+
+    The round carries a fixed question text so consumers can tell it from one
+    the person was asked, and its content is an adopted fact, so requirement
+    extraction withholds it while question generation still sees it.
+    """
+    state.rounds.append(
+        InterviewRound(
+            round_number=state.current_round_number,
+            question=PM_EVIDENCE_ROUND_QUESTION,
+            user_response=evidence,
+        )
+    )
+    state.mark_updated()
+
+
 def _meta_path(session_id: str, data_dir: Path | None = None) -> Path:
     """Return the path to the pm_meta JSON file for a session."""
     base = data_dir or _DATA_DIR
@@ -452,6 +469,19 @@ class PMInterviewHandler:
                     items={"type": "string"},
                 ),
                 MCPToolParameter(
+                    name="evidence",
+                    type=ToolInputType.STRING,
+                    description=(
+                        "What the answer was weighed against — the advisory lanes' "
+                        "findings, prefixed [from-code] / [from-data]. Sent on the "
+                        "same call as the answer so it is recorded before the next "
+                        "question is generated, which is what lets it inform that "
+                        "question. It is an adopted fact, not a decision: requirement "
+                        "extraction withholds it, and it answers nothing."
+                    ),
+                    required=False,
+                ),
+                MCPToolParameter(
                     name="last_question",
                     type=ToolInputType.STRING,
                     description=(
@@ -512,6 +542,7 @@ class PMInterviewHandler:
         cwd_arg = arguments.get("cwd")
         selected_repos: list[str] | None = arguments.get("selected_repos")
         last_question = arguments.get("last_question")
+        evidence = arguments.get("evidence")
 
         # Auto-detect action from parameter presence (AC 13)
         action = _detect_action(arguments)
@@ -804,7 +835,7 @@ class PMInterviewHandler:
 
             # ── Resume with answer ─────────────────────────────────
             if action == "resume" and session_id:
-                return await self._handle_answer(engine, session_id, answer, cwd)
+                return await self._handle_answer(engine, session_id, answer, cwd, evidence=evidence)
 
             return Result.err(
                 MCPToolError(
@@ -1304,6 +1335,7 @@ class PMInterviewHandler:
         session_id: str,
         answer: str | None,
         cwd: str,
+        evidence: str | None = None,
     ) -> Result[MCPToolResult, MCPServerError]:
         """Resume session, record an answer, check completion, then ask next question.
 
@@ -1407,9 +1439,35 @@ class PMInterviewHandler:
             if classify_answer_provenance(answer) == "observation":
                 return await self._record_evidence_round(engine, state, session_id, answer, cwd)
 
-            last_question = state.rounds[-1].question
-            if state.rounds[-1].user_response is None:
-                state.rounds.pop()
+            # The pending question is found by being unanswered, not by being
+            # last. Evidence rounds are answered rounds in the same ordered
+            # stream, so a trailing-round assumption records the user's decision
+            # under the evidence marker and strands the real question unanswered
+            # for the rest of the session.
+            pending_index = next(
+                (
+                    i
+                    for i in reversed(range(len(state.rounds)))
+                    if state.rounds[i].user_response is None
+                ),
+                None,
+            )
+            if pending_index is not None:
+                last_question = state.rounds[pending_index].question
+                state.rounds.pop(pending_index)
+            else:
+                # No question is pending. Fall back to the most recent round the
+                # person was actually asked — an evidence round is not one, and
+                # letting it be the fallback files a decision under the marker,
+                # which is the defect this whole path exists to prevent.
+                last_question = next(
+                    (
+                        r.question
+                        for r in reversed(state.rounds)
+                        if r.question != PM_EVIDENCE_ROUND_QUESTION
+                    ),
+                    state.rounds[-1].question,
+                )
 
             # ── User chose to skip (decide later / defer to dev) ───
             # The main session detects classification via response_meta
@@ -1455,6 +1513,17 @@ class PMInterviewHandler:
                     )
                 state = record_result.value
                 state.clear_stored_ambiguity()
+
+        # ── What the decision was weighed against ─────────────────
+        # Recorded in the same call as the answer, and before the next question
+        # is generated. Two things fall out of that placement and neither is a
+        # rule anyone has to follow: the evidence cannot fill the question,
+        # because the answer above already did; and it reaches the generator in
+        # time to inform the question that follows, which is the entire reason
+        # it is recorded at all. Submitting it on a later call could do neither
+        # -- the next question was already written by then.
+        if evidence:
+            _append_evidence_round(state, evidence)
 
         # ── Completion check (AC 12) ─────────────────────────────
         # Completion is determined by engine ambiguity scoring.

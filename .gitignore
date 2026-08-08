@@ -138,3 +138,8 @@ docs/cli-inventory.yaml
 .ouroboros/context_pack.json
 **/.ouroboros/context_pack.json
 
+
+# PM interview artifacts and opencode plugin build output
+.ouroboros/
+src/ouroboros/opencode/plugin/node_modules/
+src/ouroboros/opencode/plugin/bun.lock

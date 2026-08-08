@@ -187,7 +187,9 @@ _EXPECTED_OUROBOROS_REQUIRED_CONTEXT_KEYS = {
     ),
     "ouroboros_lineage_status": ("lineage_id",),
     "ouroboros_measure_drift": ("session_id", "current_output", "seed_content"),
-    "ouroboros_pm_interview": ("initial_context", "cwd", "session_id"),
+    # ``evidence`` carries what a decision was weighed against, on the same call
+    # as the answer so it is recorded before the next question is generated.
+    "ouroboros_pm_interview": ("initial_context", "cwd", "session_id", "evidence"),
     "ouroboros_project_status": (),
     "ouroboros_qa": (
         "artifact",
