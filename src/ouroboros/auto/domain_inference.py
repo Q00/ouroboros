@@ -805,7 +805,10 @@ _FIRST_NP_PREFIX = (
 _BROWSER_QUALIFIED_UI_HEAD_RE = re.compile(
     _FIRST_NP_PREFIX
     + rf"(?:{_NP_MODIFIER_TOKEN}\s+){{0,4}}?"
-    + rf"(?:{_WEB_APP_GOAL_SIGNAL_FRAGMENT}|web[\s\-]based|in[\s\-]browser)"
+    # Bare "web" is a qualifier only in this bounded form — directly
+    # modifying a UI product head ("web dashboard", #1813 R60); it stays
+    # out of the general signal vocabulary.
+    + rf"(?:{_WEB_APP_GOAL_SIGNAL_FRAGMENT}|web[\s\-]based|in[\s\-]browser|web)"
     + rf"(?:[\s\-]+{_NP_MODIFIER_TOKEN}){{0,3}}?"
     + rf"(?:[\s\-]+{_NOMINAL_GERUND_FRAGMENT})?"
     + rf"[\s\-]+{_UI_PRODUCT_HEAD_FRAGMENT}[\s.!?]*$"
@@ -1106,12 +1109,23 @@ _AUDIENCE_CLAUSE_RE = re.compile(
 _WEB_SIMILARITY_MODIFIER_RE = re.compile(
     rf"\b{_WEB_APP_GOAL_SIGNAL_FRAGMENT}[\s\-]+(?:like|style|styled|esque|inspired|themed)\b"
 )
+# A browser/web token followed by a component-artifact noun is re-headed
+# by that component (#1813 R60): a "browser extension settings page" is
+# an extension surface, not a standalone browser application, so the
+# browser word carries no web-product evidence. The component noun stays
+# behind for the other matchers.
+_BROWSER_COMPONENT_RE = re.compile(
+    r"\b(?:web|browsers?)[\s\-]+"
+    r"(?=(?:extensions?|plugins?|add[\s\-]?ons?|automation|devtools?|drivers?)\b)"
+)
 
 
 def _strip_consumer_relations(text: str) -> str:
     """Remove relational consumer targets, human-audience clauses, and
-    similarity modifiers — none of them name the produced artifact."""
+    similarity/component modifiers — none of them name the produced
+    artifact."""
     text = _WEB_SIMILARITY_MODIFIER_RE.sub(" ", text)
+    text = _BROWSER_COMPONENT_RE.sub(" ", text)
     return _RELATIONAL_TARGET_RE.sub(" ", _AUDIENCE_CLAUSE_RE.sub(" ", text))
 
 

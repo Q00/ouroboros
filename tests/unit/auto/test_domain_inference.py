@@ -3538,6 +3538,46 @@ def test_panel_and_form_heads_own_the_artifact(goal: str, outputs: str) -> None:
     assert result.single is TaskClass.WEB_APP
 
 
+def test_bare_web_qualifier_owns_a_ui_head() -> None:
+    """R60 probe: "web" directly modifying a UI product head is the
+    bounded ownership form — deployment prose need not repeat
+    "browser"."""
+    ledger = _bare_ledger("Build a web dashboard")
+    _seed_section(ledger, "outputs", value="Login page with settings panel and navigation")
+    _seed_section(ledger, "runtime_context", value="Containerized service")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP
+
+
+@pytest.mark.parametrize(
+    ("goal", "outputs", "runtime"),
+    [
+        (
+            "Build a browser extension settings page",
+            "Settings panel with permission toggles",
+            "Browser extension runtime",
+        ),
+        (
+            "Build a browser plugin admin page",
+            "Role controls with an admin panel",
+            "Browser plugin host",
+        ),
+    ],
+)
+def test_component_nouns_rehead_the_browser_qualifier(
+    goal: str, outputs: str, runtime: str
+) -> None:
+    """R60 guard: extension/plugin nouns re-head the browser word — a
+    component surface is not a standalone browser application, even with
+    widget-rich outputs."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value=outputs)
+    _seed_section(ledger, "runtime_context", value=runtime)
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes
+
+
 @pytest.mark.parametrize(
     "goal",
     [
