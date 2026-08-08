@@ -1737,32 +1737,18 @@ class EventStore:
         limit: int | None = None,
         max_row_id: int | None = None,
     ) -> tuple[list[BaseEvent], int]:
-        """Get events for an aggregate after a given row ID.
+        """Incrementally fetch events for an aggregate after ``last_row_id``
+        (pass 0 for the beginning), returning ``(new events, max rowid seen)``;
+        feed the max rowid back as ``last_row_id`` on the next poll.
 
-        Incremental fetch that only returns new events since the last poll,
-        avoiding the O(n) cost of replaying the full event history.
-
-        Args:
-            aggregate_type: The type of aggregate (e.g., "execution").
-            aggregate_id: The unique identifier of the aggregate.
-            last_row_id: The SQLite rowid of the last event processed.
-                         Pass 0 to get all events from the beginning.
-            limit: Optional maximum number of events to materialize. When set,
-                   the page is ordered by ``rowid`` (the cursor dimension) and
-                   capped, so the returned ``max(rowid)`` is a true boundary and
-                   a follow-up poll resumes the remainder without skipping rows
-                   appended out of timestamp order. ``None`` keeps the unbounded
-                   timestamp-ordered fetch other callers rely on.
-            max_row_id: Optional inclusive upper bound on rowid. Lets a caller
-                   that has already chosen a global page boundary re-read exactly
-                   the rows at or before that boundary (``rowid <= max_row_id``).
-
-        Returns:
-            Tuple of (list of new events, max rowid seen).
-            The max rowid should be passed back as last_row_id on the next call.
-
-        Raises:
-            PersistenceError: If the query fails.
+        ``limit`` switches the page to rowid order (the cursor dimension) and
+        caps it, so the returned ``max(rowid)`` is a true boundary and a
+        follow-up poll resumes the remainder without skipping rows appended out
+        of timestamp order; ``None`` keeps the unbounded timestamp-ordered
+        fetch other callers rely on. ``max_row_id`` optionally bounds the page
+        inclusively so a caller can re-read exactly the rows at or before an
+        already-chosen global boundary. Raises :class:`PersistenceError` if the
+        query fails.
         """
         if self._engine is None:
             raise PersistenceError(
@@ -2164,20 +2150,11 @@ class EventStore:
         *,
         aggregate_type: str | None = None,
     ) -> list[BaseEvent]:
-        """Query events with optional filters.
+        """Query events (timestamp-descending) with optional aggregate-id,
+        event-type, and aggregate-type filters plus limit/offset pagination.
 
-        Args:
-            aggregate_id: Optional aggregate ID to filter by (e.g., session_id).
-            event_type: Optional event type to filter by.
-            limit: Maximum number of events to return.
-            offset: Number of events to skip for pagination.
-            aggregate_type: Optional aggregate family filter.
-
-        Returns:
-            List of events matching the criteria, ordered by timestamp descending.
-
-        Raises:
-            PersistenceError: If the query fails.
+        Raises :class:`PersistenceError` if the store is uninitialized or the
+        query fails.
         """
         if self._engine is None:
             raise PersistenceError(
@@ -2218,6 +2195,24 @@ class EventStore:
                     "limit": limit,
                     "offset": offset,
                 },
+            ) from e
+
+    async def count_events(self) -> int:
+        """Count all persisted events; requires :meth:`initialize` first."""
+        if self._engine is None:
+            raise PersistenceError(
+                "EventStore not initialized. Call initialize() first.",
+                operation="count_events",
+            )
+        try:
+            async with self._engine.begin() as conn:
+                result = await conn.execute(select(func.count()).select_from(events_table))
+                return int(result.scalar_one())
+        except Exception as e:
+            raise PersistenceError(
+                f"Failed to count events: {e}",
+                operation="select",
+                table="events",
             ) from e
 
     async def query_latest_events_per_aggregate(
