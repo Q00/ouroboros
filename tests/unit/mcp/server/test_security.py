@@ -339,6 +339,26 @@ class TestFreetextInsideContainers:
 
         assert result.is_ok, result
 
+    def test_pm_evidence_may_quote_source(self) -> None:
+        """``evidence`` carries what ``answer`` carried before the two split.
+
+        Lane findings quote source, and source contains ``;``. Splitting the
+        field without splitting the exemption made the move itself a rejection:
+        the payload was identical, the field name was new, and the only way
+        through would have been to reword the finding.
+        """
+        validator = InputValidator()
+        result = validator.validate(
+            "ouroboros_pm_interview",
+            {
+                "session_id": "s1",
+                "answer": "counted by service date",
+                "evidence": "[from-code] src/checkout.ts: `revokeAccess(user);`",
+            },
+        )
+
+        assert result.is_ok, result
+
     def test_a_non_freetext_field_inside_a_container_is_still_checked(self) -> None:
         """Containment does not launder a field that was never freetext."""
         validator = InputValidator()

@@ -97,8 +97,8 @@ from memory, so it is the last one to skip evidence on.
 Apply this to **every** MCP response that carries a question, including the one
 Step 2 returned and any question re-shown on resume.
 
-**Except one:** a response with `meta.evidence_recorded=true` is the
-acknowledgement from C2, not a question turn. Do not show it, do not ask
+**Except one:** a response with `meta.evidence_recorded=true` acknowledges a
+recorded observation, not a question turn. Do not show it, do not ask
 anything, and do not fan out — its `meta.pending_question` is the question
 already on screen, repeated so you can see nothing was consumed. Continue from
 where you were.
@@ -225,7 +225,10 @@ Rules for building it:
   something the record does not contain. Offer to register the repository
   instead, so the next question can be answered against it.
 
-**B. Show content + get user input** (only after A2's lanes have returned):
+**B. Show content + get user input** (once A2's lanes have returned):
+
+The question text was already shown in A2 and the user may answer it at any
+point; what waits here is your formal prompt, not the person.
 
 Print the MCP content text to the user first, with the lane findings beside it.
 
@@ -286,9 +289,10 @@ better absent than filled with something plausible, and `Reasoning` drawn from
 nothing they said is the failure this labelling exists to make visible.
 
 **No codebase-context section.** The regular interview adds one, because there
-the main session inspects code itself. Here it does not: the lanes did, and their
-findings travel separately in C2 as an adopted fact. Putting a lane's finding
-here would record it as part of the user's decision.
+the main session inspects code itself. Here it does not: the lanes did, and
+their findings ride the same call in the `evidence` field, where they are
+recorded as an adopted fact. Putting a lane's finding in this payload instead
+would record it as part of the user's decision.
 
 **Then confirm — this is the gate, and it is what licenses the structuring
 above.** One `AskUserQuestion` before sending:
@@ -314,37 +318,32 @@ Append `[refined]` only after this confirmation: an unconfirmed structure carrie
 your reading of the answer under the user's name, and the PRD cannot tell the
 difference later.
 
-**C2. Record what the answer was weighed against:**
-
-After the answer call returns, send the lane findings back as one more call —
-the same tool, with the evidence as the `answer` and an observation prefix:
+**Send the answer and what it was weighed against in one call.** `evidence`
+carries the lanes' findings, prefixed `[from-code]` / `[from-data]`:
 
 ```
 Tool: ouroboros_pm_interview
 Arguments:
   session_id: <meta.session_id>
-  <meta.response_param>: |
+  <meta.response_param>: <the refined answer, or "[decide_later]" / "[deferred]">
+  evidence: |
     [from-code] billing-api src/billing/lapse.py: access continues to period end.
     [from-code] storefront src/checkout.ts: access is revoked immediately.
     [from-data] active subscriptions by plan, last 90 days: standard 12,480 / premium 3,120.
 ```
 
-**Why this exists.** The question generator cannot read code or call tools. If
-only the decision reaches it, the next question is written against a system it
-was shown half of — most visibly when two repositories disagreed and the user
-picked one: without this call the generator never learns the other exists.
+**One call, not two.** The server records the answer, then the evidence, then
+generates the next question — so the evidence reaches the generator in time to
+inform that question, which is the only reason to record it. Sent on a later
+call it arrives after the next question was already written, and it lands in the
+round stream at the point where the pending question is, which is how a decision
+ends up filed against the evidence instead of against its question.
 
-**Why it is safe.** The prefix marks it as an adopted fact, so requirement
-extraction withholds it and the PRD records no requirement from it, while
-question generation still sees it. And the server appends it as its own round
-rather than filling the pending question — so evidence cannot become somebody's
-answer even if you call in the wrong order. The response returns
-`meta.evidence_recorded=true` and the still-unanswered question; no new question
-is generated.
-
-Send it once per question, after the user's answer. Carry the lanes' findings as
-they reported them — do not add a conclusion, and do not send a no-op lane's
-reason (there was nothing weighed). If both lanes were no-ops, skip the call.
+**What to put there.** The lanes' findings as they reported them: no conclusion
+of your own, and nothing from a no-op lane — there was nothing weighed. If both
+lanes were no-ops, omit `evidence` entirely. The server records it as an adopted
+fact, so requirement extraction withholds it and it never becomes a PRD
+requirement, and it answers no question.
 
 **D. Check completion:**
 

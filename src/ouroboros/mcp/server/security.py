@@ -454,6 +454,12 @@ class InputValidator:
         "goal",
         "initial_context",
         "answer",
+        # Lane findings quote source, and source contains ``;``. This carries
+        # what ``answer`` used to carry before the two were split, so leaving it
+        # off the list made moving the field a rejection: the only way through
+        # would have been to reword the finding, which is what this PR removed
+        # for ``results[].content`` for exactly the same reason.
+        "evidence",
         "current_approach",
         "problem_context",
         "acceptance_criterion",
