@@ -492,7 +492,7 @@ def _matches_cli(ledger: SeedDraftLedger) -> bool:
     # library and web-app vocabulary (#1813 R61): in "a CLI documentation
     # website" the produced artifact is the website, so the goal-side CLI
     # token carries no ownership when the first NP heads a UI product.
-    goal_signal = _goal_has_unnegated_cli_signal(goal_text) and not _goal_first_np_has_ui_shape(
+    goal_signal = _goal_has_unnegated_cli_signal(goal_text) and not _goal_first_np_is_ui_headed(
         _goal_text(ledger)
     )
     # Each of the three signals is independently sufficient once the
@@ -552,7 +552,7 @@ def _matches_web_service(ledger: SeedDraftLedger) -> bool:
     # in "a REST API documentation website" the API is the website's
     # subject, so a UI-headed goal contributes no service ownership —
     # outputs evidence (produced responses, endpoint lists) still owns.
-    ui_headed_goal = _goal_first_np_has_ui_shape(goal)
+    ui_headed_goal = _goal_first_np_is_ui_headed(goal)
     if not ui_headed_goal and _PRODUCED_SERVICE_RE.search(service_goal):
         return True
     # The sections are joined with a sentence boundary so the destination
@@ -1382,38 +1382,118 @@ _NP_WALK_GERUND_WORDS = _NOMINAL_GERUND_WORDS | {
     "booking",
 }
 _UI_HEAD_NOUN_RE = re.compile(rf"^{_UI_PRODUCT_HEAD_FRAGMENT}$")
+# The gate's head decision is default-allow with a NON-product denylist
+# (#1813 R63): legitimate UI product nouns need no pre-enumeration
+# ("kanban board", "survey builder", "spreadsheet", "workspace"), while
+# report/tool/component-class heads keep their own artifact identity.
+_NON_PRODUCT_HEAD_WORDS = frozenset(
+    [
+        "report",
+        "reports",
+        "documentation",
+        "doc",
+        "docs",
+        "guide",
+        "guides",
+        "manual",
+        "manuals",
+        "summary",
+        "summaries",
+        "audit",
+        "audits",
+        "benchmark",
+        "benchmarks",
+        "harness",
+        "harnesses",
+        "cli",
+        "clis",
+        "tool",
+        "tools",
+        "toolkit",
+        "toolkits",
+        "utility",
+        "utilities",
+        "generator",
+        "generators",
+        "scaffolder",
+        "scaffolders",
+        "compiler",
+        "compilers",
+        "converter",
+        "converters",
+        "crawler",
+        "crawlers",
+        "scraper",
+        "scrapers",
+        "scanner",
+        "scanners",
+        "bot",
+        "bots",
+        "script",
+        "scripts",
+        "suite",
+        "suites",
+        "pipeline",
+        "pipelines",
+        "library",
+        "libraries",
+        "sdk",
+        "sdks",
+        "package",
+        "packages",
+        "api",
+        "apis",
+        "endpoint",
+        "endpoints",
+        "service",
+        "services",
+        "server",
+        "servers",
+        "backend",
+        "backends",
+        "daemon",
+        "daemons",
+        "analysis",
+        "analyses",
+        "analyzer",
+        "analyzers",
+        "exporter",
+        "exporters",
+        "importer",
+        "importers",
+        "wrapper",
+        "wrappers",
+        "adapter",
+        "adapters",
+    ]
+)
 
 
-def _goal_first_np_has_ui_shape(goal_text: str) -> bool:
-    """Output composition corroborates ownership; it cannot create it
-    (#1813 R55). The goal's own first noun phrase must carry UI-product
-    vocabulary — a goal headed by another artifact ("a report on browser
-    pages") stays that artifact no matter how widget-rich the outputs
-    read. The walk mirrors the first-NP grammar: structural prepositions
-    and relativizers end the phrase, a second determiner opens an
-    embedded noun phrase, and participles are verbal outside the
-    nominal-gerund vocabulary.
+def _goal_first_np_head(goal_text: str) -> str | None:
+    """Walk the goal's first noun phrase and return its final head.
 
-    Ownership shape is decided by the phrase's FINAL head alone (#1813
-    R56/R57): "browser performance report" is a report and "static
-    website generator CLI" is a CLI, no matter which web words modify
-    them — the same final-head semantics as the direct grant."""
+    The walk mirrors the first-NP grammar: structural prepositions and
+    relativizers end the phrase, a second determiner opens an embedded
+    noun phrase, and participles are verbal outside phrase-initial
+    position and the nominal-gerund vocabulary. Returns ``None`` when no
+    product NP exists — a bare-verb walk ("Migrate from ..."), or a
+    qualified component compound ("browser extension settings page",
+    "Chrome plugin popup page"), whose surfaces belong to the component
+    (#1813 R61-R63)."""
     np_tokens: list[str] = []
     seen_determiner = False
     content_since_determiner = 0
-    previous_lowered = ""
     first_segment = re.split(r"[.;:!?,]", goal_text)[0]
     for token in re.findall(r"[\w'’\-]+", first_segment):
         lowered = token.lower()
-        # Component ownership is scoped to browser-component compounds
-        # (#1813 R62): "browser extension settings page" belongs to the
-        # extension, while "plugin management dashboard" merely manages
-        # plugins — the component word must directly follow the
-        # browser/web token to own.
-        if lowered in _COMPONENT_NOUN_WORDS and (
-            previous_lowered == "web" or previous_lowered.startswith("browser")
-        ):
-            return False
+        # Component ownership is positional (#1813 R62/R63): a QUALIFIED
+        # component — one with a preceding content token, whether
+        # "browser extension" or the brand-qualified "Chrome extension" —
+        # is the produced artifact and its surfaces belong to it, while a
+        # phrase-initial component is the subject of what follows
+        # ("plugin management dashboard").
+        if lowered in _COMPONENT_NOUN_WORDS and content_since_determiner > 0:
+            return None
         if lowered in _NP_CHAIN_STOP_WORDS:
             break
         if lowered in _NP_DETERMINER_WORDS:
@@ -1421,7 +1501,6 @@ def _goal_first_np_has_ui_shape(goal_text: str) -> bool:
                 break
             seen_determiner = True
             content_since_determiner = 0
-            previous_lowered = lowered
             continue
         # An unknown participle is attributive in phrase-initial position
         # ("a recruiting dashboard") and verbal once content precedes it
@@ -1436,10 +1515,29 @@ def _goal_first_np_has_ui_shape(goal_text: str) -> bool:
             break
         np_tokens.append(lowered)
         content_since_determiner += 1
-        previous_lowered = lowered
-    if not np_tokens:
-        return False
-    return bool(_UI_HEAD_NOUN_RE.match(np_tokens[-1]))
+    if not np_tokens or not seen_determiner:
+        return None
+    return np_tokens[-1]
+
+
+def _goal_first_np_has_ui_shape(goal_text: str) -> bool:
+    """Output composition corroborates ownership; it cannot create it
+    (#1813 R55). Default-allow with a non-product denylist (#1813 R63):
+    legitimate UI product nouns need no pre-enumeration ("kanban board",
+    "spreadsheet"), while report/tool/component-class heads keep their
+    own artifact identity."""
+    head = _goal_first_np_head(goal_text)
+    return head is not None and head not in _NON_PRODUCT_HEAD_WORDS
+
+
+def _goal_first_np_is_ui_headed(goal_text: str) -> bool:
+    """Affirmative UI-product head for cross-class suppression (#1813
+    R61/R63): suppressing cli/service goal evidence demands the stricter
+    claim that the phrase is HEADED by a UI product noun ("a CLI
+    documentation website"), not merely that its head is unlisted ("a
+    command line habit tracker")."""
+    head = _goal_first_np_head(goal_text)
+    return head is not None and bool(_UI_HEAD_NOUN_RE.match(head))
 
 
 _MANIPULATED_TARGET_RE = re.compile(

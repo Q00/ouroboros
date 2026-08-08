@@ -3657,6 +3657,47 @@ def test_component_subjects_do_not_veto_ui_products(goal: str) -> None:
 @pytest.mark.parametrize(
     "goal",
     [
+        "Build a browser-based kanban board",
+        "Build a web-based survey builder",
+        "Build an online spreadsheet that runs in browsers",
+        "Build an internal admin workspace that runs in browsers",
+    ],
+)
+def test_non_enumerated_product_heads_own_with_browser_evidence(goal: str) -> None:
+    """R63 probe: the shape gate is default-allow — legitimate UI product
+    nouns need no pre-enumeration; only report/tool/component-class
+    heads keep their own identity."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value="Users can drag and drop cards between columns")
+    _seed_section(ledger, "runtime_context", value="Browser")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
+        "Build a Chrome extension settings page",
+        "Build a Firefox add-on options page",
+        "Build a Safari extension configuration panel",
+        "Build a Chrome plugin popup page",
+    ],
+)
+def test_brand_qualified_components_own_their_surfaces(goal: str) -> None:
+    """R63 guard: component ownership is positional — a qualified
+    component (browser word or brand) owns its surfaces, so extension
+    and plugin pages stay outside web_app."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value="Interactive settings panel with navigation and buttons")
+    _seed_section(ledger, "runtime_context", value="Runs in browsers")
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
         "The product is an admin portal that runs in browsers",
         "The deliverable is an admin portal available in browsers",
     ],
