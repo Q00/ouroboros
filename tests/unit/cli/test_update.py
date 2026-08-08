@@ -30,6 +30,7 @@ from ouroboros.cli.commands.update import (
     _resolve_runtime,
     _upgrade_command,
     _upgrade_environment,
+    _validate_runtime_option,
     app,
 )
 from ouroboros.core.errors import ConfigError
@@ -830,6 +831,74 @@ class TestCheckFlow:
 
 class TestUpdateFlow:
     """Tests for the full update flow (dry-run — no subprocess execution)."""
+
+    @pytest.mark.parametrize("extra_args", [[], ["--dry-run"]], ids=["normal", "dry-run"])
+    def test_invalid_runtime_fails_before_any_io_or_mutation(
+        self,
+        extra_args: list[str],
+    ) -> None:
+        with (
+            patch("ouroboros.cli.commands.update._latest_pypi_version") as latest,
+            patch("ouroboros.cli.commands.update._detect_installation_identity") as detect,
+            patch("ouroboros.cli.commands.update._run_step") as step,
+            patch("ouroboros.cli.commands.update._configured_runtime_topology") as topology,
+            patch("ouroboros.cli.commands.update._refresh_runtime_config") as refresh_config,
+            patch("ouroboros.cli.commands.update._refresh_claude_plugin") as refresh_plugin,
+            patch("ouroboros.cli.commands.update.subprocess.run") as run,
+        ):
+            result = runner.invoke(
+                app,
+                ["--yes", "--runtime", "not-a-runtime", *extra_args],
+            )
+
+        assert result.exit_code == 2
+        assert "unsupported runtime 'not-a-runtime'" in _plain(result.output)
+        latest.assert_not_called()
+        detect.assert_not_called()
+        step.assert_not_called()
+        topology.assert_not_called()
+        refresh_config.assert_not_called()
+        refresh_plugin.assert_not_called()
+        run.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "runtime",
+        [
+            "auto",
+            "none",
+            "claude",
+            "codex",
+            "opencode",
+            "hermes",
+            "gemini",
+            "kiro",
+            "copilot",
+            "goose",
+            "pi",
+            "gjc",
+            "antigravity",
+            "grok",
+            "zcode",
+        ],
+    )
+    def test_runtime_validation_accepts_canonical_backends(self, runtime: str) -> None:
+        assert _validate_runtime_option(runtime) == runtime
+
+    @pytest.mark.parametrize(
+        ("runtime", "expected"),
+        [
+            (" CLAUDE_CODE ", "claude"),
+            ("CODEX_CLI", "codex"),
+            ("OpenCode_CLI", "opencode"),
+            ("hermes_cli", "hermes"),
+        ],
+    )
+    def test_runtime_validation_canonicalizes_supported_aliases(
+        self,
+        runtime: str,
+        expected: str,
+    ) -> None:
+        assert _validate_runtime_option(runtime) == expected
 
     def test_unproven_identity_exits_without_mutation(self) -> None:
         with (

@@ -528,6 +528,21 @@ def _canonical_runtime_backend(runtime: str) -> str:
     return _RUNTIME_ALIASES.get(runtime.strip().lower(), runtime.strip().lower())
 
 
+def _validate_runtime_option(runtime: str) -> str:
+    """Normalize supported runtime values before update performs any I/O."""
+    normalized = runtime.strip().lower()
+    if normalized in {"auto", "none"}:
+        return normalized
+    backend = _canonical_runtime_backend(normalized)
+    if backend not in _RUNTIME_CLI_IDENTITIES:
+        supported = ", ".join(("auto", "none", *_RUNTIME_CLI_IDENTITIES))
+        raise typer.BadParameter(
+            f"unsupported runtime {runtime!r}; choose one of: {supported}",
+            param_hint="--runtime",
+        )
+    return backend
+
+
 def _runtime_executable_identity(
     runtime: str,
     config: object | None,
@@ -699,6 +714,7 @@ def update(
             "-r",
             help="Runtime integration to refresh after upgrading "
             "(auto preserves the configured backend; none skips refresh).",
+            callback=_validate_runtime_option,
         ),
     ] = "auto",
 ) -> None:
