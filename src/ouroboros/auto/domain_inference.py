@@ -747,9 +747,13 @@ _RELATIONAL_TARGET_RE = re.compile(
     r"compatible\s+with|used\s+with|works?\s+with|interopera\w*\s+with|"
     r"paired\s+with|hosted\s+on|deployed\s+(?:on|to)|running\s+on|"
     r"served\s+(?:from|on)|published\s+(?:on|to))\s+"
+    # Coordinated consumer lists are consumed whole (#1813 R37): the web
+    # item may sit anywhere in "mobile apps and web apps".
+    r"(?:(?:an?|the|my|our|your)\s+)?(?:[\w\-'’]+(?:\s+[\w\-'’]+){0,2}?\s*(?:,|\band\b|\bor\b|/)\s*){0,3}?"
     r"(?:an?\s+|the\s+)?(?:[\w\-'’]+\s+){0,2}?"
     r"(?:web[\s\-]?app(?:lication)?s?|webapps?|websites?|web\s+uis?|frontends?|"
     r"front[\s\-]ends?|single[\s\-]page\s+app(?:lication)?s?)\b"
+    r"(?:\s*(?:,|\band\b|\bor\b|/)\s*(?:(?:an?|the|my|our|your)\s+)?[\w\-'’]+(?:\s+[\w\-'’]+){0,2}){0,3}"
 )
 
 
@@ -839,6 +843,13 @@ def _goal_has_web_only_conjunct(goal_text: str, other_evidence_re: re.Pattern[st
     )
 
 
+_POSTPOSITIVE_BROWSER_DENIAL_RE = re.compile(
+    rf"\b{_WEB_APP_GOAL_SIGNAL_FRAGMENT}(?:\s+support)?\s+(?:is\s+|are\s+)?"
+    r"(?:not\s+supported|unsupported|disabled|unavailable|dropped|excluded|"
+    r"turned\s+off|removed)\b"
+)
+
+
 def _ledger_has_browser_context(ledger: SeedDraftLedger) -> bool:
     """Affirmative browser context: standardized outputs/runtime keywords,
     or an unnegated goal-side web-app signal. Shared by the web_app
@@ -852,9 +863,13 @@ def _ledger_has_browser_context(ledger: SeedDraftLedger) -> bool:
     # interop/compatibility targets in outputs are consumers of the
     # artifact, not evidence that it IS a browser product.
     context_text = _RELATIONAL_TARGET_RE.sub(" ", outputs + " " + runtime)
+    # Postpositive denials ("the browser is not supported", "browser
+    # support disabled") negate from behind (#1813 R37).
+    context_text = _POSTPOSITIVE_BROWSER_DENIAL_RE.sub(" ", context_text)
     context_text = _strip_negated_signals(context_text, _WEB_APP_GOAL_SIGNAL_FRAGMENT)
+    goal_for_context = _RELATIONAL_TARGET_RE.sub(" ", _goal_text(ledger))
     return bool(_WEB_APP_GOAL_SIGNAL_RE.search(context_text)) or (
-        _goal_has_unnegated_web_app_signal(_goal_text(ledger))
+        _goal_has_unnegated_web_app_signal(goal_for_context)
     )
 
 
@@ -1022,6 +1037,8 @@ _CONSUMED_DEPENDENCY_RE = re.compile(
     r"create|creating|deliver|delivering)\b)"
     r"(?:an?\s+|the\s+)?(?:[\w\-'’]+\s+){0,2}?"
     r"(?:public\s+api|rest\s+apis?|apis?|sdks?|clis?|command[\s\-]line(?:\s+(?!(?:or|and|nor|but)\b)[\w\-'’]+){0,2}|web\s+services?)\b"
+    # Later coordinated items are dependencies too (#1813 R37).
+    r"(?:\s*(?:,|\band\b|\bor\b|/)\s*(?:(?:an?|the|my|our|your)\s+)?[\w\-'’]+(?:\s+[\w\-'’]+){0,2}){0,3}"
 )
 _PRENOMINAL_DEPENDENCY_CLIENT_RE = re.compile(
     r"\b(?:public\s+api|rest\s+apis?|apis?|sdks?|clis?|"

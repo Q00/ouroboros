@@ -2607,3 +2607,46 @@ def test_output_side_consumer_relations_are_not_browser_context(goal, outputs, r
     _seed_section(ledger, "runtime_context", value=runtime)
     result = derive_domain_from_ledger(ledger)
     assert TaskClass.WEB_APP not in result.classes
+
+
+@pytest.mark.parametrize(
+    "runtime",
+    [
+        "The browser is not supported; native desktop runtime",
+        "Browser support disabled; native desktop runtime",
+    ],
+)
+def test_postpositive_browser_denials_are_not_context(runtime: str) -> None:
+    """R37 probe: denials where the cue follows the browser term."""
+    ledger = _bare_ledger("Build a desktop settings tool")
+    _seed_section(ledger, "outputs", value="Settings panel for local files")
+    _seed_section(ledger, "runtime_context", value=runtime)
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes
+
+
+def test_coordinated_consumer_lists_are_fully_consumed() -> None:
+    """R37 probe: a web target later in a coordinated consumer list is
+    still a consumer."""
+    ledger = _bare_ledger("Build a desktop tool compatible with mobile apps and web apps")
+    _seed_section(ledger, "outputs", value="Settings panel for local files")
+    _seed_section(ledger, "runtime_context", value="Native desktop runtime")
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes
+
+
+def test_coordinated_supporting_list_keeps_library_single() -> None:
+    ledger = _bare_ledger("Build an SDK supporting websites, web apps, and browser UIs")
+    _seed_section(ledger, "outputs", value="An importable package with a public API")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.LIBRARY
+
+
+def test_coordinated_dependency_lists_are_fully_consumed() -> None:
+    """R37 probe: later items in a dependency list are dependencies too."""
+    ledger = _bare_ledger("Build a web app compatible with a REST API and command-line tools")
+    _seed_section(ledger, "outputs", value="Login page with settings panel and navigation")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP
