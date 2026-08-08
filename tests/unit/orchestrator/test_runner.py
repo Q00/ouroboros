@@ -8417,6 +8417,7 @@ class TestOrchestratorRunner:
         mock_event_store: AsyncMock,
         mock_console: MagicMock,
         sample_seed: Seed,
+        tmp_path: Path,
     ) -> None:
         """Delegated child runs should fork from the inherited parent runtime handle."""
         inherited_handle = RuntimeHandle(
@@ -8428,7 +8429,9 @@ class TestOrchestratorRunner:
         mock_adapter.runtime_backend = "claude"
         mock_adapter.llm_backend = "test-llm"
         mock_adapter._model = "test-model"
-        mock_adapter.working_directory = "/tmp/project"
+        project = tmp_path / "project"
+        project.mkdir()
+        mock_adapter.working_directory = str(project)
         mock_adapter.permission_mode = "acceptEdits"
         captured_kwargs: dict[str, Any] = {}
 

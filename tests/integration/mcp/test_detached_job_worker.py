@@ -10,14 +10,20 @@ import subprocess
 import sys
 import textwrap
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from ouroboros.mcp.detached_jobs import DetachedJobAcceptanceTimeout
+from ouroboros.core.types import Result
+from ouroboros.mcp.detached_jobs import (
+    DetachedJobAcceptanceTimeout,
+    DetachedJobRequest,
+    launch_detached_job,
+)
 from ouroboros.mcp.errors import MCPToolError
 from ouroboros.mcp.job_manager import JobLinks, JobManager, JobStatus
 from ouroboros.mcp.tools.background import start_background_tool_job
+from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
 from ouroboros.orchestrator.heartbeat import is_process_identity_alive
 from ouroboros.orchestrator.persisted_process_identity import (
     persisted_process_owner_alive,
@@ -78,6 +84,281 @@ async def _wait_terminal(
         if asyncio.get_running_loop().time() >= deadline:
             raise AssertionError(f"job {job_id} did not become terminal")
         await asyncio.sleep(0.05)
+
+
+def test_reaper_registration_failure_does_not_reject_spawned_worker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Once Popen succeeds, local reaper setup cannot reopen acceptance."""
+    from ouroboros.mcp import detached_jobs
+
+    process = SimpleNamespace(pid=4242, wait=lambda: 0)
+    popen = MagicMock(return_value=process)
+    monkeypatch.setattr(detached_jobs.subprocess, "Popen", popen)
+
+    def fail_reaper_start(_thread) -> None:
+        raise RuntimeError("reaper unavailable")
+
+    monkeypatch.setattr(detached_jobs.threading.Thread, "start", fail_reaper_start)
+
+    spawned = detached_jobs._spawn_worker(tmp_path / "request.json", cwd=str(tmp_path))
+
+    assert spawned is process
+    popen.assert_called_once()
+
+
+class _AcceptanceProbeManager:
+    def __init__(self, outcomes: list[object]) -> None:
+        self.outcomes = outcomes
+        self.abandoned: list[str] = []
+
+    async def get_snapshot(self, _job_id: str):
+        outcome = self.outcomes.pop(0)
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+    def abandon_reserved_job_id(self, job_id: str) -> None:
+        self.abandoned.append(job_id)
+
+
+def _detached_request(tmp_path: Path) -> DetachedJobRequest:
+    return DetachedJobRequest(
+        job_id="job_acceptance_probe",
+        tool_name="ouroboros_start_evaluate",
+        arguments={"session_id": "orch_probe", "artifact": "partial"},
+        database_url="sqlite+aiosqlite:///acceptance-probe.db",
+        cwd=str(tmp_path),
+    )
+
+
+@pytest.mark.asyncio
+async def test_live_failed_status_waits_for_fallback_created_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A live child can publish failed status before its fallback job receipt."""
+    from ouroboros.mcp import detached_jobs
+
+    snapshot = SimpleNamespace(job_id="job_acceptance_probe")
+    manager = _AcceptanceProbeManager([ValueError("not yet"), snapshot])
+    process = SimpleNamespace(pid=4242, poll=lambda: None)
+    monkeypatch.setattr(detached_jobs, "write_private_json", MagicMock())
+    monkeypatch.setattr(detached_jobs, "_spawn_worker", MagicMock(return_value=process))
+    monkeypatch.setattr(
+        detached_jobs,
+        "read_status",
+        MagicMock(return_value={"state": "failed", "error": "worker fallback pending"}),
+    )
+    monkeypatch.setattr(detached_jobs.asyncio, "sleep", AsyncMock())
+
+    accepted = await launch_detached_job(
+        job_manager=manager,  # type: ignore[arg-type]
+        event_store=SimpleNamespace(database_url=_detached_request(tmp_path).database_url),  # type: ignore[arg-type]
+        request=_detached_request(tmp_path),
+    )
+
+    assert accepted is snapshot
+    assert manager.abandoned == []
+
+
+@pytest.mark.asyncio
+async def test_dead_child_gets_final_durable_read_before_abandon(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A created commit between the initial miss and exit remains accepted."""
+    from ouroboros.mcp import detached_jobs
+
+    snapshot = SimpleNamespace(job_id="job_acceptance_probe")
+    manager = _AcceptanceProbeManager([ValueError("stale miss"), snapshot])
+    process = SimpleNamespace(pid=4242, poll=lambda: 1)
+    monkeypatch.setattr(detached_jobs, "write_private_json", MagicMock())
+    monkeypatch.setattr(detached_jobs, "_spawn_worker", MagicMock(return_value=process))
+    cleanup = MagicMock()
+    monkeypatch.setattr(detached_jobs, "cleanup_worker_artifacts", cleanup)
+
+    accepted = await launch_detached_job(
+        job_manager=manager,  # type: ignore[arg-type]
+        event_store=SimpleNamespace(database_url=_detached_request(tmp_path).database_url),  # type: ignore[arg-type]
+        request=_detached_request(tmp_path),
+    )
+
+    assert accepted is snapshot
+    assert manager.abandoned == []
+    cleanup.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_dead_child_abandons_only_after_final_durable_absence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from ouroboros.mcp import detached_jobs
+
+    manager = _AcceptanceProbeManager([ValueError("stale miss"), ValueError("final absence")])
+    process = SimpleNamespace(pid=4242, poll=lambda: 1)
+    monkeypatch.setattr(detached_jobs, "write_private_json", MagicMock())
+    monkeypatch.setattr(detached_jobs, "_spawn_worker", MagicMock(return_value=process))
+    monkeypatch.setattr(
+        detached_jobs,
+        "read_status",
+        MagicMock(return_value={"state": "failed", "error": "worker rejected"}),
+    )
+
+    with pytest.raises(RuntimeError, match="worker rejected"):
+        await launch_detached_job(
+            job_manager=manager,  # type: ignore[arg-type]
+            event_store=SimpleNamespace(  # type: ignore[arg-type]
+                database_url=_detached_request(tmp_path).database_url
+            ),
+            request=_detached_request(tmp_path),
+        )
+
+    assert manager.abandoned == ["job_acceptance_probe"]
+
+
+@pytest.mark.asyncio
+async def test_dead_child_final_read_error_remains_fail_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from ouroboros.mcp import detached_jobs
+
+    manager = _AcceptanceProbeManager(
+        [ValueError("stale miss"), RuntimeError("final receipt unreadable")]
+    )
+    process = SimpleNamespace(pid=4242, poll=lambda: 1)
+    monkeypatch.setattr(detached_jobs, "write_private_json", MagicMock())
+    monkeypatch.setattr(detached_jobs, "_spawn_worker", MagicMock(return_value=process))
+
+    with pytest.raises(RuntimeError, match="final receipt unreadable"):
+        await launch_detached_job(
+            job_manager=manager,  # type: ignore[arg-type]
+            event_store=SimpleNamespace(  # type: ignore[arg-type]
+                database_url=_detached_request(tmp_path).database_url
+            ),
+            request=_detached_request(tmp_path),
+        )
+
+    assert manager.abandoned == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failure_surface", "expected_exit_code"),
+    (("exception", 1), ("structured_error", 0)),
+)
+async def test_worker_preserves_live_job_after_postaccept_receipt_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_surface: str,
+    expected_exit_code: int,
+) -> None:
+    """Worker compensation cannot interrupt a durably accepted live owner."""
+    from ouroboros.mcp import detached_worker
+
+    request = DetachedJobRequest(
+        job_id="job_worker_postaccept_receipt",
+        tool_name="ouroboros_start_evaluate",
+        arguments={"session_id": "orch_worker_postaccept", "artifact": "partial"},
+        database_url=f"sqlite+aiosqlite:///{tmp_path / 'worker-postaccept.db'}",
+        cwd=str(tmp_path),
+    )
+    state: dict[str, object] = {"runner_calls": 0, "live_before_failure": False}
+    final: dict[str, object] = {}
+
+    class ReceiptFailureManager(JobManager):
+        fail_receipt = True
+
+        async def get_snapshot(self, job_id: str):
+            snapshot = await super().get_snapshot(job_id)
+            if self.fail_receipt and self.has_live_job_task(job_id):
+                self.fail_receipt = False
+                state["live_before_failure"] = True
+                raise RuntimeError("accepted receipt unavailable")
+            return snapshot
+
+    class AcceptedThenReceiptFailureHandler:
+        def __init__(self, manager: ReceiptFailureManager) -> None:
+            self.manager = manager
+
+        async def handle(self, _arguments):
+            job_id = await self.manager.allocate_job_id()
+            assert job_id == request.job_id
+            assert self.manager.claim_forced_inline_allocation(job_id)
+            release = asyncio.Event()
+            asyncio.get_running_loop().call_later(0.05, release.set)
+
+            async def accepted_work() -> MCPToolResult:
+                state["runner_calls"] = int(state["runner_calls"]) + 1
+                await release.wait()
+                return MCPToolResult(
+                    content=(MCPContentItem(type=ContentType.TEXT, text="evaluation completed"),),
+                    is_error=False,
+                    meta={"final_approved": True},
+                )
+
+            try:
+                await self.manager.start_job(
+                    job_type="evaluate",
+                    initial_message="Queued evaluation",
+                    runner=accepted_work(),
+                    links=JobLinks(session_id="orch_worker_postaccept"),
+                    job_id=job_id,
+                )
+            except RuntimeError as exc:
+                if failure_surface == "exception":
+                    raise
+                return Result.err(MCPToolError(str(exc), tool_name=request.tool_name))
+            raise AssertionError("accepted receipt failure was not surfaced")
+
+    class FakeServer:
+        def __init__(self, event_store: EventStore) -> None:
+            self.event_store = event_store
+            self.job_manager = ReceiptFailureManager(
+                event_store,
+                durable_jobs=True,
+                forced_inline_job_id=request.job_id,
+            )
+            self._tool_handlers = {
+                request.tool_name: AcceptedThenReceiptFailureHandler(self.job_manager)
+            }
+
+        async def shutdown(self) -> None:
+            final["snapshot"] = await self.job_manager.get_snapshot(request.job_id)
+            final["events"] = await self.event_store.replay("job", request.job_id)
+            await self.event_store.close()
+
+    server_ref: dict[str, FakeServer] = {}
+
+    def create_server(*, event_store: EventStore, **_kwargs) -> FakeServer:
+        server = FakeServer(event_store)
+        server_ref["server"] = server
+        return server
+
+    monkeypatch.setattr(detached_worker, "_load_request", MagicMock(return_value=request))
+    monkeypatch.setattr(detached_worker.os, "chdir", MagicMock())
+    monkeypatch.setattr(detached_worker, "create_ouroboros_server", create_server)
+    monkeypatch.setattr(detached_worker, "_status", MagicMock())
+    cleanup = MagicMock()
+    monkeypatch.setattr(detached_worker, "cleanup_worker_artifacts", cleanup)
+    compensate = AsyncMock(wraps=detached_worker._record_start_failure)
+    monkeypatch.setattr(detached_worker, "_record_start_failure", compensate)
+
+    exit_code = await detached_worker.run_worker(tmp_path / "request.json")
+
+    assert exit_code == expected_exit_code
+    assert state == {"runner_calls": 1, "live_before_failure": True}
+    compensate.assert_not_awaited()
+    snapshot = final["snapshot"]
+    assert snapshot.status == JobStatus.COMPLETED  # type: ignore[union-attr]
+    assert snapshot.result_text == "evaluation completed"  # type: ignore[union-attr]
+    events = final["events"]
+    assert all(event.type != "mcp.job.interrupted" for event in events)  # type: ignore[union-attr]
+    assert not server_ref["server"].job_manager.has_live_job_task(request.job_id)
+    cleanup.assert_called_once()
 
 
 @pytest.mark.asyncio
