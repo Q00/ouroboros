@@ -746,17 +746,62 @@ _UI_PRODUCT_HEAD_FRAGMENT = (
     r"(?:apps?|applications?|webapps?|uis?|interfaces?|pages?|"
     r"frontends?|sites?|websites?|dashboards?|consoles?|portals?)"
 )
+# Shared first-noun-phrase grammar (#1813 R50/R52/R55): routine intent
+# wrappers, an optional specificational copula ("the product is ..."),
+# at most two lead tokens, ONE determiner, then modifiers. A determiner
+# deeper in the chain opens an embedded noun phrase, participles are
+# verbal outside the nominal-gerund slot, and structural prepositions or
+# relativizers end the phrase.
+_NP_CHAIN_STOP_FRAGMENT = (
+    r"(?:that|which|who|to|for|of|from|with|without|via|through|by|on|in|at|"
+    r"and|or|nor|but|about|regarding|concerning)"
+)
+_QUALIFIER_WRAPPER_FRAGMENT = (
+    r"(?:(?:i|we|you|please|kindly|really|just|ideally|ultimately|"
+    r"eventually|currently|first|next|now|then|also|help|me|us|let[’']?s|"
+    r"want|wants|wanted|need|needs|needed|would|like|love|hope|hoping|"
+    r"plan|planning|aim|aiming|intend|intending|going|trying|try|wish|"
+    r"wishes|to)\s+){0,6}?"
+)
+# A specificational copula declares the produced artifact directly
+# (#1813 R55): definite subject + copula + indefinite NP ("the product
+# is an admin portal that runs in browsers").
+_COPULAR_FRAME_FRAGMENT = (
+    r"(?:the\s+(?:[\w\-]+\s+){1,2}?(?:is|are|will\s+be|would\s+be|"
+    r"should\s+be|must\s+be|shall\s+be|becomes?)\s+)?"
+)
+_NP_LEAD_FRAGMENT = rf"(?:(?!{_NP_CHAIN_STOP_FRAGMENT}\b)(?![\w'’\-]+ing\b)[\w'’\-]+\s+){{0,2}}?"
+_NP_DETERMINER_FRAGMENT = r"(?:(?:an?|the|one|this|our|my|your)\s+)?"
+_NP_MODIFIER_TOKEN = (
+    rf"(?!(?:an?|the|one|this|{_NP_CHAIN_STOP_FRAGMENT})\b)"
+    r"(?![\w'’\-]+ing\b)[\w'’\-]+"
+)
+_NOMINAL_GERUND_FRAGMENT = (
+    r"(?:billing|landing|onboarding|shopping|reporting|logging|"
+    r"messaging|streaming|banking|invoicing|pricing|staging|voting|"
+    r"polling)"
+)
+_FIRST_NP_PREFIX = (
+    r"^"
+    + _QUALIFIER_WRAPPER_FRAGMENT
+    + _COPULAR_FRAME_FRAGMENT
+    + _NP_LEAD_FRAGMENT
+    + _NP_DETERMINER_FRAGMENT
+)
 # Browser-qualified UI product heads own the artifact the way the literal
 # web-app vocabulary does (#1813 R44): in "browser-based admin portal" the
 # browser qualifier is the web signal and the UI noun is the produced
-# head. The qualifier must modify its head within one noun phrase — a
-# preposition or coordinator between them ("browser benchmark without
-# forms or pages") breaks the chain, and the head must end the goal core
-# (same finality rule as the artifact-phrase path).
+# head. The qualifier and head must live in the goal's own first noun
+# phrase (#1813 R55): a goal-final prepositional object ("a report on
+# browser pages") is a subject, not the produced artifact, so the same
+# first-NP prefix guards this rule as the postnominal one.
 _BROWSER_QUALIFIED_UI_HEAD_RE = re.compile(
-    rf"\b(?:{_WEB_APP_GOAL_SIGNAL_FRAGMENT}|web[\s\-]based|in[\s\-]browser)"
-    r"(?:[\s\-]+(?!(?:and|or|nor|but|without|with|for|about|that|which|not|no)\b)[\w'’]+){0,3}?"
-    rf"[\s\-]+{_UI_PRODUCT_HEAD_FRAGMENT}[\s.!?]*$"
+    _FIRST_NP_PREFIX
+    + rf"(?:{_NP_MODIFIER_TOKEN}\s+){{0,4}}?"
+    + rf"(?:{_WEB_APP_GOAL_SIGNAL_FRAGMENT}|web[\s\-]based|in[\s\-]browser)"
+    + rf"(?:[\s\-]+{_NP_MODIFIER_TOKEN}){{0,3}}?"
+    + rf"(?:[\s\-]+{_NOMINAL_GERUND_FRAGMENT})?"
+    + rf"[\s\-]+{_UI_PRODUCT_HEAD_FRAGMENT}[\s.!?]*$"
 )
 # Ownership is word-order independent (#1813 R45): a postnominal
 # runtime/availability qualifier ("an admin portal for the browser",
@@ -812,31 +857,18 @@ _POSTNOMINAL_BROWSER_QUALIFIER_RE = re.compile(
     # before the head, where nominal gerunds are ordinary product
     # vocabulary ("billing dashboard", "landing page") but relational and
     # subject-matter stems keep their verbal reading.
-    # Routine intent wrappers precede the imperative ("I want to build",
-    # "we need to create") without changing what is produced (#1813 R52).
-    r"^(?:(?:i|we|you|please|kindly|really|just|ideally|ultimately|"
-    r"eventually|currently|first|next|now|then|also|help|me|us|let[’']?s|"
-    r"want|wants|wanted|need|needs|needed|would|like|love|hope|hoping|"
-    r"plan|planning|aim|aiming|intend|intending|going|trying|try|wish|"
-    r"wishes|to)\s+){0,6}?"
-    r"(?:(?!(?:that|which|who|to|for|of|from|with|without|via|through|by|on|in|at|"
-    r"and|or|nor|but|about|regarding|concerning)\b)(?![\w'’\-]+ing\b)[\w'’\-]+\s+){0,2}?"
-    r"(?:(?:an?|the|one|this|our|my|your)\s+)?"
-    r"(?:(?!(?:an?|the|one|this|that|which|who|to|for|of|from|with|without|via|"
-    r"through|by|on|in|at|and|or|nor|but|about|regarding|concerning)\b)"
-    r"(?![\w'’\-]+ing\b)[\w'’\-]+\s+){0,6}?"
+    _FIRST_NP_PREFIX
+    + rf"(?:{_NP_MODIFIER_TOKEN}\s+){{0,6}}?"
     # The attributive slot admits only nominal gerunds — established
     # compound-noun product vocabulary (#1813 R51). An unknown participle
     # is verbal by default ("a report evaluating dashboards"), so
     # subject and relationship verbs block without enumeration.
-    r"(?:(?:billing|landing|onboarding|shopping|reporting|logging|"
-    r"messaging|streaming|banking|invoicing|pricing|staging|voting|"
-    r"polling)\s+)?"
-    rf"{_UI_PRODUCT_HEAD_FRAGMENT}"
+    + rf"(?:{_NOMINAL_GERUND_FRAGMENT}\s+)?"
+    + _UI_PRODUCT_HEAD_FRAGMENT
     # A comma may introduce a dependent qualifier ("an admin portal,
     # accessible in the browser") — a coordinator after it is real
     # coordination and stays outside the phrase (#1813 R47).
-    r"(?:\s*,\s+(?!(?:and|or|nor|but|plus|alongside|not|no)\b)|\s+)"
+    + r"(?:\s*,\s+(?!(?:and|or|nor|but|plus|alongside|not|no)\b)|\s+)"
     r"(?:(?:that|which)\s+)?"
     rf"(?:{_POSTNOMINAL_PREDICATE_TOKEN}\s+){{0,4}}?"
     # Routine infinitival and "for use in" qualifiers declare the same
@@ -1150,6 +1182,83 @@ def _goal_has_browser_ui_product_head(goal_text: str) -> bool:
     return _goal_has_unnegated_web_app_signal(core)
 
 
+_NP_CHAIN_STOP_WORDS = frozenset(
+    [
+        "that",
+        "which",
+        "who",
+        "to",
+        "for",
+        "of",
+        "from",
+        "with",
+        "without",
+        "via",
+        "through",
+        "by",
+        "on",
+        "in",
+        "at",
+        "and",
+        "or",
+        "nor",
+        "but",
+        "about",
+        "regarding",
+        "concerning",
+    ]
+)
+_NP_DETERMINER_WORDS = frozenset(["a", "an", "the", "one", "this", "our", "my", "your"])
+_NOMINAL_GERUND_WORDS = frozenset(
+    [
+        "billing",
+        "landing",
+        "onboarding",
+        "shopping",
+        "reporting",
+        "logging",
+        "messaging",
+        "streaming",
+        "banking",
+        "invoicing",
+        "pricing",
+        "staging",
+        "voting",
+        "polling",
+    ]
+)
+_UI_SHAPE_VOCAB_RE = re.compile(
+    rf"\b(?:{_UI_PRODUCT_HEAD_FRAGMENT}|{_WEB_APP_GOAL_SIGNAL_FRAGMENT}|"
+    r"web[\s\-]based|in[\s\-]browser)\b"
+)
+
+
+def _goal_first_np_has_ui_shape(goal_text: str) -> bool:
+    """Output composition corroborates ownership; it cannot create it
+    (#1813 R55). The goal's own first noun phrase must carry UI-product
+    vocabulary — a goal headed by another artifact ("a report on browser
+    pages") stays that artifact no matter how widget-rich the outputs
+    read. The walk mirrors the first-NP grammar: structural prepositions
+    and relativizers end the phrase, a second determiner opens an
+    embedded noun phrase, and participles are verbal outside the
+    nominal-gerund vocabulary."""
+    np_tokens: list[str] = []
+    seen_determiner = False
+    for token in re.findall(r"[\w'’\-]+", goal_text):
+        lowered = token.lower()
+        if lowered in _NP_CHAIN_STOP_WORDS:
+            break
+        if lowered in _NP_DETERMINER_WORDS:
+            if seen_determiner:
+                break
+            seen_determiner = True
+            continue
+        if lowered.endswith("ing") and lowered not in _NOMINAL_GERUND_WORDS:
+            break
+        np_tokens.append(lowered)
+    return bool(_UI_SHAPE_VOCAB_RE.search(" ".join(np_tokens)))
+
+
 _MANIPULATED_TARGET_RE = re.compile(
     r"\b(?:opens?|opening|submits?|submitting|clicks?|clicking|fills?|filling|"
     r"screenshots?|captures?|capturing|crawls?|crawling|scrapes?|scraping|"
@@ -1242,6 +1351,12 @@ def _matches_web_app(ledger: SeedDraftLedger) -> bool:
         _goal_has_browser_ui_product_head(_goal_text(ledger))
     ):
         return False
+    # Positive UI-product ownership precedes output composition (#1813
+    # R55): the goal's first noun phrase must carry UI vocabulary before
+    # widget-rich outputs may corroborate — "a report on browser pages"
+    # keeps its report identity regardless of output wording.
+    if not _goal_first_np_has_ui_shape(_goal_text(ledger)):
+        return False
     ui_text = _strip_negated_signals(outputs, _UI_SIGNAL_STRIP_FRAGMENT)
     ui_text = _MANIPULATED_TARGET_RE.sub(" ", ui_text)
     return _ledger_has_browser_context(ledger) and bool(_UI_COMPOSITION_RE.search(ui_text))
@@ -1292,8 +1407,15 @@ _DESTINATION_CONTEXT_RE = re.compile(
     r"wanted|need|needs|needed|would|like|to|going|plan|planning|aim|"
     r"aiming|intend|intending|hope|hoping|trying|try)\s+){0,6}?"
     rf"(?!{_PRODUCTION_VERB_FRAGMENT}\b)[a-z][\w\-]*\s+"
-    r"(?=(?:[\w\-'’]+\s+){0,5}?(?:the|this|that|these|those|our|my|your|"
-    r"its|it|them|from|existing|legacy|old|current|original)\b)"
+    # The object must be age/source-marked or anaphoric (#1813 R55):
+    # transformation references something that already exists ("the
+    # existing script", "from a legacy script", "it"), while transfers
+    # take plainly definite or indefinite objects ("the credentials",
+    # "a request") and keep their dependency reading. Bare definiteness
+    # on either side decides nothing — "to the CLI described in the
+    # requirements" is still a produced destination.
+    r"(?=(?:[\w\-'’]+\s+){0,5}?(?:it|them|from|existing|legacy|old|"
+    r"current|original|outdated|deprecated|previous|former)\b)"
     r"(?:[\w\-'’]+\s+){0,6}$"
 )
 
@@ -1303,12 +1425,6 @@ def _strip_consumed_dependencies(text: str) -> str:
 
     def _spare_destinations(match: re.Match[str]) -> str:
         if re.match(r"to\s", match.group(0)) is None:
-            return " "
-        # A transformation destination is a NEW artifact and takes an
-        # indefinite introduction ("to a CLI"); a definite destination
-        # ("submit the credentials to the public API") names an existing
-        # endpoint being addressed, which is a transfer (#1813 R54).
-        if re.match(r"to\s+(?:the|our|my|your|its|his|her|their)\b", match.group(0)):
             return " "
         segment = re.split(r"[.;:!?]", text[: match.start()])[-1]
         if _DESTINATION_CONTEXT_RE.match(segment):

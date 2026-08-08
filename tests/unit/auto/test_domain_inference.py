@@ -3386,3 +3386,69 @@ def test_definite_destinations_are_transfers_not_transformations(
     _seed_section(ledger, "runtime_context", value="Runs on developer machines")
     result = derive_domain_from_ledger(ledger)
     assert excluded not in result.classes
+
+
+def test_report_artifacts_cannot_gain_ownership_from_outputs() -> None:
+    """R55 guard: output composition corroborates ownership but cannot
+    create it — a goal whose first noun phrase is a report keeps its
+    report identity regardless of widget-rich output wording."""
+    ledger = _bare_ledger("Build a report on browser pages")
+    _seed_section(ledger, "outputs", value="Login page vulnerabilities and settings panel risks")
+    _seed_section(ledger, "runtime_context", value="Local batch job")
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
+        "The product is an admin portal that runs in browsers",
+        "The deliverable is an admin portal available in browsers",
+    ],
+)
+def test_copular_product_declarations_own_the_artifact(goal: str) -> None:
+    """R55 probe: a specificational copula — definite subject, copula,
+    indefinite NP — declares the produced artifact directly."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value="Role management and account administration")
+    _seed_section(ledger, "runtime_context", value="Browser")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP
+
+
+@pytest.mark.parametrize(
+    ("goal", "outputs", "runtime", "expected"),
+    [
+        (
+            "Migrate the existing script to the CLI described in the requirements",
+            "Converted workflows with progress logs",
+            "Runs on developer machines",
+            TaskClass.CLI,
+        ),
+        (
+            "Convert the legacy tool to the command-line application requested above",
+            "Converted workflows with progress logs",
+            "Runs on developer machines",
+            TaskClass.CLI,
+        ),
+        (
+            "Promote the old endpoint to the REST API specified in the contract",
+            "JSON responses with status codes",
+            "Containerized HTTP service",
+            TaskClass.WEB_SERVICE,
+        ),
+    ],
+)
+def test_definite_produced_destinations_keep_ownership(
+    goal: str, outputs: str, runtime: str, expected: TaskClass
+) -> None:
+    """R55 probe: definiteness decides nothing by itself — a
+    transformation context keeps its produced destination even when the
+    destination is introduced with "the"."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value=outputs)
+    _seed_section(ledger, "runtime_context", value=runtime)
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is expected
