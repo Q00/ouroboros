@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING, Any
 import anyio
 
 from ouroboros.core.filesystem_capability import (
+    DirectoryChainFingerprint,
     NoFollowDirectoryChain,
     nofollow_directory_capabilities_available,
     open_nofollow_directory_chain,
@@ -88,6 +89,7 @@ class _PendingBashTarget:
     reported_path: str
     workspace_relative_path: str
     pre_fingerprint: tuple[int, int, int, int, int, int] | None
+    workspace_fingerprint: DirectoryChainFingerprint
 
     @property
     def parent_fd(self) -> int | None:
@@ -104,29 +106,42 @@ def _pending_bash_filesystem_targets(
     message: AgentMessage,
     *,
     task_cwd: str | None,
+    workspace_chain: NoFollowDirectoryChain | None = None,
 ) -> tuple[_PendingBashTarget, ...]:
     """Lease Bash receiver parents and capture pre-execution file identity."""
     if message.tool_name != "Bash" or _runtime_message_is_tool_completion(message):
         return ()
     effective_cwd = _runtime_message_effective_cwd(message, task_cwd=task_cwd)
-    if effective_cwd is None:
+    if effective_cwd is None or task_cwd is None:
         return ()
+    owned_workspace_chain: NoFollowDirectoryChain | None = None
+    if workspace_chain is None:
+        try:
+            owned_workspace_chain = open_nofollow_directory_chain(Path(os.path.abspath(task_cwd)))
+        except (OSError, RuntimeError, ValueError):
+            return ()
+        workspace_chain = owned_workspace_chain
     targets: list[_PendingBashTarget] = []
-    for command in _runtime_message_command_values(message):
-        for target in _shell_command_mutation_targets(command):
-            pending = _lease_bash_target(
-                target,
-                task_cwd=task_cwd,
-                effective_cwd=effective_cwd,
-            )
-            if pending is not None:
-                targets.append(pending)
-                if len(targets) > _MAX_BASH_FILESYSTEM_EFFECTS or len(
-                    {item.workspace_relative_path for item in targets}
-                ) != len(targets):
-                    _close_pending_targets(tuple(targets))
-                    return ()
-    return tuple(targets)
+    try:
+        for command in _runtime_message_command_values(message):
+            for target in _shell_command_mutation_targets(command):
+                pending = _lease_bash_target(
+                    target,
+                    task_cwd=task_cwd,
+                    effective_cwd=effective_cwd,
+                    workspace_chain=workspace_chain,
+                )
+                if pending is not None:
+                    targets.append(pending)
+                    if len(targets) > _MAX_BASH_FILESYSTEM_EFFECTS or len(
+                        {item.workspace_relative_path for item in targets}
+                    ) != len(targets):
+                        _close_pending_targets(tuple(targets))
+                        return ()
+        return tuple(targets)
+    finally:
+        if owned_workspace_chain is not None:
+            owned_workspace_chain.close()
 
 
 def _lease_bash_target(
@@ -134,6 +149,7 @@ def _lease_bash_target(
     *,
     task_cwd: str,
     effective_cwd: str,
+    workspace_chain: NoFollowDirectoryChain,
 ) -> _PendingBashTarget | None:
     """Open a no-follow dirfd chain that survives path-component replacement."""
     directory_chain: NoFollowDirectoryChain | None = None
@@ -154,6 +170,9 @@ def _lease_bash_target(
             workspace,
             relative_components=relative.parts[:-1],
         )
+        if not workspace_chain.matches_opened_prefix(directory_chain):
+            return None
+        workspace_fingerprint = workspace_chain.fingerprint()
         parent_fd = directory_chain.leaf_fd
         try:
             pre = os.stat(relative.name, dir_fd=parent_fd, follow_symlinks=False)
@@ -167,6 +186,7 @@ def _lease_bash_target(
             reported_path=target,
             workspace_relative_path=relative.as_posix(),
             pre_fingerprint=pre_fingerprint,
+            workspace_fingerprint=workspace_fingerprint,
         )
         directory_chain = None
         return pending
@@ -228,6 +248,15 @@ def _attach_bash_filesystem_effects(
                     "capture": "ouroboros.leaf-dispatch.v1",
                     "path": target.reported_path,
                     "workspace_relative_path": target.workspace_relative_path,
+                    "workspace_chain": [
+                        {
+                            "name": name,
+                            "st_dev": device,
+                            "st_ino": inode,
+                            "st_mode": mode,
+                        }
+                        for name, device, inode, mode in target.workspace_fingerprint
+                    ],
                     "st_dev": identity.st_dev,
                     "st_ino": identity.st_ino,
                     "st_mode": identity.st_mode,
@@ -322,18 +351,35 @@ class _BashFilesystemLeaseTracker:
 
     def __init__(self, *, task_cwd: str | None) -> None:
         self._task_cwd = task_cwd
+        self._workspace_chain: NoFollowDirectoryChain | None = None
         self._pending_by_id: dict[str, tuple[_PendingBashTarget, ...]] = {}
         self._seen_call_ids: set[str] = set()
         self._pending_bash_call_ids: set[str] = set()
         self._idless: tuple[_PendingBashTarget, ...] | None = None
         self._idless_active = False
         self._idless_bash_active = False
+        self._idless_tool_name: str | None = None
 
     def __enter__(self) -> _BashFilesystemLeaseTracker:
+        if self._task_cwd is not None and self._workspace_chain is None:
+            try:
+                self._workspace_chain = open_nofollow_directory_chain(
+                    Path(os.path.abspath(self._task_cwd))
+                )
+            except (OSError, RuntimeError, ValueError):
+                self._workspace_chain = None
         return self
 
     def __exit__(self, *_exc_info: object) -> None:
         self.close()
+
+    def _poison_pending_named_bash_leases(self) -> None:
+        """Close every active named Bash lease without making it reusable."""
+        for pending_id in tuple(self._pending_bash_call_ids):
+            _close_pending_targets(self._pending_by_id.pop(pending_id, ()))
+            self._seen_call_ids.add(pending_id)
+            self._pending_by_id[pending_id] = ()
+        self._pending_bash_call_ids.clear()
 
     def observe(self, message: AgentMessage) -> AgentMessage:
         """Lease calls, attach completion effects, and reject ambiguous pairing."""
@@ -357,22 +403,23 @@ class _BashFilesystemLeaseTracker:
                     or message_tool_name(message) == "Bash"
                 )
                 if is_bash_candidate:
-                    for pending_id in tuple(self._pending_bash_call_ids):
-                        _close_pending_targets(self._pending_by_id.pop(pending_id, ()))
-                        self._seen_call_ids.add(pending_id)
-                        self._pending_by_id[pending_id] = ()
-                    self._pending_bash_call_ids.clear()
+                    self._poison_pending_named_bash_leases()
                     _close_pending_targets(self._idless or ())
                     self._idless = ()
                     self._idless_active = True
                     self._idless_bash_active = False
+                    self._idless_tool_name = None
             return message
         call_id = _runtime_message_tool_call_id(message)
         tool_name = message_tool_name(message)
         if tool_name is not None and not _runtime_message_is_tool_completion(message):
             targets = (
-                _pending_bash_filesystem_targets(message, task_cwd=self._task_cwd)
-                if tool_name == "Bash"
+                _pending_bash_filesystem_targets(
+                    message,
+                    task_cwd=self._task_cwd,
+                    workspace_chain=self._workspace_chain,
+                )
+                if tool_name == "Bash" and self._workspace_chain is not None
                 else ()
             )
             if call_id is not None:
@@ -390,11 +437,13 @@ class _BashFilesystemLeaseTracker:
                 self._idless_active = True
                 self._idless = targets
                 self._idless_bash_active = tool_name == "Bash"
+                self._idless_tool_name = tool_name
             else:
                 _close_pending_targets(self._idless or ())
                 _close_pending_targets(targets)
                 self._idless = ()
                 self._idless_bash_active = False
+                self._idless_tool_name = None
             return message
         if not _runtime_message_is_tool_completion(message):
             return message
@@ -402,11 +451,28 @@ class _BashFilesystemLeaseTracker:
             targets = self._pending_by_id.pop(call_id, ())
             self._pending_bash_call_ids.discard(call_id)
         else:
+            unique_idless_tool = self._idless_tool_name if self._idless_active else None
+            normalized_completion_tool = (
+                tool_name.strip() if isinstance(tool_name, str) and tool_name.strip() else None
+            )
+            orphan_bash_completion = normalized_completion_tool == "Bash" or (
+                normalized_completion_tool is None and unique_idless_tool is None
+            )
+            if orphan_bash_completion and unique_idless_tool != "Bash":
+                # A terminal that cannot be assigned to one active id-less Bash
+                # call could belong to any concurrent named Bash call.  It
+                # closes every such authority boundary; a later matching ID
+                # must not extend or revive one of their receiver leases.
+                self._poison_pending_named_bash_leases()
             targets = self._idless or ()
             self._idless = None
             self._idless_active = False
             self._idless_bash_active = False
-        if tool_name not in {None, "Bash"}:
+            self._idless_tool_name = None
+        normalized_tool_name = (
+            tool_name.strip() if isinstance(tool_name, str) and tool_name.strip() else None
+        )
+        if normalized_tool_name not in {None, "Bash"}:
             _close_pending_targets(targets)
             return message
         return _attach_bash_filesystem_effects(message, targets) if targets else message
@@ -423,6 +489,10 @@ class _BashFilesystemLeaseTracker:
             self._idless = None
         self._idless_active = False
         self._idless_bash_active = False
+        self._idless_tool_name = None
+        if self._workspace_chain is not None:
+            self._workspace_chain.close()
+            self._workspace_chain = None
 
 
 def _correlated_tool_result_name(

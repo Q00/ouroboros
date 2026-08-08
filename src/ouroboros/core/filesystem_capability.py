@@ -6,6 +6,8 @@ from dataclasses import dataclass
 import os
 from pathlib import Path
 
+DirectoryChainFingerprint = tuple[tuple[str, int, int, int], ...]
+
 
 def _directory_identity(value: os.stat_result) -> tuple[int, int, int]:
     return (value.st_dev, value.st_ino, value.st_mode)
@@ -54,6 +56,37 @@ class NoFollowDirectoryChain:
             )
         except (OSError, RuntimeError, ValueError):
             return False
+
+    def matches_opened_prefix(self, other: NoFollowDirectoryChain) -> bool:
+        """Check that this chain is the identical held prefix of another walk."""
+        prefix_length = len(self._directory_fds)
+        if self._component_names != other._component_names[
+            : len(self._component_names)
+        ] or prefix_length > len(other._directory_fds):
+            return False
+        try:
+            return all(
+                _directory_identity(os.fstat(left_fd)) == _directory_identity(os.fstat(right_fd))
+                for left_fd, right_fd in zip(
+                    self._directory_fds,
+                    other._directory_fds[:prefix_length],
+                    strict=True,
+                )
+            )
+        except (OSError, RuntimeError, ValueError):
+            return False
+
+    def fingerprint(self) -> DirectoryChainFingerprint:
+        """Snapshot component names and opened identities for durable replay."""
+        if len(self._directory_fds) != len(self._component_names) + 1:
+            msg = "no-follow directory chain is closed or malformed"
+            raise OSError(msg)
+        names = (os.sep, *self._component_names)
+        return tuple(
+            (name, identity.st_dev, identity.st_ino, identity.st_mode)
+            for name, directory_fd in zip(names, self._directory_fds, strict=True)
+            for identity in (os.fstat(directory_fd),)
+        )
 
     def postvalidate(self) -> bool:
         """Confirm every held child is still named by its held parent."""

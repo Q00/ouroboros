@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 import inspect
 import os
@@ -16,6 +17,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from ouroboros.core.filesystem_capability import open_nofollow_directory_chain
 from ouroboros.events.base import BaseEvent
 import ouroboros.harness.deliver_gate as deliver_gate_module
 from ouroboros.harness.deliver_gate import load_ac_evidence_manifest
@@ -63,12 +65,28 @@ class _EventStore:
         return self.events
 
 
+def _workspace_chain_payload(workspace: Path) -> list[dict[str, int | str]]:
+    workspace_chain = open_nofollow_directory_chain(workspace)
+    try:
+        workspace_fingerprint = workspace_chain.fingerprint()
+    finally:
+        workspace_chain.close()
+    return [
+        {"name": name, "st_dev": device, "st_ino": inode, "st_mode": mode}
+        for name, device, inode, mode in workspace_fingerprint
+    ]
+
+
 def _effect(path: Path, *, relative_path: str) -> dict[str, object]:
     current = path.lstat()
+    workspace = path
+    for _part in Path(relative_path).parts:
+        workspace = workspace.parent
     return {
         "capture": "ouroboros.leaf-dispatch.v1",
         "path": relative_path,
         "workspace_relative_path": relative_path,
+        "workspace_chain": _workspace_chain_payload(workspace),
         "st_dev": current.st_dev,
         "st_ino": current.st_ino,
         "st_mode": current.st_mode,
@@ -205,6 +223,7 @@ async def _run_production_artifact_route(
     *,
     call_id: str,
     completion_data: dict[str, Any],
+    before_verify: Callable[[], None] | None = None,
 ):
     class StubRuntime:
         runtime_backend = "opencode"
@@ -262,6 +281,8 @@ async def _run_production_artifact_route(
     tool_completion = next(
         event for event in store.events if event.type == "execution.tool.completed"
     )
+    if before_verify is not None:
+        before_verify()
     manifest, fact = await _artifact_fact(
         store.events,
         task_cwd=tmp_path,
@@ -289,6 +310,7 @@ async def test_accepted_command_artifact_flows_from_journal_to_verifier(tmp_path
     assert provenance["command_call_id"] == "accepted"
     assert provenance["retry_attempt"] == 1
     assert provenance["session_attempt_id"] == "ac_1_attempt_2"
+    assert provenance["workspace_chain"][0]["name"] == os.sep
     assert fact.evidence_handle == manifest.entries[0].handle
 
 
@@ -372,37 +394,33 @@ async def test_production_capture_persists_through_journal_to_verifier(tmp_path:
 @pytest.mark.asyncio
 async def test_production_route_rejects_intermediate_task_cwd_ancestor_swap(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The real dispatch-to-journal route rejects a pre-linked ancestor escape."""
+    """The real route rejects ordinary ancestor replacement before Bash start."""
     ancestor = tmp_path / "trusted-ancestor"
     workspace = ancestor / "workspace"
     workspace.mkdir(parents=True)
     artifact = workspace / "claimed.txt"
     artifact.write_text("before", encoding="utf-8")
     displaced_ancestor = tmp_path / "displaced-ancestor"
-    outside_ancestor = tmp_path / "outside-ancestor"
-    outside_workspace = outside_ancestor / workspace.name
-    outside_workspace.mkdir(parents=True)
-    outside_artifact = outside_workspace / artifact.name
-    os.link(artifact, outside_artifact)
+    replacement_ancestor = tmp_path / "replacement-ancestor"
+    replacement_workspace = replacement_ancestor / workspace.name
+    replacement_workspace.mkdir(parents=True)
+    replacement_artifact = replacement_workspace / artifact.name
+    os.link(artifact, replacement_artifact)
     expected_before_swap = _effect(artifact, relative_path=artifact.name)
-    assert expected_before_swap == _effect(outside_artifact, relative_path=artifact.name)
-    original_open = os.open
+    leaf_identity_keys = (
+        "st_dev",
+        "st_ino",
+        "st_mode",
+        "st_size",
+        "st_mtime_ns",
+        "st_ctime_ns",
+    )
+    replacement_before_swap = _effect(replacement_artifact, relative_path=artifact.name)
+    assert tuple(expected_before_swap[key] for key in leaf_identity_keys) == tuple(
+        replacement_before_swap[key] for key in leaf_identity_keys
+    )
     swapped = False
-
-    def adversarial_open(path, flags, mode=0o777, *, dir_fd=None):
-        nonlocal swapped
-        fd = original_open(path, flags, mode, dir_fd=dir_fd)
-        if not swapped and dir_fd is not None and os.fspath(path) == ancestor.name:
-            assert expected_before_swap == _effect(artifact, relative_path=artifact.name)
-            ancestor.rename(displaced_ancestor)
-            ancestor.symlink_to(outside_ancestor, target_is_directory=True)
-            swapped = True
-        return fd
-
-    monkeypatch.setattr(os, "open", adversarial_open)
-    monkeypatch.setattr(os, "supports_dir_fd", {*os.supports_dir_fd, adversarial_open})
 
     class StubRuntime:
         runtime_backend = "opencode"
@@ -410,6 +428,18 @@ async def test_production_route_rejects_intermediate_task_cwd_ancestor_swap(
         working_directory = str(workspace)
 
         async def execute_task(self, **_kwargs: Any):
+            nonlocal swapped
+            assert expected_before_swap == _effect(artifact, relative_path=artifact.name)
+            ancestor.rename(displaced_ancestor)
+            replacement_ancestor.rename(ancestor)
+            swapped = True
+            replacement_after_swap = _effect(
+                workspace / artifact.name,
+                relative_path=artifact.name,
+            )
+            assert tuple(expected_before_swap[key] for key in leaf_identity_keys) == tuple(
+                replacement_after_swap[key] for key in leaf_identity_keys
+            )
             yield AgentMessage(
                 type="assistant",
                 content="write artifact",
@@ -471,11 +501,49 @@ async def test_production_route_rejects_intermediate_task_cwd_ancestor_swap(
         session_attempt_id=str(tool_start.data["session_attempt_id"]),
     )
 
-    assert result.success is False
+    assert result.success is True
     assert swapped is True
-    assert _effect(outside_artifact, relative_path=artifact.name) != expected_before_swap
+    assert _effect(workspace / artifact.name, relative_path=artifact.name) != expected_before_swap
     assert "filesystem_effects" not in tool_completion.data
     assert all("command_artifacts" not in entry.payload for entry in manifest.entries)
+    assert fact.evidence_handle == "missing:files_touched:0"
+
+
+@pytest.mark.asyncio
+async def test_production_route_rejects_post_capture_ordinary_ancestor_replacement(
+    tmp_path: Path,
+) -> None:
+    """Durable workspace identity rejects namespace replacement before replay."""
+    ancestor = tmp_path / "selected-ancestor"
+    workspace = ancestor / "workspace"
+    workspace.mkdir(parents=True)
+    artifact = workspace / "claimed.txt"
+    artifact.write_text("before", encoding="utf-8")
+    displaced_ancestor = tmp_path / "displaced-ancestor"
+    replacement_ancestor = tmp_path / "replacement-ancestor"
+    replacement_workspace = replacement_ancestor / workspace.name
+    replacement_workspace.mkdir(parents=True)
+    replacement_artifact = replacement_workspace / artifact.name
+    os.link(artifact, replacement_artifact)
+    swapped = False
+
+    def replace_before_verify() -> None:
+        nonlocal swapped
+        ancestor.rename(displaced_ancestor)
+        replacement_ancestor.rename(ancestor)
+        swapped = True
+
+    tool_completion, manifest, fact = await _run_production_artifact_route(
+        workspace,
+        call_id="post-capture-ancestor-replacement",
+        completion_data={"tool_result": {"is_error": False, "meta": {"exit_status": 0}}},
+        before_verify=replace_before_verify,
+    )
+
+    assert swapped is True
+    assert len(tool_completion.data["filesystem_effects"]) == 1
+    assert manifest.entries[0].payload.get("command_artifacts") is not None
+    assert artifact.read_text(encoding="utf-8") == "accepted"
     assert fact.evidence_handle == "missing:files_touched:0"
 
 
@@ -738,6 +806,93 @@ async def test_production_malformed_alias_cannot_launder_local_effect(tmp_path: 
 
 
 @pytest.mark.asyncio
+async def test_orphan_idless_terminal_blocks_late_named_capture_end_to_end(
+    tmp_path: Path,
+) -> None:
+    """A terminal without an id closes the named command before a late mutation."""
+    artifact = tmp_path / "claimed.txt"
+    artifact.write_text("before", encoding="utf-8")
+
+    class StubRuntime:
+        runtime_backend = "opencode"
+        permission_mode = "acceptEdits"
+        working_directory = str(tmp_path)
+
+        async def execute_task(self, **_kwargs: Any):
+            yield AgentMessage(
+                type="assistant",
+                content="start named command",
+                tool_name="Bash",
+                data={
+                    "tool_call_id": "named-command",
+                    "tool_input": {"command": "printf accepted > claimed.txt"},
+                },
+            )
+            yield AgentMessage(
+                type="tool_result",
+                content="unassigned Bash completion",
+                tool_name="Bash",
+                data={
+                    "subtype": "tool_result",
+                    "tool_result": {"is_error": False, "meta": {"exit_status": 0}},
+                },
+            )
+            artifact.write_text("late mutation", encoding="utf-8")
+            yield AgentMessage(
+                type="tool_result",
+                content="late matching completion",
+                tool_name="Bash",
+                data={
+                    "subtype": "tool_result",
+                    "tool_call_id": "named-command",
+                    "tool_result": {"is_error": False, "meta": {"exit_status": 0}},
+                },
+            )
+            yield AgentMessage(
+                type="result", content="[TASK_COMPLETE]", data={"subtype": "success"}
+            )
+
+    store = _EventStore([])
+    executor = ParallelACExecutor(
+        adapter=StubRuntime(),
+        event_store=store,
+        console=MagicMock(),
+        enable_decomposition=False,
+        task_cwd=str(tmp_path),
+        run_verify_commands=False,
+    )
+    await executor._execute_atomic_ac(
+        ac_index=0,
+        ac_content="Create claimed.txt",
+        session_id="sess_1",
+        execution_id="exec_1",
+        tools=["Bash"],
+        system_prompt="test",
+        seed_goal="test provenance",
+        depth=0,
+        start_time=datetime.now(UTC),
+        retry_attempt=1,
+        node_identity=ExecutionNodeIdentity.root(execution_context_id="exec_1", ac_index=0),
+    )
+    tool_start = next(event for event in store.events if event.type == "execution.tool.started")
+    completions = [event for event in store.events if event.type == "execution.tool.completed"]
+    manifest, fact = await _artifact_fact(
+        store.events,
+        task_cwd=tmp_path,
+        ac_id=str(tool_start.data["ac_id"]),
+        session_attempt_id=str(tool_start.data["session_attempt_id"]),
+    )
+
+    assert len(completions) == 2
+    assert "tool_call_id" not in completions[0].data
+    assert completions[0].data["tool_name"] == "Bash"
+    assert completions[1].data["tool_call_id"] == "named-command"
+    assert "filesystem_effects" not in completions[1].data
+    assert all("command_artifacts" not in entry.payload for entry in manifest.entries)
+    assert fact.evidence_handle == "missing:files_touched:0"
+
+
+@pytest.mark.asyncio
 async def test_leaf_dispatcher_stream_strips_forged_completion_effect(tmp_path: Path) -> None:
     artifact = tmp_path / "claimed.txt"
     artifact.write_text("stale", encoding="utf-8")
@@ -958,6 +1113,36 @@ async def test_cross_session_artifact_is_rejected(tmp_path: Path) -> None:
         lambda effect: {**effect, "unknown": "forbidden"},
         lambda effect: {**effect, "st_ino": "1"},
         lambda effect: {**effect, "st_mode": stat.S_IFLNK},
+        lambda effect: {key: value for key, value in effect.items() if key != "workspace_chain"},
+        lambda effect: {**effect, "workspace_chain": []},
+        lambda effect: {
+            **effect,
+            "workspace_chain": [
+                effect["workspace_chain"][0],
+                *effect["workspace_chain"],
+            ],
+        },
+        lambda effect: {
+            **effect,
+            "workspace_chain": [
+                {**effect["workspace_chain"][0], "st_ino": 0},
+                *effect["workspace_chain"][1:],
+            ],
+        },
+        lambda effect: {
+            **effect,
+            "workspace_chain": [
+                {**effect["workspace_chain"][0], "unknown": "forbidden"},
+                *effect["workspace_chain"][1:],
+            ],
+        },
+        lambda effect: {
+            **effect,
+            "workspace_chain": [
+                *effect["workspace_chain"][:-1],
+                {**effect["workspace_chain"][-1], "name": "x" * 4096},
+            ],
+        },
     ),
 )
 async def test_malformed_or_escaping_effect_invalidates_whole_command(
@@ -1010,6 +1195,65 @@ async def test_crafted_nested_artifact_invalidates_otherwise_valid_target(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_crafted_workspace_chain_invalidates_durable_authority(tmp_path: Path) -> None:
+    artifact = tmp_path / "claimed.txt"
+    artifact.write_text("accepted", encoding="utf-8")
+    manifest, _fact = await _artifact_fact(
+        _command_events(
+            call_id="crafted-workspace",
+            effects=[_effect(artifact, relative_path=artifact.name)],
+        ),
+        task_cwd=tmp_path,
+    )
+    entry = manifest.entries[0]
+    payload = dict(entry.payload)
+    provenance = dict(payload["command_artifacts"])
+    workspace_chain = [dict(component) for component in provenance["workspace_chain"]]
+    workspace_chain[-1]["st_ino"] += 1
+    provenance["workspace_chain"] = workspace_chain
+    payload["command_artifacts"] = provenance
+    crafted = EvidenceManifest(
+        ac_id=manifest.ac_id,
+        entries=(entry.model_copy(update={"payload": payload}),),
+    )
+
+    facts = _standard_deliver_facts(
+        EvidenceRecord(data={"files_touched": [artifact.name]}),
+        crafted,
+        task_cwd=str(tmp_path),
+        verifier_passed=True,
+    )
+
+    assert facts is not None
+    assert facts[0].evidence_handle == "missing:files_touched:0"
+
+
+@pytest.mark.asyncio
+async def test_mixed_workspace_chains_invalidate_whole_command(tmp_path: Path) -> None:
+    first = tmp_path / "first.txt"
+    second = tmp_path / "second.txt"
+    first.write_text("first", encoding="utf-8")
+    second.write_text("second", encoding="utf-8")
+    first_effect = _effect(first, relative_path=first.name)
+    second_effect = _effect(second, relative_path=second.name)
+    second_chain = [dict(component) for component in second_effect["workspace_chain"]]
+    second_chain[-1]["st_ino"] += 1
+    second_effect["workspace_chain"] = second_chain
+
+    manifest, fact = await _artifact_fact(
+        _command_events(
+            call_id="mixed-workspace",
+            effects=[first_effect, second_effect],
+        ),
+        task_cwd=tmp_path,
+        claim=first.name,
+    )
+
+    assert "command_artifacts" not in manifest.entries[0].payload
+    assert fact.evidence_handle == "missing:files_touched:0"
+
+
+@pytest.mark.asyncio
 async def test_duplicate_artifact_path_invalidates_whole_command(tmp_path: Path) -> None:
     artifact = tmp_path / "claimed.txt"
     artifact.write_text("accepted", encoding="utf-8")
@@ -1030,10 +1274,12 @@ async def test_symlink_escape_is_rejected_at_verifier_boundary(tmp_path: Path) -
     outside.write_text("outside", encoding="utf-8")
     (tmp_path / "escape.txt").symlink_to(outside)
 
+    effect = _effect(outside, relative_path="escape.txt")
+    effect["workspace_chain"] = _workspace_chain_payload(tmp_path)
     _manifest, fact = await _artifact_fact(
         _command_events(
             call_id="symlink",
-            effects=[_effect(outside, relative_path="escape.txt")],
+            effects=[effect],
         ),
         task_cwd=tmp_path,
         claim="escape.txt",
@@ -1367,6 +1613,239 @@ async def test_malformed_named_completion_poisons_later_valid_completion(tmp_pat
     manifest, fact = await _artifact_fact(events, task_cwd=tmp_path)
 
     assert manifest.entries == ()
+    assert fact.evidence_handle == "missing:files_touched:0"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("orphan_tool_name", ("Bash", " Bash ", None, "", 7))
+async def test_crafted_orphan_idless_terminal_vetoes_named_journal_pair(
+    tmp_path: Path,
+    orphan_tool_name: object,
+) -> None:
+    """Durable events cannot revive a named Bash call after an orphan terminal."""
+    artifact = tmp_path / "claimed.txt"
+    artifact.write_text("captured", encoding="utf-8")
+    events = _command_events(
+        call_id="named", effects=[_effect(artifact, relative_path=artifact.name)]
+    )
+    orphan_data = {
+        key: value
+        for key, value in events[1].data.items()
+        if key not in {"tool_call_id", "filesystem_effects", "tool_name"}
+    }
+    if orphan_tool_name is not None:
+        orphan_data["tool_name"] = orphan_tool_name
+    orphan = events[1].model_copy(
+        update={
+            "id": "orphan-idless-completion",
+            "timestamp": events[0].timestamp + timedelta(microseconds=1),
+            "data": orphan_data,
+        }
+    )
+    events[1] = events[1].model_copy(
+        update={"timestamp": events[0].timestamp + timedelta(microseconds=2)}
+    )
+
+    manifest, fact = await _artifact_fact([events[0], orphan, events[1]], task_cwd=tmp_path)
+
+    assert manifest.entries == ()
+    assert fact.evidence_handle == "missing:files_touched:0"
+
+
+@pytest.mark.asyncio
+async def test_crafted_idless_other_tool_terminal_preserves_named_journal_pair(
+    tmp_path: Path,
+) -> None:
+    """An explicit other-tool completion is not a Bash authority boundary."""
+    artifact = tmp_path / "claimed.txt"
+    artifact.write_text("captured", encoding="utf-8")
+    events = _command_events(
+        call_id="named", effects=[_effect(artifact, relative_path=artifact.name)]
+    )
+    orphan = events[1].model_copy(
+        update={
+            "id": "unrelated-edit-completion",
+            "timestamp": events[0].timestamp + timedelta(microseconds=1),
+            "data": {
+                key: ("Edit" if key == "tool_name" else value)
+                for key, value in events[1].data.items()
+                if key not in {"tool_call_id", "filesystem_effects"}
+            },
+        }
+    )
+    events[1] = events[1].model_copy(
+        update={"timestamp": events[0].timestamp + timedelta(microseconds=2)}
+    )
+
+    manifest, fact = await _artifact_fact([events[0], orphan, events[1]], task_cwd=tmp_path)
+
+    assert manifest.entries[0].payload.get("command_artifacts") is not None
+    assert fact.evidence_handle == manifest.entries[0].handle
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("idless_first", (False, True))
+async def test_owned_idless_bash_pair_preserves_named_journal_authority(
+    tmp_path: Path,
+    idless_first: bool,
+) -> None:
+    """A unique id-less Bash pair remains independent of a concurrent named pair."""
+    artifact = tmp_path / "claimed.txt"
+    artifact.write_text("captured", encoding="utf-8")
+    named_start, named_completion = _command_events(
+        call_id="named", effects=[_effect(artifact, relative_path=artifact.name)]
+    )
+    identity = {
+        key: named_start.data[key]
+        for key in ("ac_id", "execution_id", "retry_attempt", "session_attempt_id")
+    }
+    idless_start = BaseEvent(
+        id="idless-bash-start",
+        type="execution.tool.started",
+        timestamp=named_start.timestamp,
+        aggregate_type="execution",
+        aggregate_id="ac_1",
+        data={
+            **identity,
+            "tool_name": "Bash",
+            "tool_input": {"command": "true"},
+        },
+    )
+    idless_completion = BaseEvent(
+        id="idless-bash-completion",
+        type="execution.tool.completed",
+        timestamp=named_start.timestamp,
+        aggregate_type="execution",
+        aggregate_id="ac_1",
+        data={
+            **identity,
+            "tool_name": "Bash",
+            "tool_result": {"is_error": False, "meta": {"exit_status": 0}},
+        },
+    )
+    ordered = (
+        [idless_start, named_start, idless_completion, named_completion]
+        if idless_first
+        else [named_start, idless_start, idless_completion, named_completion]
+    )
+    events = [
+        event.model_copy(
+            update={"timestamp": named_start.timestamp + timedelta(microseconds=index)}
+        )
+        for index, event in enumerate(ordered)
+    ]
+
+    manifest, fact = await _artifact_fact(events, task_cwd=tmp_path)
+
+    artifact_entries = [
+        entry for entry in manifest.entries if entry.payload.get("command_artifacts") is not None
+    ]
+    assert len(artifact_entries) == 1
+    assert fact.evidence_handle == artifact_entries[0].handle
+
+
+@pytest.mark.asyncio
+async def test_owned_idless_edit_nameless_terminal_preserves_named_journal_authority(
+    tmp_path: Path,
+) -> None:
+    """A nameless terminal owned by one id-less Edit is not an orphan Bash terminal."""
+    artifact = tmp_path / "claimed.txt"
+    artifact.write_text("captured", encoding="utf-8")
+    named_start, named_completion = _command_events(
+        call_id="named", effects=[_effect(artifact, relative_path=artifact.name)]
+    )
+    identity = {
+        key: named_start.data[key]
+        for key in ("ac_id", "execution_id", "retry_attempt", "session_attempt_id")
+    }
+    edit_start = BaseEvent(
+        id="idless-edit-start",
+        type="execution.tool.started",
+        timestamp=named_start.timestamp + timedelta(microseconds=1),
+        aggregate_type="execution",
+        aggregate_id="ac_1",
+        data={
+            **identity,
+            "tool_name": "Edit",
+            "tool_input": {"file_path": "other.txt"},
+        },
+    )
+    nameless_completion = BaseEvent(
+        id="idless-edit-completion",
+        type="execution.tool.completed",
+        timestamp=named_start.timestamp + timedelta(microseconds=2),
+        aggregate_type="execution",
+        aggregate_id="ac_1",
+        data={
+            **identity,
+            "tool_result": {"is_error": False},
+        },
+    )
+    named_completion = named_completion.model_copy(
+        update={"timestamp": named_start.timestamp + timedelta(microseconds=3)}
+    )
+
+    manifest, fact = await _artifact_fact(
+        [named_start, edit_start, nameless_completion, named_completion],
+        task_cwd=tmp_path,
+    )
+
+    artifact_entries = [
+        entry for entry in manifest.entries if entry.payload.get("command_artifacts") is not None
+    ]
+    assert len(artifact_entries) == 1
+    assert fact.evidence_handle == artifact_entries[0].handle
+
+
+@pytest.mark.asyncio
+async def test_duplicate_idless_starts_poison_named_journal_authority(tmp_path: Path) -> None:
+    """Two active id-less starts cannot donate their ambiguous terminal to a named peer."""
+    artifact = tmp_path / "claimed.txt"
+    artifact.write_text("captured", encoding="utf-8")
+    named_start, named_completion = _command_events(
+        call_id="named", effects=[_effect(artifact, relative_path=artifact.name)]
+    )
+    identity = {
+        key: named_start.data[key]
+        for key in ("ac_id", "execution_id", "retry_attempt", "session_attempt_id")
+    }
+    idless_events = [
+        BaseEvent(
+            id=f"ambiguous-idless-start-{index}",
+            type="execution.tool.started",
+            timestamp=named_start.timestamp + timedelta(microseconds=index),
+            aggregate_type="execution",
+            aggregate_id="ac_1",
+            data={
+                **identity,
+                "tool_name": "Bash",
+                "tool_input": {"command": "true"},
+            },
+        )
+        for index in (1, 2)
+    ]
+    idless_completion = BaseEvent(
+        id="ambiguous-idless-completion",
+        type="execution.tool.completed",
+        timestamp=named_start.timestamp + timedelta(microseconds=3),
+        aggregate_type="execution",
+        aggregate_id="ac_1",
+        data={
+            **identity,
+            "tool_name": "Bash",
+            "tool_result": {"is_error": False, "meta": {"exit_status": 0}},
+        },
+    )
+    named_completion = named_completion.model_copy(
+        update={"timestamp": named_start.timestamp + timedelta(microseconds=4)}
+    )
+
+    manifest, fact = await _artifact_fact(
+        [named_start, *idless_events, idless_completion, named_completion],
+        task_cwd=tmp_path,
+    )
+
+    assert all("command_artifacts" not in entry.payload for entry in manifest.entries)
     assert fact.evidence_handle == "missing:files_touched:0"
 
 

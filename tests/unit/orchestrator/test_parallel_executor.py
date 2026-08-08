@@ -1045,16 +1045,19 @@ def test_capture_rejects_intermediate_workspace_ancestor_swap(
     os.link(artifact, outside_artifact)
     original_open = os.open
     swapped = False
+    matching_open_count = 0
     fingerprint_before_swap = None
 
     def adversarial_open(path, flags, mode=0o777, *, dir_fd=None):
-        nonlocal fingerprint_before_swap, swapped
+        nonlocal fingerprint_before_swap, matching_open_count, swapped
         fd = original_open(path, flags, mode, dir_fd=dir_fd)
-        if not swapped and dir_fd is not None and os.fspath(path) == ancestor.name:
-            fingerprint_before_swap = _stat_fingerprint(artifact.lstat())
-            ancestor.rename(displaced_ancestor)
-            ancestor.symlink_to(outside_ancestor, target_is_directory=True)
-            swapped = True
+        if dir_fd is not None and os.fspath(path) == ancestor.name:
+            matching_open_count += 1
+            if not swapped and matching_open_count == 2:
+                fingerprint_before_swap = _stat_fingerprint(artifact.lstat())
+                ancestor.rename(displaced_ancestor)
+                ancestor.symlink_to(outside_ancestor, target_is_directory=True)
+                swapped = True
         return fd
 
     monkeypatch.setattr(os, "open", adversarial_open)
@@ -1578,6 +1581,146 @@ def test_unidentified_malformed_completion_poison_cannot_be_revived(tmp_path) ->
 
     assert "filesystem_effects" not in rejected.data
     assert "filesystem_effects" not in revived.data
+
+
+@pytest.mark.parametrize("completion_tool_name", ("Bash", None))
+def test_orphan_idless_bash_terminal_poisons_all_named_leases(
+    tmp_path,
+    completion_tool_name,
+) -> None:
+    """One unassignable terminal closes, rather than donates, every named lease."""
+    targets = (tmp_path / "first.py", tmp_path / "second.py")
+    for target in targets:
+        target.write_text("before\n", encoding="utf-8")
+    calls = tuple(
+        AgentMessage(
+            type="tool",
+            content=f"Bash: touch {target.name}",
+            tool_name="Bash",
+            data={
+                "tool_input": {"command": f"touch {target.name}"},
+                "tool_call_id": f"named-{index}",
+            },
+        )
+        for index, target in enumerate(targets)
+    )
+    orphan = AgentMessage(
+        type="tool_result",
+        content="unassigned command completed",
+        tool_name=completion_tool_name,
+        data={"subtype": "tool_result", "exit_code": 0},
+    )
+    completions = tuple(
+        AgentMessage(
+            type="tool_result",
+            content="late matching completion",
+            tool_name="Bash",
+            data={
+                "subtype": "tool_result",
+                "exit_code": 0,
+                "tool_call_id": f"named-{index}",
+            },
+        )
+        for index in range(len(targets))
+    )
+
+    with _BashFilesystemLeaseTracker(task_cwd=str(tmp_path)) as tracker:
+        for call in calls:
+            tracker.observe(call)
+        tracker.observe(orphan)
+        for index, target in enumerate(targets, start=11):
+            os.utime(target, ns=(index * 1_000_000_000, index * 1_000_000_000))
+        observed = tuple(tracker.observe(completion) for completion in completions)
+
+    assert all("filesystem_effects" not in completion.data for completion in observed)
+
+
+def test_legitimate_idless_bash_pair_does_not_poison_named_lease(tmp_path) -> None:
+    """A unique id-less Bash start owns its terminal without closing a named peer."""
+    idless_target = tmp_path / "idless.py"
+    named_target = tmp_path / "named.py"
+    idless_target.write_text("before\n", encoding="utf-8")
+    named_target.write_text("before\n", encoding="utf-8")
+    idless_call = AgentMessage(
+        type="tool",
+        content="Bash: touch idless.py",
+        tool_name="Bash",
+        data={"tool_input": {"command": "touch idless.py"}},
+    )
+    named_call = AgentMessage(
+        type="tool",
+        content="Bash: touch named.py",
+        tool_name="Bash",
+        data={
+            "tool_input": {"command": "touch named.py"},
+            "tool_call_id": "named-peer",
+        },
+    )
+    idless_completion = AgentMessage(
+        type="tool_result",
+        content="idless command completed",
+        data={"subtype": "tool_result", "exit_code": 0},
+    )
+    named_completion = AgentMessage(
+        type="tool_result",
+        content="named command completed",
+        tool_name="Bash",
+        data={
+            "subtype": "tool_result",
+            "exit_code": 0,
+            "tool_call_id": "named-peer",
+        },
+    )
+
+    with _BashFilesystemLeaseTracker(task_cwd=str(tmp_path)) as tracker:
+        tracker.observe(idless_call)
+        tracker.observe(named_call)
+        os.utime(idless_target, ns=(13_000_000_000, 13_000_000_000))
+        observed_idless = tracker.observe(idless_completion)
+        os.utime(named_target, ns=(14_000_000_000, 14_000_000_000))
+        observed_named = tracker.observe(named_completion)
+
+    assert observed_idless.data["filesystem_effects"][0]["path"] == "idless.py"
+    assert observed_named.data["filesystem_effects"][0]["path"] == "named.py"
+
+
+def test_unrelated_idless_non_bash_terminal_preserves_named_lease(tmp_path) -> None:
+    """An explicitly other-tool terminal cannot close a named Bash command."""
+    target = tmp_path / "claimed.py"
+    target.write_text("before\n", encoding="utf-8")
+    call = AgentMessage(
+        type="tool",
+        content="Bash: touch claimed.py",
+        tool_name="Bash",
+        data={
+            "tool_input": {"command": "touch claimed.py"},
+            "tool_call_id": "named-bash",
+        },
+    )
+    edit_completion = AgentMessage(
+        type="tool_result",
+        content="Edit completed",
+        tool_name="Edit",
+        data={"subtype": "tool_result", "exit_code": 0},
+    )
+    bash_completion = AgentMessage(
+        type="tool_result",
+        content="Bash completed",
+        tool_name="Bash",
+        data={
+            "subtype": "tool_result",
+            "exit_code": 0,
+            "tool_call_id": "named-bash",
+        },
+    )
+
+    with _BashFilesystemLeaseTracker(task_cwd=str(tmp_path)) as tracker:
+        tracker.observe(call)
+        tracker.observe(edit_completion)
+        os.utime(target, ns=(15_000_000_000, 15_000_000_000))
+        observed = tracker.observe(bash_completion)
+
+    assert observed.data["filesystem_effects"][0]["path"] == "claimed.py"
 
 
 @pytest.mark.parametrize("call_id", (None, "call-1"))
