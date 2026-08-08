@@ -6,6 +6,11 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
+from ouroboros.harness.deliver_gate import (
+    RUNTIME_FAILURE_BOOLEAN_FIELDS,
+    RUNTIME_SUCCESS_BOOLEAN_FIELDS,
+    RUNTIME_TOOL_EXIT_STATUS_FIELDS,
+)
 from ouroboros.mcp.types import MCPToolResult
 from ouroboros.orchestrator.adapter import (
     AgentMessage,
@@ -44,6 +49,23 @@ _RUNTIME_FAILED_EVENT_TYPES = frozenset(
         "task.failed",
         "turn.failed",
     }
+)
+
+# Closed command-verdict vocabulary shared with the journal verifier.  These
+# are metadata only: filesystem authority still comes exclusively from the
+# LeafDispatcher's held dirfd lease.
+_RUNTIME_STATUS_VERDICT_FIELDS = (
+    "subtype",
+    "status",
+    "runtime_status",
+    "runtime_signal",
+    "runtime_event_type",
+)
+_RUNTIME_VERDICT_FIELDS = (
+    *RUNTIME_SUCCESS_BOOLEAN_FIELDS,
+    *RUNTIME_FAILURE_BOOLEAN_FIELDS,
+    *RUNTIME_TOOL_EXIT_STATUS_FIELDS,
+    *_RUNTIME_STATUS_VERDICT_FIELDS,
 )
 
 
@@ -209,9 +231,20 @@ def serialize_runtime_message_metadata(
     """Serialize shared runtime metadata for persisted progress/audit events."""
     from ouroboros.orchestrator.workflow_state import resolve_ac_marker_update
 
-    metadata: dict[str, Any] = {}
+    metadata = _project_runtime_verdict_fields(message.data, exclude={"is_error"})
+    if "meta" in message.data:
+        raw_meta = message.data["meta"]
+        if isinstance(raw_meta, Mapping):
+            projected_meta = _project_runtime_verdict_fields(raw_meta)
+            if projected_meta:
+                metadata["meta"] = projected_meta
+        else:
+            # Preserve a JSON-safe poison value.  Dropping a malformed-present
+            # verdict container would let a simultaneous zero exit launder it.
+            metadata["meta"] = True
+
     message_runtime_event_type = runtime_event_type(message)
-    if message_runtime_event_type is not None:
+    if message_runtime_event_type is not None and "runtime_event_type" not in metadata:
         metadata["runtime_event_type"] = message_runtime_event_type
     if runtime_signal is None or runtime_status is None:
         runtime_signal, runtime_status = derive_runtime_signal(
@@ -253,7 +286,7 @@ def serialize_runtime_message_metadata(
             metadata["recovery_discontinuity"] = dict(recovery_discontinuity)
 
     subtype = message_subtype(message)
-    if subtype:
+    if subtype and "subtype" not in metadata:
         metadata["subtype"] = subtype
 
     session_id = message.data.get("session_id")
@@ -314,10 +347,10 @@ def serialize_runtime_message_metadata(
     if thinking:
         metadata["thinking"] = thinking
 
-    if runtime_signal:
+    if runtime_signal and "runtime_signal" not in metadata:
         metadata["runtime_signal"] = runtime_signal
 
-    if runtime_status:
+    if runtime_status and "runtime_status" not in metadata:
         metadata["runtime_status"] = runtime_status
 
     tool_definition = message.data.get("tool_definition")
@@ -326,6 +359,18 @@ def serialize_runtime_message_metadata(
 
     if tool_result is not None:
         metadata["tool_result"] = tool_result
+    elif "tool_result" in message.data:
+        # A malformed-present result container must remain visible to the
+        # verifier rather than disappearing during normalization.
+        metadata["tool_result"] = True
+
+    # This field is reserved for LeafDispatcher's locally measured dirfd lease
+    # effects.  The dispatcher strips adapter-supplied values before projection;
+    # preserve the measured completion payload so the journal verifier can reuse
+    # that existing authority instead of reconstructing provenance from prose.
+    filesystem_effects = message.data.get("filesystem_effects")
+    if isinstance(filesystem_effects, (list, tuple)):
+        metadata["filesystem_effects"] = _clone_metadata_value(filesystem_effects)
 
     tool_call_id = message.data.get("tool_call_id")
     if isinstance(tool_call_id, str) and tool_call_id.strip():
@@ -458,6 +503,20 @@ def _clone_metadata_value(value: Any) -> Any:
     return value
 
 
+def _project_runtime_verdict_fields(
+    value: Mapping[str, Any],
+    *,
+    exclude: set[str] | None = None,
+) -> dict[str, Any]:
+    """Copy only closed command-verdict fields without normalizing failures away."""
+    excluded = exclude or set()
+    return {
+        key: _clone_metadata_value(value[key])
+        for key in _RUNTIME_VERDICT_FIELDS
+        if key in value and key not in excluded
+    }
+
+
 def _normalize_tool_result_payload(tool_result: object) -> dict[str, Any] | None:
     """Normalize an MCP tool result object or mapping into projection-safe data."""
     if isinstance(tool_result, MCPToolResult):
@@ -471,6 +530,7 @@ def _normalize_tool_result_payload(tool_result: object) -> dict[str, Any] | None
         "text_content": "",
         "meta": {},
     }
+    normalized.update(_project_runtime_verdict_fields(tool_result, exclude={"is_error"}))
 
     raw_content = tool_result.get("content")
     if isinstance(raw_content, list | tuple):
@@ -509,9 +569,12 @@ def _normalize_tool_result_payload(tool_result: object) -> dict[str, Any] | None
             # signal launder an unknown/failing result into success.
             normalized["is_error_invalid"] = True
 
-    meta = tool_result.get("meta")
-    if isinstance(meta, Mapping):
-        normalized["meta"] = dict(meta)
+    if "meta" in tool_result:
+        meta = tool_result["meta"]
+        if isinstance(meta, Mapping):
+            normalized["meta"] = _clone_metadata_value(meta)
+        else:
+            normalized["meta"] = True
 
     return normalized
 
