@@ -60,8 +60,10 @@ async def append_runtime_lifecycle(event_store: object, event: BaseEvent) -> boo
     """
     identity = _identity(event)
     settle = getattr(event_store, "settle_transactional_write", None)
+    declared_settle = getattr(type(event_store), "settle_transactional_write", None)
     if (
-        not callable(settle)
+        not callable(declared_settle)
+        or not callable(settle)
         or identity is None
         or event.type not in _ACTIVE_EVENTS | _TERMINAL_EVENTS
     ):
@@ -214,7 +216,8 @@ async def admit_if_target_active(
     inactive guard always wins and prevents a stale hub from reopening it.
     """
     settle = getattr(event_store, "settle_transactional_write", None)
-    if not callable(settle):
+    declared_settle = getattr(type(event_store), "settle_transactional_write", None)
+    if not callable(declared_settle) or not callable(settle):
         return None
     return await settle(
         lambda engine: _admit_if_target_active(
