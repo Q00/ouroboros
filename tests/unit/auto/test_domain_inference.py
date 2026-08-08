@@ -2671,3 +2671,55 @@ def test_as_well_as_joins_consumer_lists() -> None:
     _seed_section(ledger, "runtime_context", value="Native desktop runtime")
     result = derive_domain_from_ledger(ledger)
     assert TaskClass.WEB_APP not in result.classes
+
+
+@pytest.mark.parametrize(
+    "runtime",
+    [
+        "Browser functionality has been disabled; native desktop runtime",
+        "Browser use is prohibited; native desktop runtime",
+        "Browser access has been removed; native desktop runtime",
+    ],
+)
+def test_postpositive_denials_with_auxiliaries(runtime: str) -> None:
+    """R39 probe: perfect/passive auxiliaries and prohibition verbs."""
+    ledger = _bare_ledger("Build a native desktop settings tool")
+    _seed_section(ledger, "outputs", value="Settings panel for local files")
+    _seed_section(ledger, "runtime_context", value=runtime)
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
+        "Build a native desktop settings tool designed for mobile and web apps",
+        "Build a native desktop settings tool intended for use with web apps",
+        "Build a native desktop settings tool usable by web apps",
+        "Build a native desktop settings tool for use in browsers",
+    ],
+)
+def test_designed_for_and_usable_by_are_consumer_relations(goal: str) -> None:
+    """R39 probe: design/intent/usability targets are consumers or
+    deployment compatibility, not the produced artifact."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value="Settings panel for local files")
+    _seed_section(ledger, "runtime_context", value="Native desktop runtime")
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
+        "Build a web app that uses a hosted command line service",
+        "Build a web app dependent on a REST API",
+    ],
+)
+def test_uses_and_dependent_on_are_consumed_dependencies(goal: str) -> None:
+    """R39 probe: uses / dependent on name consumed dependencies."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value="Login page with settings panel and navigation")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP

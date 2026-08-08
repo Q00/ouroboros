@@ -746,13 +746,16 @@ _RELATIONAL_TARGET_RE = re.compile(
     r"used\s+by|consumed\s+by|embedded\s+in|integrat\w*\s+with|"
     r"compatible\s+with|used\s+with|works?\s+with|interopera\w*\s+with|"
     r"paired\s+with|hosted\s+on|deployed\s+(?:on|to)|running\s+on|"
-    r"served\s+(?:from|on)|published\s+(?:on|to))\s+"
+    r"served\s+(?:from|on)|published\s+(?:on|to)|"
+    r"designed\s+for|intended\s+for(?:\s+use\s+(?:with|in|by))?|"
+    r"meant\s+for|built\s+for|made\s+for|usable\s+by|"
+    r"for\s+use\s+(?:with|in|by))\s+"
     # Coordinated consumer lists are consumed whole (#1813 R37): the web
     # item may sit anywhere in "mobile apps and web apps".
     r"(?:(?:an?|the|my|our|your)\s+)?(?:[\w\-'’]+(?:\s+[\w\-'’]+){0,2}?\s*(?:,|\band\b|\bor\b|\bas\s+well\s+as\b|\balong\s+with\b|\bplus\b|/)\s*){0,3}?"
     r"(?:an?\s+|the\s+)?(?:[\w\-'’]+\s+){0,2}?"
     r"(?:web[\s\-]?app(?:lication)?s?|webapps?|websites?|web\s+uis?|frontends?|"
-    r"front[\s\-]ends?|single[\s\-]page\s+app(?:lication)?s?)\b"
+    r"front[\s\-]ends?|single[\s\-]page\s+app(?:lication)?s?|browsers?)\b"
     r"(?:\s*(?:,|\band\b|\bor\b|\bas\s+well\s+as\b|\balong\s+with\b|\bplus\b|/)\s*(?:(?:an?|the|my|our|your)\s+)?[\w\-'’]+(?:\s+[\w\-'’]+){0,2}){0,3}"
 )
 
@@ -844,9 +847,11 @@ def _goal_has_web_only_conjunct(goal_text: str, other_evidence_re: re.Pattern[st
 
 
 _POSTPOSITIVE_BROWSER_DENIAL_RE = re.compile(
-    rf"\b{_WEB_APP_GOAL_SIGNAL_FRAGMENT}(?:\s+[\w\-]+){{0,2}}?\s+(?:is\s+|are\s+)?"
+    rf"\b{_WEB_APP_GOAL_SIGNAL_FRAGMENT}(?:\s+[\w\-]+){{0,2}}?\s+"
+    r"(?:is\s+|are\s+|was\s+|were\s+|has\s+been\s+|have\s+been\s+|"
+    r"had\s+been\s+|will\s+be\s+)?"
     r"(?:not\s+supported|unsupported|disabled|unavailable|dropped|excluded|"
-    r"turned\s+off|removed)\b"
+    r"turned\s+off|removed|prohibited|forbidden|banned|blocked|stripped)\b"
 )
 
 
@@ -1030,6 +1035,7 @@ _CONSUMED_DEPENDENCY_RE = re.compile(
     r"consumes?|consuming|calls?|calling|"
     r"powered\s+by|backed\s+by|built\s+on|driven\s+by|served\s+by|"
     r"integrat\w*\s+with|invokes?|invoking|fetch\w*\s+(?:data\s+)?from|"
+    r"uses|dependent\s+(?:on|upon)|depends?\s+(?:on|upon)|relies?\s+on|"
     r"wrapp?\w*|built\s+around|compatible\s+with|works?\s+with|"
     r"interopera\w*\s+with|paired\s+with)\s+"
     r"(?!(?:be|expose|exposing|provide|providing|offer|offering|serve|serving|"
