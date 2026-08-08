@@ -2469,9 +2469,7 @@ def create_ouroboros_server(
             agent_runtime_backend=interview_runtime_backend,
             opencode_mode=opencode_mode,
         ),
-        MeasureDriftHandler(
-            event_store=event_store,
-        ),
+        MeasureDriftHandler(event_store=event_store),
         InterviewHandler(
             interview_engine=interview_engine,
             event_store=event_store,
