@@ -794,6 +794,13 @@ _POSTNOMINAL_BROWSER_QUALIFIER_RE = re.compile(
     r"(?:\s*,\s+(?!(?:and|or|nor|but|plus|alongside|not|no)\b)|\s+)"
     r"(?:(?:that|which)\s+)?"
     rf"(?:{_POSTNOMINAL_PREDICATE_TOKEN}\s+){{0,4}}?"
+    # Routine infinitival and "for use in" qualifiers declare the same
+    # environment (#1813 R48): "designed to run in browsers", "for use in
+    # browsers". The infinitive verb comes from the same closed runtime
+    # set, so "to test/audit" action targets stay outside the grammar.
+    r"(?:to\s+(?:run|operate|work|load|render|execute|function|display|"
+    r"open|serve|live)\s+)?"
+    r"(?:for\s+use\s+)?"
     r"(?:in|inside|within|for|from|through|via|on)\s+"
     # Ordinary spelling variants are equivalent environments (#1813 R46):
     # "a web browser", "modern browsers".

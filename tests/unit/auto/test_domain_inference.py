@@ -3060,3 +3060,49 @@ def test_nominal_tokens_after_the_ui_head_reject_ownership(
     _seed_section(ledger, "runtime_context", value=runtime)
     result = derive_domain_from_ledger(ledger)
     assert TaskClass.WEB_APP not in result.classes
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
+        "Build an admin portal for use in browsers",
+        "Build an admin portal designed to run in browsers",
+        "Build an admin portal built to operate in a web browser",
+    ],
+)
+def test_infinitival_and_for_use_qualifiers_own_the_artifact(goal: str) -> None:
+    """R48 probe: "for use in" and closed-set runtime infinitives declare
+    the same environment as the direct prepositional forms."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value="Role management and account administration")
+    _seed_section(ledger, "runtime_context", value="Browser")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP
+
+
+@pytest.mark.parametrize(
+    ("goal", "outputs", "runtime"),
+    [
+        (
+            "Build an admin portal for use in browser extensions",
+            "Role management and account administration",
+            "Browser extension runtime",
+        ),
+        (
+            "Build an admin portal designed to run in the browser automation suite",
+            "Automation run summaries",
+            "Local shell / terminal",
+        ),
+    ],
+)
+def test_infinitival_qualifiers_still_respect_reheading(
+    goal: str, outputs: str, runtime: str
+) -> None:
+    """R48 guard: the infinitival forms compose with the trailing-noun
+    rejection — a re-headed environment stays a consumed artifact."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value=outputs)
+    _seed_section(ledger, "runtime_context", value=runtime)
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes
