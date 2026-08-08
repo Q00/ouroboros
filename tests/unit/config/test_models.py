@@ -306,6 +306,7 @@ class TestExecutionConfig:
         """ExecutionConfig stores execution settings."""
         config = ExecutionConfig(
             max_iterations_per_ac=20,
+            ac_attempt_timeout_seconds=1200,
             retrospective_interval=5,
             tui_autolaunch=True,
             auto_evaluate=False,
@@ -315,6 +316,7 @@ class TestExecutionConfig:
             context_pack=False,
         )
         assert config.max_iterations_per_ac == 20
+        assert config.ac_attempt_timeout_seconds == 1200
         assert config.retrospective_interval == 5
         assert config.tui_autolaunch is True
         assert config.auto_evaluate is False
@@ -328,6 +330,7 @@ class TestExecutionConfig:
         """ExecutionConfig has sensible defaults."""
         config = ExecutionConfig()
         assert config.max_iterations_per_ac == 10
+        assert config.ac_attempt_timeout_seconds == 900
         assert config.retrospective_interval == 3
         assert config.tui_autolaunch is False
         assert config.auto_evaluate is True
@@ -336,6 +339,23 @@ class TestExecutionConfig:
         assert config.default_model is None
         assert config.decomposition_mode == "bounce_only"
         assert config.context_pack is True
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        (("max_iterations_per_ac", 0), ("ac_attempt_timeout_seconds", 0)),
+    )
+    def test_execution_attempt_budgets_must_be_positive(
+        self,
+        field: str,
+        value: int,
+    ) -> None:
+        with pytest.raises(ValidationError):
+            ExecutionConfig(**{field: value})
+
+    @pytest.mark.parametrize("value", (2**53 + 3, 10**400))
+    def test_execution_attempt_timeout_rejects_unrepresentable_integer(self, value: int) -> None:
+        with pytest.raises(ValidationError):
+            ExecutionConfig(ac_attempt_timeout_seconds=value)
 
     @pytest.mark.parametrize(("raw", "expected"), [(0, 1), (11, 10), (4, 4)])
     def test_auto_evolve_generation_budget_is_clamped(self, raw: int, expected: int) -> None:

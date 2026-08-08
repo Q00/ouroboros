@@ -545,7 +545,9 @@ def test_v9_inputs_freeze_context_profile_parent_lineage_pause_and_runtime_capab
     inputs = contract["execution_inputs"]
     semantics = contract["execution_semantics"]
     assert inputs["schema_version"] == 2
-    assert semantics["version"] == 4
+    assert semantics["version"] == 5
+    assert semantics["max_iterations_per_ac"] == 10
+    assert semantics["ac_attempt_timeout_seconds"] == 900
     assert semantics["adaptive_concurrency_policy"] == {
         "algorithm": "aimd/v2",
         "admission_scope": "provider_call",
@@ -917,6 +919,8 @@ def test_resume_rejects_runtime_effort_capability_or_vocabulary_drift(
         "max_decomposition_depth",
         "max_parallel_workers",
         "effective_parallel_workers",
+        "max_iterations_per_ac",
+        "ac_attempt_timeout_seconds",
         "adaptive_concurrency_policy",
         "fat_harness_mode",
         "shadow_replay_enabled",

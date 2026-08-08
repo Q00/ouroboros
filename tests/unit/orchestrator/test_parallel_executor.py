@@ -7,6 +7,7 @@ from collections.abc import Mapping
 from dataclasses import replace
 from datetime import UTC, datetime
 import json
+import math
 import os
 from pathlib import Path
 import shlex
@@ -17,8 +18,15 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import anyio
 import pytest
 
+from ouroboros.core.attempt_budget import (
+    MAX_AC_ATTEMPT_TIMEOUT_SECONDS,
+    AttemptBudgetExhaustion,
+    AttemptBudgetKind,
+    AttemptBudgetProgress,
+)
 from ouroboros.core.seed import (
     AcceptanceCriterionSpec,
     InvestmentSpec,
@@ -29,6 +37,7 @@ from ouroboros.core.seed import (
 from ouroboros.events.base import BaseEvent
 from ouroboros.harness.journal import EvidenceEntry, EvidenceKind, EvidenceManifest
 from ouroboros.mcp.types import MCPToolDefinition
+from ouroboros.orchestrator import retry_hints
 from ouroboros.orchestrator.adapter import (
     FULL_CAPABILITIES,
     AgentMessage,
@@ -68,15 +77,19 @@ from ouroboros.orchestrator.execution_authority import (
 )
 from ouroboros.orchestrator.execution_runtime_scope import (
     ExecutionNodeIdentity,
+    build_ac_runtime_identity,
     build_level_coordinator_runtime_scope,
 )
 from ouroboros.orchestrator.leaf_dispatcher import (
+    LeafDispatcher,
+    LeafDispatchState,
     _attach_bash_filesystem_effects,
     _BashFilesystemLeaseTracker,
     _close_pending_targets,
     _correlated_tool_result_name,
     _pending_bash_filesystem_targets,
     _stat_fingerprint,
+    restored_attempt_budget_exhaustion,
 )
 from ouroboros.orchestrator.level_context import ACContextSummary, LevelContext
 from ouroboros.orchestrator.parallel_executor import (
@@ -4972,6 +4985,534 @@ class _FinalMessageRuntime:
                 metadata=dict(resume_handle.metadata) if resume_handle is not None else {},
             ),
         )
+
+
+@pytest.mark.asyncio
+async def test_atomic_attempt_stops_before_over_budget_tool_effect() -> None:
+    """The common stream owner must cap tool-bearing turns for every runtime."""
+
+    class _Process:
+        def __init__(self) -> None:
+            self.closed = False
+
+        async def aclose(self) -> None:
+            await asyncio.sleep(0)
+            self.closed = True
+
+    class _StepBudgetRuntime(_FinalMessageRuntime):
+        def __init__(self) -> None:
+            super().__init__(
+                "must not reach terminal",
+                native_session_id="unused",
+                support_messages=tuple(
+                    AgentMessage(
+                        type="assistant",
+                        content=f"Calling tool {index}",
+                        tool_name="Read",
+                        data={"tool_input": {"file_path": f"file-{index}.txt"}},
+                    )
+                    for index in range(3)
+                ),
+            )
+            self.process = _Process()
+            self.finalized = False
+
+        async def execute_task(self, **kwargs: Any):
+            try:
+                async for message in super().execute_task(**kwargs):
+                    yield message
+            finally:
+                await self.process.aclose()
+                self.finalized = True
+
+    runtime = _StepBudgetRuntime()
+    event_store = AsyncMock()
+    executor = ParallelACExecutor(
+        adapter=runtime,
+        event_store=event_store,
+        console=MagicMock(),
+        enable_decomposition=False,
+        max_iterations_per_ac=2,
+    )
+    counters = {"messages_count": 0, "tool_calls_count": 0}
+
+    result = await executor._execute_atomic_ac(
+        ac_index=0,
+        ac_content="Inspect three files",
+        session_id="sess_budget_steps",
+        execution_id="exec_budget_steps",
+        tools=["Read"],
+        system_prompt="system",
+        seed_goal="Bound one attempt",
+        depth=0,
+        start_time=datetime.now(UTC),
+        execution_counters=counters,
+    )
+
+    assert result.success is False
+    assert result.attempt_budget_exhaustion is not None
+    assert result.attempt_budget_exhaustion.kind is AttemptBudgetKind.AGENTIC_STEPS
+    assert result.attempt_budget_exhaustion.limit == 2
+    assert result.attempt_budget_exhaustion.observed == 3
+    assert counters == {"messages_count": 3, "tool_calls_count": 2}
+    assert runtime.call_count == 1
+    assert runtime.finalized is True
+    assert runtime.process.closed is True
+    assert retry_hints.is_retryable_failure(result) is False
+    budget_events = [
+        call.args[0]
+        for call in event_store.append.await_args_list
+        if call.args and call.args[0].type == "execution.ac.attempt_budget_exhausted"
+    ]
+    assert len(budget_events) == 1
+    assert budget_events[0].data["action"] == "fail_no_successor"
+
+
+@pytest.mark.asyncio
+async def test_atomic_attempt_external_cancellation_closes_runtime_stream(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """External cancellation must wait for provider cleanup before propagating."""
+
+    class _Process:
+        def __init__(self) -> None:
+            self.close_started = False
+            self.closed = False
+
+        async def aclose(self) -> None:
+            self.close_started = True
+            await anyio.sleep(0)
+            self.closed = True
+
+    class _CancellationRuntime(_FinalMessageRuntime):
+        def __init__(self) -> None:
+            super().__init__("unused", native_session_id="unused")
+            self.message_yielded = False
+            self.process = _Process()
+            self.finalized = False
+
+        async def execute_task(self, **_kwargs: Any):
+            self.call_count += 1
+            try:
+                self.message_yielded = True
+                yield AgentMessage(
+                    type="system",
+                    content="provider is active",
+                    data={"subtype": "progress"},
+                )
+                await anyio.sleep_forever()
+            finally:
+                await self.process.aclose()
+                self.finalized = True
+
+    runtime = _CancellationRuntime()
+    executor = ParallelACExecutor(
+        adapter=runtime,
+        event_store=AsyncMock(),
+        console=MagicMock(),
+        enable_decomposition=False,
+    )
+    activity_started = anyio.Event()
+
+    async def _block_activity(**_kwargs: Any) -> None:
+        activity_started.set()
+        await anyio.sleep_forever()
+
+    monkeypatch.setattr(executor._event_emitter, "observe_ac_activity", _block_activity)
+    cancellation_saw_closed_stream: bool | None = None
+
+    async def _run_attempt() -> None:
+        nonlocal cancellation_saw_closed_stream
+        try:
+            await executor._execute_atomic_ac(
+                ac_index=0,
+                ac_content="Remain active until cancelled",
+                session_id="sess_external_cancel",
+                execution_id="exec_external_cancel",
+                tools=["Read"],
+                system_prompt="system",
+                seed_goal="Cancel one attempt",
+                depth=0,
+                start_time=datetime.now(UTC),
+            )
+        except anyio.get_cancelled_exc_class():
+            cancellation_saw_closed_stream = runtime.process.closed
+            raise
+
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(_run_attempt)
+        await activity_started.wait()
+        task_group.cancel_scope.cancel()
+
+    assert runtime.message_yielded is True
+    assert runtime.process.close_started is True
+    assert runtime.process.closed is True
+    assert runtime.finalized is True
+    assert cancellation_saw_closed_stream is True
+
+
+@pytest.mark.asyncio
+async def test_attempt_budget_exhaustion_skips_provider_recovery_paths() -> None:
+    """Cleanup failure cannot renew exhaustion through bounce or redispatch."""
+
+    class _CloseFailingStepRuntime(_FinalMessageRuntime):
+        def __init__(self) -> None:
+            super().__init__(
+                "must not reach terminal",
+                native_session_id="unused",
+                support_messages=(
+                    AgentMessage(type="assistant", content="tool 1", tool_name="Read"),
+                    AgentMessage(type="assistant", content="tool 2", tool_name="Read"),
+                ),
+            )
+            self.finalized = False
+
+        async def execute_task(self, **kwargs: Any):
+            try:
+                async for message in super().execute_task(**kwargs):
+                    yield message
+            finally:
+                self.finalized = True
+                raise RuntimeError("provider close failed after step exhaustion")
+
+    runtime = _CloseFailingStepRuntime()
+    event_store = AsyncMock()
+    executor = ProcessLocalTestExecutor(
+        adapter=runtime,
+        event_store=event_store,
+        console=MagicMock(),
+        enable_decomposition=False,
+        max_iterations_per_ac=1,
+    )
+    executor._maybe_recover_with_bounce_decomposition = AsyncMock(return_value=(None, None))
+    executor._maybe_redispatch_alt_harness = AsyncMock(return_value=None)
+
+    result = await executor._execute_single_ac(
+        ac_index=0,
+        ac_content="Bound one attempt",
+        session_id="sess_budget_terminal",
+        tools=["Read"],
+        tool_catalog=None,
+        system_prompt="system",
+        seed_goal="Bound one attempt",
+        execution_id="exec_budget_terminal",
+        same_runtime_budget_exhausted=True,
+    )
+
+    assert result.success is False
+    assert result.attempt_budget_exhaustion is not None
+    assert result.attempt_budget_exhaustion.kind is AttemptBudgetKind.AGENTIC_STEPS
+    assert result.attempt_budget_exhaustion.limit == 1
+    assert result.attempt_budget_exhaustion.observed == 2
+    assert retry_hints.is_retryable_failure(result) is False
+    assert runtime.call_count == 1
+    assert runtime.finalized is True
+    executor._maybe_recover_with_bounce_decomposition.assert_not_awaited()
+    executor._maybe_redispatch_alt_harness.assert_not_awaited()
+    budget_events = [
+        call.args[0]
+        for call in event_store.append.await_args_list
+        if call.args and call.args[0].type == "execution.ac.attempt_budget_exhausted"
+    ]
+    assert len(budget_events) == 1
+
+
+@pytest.mark.asyncio
+async def test_attempt_budget_exhaustion_cannot_be_recovered_by_verify_gate(
+    tmp_path: Path,
+) -> None:
+    """A passing partial artifact contract cannot erase hard exhaustion."""
+    (tmp_path / "done.txt").write_text("done\n", encoding="utf-8")
+    seed = Seed(
+        goal="Bound one attempt",
+        acceptance_criteria=(
+            AcceptanceCriterionSpec(
+                description="Create done.txt",
+                expected_artifacts=("done.txt",),
+            ),
+        ),
+        ontology_schema=OntologySchema(name="BudgetedArtifact", description="d"),
+        metadata=SeedMetadata(ambiguity_score=0.0),
+    )
+    exhausted = ACExecutionResult(
+        ac_index=0,
+        ac_content="Create done.txt",
+        success=False,
+        error="Atomic attempt budget exhausted",
+        outcome=ACExecutionOutcome.FAILED,
+        attempt_budget_exhaustion=AttemptBudgetExhaustion(
+            kind=AttemptBudgetKind.AGENTIC_STEPS,
+            limit=1.0,
+            observed=2.0,
+        ),
+    )
+    executor = ParallelACExecutor(
+        adapter=_FinalMessageRuntime(
+            "unused",
+            native_session_id="unused",
+            cwd=str(tmp_path),
+        ),
+        event_store=AsyncMock(),
+        console=MagicMock(),
+        enable_decomposition=False,
+        task_cwd=str(tmp_path),
+    )
+
+    gated = await executor._apply_verify_gate(
+        seed=seed,
+        ac_index=0,
+        result=exhausted,
+        session_id="sess_budget_verify",
+        execution_id="exec_budget_verify",
+    )
+
+    assert gated is exhausted
+    assert gated.success is False
+    assert gated.attempt_budget_exhaustion is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider_close_fails", (False, True))
+async def test_atomic_attempt_wall_clock_cap_beats_continuous_activity(
+    provider_close_fails: bool,
+) -> None:
+    """Progress messages may reset the idle watchdog but never the total deadline."""
+
+    class _ActiveForeverRuntime:
+        _runtime_handle_backend = "opencode"
+        _cwd = "/tmp/project"
+        _permission_mode = "acceptEdits"
+
+        def __init__(self) -> None:
+            self.closed = False
+
+        @property
+        def runtime_backend(self) -> str:
+            return self._runtime_handle_backend
+
+        @property
+        def working_directory(self) -> str:
+            return self._cwd
+
+        @property
+        def permission_mode(self) -> str:
+            return self._permission_mode
+
+        async def execute_task(self, **_kwargs: Any):
+            try:
+                while True:
+                    yield AgentMessage(
+                        type="system",
+                        content="still working",
+                        data={"subtype": "progress"},
+                    )
+                    await asyncio.sleep(0.001)
+            finally:
+                self.closed = True
+                if provider_close_fails:
+                    raise RuntimeError("provider close failed after wall-clock exhaustion")
+
+    runtime = _ActiveForeverRuntime()
+    event_store = AsyncMock()
+    executor = ParallelACExecutor(
+        adapter=runtime,
+        event_store=event_store,
+        console=MagicMock(),
+        enable_decomposition=False,
+        max_iterations_per_ac=100,
+        ac_attempt_timeout_seconds=0.02,
+    )
+
+    result = await executor._execute_atomic_ac(
+        ac_index=0,
+        ac_content="Never-ending active task",
+        session_id="sess_budget_time",
+        execution_id="exec_budget_time",
+        tools=["Read"],
+        system_prompt="system",
+        seed_goal="Bound one attempt",
+        depth=0,
+        start_time=datetime.now(UTC),
+    )
+
+    assert result.success is False
+    assert result.attempt_budget_exhaustion is not None
+    assert result.attempt_budget_exhaustion.kind is AttemptBudgetKind.WALL_CLOCK
+    assert result.attempt_budget_exhaustion.limit == pytest.approx(0.02)
+    assert result.attempt_budget_exhaustion.observed >= 0.02
+    assert runtime.closed is True
+    assert retry_hints.is_retryable_failure(result) is False
+    budget_events = [
+        call.args[0]
+        for call in event_store.append.await_args_list
+        if call.args and call.args[0].type == "execution.ac.attempt_budget_exhausted"
+    ]
+    assert len(budget_events) == 1
+
+
+@pytest.mark.asyncio
+async def test_resumed_atomic_attempt_with_zero_time_never_enters_provider() -> None:
+    """A zero-allowance durable snapshot must terminalize before adapter entry."""
+
+    runtime = _FinalMessageRuntime(
+        "must not enter provider",
+        native_session_id="must-not-dispatch",
+    )
+    executor = ParallelACExecutor(
+        adapter=runtime,
+        event_store=AsyncMock(),
+        console=MagicMock(),
+        enable_decomposition=False,
+    )
+    exhausted_progress = AttemptBudgetProgress(
+        max_agentic_steps=10,
+        timeout_microseconds=900_000_000,
+        agentic_steps_consumed=2,
+        remaining_timeout_microseconds=0,
+    )
+    exhaustion = restored_attempt_budget_exhaustion(
+        exhausted_progress,
+        timeout_seconds=900.0,
+    )
+    assert exhaustion is not None
+    state = LeafDispatchState(
+        messages=[],
+        runtime_handle=None,
+        agentic_step_count=exhausted_progress.agentic_steps_consumed,
+        attempt_budget_snapshot=exhausted_progress,
+        attempt_budget_exhaustion=exhaustion,
+    )
+
+    with patch.object(runtime, "execute_task", wraps=runtime.execute_task) as execute_task:
+        await LeafDispatcher(executor).stream(
+            state=state,
+            prompt="resume",
+            tools=["Read"],
+            system_prompt="system",
+            execute_effort_kwargs={},
+            runtime_identity=build_ac_runtime_identity(
+                0,
+                execution_context_id="exec_zero_remaining",
+            ),
+            execution_context_id="exec_zero_remaining",
+            session_id="sess_zero_remaining",
+            ac_index=0,
+            ac_content="Resume an expired provider attempt",
+            is_sub_ac=False,
+            parent_ac_index=None,
+            sub_ac_index=None,
+            node_identity=None,
+            retry_attempt=0,
+            semantic_ac_key="ac_zero_remaining",
+            label="AC 1",
+            indent="",
+            execution_counters=None,
+            max_iterations_per_ac=10,
+            ac_attempt_timeout_seconds=900.0,
+        )
+
+    execute_task.assert_not_called()
+
+    assert runtime.call_count == 0
+    assert state.messages == []
+    assert state.attempt_budget_exhaustion == exhaustion
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("remaining_microseconds", (1, 999_999))
+async def test_parallel_attempt_resume_preserves_exact_near_max_remaining_time(
+    remaining_microseconds: int,
+) -> None:
+    """Parallel provider entry uses only the exact persisted remainder."""
+
+    total_microseconds = MAX_AC_ATTEMPT_TIMEOUT_SECONDS * 1_000_000
+    progress = AttemptBudgetProgress(
+        max_agentic_steps=10,
+        timeout_microseconds=total_microseconds,
+        agentic_steps_consumed=2,
+        remaining_timeout_microseconds=remaining_microseconds,
+    )
+    state = LeafDispatchState(
+        messages=[],
+        runtime_handle=None,
+        agentic_step_count=progress.agentic_steps_consumed,
+        attempt_budget_snapshot=progress,
+    )
+
+    class _CancelScope:
+        def __init__(self, *, deadline: float = math.inf, shield: bool = False) -> None:
+            del shield
+            self.deadline = deadline
+            self.cancel_called = False
+            self.cancelled_caught = False
+            deadlines.append(deadline)
+
+        def __enter__(self) -> _CancelScope:
+            return self
+
+        def __exit__(self, *_args: object) -> bool:
+            return False
+
+    runtime = _FinalMessageRuntime(
+        "entered provider",
+        native_session_id=f"near-max-{remaining_microseconds}",
+    )
+    executor = ParallelACExecutor(
+        adapter=runtime,
+        event_store=AsyncMock(),
+        console=MagicMock(),
+        enable_decomposition=False,
+        max_iterations_per_ac=10,
+        ac_attempt_timeout_seconds=MAX_AC_ATTEMPT_TIMEOUT_SECONDS,
+    )
+    deadlines: list[float] = []
+
+    with (
+        patch(
+            "ouroboros.orchestrator.leaf_dispatcher.anyio.current_time",
+            return_value=100.0,
+        ),
+        patch(
+            "ouroboros.orchestrator.leaf_dispatcher.anyio.CancelScope",
+            _CancelScope,
+        ),
+    ):
+        await LeafDispatcher(executor).stream(
+            state=state,
+            prompt="resume",
+            tools=["Read"],
+            system_prompt="system",
+            execute_effort_kwargs={},
+            runtime_identity=build_ac_runtime_identity(
+                0,
+                execution_context_id="exec_near_max_remaining",
+            ),
+            execution_context_id="exec_near_max_remaining",
+            session_id="sess_near_max_remaining",
+            ac_index=0,
+            ac_content="Resume with exact remaining authority",
+            is_sub_ac=False,
+            parent_ac_index=None,
+            sub_ac_index=None,
+            node_identity=None,
+            retry_attempt=0,
+            semantic_ac_key="ac_near_max_remaining",
+            label="AC 1",
+            indent="",
+            execution_counters=None,
+            max_iterations_per_ac=10,
+            ac_attempt_timeout_seconds=MAX_AC_ATTEMPT_TIMEOUT_SECONDS,
+        )
+        captured = state.attempt_budget_progress(
+            max_agentic_steps=10,
+            timeout_seconds=MAX_AC_ATTEMPT_TIMEOUT_SECONDS,
+        )
+
+    assert runtime.call_count == 1
+    assert state.final_message == "entered provider"
+    assert captured.remaining_timeout_microseconds == remaining_microseconds
+    assert len(deadlines) >= 2
+    assert 0 < deadlines[0] - 100.0 <= progress.remaining_timeout_seconds
 
 
 def _deep_macos_workspace() -> str:
@@ -14258,6 +14799,61 @@ class TestParallelACExecutor:
             "abandon",
         ]
         assert all(event.data["max_attempts"] == MAX_STALL_RETRIES + 1 for event in stall_events)
+
+    @pytest.mark.asyncio
+    async def test_attempt_budget_exhaustion_never_enters_batch_retry_loop(self) -> None:
+        """A hard attempt allowance cannot be renewed by the V3 retry loop."""
+        seed = _make_seed("AC 0 flow")
+        executor = ParallelACExecutor(
+            adapter=MagicMock(),
+            event_store=AsyncMock(),
+            console=MagicMock(),
+            enable_decomposition=False,
+            ac_retry_attempts=2,
+            cross_harness_redispatch=False,
+        )
+        exhaustion = AttemptBudgetExhaustion(
+            kind=AttemptBudgetKind.AGENTIC_STEPS,
+            limit=1.0,
+            observed=2.0,
+        )
+        batch_calls = 0
+
+        async def exhausted_batch(**kwargs: Any) -> list[ACExecutionResult]:
+            nonlocal batch_calls
+            batch_calls += 1
+            return [
+                ACExecutionResult(
+                    ac_index=idx,
+                    ac_content=seed.acceptance_criteria[idx],
+                    success=False,
+                    error="Atomic attempt budget exhausted",
+                    outcome=ACExecutionOutcome.FAILED,
+                    attempt_budget_exhaustion=exhaustion,
+                )
+                for idx in kwargs["batch_indices"]
+            ]
+
+        executor._execute_ac_batch = exhausted_batch  # type: ignore[method-assign]
+
+        results = await executor._run_batch_with_verify_and_retry(
+            seed=seed,
+            batch_executable=[0],
+            session_id="sess_budget_no_retry",
+            execution_id="exec_budget_no_retry",
+            tools=["Read"],
+            tool_catalog=None,
+            system_prompt="system",
+            level_contexts=[],
+            ac_retry_attempts={0: 0},
+            execution_counters=None,
+        )
+
+        assert batch_calls == 1
+        result = results[0]
+        assert isinstance(result, ACExecutionResult)
+        assert result.attempt_budget_exhaustion == exhaustion
+        assert retry_hints.is_retryable_failure(result) is False
 
     @pytest.mark.asyncio
     async def test_alt_harness_defers_until_same_runtime_retry_budget_spent(self) -> None:

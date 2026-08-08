@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 import copy
 from datetime import UTC, datetime, timedelta
@@ -13,6 +14,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from ouroboros.core.attempt_budget import (
+    MAX_AC_ATTEMPT_TIMEOUT_SECONDS,
+    AttemptBudgetProgress,
+)
 from ouroboros.core.errors import ConfigError, PersistenceError
 from ouroboros.core.project_identity import resolve_project_identity
 from ouroboros.core.seed import (
@@ -36,6 +41,11 @@ from ouroboros.orchestrator.adapter import (
     ParamSupport,
     RuntimeCapabilities,
     RuntimeHandle,
+)
+from ouroboros.orchestrator.attempt_budget_runtime import (
+    AttemptBudgetedMessageStream,
+    DirectAttemptBudget,
+    direct_bounded_route_runtime_active,
 )
 from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime
 from ouroboros.orchestrator.coordinator import CoordinatorReview
@@ -93,6 +103,7 @@ _LONG_WINDOW_429_ENCODINGS = tuple(
     for value in (429, "429")
 )
 _EXPECTED_CANONICAL_PROJECT_CWD = str(Path("/tmp/project").resolve())
+_DIRECT_ATTEMPT_BUDGET_PROGRESS_KEY = "direct_attempt_budget_progress"
 
 
 def _task_workspace() -> TaskWorkspace:
@@ -207,6 +218,106 @@ def _allow_mocked_precreated_durable_state(runner: OrchestratorRunner) -> None:
     runner._reconstruct_precreated_durable_tracker = AsyncMock(side_effect=reconstruct)
 
 
+def _direct_attempt_budget_progress(
+    runner: OrchestratorRunner,
+    *,
+    root_ac_count: int,
+    agentic_steps_consumed: int = 0,
+    elapsed_timeout_seconds: float = 0,
+) -> AttemptBudgetProgress:
+    bounded_root_count = max(1, root_ac_count)
+    return AttemptBudgetProgress.capture(
+        agentic_steps_consumed=agentic_steps_consumed,
+        elapsed_timeout_seconds=elapsed_timeout_seconds,
+        max_agentic_steps=runner._max_iterations_per_ac * bounded_root_count,
+        timeout_seconds=runner._ac_attempt_timeout_seconds * bounded_root_count,
+    )
+
+
+def test_direct_attempt_budget_rejects_scaled_timeout_overflow() -> None:
+    with pytest.raises(ValueError, match="scaled attempt timeout"):
+        DirectAttemptBudget.from_execution_semantics(
+            {
+                "max_iterations_per_ac": 1,
+                "ac_attempt_timeout_seconds": 9_007_199_254,
+            },
+            root_ac_count=2,
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("remaining_microseconds", (1, 999_999))
+async def test_direct_attempt_resume_preserves_exact_near_max_remaining_time(
+    remaining_microseconds: int,
+) -> None:
+    """Direct provider entry uses only the exact persisted remainder."""
+
+    total_microseconds = MAX_AC_ATTEMPT_TIMEOUT_SECONDS * 1_000_000
+    progress = AttemptBudgetProgress(
+        max_agentic_steps=10,
+        timeout_microseconds=total_microseconds,
+        agentic_steps_consumed=2,
+        remaining_timeout_microseconds=remaining_microseconds,
+    )
+
+    async def one_message() -> AsyncIterator[AgentMessage]:
+        yield AgentMessage(type="assistant", content="entered provider")
+
+    class _Clock:
+        times = iter((100.0, 100.0, 100.25, 100.25))
+
+        @classmethod
+        def time(cls) -> float:
+            return next(cls.times)
+
+    class _Timeout:
+        def __init__(self, deadline: float) -> None:
+            self.deadline = deadline
+
+        async def __aenter__(self) -> None:
+            return None
+
+        async def __aexit__(self, *_args: object) -> bool:
+            return False
+
+        @staticmethod
+        def expired() -> bool:
+            return False
+
+    deadlines: list[float] = []
+    source = one_message()
+    try:
+        stream = AttemptBudgetedMessageStream(
+            source,
+            max_agentic_steps=10,
+            timeout_seconds=MAX_AC_ATTEMPT_TIMEOUT_SECONDS,
+            progress=progress,
+        )
+
+        with (
+            patch(
+                "ouroboros.orchestrator.attempt_budget_runtime.asyncio.get_running_loop",
+                return_value=_Clock(),
+            ),
+            patch(
+                "ouroboros.orchestrator.attempt_budget_runtime.asyncio.timeout_at",
+                side_effect=lambda deadline: deadlines.append(deadline) or _Timeout(deadline),
+            ),
+        ):
+            async with stream.lifetime():
+                message = await anext(stream)
+                captured = stream.progress()
+
+        assert message.content == "entered provider"
+        assert captured.remaining_timeout_microseconds <= remaining_microseconds
+        assert len(deadlines) == 1
+        # The timeout remains anchored to the first provider read. A later
+        # clock sample must not rebase the deadline and mint that gap.
+        assert 0 < deadlines[0] - 100.0 <= progress.remaining_timeout_seconds
+    finally:
+        await source.aclose()
+
+
 def _attach_live_process_local_contract(
     runner: OrchestratorRunner,
     tracker: SessionTracker,
@@ -236,7 +347,29 @@ def _attach_live_process_local_contract(
         execution_contract=contract,
     )
     _allow_mocked_precreated_durable_state(runner)
-    return tracker.with_progress({EXECUTION_CONTRACT_PROGRESS_KEY: contract})
+    attempt_budget_progress = _direct_attempt_budget_progress(
+        runner,
+        root_ac_count=len(seed.acceptance_criteria),
+    )
+    return tracker.with_progress(
+        {
+            EXECUTION_CONTRACT_PROGRESS_KEY: contract,
+            _DIRECT_ATTEMPT_BUDGET_PROGRESS_KEY: (attempt_budget_progress.to_contract_data()),
+        }
+    )
+
+
+def _attach_exact_resume_handle(
+    tracker: SessionTracker,
+    adapter: MagicMock,
+    native_session_id: str,
+) -> tuple[SessionTracker, RuntimeHandle]:
+    """Give a resume fixture the exact provider identity required by PAUSED."""
+    handle = RuntimeHandle(
+        backend=adapter.runtime_backend,
+        native_session_id=native_session_id,
+    )
+    return tracker.with_progress({"runtime": handle.to_session_state_dict()}), handle
 
 
 def _enable_direct_bounded_routes(
@@ -721,6 +854,37 @@ class TestOrchestratorRunner:
         _allow_mocked_precreated_durable_state(runner)
         return runner
 
+    @pytest.mark.parametrize(
+        "attempt_timeout",
+        (MAX_AC_ATTEMPT_TIMEOUT_SECONDS + 1, 2**53 + 3, 10**400),
+    )
+    def test_resume_rejects_unrepresentable_durable_attempt_timeout(
+        self,
+        runner: OrchestratorRunner,
+        sample_seed: Seed,
+        attempt_timeout: int,
+    ) -> None:
+        """A fingerprint cannot authorize a timeout outside the durable boundary."""
+
+        contract = copy.deepcopy(
+            runner._build_execution_contract(
+                project_identity=runner._project_identity(),
+                seed=sample_seed,
+            )
+        )
+        semantics = contract["execution_semantics"]
+        proof = contract["frugality_proof"]
+        semantics["ac_attempt_timeout_seconds"] = attempt_timeout
+        proof["execution_semantics_fingerprint"] = runner._execution_semantics_fingerprint(
+            semantics
+        )
+
+        with pytest.raises(OrchestratorError, match="invalid execution contract"):
+            runner._restore_execution_contract_snapshot(
+                {EXECUTION_CONTRACT_PROGRESS_KEY: contract},
+                seed=sample_seed,
+            )
+
     async def test_close_adapter_awaits_runtime_lifecycle(self, runner) -> None:
         runner._adapter.aclose = AsyncMock()
 
@@ -803,7 +967,15 @@ class TestOrchestratorRunner:
             structured_output=True,
             model_override_support=ParamSupport.NATIVE,
         )
-        assert runner._bounded_route_runtime_active() is False
+        assert (
+            direct_bounded_route_runtime_active(
+                max_decomposition_depth=runner._max_decomposition_depth,
+                model_router=runner._model_router,
+                route_economics=runner._route_economics,
+                adapter=mock_adapter,
+            )
+            is False
+        )
         mock_adapter.execute_task.assert_not_called()
 
     def test_runner_accepts_shared_persistable_maximum_depth(
@@ -1041,6 +1213,285 @@ class TestOrchestratorRunner:
         )
         assert recovery_event.data["pattern"] == "spinning"
         assert recovery_event.data["persona"] == "hacker"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("provider_close_fails", (False, True))
+    async def test_execute_seed_direct_stops_at_scaled_agentic_budget(
+        self,
+        runner: OrchestratorRunner,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        sample_seed: Seed,
+        provider_close_fails: bool,
+    ) -> None:
+        """Whole-Seed direct calls get a finite per-root-AC step allowance."""
+
+        runner._max_iterations_per_ac = 1
+        runner._ac_attempt_timeout_seconds = 10
+        terminate_calls = 0
+        produced = 0
+
+        async def terminate(_handle: RuntimeHandle) -> bool:
+            nonlocal terminate_calls
+            terminate_calls += 1
+            return True
+
+        live_handle = RuntimeHandle(
+            backend="opencode",
+            native_session_id="direct-budget",
+        ).bind_controls(terminate_callback=terminate)
+
+        async def mock_execute(*args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
+            nonlocal produced
+            del args, kwargs
+            try:
+                for index in range(20):
+                    produced += 1
+                    yield AgentMessage(
+                        type="tool",
+                        content=f"tool {index}",
+                        tool_name="Read",
+                        resume_handle=live_handle,
+                    )
+            finally:
+                if provider_close_fails:
+                    raise RuntimeError("provider close failed after step exhaustion")
+
+        mock_adapter.execute_task = mock_execute
+
+        async def create_session(*args: Any, **kwargs: Any):
+            return Result.ok(
+                SessionTracker.create(
+                    str(kwargs["execution_id"]),
+                    str(kwargs["seed_id"]),
+                    session_id=str(kwargs["session_id"]),
+                )
+            )
+
+        with (
+            patch.object(runner._session_repo, "create_session", create_session),
+            patch.object(
+                runner._session_repo,
+                "mark_failed",
+                AsyncMock(return_value=Result.ok(None)),
+            ),
+        ):
+            result = await runner.execute_seed(sample_seed, parallel=False)
+
+        assert result.is_ok and result.value.success is False
+        assert produced == 4  # 3 root ACs x 1 admitted step, then the boundary turn
+        assert terminate_calls == 1
+        assert "agentic_steps limit=3" in result.value.final_message
+        budget_event = next(
+            call.args[0]
+            for call in mock_event_store.append.await_args_list
+            if getattr(call.args[0], "type", None) == "execution.ac.attempt_budget_exhausted"
+        )
+        assert budget_event.data["ac_index"] is None
+        assert budget_event.data["budget_kind"] == "agentic_steps"
+        assert budget_event.data["limit"] == 3
+        assert budget_event.data["observed"] == 4
+        assert budget_event.data["scope"] == "direct_seed"
+        assert budget_event.data["root_ac_count"] == 3
+
+    @pytest.mark.asyncio
+    async def test_execute_seed_direct_preserves_budget_result_when_event_write_fails(
+        self,
+        runner: OrchestratorRunner,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        sample_seed: Seed,
+    ) -> None:
+        """Observe-only budget telemetry cannot mask an enforced direct boundary."""
+
+        runner._max_iterations_per_ac = 1
+        runner._ac_attempt_timeout_seconds = 10
+        produced = 0
+
+        async def mock_execute(*args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
+            nonlocal produced
+            del args, kwargs
+            for index in range(20):
+                produced += 1
+                yield AgentMessage(
+                    type="tool",
+                    content=f"tool {index}",
+                    tool_name="Read",
+                )
+
+        async def append_event(event: Any) -> None:
+            if event.type == "execution.ac.attempt_budget_exhausted":
+                raise RuntimeError("budget telemetry unavailable")
+
+        async def create_session(*args: Any, **kwargs: Any):
+            return Result.ok(
+                SessionTracker.create(
+                    str(kwargs["execution_id"]),
+                    str(kwargs["seed_id"]),
+                    session_id=str(kwargs["session_id"]),
+                )
+            )
+
+        mock_adapter.execute_task = mock_execute
+        mock_event_store.append.side_effect = append_event
+
+        with (
+            patch.object(runner._session_repo, "create_session", create_session),
+            patch.object(
+                runner._session_repo,
+                "mark_failed",
+                AsyncMock(return_value=Result.ok(None)),
+            ),
+        ):
+            result = await runner.execute_seed(sample_seed, parallel=False)
+
+        assert result.is_ok and result.value.success is False
+        assert produced == 4
+        assert "agentic_steps limit=3" in result.value.final_message
+        assert "budget telemetry unavailable" not in result.value.final_message
+        assert any(
+            getattr(call.args[0], "type", None) == "execution.ac.attempt_budget_exhausted"
+            for call in mock_event_store.append.await_args_list
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("provider_close_fails", (False, True))
+    async def test_execute_seed_direct_stops_at_scaled_wall_clock_budget(
+        self,
+        runner: OrchestratorRunner,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        sample_seed: Seed,
+        provider_close_fails: bool,
+    ) -> None:
+        """Slow post-read processing cannot outlive the direct provider deadline."""
+
+        runner._max_iterations_per_ac = 100
+        runner._ac_attempt_timeout_seconds = 1
+        terminate_calls = 0
+        provider_finalized = asyncio.Event()
+
+        async def terminate(_handle: RuntimeHandle) -> bool:
+            nonlocal terminate_calls
+            assert provider_finalized.is_set()
+            terminate_calls += 1
+            return True
+
+        live_handle = RuntimeHandle(
+            backend="opencode",
+            native_session_id="direct-time-budget",
+        ).bind_controls(terminate_callback=terminate)
+
+        async def mock_execute(*args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
+            del args, kwargs
+            try:
+                yield AgentMessage(
+                    type="assistant",
+                    content="entered slow consumer processing",
+                    resume_handle=live_handle,
+                )
+                await asyncio.Event().wait()
+            finally:
+                provider_finalized.set()
+                if provider_close_fails:
+                    raise RuntimeError("provider close failed after deadline")
+
+        async def slow_progress(*args: Any, **kwargs: Any) -> Any:
+            del args, kwargs
+            await asyncio.sleep(1)
+            raise AssertionError("post-read processing exceeded the fixed deadline")
+
+        mock_adapter.execute_task = mock_execute
+
+        async def create_session(*args: Any, **kwargs: Any):
+            return Result.ok(
+                SessionTracker.create(
+                    str(kwargs["execution_id"]),
+                    str(kwargs["seed_id"]),
+                    session_id=str(kwargs["session_id"]),
+                )
+            )
+
+        with (
+            patch.object(runner._session_repo, "create_session", create_session),
+            patch.object(
+                DirectAttemptBudget,
+                "from_execution_semantics",
+                return_value=DirectAttemptBudget(
+                    max_agentic_steps=300,
+                    timeout_seconds=0.03,
+                    root_ac_count=3,
+                ),
+            ),
+            patch.object(
+                runner._session_repo,
+                "mark_failed",
+                AsyncMock(return_value=Result.ok(None)),
+            ),
+            patch.object(runner, "_update_and_persist_progress", slow_progress),
+        ):
+            started = asyncio.get_running_loop().time()
+            result = await runner.execute_seed(sample_seed, parallel=False)
+            elapsed = asyncio.get_running_loop().time() - started
+
+        assert result.is_ok and result.value.success is False
+        assert elapsed < 0.9
+        assert provider_finalized.is_set()
+        assert terminate_calls == 1
+        budget_events = [
+            call.args[0]
+            for call in mock_event_store.append.await_args_list
+            if getattr(call.args[0], "type", None) == "execution.ac.attempt_budget_exhausted"
+        ]
+        assert len(budget_events) == 1
+        budget_event = budget_events[0]
+        assert budget_event.data["budget_kind"] == "wall_clock"
+        assert budget_event.data["limit"] == pytest.approx(0.03)
+        assert budget_event.data["observed"] >= 0.03
+
+    @pytest.mark.asyncio
+    async def test_execute_seed_direct_does_not_misclassify_provider_timeout(
+        self,
+        runner: OrchestratorRunner,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        sample_seed: Seed,
+    ) -> None:
+        """A provider-raised TimeoutError is not evidence that our deadline fired."""
+
+        async def mock_execute(*args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
+            del args, kwargs
+            if False:  # pragma: no cover - makes this an async generator
+                yield AgentMessage(type="assistant", content="unreachable")
+            raise TimeoutError("provider transport timed out")
+
+        mock_adapter.execute_task = mock_execute
+
+        async def create_session(*args: Any, **kwargs: Any):
+            return Result.ok(
+                SessionTracker.create(
+                    str(kwargs["execution_id"]),
+                    str(kwargs["seed_id"]),
+                    session_id=str(kwargs["session_id"]),
+                )
+            )
+
+        with (
+            patch.object(runner._session_repo, "create_session", create_session),
+            patch.object(
+                runner._session_repo,
+                "mark_failed",
+                AsyncMock(return_value=Result.ok(None)),
+            ),
+        ):
+            result = await runner.execute_seed(sample_seed, parallel=False)
+
+        assert result.is_err
+        assert "provider transport timed out" in str(result.error)
+        assert all(
+            getattr(call.args[0], "type", None) != "execution.ac.attempt_budget_exhausted"
+            for call in mock_event_store.append.await_args_list
+        )
 
     @pytest.mark.asyncio
     async def test_execute_seed_direct_walks_bounded_routes_in_fresh_sessions(
@@ -2047,7 +2498,7 @@ class TestOrchestratorRunner:
             aggregate_type="execution",
             aggregate_id="execution-route-resume",
             data={
-                "schema_version": 1,
+                "schema_version": 2,
                 "execution_id": "execution-route-resume",
                 "session_id": "session-route-resume",
                 "root_ac_index": None,
@@ -2058,6 +2509,9 @@ class TestOrchestratorRunner:
                 "attempt_index": 0,
                 "prior_route_ids": [],
                 "route": paused_candidate.to_contract_data(),
+                "attempt_budget_progress": paused_tracker.progress[
+                    _DIRECT_ATTEMPT_BUDGET_PROGRESS_KEY
+                ],
                 "recoverable_pause": True,
                 "final_acceptance_declared": False,
             },
@@ -2100,6 +2554,7 @@ class TestOrchestratorRunner:
     @pytest.mark.parametrize(
         ("scenario", "expected_calls"),
         [
+            ("legacy_initial_handleless_pause", 1),
             ("initial_handleless_pause", 1),
             ("successor_handleless_pause", 2),
             ("pause_handle_persistence_failure", 1),
@@ -2129,7 +2584,8 @@ class TestOrchestratorRunner:
             enable_decomposition=False,
         )
         runner._run_verify_commands = False
-        _enable_direct_bounded_routes(runner, mock_adapter)
+        if scenario != "legacy_initial_handleless_pause":
+            _enable_direct_bounded_routes(runner, mock_adapter)
         mock_adapter.llm_backend = "test-llm"
         mock_adapter._model = "test-model"
         provider_calls: list[dict[str, Any]] = []
@@ -2370,7 +2826,7 @@ class TestOrchestratorRunner:
             aggregate_type="execution",
             aggregate_id=paused_tracker.execution_id,
             data={
-                "schema_version": 1,
+                "schema_version": 2,
                 "execution_id": paused_tracker.execution_id,
                 "session_id": paused_tracker.session_id,
                 "root_ac_index": None,
@@ -2382,6 +2838,9 @@ class TestOrchestratorRunner:
                 "attempt_index": 0,
                 "prior_route_ids": [],
                 "route": paused_candidate.to_contract_data(),
+                "attempt_budget_progress": paused_tracker.progress[
+                    _DIRECT_ATTEMPT_BUDGET_PROGRESS_KEY
+                ],
                 "recoverable_pause": True,
                 "final_acceptance_declared": False,
             },
@@ -2505,7 +2964,7 @@ class TestOrchestratorRunner:
             aggregate_type="execution",
             aggregate_id=paused_tracker.execution_id,
             data={
-                "schema_version": 1,
+                "schema_version": 2,
                 "execution_id": paused_tracker.execution_id,
                 "session_id": paused_tracker.session_id,
                 "root_ac_index": None,
@@ -2514,6 +2973,9 @@ class TestOrchestratorRunner:
                 "attempt_index": 0,
                 "prior_route_ids": [],
                 "route": paused_candidate.to_contract_data(),
+                "attempt_budget_progress": paused_tracker.progress[
+                    _DIRECT_ATTEMPT_BUDGET_PROGRESS_KEY
+                ],
                 "recoverable_pause": True,
                 "final_acceptance_declared": False,
             },
@@ -2680,13 +3142,17 @@ class TestOrchestratorRunner:
         initial = admit_compat_escalation_route(projection, effort=None)
         assert initial.selected is not None
         episode_id = "route:" + hashlib.sha256(f"{execution_id}\0direct".encode()).hexdigest()
+        attempt_budget_progress = _direct_attempt_budget_progress(
+            runner,
+            root_ac_count=1,
+        ).to_contract_data()
         pauses = [
             BaseEvent(
                 type="execution.ac.route_paused",
                 aggregate_type="execution",
                 aggregate_id=execution_id,
                 data={
-                    "schema_version": 1,
+                    "schema_version": 2,
                     "execution_id": execution_id,
                     "session_id": session_id,
                     "root_ac_index": None,
@@ -2695,6 +3161,7 @@ class TestOrchestratorRunner:
                     "attempt_index": 0,
                     "prior_route_ids": [],
                     "route": initial.selected.to_contract_data(),
+                    "attempt_budget_progress": attempt_budget_progress,
                     "recoverable_pause": True,
                     "final_acceptance_declared": False,
                 },
@@ -2791,7 +3258,7 @@ class TestOrchestratorRunner:
             aggregate_type="execution",
             aggregate_id=execution_id,
             data={
-                "schema_version": 1,
+                "schema_version": 2,
                 "execution_id": execution_id,
                 "session_id": session_id,
                 "root_ac_index": None,
@@ -2800,6 +3267,10 @@ class TestOrchestratorRunner:
                 "attempt_index": 1,
                 "prior_route_ids": [current.route_id],
                 "route": drifted_pause.to_contract_data(),
+                "attempt_budget_progress": _direct_attempt_budget_progress(
+                    runner,
+                    root_ac_count=1,
+                ).to_contract_data(),
                 "recoverable_pause": True,
                 "final_acceptance_declared": False,
             },
@@ -4422,6 +4893,10 @@ class TestOrchestratorRunner:
             sample_seed,
             session_id=tracker.session_id,
         )
+        pause_handle = RuntimeHandle(
+            backend=mock_adapter.runtime_backend,
+            native_session_id="pause-persistence-pending",
+        )
 
         async def mock_execute(*args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
             del args, kwargs
@@ -4429,6 +4904,7 @@ class TestOrchestratorRunner:
                 type="result",
                 content="Usage limit reached. Please try again in 5 hours.",
                 data={"subtype": "error", "error_type": "CodexCliError"},
+                resume_handle=pause_handle,
             )
 
         mock_adapter.execute_task = mock_execute
@@ -5006,9 +5482,12 @@ class TestOrchestratorRunner:
             return True
 
         runtime_handle = RuntimeHandle(
-            backend="codex_cli",
+            backend=mock_adapter.runtime_backend,
             native_session_id="thread-123",
         ).bind_controls(terminate_callback=terminate)
+        running_tracker = running_tracker.with_progress(
+            {"runtime": runtime_handle.to_session_state_dict()}
+        )
 
         async def mock_execute(*args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
             del args, kwargs
@@ -5084,6 +5563,11 @@ class TestOrchestratorRunner:
             sample_seed,
             session_id="sess_resume_pause_pending",
         )
+        tracker, _resume_handle = _attach_exact_resume_handle(
+            tracker,
+            mock_adapter,
+            "resume-pause-persistence-pending",
+        )
 
         async def mock_execute(*args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
             del args, kwargs
@@ -5151,6 +5635,11 @@ class TestOrchestratorRunner:
             tracker,
             sample_seed,
             session_id=tracker.session_id,
+        )
+        tracker, _resume_handle = _attach_exact_resume_handle(
+            tracker,
+            mock_adapter,
+            "resume-projection-pending",
         )
 
         async def mock_execute(*args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
@@ -5225,6 +5714,11 @@ class TestOrchestratorRunner:
             tracker,
             sample_seed,
             session_id="sess_resume_pause_cancel",
+        )
+        tracker, _resume_handle = _attach_exact_resume_handle(
+            tracker,
+            mock_adapter,
+            "resume-late-cancellation",
         )
 
         async def mock_execute(*args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
@@ -6147,7 +6641,12 @@ class TestOrchestratorRunner:
             )
         else:
             runner._max_decomposition_depth = MAX_DECOMPOSITION_DEPTH + 1
-        assert runner._bounded_route_runtime_active() is False
+        assert not direct_bounded_route_runtime_active(
+            max_decomposition_depth=runner._max_decomposition_depth,
+            model_router=runner._model_router,
+            route_economics=runner._route_economics,
+            adapter=runner._adapter,
+        )
         executor_cls = MagicMock(
             side_effect=AssertionError("parallel executor entered without model enforcement")
         )
@@ -6662,7 +7161,13 @@ class TestOrchestratorRunner:
             sample_seed,
             session_id="sess_resume_paused",
         )
-        runtime_handle = RuntimeHandle(backend="codex_cli", native_session_id="thread-123")
+        runtime_handle = RuntimeHandle(
+            backend=mock_adapter.runtime_backend,
+            native_session_id="thread-123",
+        )
+        paused_tracker = paused_tracker.with_progress(
+            {"runtime": runtime_handle.to_session_state_dict()}
+        )
 
         async def mock_execute(*args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
             del args, kwargs
@@ -6692,6 +7197,369 @@ class TestOrchestratorRunner:
         assert result.is_ok
         assert result.value.success is True
         mark_completed.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_legacy_direct_resume_without_exact_handle_never_redispatches(
+        self,
+        runner: OrchestratorRunner,
+        mock_adapter: MagicMock,
+        sample_seed: Seed,
+    ) -> None:
+        """A legacy PAUSED snapshot without provider identity must fail closed."""
+
+        paused_tracker = SessionTracker.create(
+            "exec_handleless_resume",
+            sample_seed.metadata.seed_id,
+            session_id="sess_handleless_resume",
+        ).with_status(SessionStatus.PAUSED)
+        paused_tracker = _attach_live_process_local_contract(
+            runner,
+            paused_tracker,
+            sample_seed,
+            session_id=paused_tracker.session_id,
+        )
+        provider_calls = 0
+
+        async def mock_execute(*_args: Any, **_kwargs: Any) -> AsyncIterator[AgentMessage]:
+            nonlocal provider_calls
+            provider_calls += 1
+            yield AgentMessage(type="result", content="must not run")
+
+        mock_adapter.execute_task = mock_execute
+        with patch.object(
+            runner._session_repo,
+            "reconstruct_session",
+            AsyncMock(return_value=Result.ok(paused_tracker)),
+        ):
+            result = await runner.resume_session(paused_tracker.session_id, sample_seed)
+
+        assert result.is_err
+        assert "without its exact resumable provider handle" in result.error.message
+        assert provider_calls == 0
+
+    @pytest.mark.asyncio
+    async def test_resume_session_stops_at_direct_agentic_budget_without_retry(
+        self,
+        runner: OrchestratorRunner,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        sample_seed: Seed,
+    ) -> None:
+        """Legacy direct resumes share the same finite provider boundary."""
+
+        runner._max_iterations_per_ac = 1
+        runner._ac_attempt_timeout_seconds = 10
+        paused_tracker = SessionTracker.create(
+            "exec_resume_budget",
+            sample_seed.metadata.seed_id,
+        ).with_status(SessionStatus.PAUSED)
+        paused_tracker = _attach_live_process_local_contract(
+            runner,
+            paused_tracker,
+            sample_seed,
+            session_id="sess_resume_budget",
+        )
+        paused_tracker = paused_tracker.with_progress(
+            {
+                _DIRECT_ATTEMPT_BUDGET_PROGRESS_KEY: _direct_attempt_budget_progress(
+                    runner,
+                    root_ac_count=len(sample_seed.acceptance_criteria),
+                    agentic_steps_consumed=2,
+                ).to_contract_data()
+            }
+        )
+        terminate_calls = 0
+        provider_calls = 0
+        produced_tool_turns = 0
+
+        async def terminate(_handle: RuntimeHandle) -> bool:
+            nonlocal terminate_calls
+            terminate_calls += 1
+            return True
+
+        live_handle = RuntimeHandle(
+            backend="opencode",
+            native_session_id="resume-budget",
+        ).bind_controls(terminate_callback=terminate)
+        paused_tracker = paused_tracker.with_progress(
+            {"runtime": live_handle.to_session_state_dict()}
+        )
+
+        async def mock_execute(*args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
+            nonlocal provider_calls
+            nonlocal produced_tool_turns
+            del args, kwargs
+            provider_calls += 1
+            for index in range(20):
+                produced_tool_turns += 1
+                yield AgentMessage(
+                    type="tool",
+                    content=f"tool {index}",
+                    tool_name="Read",
+                    resume_handle=live_handle,
+                )
+
+        mock_adapter.execute_task = mock_execute
+
+        with (
+            patch.object(
+                runner._session_repo,
+                "reconstruct_session",
+                AsyncMock(return_value=Result.ok(paused_tracker)),
+            ),
+            patch.object(
+                runner._session_repo,
+                "mark_failed",
+                AsyncMock(return_value=Result.ok(None)),
+            ),
+        ):
+            result = await runner.resume_session("sess_resume_budget", sample_seed)
+
+        assert result.is_ok and result.value.success is False
+        assert provider_calls == 1
+        assert produced_tool_turns == 2
+        assert terminate_calls == 1
+        assert "agentic_steps limit=3" in result.value.final_message
+        budget_event = next(
+            call.args[0]
+            for call in mock_event_store.append.await_args_list
+            if getattr(call.args[0], "type", None) == "execution.ac.attempt_budget_exhausted"
+        )
+        assert budget_event.data["call_site"] == "runner_resume"
+        assert budget_event.data["limit"] == 3
+        runner._retire_process_local_authority(
+            session_id="sess_resume_budget",
+            execution_id=paused_tracker.execution_id,
+        )
+
+    @pytest.mark.asyncio
+    async def test_resume_session_uses_only_remaining_direct_wall_clock_budget(
+        self,
+        runner: OrchestratorRunner,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        sample_seed: Seed,
+    ) -> None:
+        """A resumed attempt's remainder also covers slow post-read processing."""
+
+        runner._max_iterations_per_ac = 100
+        runner._ac_attempt_timeout_seconds = 1
+        paused_tracker = SessionTracker.create(
+            "exec_resume_time_budget",
+            sample_seed.metadata.seed_id,
+        ).with_status(SessionStatus.PAUSED)
+        paused_tracker = _attach_live_process_local_contract(
+            runner,
+            paused_tracker,
+            sample_seed,
+            session_id="sess_resume_time_budget",
+        ).with_progress(
+            {
+                _DIRECT_ATTEMPT_BUDGET_PROGRESS_KEY: _direct_attempt_budget_progress(
+                    runner,
+                    root_ac_count=len(sample_seed.acceptance_criteria),
+                    elapsed_timeout_seconds=2.98,
+                ).to_contract_data()
+            }
+        )
+        terminate_calls = 0
+        provider_finalized = asyncio.Event()
+
+        async def terminate(_handle: RuntimeHandle) -> bool:
+            nonlocal terminate_calls
+            assert provider_finalized.is_set()
+            terminate_calls += 1
+            return True
+
+        live_handle = RuntimeHandle(
+            backend="opencode",
+            native_session_id="resume-time-budget",
+        ).bind_controls(terminate_callback=terminate)
+        paused_tracker = paused_tracker.with_progress(
+            {"runtime": live_handle.to_session_state_dict()}
+        )
+
+        async def mock_execute(*args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
+            del args, kwargs
+            try:
+                yield AgentMessage(
+                    type="assistant",
+                    content="entered resumed slow consumer processing",
+                    resume_handle=live_handle,
+                )
+                await asyncio.Event().wait()
+            finally:
+                provider_finalized.set()
+
+        async def slow_progress(*args: Any, **kwargs: Any) -> Any:
+            del args, kwargs
+            await asyncio.sleep(1)
+            raise AssertionError("resumed post-read processing exceeded the fixed deadline")
+
+        mock_adapter.execute_task = mock_execute
+        started = asyncio.get_running_loop().time()
+        try:
+            with (
+                patch.object(
+                    runner._session_repo,
+                    "reconstruct_session",
+                    AsyncMock(return_value=Result.ok(paused_tracker)),
+                ),
+                patch.object(
+                    runner._session_repo,
+                    "mark_failed",
+                    AsyncMock(return_value=Result.ok(None)),
+                ),
+                patch.object(runner, "_update_and_persist_progress", slow_progress),
+            ):
+                result = await runner.resume_session(
+                    "sess_resume_time_budget",
+                    sample_seed,
+                )
+        finally:
+            runner._retire_process_local_authority(
+                session_id="sess_resume_time_budget",
+                execution_id=paused_tracker.execution_id,
+            )
+
+        elapsed = asyncio.get_running_loop().time() - started
+        assert result.is_ok and result.value.success is False
+        assert elapsed < 0.5
+        assert provider_finalized.is_set()
+        assert terminate_calls == 1
+        budget_events = [
+            call.args[0]
+            for call in mock_event_store.append.await_args_list
+            if getattr(call.args[0], "type", None) == "execution.ac.attempt_budget_exhausted"
+        ]
+        assert len(budget_events) == 1
+        budget_event = budget_events[0]
+        assert budget_event.data["budget_kind"] == "wall_clock"
+        assert budget_event.data["limit"] == pytest.approx(3.0)
+        assert budget_event.data["observed"] >= 3.0
+
+    @pytest.mark.asyncio
+    async def test_resume_session_rejects_missing_direct_budget_progress_before_provider(
+        self,
+        runner: OrchestratorRunner,
+        mock_adapter: MagicMock,
+        sample_seed: Seed,
+    ) -> None:
+        paused_tracker = SessionTracker.create(
+            "exec_resume_missing_budget",
+            sample_seed.metadata.seed_id,
+        ).with_status(SessionStatus.PAUSED)
+        paused_tracker = _attach_live_process_local_contract(
+            runner,
+            paused_tracker,
+            sample_seed,
+            session_id="sess_resume_missing_budget",
+        ).with_progress({_DIRECT_ATTEMPT_BUDGET_PROGRESS_KEY: None})
+        provider_called = False
+
+        async def mock_execute(*args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
+            nonlocal provider_called
+            del args, kwargs
+            provider_called = True
+            yield AgentMessage(type="result", content="must not run")
+
+        mock_adapter.execute_task = mock_execute
+        try:
+            with patch.object(
+                runner._session_repo,
+                "reconstruct_session",
+                AsyncMock(return_value=Result.ok(paused_tracker)),
+            ):
+                result = await runner.resume_session(
+                    "sess_resume_missing_budget",
+                    sample_seed,
+                )
+        finally:
+            runner._retire_process_local_authority(
+                session_id="sess_resume_missing_budget",
+                execution_id=paused_tracker.execution_id,
+            )
+
+        assert result.is_err
+        assert "valid direct attempt budget progress" in str(result.error)
+        assert provider_called is False
+
+    @pytest.mark.asyncio
+    async def test_resume_session_preserves_budget_result_when_event_write_fails(
+        self,
+        runner: OrchestratorRunner,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        sample_seed: Seed,
+    ) -> None:
+        """Resume exhaustion remains terminal when its audit event cannot persist."""
+
+        runner._max_iterations_per_ac = 1
+        runner._ac_attempt_timeout_seconds = 10
+        paused_tracker = SessionTracker.create(
+            "exec_resume_budget_event_failure",
+            sample_seed.metadata.seed_id,
+        ).with_status(SessionStatus.PAUSED)
+        paused_tracker = _attach_live_process_local_contract(
+            runner,
+            paused_tracker,
+            sample_seed,
+            session_id="sess_resume_budget_event_failure",
+        )
+        paused_tracker, _resume_handle = _attach_exact_resume_handle(
+            paused_tracker,
+            mock_adapter,
+            "resume-budget-event-failure",
+        )
+        provider_calls = 0
+
+        async def mock_execute(*args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
+            nonlocal provider_calls
+            del args, kwargs
+            provider_calls += 1
+            for index in range(20):
+                yield AgentMessage(
+                    type="tool",
+                    content=f"tool {index}",
+                    tool_name="Read",
+                )
+
+        async def append_event(event: Any) -> None:
+            if event.type == "execution.ac.attempt_budget_exhausted":
+                raise RuntimeError("budget telemetry unavailable")
+
+        mock_adapter.execute_task = mock_execute
+        mock_event_store.append.side_effect = append_event
+
+        with (
+            patch.object(
+                runner._session_repo,
+                "reconstruct_session",
+                AsyncMock(return_value=Result.ok(paused_tracker)),
+            ),
+            patch.object(
+                runner._session_repo,
+                "mark_failed",
+                AsyncMock(return_value=Result.ok(None)),
+            ),
+        ):
+            result = await runner.resume_session(
+                "sess_resume_budget_event_failure",
+                sample_seed,
+            )
+
+        assert result.is_ok and result.value.success is False
+        assert provider_calls == 1
+        assert "agentic_steps limit=3" in result.value.final_message
+        assert "budget telemetry unavailable" not in result.value.final_message
+        assert any(
+            getattr(call.args[0], "type", None) == "execution.ac.attempt_budget_exhausted"
+            for call in mock_event_store.append.await_args_list
+        )
+        runner._retire_process_local_authority(
+            session_id="sess_resume_budget_event_failure",
+            execution_id=paused_tracker.execution_id,
+        )
 
     @pytest.mark.asyncio
     async def test_public_resume_accepts_pre_anchor_managed_linked_identity(
@@ -6776,6 +7644,14 @@ class TestOrchestratorRunner:
                     "execution_id": execution_id,
                     "seed_id": sample_seed.metadata.seed_id,
                 },
+                _DIRECT_ATTEMPT_BUDGET_PROGRESS_KEY: _direct_attempt_budget_progress(
+                    runner,
+                    root_ac_count=len(sample_seed.acceptance_criteria),
+                ).to_contract_data(),
+                "runtime": RuntimeHandle(
+                    backend=mock_adapter.runtime_backend,
+                    native_session_id="resume-managed-linked",
+                ).to_session_state_dict(),
             }
         )
 
@@ -6823,6 +7699,11 @@ class TestOrchestratorRunner:
             paused_tracker,
             research_seed,
             session_id="sess_resume_research",
+        )
+        paused_tracker, _resume_handle = _attach_exact_resume_handle(
+            paused_tracker,
+            mock_adapter,
+            "resume-research",
         )
         captured: dict[str, Any] = {}
 
@@ -6887,6 +7768,11 @@ class TestOrchestratorRunner:
             paused_tracker,
             sample_seed,
             session_id="sess_resume_context",
+        )
+        paused_tracker, _resume_handle = _attach_exact_resume_handle(
+            paused_tracker,
+            mock_adapter,
+            "resume-context",
         )
         manifest.write_text(
             '[project]\nname = "resume-app"\nversion = "9.9.9"\n',

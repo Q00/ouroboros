@@ -119,6 +119,20 @@ Fail-closed marker for a provider boundary whose effects may have occurred but
 whose terminal result is not yet durable. Recovery must not redispatch a sealed
 attempt; a later terminal lifecycle event supersedes the seal.
 
+### execution.ac.attempt_budget_exhausted
+
+Emitted when the common runtime stream owner stops an atomic attempt or legacy
+whole-Seed direct call at its finite boundary. `budget_kind=agentic_steps` means the first over-budget
+tool-bearing agent turn was observed and no later turn was admitted;
+`budget_kind=wall_clock` means
+the fixed attempt deadline expired even though progress may still have been
+streaming. The event records the configured `limit`, measured `observed` value,
+and `action=fail_no_successor`. Exhaustion is terminal for that bounded
+execution scope: it cannot authorize retry, verification recovery, bounce
+decomposition, an alternate runtime, or a route successor. The event is audit
+evidence, never an acceptance verdict. Direct calls use `ac_index=null`,
+`scope=direct_seed`, and record `root_ac_count` plus `call_site`.
+
 ### mcp.job.created
 
 Emitted when a background MCP job is created. Its owner fields let a later

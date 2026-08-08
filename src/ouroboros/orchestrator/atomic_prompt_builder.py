@@ -279,6 +279,15 @@ class AtomicPromptBuilder:
                 "clearly.\nWhen complete, explicitly state: [TASK_COMPLETE]"
             )
 
+        attempt_budget_instruction = (
+            "## Hard Attempt Budget\n"
+            f"Finish within {executor._max_iterations_per_ac} tool-bearing agent turns "
+            f"and {executor._ac_attempt_timeout_seconds:g} total wall-clock seconds. "
+            "Progress messages do not extend either boundary. If the task cannot fit, "
+            "return the concrete attempted/remaining scope so the harness can classify "
+            "a trace-informed bounce; do not start another tool turn beyond the cap.\n"
+        )
+
         prompt = f"""Execute the following task:
 
 ## Working Directory
@@ -295,6 +304,8 @@ Files present:
 {capsule.to_prompt_reference_block() if capsule is not None else ""}
 
 {render_auto_recursion_guard()}
+
+{attempt_budget_instruction}
 
 {task_section}
 {legacy_context_section}{retry_section}{parallel_section}

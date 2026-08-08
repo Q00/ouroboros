@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import Any
 
 from ouroboros.events.base import BaseEvent
 from ouroboros.resilience.lateral import LateralThinker, ThinkingPersona
@@ -32,6 +34,39 @@ class RecoverySnapshot:
     failed_attempts: tuple[str, ...] = ()
     used_personas: tuple[ThinkingPersona, ...] = ()
     interventions_used: int = 0
+
+
+def build_runner_recovery_snapshot(
+    *,
+    goal: str,
+    acceptance_criteria: Iterable[Any],
+    final_message: str,
+    messages_processed: int,
+    recovery_personas: Iterable[str],
+    interventions_used: int,
+) -> RecoverySnapshot:
+    """Project the sequential runner's live workflow into recovery input."""
+
+    criteria = tuple(acceptance_criteria)
+    unfinished = [f"{ac.index}. {ac.content}" for ac in criteria if ac.status.value != "completed"]
+    unfinished_text = "\n".join(unfinished[:5]) or "None"
+    return RecoverySnapshot(
+        problem_context=(
+            f"Goal: {goal}\nUnfinished acceptance criteria:\n{unfinished_text}\n\n"
+            f"Previous final message:\n{final_message[:1000]}"
+        ),
+        current_approach=(
+            "The first run attempted the seed normally and ended without satisfying "
+            "the workflow. Continue from the current repository state, but avoid "
+            "repeating the same failed path."
+        ),
+        messages_processed=messages_processed,
+        completed_count=sum(ac.status.value == "completed" for ac in criteria),
+        total_count=len(criteria),
+        final_error=final_message,
+        used_personas=tuple(ThinkingPersona(persona) for persona in recovery_personas),
+        interventions_used=interventions_used,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -225,6 +260,7 @@ __all__ = [
     "RecoveryActionKind",
     "RecoveryPlanner",
     "RecoverySnapshot",
+    "build_runner_recovery_snapshot",
     "coerce_failed_attempt_personas",
     "create_recovery_applied_event",
     "get_run_recovery_protocol_prompt",

@@ -351,11 +351,13 @@ clarification:
 
 ## `execution`
 
-Controls Phase 2 — the Double Diamond execution loop.
+Controls the current execution phase, including atomic provider attempts and
+legacy whole-Seed direct/resume calls.
 
 ```yaml
 execution:
-  max_iterations_per_ac: 10   # Maximum execution iterations per acceptance criterion
+  max_iterations_per_ac: 10   # Tool-bearing agent turns per atomic attempt
+  ac_attempt_timeout_seconds: 900 # Total wall-clock cap per atomic attempt
   retrospective_interval: 3   # Iterations between automatic retrospectives
   auto_evaluate: true          # Evaluate completed runs, including failed runs with artifacts
   auto_evolve: true            # Continue rejected evaluations through bounded Ralph
@@ -367,7 +369,8 @@ execution:
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `max_iterations_per_ac` | `int >= 1` | `10` | Maximum number of execution iterations for a single acceptance criterion before the system escalates or declares failure. |
+| `max_iterations_per_ac` | `int >= 1` | `10` | Maximum tool-bearing agent turns targeted in one atomic attempt. The common stream owner cancels at the first observed over-budget turn and admits no later turn. Whole-Seed direct/resume calls multiply the limit by root AC count. |
+| `ac_attempt_timeout_seconds` | `int [1, 9007199254]` | `900` | Hard wall-clock ceiling for one atomic provider attempt. The upper bound keeps durable microseconds exact for IEEE-754/JSON consumers. Progress messages do not extend it. Whole-Seed direct/resume calls multiply the exact microsecond limit by root AC count and fail closed if the scaled value would exceed the same boundary. |
 | `retrospective_interval` | `int >= 1` | `3` | Number of iterations between automatic retrospective evaluations. |
 | `auto_evaluate` | `bool` | `true` | Enqueue formal 3-stage evaluation after a completed background run has a session and artifact. This includes unsuccessful AC execution; handler-level failures without an evaluable run are excluded. |
 | `auto_evolve` | `bool` | `true` | When formal evaluation returns an explicit rejection, seed a generation-1 lineage snapshot and enqueue a bounded Ralph continuation. Per-call `auto_evolve` overrides this setting. |
@@ -923,6 +926,7 @@ clarification:
 
 execution:
   max_iterations_per_ac: 10
+  ac_attempt_timeout_seconds: 900
   retrospective_interval: 3
 
 resilience:
