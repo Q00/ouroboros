@@ -2860,3 +2860,73 @@ def test_companion_and_installation_relations(goal: str) -> None:
     _seed_section(ledger, "runtime_context", value="Native desktop runtime")
     result = derive_domain_from_ledger(ledger)
     assert TaskClass.WEB_APP not in result.classes
+
+
+@pytest.mark.parametrize(
+    ("goal", "outputs"),
+    [
+        (
+            "Build a browser-based admin portal",
+            "Role management and account administration",
+        ),
+        (
+            "Build a browser admin console",
+            "Manage accounts and permissions",
+        ),
+    ],
+)
+def test_browser_qualified_ui_heads_own_the_artifact(goal: str, outputs: str) -> None:
+    """R44 probe: ordinary browser-qualified UI heads (portal, console)
+    are affirmative ownership even when the outputs use no widget-catalog
+    wording."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value=outputs)
+    _seed_section(ledger, "runtime_context", value="Browser")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP
+
+
+def test_similarity_modifier_is_not_browser_ownership() -> None:
+    """R44 probe: "browser-like" compares the panel to a browser; the
+    produced artifact is the native desktop app."""
+    ledger = _bare_ledger("Build a native desktop app with a browser-like settings panel")
+    _seed_section(ledger, "outputs", value="Settings panel with local preferences")
+    _seed_section(ledger, "runtime_context", value="Native desktop runtime")
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
+        "Build a desktop app that mimics a web app",
+        "Build a native desktop companion that runs inside web apps",
+        "Build a native desktop companion embedded within web apps",
+    ],
+)
+def test_comparison_and_hosting_relations_are_not_ownership(goal: str) -> None:
+    """R44 probe: imitation names a reference artifact and inside/within
+    name an execution host — neither is the produced artifact."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value="Settings panel with local preferences")
+    _seed_section(ledger, "runtime_context", value="Native desktop runtime")
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
+        "Build a CLI targeting browser admin portals",
+        "Build a browser admin portal generator CLI",
+    ],
+)
+def test_qualified_ui_heads_respect_relations_and_finality(goal: str) -> None:
+    """R44 guard: the qualified-head grant cannot be fed by a relational
+    browser mention, and a non-final head keeps its own artifact."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value="Deterministic stdout and exit code 0")
+    _seed_section(ledger, "runtime_context", value="Local shell / terminal")
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes

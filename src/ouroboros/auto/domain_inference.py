@@ -739,6 +739,19 @@ _WEB_APP_ARTIFACT_PHRASE_RE = re.compile(
     r"\b(?:web[\s\-]?app(?:lication)?s?|webapps?|websites?|web\s+uis?|frontends?|"
     r"front[\s\-]ends?|single[\s\-]page\s+app(?:lication)?s?)\b"
 )
+# Browser-qualified UI product heads own the artifact the way the literal
+# web-app vocabulary does (#1813 R44): in "browser-based admin portal" the
+# browser qualifier is the web signal and the UI noun is the produced
+# head. The qualifier must modify its head within one noun phrase — a
+# preposition or coordinator between them ("browser benchmark without
+# forms or pages") breaks the chain, and the head must end the goal core
+# (same finality rule as the artifact-phrase path).
+_BROWSER_QUALIFIED_UI_HEAD_RE = re.compile(
+    rf"\b{_WEB_APP_GOAL_SIGNAL_FRAGMENT}"
+    r"(?:[\s\-]+(?!(?:and|or|nor|but|without|with|for|about|that|which|not|no)\b)[\w'’]+){0,3}?"
+    r"[\s\-]+(?:apps?|applications?|webapps?|uis?|interfaces?|pages?|"
+    r"frontends?|sites?|websites?|dashboards?|consoles?|portals?)[\s.!?]*$"
+)
 
 
 # "to <verb> X" is an action target; "to a/an/the X" is a plain PP and
@@ -746,17 +759,31 @@ _WEB_APP_ARTIFACT_PHRASE_RE = re.compile(
 _INFINITIVE_TARGET_RE = re.compile(r"\bto\s+(?!be\b|an?\b|the\b)[\w\-]+\s+[^,.;]*")
 _RELATIONAL_TARGET_RE = re.compile(
     r"\b(?:targeting|supporting|serving|powering|backing|aimed\s+at|"
-    r"used\s+by|consumed\s+by|embedded\s+in|integrat\w*\s+with|"
+    r"used\s+by|consumed\s+by|embedded\s+(?:in|into|within|inside)|"
+    r"nested\s+(?:in|within|inside)|contained\s+(?:in|within|inside)|"
+    r"integrat\w*\s+with|"
     r"compatible\s+with|used\s+with|works?\s+with|interopera\w*\s+with|"
-    r"paired\s+with|hosted\s+on|deployed\s+(?:on|to)|running\s+on|"
+    r"paired\s+with|hosted\s+(?:on|in|within|inside)|deployed\s+(?:on|to)|"
+    # Execution hosts are consumers of the artifact (#1813 R44): a
+    # companion that "runs inside web apps" is hosted BY them.
+    r"runs?\s+(?:on|in|inside|within)|running\s+(?:on|in|inside|within)|"
+    r"lives?\s+(?:in|inside|within)|living\s+(?:in|inside|within)|"
     r"served\s+(?:from|on)|published\s+(?:on|to)|"
+    # Comparison and imitation name a reference artifact, not the produced
+    # one (#1813 R44): "mimics a web app" builds something else.
+    r"mimic(?:s|king|ked)?|emulat\w*|imitat\w*|resembl\w*|"
+    r"mirrors?|mirroring|modell?ed\s+(?:on|after)|styled\s+(?:after|like)|"
+    r"patterned\s+(?:on|after)|inspired\s+by|similar\s+to|akin\s+to|"
+    r"comparable\s+to|reminiscent\s+of|looks?\s+like|looking\s+like|"
+    r"feels?\s+like|feeling\s+like|behaves?\s+like|behaving\s+like|"
+    r"acts?\s+like|acting\s+like|works?\s+like|working\s+like|"
     r"designed\s+for|intended\s+for(?:\s+use\s+(?:with|in|by))?|"
     r"meant\s+for|built\s+for|made\s+for|usable\s+by|"
     r"available\s+to|accessible\s+to|open\s+to|exposed\s+to|"
     r"syncs?\s+with|synchroniz\w*\s+with|connects?\s+(?:to|with)|"
     r"links?\s+(?:to|with)|talks?\s+to|communicates?\s+with|"
     r"marketed\s+to|sold\s+to|advertised\s+to|promoted\s+to|pitched\s+to|"
-    r"used\s+alongside|installed\s+(?:into|in|on)|embedded\s+into|"
+    r"used\s+alongside|installed\s+(?:into|in|on)|"
     r"bundled\s+(?:with|into)|packaged\s+(?:with|into)|shipped\s+(?:with|into)|"
     r"plugged\s+into|mounted\s+(?:in|on)|"
     r"for\s+use\s+(?:with|in|by)|for)\s+"
@@ -796,7 +823,15 @@ def _goal_artifact_head_is_web_app(goal_text: str) -> bool:
     core = _strip_consumer_relations(core)
     web_matches = list(_WEB_APP_ARTIFACT_PHRASE_RE.finditer(core))
     if not web_matches:
-        return False
+        # A browser-qualified UI head ("browser-based admin portal",
+        # "browser admin console") is affirmative ownership too (#1813
+        # R44). The qualifier is searched on the stripped core, so
+        # negated, relational, and similarity browser mentions cannot
+        # qualify a head.
+        qualified = _BROWSER_QUALIFIED_UI_HEAD_RE.search(core)
+        if qualified is None:
+            return False
+        web_matches = [qualified]
     # A head is final: trailing words after the last web phrase ("web app
     # scaffolding CLI", "website generator CLI") mean the web phrase
     # modifies another artifact (#1813 W1).
@@ -891,8 +926,17 @@ _AUDIENCE_CLAUSE_RE = re.compile(
 )
 
 
+# "browser-like", "web-app-style": a similarity suffix marks the web token
+# as a comparison reference, not the produced artifact (#1813 R44).
+_WEB_SIMILARITY_MODIFIER_RE = re.compile(
+    rf"\b{_WEB_APP_GOAL_SIGNAL_FRAGMENT}[\s\-]+(?:like|style|styled|esque|inspired|themed)\b"
+)
+
+
 def _strip_consumer_relations(text: str) -> str:
-    """Remove relational consumer targets and human-audience clauses."""
+    """Remove relational consumer targets, human-audience clauses, and
+    similarity modifiers — none of them name the produced artifact."""
+    text = _WEB_SIMILARITY_MODIFIER_RE.sub(" ", text)
     return _RELATIONAL_TARGET_RE.sub(" ", _AUDIENCE_CLAUSE_RE.sub(" ", text))
 
 
