@@ -766,24 +766,40 @@ _BROWSER_QUALIFIED_UI_HEAD_RE = re.compile(
 # opens a page in the browser"), and an artifact noun between head and
 # qualifier re-heads the phrase ("an admin portal generator for the
 # browser").
-_OTHER_ARTIFACT_NOUN_FRAGMENT = (
-    r"(?:sdks?|librar(?:y|ies)|clis?|tools?|toolkits?|packages?|apis?|"
-    r"services?|extensions?|plugins?|generators?|scaffolders?|crawlers?|"
-    r"scrapers?|scanners?|suites?|pipelines?|companions?|bots?|scripts?|"
-    r"reports?|clients?|servers?|daemons?|wrappers?|adapters?)"
+# The span between a UI head and its environment preposition is
+# predicative — relativizers, copulas, adverbs, and runtime/availability
+# predicates form a closed grammar (#1813 R47). Any other token after the
+# head is nominal and re-heads the phrase ("admin portal accessibility
+# audit", "admin portal documentation", "admin portal test harness"), so
+# unlisted words block by default instead of an artifact-noun denylist
+# blocking by enumeration.
+_POSTNOMINAL_PREDICATE_TOKEN = (
+    r"(?:[\w\-]+ly|also|only|still|already|now|and|or|"
+    r"is|are|was|were|be|being|been|will|would|can|could|may|might|must|"
+    r"runs?|running|operates?|operating|works?|working|loads?|loading|"
+    r"opens?|opening|renders?|rendered|rendering|serves?|served|serving|"
+    r"delivers?|delivered|displayed|shown|hosted|lives?|living|"
+    r"executes?|executing|usable|useable|used|accessible|available|"
+    r"reachable|viewable|accessed|opened|intended|designed|meant|built|"
+    r"made|optimized|optimised|tailored|deployed|published|distributed|"
+    r"offered|provided)"
 )
 _POSTNOMINAL_BROWSER_QUALIFIER_RE = re.compile(
     r"^(?:(?!(?:that|which|who|to|for|of|from|with|without|via|through|by|on|in|at|"
     r"and|or|nor|but)\b)[\w'’\-]+\s+){0,5}?"
-    rf"{_UI_PRODUCT_HEAD_FRAGMENT}\s+"
+    rf"{_UI_PRODUCT_HEAD_FRAGMENT}"
+    # A comma may introduce a dependent qualifier ("an admin portal,
+    # accessible in the browser") — a coordinator after it is real
+    # coordination and stays outside the phrase (#1813 R47).
+    r"(?:\s*,\s+(?!(?:and|or|nor|but|plus|alongside|not|no)\b)|\s+)"
     r"(?:(?:that|which)\s+)?"
-    rf"(?:(?!(?:not|no|never|cannot|isn[’']?t|aren[’']?t|won[’']?t|can[’']?t|"
-    rf"doesn[’']?t|don[’']?t|{_OTHER_ARTIFACT_NOUN_FRAGMENT})\b)[\w'’\-]+\s+){{0,4}}?"
+    rf"(?:{_POSTNOMINAL_PREDICATE_TOKEN}\s+){{0,4}}?"
     r"(?:in|inside|within|for|from|through|via|on)\s+"
     # Ordinary spelling variants are equivalent environments (#1813 R46):
     # "a web browser", "modern browsers".
     r"(?:(?:an?|the|any|all|every|most)\s+)?"
-    rf"(?:(?!(?:not|no|{_OTHER_ARTIFACT_NOUN_FRAGMENT})\b)[\w\-]+\s+){{0,2}}?"
+    r"(?:(?:web|modern|current|standard|major|mobile|desktop|mainstream|"
+    r"common|popular|supported|default|local|system)\s+){0,2}?"
     r"browsers?\b"
     # The environment phrase must END at the browser token (#1813 R46): a
     # trailing noun re-heads it into an artifact ("the browser extension",
@@ -846,6 +862,19 @@ def _goal_artifact_head_is_web_app(goal_text: str) -> bool:
     position, since English modifiers precede their head."""
     if _goal_denies_web_app_artifact(goal_text):
         return False
+    # Postnominal qualifiers are consulted on the UNSPLIT goal, BEFORE
+    # clause stripping (#1813 R45/R47): conjunct splitting would discard
+    # a comma-introduced dependent qualifier ("an admin portal,
+    # accessible in the browser"), and the subject-clause/relational
+    # strips would remove the very qualifier that carries ownership. The
+    # anchored chain cannot cross a real coordination, so co-product
+    # commas stay outside the phrase. Similarity modifiers are normalized
+    # first so "browser-like" cannot qualify.
+    postnominal_core = _WEB_SIMILARITY_MODIFIER_RE.sub(
+        " ", _strip_negated_signals(goal_text, _WEB_APP_GOAL_SIGNAL_FRAGMENT)
+    ).strip()
+    if _POSTNOMINAL_BROWSER_QUALIFIER_RE.search(postnominal_core):
+        return True
     # The head is judged on the goal's FIRST conjunct (#1813 R33): a web
     # phrase in a later coordinated conjunct is a co-product (the grant
     # handles it) and must not erase the first conjunct's own artifact
@@ -855,14 +884,6 @@ def _goal_artifact_head_is_web_app(goal_text: str) -> bool:
     # otherwise behead a coordinated denial at its first comma and leave
     # the surviving alternatives looking affirmative.
     core = _strip_negated_signals(goal_text, _WEB_APP_GOAL_SIGNAL_FRAGMENT)
-    # Postnominal qualifiers are consulted BEFORE clause stripping (#1813
-    # R45) — subject-clause and relational strips would otherwise remove
-    # the very qualifier ("for the browser", "that runs in the browser")
-    # that carries ownership. Similarity modifiers are normalized first so
-    # "browser-like" cannot qualify.
-    postnominal_core = _WEB_SIMILARITY_MODIFIER_RE.sub(" ", core).strip()
-    if _POSTNOMINAL_BROWSER_QUALIFIER_RE.search(postnominal_core):
-        return True
     core = _strip_consumed_dependencies(_SUBJECT_CLAUSE_RE.sub(" ", core))
     # "to test/analyze/deploy a web app" names the target of another
     # artifact, not the produced one (#1813 R28), and participial

@@ -3009,3 +3009,54 @@ def test_trailing_artifact_nouns_reject_the_environment_reading(goal: str, runti
     _seed_section(ledger, "runtime_context", value=runtime)
     result = derive_domain_from_ledger(ledger)
     assert TaskClass.WEB_APP not in result.classes
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
+        "Build an admin portal, accessible in the browser",
+        "Build an admin portal, which runs in the browser",
+    ],
+)
+def test_comma_introduced_qualifiers_keep_ownership(goal: str) -> None:
+    """R47 probe: a comma before the qualifier introduces a dependent
+    qualifier, not a co-product conjunct."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value="Role management and account administration")
+    _seed_section(ledger, "runtime_context", value="Browser")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP
+
+
+@pytest.mark.parametrize(
+    ("goal", "outputs", "runtime"),
+    [
+        (
+            "Build an admin portal accessibility audit for the browser",
+            "Audit findings and risk scores",
+            "Local report generation",
+        ),
+        (
+            "Build admin portal documentation for the browser",
+            "Reference pages and usage guides",
+            "Local documentation build",
+        ),
+        (
+            "Build an admin portal test harness for the browser",
+            "Deterministic test verdicts",
+            "Local shell / terminal",
+        ),
+    ],
+)
+def test_nominal_tokens_after_the_ui_head_reject_ownership(
+    goal: str, outputs: str, runtime: str
+) -> None:
+    """R47 guard: the head-to-environment span is predicative — a nominal
+    token after the UI head re-heads the phrase (audit, documentation,
+    test harness), regardless of any artifact-noun enumeration."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value=outputs)
+    _seed_section(ledger, "runtime_context", value=runtime)
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes
