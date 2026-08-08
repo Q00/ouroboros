@@ -3345,3 +3345,44 @@ def test_destination_ownership_is_verb_independent(
     result = derive_domain_from_ledger(ledger)
     assert result.is_single
     assert result.single is expected
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
+        "Build an admin portal that must function in browsers",
+        "Build an admin portal that shall function in browsers",
+    ],
+)
+def test_direct_modal_runtime_predicates_own_the_artifact(goal: str) -> None:
+    """R54 probe: a modal directly governing a runtime verb is the same
+    environment declaration as its to-infinitive equivalent — the runtime
+    vocabulary is one shared set across grammar positions."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value="Role management and account administration")
+    _seed_section(ledger, "runtime_context", value="Browser")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP
+
+
+@pytest.mark.parametrize(
+    ("goal", "outputs", "excluded"),
+    [
+        ("Submit the credentials to the public API", "Submission confirmations", TaskClass.LIBRARY),
+        ("Upload the artifact to the public API", "Upload confirmations", TaskClass.LIBRARY),
+        ("Send the request to the REST API", "Delivery confirmations", TaskClass.WEB_SERVICE),
+        ("Forward the event to the REST API", "Delivery confirmations", TaskClass.WEB_SERVICE),
+    ],
+)
+def test_definite_destinations_are_transfers_not_transformations(
+    goal: str, outputs: str, excluded: TaskClass
+) -> None:
+    """R54 guard: a transformation destination is a NEW artifact and
+    takes an indefinite introduction ("to a CLI"); a definite destination
+    ("to the public API") names an existing endpoint being addressed."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value=outputs)
+    _seed_section(ledger, "runtime_context", value="Runs on developer machines")
+    result = derive_domain_from_ledger(ledger)
+    assert excluded not in result.classes

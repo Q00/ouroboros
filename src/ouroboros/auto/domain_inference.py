@@ -776,16 +776,26 @@ _BROWSER_QUALIFIED_UI_HEAD_RE = re.compile(
 # audit", "admin portal documentation", "admin portal test harness"), so
 # unlisted words block by default instead of an artifact-noun denylist
 # blocking by enumeration.
+# One closed runtime-verb vocabulary shared by every grammar position —
+# direct predicate ("must function in browsers"), participle, and the
+# to-infinitive complement — so the branches cannot drift apart (#1813
+# R54).
+_RUNTIME_VERB_FRAGMENT = (
+    r"(?:runs?|running|run|operates?|operating|operate|works?|working|"
+    r"work|functions?|functioning|function|loads?|loading|load|opens?|"
+    r"opening|open|renders?|rendered|rendering|render|serves?|served|"
+    r"serving|serve|executes?|executing|execute|displays?|displayed|"
+    r"display|lives?|living|live|behaves?|behave)"
+)
 _POSTNOMINAL_PREDICATE_TOKEN = (
     r"(?:[\w\-]+ly|also|only|still|already|now|and|or|"
     r"is|are|was|were|be|being|been|will|would|can|could|may|might|must|"
     r"should|shall|has|have|had|ought|expected|required|requires?|needs?|"
     r"needed|supposed|planned|guaranteed|mandated|obliged|obligated|"
     r"compelled|forced|slated|scheduled|destined|"
-    r"runs?|running|operates?|operating|works?|working|loads?|loading|"
-    r"opens?|opening|renders?|rendered|rendering|serves?|served|serving|"
-    r"delivers?|delivered|displayed|shown|hosted|lives?|living|"
-    r"executes?|executing|usable|useable|used|accessible|available|"
+    rf"{_RUNTIME_VERB_FRAGMENT}|loads?|loading|"
+    r"delivers?|delivered|displayed|shown|hosted|"
+    r"usable|useable|used|accessible|available|"
     r"compatible|supported|"
     r"reachable|viewable|accessed|opened|intended|designed|meant|built|"
     r"made|optimized|optimised|tailored|deployed|published|distributed|"
@@ -835,8 +845,8 @@ _POSTNOMINAL_BROWSER_QUALIFIER_RE = re.compile(
     # runtime/availability sets — active, passive ("to be used"), and
     # adjectival ("to be accessible") alike (#1813 R49) — so "to
     # test/audit" action targets stay outside the grammar.
-    r"(?:to\s+(?:be\s+)?(?:run|operate|work|load|render|execute|function|"
-    r"display|open|serve|live|used|accessed|opened|served|rendered|"
+    rf"(?:to\s+(?:be\s+)?(?:{_RUNTIME_VERB_FRAGMENT}|"
+    r"used|accessed|opened|served|rendered|"
     r"displayed|delivered|operated|executed|loaded|viewed|reached|hosted|"
     r"accessible|available|usable|useable|reachable|viewable)\s+)?"
     r"(?:for\s+use\s+)?"
@@ -1293,6 +1303,12 @@ def _strip_consumed_dependencies(text: str) -> str:
 
     def _spare_destinations(match: re.Match[str]) -> str:
         if re.match(r"to\s", match.group(0)) is None:
+            return " "
+        # A transformation destination is a NEW artifact and takes an
+        # indefinite introduction ("to a CLI"); a definite destination
+        # ("submit the credentials to the public API") names an existing
+        # endpoint being addressed, which is a transfer (#1813 R54).
+        if re.match(r"to\s+(?:the|our|my|your|its|his|her|their)\b", match.group(0)):
             return " "
         segment = re.split(r"[.;:!?]", text[: match.start()])[-1]
         if _DESTINATION_CONTEXT_RE.match(segment):
