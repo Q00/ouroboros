@@ -28,11 +28,13 @@ from ouroboros.cli.commands.update import (
     _refresh_runtime_config,
     _resolve_environment_console,
     _resolve_runtime,
+    _run_step,
     _upgrade_command,
     _upgrade_environment,
     _validate_runtime_option,
     app,
 )
+from ouroboros.config.loader import _load_env_file
 from ouroboros.core.errors import ConfigError
 
 runner = CliRunner()
@@ -481,6 +483,87 @@ class TestUpgradeCommand:
             "ouroboros-ai",
         ]
         assert _upgrade_environment(identity) == {"PIPX_HOME": str(identity.manager_home)}
+
+    @pytest.mark.parametrize(
+        ("manager", "project_controls", "root_key"),
+        [
+            (
+                "uv",
+                {
+                    "UV_INDEX": "https://attacker.invalid/simple",
+                    "UV_DEFAULT_INDEX": "https://attacker.invalid/default",
+                    "UV_CONFIG_FILE": "./attacker-uv.toml",
+                },
+                "UV_TOOL_DIR",
+            ),
+            (
+                "pipx",
+                {
+                    "PIP_INDEX_URL": "https://attacker.invalid/simple",
+                    "PIP_EXTRA_INDEX_URL": "https://attacker.invalid/extra",
+                    "PIP_CONFIG_FILE": "./attacker-pip.conf",
+                },
+                "PIPX_HOME",
+            ),
+        ],
+    )
+    def test_project_env_cannot_redirect_upgrade_source(
+        self,
+        tmp_path: Path,
+        manager: Literal["uv", "pipx"],
+        project_controls: dict[str, str],
+        root_key: str,
+    ) -> None:
+        env_file = tmp_path / ".env"
+        env_file.write_text(
+            "".join(f"{key}={value}\n" for key, value in project_controls.items()),
+            encoding="utf-8",
+        )
+        identity = _identity(manager, tmp_path)
+        completed = MagicMock(returncode=0)
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("ouroboros.cli.commands.update.subprocess.run", return_value=completed) as run,
+        ):
+            _load_env_file(env_file, trusted=False)
+            assert _run_step(
+                _upgrade_command(identity, prerelease=False),
+                description="upgrade",
+                dry_run=False,
+                env_overrides=_upgrade_environment(identity),
+            )
+
+        command_env = run.call_args.kwargs["env"]
+        assert project_controls.keys().isdisjoint(command_env)
+        assert command_env[root_key] == str(identity.manager_home)
+
+    @pytest.mark.parametrize(
+        ("manager", "trusted_key"),
+        [("uv", "UV_INDEX"), ("pipx", "PIP_INDEX_URL")],
+    )
+    def test_trusted_process_upgrade_source_is_preserved(
+        self,
+        tmp_path: Path,
+        manager: Literal["uv", "pipx"],
+        trusted_key: str,
+    ) -> None:
+        identity = _identity(manager, tmp_path)
+        trusted_source = "https://packages.example/simple"
+        completed = MagicMock(returncode=0)
+
+        with (
+            patch.dict(os.environ, {trusted_key: trusted_source}, clear=True),
+            patch("ouroboros.cli.commands.update.subprocess.run", return_value=completed) as run,
+        ):
+            assert _run_step(
+                _upgrade_command(identity, prerelease=False),
+                description="upgrade",
+                dry_run=False,
+                env_overrides=_upgrade_environment(identity),
+            )
+
+        assert run.call_args.kwargs["env"][trusted_key] == trusted_source
 
 
 class TestResolveRuntime:
