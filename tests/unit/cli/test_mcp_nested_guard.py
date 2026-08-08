@@ -114,6 +114,18 @@ def test_public_claude_sdk_runtime_fails_before_process_state(monkeypatch):
     assert "_OUROBOROS_NESTED" not in os.environ
 
 
+def test_public_claude_sdk_alias_reaches_canonical_mcp2_guard(monkeypatch):
+    """The shipped SDK alias parses before the MCP 2 boundary rejects it."""
+    monkeypatch.delenv("_OUROBOROS_NESTED", raising=False)
+
+    result = runner.invoke(app, ["serve", "--runtime", "claude-sdk"])
+
+    assert result.exit_code == 1
+    assert "Invalid value" not in result.output
+    assert " ".join(result.output.split()) == " ".join(UNSUPPORTED_CLAUDE_SDK_MCP_MESSAGE.split())
+    assert "_OUROBOROS_NESTED" not in os.environ
+
+
 def test_forced_sdk_mcp_mix_fails_before_process_state(monkeypatch):
     monkeypatch.delenv("_OUROBOROS_NESTED", raising=False)
 

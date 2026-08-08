@@ -57,6 +57,13 @@ class _FakeProcess:
         return self._returncode
 
 
+def _make_fake_codex_cli(tmp_path: Path) -> Path:
+    cli_path = tmp_path / "codex"
+    cli_path.write_text("#!/bin/sh\nprintf '%s\\n' 'codex 0.0.0-test'\n", encoding="utf-8")
+    cli_path.chmod(0o755)
+    return cli_path
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("prompt", "expected_warning", "expected_error"),
@@ -81,6 +88,7 @@ async def test_unhandled_ooo_commands_pass_through_to_codex_unchanged(
 ) -> None:
     """Unsupported and plugin-only `ooo` commands should bypass intercept dispatch."""
     captured_processes: list[_FakeProcess] = []
+    cli_path = _make_fake_codex_cli(tmp_path)
 
     async def fake_create_subprocess_exec(*command: str, **kwargs: object) -> _FakeProcess:
         assert kwargs["cwd"] == str(tmp_path)
@@ -103,7 +111,7 @@ async def test_unhandled_ooo_commands_pass_through_to_codex_unchanged(
     ):
         runtime = create_agent_runtime(
             backend="codex",
-            cli_path="/tmp/codex",
+            cli_path=str(cli_path),
             permission_mode="acceptEdits",
             cwd=tmp_path,
         )
@@ -135,6 +143,7 @@ async def test_packaged_ooo_auto_missing_mcp_tool_fails_closed_without_codex_fal
     tmp_path: Path,
 ) -> None:
     """Packaged `ooo auto` must not fall through to Codex when the MCP tool is absent."""
+    cli_path = _make_fake_codex_cli(tmp_path)
     fake_server = AsyncMock()
     fake_server.call_tool = AsyncMock(
         side_effect=LookupError("No local handler registered for tool: ouroboros_start_auto")
@@ -149,7 +158,7 @@ async def test_packaged_ooo_auto_missing_mcp_tool_fails_closed_without_codex_fal
     ):
         runtime = create_agent_runtime(
             backend="codex",
-            cli_path="/tmp/codex",
+            cli_path=str(cli_path),
             permission_mode="acceptEdits",
             cwd=tmp_path,
         )

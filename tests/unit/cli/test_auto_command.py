@@ -159,7 +159,8 @@ def test_auto_goal_skip_run_does_not_require_subcommand() -> None:
     assert "auto_test" in result.output
 
 
-def test_auto_public_claude_runtime_selects_sdk() -> None:
+@pytest.mark.parametrize("runtime", ["claude", "claude-sdk"])
+def test_auto_public_claude_runtime_selects_sdk(runtime: str) -> None:
     result_value = AutoPipelineResult(
         status="complete",
         auto_session_id="auto_claude_cli",
@@ -175,7 +176,7 @@ def test_auto_public_claude_runtime_selects_sdk() -> None:
     ) as run_auto:
         result = runner.invoke(
             app,
-            ["auto", "safe test goal", "--skip-run", "--runtime", "claude"],
+            ["auto", "safe test goal", "--skip-run", "--runtime", runtime],
         )
 
     assert result.exit_code == 0

@@ -67,6 +67,7 @@ class AgentRuntimeBackend(str, Enum):  # noqa: UP042
     """Supported orchestrator runtime backends for workflow handoff."""
 
     CLAUDE = "claude"
+    CLAUDE_SDK = "claude-sdk"
     CLAUDE_CLI = "claude-cli"
     CODEX = "codex"
     OPENCODE = "opencode"

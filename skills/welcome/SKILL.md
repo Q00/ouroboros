@@ -793,9 +793,10 @@ Give brief personalized response (1-2 sentences) based on choice.
 
 ### Step 3: Advanced Runtime Check
 
-Ordinary Claude setup uses the dependency-free CLI profile and intentionally
-leaves host-owned `~/.claude/mcp.json` untouched. Do not inspect or mutate that
-file as an onboarding health check.
+Ordinary Claude setup uses the default `[claude]` Agent SDK profile on MCP 1.x.
+It intentionally leaves host-owned `~/.claude/mcp.json` untouched; do not
+inspect or mutate that file as an onboarding health check. The dependency-free
+worker is the explicit `[claude-cli]` profile used by an isolated MCP 2 process.
 
 If the active runtime does not expose Ouroboros MCP tools, **AskUserQuestion**:
 ```json

@@ -34,6 +34,55 @@ class WorkerSafeEvaluationInputs:
     artifact: str
 
 
+@dataclass(slots=True)
+class SeedHandoffRedemption:
+    """Compensate a one-shot handoff until downstream ownership is accepted."""
+
+    registry: Any | None
+    handoff_id: str | None
+    session_id: str
+    seed_content: str | None
+
+    def rollback(self) -> None:
+        if self.registry is not None and self.handoff_id and self.seed_content is not None:
+            self.registry.restore(
+                self.handoff_id,
+                session_id=self.session_id,
+                seed_content=self.seed_content,
+            )
+
+    async def accept(
+        self,
+        operation: Awaitable[Any],
+        *,
+        require_ok: bool = False,
+        acceptance_may_have_occurred: bool | Callable[[BaseException], bool] = True,
+    ) -> Any:
+        """Commit redemption once the selected transport accepts ownership.
+
+        The transport callback classifies every exceptional exit against its
+        authoritative acceptance phase. Detached transports can become
+        ambiguous before an exception is observed; local transports can prove
+        acceptance through JobManager even if their receipt read then fails.
+        Plugin dispatch is different: no owner exists until the ``_subagent``
+        envelope is returned, so every pre-envelope exception is compensable.
+        """
+        try:
+            result = await operation
+        except BaseException as exc:
+            acceptance_is_authoritative_or_ambiguous = (
+                acceptance_may_have_occurred(exc)
+                if callable(acceptance_may_have_occurred)
+                else acceptance_may_have_occurred
+            )
+            if not acceptance_is_authoritative_or_ambiguous:
+                self.rollback()
+            raise
+        if require_ok and result.is_err:
+            self.rollback()
+        return result
+
+
 def worker_safe_evaluation_inputs(
     seed_content: object,
     acceptance_criterion: str | None,
@@ -56,14 +105,14 @@ def restore_seed_handoff(
     *,
     session_id: str,
     registry: Any | None,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], SeedHandoffRedemption]:
     """Restore a raw Seed only inside the parent process that minted its handle."""
 
     restored = dict(arguments)
     handoff_id = arguments.get("seed_handoff_id")
     if not isinstance(handoff_id, str) or not handoff_id:
-        return restored
-    seed_content = registry.resolve(handoff_id, session_id=session_id) if registry else None
+        return restored, SeedHandoffRedemption(registry, None, session_id, None)
+    seed_content = registry.consume(handoff_id, session_id=session_id) if registry else None
     if seed_content is None:
         raise ValueError("seed_handoff_id is unknown or does not belong to this session")
     restored["seed_content"] = seed_content
@@ -72,7 +121,7 @@ def restore_seed_handoff(
     # a fresh worker can use the restored parent-owned Seed without consulting
     # an empty process-local registry.
     restored.pop("seed_handoff_id", None)
-    return restored
+    return restored, SeedHandoffRedemption(registry, handoff_id, session_id, seed_content)
 
 
 def snapshot_auto_evolve_policy(

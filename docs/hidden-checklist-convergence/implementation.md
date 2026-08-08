@@ -25,9 +25,13 @@ constructs bare handlers at runtime, which previously caused the first real
 Ralph iteration to terminate with `EvolutionaryLoop not configured` even
 though constructor-mocked tests passed.
 
-Passive OpenCode plugin interception now resolves through the same configured
-graph rather than the former lightweight definition factory. Other runtimes
-retain their existing dispatcher/server ownership model.
+Passive OpenCode, Codex, and Hermes builtin interception now resolve through
+the same configured graph rather than the former lightweight definition
+factory. Backend handle aliases such as `codex_cli` and `hermes_cli` are
+canonicalized before deciding whether the injected runtime owner can be reused.
+Each runtime retains the complete configured tool composition, including its
+MCP server resource owner. `shutdown_configured_runtime_tools()` provides
+deterministic EventStore, ControlBus, and bridge teardown.
 
 When OpenCode passive-plugin dispatch is active, an evaluation with
 `auto_evolve: true` remains parent-owned and pollable. The parent runs the
@@ -78,7 +82,7 @@ whether it creates evaluation or Ralph successors by reading newer config.
 - Single-AC evaluations without checklist metadata use Ralph's existing
   full-graph focus fallback.
 - Plugin Seed handoffs are intentionally process-local until redemption. The
-  parent consumes the opaque handle, restores the raw Seed into its private
+  parent consumes the opaque handle exactly once, restores the raw Seed into its private
   evaluation request, and gives a detached evaluation owner no process-local
   handle to resolve. If evaluation itself is delegated, the parent derives its
   checklist from the raw Seed but passes only the same worker-safe projection.
@@ -87,6 +91,14 @@ whether it creates evaluation or Ralph successors by reading newer config.
   artifacts, and separately rendered checklist text using the same longest-first
   contract redactor as retry hints. Raw verifier material remains absent from
   plugin-worker prompts and worker-queryable events.
+
+- The confidentiality boundary covers data transported by Ouroboros into
+  worker prompts, contexts, events, artifacts, and retry surfaces. It is not a
+  filesystem sandbox: if an operator stores the original raw Seed in a location
+  that the worker's Read/Bash capabilities can access, the worker may still
+  discover that file independently. Strong holdout isolation therefore also
+  requires placing raw Seeds outside the worker-visible workspace or running
+  the worker with an appropriate filesystem sandbox.
 
 - Run-to-evaluation arguments retain the source execution completion status.
   A failed-but-evaluable run can be formally judged and evolved without being

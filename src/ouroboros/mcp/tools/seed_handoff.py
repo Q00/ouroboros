@@ -189,3 +189,21 @@ class SeedHandoffRegistry:
             return None
         self._entries.move_to_end(handoff_id)
         return entry[1]
+
+    def consume(self, handoff_id: str, *, session_id: str) -> str | None:
+        """Redeem a session-bound handoff exactly once."""
+        entry = self._entries.get(handoff_id)
+        if entry is None or entry[0] != session_id:
+            return None
+        del self._entries[handoff_id]
+        return entry[1]
+
+    def restore(self, handoff_id: str, *, session_id: str, seed_content: str) -> bool:
+        """Compensate a failed redemption without replacing another claim."""
+        if handoff_id in self._entries:
+            return False
+        self._entries[handoff_id] = (session_id, seed_content)
+        self._entries.move_to_end(handoff_id)
+        while len(self._entries) > max(1, self.max_entries):
+            self._entries.popitem(last=False)
+        return True

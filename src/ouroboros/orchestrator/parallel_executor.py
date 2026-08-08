@@ -57,9 +57,7 @@ from ouroboros.core.seed import (
     derive_semantic_ac_key,
     expected_artifact_workspace_path_error,
 )
-from ouroboros.core.session_signal import (
-    SessionSignalMode,
-)
+from ouroboros.core.session_signal import SessionSignalMode
 from ouroboros.events.session_signal import (
     create_session_signal_applied_event,
     create_session_signal_completed_event,
@@ -77,6 +75,7 @@ from ouroboros.harness.claim_term_guard import strict_deterministic_claim_term_g
 from ouroboros.harness.deliver_gate import (
     DeliverEvidenceClaim,
     DeliverEvidenceFact,
+    _journal_entry_proves_command_artifact,
     evaluate_deliver_claim,
     load_ac_evidence_manifest,
 )
@@ -409,6 +408,7 @@ from ouroboros.orchestrator.synapse import (
     SessionSignalTarget,
     render_after_turn_signal_prompt,
     render_inform_signal_prompt,
+    target_ended_rejection_event,
 )
 from ouroboros.orchestrator.verifier import (
     RetryAdmission,
@@ -416,6 +416,10 @@ from ouroboros.orchestrator.verifier import (
     VerifierContractError,
     VerifierVerdict,
     verifier_operational_failure_verdict,
+)
+from ouroboros.orchestrator.workspace_evidence_paths import (
+    is_untracked_top_level_evidence_path,
+    load_tracked_workspace_paths,
 )
 
 _PARALLEL_PAUSE_REPLAY_PAGE_SIZE = 64
@@ -1434,7 +1438,9 @@ def _standard_deliver_facts(
                 continue
             seen.add(dedupe_key)
             matches = (
-                _matching_journal_entries(manifest, field=field, value=match_value)
+                _matching_journal_entries(
+                    manifest, field=field, value=match_value, task_cwd=task_cwd
+                )
                 if eligible
                 else ()
             )
@@ -1486,6 +1492,7 @@ def _matching_journal_entries(
     *,
     field: str,
     value: str,
+    task_cwd: str | None = None,
 ) -> tuple[EvidenceEntry, ...]:
     matches: list[EvidenceEntry] = []
     for entry in manifest.entries:
@@ -1494,6 +1501,11 @@ def _matching_journal_entries(
         payload = entry.payload
         tool_name = payload.get("tool_name")
         if field == "files_touched":
+            if tool_name == "Bash" and _journal_entry_proves_command_artifact(
+                entry, relative_path=value, task_cwd=task_cwd
+            ):
+                matches.append(entry)
+                continue
             if tool_name not in _FILE_MUTATION_TOOLS:
                 continue
             observed = payload.get("workspace_relative_path")
@@ -5146,18 +5158,24 @@ class ParallelACExecutor:
                     for declared in declared_paths
                 )
 
+            tracked_paths = load_tracked_workspace_paths(root)
+
             digest = hashlib.sha256()
             paths = sorted(root.rglob("*"), key=lambda path: path.as_posix())
             for path in paths:
                 relative = path.relative_to(root)
                 declared_contract_path = is_declared_contract_path(relative)
                 if (
-                    any(
+                    is_untracked_top_level_evidence_path(
+                        relative,
+                        tracked_paths=tracked_paths,
+                        is_directory=path.is_dir() and not path.is_symlink(),
+                    )
+                    or any(
                         part in _WORKSPACE_FINGERPRINT_IGNORED_DIRECTORIES
                         for part in relative.parts
                     )
-                    and not declared_contract_path
-                ):
+                ) and not declared_contract_path:
                     continue
                 try:
                     stat = path.lstat()
@@ -8650,15 +8668,7 @@ Respond with either ATOMIC or the structured JSON object only.
             )
             sealed_dispatch_ids.add(sealed_id)
 
-        async def _terminalize_route_drift(dispatch_id_to_terminalize: str) -> ACExecutionResult:
-            """Close durable recovery state when live admission becomes stale."""
-
-            nonlocal clear_cached_runtime_handle
-            clear_cached_runtime_handle = True
-            await _seal_dispatch(
-                dispatch_id_to_terminalize,
-                reason="live route authority changed before provider entry",
-            )
+        async def _emit_runtime_failure(error: str) -> None:
             await self._emit_ac_runtime_event(
                 event_type="execution.session.failed",
                 runtime_identity=runtime_identity,
@@ -8668,7 +8678,20 @@ Respond with either ATOMIC or the structured JSON object only.
                 session_id=dispatch_state.ac_session_id,
                 orchestrator_session_id=session_id,
                 success=False,
-                error="route admission blocked: live route state changed before provider entry",
+                error=error,
+            )
+
+        async def _terminalize_route_drift(dispatch_id_to_terminalize: str) -> ACExecutionResult:
+            """Close durable recovery state when live admission becomes stale."""
+
+            nonlocal clear_cached_runtime_handle
+            clear_cached_runtime_handle = True
+            await _seal_dispatch(
+                dispatch_id_to_terminalize,
+                reason="live route authority changed before provider entry",
+            )
+            await _emit_runtime_failure(
+                "route admission blocked: live route state changed before provider entry"
             )
             return _route_drift_blocked_result()
 
@@ -8692,10 +8715,6 @@ Respond with either ATOMIC or the structured JSON object only.
                 try:
                     if before_provider_entry is not None:
                         await before_provider_entry()
-                    # Durable SessionSignal bookkeeping is not an external
-                    # provider effect.  Keep the task replayable until that
-                    # bookkeeping completes and the batch gate admits the
-                    # actual adapter boundary.
                     provider_effect_scope.enter()
                     provider_effect_active = True
                     await self._authority_leaf_dispatcher_stream(
@@ -8773,7 +8792,6 @@ Respond with either ATOMIC or the structured JSON object only.
             final_message = dispatch_state.final_message
             success = dispatch_state.success
 
-            # Check if stall was detected (CancelScope ate the Cancelled)
             if dispatch_state.stalled:
                 duration = (datetime.now(UTC) - start_time).total_seconds()
                 log.warning(
@@ -8788,6 +8806,7 @@ Respond with either ATOMIC or the structured JSON object only.
                     active_dispatch_id,
                     reason="provider stall crossed an uncertain external-effect boundary",
                 )
+                await _emit_runtime_failure(_STALL_SENTINEL)
                 return ACExecutionResult(
                     ac_index=ac_index,
                     ac_content=ac_content,
@@ -8801,8 +8820,7 @@ Respond with either ATOMIC or the structured JSON object only.
                     route_candidate=observed_route_candidate,
                 )
 
-            # Quota is a hard pause boundary, so it must be recognized before
-            # queued SessionSignals are allowed to open another provider turn.
+            # A quota pause must be recognized before queued signals open another turn.
             # Preserve the exact primary handle and let the outer ``finally``
             # reject any still-pending signals as target-ended; PAUSED must
             # imply that no effect happened after the quota-ending message.
@@ -9121,9 +9139,6 @@ Respond with either ATOMIC or the structured JSON object only.
                         dispatch_state.success = primary_turn.success
                         dispatch_state.final_message = primary_turn.final_message
 
-                self._session_signal_hub.unregister(signal_target)
-                signal_target_registered = False
-
                 runtime_handle = dispatch_state.runtime_handle
                 ac_session_id = dispatch_state.ac_session_id
                 final_message = dispatch_state.final_message
@@ -9394,10 +9409,13 @@ Respond with either ATOMIC or the structured JSON object only.
                         reason=reason,
                         replayable=replayable,
                     )
+                    if await self._ac_runtime_handle_manager.runtime_lifecycle_is_active(
+                        runtime_identity,
+                        execution_context_id,
+                        observed=bool(dispatch_state.lifecycle_event_count),
+                    ):
+                        await _emit_runtime_failure("Runtime attempt cancelled or interrupted.")
             except Exception as seal_error:
-                # A cancellation seal is the last durable protection against
-                # replay.  Hiding its failure would leave an entered provider
-                # boundary looking resumable, so surface a fail-closed error.
                 raise RuntimeError(
                     "AC dispatch cancellation seal failed; refusing replayable recovery"
                 ) from seal_error
@@ -9475,18 +9493,13 @@ Respond with either ATOMIC or the structured JSON object only.
                     pending_signals = self._session_signal_hub.unregister(signal_target)
                     signal_target_registered = False
                     for pending_signal in pending_signals:
-                        await self._safe_emit_event(
-                            create_session_signal_rejected_event(
-                                pending_signal.signal,
-                                rejection_code="target_ended_before_boundary",
-                                detail=(
-                                    "The runtime attempt ended before the queued signal "
-                                    "reached its delivery boundary."
-                                ),
-                                effective_mode=pending_signal.effective_mode,
-                                runtime_backend=signal_target.runtime_backend,
-                            )
+                        rejection = await target_ended_rejection_event(
+                            self._event_store,
+                            pending_signal,
+                            runtime_backend=signal_target.runtime_backend,
                         )
+                        if rejection is not None:
+                            await self._safe_emit_event(rejection)
                 # Frugality-proof token axis (seed AC2). Attribute this leaf's real
                 # runtime-measured spend on EVERY exit — success, stall, and the
                 # mid-stream exception path all consumed tokens, and spend is spend.

@@ -70,6 +70,7 @@ class AgentRuntimeBackend(str, Enum):  # noqa: UP042
     """Supported orchestrator runtime backends for MCP commands."""
 
     CLAUDE = "claude"
+    CLAUDE_SDK = "claude-sdk"
     CLAUDE_CLI = "claude-cli"
     CODEX = "codex"
     OPENCODE = "opencode"
@@ -937,7 +938,8 @@ def serve(
         typer.Option(
             "--runtime",
             help=(
-                "Agent runtime backend for orchestrator-driven tools (claude, claude-cli, codex, "
+                "Agent runtime backend for orchestrator-driven tools (claude, claude-sdk, "
+                "claude-cli, codex, "
                 "opencode, hermes, gemini, copilot, goose, kiro, pi, gjc, "
                 "antigravity, grok, or zcode)."
             ),
@@ -988,7 +990,8 @@ def serve(
     # A resolver normally prevents a mixed interpreter. Also reject an
     # explicit SDK runtime request: this command is the MCP 2 server boundary,
     # so Claude execution here must use the out-of-process CLI worker.
-    if has_unsupported_claude_sdk_mcp_mix() or (runtime is not None and runtime.value == "claude"):
+    selected_runtime = public_runtime_backend(runtime.value if runtime else None)
+    if has_unsupported_claude_sdk_mcp_mix() or selected_runtime == "claude":
         _stderr_console.print(Text(UNSUPPORTED_CLAUDE_SDK_MCP_MESSAGE, style="red"))
         raise typer.Exit(1)
 
@@ -1010,7 +1013,7 @@ def serve(
                 port,
                 transport,
                 db_path,
-                public_runtime_backend(runtime.value if runtime else None),
+                selected_runtime,
                 llm_backend.value if llm_backend else None,
             )
         )
@@ -1053,7 +1056,8 @@ def info(
         typer.Option(
             "--runtime",
             help=(
-                "Agent runtime backend for orchestrator-driven tools (claude, claude-cli, codex, "
+                "Agent runtime backend for orchestrator-driven tools (claude, claude-sdk, "
+                "claude-cli, codex, "
                 "opencode, hermes, gemini, copilot, goose, kiro, pi, gjc, "
                 "antigravity, grok, or zcode)."
             ),

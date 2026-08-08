@@ -12,6 +12,7 @@ from pathlib import Path
 import shlex
 import subprocess
 import sys
+import textwrap
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -75,6 +76,7 @@ from ouroboros.orchestrator.leaf_dispatcher import (
     _close_pending_targets,
     _correlated_tool_result_name,
     _pending_bash_filesystem_targets,
+    _stat_fingerprint,
 )
 from ouroboros.orchestrator.level_context import ACContextSummary, LevelContext
 from ouroboros.orchestrator.parallel_executor import (
@@ -569,6 +571,7 @@ def test_files_touched_authenticates_every_stable_multi_receiver(
 
     with _BashFilesystemLeaseTracker(task_cwd=str(tmp_path)) as tracker:
         observed_call = tracker.observe(call)
+        assert len(tracker._pending_by_id["multi-receiver"]) == 2
         completed = subprocess.run(  # noqa: S602
             command,
             cwd=tmp_path,
@@ -1027,6 +1030,82 @@ def test_files_touched_rejects_parent_symlink_swap_restored_before_completion(tm
     )
 
 
+def test_capture_rejects_intermediate_workspace_ancestor_swap(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pre-linked external inode cannot survive a task_cwd ancestor swap."""
+    ancestor = tmp_path / "trusted-ancestor"
+    workspace = ancestor / "workspace"
+    workspace.mkdir(parents=True)
+    artifact = workspace / "claimed.py"
+    artifact.write_text("before\n", encoding="utf-8")
+    displaced_ancestor = tmp_path / "displaced-ancestor"
+    outside_ancestor = tmp_path / "outside-ancestor"
+    outside_workspace = outside_ancestor / workspace.name
+    outside_workspace.mkdir(parents=True)
+    outside_artifact = outside_workspace / artifact.name
+    os.link(artifact, outside_artifact)
+    original_open = os.open
+    swapped = False
+    matching_open_count = 0
+    fingerprint_before_swap = None
+
+    def adversarial_open(path, flags, mode=0o777, *, dir_fd=None):
+        nonlocal fingerprint_before_swap, matching_open_count, swapped
+        fd = original_open(path, flags, mode, dir_fd=dir_fd)
+        if dir_fd is not None and os.fspath(path) == ancestor.name:
+            matching_open_count += 1
+            if not swapped and matching_open_count == 2:
+                fingerprint_before_swap = _stat_fingerprint(artifact.lstat())
+                ancestor.rename(displaced_ancestor)
+                ancestor.symlink_to(outside_ancestor, target_is_directory=True)
+                swapped = True
+        return fd
+
+    monkeypatch.setattr(os, "open", adversarial_open)
+    monkeypatch.setattr(os, "supports_dir_fd", {*os.supports_dir_fd, adversarial_open})
+    call = AgentMessage(
+        type="tool",
+        content="Bash: touch claimed.py",
+        tool_name="Bash",
+        data={
+            "tool_input": {"command": "touch claimed.py"},
+            "tool_call_id": "ancestor-swap",
+        },
+    )
+    completion = AgentMessage(
+        type="tool_result",
+        content="command completed with exit code 0",
+        data={
+            "subtype": "tool_result",
+            "exit_code": 0,
+            "tool_call_id": "ancestor-swap",
+        },
+    )
+
+    with _BashFilesystemLeaseTracker(task_cwd=str(workspace)) as tracker:
+        tracker.observe(call)
+        pending = tracker._pending_by_id["ancestor-swap"][0]
+        assert fingerprint_before_swap == pending.pre_fingerprint
+        completed = subprocess.run(  # noqa: S602
+            "touch claimed.py",
+            cwd=workspace,
+            shell=True,
+            check=False,
+        )
+        observed_completion = tracker.observe(completion)
+
+    assert swapped is True
+    assert completed.returncode == 0
+    assert _stat_fingerprint(outside_artifact.lstat()) != fingerprint_before_swap
+    assert "filesystem_effects" not in observed_completion.data
+    assert not _runtime_messages_support_file_claim(
+        "claimed.py",
+        (call, observed_completion),
+        task_cwd=str(workspace),
+    )
+
+
 def test_bash_receiver_lease_cleanup_is_idempotent(tmp_path) -> None:
     """Unmatched/cancelled dispatch cleanup closes every held receiver dirfd."""
     target = tmp_path / "claimed.py"
@@ -1048,6 +1127,198 @@ def test_bash_receiver_lease_cleanup_is_idempotent(tmp_path) -> None:
     for fd in fds:
         with pytest.raises(OSError):
             os.fstat(fd)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="RLIMIT_NOFILE is POSIX-only")
+def test_bash_receiver_fd_budget_preserves_pipe_headroom_under_low_rlimit(tmp_path) -> None:
+    """A wide command abandons capture before it can starve subprocess pipes."""
+    child_script = textwrap.dedent(
+        r"""
+        import os
+        from pathlib import Path
+        import resource
+        import subprocess
+        import sys
+
+        from ouroboros.orchestrator.adapter import AgentMessage
+        from ouroboros.orchestrator.leaf_dispatcher import _BashFilesystemLeaseTracker
+
+        workspace = Path(sys.argv[1])
+        _soft_limit, hard_limit = resource.getrlimit(resource.RLIMIT_NOFILE)
+        limit = 256 if hard_limit == resource.RLIM_INFINITY else min(256, hard_limit)
+        if limit < 128:
+            raise SystemExit(77)
+        resource.setrlimit(resource.RLIMIT_NOFILE, (limit, hard_limit))
+
+        fd_directory = Path("/proc/self/fd")
+        if not fd_directory.exists():
+            fd_directory = Path("/dev/fd")
+        if not fd_directory.exists():
+            raise SystemExit(77)
+
+        def fd_count():
+            return len(os.listdir(fd_directory))
+
+        baseline = fd_count()
+        receivers = [f"claimed_{index}.txt" for index in range(64)]
+        command = "touch " + " ".join(receivers)
+        call = AgentMessage(
+            type="tool",
+            content=f"Bash: {command}",
+            tool_name="Bash",
+            data={"tool_input": {"command": command}, "tool_call_id": "fd-budget"},
+        )
+        completion = AgentMessage(
+            type="tool_result",
+            content="command completed with exit code 0",
+            tool_name="Bash",
+            data={"subtype": "tool_result", "exit_code": 0, "tool_call_id": "fd-budget"},
+        )
+
+        with _BashFilesystemLeaseTracker(task_cwd=str(workspace)) as tracker:
+            tracker.observe(call)
+            assert tracker._pending_by_id["fd-budget"] == ()
+            assert fd_count() < limit // 2
+            completed = subprocess.run(
+                ["/bin/sh", "-c", command],
+                cwd=workspace,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=True,
+            )
+            assert completed.stdout == ""
+            assert completed.stderr == ""
+            observed = tracker.observe(completion)
+            assert "filesystem_effects" not in observed.data
+            probe = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    "import sys; print('stdout-ok'); print('stderr-ok', file=sys.stderr)",
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=True,
+            )
+            assert probe.stdout == "stdout-ok\n"
+            assert probe.stderr == "stderr-ok\n"
+
+        assert fd_count() <= baseline + 1
+        print("fd-budget-ok")
+        """
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-c", child_script, str(tmp_path)],
+        cwd=Path.cwd(),
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    if result.returncode == 77:  # pragma: no cover - constrained host fallback
+        pytest.skip("host cannot provide the isolated RLIMIT_NOFILE regression")
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "fd-budget-ok\n"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="RLIMIT_NOFILE is POSIX-only")
+def test_bash_receiver_fd_budget_is_process_wide_across_trackers(tmp_path) -> None:
+    """Concurrent trackers share headroom and cannot collectively starve pipes."""
+    child_script = textwrap.dedent(
+        r"""
+        import os
+        from pathlib import Path
+        import resource
+        import subprocess
+        import sys
+
+        from ouroboros.orchestrator.adapter import AgentMessage
+        from ouroboros.orchestrator.leaf_dispatcher import _BashFilesystemLeaseTracker
+
+        workspace = Path(sys.argv[1])
+        _soft_limit, hard_limit = resource.getrlimit(resource.RLIMIT_NOFILE)
+        limit = 256 if hard_limit == resource.RLIM_INFINITY else min(256, hard_limit)
+        if limit < 128:
+            raise SystemExit(77)
+        resource.setrlimit(resource.RLIMIT_NOFILE, (limit, hard_limit))
+
+        fd_directory = Path("/proc/self/fd")
+        if not fd_directory.exists():
+            fd_directory = Path("/dev/fd")
+        if not fd_directory.exists():
+            raise SystemExit(77)
+
+        def fd_count():
+            return len(os.listdir(fd_directory))
+
+        baseline = fd_count()
+        trackers = [
+            _BashFilesystemLeaseTracker(task_cwd=str(workspace)) for _index in range(4)
+        ]
+        retained = 0
+        abandoned = 0
+        try:
+            for tracker_index, tracker in enumerate(trackers):
+                tracker.__enter__()
+                for call_index in range(20):
+                    receiver = f"tracker_{tracker_index}_{call_index}.txt"
+                    call_id = f"tracker-{tracker_index}-call-{call_index}"
+                    tracker.observe(
+                        AgentMessage(
+                            type="tool",
+                            content=f"Bash: touch {receiver}",
+                            tool_name="Bash",
+                            data={
+                                "tool_input": {"command": f"touch {receiver}"},
+                                "tool_call_id": call_id,
+                            },
+                        )
+                    )
+                    lease_count = len(tracker._pending_by_id[call_id])
+                    assert lease_count in {0, 1}
+                    retained += lease_count
+                    abandoned += lease_count == 0
+
+            assert retained > 0
+            assert abandoned > 0
+            assert fd_count() <= limit // 2
+            probe = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    "import sys; print('stdout-ok'); print('stderr-ok', file=sys.stderr)",
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=True,
+            )
+            assert probe.stdout == "stdout-ok\n"
+            assert probe.stderr == "stderr-ok\n"
+        finally:
+            for tracker in reversed(trackers):
+                tracker.close()
+
+        assert fd_count() <= baseline + 1
+        print("multi-fd-budget-ok")
+        """
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-c", child_script, str(tmp_path)],
+        cwd=Path.cwd(),
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    if result.returncode == 77:  # pragma: no cover - constrained host fallback
+        pytest.skip("host cannot provide the isolated RLIMIT_NOFILE regression")
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "multi-fd-budget-ok\n"
 
 
 def test_completed_receiver_lease_cannot_close_reused_fd(tmp_path) -> None:
@@ -1239,6 +1510,66 @@ def test_receiver_lease_tracker_strips_forged_effect_without_local_lease(tmp_pat
     assert "filesystem_effects" not in observed.data
 
 
+def test_receiver_lease_tracker_preserves_unrelated_final_message_identity() -> None:
+    """Provenance filtering must not alter unrelated final-message semantics."""
+    nested = {"decision": "pause"}
+    data = {"subtype": "success", "routing": nested}
+    final = AgentMessage(type="result", content="done", data=data)
+
+    with _BashFilesystemLeaseTracker(task_cwd=None) as tracker:
+        observed = tracker.observe(final)
+
+    assert observed is final
+    assert observed.data is data
+    assert observed.data["routing"] is nested
+
+
+def test_receiver_lease_tracker_strips_reserved_effect_from_unrelated_message() -> None:
+    """The reserved field is removed even outside a recognizable tool event."""
+    nested = {"decision": "before"}
+    forged_effects = [{"capture": "forged"}]
+    message = AgentMessage(
+        type="assistant",
+        content="ordinary message",
+        data={"routing": nested, "filesystem_effects": forged_effects},
+    )
+
+    with _BashFilesystemLeaseTracker(task_cwd=None) as tracker:
+        observed = tracker.observe(message)
+
+    nested["decision"] = "after"
+    forged_effects.append({"capture": "late-forgery"})
+    assert observed is not message
+    assert "filesystem_effects" not in observed.data
+    assert observed.data["routing"] == {"decision": "before"}
+
+
+def test_receiver_lease_tracker_snapshots_every_tool_completion() -> None:
+    """Late adapter mutation cannot rewrite even a non-Bash completion."""
+    meta = {"exit_status": 0}
+    completion = AgentMessage(
+        type="tool_result",
+        content="edit completed",
+        tool_name="Edit",
+        data={
+            "subtype": "tool_result",
+            "tool_call_id": "edit-call",
+            "tool_result": {"is_error": False, "meta": meta},
+        },
+    )
+
+    with _BashFilesystemLeaseTracker(task_cwd=None) as tracker:
+        observed = tracker.observe(completion)
+
+    meta["exit_status"] = 99
+    meta["tool_use_id"] = "late-forgery"
+    assert observed is not completion
+    assert observed.data["tool_result"] == {
+        "is_error": False,
+        "meta": {"exit_status": 0},
+    }
+
+
 def test_receiver_lease_tracker_replaces_forged_effect_with_local_capture(tmp_path) -> None:
     """A real mutation reattaches only the receiver measured by the tracker."""
     forged_target = tmp_path / "forged.py"
@@ -1377,6 +1708,213 @@ def test_conflicting_call_aliases_poison_related_existing_lease(tmp_path) -> Non
         observed = tracker.observe(completion)
 
     assert "filesystem_effects" not in observed.data
+
+
+def test_malformed_call_alias_poison_cannot_be_revived(tmp_path) -> None:
+    """A present non-string alias closes the named lease before projection."""
+    target = tmp_path / "claimed.py"
+    target.write_text("before\n", encoding="utf-8")
+    call = AgentMessage(
+        type="tool",
+        content="Bash: touch claimed.py",
+        tool_name="Bash",
+        data={"tool_input": {"command": "touch claimed.py"}, "tool_call_id": "call-x"},
+    )
+    malformed = AgentMessage(
+        type="tool_result",
+        content="malformed completion",
+        data={
+            "subtype": "tool_result",
+            "exit_code": 0,
+            "tool_call_id": "call-x",
+            "tool_use_id": 7,
+        },
+    )
+    valid = AgentMessage(
+        type="tool_result",
+        content="later valid completion",
+        data={"subtype": "tool_result", "exit_code": 0, "tool_call_id": "call-x"},
+    )
+
+    with _BashFilesystemLeaseTracker(task_cwd=str(tmp_path)) as tracker:
+        tracker.observe(call)
+        os.utime(target, ns=(8_000_000_000, 8_000_000_000))
+        rejected = tracker.observe(malformed)
+        revived = tracker.observe(valid)
+
+    assert "filesystem_effects" not in rejected.data
+    assert "filesystem_effects" not in revived.data
+
+
+def test_unidentified_malformed_completion_poison_cannot_be_revived(tmp_path) -> None:
+    """A malformed completion with no usable ID closes every pending Bash lease."""
+    target = tmp_path / "claimed.py"
+    target.write_text("before\n", encoding="utf-8")
+    call = AgentMessage(
+        type="tool",
+        content="Bash: touch claimed.py",
+        tool_name="Bash",
+        data={"tool_input": {"command": "touch claimed.py"}, "tool_call_id": "call-x"},
+    )
+    malformed = AgentMessage(
+        type="tool_result",
+        content="unidentified malformed completion",
+        data={"subtype": "tool_result", "exit_code": 0, "tool_use_id": 7},
+    )
+    valid = AgentMessage(
+        type="tool_result",
+        content="later valid completion",
+        data={"subtype": "tool_result", "exit_code": 0, "tool_call_id": "call-x"},
+    )
+
+    with _BashFilesystemLeaseTracker(task_cwd=str(tmp_path)) as tracker:
+        tracker.observe(call)
+        os.utime(target, ns=(9_000_000_000, 9_000_000_000))
+        rejected = tracker.observe(malformed)
+        revived = tracker.observe(valid)
+
+    assert "filesystem_effects" not in rejected.data
+    assert "filesystem_effects" not in revived.data
+
+
+@pytest.mark.parametrize("completion_tool_name", ("Bash", None))
+def test_orphan_idless_bash_terminal_poisons_all_named_leases(
+    tmp_path,
+    completion_tool_name,
+) -> None:
+    """One unassignable terminal closes, rather than donates, every named lease."""
+    targets = (tmp_path / "first.py", tmp_path / "second.py")
+    for target in targets:
+        target.write_text("before\n", encoding="utf-8")
+    calls = tuple(
+        AgentMessage(
+            type="tool",
+            content=f"Bash: touch {target.name}",
+            tool_name="Bash",
+            data={
+                "tool_input": {"command": f"touch {target.name}"},
+                "tool_call_id": f"named-{index}",
+            },
+        )
+        for index, target in enumerate(targets)
+    )
+    orphan = AgentMessage(
+        type="tool_result",
+        content="unassigned command completed",
+        tool_name=completion_tool_name,
+        data={"subtype": "tool_result", "exit_code": 0},
+    )
+    completions = tuple(
+        AgentMessage(
+            type="tool_result",
+            content="late matching completion",
+            tool_name="Bash",
+            data={
+                "subtype": "tool_result",
+                "exit_code": 0,
+                "tool_call_id": f"named-{index}",
+            },
+        )
+        for index in range(len(targets))
+    )
+
+    with _BashFilesystemLeaseTracker(task_cwd=str(tmp_path)) as tracker:
+        for call in calls:
+            tracker.observe(call)
+        tracker.observe(orphan)
+        for index, target in enumerate(targets, start=11):
+            os.utime(target, ns=(index * 1_000_000_000, index * 1_000_000_000))
+        observed = tuple(tracker.observe(completion) for completion in completions)
+
+    assert all("filesystem_effects" not in completion.data for completion in observed)
+
+
+def test_legitimate_idless_bash_pair_does_not_poison_named_lease(tmp_path) -> None:
+    """A unique id-less Bash start owns its terminal without closing a named peer."""
+    idless_target = tmp_path / "idless.py"
+    named_target = tmp_path / "named.py"
+    idless_target.write_text("before\n", encoding="utf-8")
+    named_target.write_text("before\n", encoding="utf-8")
+    idless_call = AgentMessage(
+        type="tool",
+        content="Bash: touch idless.py",
+        tool_name="Bash",
+        data={"tool_input": {"command": "touch idless.py"}},
+    )
+    named_call = AgentMessage(
+        type="tool",
+        content="Bash: touch named.py",
+        tool_name="Bash",
+        data={
+            "tool_input": {"command": "touch named.py"},
+            "tool_call_id": "named-peer",
+        },
+    )
+    idless_completion = AgentMessage(
+        type="tool_result",
+        content="idless command completed",
+        data={"subtype": "tool_result", "exit_code": 0},
+    )
+    named_completion = AgentMessage(
+        type="tool_result",
+        content="named command completed",
+        tool_name="Bash",
+        data={
+            "subtype": "tool_result",
+            "exit_code": 0,
+            "tool_call_id": "named-peer",
+        },
+    )
+
+    with _BashFilesystemLeaseTracker(task_cwd=str(tmp_path)) as tracker:
+        tracker.observe(idless_call)
+        tracker.observe(named_call)
+        os.utime(idless_target, ns=(13_000_000_000, 13_000_000_000))
+        observed_idless = tracker.observe(idless_completion)
+        os.utime(named_target, ns=(14_000_000_000, 14_000_000_000))
+        observed_named = tracker.observe(named_completion)
+
+    assert observed_idless.data["filesystem_effects"][0]["path"] == "idless.py"
+    assert observed_named.data["filesystem_effects"][0]["path"] == "named.py"
+
+
+def test_unrelated_idless_non_bash_terminal_preserves_named_lease(tmp_path) -> None:
+    """An explicitly other-tool terminal cannot close a named Bash command."""
+    target = tmp_path / "claimed.py"
+    target.write_text("before\n", encoding="utf-8")
+    call = AgentMessage(
+        type="tool",
+        content="Bash: touch claimed.py",
+        tool_name="Bash",
+        data={
+            "tool_input": {"command": "touch claimed.py"},
+            "tool_call_id": "named-bash",
+        },
+    )
+    edit_completion = AgentMessage(
+        type="tool_result",
+        content="Edit completed",
+        tool_name="Edit",
+        data={"subtype": "tool_result", "exit_code": 0},
+    )
+    bash_completion = AgentMessage(
+        type="tool_result",
+        content="Bash completed",
+        tool_name="Bash",
+        data={
+            "subtype": "tool_result",
+            "exit_code": 0,
+            "tool_call_id": "named-bash",
+        },
+    )
+
+    with _BashFilesystemLeaseTracker(task_cwd=str(tmp_path)) as tracker:
+        tracker.observe(call)
+        tracker.observe(edit_completion)
+        os.utime(target, ns=(15_000_000_000, 15_000_000_000))
+        observed = tracker.observe(bash_completion)
+
+    assert observed.data["filesystem_effects"][0]["path"] == "claimed.py"
 
 
 @pytest.mark.parametrize("call_id", (None, "call-1"))
