@@ -96,8 +96,8 @@ PICKER_INDEX_DDL: tuple[str, ...] = (
     "ON events (event_type) "
     f"WHERE {PICKER_START_SCOPE_SQL}",
     f"CREATE INDEX IF NOT EXISTS {AGGREGATE_EVENT_INDEX} "
-    "ON events (aggregate_id, event_type, json_valid(payload)) "
-    f"WHERE {PICKER_PROGRESS_SCOPE_SQL}",
+    "ON events (aggregate_id, event_type) "
+    f"WHERE {PICKER_PROGRESS_SCOPE_SQL} AND {VALID_JSON_SQL}",
     f"CREATE INDEX IF NOT EXISTS {RUNNING_PROGRESS_INDEX} "
     "ON events (aggregate_id, event_type) "
     f"WHERE {PICKER_PROGRESS_SCOPE_SQL} AND {VALID_JSON_SQL} AND {RUNNING_PROGRESS_SQL}",
@@ -110,7 +110,7 @@ PICKER_INDEX_DDL_BY_NAME = dict(zip(PICKER_INDEX_NAMES, PICKER_INDEX_DDL, strict
 _PICKER_INDEX_KEY_COLUMNS: dict[str, tuple[str | None, ...]] = {
     DIRECT_EVENT_INDEX: ("event_type", "aggregate_id"),
     START_EVENT_INDEX: ("event_type",),
-    AGGREGATE_EVENT_INDEX: ("aggregate_id", "event_type", None),
+    AGGREGATE_EVENT_INDEX: ("aggregate_id", "event_type"),
     RUNNING_PROGRESS_INDEX: ("aggregate_id", "event_type"),
     WORKFLOW_SNAPSHOT_INDEX: ("aggregate_id",),
 }

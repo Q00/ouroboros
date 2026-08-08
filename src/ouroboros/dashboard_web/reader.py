@@ -455,7 +455,7 @@ def _fetch_latest_progress_rows(
                 f"INDEXED BY {AGGREGATE_EVENT_INDEX} "
                 "WHERE aggregate_id = ? AND event_type = ? "
                 f"AND {PICKER_PROGRESS_SCOPE_SQL} AND {VALID_JSON_SQL} "
-                "ORDER BY rowid DESC LIMIT 1",
+                "ORDER BY aggregate_id DESC, event_type DESC, rowid DESC LIMIT 1",
                 [aggregate_id, event_type],
             ).fetchone()
             if latest is not None:
@@ -465,7 +465,8 @@ def _fetch_latest_progress_rows(
                 f"INDEXED BY {RUNNING_PROGRESS_INDEX} "
                 "WHERE aggregate_id = ? AND event_type = ? "
                 f"AND {PICKER_PROGRESS_SCOPE_SQL} AND {VALID_JSON_SQL} "
-                f"AND {RUNNING_PROGRESS_SQL} ORDER BY rowid DESC LIMIT 1",
+                f"AND {RUNNING_PROGRESS_SQL} "
+                "ORDER BY aggregate_id DESC, event_type DESC, rowid DESC LIMIT 1",
                 [aggregate_id, event_type],
             ).fetchone()
             if latest_running is not None:
@@ -476,7 +477,8 @@ def _fetch_latest_progress_rows(
                     f"INDEXED BY {WORKFLOW_SNAPSHOT_INDEX} "
                     "WHERE aggregate_id = ? AND event_type = ? "
                     f"AND {WORKFLOW_PROGRESS_SCOPE_SQL} AND {VALID_JSON_SQL} "
-                    f"AND {WORKFLOW_SNAPSHOT_SQL} ORDER BY rowid DESC LIMIT 1",
+                    f"AND {WORKFLOW_SNAPSHOT_SQL} "
+                    "ORDER BY aggregate_id DESC, rowid DESC LIMIT 1",
                     [aggregate_id, event_type],
                 ).fetchone()
                 if latest_snapshot is not None:
@@ -500,7 +502,7 @@ def list_recent_executions(db_path: str | Path, *, limit: int = 10) -> list[dict
         "SELECT rowid, aggregate_id, event_type, payload "
         f"FROM events INDEXED BY {START_EVENT_INDEX} "
         f"WHERE {PICKER_START_SCOPE_SQL} "
-        "AND rowid <= ? ORDER BY rowid DESC LIMIT ?"
+        "AND rowid <= ? ORDER BY event_type DESC, rowid DESC LIMIT ?"
     )
     conn = _connect_readonly(path)
     try:

@@ -22,6 +22,7 @@ from ouroboros.persistence.picker_indexes import (
     PICKER_INDEX_NAMES,
     PICKER_PROGRESS_SCOPE_SQL,
     START_EVENT_INDEX,
+    VALID_JSON_SQL,
     matching_picker_indexes,
     normalize_index_ddl,
 )
@@ -114,8 +115,8 @@ def test_contract_checker_rejects_column_order_drift_with_same_predicate(tmp_pat
         conn.execute(f'DROP INDEX "{AGGREGATE_EVENT_INDEX}"')
         conn.execute(
             f'CREATE INDEX "{AGGREGATE_EVENT_INDEX}" '
-            "ON events (event_type, aggregate_id, json_valid(payload)) "
-            f"WHERE {PICKER_PROGRESS_SCOPE_SQL}"
+            "ON events (event_type, aggregate_id) "
+            f"WHERE {PICKER_PROGRESS_SCOPE_SQL} AND {VALID_JSON_SQL}"
         )
 
         matching = matching_picker_indexes(conn)
