@@ -397,6 +397,25 @@ def register_code_investigation_fanout(
     )
 
 
+def _advisory_synthesizer_input(
+    expected_keys: list[str],
+    *,
+    tool_name: str | None,
+    roster_repo_ids: list[str] | None,
+) -> dict[str, Any]:
+    """Return the request-side state one advisory fan-out persists.
+
+    Additive by omission: a key absent means "the default", which keeps an
+    interview record identical to what it was before a second tool existed.
+    """
+    data: dict[str, Any] = {"lane_ids": list(expected_keys)}
+    if tool_name and tool_name != "ouroboros_interview":
+        data["tool_name"] = tool_name
+    if roster_repo_ids is not None:
+        data["roster_repo_ids"] = list(roster_repo_ids)
+    return data
+
+
 def register_question_advisory_fanout(
     registry: FanoutRegistry,
     *,
@@ -404,8 +423,20 @@ def register_question_advisory_fanout(
     payloads: list[SubagentPayload],
     correlation_key: str = "context.lane_id",
     fanout_id: str | None = None,
+    tool_name: str | None = None,
+    roster_repo_ids: list[str] | None = None,
 ) -> str | None:
     """Register an interview question-advisory fan-out for later result re-entry.
+
+    ``tool_name`` names the issuing MCP tool when it is not the interview, and
+    re-entry reads the answer contracts from that tool's catalog: a lane id
+    alone does not say whose catalog, and both tools declare a ``data_context``.
+    It is written only when it differs from the default so an interview record
+    is byte-identical to what earlier versions wrote.
+
+    ``roster_repo_ids`` bounds which repositories a lane may cite. It is
+    per-session data the producer knew and re-entry cannot re-derive, so unlike
+    the contracts it is persisted; a record without one is simply not bounded.
 
     The advisory lanes are stamped to correlate by ``context.lane_id`` (a lane's
     persona is absent on the ``code_context`` / ``web_context`` lanes), so the
@@ -462,7 +493,9 @@ def register_question_advisory_fanout(
         correlation_key=correlation_key,
         expected_keys=expected_keys,
         question_identity=question_identity,
-        synthesizer_input={"lane_ids": list(expected_keys)},
+        synthesizer_input=_advisory_synthesizer_input(
+            expected_keys, tool_name=tool_name, roster_repo_ids=roster_repo_ids
+        ),
         fanout_id=fanout_id,
         required_keys=required_keys,
     )
@@ -474,6 +507,8 @@ def stamp_question_advisory_fanout(
     *,
     session_id: str,
     payloads: list[SubagentPayload],
+    tool_name: str | None = None,
+    roster_repo_ids: list[str] | None = None,
 ) -> None:
     """Register the advisory fan-out and stamp its id, if there is one to stamp.
 
@@ -486,7 +521,11 @@ def stamp_question_advisory_fanout(
     if registry is None:
         return
     fanout_id = register_question_advisory_fanout(
-        registry, session_id=session_id, payloads=payloads
+        registry,
+        session_id=session_id,
+        payloads=payloads,
+        tool_name=tool_name,
+        roster_repo_ids=roster_repo_ids,
     )
     if fanout_id is not None:
         meta["question_advisory_fanout_id"] = fanout_id
@@ -507,11 +546,18 @@ def stamp_lateral_persona_fanout(
         dispatch_record["fanout_id"] = fanout_id
 
 
-def _canonical_lane_contracts() -> dict[str, Mapping[str, Any]]:
+def _canonical_lane_contracts(
+    tool_name: str = "ouroboros_interview",
+) -> dict[str, Mapping[str, Any]]:
     """Return the ``lane_id -> answer_contract`` map this build advertises.
 
     Which lanes are contracted is a property of the code, and it is read from
     the code every time rather than from the record.
+
+    The map is per tool. A lane id alone does not identify a contract once a
+    second tool exists: both declare a ``data_context``, and PM's code lane is
+    not the interview's. The issuing tool is recorded with the fan-out, and its
+    catalog is the only thing that says what its lanes promised.
 
     An earlier revision of this PR persisted a copy of each contract with the
     record, so that a submission arriving after a restart or an upgrade would be
@@ -529,12 +575,19 @@ def _canonical_lane_contracts() -> dict[str, Mapping[str, Any]]:
     question being asked. So the copy prevented a rare, benign ``partial``, and
     in exchange made the set of lanes that must be validated into mutable data.
     """
-    from ouroboros.orchestrator.capabilities.interview_schemas import (
-        _interview_question_advisory_fanout_metadata,
-    )
+    from ouroboros.orchestrator.capabilities import ouroboros_tool_capability_metadata
+
+    try:
+        advisory = ouroboros_tool_capability_metadata(tool_name)["orchestration"][
+            "question_advisory_fanout"
+        ]
+    except (KeyError, TypeError):
+        # A tool that declares no advisory catalog contracts nothing. This is
+        # not "nothing to check" being guessed at: there is no contracted lane.
+        return {}
 
     contracts: dict[str, Mapping[str, Any]] = {}
-    for lane in _interview_question_advisory_fanout_metadata()["lanes"]:
+    for lane in advisory["lanes"]:
         if "answer_contract" not in lane:
             continue
         contract = lane["answer_contract"]
@@ -936,13 +989,16 @@ def _contract_violations(
     """
     if record.kind != FANOUT_KIND_QUESTION_ADVISORY:
         return {}
-    contracts = _canonical_lane_contracts()
+    contracts = _canonical_lane_contracts(
+        str(record.synthesizer_input.get("tool_name") or "ouroboros_interview")
+    )
     violations: dict[str, list[str]] = {}
     for lane_id, output in provided.items():
         if lane_id not in contracts:
             continue
         errors = _validate_against_contract(output, contracts[lane_id])
         errors.extend(_provenance_violations(record, output))
+        errors.extend(_roster_violations(record, output))
         errors.extend(_aggregate_violations(output))
         if errors:
             violations[lane_id] = errors
@@ -985,6 +1041,45 @@ def _aggregate_violations(output: Any) -> list[str]:
                 problems.append(f"read_requests/{index}/values: repeats a group")
                 break
             seen.add(group)
+    return problems
+
+
+def _roster_violations(record: FanoutRecord, output: Any) -> list[str]:
+    """Return violations for evidence claiming a repository outside the roster.
+
+    The schema can only check that a ``repo_id`` is *shaped* like one, and shape
+    is not membership. This is what makes the roster a boundary rather than a
+    suggestion: where a lane may look stays open, what it may hand back as
+    evidence is closed, and the decision is made from the value alone.
+
+    ``examined_repository_ids`` is judged the same way, because it is the scope
+    every other statement in that answer is relative to.
+
+    A record with no persisted roster is not checked -- an interview fan-out, or
+    one whose producer bounded nothing. Inventing a boundary at re-entry would
+    reject evidence its child was never told to avoid.
+    """
+    if not isinstance(output, Mapping):
+        return []
+    roster = record.synthesizer_input.get("roster_repo_ids")
+    if not isinstance(roster, (list, tuple)):
+        return []
+    allowed = {str(item) for item in roster}
+    problems: list[str] = []
+    examined = output.get("examined_repository_ids")
+    if isinstance(examined, (list, tuple)):
+        problems += [
+            f"examined_repository_ids: {repo_id!r} is not in this session's roster"
+            for repo_id in examined
+            if str(repo_id) not in allowed
+        ]
+    evidence = output.get("evidence")
+    if isinstance(evidence, (list, tuple)):
+        problems += [
+            f"evidence: {item.get('repo_id')!r} is not in this session's roster"
+            for item in evidence
+            if isinstance(item, Mapping) and str(item.get("repo_id") or "") not in allowed | {""}
+        ]
     return problems
 
 

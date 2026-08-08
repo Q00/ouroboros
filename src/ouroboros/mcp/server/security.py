@@ -543,10 +543,20 @@ class InputValidator:
                             details={"pattern": pattern},
                         )
                     )
-            # Skip shell-metachar check for known freetext fields —
-            # they carry code/prompts, never shell commands.
-            root_field = key.split(".")[0].split("[")[0]
-            if root_field not in self.FREETEXT_FIELDS:
+            # Skip shell-metachar check for known freetext fields — they carry
+            # code/prompts, never shell commands.
+            #
+            # Matched on every segment of the path, not only the first. A
+            # freetext field is freetext wherever it sits, and the fan-out
+            # submission puts one inside a container: ``results[0].content``
+            # carries a subagent's finding, which routinely quotes source, and
+            # source routinely contains ``;``. Judging by the root alone rejected
+            # it under the container's name, so the only way through was to
+            # reword the finding — leaving the record saying something the lane
+            # never said, which is worse than the character it was guarding.
+            if not self.FREETEXT_FIELDS.intersection(
+                segment.split("[")[0] for segment in key.split(".")
+            ):
                 for char in shell_metacharacters:
                     if char in value:
                         return Result.err(
