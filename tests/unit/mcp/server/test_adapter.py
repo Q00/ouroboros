@@ -2,6 +2,7 @@
 
 import asyncio
 from datetime import UTC, datetime
+import json
 import re
 from types import SimpleNamespace
 from typing import Any
@@ -33,7 +34,6 @@ from ouroboros.mcp.server.adapter import (
     _validate_parameter_constraints,
     validate_transport,
 )
-from ouroboros.mcp.tools import job_handlers as job_handlers_module
 from ouroboros.mcp.tools.job_handlers import JobResultHandler, JobWaitHandler
 from ouroboros.mcp.types import (
     ContentType,
@@ -1299,11 +1299,10 @@ class TestMCPServerAdapterTools:
         finally:
             await store.close()
 
-    async def test_call_tool_job_wait_timeout_then_job_result_recovers_terminal_snapshot(
-        self, tmp_path, monkeypatch
+    async def test_call_tool_job_wait_delayed_zero_snapshot_then_result_recovers_terminal(
+        self, tmp_path
     ) -> None:
-        """A bounded wait response can be followed by adapter-routed terminal result fetch."""
-        monkeypatch.setattr(job_handlers_module, "_JOB_WAIT_RESPONSE_GRACE_SECONDS", 0.01)
+        """A delayed zero-time snapshot still composes with a later terminal result."""
         store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'jobs.db'}")
         await store.initialize()
         try:
@@ -1346,7 +1345,7 @@ class TestMCPServerAdapterTools:
                     assert job_id == running.job_id
                     assert cursor == 4
                     assert timeout_seconds == 0
-                    await asyncio.sleep(1)
+                    await asyncio.sleep(1.05)
                     return running, False
 
             manager = RecoveringJobManager()
@@ -1362,7 +1361,9 @@ class TestMCPServerAdapterTools:
             result = await adapter.call_tool("ouroboros_job_result", {"job_id": running.job_id})
 
             assert wait_result.is_ok
-            assert wait_result.value.meta["wait_timed_out"] is True
+            assert "wait_timed_out" not in wait_result.value.meta
+            assert wait_result.value.meta["lifecycle_status"] == "running"
+            assert wait_result.value.meta["cursor"] == 4
             assert wait_result.value.meta["result_available"] is False
             assert result.is_ok
             assert result.value.text_content == "terminal result"
@@ -2934,3 +2935,106 @@ def test_composition_root_builds_the_registry_at_its_final_directory(tmp_path) -
 
     assert handler.fanout_registry is not None
     assert handler.fanout_registry.directory == tmp_path / "fanout"
+
+
+@pytest.mark.asyncio
+async def test_production_fanout_returns_only_disposable_envelope(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Replay is input-exact while every terminal child body stays artifact-only."""
+    from ouroboros.core.disposable_memory import DisposableResultEnvelope
+    from ouroboros.mcp.server import adapter as adapter_module
+    from ouroboros.mcp.tools import fanout_handler
+    from ouroboros.mcp.tools.fanout import FANOUT_KIND_QUESTION_ADVISORY
+
+    launcher = tmp_path / "launcher"
+    project = tmp_path / "runtime-project"
+    launcher.mkdir()
+    project.mkdir()
+    monkeypatch.chdir(launcher)
+    event_store = EventStore(f"sqlite+aiosqlite:///{project / 'events.db'}")
+    server = adapter_module.create_ouroboros_server(
+        name="fanout-disposable-probe",
+        event_store=event_store,
+        state_dir=project / "state",
+        project_dir=project,
+    )
+    handler = server._tool_handlers["ouroboros_submit_fanout_results"]
+    assert handler.disposable_memory is not None
+    assert handler.disposable_memory.artifact_store.root == (
+        project.resolve() / ".ouroboros" / "artifacts"
+    )
+    registry = handler.fanout_registry
+    assert registry is not None
+    fanout_id = registry.register(
+        kind=FANOUT_KIND_QUESTION_ADVISORY,
+        session_id="session-disposable",
+        correlation_key="context.lane_id",
+        expected_keys=["code_context"],
+        synthesizer_input={"lane_ids": ["code_context"]},
+        required_keys=["code_context"],
+    )
+    assert fanout_id is not None
+    marker = "large-child-body:" + ("x" * 900_000)
+    arguments = {
+        "session_id": "session-disposable",
+        "fanout_id": fanout_id,
+        "correlation_key": "context.lane_id",
+        "results": [{"key": "code_context", "content": marker}],
+    }
+    synthesis_calls = 0
+    original_synthesize = fanout_handler.synthesize_fanout_results
+
+    def tracked_synthesize(prepared):
+        nonlocal synthesis_calls
+        synthesis_calls += 1
+        return original_synthesize(prepared)
+
+    monkeypatch.setattr(fanout_handler, "synthesize_fanout_results", tracked_synthesize)
+    try:
+        first = await handler.handle(arguments)
+        second = await handler.handle(arguments)
+        assert first.is_ok and second.is_ok
+        first_result = first.unwrap()
+        second_result = second.unwrap()
+        envelope = DisposableResultEnvelope.model_validate(first_result.meta)
+
+        assert second_result.meta == first_result.meta
+        assert synthesis_calls == 1
+        assert len(json.dumps(first_result.meta).encode("utf-8")) < 4 * 1024
+        assert marker not in first_result.content[0].text
+        assert marker not in json.dumps(first_result.meta)
+
+        fetched = handler.disposable_memory.fetch(envelope.contract_id)
+        assert marker in json.dumps(fetched.body)
+        events = await event_store.replay("contract", envelope.contract_id)
+        assert len(events) == 1
+        assert marker not in json.dumps(events[0].data)
+
+        changed_marker = "changed-child-body:" + ("y" * 900_000)
+        changed = await handler.handle(
+            {
+                **arguments,
+                "results": [{"key": "code_context", "content": changed_marker}],
+            }
+        )
+        assert changed.is_ok
+        changed_result = changed.unwrap()
+        changed_envelope = DisposableResultEnvelope.model_validate(changed_result.meta)
+
+        assert changed_envelope.contract_id != envelope.contract_id
+        assert changed_envelope.artifact_ref != envelope.artifact_ref
+        assert synthesis_calls == 2
+        assert len(json.dumps(changed_result.meta).encode("utf-8")) < 4 * 1024
+        assert changed_marker not in changed_result.content[0].text
+        assert changed_marker not in json.dumps(changed_result.meta)
+
+        changed_fetched = handler.disposable_memory.fetch(changed_envelope.contract_id)
+        assert changed_marker in json.dumps(changed_fetched.body)
+        assert marker not in json.dumps(changed_fetched.body)
+        assert marker in json.dumps(handler.disposable_memory.fetch(envelope.contract_id).body)
+        changed_events = await event_store.replay("contract", changed_envelope.contract_id)
+        assert len(changed_events) == 1
+        assert changed_marker not in json.dumps(changed_events[0].data)
+    finally:
+        await event_store.close()

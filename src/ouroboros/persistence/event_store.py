@@ -17,7 +17,6 @@ from pathlib import Path
 import sqlite3
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote, unquote
-from uuid import uuid4
 
 from sqlalchemy import and_, case, event, func, or_, select, text
 from sqlalchemy.engine import make_url
@@ -26,7 +25,6 @@ from sqlalchemy.exc import IntegrityError, OperationalError
 if TYPE_CHECKING:
     from ouroboros.orchestrator.workflow_lifecycle import WorkflowLifecycleEvent
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
-from sqlalchemy.pool import AsyncAdaptedQueuePool
 
 from ouroboros.core.errors import PersistenceError
 from ouroboros.events.base import BaseEvent
@@ -34,10 +32,22 @@ from ouroboros.persistence.backend_contract import require_sqlite_event_store_ur
 from ouroboros.persistence.schema import (
     ac_acceptance_guards_table,
     events_table,
-    metadata,
+    initialize_event_store_schema,
     session_start_guards_table,
     session_terminal_guards_table,
 )
+from ouroboros.persistence.sqlite_connection import configure_writable_sqlite_connection
+from ouroboros.persistence.sqlite_memory import (
+    canonicalize_named_memory_sqlite_url,
+    configure_anonymous_memory_engine,
+    configure_named_memory_engine,
+    is_anonymous_in_memory_sqlite_url,
+    is_canonical_named_memdb_url,
+    is_named_memory_sqlite_url,
+    validate_canonical_named_memdb_sqlite_url,
+    validate_standard_shared_memory_sqlite_url,
+)
+from ouroboros.persistence.write_lifecycle import run_with_write_lifecycle
 
 logger = logging.getLogger(__name__)
 
@@ -178,36 +188,6 @@ async def _await_sqlite_write_atomically[T](awaitable: Coroutine[Any, Any, T]) -
     callers and regressions that only need transaction settlement.
     """
     return await _run_to_settlement(awaitable)
-
-
-async def _run_with_write_lifecycle[T](
-    coro: Coroutine[Any, Any, T],
-    *,
-    registry: set[asyncio.Task[Any]],
-    refuse_when: Callable[[], bool],
-    operation: str,
-) -> T:
-    """Keep a complete logical write registered across retries and backoff."""
-    if refuse_when():
-        coro.close()
-        raise PersistenceError(
-            "EventStore is closing; write refused.",
-            operation=operation,
-        )
-    task = asyncio.current_task()
-    if task is None:  # pragma: no cover - async functions always have a task here.
-        coro.close()
-        raise PersistenceError(
-            "EventStore write has no owning task.",
-            operation=operation,
-        )
-    already_registered = task in registry
-    registry.add(task)
-    try:
-        return await coro
-    finally:
-        if not already_registered:
-            registry.discard(task)
 
 
 def acceptance_generation_id_for_session(session_id: str, execution_id: str) -> str:
@@ -636,8 +616,17 @@ class EventStore:
         self._settling_writes = set()
         self._closing = False
         self._lifecycle_lock = asyncio.Lock()
+        validate_standard_shared_memory_sqlite_url(database_url)
+        validate_canonical_named_memdb_sqlite_url(database_url)
         if read_only:
+            if is_named_memory_sqlite_url(database_url):
+                raise ValueError(
+                    "Read-only named in-memory EventStore URLs are unsupported; "
+                    "they cannot be reopened as the same process-local database."
+                )
             database_url = self._coerce_to_readonly_url(database_url)
+        else:
+            database_url = canonicalize_named_memory_sqlite_url(database_url)
         require_sqlite_event_store_url(database_url)
         self._database_url = database_url
         self._engine: AsyncEngine | None = None
@@ -652,6 +641,9 @@ class EventStore:
         Leaves non-SQLite URLs untouched. Existing ``file:`` URI forms are
         rebuilt so caller-supplied query parameters cannot weaken read-only mode.
         """
+        if is_anonymous_in_memory_sqlite_url(database_url):
+            return database_url
+
         prefix = "sqlite+aiosqlite:///"
         if not database_url.startswith(prefix):
             return database_url
@@ -682,7 +674,9 @@ class EventStore:
             parsed = make_url(database_url)
         except Exception:
             return None
-        is_memory_mode = str(parsed.query.get("mode", "")).lower() == "memory"
+        is_memory_mode = str(parsed.query.get("mode", "")) == "memory" or (
+            is_canonical_named_memdb_url(database_url)
+        )
         if parsed.get_backend_name() != "sqlite" or is_memory_mode:
             return None
         database = parsed.database or ""
@@ -758,18 +752,18 @@ class EventStore:
                 ``read_only=True`` skip schema creation and all others create
                 it, preserving the prior default behaviour.
 
-        For aiosqlite ``:memory:`` databases, backs the store with SQLite's
-        process-shared in-memory VFS (``memdb``): pooled connections join one
-        shared database with normal connection-scoped transactions, and a
-        keepalive connection anchors the database's lifetime.
+        For pathless and ``:memory:`` aiosqlite databases, backs the store with
+        SQLite's process-shared in-memory VFS (``memdb``): pooled connections
+        join one shared database with normal connection-scoped transactions,
+        and a keepalive connection anchors the database's lifetime.
         """
-        # Mutually exclusive with close() in BOTH orders (review rounds
-        # seven and eight): initialization during an in-flight close waits for
-        # the full drain/checkpoint/dispose sequence, and a close started
-        # during initialization waits for initialization to finish.
+        # Serialize with close; once work starts, settle it before surfacing cancellation.
         async with self._lifecycle_lock:
             self._closing = False
-            await self._initialize_locked(create_schema=create_schema)
+            await _run_to_settlement(
+                self._initialize_locked(create_schema=create_schema),
+                operation="initialize",
+            )
 
     async def _initialize_locked(self, *, create_schema: bool | None = None) -> None:
         if self._configuration_error is not None:
@@ -800,50 +794,18 @@ class EventStore:
                 "connect_args": connect_args,
             }
             engine_url = self._database_url
-            if self._database_url.endswith("/:memory:"):
-                # A plain ``:memory:`` SQLite database is scoped to ONE DB-API
-                # connection, which is fundamentally unsafe under concurrent
-                # async use:
-                #
-                # - StaticPool (used previously) hands the same connection to
-                #   CONCURRENT ``engine.begin()`` blocks with no mutual
-                #   exclusion. SQLite transactions are connection-scoped, so a
-                #   concurrent block exiting via exception (e.g. a monitor task
-                #   cancelled mid-SELECT) issues a ROLLBACK that silently
-                #   discards another task's uncommitted INSERT — whose own
-                #   COMMIT then no-ops (sqlite3 commit with no active
-                #   transaction) and append() reports success while the event
-                #   vanishes. That silent append-void is the mechanism behind
-                #   the #1566 / PR #1576 CI zombie jobs.
-                # - ANY single-connection pool additionally loses the entire
-                #   database when asyncio cancellation invalidates the pooled
-                #   connection: the replacement connection is a fresh empty DB
-                #   ("no such table: events").
-                #
-                # Fix: back ``:memory:`` stores with SQLite's process-shared
-                # in-memory VFS (``memdb``, SQLite >= 3.36). Every pooled
-                # connection then joins the SAME in-memory database with normal
-                # connection-scoped transactions (no interleaving) and the
-                # database survives connection invalidation; a keepalive
-                # connection anchors its lifetime. Each store instance gets a
-                # unique name, preserving the "one ``:memory:`` store == one
-                # private database" semantics.
-                if sqlite3.sqlite_version_info >= (3, 36):
-                    shared_name = f"/ouroboros-mem-{uuid4().hex}"
-                    engine_url = f"sqlite+aiosqlite:///file:{shared_name}?vfs=memdb&uri=true"
-                    self._memory_keepalive = sqlite3.connect(
-                        f"file:{shared_name}?vfs=memdb",
-                        uri=True,
-                        check_same_thread=False,
-                    )
-                else:  # pragma: no cover - ancient SQLite fallback
-                    # Serialized one-connection pool: keeps the shared
-                    # connection AND makes checkouts mutually exclusive so
-                    # transactions cannot interleave (closes the append-void);
-                    # cancellation-invalidation remains a residual risk here.
-                    engine_kwargs["poolclass"] = AsyncAdaptedQueuePool
-                    engine_kwargs["pool_size"] = 1
-                    engine_kwargs["max_overflow"] = 0
+            if is_anonymous_in_memory_sqlite_url(self._database_url):
+                engine_url, self._memory_keepalive = configure_anonymous_memory_engine(
+                    self._database_url, engine_kwargs
+                )
+            else:
+                # Named in-memory URIs intentionally share one database across
+                # EventStore instances in this process. Keep that caller-chosen
+                # identity, but use distinct pooled connections so concurrent
+                # transaction scopes cannot interleave on one DB-API handle.
+                self._memory_keepalive = configure_named_memory_engine(
+                    self._database_url, engine_kwargs
+                )
 
             self._engine = create_async_engine(
                 engine_url,
@@ -857,16 +819,10 @@ class EventStore:
 
                 @event.listens_for(self._engine.sync_engine, "connect")
                 def _set_sqlite_pragmas(dbapi_conn, _connection_record):
-                    cursor = dbapi_conn.cursor()
-                    cursor.execute("PRAGMA journal_mode=WAL")
-                    cursor.execute("PRAGMA synchronous=NORMAL")
-                    cursor.execute("PRAGMA busy_timeout=30000")
-                    cursor.close()
+                    configure_writable_sqlite_connection(dbapi_conn)
 
-        # Create all tables defined in metadata (skipped for read-only consumers)
         if create_schema:
-            async with self._engine.begin() as conn:
-                await conn.run_sync(metadata.create_all)
+            await initialize_event_store_schema(self._engine, logger)
 
     async def append(
         self,
@@ -1419,6 +1375,35 @@ class EventStore:
         """Return whether ``event`` requires the Foundation B final gate CAS."""
         return _is_ac_acceptance_finalized_event(event)
 
+    async def settle_transactional_write[T](
+        self,
+        transaction: Callable[[AsyncEngine], Coroutine[Any, Any, T]],
+        *,
+        operation: str,
+    ) -> T:
+        """Run an external transaction inside this store's write lifecycle.
+        Persistence helpers that need a custom atomic transaction must still
+        share close admission and draining with ordinary EventStore writes.
+        Accepting a factory keeps engine access behind that lifecycle fence,
+        including after the store has closed.
+        """
+        if self._closing:
+            raise PersistenceError(
+                "EventStore is closing; write refused.",
+                operation=operation,
+            )
+        if self._engine is None:
+            raise PersistenceError(
+                "EventStore not initialized. Call initialize() first.",
+                operation=operation,
+            )
+        return await _run_to_settlement(
+            transaction(self._engine),
+            registry=self._settling_writes,
+            refuse_when=lambda: self._closing,
+            operation=operation,
+        )
+
     async def append_with_rowid(
         self,
         event: BaseEvent,
@@ -1426,7 +1411,7 @@ class EventStore:
         _skip_workflow_ir_guard: bool = False,
     ) -> int:
         """Append an event and return its exact SQLite rowid."""
-        return await _run_with_write_lifecycle(
+        return await run_with_write_lifecycle(
             self._append_with_rowid_registered(
                 event,
                 _skip_workflow_ir_guard=_skip_workflow_ir_guard,
@@ -1564,7 +1549,7 @@ class EventStore:
             PersistenceError: If the batch operation fails. No events
                              will be persisted if this is raised.
         """
-        await _run_with_write_lifecycle(
+        await run_with_write_lifecycle(
             self._append_batch_registered(events),
             registry=self._settling_writes,
             refuse_when=lambda: self._closing,

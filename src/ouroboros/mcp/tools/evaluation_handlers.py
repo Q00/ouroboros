@@ -29,8 +29,9 @@ from ouroboros.core.seed import AcceptanceCriterionSpec, Seed, ac_text
 from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.job_manager import JobLinks, JobManager
-from ouroboros.mcp.tools.background import start_background_tool_job
+from ouroboros.mcp.tools import background as background_jobs
 from ouroboros.mcp.tools.bridge_mixin import BridgeAwareMixin
+from ouroboros.mcp.tools.fanout_handler import SubmitFanoutResultsHandler  # noqa: F401
 from ouroboros.mcp.tools.job_observer import build_job_observer_contract
 from ouroboros.mcp.tools.subagent import (
     DELEGATED_TO_SUBAGENT,
@@ -38,7 +39,6 @@ from ouroboros.mcp.tools.subagent import (
     build_evaluate_subagent,
     dispatch_plugin_terminal,
     should_dispatch_via_plugin,
-    submit_fanout_results,
 )
 from ouroboros.mcp.types import (
     ContentType,
@@ -1928,128 +1928,6 @@ class LateralThinkHandler(BridgeAwareMixin):
 
 
 @dataclass
-class SubmitFanoutResultsHandler:
-    """Handler for the ``ouroboros_submit_fanout_results`` re-entry tool.
-
-    After a host fans out a set of advisory/persona/investigation subagents
-    (declared by :func:`stamp_fanout_meta` with a stamped ``fanout_id``), it
-    submits the correlated child outputs back through this tool. The server
-    validates the expected keys against the persisted fan-out record and, when
-    complete, routes to the revived synthesizer for the record's kind, returning
-    the correlated synthesis for the host to continue with. Sequential hosts
-    submit after processing payloads one-by-one — same tool, same contract.
-    """
-
-    fanout_registry: FanoutRegistry | None = field(default=None, repr=False)
-
-    def __post_init__(self) -> None:
-        self._registry = self.fanout_registry or FanoutRegistry()
-
-    @property
-    def definition(self) -> MCPToolDefinition:
-        """Return the tool definition."""
-        return MCPToolDefinition(
-            name="ouroboros_submit_fanout_results",
-            description=(
-                "Submit correlated results from a subagent fan-out back to "
-                "Ouroboros. After spawning the advisory/persona/investigation "
-                "subagents declared by a prior tool's `meta` (which stamped a "
-                "`fanout_id` and a `result_correlation_key`), call this tool with "
-                "one {key, content} per child output — `key` is the value of the "
-                "correlation field for that child. A child you could not spawn "
-                "at all is exactly {key, undispatched: true}; never invent output. "
-                "Missing required keys return `status=partial`; retry with EVERY lane."
-            ),
-            parameters=(
-                MCPToolParameter(
-                    name="session_id",
-                    type=ToolInputType.STRING,
-                    description="Interview/lateral session id the fan-out belongs to.",
-                    required=False,
-                ),
-                MCPToolParameter(
-                    name="fanout_id",
-                    type=ToolInputType.STRING,
-                    description="The fanout_id stamped into the originating tool's meta.",
-                    required=True,
-                ),
-                MCPToolParameter(
-                    name="correlation_key",
-                    type=ToolInputType.STRING,
-                    description=(
-                        "The result_correlation_key from the originating meta "
-                        "(e.g. 'context.persona' or 'code_facts')."
-                    ),
-                    required=False,
-                ),
-                MCPToolParameter(
-                    name="results",
-                    type=ToolInputType.ARRAY,
-                    description=(
-                        "Correlated child outputs: objects with a 'key' (the "
-                        "correlation value) and a 'content' (the child result), "
-                        "or 'undispatched': true when the child never ran."
-                    ),
-                    required=True,
-                ),
-            ),
-        )
-
-    async def handle(
-        self,
-        arguments: dict[str, Any],
-    ) -> Result[MCPToolResult, MCPServerError]:
-        """Validate the submitted fan-out results and route them to synthesis."""
-        fanout_id = str(arguments.get("fanout_id") or "").strip()
-        if not fanout_id:
-            return Result.err(
-                MCPToolError(
-                    "fanout_id is required",
-                    tool_name="ouroboros_submit_fanout_results",
-                )
-            )
-
-        raw_results = arguments.get("results")
-        if not isinstance(raw_results, (list, tuple)):
-            return Result.err(
-                MCPToolError(
-                    "results must be a list of {key, content} objects",
-                    tool_name="ouroboros_submit_fanout_results",
-                )
-            )
-        results = list(raw_results)  # not filtered; the core reports bad entries
-
-        outcome = submit_fanout_results(
-            self._registry,
-            session_id=str(arguments.get("session_id") or ""),
-            correlation_key=str(arguments.get("correlation_key") or ""),
-            results=results,
-            fanout_id=fanout_id,
-        )
-
-        if outcome.get("status") == "unknown_fanout_id":
-            return Result.err(
-                MCPToolError(
-                    str(outcome.get("error") or "unknown fanout_id"),
-                    tool_name="ouroboros_submit_fanout_results",
-                )
-            )
-
-        return Result.ok(
-            MCPToolResult(
-                content=(
-                    MCPContentItem(
-                        type=ContentType.TEXT,
-                        text=json.dumps(outcome, ensure_ascii=False, sort_keys=True),
-                    ),
-                ),
-                is_error=False,
-                meta=outcome,
-            )
-        )
-
-
-@dataclass
 class StartEvaluateHandler:
     """Start an evaluation asynchronously and return a job ID immediately.
 
@@ -2163,50 +2041,48 @@ class StartEvaluateHandler:
                 )
             )
 
-        from ouroboros.mcp.tools.evaluation_job import restore_seed_handoff
-
-        try:
-            arguments = restore_seed_handoff(
-                arguments, session_id=session_id, registry=self.seed_handoff_registry
-            )
-        except ValueError as exc:
-            return Result.err(MCPToolError(str(exc), tool_name="ouroboros_start_evaluate"))
-
-        from ouroboros.mcp.tools.evaluation_job import resolve_auto_evolve_policy
+        from ouroboros.mcp.tools.evaluation_job import (
+            dispatch_plugin_evaluation,
+            resolve_auto_evolve_policy,
+            restore_seed_handoff,
+        )
 
         try:
             arguments, auto_evolve_enabled = resolve_auto_evolve_policy(
                 arguments, configured_enabled=get_auto_evolve_enabled()
             )
+            plugin_dispatch = should_dispatch_via_plugin(
+                self.agent_runtime_backend, self.opencode_mode
+            )
+            background_acceptance = background_jobs.BackgroundJobAcceptanceState()
         except ValueError as exc:
             return Result.err(MCPToolError(str(exc), tool_name="ouroboros_start_evaluate"))
 
-        # --- Subagent dispatch: gate on runtime + opencode_mode ---
+        try:
+            arguments, seed_handoff = restore_seed_handoff(
+                arguments, session_id=session_id, registry=self.seed_handoff_registry
+            )
+        except ValueError as exc:
+            return Result.err(MCPToolError(str(exc), tool_name="ouroboros_start_evaluate"))
+
         # Plugin mode is terminal only when no convergence successor is needed:
         # return the delegation envelope without enqueuing a background job,
         # matching StartExecuteSeedHandler / StartEvolveStepHandler. Polling a
         # fake job_id would break the ouroboros_job_status contract.
-        plugin_dispatch = should_dispatch_via_plugin(self.agent_runtime_backend, self.opencode_mode)
         if plugin_dispatch and not auto_evolve_enabled:
-            from ouroboros.mcp.tools.evaluation_job import dispatch_plugin_evaluation
-
-            return await dispatch_plugin_evaluation(
-                arguments=arguments,
-                session_id=session_id,
-                artifact=artifact,
-                event_store=self._event_store,
-                resolve_working_dir=_resolve_evaluate_working_dir,
+            return await seed_handoff.accept(
+                dispatch_plugin_evaluation(
+                    arguments=arguments,
+                    session_id=session_id,
+                    artifact=artifact,
+                    event_store=self._event_store,
+                    resolve_working_dir=_resolve_evaluate_working_dir,
+                ),
+                require_ok=True,
+                acceptance_may_have_occurred=False,
             )
 
-        # Fall-through: real background job path.
-        #
-        # NOTE: this path now routes through ``start_background_tool_job``,
-        # which gives StartEvaluate the same job-scoped ``cancel_key`` and
-        # AgentProcess ``process_id`` as evolve/execute/ralph.  Before this
-        # extraction StartEvaluate passed neither, so the durable
-        # ``mcp_job:{job_id}`` cancel marker written by
-        # ``JobManager.cancel_job`` was never observable by the evaluate
-        # agent process — a restart-visible cancel was silently dropped.
+        # The shared helper preserves job-scoped cancellation across restart.
         async def _runner(_handle) -> MCPToolResult:
             from ouroboros.mcp.tools.evaluation_job import run_evaluation_job
 
@@ -2222,29 +2098,31 @@ class StartEvaluateHandler:
                 start_ralph_handler=self.start_ralph_handler,
             )
 
-        snapshot = await start_background_tool_job(
-            job_manager=self._job_manager,
-            event_store=self._event_store,
-            job_type="evaluate",
-            intent="evaluate",
-            process_scope=f"evaluate:{session_id}",
-            initial_message=f"Queued evaluation for {session_id}",
-            links=JobLinks(session_id=session_id),
-            work_fn=_runner,
-            cancelled_text="Evaluation cancelled before work began.",
-            detached_tool_name="ouroboros_start_evaluate",
-            detached_arguments=arguments,
-            runtime_backend=self.agent_runtime_backend,
-            llm_backend=self.llm_backend,
-            opencode_mode=self.opencode_mode,
+        snapshot = await seed_handoff.accept(
+            background_jobs.start_background_tool_job(
+                job_manager=self._job_manager,
+                event_store=self._event_store,
+                job_type="evaluate",
+                intent="evaluate",
+                process_scope=f"evaluate:{session_id}",
+                initial_message=f"Queued evaluation for {session_id}",
+                links=JobLinks(session_id=session_id),
+                work_fn=_runner,
+                cancelled_text="Evaluation cancelled before work began.",
+                detached_tool_name="ouroboros_start_evaluate",
+                detached_arguments=arguments,
+                runtime_backend=self.agent_runtime_backend,
+                llm_backend=self.llm_backend,
+                opencode_mode=self.opencode_mode,
+                acceptance_state=background_acceptance,
+            ),
+            acceptance_may_have_occurred=background_acceptance.may_have_accepted,
         )
 
         text = (
-            f"Started background evaluation.\n\n"
-            f"Job ID: {snapshot.job_id}\n"
-            f"Session ID: {session_id}\n\n"
-            "Use ouroboros_job_status, ouroboros_job_wait, or ouroboros_job_result "
-            "to monitor it."
+            f"Started background evaluation.\n\nJob ID: {snapshot.job_id}\n"
+            f"Session ID: {session_id}\n\nUse ouroboros_job_status, ouroboros_job_wait, "
+            "or ouroboros_job_result to monitor it."
         )
         meta = {
             "job_id": snapshot.job_id,

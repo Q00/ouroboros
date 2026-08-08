@@ -12,6 +12,13 @@ import time
 import pytest
 
 from ouroboros.dashboard_web import daemon
+from ouroboros.persistence.picker_indexes import PICKER_INDEX_DDL
+
+
+def _create_events_table(conn: sqlite3.Connection) -> None:
+    conn.execute("CREATE TABLE events (aggregate_id TEXT, event_type TEXT, payload TEXT)")
+    for statement in PICKER_INDEX_DDL:
+        conn.execute(statement)
 
 
 @pytest.fixture(autouse=True)
@@ -114,7 +121,7 @@ class TestDbIdentity:
     def _make_events_db(path, execution_id: str) -> None:
         conn = sqlite3.connect(path)
         try:
-            conn.execute("CREATE TABLE events (aggregate_id TEXT, event_type TEXT, payload TEXT)")
+            _create_events_table(conn)
             conn.execute(
                 "INSERT INTO events (aggregate_id, event_type, payload) VALUES (?, ?, ?)",
                 (
@@ -208,7 +215,7 @@ class TestPendingRun:
         empty_db = tmp_path / "empty.db"
         conn = sqlite3.connect(empty_db)
         try:
-            conn.execute("CREATE TABLE events (aggregate_id TEXT, event_type TEXT, payload TEXT)")
+            _create_events_table(conn)
             conn.commit()
         finally:
             conn.close()
@@ -239,7 +246,7 @@ class TestPendingRun:
         empty_db = tmp_path / "empty.db"
         conn = sqlite3.connect(empty_db)
         try:
-            conn.execute("CREATE TABLE events (aggregate_id TEXT, event_type TEXT, payload TEXT)")
+            _create_events_table(conn)
             conn.commit()
         finally:
             conn.close()
@@ -268,13 +275,46 @@ class TestPendingRun:
         finally:
             server.shutdown()
 
+    def test_unavailable_picker_contract_returns_503_without_watchdog_touch(self, tmp_path) -> None:
+        from ouroboros.dashboard_web.server import serve_background
+
+        legacy_db = tmp_path / "legacy.db"
+        conn = sqlite3.connect(legacy_db)
+        try:
+            conn.execute("CREATE TABLE events (aggregate_id TEXT, event_type TEXT, payload TEXT)")
+            for statement in PICKER_INDEX_DDL:
+                conn.execute(
+                    statement.replace("'workflow.progress.updated'", "'workflow.progress. updated'")
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+        server, _thread = serve_background(
+            db_path=str(legacy_db), host="127.0.0.1", port=daemon._free_port("127.0.0.1")
+        )
+        try:
+            server.last_activity = time.monotonic() - daemon.DEFAULT_IDLE_SHUTDOWN_SEC - 1
+            before = server.last_activity
+
+            status, body = self._get(server.server_address[1], "/api/runs")
+
+            assert status == 503
+            assert json.loads(body) == {
+                "runs": [],
+                "error": "picker_index_contract_unavailable",
+            }
+            assert server.last_activity == before
+        finally:
+            server.shutdown()
+
     def test_runs_api_ignores_malformed_progress_and_refreshes_watchdog(self, tmp_path) -> None:
         from ouroboros.dashboard_web.server import serve_background
 
         db = tmp_path / "malformed-progress.db"
         conn = sqlite3.connect(db)
         try:
-            conn.execute("CREATE TABLE events (aggregate_id TEXT, event_type TEXT, payload TEXT)")
+            _create_events_table(conn)
             conn.executemany(
                 "INSERT INTO events (aggregate_id, event_type, payload) VALUES (?, ?, ?)",
                 [
@@ -319,7 +359,7 @@ class TestPendingRun:
         db = tmp_path / "malformed-starts.db"
         conn = sqlite3.connect(db)
         try:
-            conn.execute("CREATE TABLE events (aggregate_id TEXT, event_type TEXT, payload TEXT)")
+            _create_events_table(conn)
             conn.execute(
                 "INSERT INTO events (aggregate_id, event_type, payload) VALUES (?, ?, ?)",
                 (

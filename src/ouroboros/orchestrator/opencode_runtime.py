@@ -812,6 +812,8 @@ class OpenCodeRuntime:
                     runtime_backend=self._runtime_backend,
                     llm_backend=self._llm_backend,
                     opencode_mode=self._opencode_mode,
+                    project_dir=self.working_directory,
+                    runtime_adapter=self,
                 )
             }
         return self._builtin_mcp_handlers

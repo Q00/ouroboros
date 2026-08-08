@@ -21,7 +21,11 @@ from urllib.parse import parse_qs, urlparse
 
 from ouroboros.dashboard_web.kanban import reduce_board
 from ouroboros.dashboard_web.page import INDEX_HTML, static_html
-from ouroboros.dashboard_web.reader import EventTail, list_recent_executions
+from ouroboros.dashboard_web.reader import (
+    EventTail,
+    PickerIndexContractError,
+    list_recent_executions,
+)
 
 # SSE poll cadence. Fast enough to feel live, slow enough that tailing a shared
 # multi-hundred-MB SQLite file stays negligible.
@@ -79,7 +83,15 @@ class _Handler(BaseHTTPRequestHandler):
         elif path == "/healthz":
             self._send_bytes(b"ok", "text/plain")
         elif path == "/api/runs":
-            self._send_json({"runs": list_recent_executions(self.server.db_path)})
+            try:
+                runs = list_recent_executions(self.server.db_path)
+            except PickerIndexContractError:
+                self._send_json(
+                    {"runs": [], "error": "picker_index_contract_unavailable"},
+                    status=503,
+                )
+                return
+            self._send_json({"runs": runs})
             # The picker is a real dashboard client even though it polls instead
             # of holding an SSE stream. Refresh only after a successful response.
             self.server.touch()
@@ -103,15 +115,19 @@ class _Handler(BaseHTTPRequestHandler):
             static_html(board, run_id=run_id).encode("utf-8"), "text/html; charset=utf-8"
         )
 
-    def _send_bytes(self, body: bytes, content_type: str) -> None:
-        self.send_response(200)
+    def _send_bytes(self, body: bytes, content_type: str, *, status: int = 200) -> None:
+        self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
 
-    def _send_json(self, obj: Any) -> None:
-        self._send_bytes(json.dumps(obj, default=str).encode("utf-8"), "application/json")
+    def _send_json(self, obj: Any, *, status: int = 200) -> None:
+        self._send_bytes(
+            json.dumps(obj, default=str).encode("utf-8"),
+            "application/json",
+            status=status,
+        )
 
     def _stream_events(self, run_id: str) -> None:
         if not run_id:

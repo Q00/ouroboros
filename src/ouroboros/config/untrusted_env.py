@@ -11,10 +11,11 @@ The loader owns *when* the policy applies; this module owns *what* it covers.
 
 from __future__ import annotations
 
-# Environment variables that determine HOW Ouroboros executes work. This
+# Environment variables that determine HOW Ouroboros executes work or install
+# its own persistent package. This
 # is the single authoritative trust boundary: a cloned repository's `.env`
 # must not be able to change which binary runs or whether the user's
-# approval gate applies. Four classes, all remote-code-execution sinks
+# approval gate applies. Five classes, all remote-code-execution sinks
 # when sourced from an untrusted location:
 #   1. Explicit CLI path overrides fed straight into a subprocess.
 #   2. Runtime/backend selectors that pick which adapter (and therefore
@@ -25,6 +26,10 @@ from __future__ import annotations
 #      auto-approve arbitrary tool calls (effectively RCE).
 #   4. Runtime-native preload hooks such as NODE_OPTIONS, which can execute
 #      attacker-controlled code before a spawned JavaScript CLI starts.
+#   5. Python package-manager controls. `ouroboros update` deliberately
+#      inherits trusted process/home configuration so corporate indexes keep
+#      working, but a cloned repository must not redirect uv/pipx resolution to
+#      its own index or config file through the project `.env`.
 # These keys are only honored from trusted sources (the real process
 # environment, ~/.ouroboros/.env, ~/.ouroboros/config.yaml), never from
 # the project-directory .env that travels with a cloned repo. Trusted .env
@@ -172,7 +177,18 @@ UNTRUSTED_ENV_DENYLIST = frozenset(
         "OUROBOROS_SHADOW_REPLAY",
     }
 )
-UNTRUSTED_ENV_DENIED_PREFIXES = ("DYLD_", "LD_")
+UNTRUSTED_ENV_DENIED_PREFIXES = (
+    "DYLD_",
+    "LD_",
+    # Package-manager source/configuration families. Prefixes are intentional:
+    # uv supports dynamically named index credentials (UV_INDEX_<NAME>_*), and
+    # both uv and pip/pipx may add new controls. Trusted real-process and home
+    # `.env` values remain allowed because this policy applies only to the
+    # project-directory `.env`.
+    "PIP_",
+    "PIPX_",
+    "UV_",
+)
 
 
 def is_untrusted_env_denied_key(key: str) -> bool:

@@ -8539,6 +8539,11 @@ class OrchestratorRunner:
             )
         )
 
+    async def _close_adapter(self) -> None:
+        adapter_aclose = getattr(self._adapter, "aclose", None)
+        if inspect.iscoroutinefunction(adapter_aclose):
+            await adapter_aclose()
+
     async def execute_seed(
         self,
         seed: Seed,
@@ -9328,7 +9333,10 @@ class OrchestratorRunner:
                 ):
                     parallel_kwargs["force_sequential_levels"] = True
 
-                return await self._execute_parallel(**parallel_kwargs)
+                try:
+                    return await self._execute_parallel(**parallel_kwargs)
+                finally:
+                    await self._close_adapter()
 
             from ouroboros.orchestrator.dependency_analyzer import (
                 ACNode,
@@ -10138,6 +10146,7 @@ class OrchestratorRunner:
                     session_id=tracker.session_id,
                     context="execute",
                 )
+                await self._close_adapter()
 
     async def _execute_parallel(
         self,
@@ -10448,37 +10457,25 @@ class OrchestratorRunner:
             tracker = tracker.with_progress(resume_owner_progress)
 
         try:
-            try:
-                parallel_result = await parallel_executor.execute_parallel(
-                    seed=seed,
-                    execution_plan=execution_plan,
-                    session_id=tracker.session_id,
-                    execution_id=exec_id,
-                    tools=merged_tools,
-                    tool_catalog=tool_catalog.tools,
-                    system_prompt=system_prompt,
-                    externally_satisfied_acs=externally_satisfied_acs,
-                    published_coordinator_pause_owner=published_coordinator_pause_owner,
-                )
-            except ParallelExecutionCancelled as cancelled:
-                return await self._handle_cancellation(
-                    session_id=tracker.session_id,
-                    execution_id=exec_id,
-                    messages_processed=cancelled.messages_processed,
-                    start_time=start_time,
-                    expected_root_indices=range(len(seed.acceptance_criteria)),
-                )
-        finally:
-            # Release any warm worker-pool sessions the runtime holds (e.g. the
-            # codex-mcp persistent connection pool). The non-parallel path closes
-            # per-turn handles, but the parallel path otherwise leaves the pool to
-            # its idle TTL — a process-leak window after every run. Guard on
-            # ``iscoroutinefunction`` so this is a no-op for runtimes without a
-            # real async ``aclose`` (and so MagicMock test adapters, whose
-            # attribute access auto-creates a non-awaitable child, are skipped).
-            adapter_aclose = getattr(self._adapter, "aclose", None)
-            if inspect.iscoroutinefunction(adapter_aclose):
-                await adapter_aclose()
+            parallel_result = await parallel_executor.execute_parallel(
+                seed=seed,
+                execution_plan=execution_plan,
+                session_id=tracker.session_id,
+                execution_id=exec_id,
+                tools=merged_tools,
+                tool_catalog=tool_catalog.tools,
+                system_prompt=system_prompt,
+                externally_satisfied_acs=externally_satisfied_acs,
+                published_coordinator_pause_owner=published_coordinator_pause_owner,
+            )
+        except ParallelExecutionCancelled as cancelled:
+            return await self._handle_cancellation(
+                session_id=tracker.session_id,
+                execution_id=exec_id,
+                messages_processed=cancelled.messages_processed,
+                start_time=start_time,
+                expected_root_indices=range(len(seed.acceptance_criteria)),
+            )
 
         # Check for cancellation after parallel execution
         if await self._check_cancellation(tracker.session_id):
@@ -11326,19 +11323,22 @@ Note: This is a resumed session. Please continue from where execution was interr
                     seed,
                     tracker.progress.get("routing_parallel_externally_satisfied_acs"),
                 )
-                return await self._execute_parallel(
-                    seed=seed,
-                    exec_id=tracker.execution_id,
-                    tracker=tracker,
-                    merged_tools=merged_tools,
-                    tool_catalog=tool_catalog,
-                    system_prompt=system_prompt,
-                    start_time=start_time,
-                    execution_contract=execution_contract,
-                    externally_satisfied_acs=resume_externally_satisfied_acs,
-                    force_sequential_levels=force_sequential,
-                    resume_execution_plan=resume_execution_plan,
-                )
+                try:
+                    return await self._execute_parallel(
+                        seed=seed,
+                        exec_id=tracker.execution_id,
+                        tracker=tracker,
+                        merged_tools=merged_tools,
+                        tool_catalog=tool_catalog,
+                        system_prompt=system_prompt,
+                        start_time=start_time,
+                        execution_contract=execution_contract,
+                        externally_satisfied_acs=resume_externally_satisfied_acs,
+                        force_sequential_levels=force_sequential,
+                        resume_execution_plan=resume_execution_plan,
+                    )
+                finally:
+                    await self._close_adapter()
         except asyncio.CancelledError:
             cancellation_result = (
                 await self._drain_requested_cancellation_before_pre_execution_cleanup(
@@ -12086,6 +12086,7 @@ Note: This is a resumed session. Please continue from where execution was interr
                     session_id=session_id,
                     context="resume",
                 )
+                await self._close_adapter()
 
 
 __all__ = [

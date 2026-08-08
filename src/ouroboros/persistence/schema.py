@@ -11,6 +11,7 @@ Table: brownfield_repos
 """
 
 from datetime import UTC, datetime
+import logging
 
 from sqlalchemy import (
     JSON,
@@ -26,6 +27,12 @@ from sqlalchemy import (
     Table,
     Text,
     text,
+)
+from sqlalchemy.engine import Connection
+from sqlalchemy.ext.asyncio import AsyncEngine
+
+from ouroboros.persistence.picker_index_provisioning import (
+    provision_picker_indexes_best_effort,
 )
 
 # Global metadata instance for all tables
@@ -124,6 +131,26 @@ session_start_guards_table = Table(
     ),
 )
 
+# Exact AC runtime ownership fence used by Synapse admission. Lifecycle events
+# remain the source of truth; this row only serializes queue admission against
+# attempt shutdown across independent MCP/worker processes.
+session_signal_target_guards_table = Table(
+    "session_signal_target_guards",
+    metadata,
+    Column("execution_id", String(128), primary_key=True),
+    Column("session_scope_id", String(256), primary_key=True),
+    Column("session_attempt_id", String(256), primary_key=True),
+    Column("active", Boolean, nullable=False),
+    Column("lifecycle_event_id", String(36), nullable=False),
+    Column(
+        "updated_at",
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+        server_default=text("CURRENT_TIMESTAMP"),
+    ),
+)
+
 # One durable compare-and-set guard for the Foundation B final acceptance
 # decision.  Attempt judgments remain append-only telemetry; this table makes
 # the Final Gate decision one-winner per process-local authority generation and
@@ -198,3 +225,22 @@ brownfield_repos_table = Table(
         server_default=text("CURRENT_TIMESTAMP"),
     ),
 )
+
+
+def create_event_store_schema(connection: Connection) -> None:
+    """Create the required EventStore schema."""
+    metadata.create_all(connection)
+
+
+async def initialize_event_store_schema(engine: AsyncEngine, logger: logging.Logger) -> None:
+    """Commit required tables, then provision optional picker indexes."""
+    async with engine.connect() as connection:
+        await connection.exec_driver_sql("BEGIN IMMEDIATE")
+        try:
+            await connection.run_sync(create_event_store_schema)
+        except BaseException:
+            await connection.rollback()
+            raise
+        else:
+            await connection.commit()
+    await provision_picker_indexes_best_effort(engine, logger)

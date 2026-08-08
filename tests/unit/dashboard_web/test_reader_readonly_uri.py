@@ -13,10 +13,17 @@ from ouroboros.dashboard_web import reader as reader_module
 from ouroboros.dashboard_web.reader import (
     _RELEVANT_EVENT_TYPES,
     EventTail,
+    PickerIndexContractError,
     _connect_readonly,
     list_recent_executions,
 )
 from ouroboros.orchestrator.events import create_workflow_progress_event
+from ouroboros.persistence.picker_indexes import (
+    AGGREGATE_EVENT_INDEX,
+    PICKER_INDEX_DDL,
+    RUNNING_PROGRESS_INDEX,
+    WORKFLOW_SNAPSHOT_INDEX,
+)
 
 
 def _make_db(path) -> None:
@@ -33,6 +40,9 @@ def _make_events_db(path, rows: list[tuple[str, str, dict]]) -> None:
     conn = sqlite3.connect(path)
     try:
         conn.execute("CREATE TABLE events (aggregate_id TEXT, event_type TEXT, payload TEXT)")
+        conn.execute("CREATE INDEX ix_events_aggregate_id ON events (aggregate_id)")
+        conn.execute("CREATE INDEX ix_events_event_type ON events (event_type)")
+        _install_picker_indexes(conn)
         conn.executemany(
             "INSERT INTO events (aggregate_id, event_type, payload) VALUES (?, ?, ?)",
             [
@@ -43,6 +53,11 @@ def _make_events_db(path, rows: list[tuple[str, str, dict]]) -> None:
         conn.commit()
     finally:
         conn.close()
+
+
+def _install_picker_indexes(conn: sqlite3.Connection) -> None:
+    for statement in PICKER_INDEX_DDL:
+        conn.execute(statement)
 
 
 def test_readonly_connect_handles_question_mark_in_path(tmp_path) -> None:
@@ -78,6 +93,104 @@ def test_readonly_connect_is_actually_read_only(tmp_path) -> None:
 
 def test_reader_includes_execution_frugality_retrospective() -> None:
     assert "execution.frugality_retrospective.reported" in _RELEVANT_EVENT_TYPES
+
+
+@pytest.mark.parametrize("wrong_same_name", [False, True])
+def test_picker_fails_before_history_reads_without_exact_index_contract(
+    tmp_path, monkeypatch, wrong_same_name: bool
+) -> None:
+    db = tmp_path / f"legacy-{wrong_same_name}.db"
+    conn = sqlite3.connect(db)
+    try:
+        conn.execute("CREATE TABLE events (aggregate_id TEXT, event_type TEXT, payload TEXT)")
+        if wrong_same_name:
+            for name in (AGGREGATE_EVENT_INDEX, RUNNING_PROGRESS_INDEX, WORKFLOW_SNAPSHOT_INDEX):
+                conn.execute(
+                    f"CREATE INDEX \"{name}\" ON events (aggregate_id) WHERE event_type = 'other'"
+                )
+        conn.execute(
+            "INSERT INTO events (aggregate_id, event_type, payload) VALUES (?, ?, ?)",
+            (
+                "orch_target",
+                "orchestrator.session.started",
+                json.dumps({"execution_id": "exec_target"}),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    statements: list[str] = []
+    vm_steps = 0
+    original_connect = reader_module._connect_readonly
+
+    def traced_connect(db_path):
+        nonlocal vm_steps
+        traced = original_connect(db_path)
+
+        def count_step():
+            nonlocal vm_steps
+            vm_steps += 1
+            return 0
+
+        traced.set_trace_callback(statements.append)
+        traced.set_progress_handler(count_step, 1)
+        return traced
+
+    monkeypatch.setattr(reader_module, "_connect_readonly", traced_connect)
+
+    with pytest.raises(PickerIndexContractError):
+        list_recent_executions(db)
+
+    assert not any("FROM events" in statement for statement in statements)
+    assert vm_steps < 500
+
+
+def test_picker_fails_before_history_read_for_literal_drift_indexes(tmp_path, monkeypatch) -> None:
+    db = tmp_path / "literal-drift.db"
+    conn = sqlite3.connect(db)
+    try:
+        conn.execute("CREATE TABLE events (aggregate_id TEXT, event_type TEXT, payload TEXT)")
+        for statement in PICKER_INDEX_DDL:
+            conn.execute(
+                statement.replace("'workflow.progress.updated'", "'workflow.progress. updated'")
+            )
+        conn.execute(
+            "INSERT INTO events (aggregate_id, event_type, payload) VALUES (?, ?, ?)",
+            (
+                "orch_target",
+                "orchestrator.session.started",
+                json.dumps({"execution_id": "exec_target"}),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    statements: list[str] = []
+    vm_steps = 0
+    original_connect = reader_module._connect_readonly
+
+    def traced_connect(db_path):
+        nonlocal vm_steps
+        traced = original_connect(db_path)
+
+        def count_step():
+            nonlocal vm_steps
+            vm_steps += 1
+            return 0
+
+        traced.set_trace_callback(statements.append)
+        traced.set_progress_handler(count_step, 1)
+        return traced
+
+    monkeypatch.setattr(reader_module, "_connect_readonly", traced_connect)
+
+    with pytest.raises(PickerIndexContractError):
+        list_recent_executions(db)
+
+    assert not any("FROM events" in statement for statement in statements)
+    assert vm_steps < 500
 
 
 def test_list_recent_executions_preserves_goal_and_reports_concurrent_runs(tmp_path) -> None:
@@ -721,6 +834,7 @@ def test_malformed_unrelated_json_is_ignored_by_picker_and_tail(tmp_path) -> Non
     conn = sqlite3.connect(db)
     try:
         conn.execute("CREATE TABLE events (aggregate_id TEXT, event_type TEXT, payload TEXT)")
+        _install_picker_indexes(conn)
         conn.executemany(
             "INSERT INTO events (aggregate_id, event_type, payload) VALUES (?, ?, ?)",
             [
@@ -751,6 +865,7 @@ def test_picker_limit_applies_after_malformed_start_rows_are_skipped(tmp_path) -
     conn = sqlite3.connect(db)
     try:
         conn.execute("CREATE TABLE events (aggregate_id TEXT, event_type TEXT, payload TEXT)")
+        _install_picker_indexes(conn)
         conn.execute(
             "INSERT INTO events (aggregate_id, event_type, payload) VALUES (?, ?, ?)",
             (
@@ -804,6 +919,7 @@ def test_picker_progress_queries_are_aggregate_bounded_at_scale(
         conn.execute("CREATE TABLE events (aggregate_id TEXT, event_type TEXT, payload TEXT)")
         conn.execute("CREATE INDEX ix_events_aggregate_id ON events (aggregate_id)")
         conn.execute("CREATE INDEX ix_events_event_type ON events (event_type)")
+        _install_picker_indexes(conn)
         foreign_payload = json.dumps(
             {"execution_id": "exec_foreign", "progress": {"runtime_status": "running"}}
         )
@@ -901,6 +1017,7 @@ def test_workflow_progress_queries_are_aggregate_bounded_at_scale(
         conn.execute("CREATE TABLE events (aggregate_id TEXT, event_type TEXT, payload TEXT)")
         conn.execute("CREATE INDEX ix_events_aggregate_id ON events (aggregate_id)")
         conn.execute("CREATE INDEX ix_events_event_type ON events (event_type)")
+        _install_picker_indexes(conn)
         foreign_payload = json.dumps(
             {
                 "execution_id": "exec_foreign",
@@ -960,7 +1077,9 @@ def test_workflow_progress_queries_are_aggregate_bounded_at_scale(
     tail_statements = list(statements)
 
     picker_workflow_queries = [
-        statement for statement in picker_statements if "'workflow.progress.updated'" in statement
+        statement
+        for statement in picker_statements
+        if "event_type = 'workflow.progress.updated'" in statement
     ]
     tail_workflow_queries = [
         statement for statement in tail_statements if "'workflow.progress.updated'" in statement
@@ -982,11 +1101,424 @@ def test_workflow_progress_queries_are_aggregate_bounded_at_scale(
     ]
     assert picker_elapsed < 0.5
     assert tail_elapsed < 0.5
-    assert len(picker_workflow_queries) == 2
+    assert len(picker_workflow_queries) == 6
     assert len(tail_workflow_queries) == 2
     assert all("aggregate_id =" in statement for statement in workflow_queries)
-    assert all("json_extract" not in statement for statement in workflow_queries)
+    assert all("json_extract" not in statement for statement in tail_workflow_queries)
     assert all(
-        any("ix_events_aggregate_id" in str(row[3]) for row in plan) for plan in workflow_plans
+        any(
+            "ix_events_aggregate_id" in str(row[3]) or "ix_events_picker_" in str(row[3])
+            for row in plan
+        )
+        for plan in workflow_plans
     )
     assert all("TEMP B-TREE" not in str(row[3]) for plan in workflow_plans for row in plan)
+
+
+def test_picker_bounds_selected_workflow_progress_history(tmp_path, monkeypatch) -> None:
+    db = tmp_path / "selected-workflow-progress-scale.db"
+    conn = sqlite3.connect(db)
+    try:
+        conn.execute("CREATE TABLE events (aggregate_id TEXT, event_type TEXT, payload TEXT)")
+        conn.execute("CREATE INDEX ix_events_aggregate_id ON events (aggregate_id)")
+        conn.execute("CREATE INDEX ix_events_event_type ON events (event_type)")
+        _install_picker_indexes(conn)
+        conn.execute(
+            "INSERT INTO events (aggregate_id, event_type, payload) VALUES (?, ?, ?)",
+            (
+                "orch_target",
+                "orchestrator.session.started",
+                json.dumps({"execution_id": "exec_target"}),
+            ),
+        )
+        historical = json.dumps(
+            {
+                "execution_id": "exec_target",
+                "acceptance_criteria": [{"node_id": "target", "status": "executing"}],
+            }
+        )
+        conn.executemany(
+            "INSERT INTO events (aggregate_id, event_type, payload) VALUES (?, ?, ?)",
+            (("exec_target", "workflow.progress.updated", historical) for _ in range(99_999)),
+        )
+        latest = json.dumps(
+            {
+                "execution_id": "exec_target",
+                "acceptance_criteria": [{"node_id": "target", "status": "completed"}],
+            }
+        )
+        conn.execute(
+            "INSERT INTO events (aggregate_id, event_type, payload) VALUES (?, ?, ?)",
+            ("exec_target", "workflow.progress.updated", latest),
+        )
+        conn.commit()
+        conn.execute("ANALYZE")
+    finally:
+        conn.close()
+
+    statements: list[str] = []
+    vm_steps = 0
+    decode_calls = 0
+    original_connect = reader_module._connect_readonly
+    original_decode = reader_module._decode_payload
+
+    def traced_connect(db_path):
+        traced = original_connect(db_path)
+
+        def count_step():
+            nonlocal vm_steps
+            vm_steps += 1
+            return 0
+
+        traced.set_trace_callback(statements.append)
+        traced.set_progress_handler(count_step, 1)
+        return traced
+
+    def counted_decode(payload):
+        nonlocal decode_calls
+        decode_calls += 1
+        return original_decode(payload)
+
+    monkeypatch.setattr(reader_module, "_connect_readonly", traced_connect)
+    monkeypatch.setattr(reader_module, "_decode_payload", counted_decode)
+    started = time.perf_counter()
+    runs = list_recent_executions(db, limit=1)
+    elapsed = time.perf_counter() - started
+
+    workflow_queries = [
+        statement
+        for statement in statements
+        if "event_type = 'workflow.progress.updated'" in statement
+    ]
+    conn = sqlite3.connect(db)
+    try:
+        plans = [
+            conn.execute("EXPLAIN QUERY PLAN " + query).fetchall() for query in workflow_queries
+        ]
+    finally:
+        conn.close()
+
+    assert [(run["status"], run["completed_count"]) for run in runs] == [("completed", 1)]
+    assert runs[0]["last_row"] == 100_001
+    assert elapsed < 0.5
+    assert vm_steps < 5_000
+    assert decode_calls <= 4
+    assert len(workflow_queries) == 6
+    assert all("TEMP B-TREE" not in str(row[3]) for plan in plans for row in plan)
+    used_indexes = {str(row[3]) for plan in plans for row in plan}
+    assert any(AGGREGATE_EVENT_INDEX in value for value in used_indexes)
+    assert any(RUNNING_PROGRESS_INDEX in value for value in used_indexes)
+    assert any(WORKFLOW_SNAPSHOT_INDEX in value for value in used_indexes)
+
+
+@pytest.mark.parametrize(
+    ("old_running_checkpoint", "expected_status"),
+    [(False, "paused"), (True, "running")],
+)
+def test_picker_bounds_producer_split_progress_with_absent_family_lookup(
+    tmp_path,
+    monkeypatch,
+    old_running_checkpoint: bool,
+    expected_status: str,
+) -> None:
+    db = tmp_path / f"producer-split-{old_running_checkpoint}.db"
+    conn = sqlite3.connect(db)
+    try:
+        conn.execute("CREATE TABLE events (aggregate_id TEXT, event_type TEXT, payload TEXT)")
+        conn.execute("CREATE INDEX ix_events_aggregate_id ON events (aggregate_id)")
+        conn.execute("CREATE INDEX ix_events_event_type ON events (event_type)")
+        _install_picker_indexes(conn)
+        conn.executemany(
+            "INSERT INTO events (aggregate_id, event_type, payload) VALUES (?, ?, ?)",
+            [
+                (
+                    "orch_target",
+                    "orchestrator.session.started",
+                    json.dumps({"execution_id": "exec_target"}),
+                ),
+                (
+                    "orch_target",
+                    "orchestrator.session.paused",
+                    json.dumps({"execution_id": "exec_target"}),
+                ),
+                (
+                    "exec_target",
+                    "workflow.progress.updated",
+                    json.dumps(
+                        {
+                            "execution_id": "exec_target",
+                            "acceptance_criteria": [{"node_id": "target", "status": "completed"}],
+                        }
+                    ),
+                ),
+            ],
+        )
+        first_status = "running" if old_running_checkpoint else "completed"
+        first = json.dumps(
+            {"execution_id": "exec_target", "progress": {"runtime_status": first_status}}
+        )
+        completed = json.dumps(
+            {"execution_id": "exec_target", "progress": {"runtime_status": "completed"}}
+        )
+        conn.execute(
+            "INSERT INTO events (aggregate_id, event_type, payload) VALUES (?, ?, ?)",
+            ("orch_target", "orchestrator.progress.updated", first),
+        )
+        conn.executemany(
+            "INSERT INTO events (aggregate_id, event_type, payload) VALUES (?, ?, ?)",
+            (("orch_target", "orchestrator.progress.updated", completed) for _ in range(99_999)),
+        )
+        conn.commit()
+        conn.execute("ANALYZE")
+    finally:
+        conn.close()
+
+    vm_steps = 0
+    decode_calls = 0
+    original_connect = reader_module._connect_readonly
+    original_decode = reader_module._decode_payload
+
+    def counted_connect(db_path):
+        traced = original_connect(db_path)
+
+        def count_step():
+            nonlocal vm_steps
+            vm_steps += 1
+            return 0
+
+        traced.set_progress_handler(count_step, 1)
+        return traced
+
+    def counted_decode(payload):
+        nonlocal decode_calls
+        decode_calls += 1
+        return original_decode(payload)
+
+    monkeypatch.setattr(reader_module, "_connect_readonly", counted_connect)
+    monkeypatch.setattr(reader_module, "_decode_payload", counted_decode)
+    started = time.perf_counter()
+    runs = list_recent_executions(db, limit=1)
+    elapsed = time.perf_counter() - started
+
+    assert [(run["status"], run["completed_count"]) for run in runs] == [(expected_status, 1)]
+    assert runs[0]["last_row"] == 100_003
+    assert elapsed < 0.5
+    assert vm_steps < 5_000
+    assert decode_calls <= 7
+
+
+def test_picker_keeps_latest_usable_workflow_snapshot_before_poison_rows(tmp_path) -> None:
+    db = tmp_path / "workflow-poison.db"
+    conn = sqlite3.connect(db)
+    try:
+        conn.execute("CREATE TABLE events (aggregate_id TEXT, event_type TEXT, payload TEXT)")
+        conn.execute("CREATE INDEX ix_events_aggregate_id ON events (aggregate_id)")
+        conn.execute("CREATE INDEX ix_events_event_type ON events (event_type)")
+        _install_picker_indexes(conn)
+        conn.executemany(
+            "INSERT INTO events (aggregate_id, event_type, payload) VALUES (?, ?, ?)",
+            [
+                (
+                    "orch_target",
+                    "orchestrator.session.started",
+                    json.dumps({"execution_id": "exec_target"}),
+                ),
+                (
+                    "exec_target",
+                    "workflow.progress.updated",
+                    json.dumps(
+                        {
+                            "execution_id": "exec_target",
+                            "acceptance_criteria": [{"node_id": "target", "status": "completed"}],
+                        }
+                    ),
+                ),
+                (
+                    "exec_target",
+                    "workflow.progress.updated",
+                    json.dumps(
+                        {
+                            "execution_id": "exec_target",
+                            "last_update": {"runtime_status": "completed"},
+                        }
+                    ),
+                ),
+                ("exec_target", "workflow.progress.updated", "{malformed"),
+            ],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    runs = list_recent_executions(db, limit=1)
+
+    assert [(run["status"], run["completed_count"]) for run in runs] == [("completed", 1)]
+    assert runs[0]["last_row"] == 3
+
+
+def test_picker_status_only_turn_cannot_erase_running_after_settled_snapshot(tmp_path) -> None:
+    db = tmp_path / "workflow-status-only-turn.db"
+    conn = sqlite3.connect(db)
+    try:
+        conn.execute("CREATE TABLE events (aggregate_id TEXT, event_type TEXT, payload TEXT)")
+        conn.execute("CREATE INDEX ix_events_aggregate_id ON events (aggregate_id)")
+        conn.execute("CREATE INDEX ix_events_event_type ON events (event_type)")
+        _install_picker_indexes(conn)
+        conn.executemany(
+            "INSERT INTO events (aggregate_id, event_type, payload) VALUES (?, ?, ?)",
+            [
+                (
+                    "orch_target",
+                    "orchestrator.session.started",
+                    json.dumps({"execution_id": "exec_target"}),
+                ),
+                (
+                    "exec_target",
+                    "workflow.progress.updated",
+                    json.dumps(
+                        {
+                            "execution_id": "exec_target",
+                            "acceptance_criteria": [{"node_id": "target", "status": "completed"}],
+                        }
+                    ),
+                ),
+                (
+                    "exec_target",
+                    "workflow.progress.updated",
+                    json.dumps(
+                        {
+                            "execution_id": "exec_target",
+                            "last_update": {"runtime_status": "running"},
+                        }
+                    ),
+                ),
+                (
+                    "exec_target",
+                    "workflow.progress.updated",
+                    json.dumps(
+                        {
+                            "execution_id": "exec_target",
+                            "last_update": {"runtime_status": "completed"},
+                        }
+                    ),
+                ),
+            ],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    runs = list_recent_executions(db, limit=1)
+
+    assert [(run["status"], run["completed_count"]) for run in runs] == [("running", 1)]
+    assert runs[0]["last_row"] == 4
+
+
+@pytest.mark.parametrize("container_key", ["progress", "last_update", None])
+@pytest.mark.parametrize("whitespace", [" ", "\t", "\n", "\r", "\v", "\f"])
+def test_picker_running_whitespace_matches_python_reducer_and_partial_index(
+    tmp_path,
+    container_key,
+    whitespace,
+) -> None:
+    db = tmp_path / f"running-whitespace-{container_key}-{ord(whitespace)}.db"
+    running_payload = {"execution_id": "exec_target"}
+    wrapped_status = f"{whitespace}running{whitespace}"
+    if container_key is None:
+        running_payload["runtime_status"] = wrapped_status
+    else:
+        running_payload[container_key] = {"runtime_status": wrapped_status}
+
+    conn = sqlite3.connect(db)
+    try:
+        conn.execute("CREATE TABLE events (aggregate_id TEXT, event_type TEXT, payload TEXT)")
+        conn.execute("CREATE INDEX ix_events_aggregate_id ON events (aggregate_id)")
+        conn.execute("CREATE INDEX ix_events_event_type ON events (event_type)")
+        _install_picker_indexes(conn)
+        conn.executemany(
+            "INSERT INTO events (aggregate_id, event_type, payload) VALUES (?, ?, ?)",
+            [
+                (
+                    "orch_target",
+                    "orchestrator.session.started",
+                    json.dumps({"execution_id": "exec_target"}),
+                ),
+                ("orch_target", "orchestrator.session.paused", "{}"),
+                (
+                    "exec_target",
+                    "workflow.progress.updated",
+                    json.dumps(
+                        {
+                            "execution_id": "exec_target",
+                            "acceptance_criteria": [{"node_id": "target", "status": "completed"}],
+                        }
+                    ),
+                ),
+                ("exec_target", "workflow.progress.updated", json.dumps(running_payload)),
+                (
+                    "exec_target",
+                    "workflow.progress.updated",
+                    json.dumps(
+                        {
+                            "execution_id": "exec_target",
+                            "last_update": {"runtime_status": "completed"},
+                        }
+                    ),
+                ),
+            ],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    runs = list_recent_executions(db, limit=1)
+
+    assert [(run["status"], run["completed_count"]) for run in runs] == [("running", 1)]
+
+
+def test_picker_unicode_whitespace_is_not_a_running_acknowledgement(tmp_path) -> None:
+    db = tmp_path / "running-nbsp.db"
+    conn = sqlite3.connect(db)
+    try:
+        conn.execute("CREATE TABLE events (aggregate_id TEXT, event_type TEXT, payload TEXT)")
+        conn.execute("CREATE INDEX ix_events_aggregate_id ON events (aggregate_id)")
+        conn.execute("CREATE INDEX ix_events_event_type ON events (event_type)")
+        _install_picker_indexes(conn)
+        conn.executemany(
+            "INSERT INTO events (aggregate_id, event_type, payload) VALUES (?, ?, ?)",
+            [
+                (
+                    "orch_target",
+                    "orchestrator.session.started",
+                    json.dumps({"execution_id": "exec_target"}),
+                ),
+                ("orch_target", "orchestrator.session.paused", "{}"),
+                (
+                    "exec_target",
+                    "workflow.progress.updated",
+                    json.dumps(
+                        {
+                            "execution_id": "exec_target",
+                            "acceptance_criteria": [{"node_id": "target", "status": "completed"}],
+                        }
+                    ),
+                ),
+                (
+                    "exec_target",
+                    "workflow.progress.updated",
+                    json.dumps(
+                        {
+                            "execution_id": "exec_target",
+                            "progress": {"runtime_status": "\u00a0running\u00a0"},
+                        }
+                    ),
+                ),
+            ],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    runs = list_recent_executions(db, limit=1)
+
+    assert [(run["status"], run["completed_count"]) for run in runs] == [("paused", 1)]
