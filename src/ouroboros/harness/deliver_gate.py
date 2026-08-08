@@ -10,14 +10,23 @@ behavior changes.
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 import json
+import os
 from pathlib import Path
+import stat
 from typing import Any, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from ouroboros.core.filesystem_capability import (
+    DirectoryChainFingerprint,
+    NoFollowDirectoryChain,
+    nofollow_directory_capabilities_available,
+    open_nofollow_directory_chain,
+)
 from ouroboros.events.base import BaseEvent
 from ouroboros.harness.claim_term_guard import ClaimTermGuard, ClaimTermGuardFact
 from ouroboros.harness.journal import (
@@ -26,6 +35,71 @@ from ouroboros.harness.journal import (
     EvidenceManifest,
     normalize_events,
 )
+
+_COMMAND_ARTIFACT_SCHEMA_VERSION = 1
+_COMMAND_ARTIFACT_CAPTURE = "ouroboros.leaf-dispatch.v1"
+_MAX_COMMAND_ARTIFACTS = 128
+_MAX_COMMAND_ARTIFACT_PATH_CHARS = 4096
+_MAX_WORKSPACE_CHAIN_COMPONENTS = 256
+RUNTIME_SUCCESS_BOOLEAN_FIELDS = ("success", "ok")
+RUNTIME_FAILURE_BOOLEAN_FIELDS = (
+    "is_error",
+    "is_error_invalid",
+    "isError",
+    "error",
+    "failure",
+    "failed",
+    "cancel",
+    "cancelled",
+    "canceled",
+    "timeout",
+    "timed_out",
+    "abort",
+    "aborted",
+)
+RUNTIME_TOOL_EXIT_STATUS_FIELDS = (
+    "exit_code",
+    "exit_status",
+    "exitCode",
+    "exitStatus",
+    "returncode",
+    "return_code",
+    "status_code",
+    "statusCode",
+    "exit",
+    "errorCode",
+    "error_code",
+)
+_FILESYSTEM_EFFECT_KEYS = frozenset(
+    {
+        "capture",
+        "path",
+        "workspace_relative_path",
+        "workspace_chain",
+        "st_dev",
+        "st_ino",
+        "st_mode",
+        "st_size",
+        "st_mtime_ns",
+        "st_ctime_ns",
+    }
+)
+_COMMAND_ARTIFACT_KEYS = frozenset(
+    {"path", "st_dev", "st_ino", "st_mode", "st_size", "st_mtime_ns", "st_ctime_ns"}
+)
+_COMMAND_ARTIFACT_PROVENANCE_KEYS = frozenset(
+    {
+        "schema_version",
+        "capture",
+        "command_call_id",
+        "completion_event_id",
+        "retry_attempt",
+        "session_attempt_id",
+        "workspace_chain",
+        "artifacts",
+    }
+)
+_WORKSPACE_CHAIN_COMPONENT_KEYS = frozenset({"name", "st_dev", "st_ino", "st_mode"})
 
 
 class EventStoreEvidenceReader(Protocol):
@@ -255,6 +329,7 @@ async def load_ac_evidence_manifest(
         admitted_entries = _accepted_tool_start_entries(
             chronological,
             scope_id=normalized_scope_id,
+            execution_id=normalized_execution_id,
             retry_attempt=accepted_retry_attempt,
             session_attempt_id=accepted_session_attempt_id,
         )
@@ -286,6 +361,7 @@ def _accepted_tool_start_entries(
     events: Iterable[BaseEvent],
     *,
     scope_id: str,
+    execution_id: str,
     retry_attempt: int | None,
     session_attempt_id: str | None,
 ) -> tuple[EvidenceEntry, ...]:
@@ -299,14 +375,28 @@ def _accepted_tool_start_entries(
     correlation is omitted fail-closed.
     """
     chronological = tuple(events)
+    event_id_counts = Counter(event.id for event in chronological)
+    idless_completion_by_start = _owned_idless_tool_completions(
+        chronological,
+        scope_id=scope_id,
+        execution_id=execution_id,
+        retry_attempt=retry_attempt,
+        session_attempt_id=session_attempt_id,
+        event_id_counts=event_id_counts,
+    )
+    owned_idless_completion_indexes = frozenset(idless_completion_by_start.values())
     entries: list[EvidenceEntry] = []
     for index, event in enumerate(chronological):
         if event.type != "execution.tool.started" or not _event_matches_scope(event, scope_id):
+            continue
+        if event_id_counts[event.id] != 1:
             continue
         data = event.data
         if retry_attempt is not None and data.get("retry_attempt") != retry_attempt:
             continue
         if session_attempt_id is not None and data.get("session_attempt_id") != session_attempt_id:
+            continue
+        if _event_has_conflicting_tool_call_ids(event):
             continue
         tool_name = data.get("tool_name") if isinstance(data, Mapping) else None
         tool_input = data.get("tool_input") if isinstance(data, Mapping) else None
@@ -325,6 +415,7 @@ def _accepted_tool_start_entries(
                     and _event_matches_accepted_attempt(
                         candidate,
                         scope_id=scope_id,
+                        execution_id=execution_id,
                         retry_attempt=retry_attempt,
                         session_attempt_id=session_attempt_id,
                     )
@@ -340,9 +431,13 @@ def _accepted_tool_start_entries(
                 chronological,
                 start_index=index,
                 scope_id=scope_id,
+                execution_id=execution_id,
                 retry_attempt=retry_attempt,
                 session_attempt_id=session_attempt_id,
                 require_command_verdict=require_command_verdict,
+                event_id_counts=event_id_counts,
+                idless_completion_by_start=idless_completion_by_start,
+                owned_idless_completion_indexes=owned_idless_completion_indexes,
             )
             if completion_veto or (completion is None and not start_success):
                 continue
@@ -351,6 +446,13 @@ def _accepted_tool_start_entries(
             "tool_name": normalized_tool_name,
             "accepted_leaf_dispatch": True,
         }
+        accepted_call_id = _event_tool_call_id(event)
+        if accepted_call_id is not None:
+            payload["tool_call_id"] = accepted_call_id
+        if retry_attempt is not None:
+            payload["retry_attempt"] = retry_attempt
+        if session_attempt_id is not None:
+            payload["session_attempt_id"] = session_attempt_id
         if normalized_input:
             payload["args_preview"] = json.dumps(
                 normalized_input,
@@ -374,6 +476,14 @@ def _accepted_tool_start_entries(
             relative_path = _event_workspace_relative_path(raw_path, data)
             if relative_path is not None:
                 payload["workspace_relative_path"] = relative_path
+        if normalized_tool_name == "Bash" and completion is not None and completion.id != event.id:
+            command_artifacts = _command_artifacts_from_completion(
+                completion,
+                retry_attempt=retry_attempt,
+                session_attempt_id=session_attempt_id,
+            )
+            if command_artifacts is not None:
+                payload["command_artifacts"] = command_artifacts
         result_preview = _event_result_preview(event, completion)
         if result_preview is not None:
             payload["result_preview"] = result_preview
@@ -392,28 +502,355 @@ def _accepted_tool_start_entries(
     return tuple(entries)
 
 
-def _event_tool_call_id(event: BaseEvent) -> str | None:
-    """Return a normalized tool-call correlation id from one execution event."""
-    data = event.data
-    if not isinstance(data, Mapping):
+def _command_artifacts_from_completion(
+    completion: BaseEvent,
+    *,
+    retry_attempt: int | None,
+    session_attempt_id: str | None,
+) -> dict[str, Any] | None:
+    """Validate and project the locally captured Bash receiver authority.
+
+    The LeafDispatcher owns capture.  This loader only closes the durable
+    schema around that existing completion payload and binds it to the accepted
+    attempt.  Any malformed entry invalidates the whole command authority.
+    """
+    if retry_attempt is None or session_attempt_id is None:
         return None
-    for key in ("tool_call_id", "tool_use_id", "call_id"):
-        value = data.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    tool_result = data.get("tool_result")
-    if isinstance(tool_result, Mapping):
-        for key in ("tool_call_id", "tool_use_id", "call_id"):
-            value = tool_result.get(key)
-            if isinstance(value, str) and value.strip():
-                return value.strip()
-        meta = tool_result.get("meta")
-        if isinstance(meta, Mapping):
-            for key in ("tool_call_id", "tool_use_id", "call_id"):
-                value = meta.get(key)
-                if isinstance(value, str) and value.strip():
-                    return value.strip()
-    return None
+    if (
+        isinstance(retry_attempt, bool)
+        or not isinstance(retry_attempt, int)
+        or retry_attempt < 0
+        or not isinstance(session_attempt_id, str)
+        or not session_attempt_id.strip()
+    ):
+        return None
+    call_id = _event_tool_call_id(completion)
+    if call_id is None or not isinstance(completion.data, Mapping):
+        return None
+    raw_effects = completion.data.get("filesystem_effects")
+    if (
+        not isinstance(raw_effects, (list, tuple))
+        or not raw_effects
+        or len(raw_effects) > _MAX_COMMAND_ARTIFACTS
+    ):
+        return None
+    artifacts: list[dict[str, int | str]] = []
+    seen_paths: set[str] = set()
+    workspace_fingerprint: DirectoryChainFingerprint | None = None
+    for raw in raw_effects:
+        if not isinstance(raw, Mapping) or frozenset(raw) != _FILESYSTEM_EFFECT_KEYS:
+            return None
+        path = raw.get("workspace_relative_path")
+        lexical_path = raw.get("path")
+        if (
+            raw.get("capture") != _COMMAND_ARTIFACT_CAPTURE
+            or not isinstance(lexical_path, str)
+            or not lexical_path.strip()
+            or not isinstance(path, str)
+            or not _is_canonical_command_artifact_path(path)
+            or path in seen_paths
+        ):
+            return None
+        numeric: dict[str, int] = {}
+        for key in _COMMAND_ARTIFACT_KEYS - {"path"}:
+            value = raw.get(key)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                return None
+            numeric[key] = value
+        if numeric["st_ino"] == 0 or not stat.S_ISREG(numeric["st_mode"]):
+            return None
+        current_workspace_fingerprint = _workspace_chain_fingerprint(raw.get("workspace_chain"))
+        if current_workspace_fingerprint is None:
+            return None
+        if workspace_fingerprint is None:
+            workspace_fingerprint = current_workspace_fingerprint
+        elif current_workspace_fingerprint != workspace_fingerprint:
+            return None
+        seen_paths.add(path)
+        artifacts.append({"path": path, **numeric})
+    if workspace_fingerprint is None:
+        return None
+    return {
+        "schema_version": _COMMAND_ARTIFACT_SCHEMA_VERSION,
+        "capture": _COMMAND_ARTIFACT_CAPTURE,
+        "command_call_id": call_id,
+        "completion_event_id": completion.id,
+        "retry_attempt": retry_attempt,
+        "session_attempt_id": session_attempt_id.strip(),
+        "workspace_chain": _serialize_workspace_chain_fingerprint(workspace_fingerprint),
+        "artifacts": artifacts,
+    }
+
+
+def _workspace_chain_fingerprint(value: object) -> DirectoryChainFingerprint | None:
+    """Validate the closed durable workspace capability snapshot."""
+    if (
+        not isinstance(value, (list, tuple))
+        or not value
+        or len(value) > _MAX_WORKSPACE_CHAIN_COMPONENTS
+    ):
+        return None
+    fingerprint: list[tuple[str, int, int, int]] = []
+    rendered_path_chars = 0
+    for index, component in enumerate(value):
+        if (
+            not isinstance(component, Mapping)
+            or frozenset(component) != _WORKSPACE_CHAIN_COMPONENT_KEYS
+        ):
+            return None
+        name = component.get("name")
+        if not isinstance(name, str) or (
+            (index == 0 and name != os.sep)
+            or (index > 0 and (name in {"", ".", ".."} or Path(name).name != name))
+        ):
+            return None
+        rendered_path_chars += len(name) + int(index > 0)
+        if rendered_path_chars > _MAX_COMMAND_ARTIFACT_PATH_CHARS:
+            return None
+        numeric: list[int] = []
+        for key in ("st_dev", "st_ino", "st_mode"):
+            item = component.get(key)
+            if isinstance(item, bool) or not isinstance(item, int) or item < 0:
+                return None
+            numeric.append(item)
+        if numeric[1] == 0 or not stat.S_ISDIR(numeric[2]):
+            return None
+        fingerprint.append((name, *numeric))
+    return tuple(fingerprint)
+
+
+def _serialize_workspace_chain_fingerprint(
+    fingerprint: DirectoryChainFingerprint,
+) -> list[dict[str, int | str]]:
+    return [
+        {"name": name, "st_dev": device, "st_ino": inode, "st_mode": mode}
+        for name, device, inode, mode in fingerprint
+    ]
+
+
+def _is_canonical_command_artifact_path(value: str) -> bool:
+    if not value or len(value) > _MAX_COMMAND_ARTIFACT_PATH_CHARS or "\\" in value:
+        return False
+    path = Path(value)
+    return (
+        not path.is_absolute()
+        and value == path.as_posix()
+        and all(part not in {"", ".", ".."} for part in path.parts)
+    )
+
+
+def _journal_entry_proves_command_artifact(
+    entry: EvidenceEntry,
+    *,
+    relative_path: str,
+    task_cwd: str | None,
+) -> bool:
+    """Verify one Phase-1 command artifact still names its captured file."""
+    payload = entry.payload
+    provenance = payload.get("command_artifacts")
+    if (
+        task_cwd is None
+        or not isinstance(provenance, Mapping)
+        or frozenset(provenance) != _COMMAND_ARTIFACT_PROVENANCE_KEYS
+        or provenance.get("schema_version") != _COMMAND_ARTIFACT_SCHEMA_VERSION
+        or provenance.get("capture") != _COMMAND_ARTIFACT_CAPTURE
+        or not isinstance(provenance.get("command_call_id"), str)
+        or not str(provenance["command_call_id"]).strip()
+        or provenance.get("command_call_id") != payload.get("tool_call_id")
+        or not isinstance(provenance.get("completion_event_id"), str)
+        or not str(provenance["completion_event_id"]).strip()
+        or len(entry.source_event_ids) != 2
+        or len(set(entry.source_event_ids)) != 2
+        or provenance.get("completion_event_id") != entry.source_event_ids[-1]
+        or isinstance(provenance.get("retry_attempt"), bool)
+        or not isinstance(provenance.get("retry_attempt"), int)
+        or int(provenance["retry_attempt"]) < 0
+        or provenance.get("retry_attempt") != payload.get("retry_attempt")
+        or not isinstance(provenance.get("session_attempt_id"), str)
+        or not str(provenance["session_attempt_id"]).strip()
+        or provenance.get("session_attempt_id") != payload.get("session_attempt_id")
+    ):
+        return False
+    artifacts = provenance.get("artifacts")
+    if (
+        not isinstance(artifacts, (list, tuple))
+        or not artifacts
+        or len(artifacts) > _MAX_COMMAND_ARTIFACTS
+    ):
+        return False
+    validated: list[Mapping[str, object]] = []
+    seen_paths: set[str] = set()
+    for artifact in artifacts:
+        if not isinstance(artifact, Mapping) or frozenset(artifact) != _COMMAND_ARTIFACT_KEYS:
+            return False
+        path = artifact.get("path")
+        if (
+            not isinstance(path, str)
+            or not _is_canonical_command_artifact_path(path)
+            or path in seen_paths
+        ):
+            return False
+        for key in _COMMAND_ARTIFACT_KEYS - {"path"}:
+            value = artifact.get(key)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                return False
+        if artifact.get("st_ino") == 0 or not stat.S_ISREG(int(artifact["st_mode"])):
+            return False
+        seen_paths.add(path)
+        validated.append(artifact)
+    matches = [artifact for artifact in validated if artifact["path"] == relative_path]
+    if len(matches) != 1:
+        return False
+    artifact = matches[0]
+    if frozenset(artifact) != _COMMAND_ARTIFACT_KEYS:
+        return False
+    workspace_fingerprint = _workspace_chain_fingerprint(provenance.get("workspace_chain"))
+    if workspace_fingerprint is None:
+        return False
+    return _nofollow_workspace_artifact_matches(
+        task_cwd,
+        relative_path,
+        expected=artifact,
+        expected_workspace=workspace_fingerprint,
+    )
+
+
+def _nofollow_workspace_artifact_matches(
+    task_cwd: str,
+    relative_path: str,
+    *,
+    expected: Mapping[str, object],
+    expected_workspace: DirectoryChainFingerprint,
+) -> bool:
+    """Match an artifact while its no-follow directory and leaf fds stay held."""
+    leased_chain: NoFollowDirectoryChain | None = None
+    current_chain: NoFollowDirectoryChain | None = None
+    leaf_fds: list[int] = []
+    try:
+        if not nofollow_directory_capabilities_available():
+            return False
+        workspace = Path(os.path.abspath(Path(task_cwd).expanduser()))
+        relative = Path(relative_path)
+        if not _is_canonical_command_artifact_path(relative_path):
+            return False
+        leased_chain = open_nofollow_directory_chain(
+            workspace,
+            relative_components=relative.parts[:-1],
+        )
+        workspace_component_count = len(workspace.parts)
+        if tuple(leased_chain.fingerprint()[:workspace_component_count]) != expected_workspace:
+            return False
+
+        # A parent can be renamed and replaced after ``open`` returns.  Rewalk
+        # the current lexical path and bind every opened directory identity,
+        # plus the leaf fingerprint, to the held no-follow traversal.
+        current_chain = open_nofollow_directory_chain(
+            workspace,
+            relative_components=relative.parts[:-1],
+        )
+        if tuple(
+            current_chain.fingerprint()[:workspace_component_count]
+        ) != expected_workspace or not leased_chain.matches_opened_directories(current_chain):
+            return False
+        leased_fd = leased_chain.leaf_fd
+        current_fd = current_chain.leaf_fd
+        leaf_flags = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0)
+        leased_leaf_fd = os.open(relative.name, leaf_flags, dir_fd=leased_fd)
+        leaf_fds.append(leased_leaf_fd)
+        leased_leaf = os.fstat(leased_leaf_fd)
+        if not stat.S_ISREG(leased_leaf.st_mode) or any(
+            expected.get(key) != getattr(leased_leaf, key)
+            for key in _COMMAND_ARTIFACT_KEYS - {"path"}
+        ):
+            return False
+        current_leaf_fd = os.open(relative.name, leaf_flags, dir_fd=current_fd)
+        leaf_fds.append(current_leaf_fd)
+        current_leaf = os.fstat(current_leaf_fd)
+        if _command_artifact_stat_fingerprint(current_leaf) != _command_artifact_stat_fingerprint(
+            leased_leaf
+        ):
+            return False
+
+        # Revalidate names after reading the leaf.  The lexical workspace or a
+        # child directory can be replaced after its second ``open`` and the
+        # immediate fd comparison above; held fds alone would then keep seeing
+        # the displaced tree.  Every current parent must still name the opened
+        # child, the final parent must still name the same leaf fingerprint,
+        # and the absolute workspace path must still name the current root.
+        named_leaf = os.stat(relative.name, dir_fd=current_fd, follow_symlinks=False)
+        if _command_artifact_stat_fingerprint(named_leaf) != _command_artifact_stat_fingerprint(
+            current_leaf
+        ):
+            return False
+        return leased_chain.postvalidate() and current_chain.postvalidate()
+    except (OSError, RuntimeError, ValueError):
+        return False
+    finally:
+        for directory_fd in reversed(leaf_fds):
+            try:
+                os.close(directory_fd)
+            except OSError:
+                pass
+        if current_chain is not None:
+            current_chain.close()
+        if leased_chain is not None:
+            leased_chain.close()
+
+
+def _command_artifact_stat_fingerprint(value: os.stat_result) -> tuple[int, ...]:
+    return tuple(getattr(value, key) for key in _COMMAND_ARTIFACT_KEYS - {"path"})
+
+
+_TOOL_CALL_ID_KEYS = ("tool_call_id", "tool_use_id", "call_id")
+
+
+def _event_tool_call_aliases(event: BaseEvent) -> tuple[tuple[str, ...], bool]:
+    """Collect every supported correlation alias and flag malformed values."""
+    if not isinstance(event.data, Mapping):
+        return (), True
+    containers: list[Mapping[str, Any]] = [event.data]
+    malformed = False
+    if "meta" in event.data:
+        message_meta = event.data["meta"]
+        if not isinstance(message_meta, Mapping):
+            malformed = True
+        else:
+            containers.append(message_meta)
+    if "tool_result" in event.data:
+        tool_result = event.data["tool_result"]
+        if not isinstance(tool_result, Mapping):
+            malformed = True
+        else:
+            containers.append(tool_result)
+            if "meta" in tool_result:
+                meta = tool_result["meta"]
+                if not isinstance(meta, Mapping):
+                    malformed = True
+                else:
+                    containers.append(meta)
+    values: list[str] = []
+    for container in containers:
+        for key in _TOOL_CALL_ID_KEYS:
+            if key not in container:
+                continue
+            value = container[key]
+            if not isinstance(value, str) or not value.strip():
+                malformed = True
+            else:
+                values.append(value.strip())
+    return tuple(values), malformed
+
+
+def _event_has_conflicting_tool_call_ids(event: BaseEvent) -> bool:
+    aliases, malformed = _event_tool_call_aliases(event)
+    return malformed or len(set(aliases)) > 1
+
+
+def _event_tool_call_id(event: BaseEvent) -> str | None:
+    """Return the sole normalized correlation id, rejecting alias conflicts."""
+    aliases, malformed = _event_tool_call_aliases(event)
+    distinct = set(aliases)
+    return next(iter(distinct)) if not malformed and len(distinct) == 1 else None
 
 
 def _event_has_explicit_tool_success(
@@ -430,6 +867,12 @@ def _event_has_explicit_tool_success(
     data = event.data
     if not isinstance(data, Mapping):
         return False
+    verdict_containers: list[Mapping[str, Any]] = [data]
+    if "meta" in data:
+        data_meta = data["meta"]
+        if not isinstance(data_meta, Mapping):
+            return False
+        verdict_containers.append(data_meta)
     if data.get("is_error_invalid") is True:
         return False
     if "is_error" in data and not isinstance(data["is_error"], bool):
@@ -437,15 +880,23 @@ def _event_has_explicit_tool_success(
     if data.get("is_error") is True:
         return False
     tool_result = data.get("tool_result")
-    if tool_result is not None and not isinstance(tool_result, Mapping):
-        return False
-    if isinstance(tool_result, Mapping):
+    if "tool_result" in data:
+        if not isinstance(tool_result, Mapping):
+            return False
+        verdict_containers.append(tool_result)
         if tool_result.get("is_error_invalid") is True:
             return False
         if "is_error" in tool_result and not isinstance(tool_result["is_error"], bool):
             return False
         if tool_result.get("is_error") is True:
             return False
+        if "meta" in tool_result:
+            meta = tool_result["meta"]
+            if not isinstance(meta, Mapping):
+                return False
+            verdict_containers.append(meta)
+    if any(_mapping_has_failure_verdict(container) for container in verdict_containers):
+        return False
     is_completion_event = event.type == "execution.tool.completed"
     command_success_signal = is_completion_event and (
         data.get("is_error") is False
@@ -491,10 +942,67 @@ def _event_has_explicit_tool_success(
     return command_success_signal if require_command_verdict else success_signal
 
 
+def _mapping_has_failure_verdict(value: Mapping[str, Any]) -> bool:
+    """Treat explicit failure flags, contradictions, and malformed verdicts as vetoes."""
+    for key in RUNTIME_SUCCESS_BOOLEAN_FIELDS:
+        if key not in value:
+            continue
+        success = value[key]
+        if not isinstance(success, bool) or not success:
+            return True
+    for key in RUNTIME_FAILURE_BOOLEAN_FIELDS:
+        if key not in value:
+            continue
+        flag = value[key]
+        if not isinstance(flag, bool) or flag:
+            return True
+    for key in RUNTIME_TOOL_EXIT_STATUS_FIELDS:
+        if key not in value:
+            continue
+        exit_value = value[key]
+        if isinstance(exit_value, bool) or not isinstance(exit_value, int) or exit_value != 0:
+            return True
+    allowed_statuses = {"completed", "success", "succeeded"}
+    allowed_values = {
+        "subtype": {*allowed_statuses, "tool_result"},
+        "status": allowed_statuses,
+        "runtime_status": allowed_statuses,
+        "runtime_signal": {"tool_completed", "session_completed"},
+        "runtime_event_type": {
+            "tool.completed",
+            "tool.output",
+            "tool.result",
+            "result.completed",
+            "run.completed",
+            "session.completed",
+            "task.completed",
+            "turn.completed",
+        },
+    }
+    for key, accepted in allowed_values.items():
+        if key not in value:
+            continue
+        status = value[key]
+        if not isinstance(status, str) or not status.strip():
+            return True
+        normalized = status.strip().lower()
+        if (
+            key == "runtime_status"
+            and normalized == "running"
+            and isinstance(value.get("runtime_signal"), str)
+            and str(value["runtime_signal"]).strip().lower() == "tool_completed"
+        ):
+            continue
+        if normalized not in accepted:
+            return True
+    return False
+
+
 def _event_matches_accepted_attempt(
     event: BaseEvent,
     *,
     scope_id: str,
+    execution_id: str,
     retry_attempt: int | None,
     session_attempt_id: str | None,
 ) -> bool:
@@ -503,11 +1011,91 @@ def _event_matches_accepted_attempt(
     data = event.data
     if not isinstance(data, Mapping):
         return False
-    if retry_attempt is not None and data.get("retry_attempt") != retry_attempt:
+    for key in ("execution_id", "parent_execution_id"):
+        if key in data and data.get(key) != execution_id:
+            return False
+    if data.get("execution_id") != execution_id:
         return False
+    if retry_attempt is not None:
+        if data.get("retry_attempt") != retry_attempt:
+            return False
+        if "attempt_number" in data and data.get("attempt_number") != retry_attempt + 1:
+            return False
     return not (
         session_attempt_id is not None and data.get("session_attempt_id") != session_attempt_id
     )
+
+
+def _normalized_event_tool_name(event: BaseEvent) -> str | None:
+    """Return one non-blank tool name for correlation-only comparisons."""
+    if not isinstance(event.data, Mapping):
+        return None
+    value = event.data.get("tool_name")
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def _owned_idless_tool_completions(
+    events: tuple[BaseEvent, ...],
+    *,
+    scope_id: str,
+    execution_id: str,
+    retry_attempt: int | None,
+    session_attempt_id: str | None,
+    event_id_counts: Mapping[str, int],
+) -> dict[int, int]:
+    """Pair id-less terminals owned by exactly one accepted-attempt start.
+
+    ID-bearing peers are independent and do not break the legacy id-less slot.
+    A duplicate, malformed, or second id-less start poisons that slot until the
+    next id-less terminal consumes it, matching the live lease tracker.
+    """
+    owned: dict[int, int] = {}
+    active = False
+    active_start_index: int | None = None
+    active_tool: str | None = None
+    for index, event in enumerate(events):
+        if event.type not in {"execution.tool.started", "execution.tool.completed"}:
+            continue
+        if not _event_matches_accepted_attempt(
+            event,
+            scope_id=scope_id,
+            execution_id=execution_id,
+            retry_attempt=retry_attempt,
+            session_attempt_id=session_attempt_id,
+        ):
+            continue
+        aliases, malformed_alias = _event_tool_call_aliases(event)
+        if aliases:
+            continue
+        if malformed_alias or event_id_counts.get(event.id) != 1:
+            active = True
+            active_start_index = None
+            active_tool = None
+            continue
+        if event.type == "execution.tool.started":
+            tool_name = _normalized_event_tool_name(event)
+            if active or tool_name is None:
+                active = True
+                active_start_index = None
+                active_tool = None
+            else:
+                active = True
+                active_start_index = index
+                active_tool = tool_name
+            continue
+
+        completion_tool = _normalized_event_tool_name(event)
+        if (
+            active
+            and active_start_index is not None
+            and active_tool is not None
+            and (completion_tool is None or completion_tool == active_tool)
+        ):
+            owned[active_start_index] = index
+        active = False
+        active_start_index = None
+        active_tool = None
+    return owned
 
 
 def _correlated_tool_completion(
@@ -515,14 +1103,22 @@ def _correlated_tool_completion(
     *,
     start_index: int,
     scope_id: str,
+    execution_id: str,
     retry_attempt: int | None,
     session_attempt_id: str | None,
     require_command_verdict: bool,
+    event_id_counts: Mapping[str, int],
+    idless_completion_by_start: Mapping[int, int],
+    owned_idless_completion_indexes: frozenset[int],
 ) -> tuple[BaseEvent | None, bool]:
     """Return an exact completion and whether failure/ambiguity vetoes the start."""
     start = events[start_index]
+    if event_id_counts.get(start.id) != 1:
+        return None, True
     start_data = start.data
     if not isinstance(start_data, Mapping):
+        return None, True
+    if _event_has_conflicting_tool_call_ids(start):
         return None, True
     start_tool = start_data.get("tool_name")
     if not isinstance(start_tool, str):
@@ -534,9 +1130,11 @@ def _correlated_tool_completion(
             candidate
             for candidate in events
             if candidate.type == "execution.tool.started"
+            and not _event_has_conflicting_tool_call_ids(candidate)
             and _event_matches_accepted_attempt(
                 candidate,
                 scope_id=scope_id,
+                execution_id=execution_id,
                 retry_attempt=retry_attempt,
                 session_attempt_id=session_attempt_id,
             )
@@ -544,13 +1142,28 @@ def _correlated_tool_completion(
         )
         if len(matching_starts) != 1:
             return None, True
+        if any(
+            candidate.type == "execution.tool.completed"
+            and _event_matches_accepted_attempt(
+                candidate,
+                scope_id=scope_id,
+                execution_id=execution_id,
+                retry_attempt=retry_attempt,
+                session_attempt_id=session_attempt_id,
+            )
+            and _event_has_conflicting_tool_call_ids(candidate)
+            and start_call_id in _event_tool_call_aliases(candidate)[0]
+            for candidate in events
+        ):
+            return None, True
         matches = tuple(
-            candidate
-            for candidate in events[start_index + 1 :]
+            (candidate_index, candidate)
+            for candidate_index, candidate in enumerate(events)
             if candidate.type == "execution.tool.completed"
             and _event_matches_accepted_attempt(
                 candidate,
                 scope_id=scope_id,
+                execution_id=execution_id,
                 retry_attempt=retry_attempt,
                 session_attempt_id=session_attempt_id,
             )
@@ -560,7 +1173,38 @@ def _correlated_tool_completion(
             return None, False
         if len(matches) != 1:
             return None, True
-        completion = matches[0]
+        completion_index, completion = matches[0]
+        if completion_index <= start_index or event_id_counts.get(completion.id) != 1:
+            return None, True
+        for candidate_index, candidate in enumerate(
+            events[start_index + 1 : completion_index],
+            start=start_index + 1,
+        ):
+            if candidate.type != "execution.tool.completed" or not _event_matches_accepted_attempt(
+                candidate,
+                scope_id=scope_id,
+                execution_id=execution_id,
+                retry_attempt=retry_attempt,
+                session_attempt_id=session_attempt_id,
+            ):
+                continue
+            if _event_tool_call_id(candidate) is not None:
+                continue
+            if candidate_index in owned_idless_completion_indexes:
+                continue
+            candidate_tool_value = (
+                candidate.data.get("tool_name") if isinstance(candidate.data, Mapping) else None
+            )
+            candidate_tool = (
+                candidate_tool_value.strip()
+                if isinstance(candidate_tool_value, str) and candidate_tool_value.strip()
+                else None
+            )
+            if candidate_tool in {None, start_tool.strip()}:
+                # An id-less same-tool (or nameless) terminal could have closed
+                # this named command.  Do not let a later matching completion
+                # revive its authority, even for a crafted durable journal.
+                return None, True
         if (
             not isinstance(completion.data, Mapping)
             or completion.data.get("tool_name") != start_tool
@@ -573,33 +1217,32 @@ def _correlated_tool_completion(
             return None, True
         return completion, False
 
-    # Legacy id-less streams: only the next same-attempt tool event may close
-    # the start. Any intervening start or id-bearing completion is ambiguous.
+    # Legacy id-less streams keep one independent slot across concurrent named
+    # peers. Only a uniquely owned id-less terminal may close the start.
+    owned_completion_index = idless_completion_by_start.get(start_index)
+    if owned_completion_index is not None:
+        completion = events[owned_completion_index]
+        if event_id_counts.get(completion.id) != 1 or not _event_has_explicit_tool_success(
+            completion,
+            require_command_verdict=require_command_verdict,
+        ):
+            return None, True
+        return completion, False
+
     for candidate in events[start_index + 1 :]:
         if candidate.type not in {"execution.tool.started", "execution.tool.completed"}:
             continue
         if not _event_matches_accepted_attempt(
             candidate,
             scope_id=scope_id,
+            execution_id=execution_id,
             retry_attempt=retry_attempt,
             session_attempt_id=session_attempt_id,
         ):
             continue
-        if candidate.type == "execution.tool.started":
+        aliases, _malformed = _event_tool_call_aliases(candidate)
+        if not aliases:
             return None, True
-        if _event_tool_call_id(candidate) is not None:
-            return None, True
-        candidate_tool = (
-            candidate.data.get("tool_name") if isinstance(candidate.data, Mapping) else None
-        )
-        if candidate_tool != start_tool:
-            return None, True
-        if not _event_has_explicit_tool_success(
-            candidate,
-            require_command_verdict=require_command_verdict,
-        ):
-            return None, True
-        return candidate, False
     return None, False
 
 
@@ -626,14 +1269,21 @@ def _event_result_preview(start: BaseEvent, completion: BaseEvent | None) -> str
 
 
 def _event_matches_scope(event: BaseEvent, scope_id: str) -> bool:
-    if event.aggregate_id == scope_id:
-        return True
-    if not isinstance(event.data, Mapping):
+    if (
+        event.aggregate_type != "execution"
+        or event.aggregate_id != scope_id
+        or not isinstance(event.data, Mapping)
+    ):
         return False
-    return any(
-        isinstance(event.data.get(key), str) and event.data[key].strip() == scope_id
-        for key in ("ac_id", "session_scope_id")
-    )
+    aliases: list[str] = []
+    for key in ("ac_id", "session_scope_id"):
+        if key not in event.data:
+            continue
+        value = event.data[key]
+        if not isinstance(value, str) or not value.strip():
+            return False
+        aliases.append(value.strip())
+    return all(value == scope_id for value in aliases)
 
 
 def _event_workspace_relative_path(raw_path: str, data: Mapping[str, Any]) -> str | None:
@@ -1281,6 +1931,9 @@ __all__ = [
     "DeliverEvidenceFact",
     "DeliverGateVerdict",
     "EventStoreEvidenceReader",
+    "RUNTIME_FAILURE_BOOLEAN_FIELDS",
+    "RUNTIME_SUCCESS_BOOLEAN_FIELDS",
+    "RUNTIME_TOOL_EXIT_STATUS_FIELDS",
     "TraceGuardResultLike",
     "TraceGuardEvidenceInput",
     "TraceGuardValidator",

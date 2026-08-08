@@ -28,6 +28,7 @@ from ouroboros.cli.commands.setup import (
     _set_default_repo,
 )
 from ouroboros.codex import CodexArtifactInstallResult
+from ouroboros.codex.runtime_profile import codex_uses_profile_v2
 from ouroboros.config._model_defaults import DEFAULT_OPUS_MODEL
 from ouroboros.config.models import OuroborosConfig, get_default_config
 from ouroboros.providers.base import CompletionConfig
@@ -187,6 +188,24 @@ class TestCodexSetup:
 
         with patch("ouroboros.cli.commands.setup.subprocess.run", return_value=completed):
             assert _codex_uses_profile_v2("/Applications/Codex.app/codex") is False
+
+    @pytest.mark.parametrize(
+        "failure",
+        (
+            subprocess.TimeoutExpired(["codex", "--help"], timeout=5),
+            OSError("cannot execute Codex help"),
+        ),
+    )
+    def test_shared_codex_profile_detection_preserves_unknown_failures(
+        self,
+        failure: BaseException,
+    ) -> None:
+        """Help failures are unknown and must not be reported as legacy evidence."""
+
+        def failing_run(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            raise failure
+
+        assert codex_uses_profile_v2("/configured/codex", run_command=failing_run) is None
 
     def test_register_codex_mcp_server_writes_guidance_comment(self, tmp_path: Path) -> None:
         """The generated Codex config should explain the config file split."""
@@ -3747,7 +3766,7 @@ class TestCodexSetup:
         assert "Setup complete!" not in result.output
 
     def test_fresh_codex_setup_installs_every_role_effort_mapping(self, tmp_path: Path) -> None:
-        """Generated legacy defaults are not user pins that suppress Codex roles."""
+        """Fresh config is model-neutral while Codex role defaults stay effective."""
         config_dir = tmp_path / ".ouroboros"
         config_dir.mkdir()
 
@@ -3762,6 +3781,20 @@ class TestCodexSetup:
             setup_cmd._setup_codex("/usr/local/bin/codex")
 
         config_dict = yaml.safe_load((config_dir / "config.yaml").read_text(encoding="utf-8"))
+        assert "qa_model" not in config_dict["llm"]
+        assert "dependency_analysis_model" not in config_dict["llm"]
+        assert "ontology_analysis_model" not in config_dict["llm"]
+        assert "context_compression_model" not in config_dict["llm"]
+        assert "default_model" not in config_dict["clarification"]
+        assert "semantic_model" not in config_dict["evaluation"]
+        assert "assertion_extraction_model" not in config_dict["evaluation"]
+        assert "wonder_model" not in config_dict["resilience"]
+        assert "reflect_model" not in config_dict["resilience"]
+        assert "models" not in config_dict["consensus"]
+        assert "advocate_model" not in config_dict["consensus"]
+        assert "devil_model" not in config_dict["consensus"]
+        assert "judge_model" not in config_dict["consensus"]
+
         role_profiles = config_dict["llm_role_profiles"]
         assert role_profiles == setup_cmd._CODEX_DEFAULT_LLM_ROLE_PROFILES
         for profile_name in set(role_profiles.values()):
@@ -3769,6 +3802,19 @@ class TestCodexSetup:
                 "reasoning_effort"
             ]
             assert effort in {"low", "medium", "high", "xhigh"}
+
+        from ouroboros.config.loader import get_qa_model, load_config
+
+        loaded = load_config(config_dir / "config.yaml")
+        with patch("ouroboros.config.loader.load_config", return_value=loaded):
+            assert get_qa_model(backend="codex") == "default"
+        with patch("ouroboros.providers.profiles.load_config", return_value=loaded):
+            resolved = resolve_completion_profile(
+                CompletionConfig(model="default", role="qa"),
+                backend="codex",
+            )
+        assert resolved.config.model == "default"
+        assert resolved.config.reasoning_effort == "xhigh"
 
     def test_existing_default_config_installs_every_role_effort_mapping(self) -> None:
         """Serialized shipped defaults must not suppress Codex effort profiles."""
@@ -4102,6 +4148,31 @@ class TestCodexSetup:
         assert config_dict["llm"]["backend"] == "codex"
         assert config_dict["llm"]["qa_model"] == "claude-sonnet-4-20250514"
         assert config_dict["llm_role_profiles"]["qa"] == "frontier"
+
+    def test_setup_codex_preserves_existing_custom_consensus_roster(self, tmp_path: Path) -> None:
+        """A user-authored consensus roster remains a pin across Codex setup."""
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        custom_roster = ["vendor/alpha", "vendor/beta", "vendor/gamma"]
+        config_path.write_text(
+            yaml.safe_dump({"consensus": {"models": custom_roster}}, sort_keys=False),
+            encoding="utf-8",
+        )
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch("ouroboros.cli.commands.setup._install_codex_artifacts"),
+            patch("ouroboros.cli.commands.setup._register_codex_mcp_server"),
+            patch("ouroboros.cli.commands.setup._retire_codex_default_profiles"),
+            patch("ouroboros.cli.commands.setup._register_codex_worker_profile"),
+        ):
+            assert setup_cmd._setup_codex("/usr/local/bin/codex") is True
+
+        config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert config_dict["consensus"]["models"] == custom_roster
+        assert "consensus_vote" not in config_dict["llm_role_profiles"]
 
     def test_setup_codex_merges_codex_mapping_into_existing_profiles(self, tmp_path: Path) -> None:
         """Existing same-name profiles should be made safe before role mappings target them."""

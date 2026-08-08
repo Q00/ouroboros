@@ -77,6 +77,7 @@ from ouroboros.harness.claim_term_guard import strict_deterministic_claim_term_g
 from ouroboros.harness.deliver_gate import (
     DeliverEvidenceClaim,
     DeliverEvidenceFact,
+    _journal_entry_proves_command_artifact,
     evaluate_deliver_claim,
     load_ac_evidence_manifest,
 )
@@ -416,6 +417,10 @@ from ouroboros.orchestrator.verifier import (
     VerifierContractError,
     VerifierVerdict,
     verifier_operational_failure_verdict,
+)
+from ouroboros.orchestrator.workspace_evidence_paths import (
+    is_untracked_top_level_evidence_path,
+    load_tracked_workspace_paths,
 )
 
 _PARALLEL_PAUSE_REPLAY_PAGE_SIZE = 64
@@ -1434,7 +1439,9 @@ def _standard_deliver_facts(
                 continue
             seen.add(dedupe_key)
             matches = (
-                _matching_journal_entries(manifest, field=field, value=match_value)
+                _matching_journal_entries(
+                    manifest, field=field, value=match_value, task_cwd=task_cwd
+                )
                 if eligible
                 else ()
             )
@@ -1486,6 +1493,7 @@ def _matching_journal_entries(
     *,
     field: str,
     value: str,
+    task_cwd: str | None = None,
 ) -> tuple[EvidenceEntry, ...]:
     matches: list[EvidenceEntry] = []
     for entry in manifest.entries:
@@ -1494,6 +1502,11 @@ def _matching_journal_entries(
         payload = entry.payload
         tool_name = payload.get("tool_name")
         if field == "files_touched":
+            if tool_name == "Bash" and _journal_entry_proves_command_artifact(
+                entry, relative_path=value, task_cwd=task_cwd
+            ):
+                matches.append(entry)
+                continue
             if tool_name not in _FILE_MUTATION_TOOLS:
                 continue
             observed = payload.get("workspace_relative_path")
@@ -5146,18 +5159,24 @@ class ParallelACExecutor:
                     for declared in declared_paths
                 )
 
+            tracked_paths = load_tracked_workspace_paths(root)
+
             digest = hashlib.sha256()
             paths = sorted(root.rglob("*"), key=lambda path: path.as_posix())
             for path in paths:
                 relative = path.relative_to(root)
                 declared_contract_path = is_declared_contract_path(relative)
                 if (
-                    any(
+                    is_untracked_top_level_evidence_path(
+                        relative,
+                        tracked_paths=tracked_paths,
+                        is_directory=path.is_dir() and not path.is_symlink(),
+                    )
+                    or any(
                         part in _WORKSPACE_FINGERPRINT_IGNORED_DIRECTORIES
                         for part in relative.parts
                     )
-                    and not declared_contract_path
-                ):
+                ) and not declared_contract_path:
                     continue
                 try:
                     stat = path.lstat()

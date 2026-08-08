@@ -56,8 +56,18 @@ from ouroboros.cli.opencode_config import (
 from ouroboros.cli.opencode_config import (
     is_bridge_plugin_entry as _is_bridge_plugin_entry,
 )
+from ouroboros.cli.setup_model_config import (
+    has_explicit_codex_model_override as _has_explicit_codex_model_override,
+)
+from ouroboros.cli.setup_model_config import (
+    is_shipped_default_roster as _is_shipped_default_roster,
+)
+from ouroboros.cli.setup_model_config import (
+    neutralize_fresh_codex_model_defaults as _neutralize_fresh_codex_model_defaults,
+)
 from ouroboros.codex.cli_policy import resolve_codex_cli_path
 from ouroboros.codex.home import resolve_codex_home
+from ouroboros.codex.runtime_profile import codex_uses_profile_v2 as _shared_codex_uses_profile_v2
 from ouroboros.config._model_defaults import (
     DEFAULT_CONSENSUS_OPUS_MODEL,
     DEFAULT_OPUS_MODEL,
@@ -476,37 +486,6 @@ _CODEX_DEFAULT_LLM_ROLE_PROFILES: dict[str, str] = {
     "agent_runtime_interview": "deep",
     "agent_runtime_coordinator": "standard",
     "agent_runtime_evaluation": "deep",
-}
-
-_DEFAULT_CONSENSUS_MODELS = (
-    "openrouter/openai/gpt-4o",
-    DEFAULT_CONSENSUS_OPUS_MODEL,
-    "openrouter/google/gemini-2.5-pro",
-)
-
-_MISSING = object()
-
-_CODEX_ROLE_MODEL_OVERRIDE_DEFAULTS: dict[str, tuple[tuple[tuple[str, ...], object], ...]] = {
-    "ambiguity": ((("clarification", "default_model"), DEFAULT_OPUS_MODEL),),
-    "assertion_extraction": ((("evaluation", "assertion_extraction_model"), DEFAULT_SONNET_MODEL),),
-    "brownfield_explore": ((("clarification", "default_model"), DEFAULT_OPUS_MODEL),),
-    "clarification": ((("clarification", "default_model"), DEFAULT_OPUS_MODEL),),
-    "consensus_advocate": ((("consensus", "advocate_model"), DEFAULT_CONSENSUS_OPUS_MODEL),),
-    "consensus_judge": ((("consensus", "judge_model"), "openrouter/google/gemini-2.5-pro"),),
-    "consensus_vote": ((("consensus", "models"), _DEFAULT_CONSENSUS_MODELS),),
-    "context_compression": ((("llm", "context_compression_model"), "gpt-4"),),
-    "dependency_analysis": ((("llm", "dependency_analysis_model"), DEFAULT_SONNET_MODEL),),
-    "mechanical_detection": ((("evaluation", "assertion_extraction_model"), DEFAULT_SONNET_MODEL),),
-    "ontology_analysis": (
-        (("llm", "ontology_analysis_model"), DEFAULT_SONNET_MODEL),
-        (("consensus", "devil_model"), "openrouter/openai/gpt-4o"),
-    ),
-    "pm_interview": ((("clarification", "default_model"), DEFAULT_OPUS_MODEL),),
-    "qa": ((("llm", "qa_model"), DEFAULT_SONNET_MODEL),),
-    "reflect": ((("resilience", "reflect_model"), DEFAULT_OPUS_MODEL),),
-    "seed_generation": ((("clarification", "default_model"), DEFAULT_OPUS_MODEL),),
-    "semantic_evaluation": ((("evaluation", "semantic_model"), DEFAULT_OPUS_MODEL),),
-    "wonder": ((("resilience", "wonder_model"), DEFAULT_OPUS_MODEL),),
 }
 
 
@@ -1141,43 +1120,7 @@ def _upsert_codex_mcp_section(raw: str, section: str) -> tuple[str, bool]:
 
 def _codex_uses_profile_v2(codex_path: str | None = None) -> bool:
     """Return whether ``codex --profile`` expects ``<name>.config.toml`` files."""
-    if codex_path is None:
-        return False
-
-    command = codex_path or "codex"
-    try:
-        result = subprocess.run(
-            [command, "--help"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            check=False,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-        return False
-
-    help_text = f"{result.stdout}\n{result.stderr}"
-    lines = help_text.splitlines()
-    for index, line in enumerate(lines):
-        if "--profile-v2" in line:
-            continue
-        if "--profile" not in line:
-            continue
-
-        description_lines: list[str] = []
-        for description_line in lines[index + 1 :]:
-            stripped = description_line.strip()
-            if stripped.startswith("-") or stripped.startswith("--"):
-                break
-            if stripped:
-                description_lines.append(stripped)
-        return any(
-            "Layer $CODEX_HOME/<name>.config.toml on top of the base user config"
-            in description_line
-            for description_line in description_lines
-        )
-
-    return False
+    return _shared_codex_uses_profile_v2(codex_path, run_command=subprocess.run) is True
 
 
 def _register_codex_mcp_server(
@@ -2107,41 +2050,6 @@ def _ensure_codex_profile_provider_mapping(profile: dict) -> dict:
     return provider_config
 
 
-def _get_nested_value(config_dict: dict, path: tuple[str, ...]) -> object:
-    """Read a nested config value, returning _MISSING when absent."""
-    current: object = config_dict
-    for part in path:
-        if not isinstance(current, dict) or part not in current:
-            return _MISSING
-        current = current[part]
-    return current
-
-
-def _has_explicit_codex_model_override(config_dict: dict, role: str) -> bool:
-    """Return True only when an existing legacy setting is a real user pin.
-
-    Default configs serialize their legacy model fields, including values from
-    prior shipped releases.  Field presence is consequently not provenance:
-    match the loader's shipped-default classification before deciding a field
-    should suppress the role's Codex effort profile.
-    """
-    for path, default in _CODEX_ROLE_MODEL_OVERRIDE_DEFAULTS.get(role, ()):
-        value = _get_nested_value(config_dict, path)
-        if value is _MISSING:
-            continue
-        if isinstance(default, str) and value in recognized_shipped_defaults(default):
-            continue
-        if (
-            isinstance(default, tuple)
-            and isinstance(value, (list, tuple))
-            and _is_shipped_default_roster(value, default)
-        ):
-            continue
-        if value != default:
-            return True
-    return False
-
-
 def _install_codex_default_llm_profiles(
     config_dict: dict,
     *,
@@ -2725,6 +2633,9 @@ def _setup_codex(codex_path: str, *, mcp_mode: CodexMcpMode = "auto") -> bool:
 
         llm_config = _ensure_mapping_section(config_dict, "llm")
         llm_config["backend"] = "codex"
+
+        if fresh_config:
+            _neutralize_fresh_codex_model_defaults(config_dict)
 
         added_profiles, updated_profiles, added_role_profiles = _install_codex_default_llm_profiles(
             config_dict,
@@ -3386,25 +3297,6 @@ def _apply_copilot_default_model(
             and _is_shipped_default_roster(current, shipped_default)
         ):
             section[key] = list(model_roster)
-
-
-def _is_shipped_default_roster(
-    current: list | tuple,
-    shipped_roster: tuple[str, ...],
-) -> bool:
-    """True when ``current`` is a shipped default roster (current or legacy).
-
-    Element-wise match against ``recognized_shipped_defaults`` so a roster
-    persisted before a pin bump (e.g. the old OpenRouter Opus slug in the
-    consensus slot) is still recognized as an untouched shipped default.
-    """
-    current_tuple = tuple(current)
-    if len(current_tuple) != len(shipped_roster):
-        return False
-    return all(
-        str(candidate) in recognized_shipped_defaults(default)
-        for candidate, default in zip(current_tuple, shipped_roster, strict=True)
-    )
 
 
 def _setup_copilot(copilot_path: str, *, non_interactive: bool = False) -> bool:
