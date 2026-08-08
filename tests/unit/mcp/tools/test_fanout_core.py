@@ -24,6 +24,7 @@ from ouroboros.mcp.tools.authoring_handlers import (
     _attach_question_assist_requests,
 )
 from ouroboros.mcp.tools.evaluation_handlers import (
+    FetchArtifactHandler,
     LateralThinkHandler,
     SubmitFanoutResultsHandler,
 )
@@ -971,6 +972,14 @@ async def test_submit_tool_requires_fanout_id() -> None:
     submit = SubmitFanoutResultsHandler()
     result = await submit.handle({"results": []})
     assert result.is_err
+
+
+@pytest.mark.asyncio
+async def test_fetch_tool_without_project_artifact_service_fails_closed() -> None:
+    result = await FetchArtifactHandler().handle({"contract_id": "fanout:missing"})
+
+    assert result.is_err
+    assert "requires a configured project artifact service" in str(result.error)
 
 
 @pytest.mark.asyncio

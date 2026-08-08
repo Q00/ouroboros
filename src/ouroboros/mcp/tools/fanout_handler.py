@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 import hashlib
 import json
@@ -27,6 +28,7 @@ from ouroboros.mcp.types import (
 )
 from ouroboros.orchestrator.agent_process import AgentProcessHandle
 from ouroboros.orchestrator.disposable_memory import DisposableMemory
+from ouroboros.persistence.artifact_errors import ArtifactStoreError
 
 log = structlog.get_logger(__name__)
 
@@ -77,7 +79,7 @@ class SubmitFanoutResultsHandler:
                 "at all is exactly {key, undispatched: true}; never invent output. "
                 "Missing required keys return `status=partial`; retry with EVERY lane. "
                 "A complete submission returns a bounded disposable artifact envelope; "
-                "fetch its body explicitly with `ouroboros artifacts fetch CONTRACT_ID`."
+                "fetch its body with the MCP tool `ouroboros_fetch_artifact`."
             ),
             parameters=(
                 MCPToolParameter(
@@ -204,6 +206,82 @@ class SubmitFanoutResultsHandler:
         return envelope.model_dump(mode="json")
 
 
+@dataclass
+class FetchArtifactHandler:
+    """Expose explicit disposable-artifact reads to MCP-only hosts."""
+
+    disposable_memory: DisposableMemory | None = field(default=None, repr=False)
+
+    @property
+    def definition(self) -> MCPToolDefinition:
+        """Return the public explicit-fetch contract."""
+        return MCPToolDefinition(
+            name="ouroboros_fetch_artifact",
+            description=(
+                "Fetch and integrity-check a disposable Ouroboros artifact by the "
+                "contract_id returned in an artifact envelope. For fan-out completion, "
+                "continue from the synthesis in the returned `body`. This is an explicit "
+                "read and never re-executes the originating work."
+            ),
+            parameters=(
+                MCPToolParameter(
+                    name="contract_id",
+                    type=ToolInputType.STRING,
+                    description="The contract_id from a disposable artifact envelope.",
+                    required=True,
+                ),
+            ),
+        )
+
+    async def handle(
+        self,
+        arguments: dict[str, Any],
+    ) -> Result[MCPToolResult, MCPServerError]:
+        """Fetch one verified body without requiring shell access."""
+        contract_id = str(arguments.get("contract_id") or "").strip()
+        if not contract_id:
+            return Result.err(
+                MCPToolError(
+                    "contract_id is required",
+                    tool_name="ouroboros_fetch_artifact",
+                )
+            )
+        if self.disposable_memory is None:
+            return Result.err(
+                MCPToolError(
+                    "artifact fetch requires a configured project artifact service",
+                    tool_name="ouroboros_fetch_artifact",
+                )
+            )
+        try:
+            fetched = await asyncio.to_thread(self.disposable_memory.fetch, contract_id)
+        except (ArtifactStoreError, OSError, ValueError) as exc:
+            return Result.err(
+                MCPToolError(
+                    f"artifact fetch failed: {exc}",
+                    tool_name="ouroboros_fetch_artifact",
+                )
+            )
+
+        payload = {
+            "contract_id": fetched.envelope.contract_id,
+            "artifact_ref": fetched.envelope.artifact_ref,
+            "body": fetched.body,
+        }
+        return Result.ok(
+            MCPToolResult(
+                content=(
+                    MCPContentItem(
+                        type=ContentType.TEXT,
+                        text=json.dumps(payload, ensure_ascii=False, sort_keys=True),
+                    ),
+                ),
+                is_error=False,
+                meta=payload,
+            )
+        )
+
+
 def create_fanout_handler(
     fanout_registry: FanoutRegistry,
     project_dir: Any,
@@ -221,4 +299,31 @@ def create_fanout_handler(
     )
 
 
-__all__ = ["SubmitFanoutResultsHandler", "create_fanout_handler"]
+def create_artifact_fetch_handler(project_dir: Any) -> FetchArtifactHandler:
+    """Build the production explicit-fetch boundary for a resolved workspace."""
+    from ouroboros.persistence.artifact_store import ContentAddressedArtifactStore
+
+    return FetchArtifactHandler(
+        disposable_memory=DisposableMemory(
+            artifact_store=ContentAddressedArtifactStore.for_project(project_dir),
+        )
+    )
+
+
+def create_fanout_handlers(
+    fanout_registry: FanoutRegistry,
+    project_dir: Any,
+    event_store: Any,
+) -> tuple[SubmitFanoutResultsHandler, FetchArtifactHandler]:
+    """Build the paired submit/fetch production boundary for one workspace."""
+    submit = create_fanout_handler(fanout_registry, project_dir, event_store)
+    return submit, FetchArtifactHandler(disposable_memory=submit.disposable_memory)
+
+
+__all__ = [
+    "FetchArtifactHandler",
+    "SubmitFanoutResultsHandler",
+    "create_artifact_fetch_handler",
+    "create_fanout_handler",
+    "create_fanout_handlers",
+]

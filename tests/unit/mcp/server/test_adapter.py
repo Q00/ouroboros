@@ -2960,6 +2960,7 @@ async def test_production_fanout_returns_only_disposable_envelope(
         project_dir=project,
     )
     handler = server._tool_handlers["ouroboros_submit_fanout_results"]
+    fetch_handler = server._tool_handlers["ouroboros_fetch_artifact"]
     assert handler.disposable_memory is not None
     assert handler.disposable_memory.artifact_store.root == (
         project.resolve() / ".ouroboros" / "artifacts"
@@ -3005,8 +3006,11 @@ async def test_production_fanout_returns_only_disposable_envelope(
         assert marker not in first_result.content[0].text
         assert marker not in json.dumps(first_result.meta)
 
-        fetched = handler.disposable_memory.fetch(envelope.contract_id)
-        assert marker in json.dumps(fetched.body)
+        fetched = await fetch_handler.handle({"contract_id": envelope.contract_id})
+        assert fetched.is_ok
+        fetched_body = fetched.unwrap().meta["body"]
+        assert marker in json.dumps(fetched_body)
+        assert fetched_body["status"] == "complete"
         events = await event_store.replay("contract", envelope.contract_id)
         assert len(events) == 1
         assert marker not in json.dumps(events[0].data)
