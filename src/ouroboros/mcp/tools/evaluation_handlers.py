@@ -29,7 +29,7 @@ from ouroboros.core.seed import AcceptanceCriterionSpec, Seed, ac_text
 from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.job_manager import JobLinks, JobManager
-from ouroboros.mcp.tools.background import start_background_tool_job
+from ouroboros.mcp.tools import background as background_jobs
 from ouroboros.mcp.tools.bridge_mixin import BridgeAwareMixin
 from ouroboros.mcp.tools.job_observer import build_job_observer_contract
 from ouroboros.mcp.tools.subagent import (
@@ -2166,7 +2166,7 @@ class StartEvaluateHandler:
         from ouroboros.mcp.tools.evaluation_job import restore_seed_handoff
 
         try:
-            arguments = restore_seed_handoff(
+            arguments, seed_handoff = restore_seed_handoff(
                 arguments, session_id=session_id, registry=self.seed_handoff_registry
             )
         except ValueError as exc:
@@ -2179,6 +2179,7 @@ class StartEvaluateHandler:
                 arguments, configured_enabled=get_auto_evolve_enabled()
             )
         except ValueError as exc:
+            seed_handoff.rollback()
             return Result.err(MCPToolError(str(exc), tool_name="ouroboros_start_evaluate"))
 
         # --- Subagent dispatch: gate on runtime + opencode_mode ---
@@ -2190,23 +2191,19 @@ class StartEvaluateHandler:
         if plugin_dispatch and not auto_evolve_enabled:
             from ouroboros.mcp.tools.evaluation_job import dispatch_plugin_evaluation
 
-            return await dispatch_plugin_evaluation(
-                arguments=arguments,
-                session_id=session_id,
-                artifact=artifact,
-                event_store=self._event_store,
-                resolve_working_dir=_resolve_evaluate_working_dir,
+            return await seed_handoff.accept(
+                dispatch_plugin_evaluation(
+                    arguments=arguments,
+                    session_id=session_id,
+                    artifact=artifact,
+                    event_store=self._event_store,
+                    resolve_working_dir=_resolve_evaluate_working_dir,
+                ),
+                require_ok=True,
+                cancellation_may_have_accepted=False,
             )
 
-        # Fall-through: real background job path.
-        #
-        # NOTE: this path now routes through ``start_background_tool_job``,
-        # which gives StartEvaluate the same job-scoped ``cancel_key`` and
-        # AgentProcess ``process_id`` as evolve/execute/ralph.  Before this
-        # extraction StartEvaluate passed neither, so the durable
-        # ``mcp_job:{job_id}`` cancel marker written by
-        # ``JobManager.cancel_job`` was never observable by the evaluate
-        # agent process — a restart-visible cancel was silently dropped.
+        # The shared helper preserves job-scoped cancellation across restart.
         async def _runner(_handle) -> MCPToolResult:
             from ouroboros.mcp.tools.evaluation_job import run_evaluation_job
 
@@ -2222,29 +2219,32 @@ class StartEvaluateHandler:
                 start_ralph_handler=self.start_ralph_handler,
             )
 
-        snapshot = await start_background_tool_job(
-            job_manager=self._job_manager,
-            event_store=self._event_store,
-            job_type="evaluate",
-            intent="evaluate",
-            process_scope=f"evaluate:{session_id}",
-            initial_message=f"Queued evaluation for {session_id}",
-            links=JobLinks(session_id=session_id),
-            work_fn=_runner,
-            cancelled_text="Evaluation cancelled before work began.",
-            detached_tool_name="ouroboros_start_evaluate",
-            detached_arguments=arguments,
-            runtime_backend=self.agent_runtime_backend,
-            llm_backend=self.llm_backend,
-            opencode_mode=self.opencode_mode,
+        background_acceptance = background_jobs.BackgroundJobAcceptanceState()
+        snapshot = await seed_handoff.accept(
+            background_jobs.start_background_tool_job(
+                job_manager=self._job_manager,
+                event_store=self._event_store,
+                job_type="evaluate",
+                intent="evaluate",
+                process_scope=f"evaluate:{session_id}",
+                initial_message=f"Queued evaluation for {session_id}",
+                links=JobLinks(session_id=session_id),
+                work_fn=_runner,
+                cancelled_text="Evaluation cancelled before work began.",
+                detached_tool_name="ouroboros_start_evaluate",
+                detached_arguments=arguments,
+                runtime_backend=self.agent_runtime_backend,
+                llm_backend=self.llm_backend,
+                opencode_mode=self.opencode_mode,
+                acceptance_state=background_acceptance,
+            ),
+            cancellation_may_have_accepted=(background_acceptance.cancellation_may_have_accepted),
         )
 
         text = (
-            f"Started background evaluation.\n\n"
-            f"Job ID: {snapshot.job_id}\n"
-            f"Session ID: {session_id}\n\n"
-            "Use ouroboros_job_status, ouroboros_job_wait, or ouroboros_job_result "
-            "to monitor it."
+            f"Started background evaluation.\n\nJob ID: {snapshot.job_id}\n"
+            f"Session ID: {session_id}\n\nUse ouroboros_job_status, ouroboros_job_wait, "
+            "or ouroboros_job_result to monitor it."
         )
         meta = {
             "job_id": snapshot.job_id,

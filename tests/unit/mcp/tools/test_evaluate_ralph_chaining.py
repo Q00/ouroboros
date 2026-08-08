@@ -383,19 +383,32 @@ async def test_server_composition_reuses_configured_chain_handlers(
     assert start_evaluate.start_ralph_handler._evolve_handler.evolutionary_loop is not None
 
 
+def _builtin_runtime(
+    runtime_backend: str,
+    opencode_mode: str | None = None,
+) -> Any:
+    if runtime_backend == "codex":
+        from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime
+
+        return CodexCliRuntime(cli_path="codex")
+    if runtime_backend == "hermes":
+        from ouroboros.orchestrator.hermes_runtime import HermesCliRuntime
+
+        return HermesCliRuntime(cli_path="hermes")
+    if runtime_backend == "opencode":
+        from ouroboros.orchestrator.opencode_runtime import OpenCodeRuntime
+
+        return OpenCodeRuntime(cli_path="opencode", opencode_mode=opencode_mode)
+
+    raise AssertionError(f"unsupported builtin test runtime: {runtime_backend}")
+
+
 def _builtin_runtime_tools(
     runtime_backend: str,
     opencode_mode: str | None = None,
 ) -> tuple[Any, ...]:
-    if runtime_backend == "codex":
-        from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime
-
-        runtime = CodexCliRuntime(cli_path="codex")
-        return tuple(runtime._get_builtin_mcp_handlers().values())
-    if runtime_backend == "hermes":
-        from ouroboros.orchestrator.hermes_runtime import HermesCliRuntime
-
-        runtime = HermesCliRuntime(cli_path="hermes")
+    if runtime_backend in {"codex", "hermes", "opencode"}:
+        runtime = _builtin_runtime(runtime_backend, opencode_mode)
         return tuple(runtime._get_builtin_mcp_handlers().values())
 
     from ouroboros.mcp.tools.definitions import get_ouroboros_tools
@@ -405,6 +418,22 @@ def _builtin_runtime_tools(
         opencode_mode=opencode_mode,
         include_auto=False,
     )
+
+
+def test_ownerless_opencode_factory_stays_lightweight_and_side_effect_free() -> None:
+    from ouroboros.mcp.tools.definitions import get_ouroboros_tools
+
+    with patch("ouroboros.mcp.server.adapter.create_ouroboros_server") as create_server:
+        tools = get_ouroboros_tools(
+            runtime_backend="opencode",
+            opencode_mode="plugin",
+            include_auto=False,
+        )
+
+    start_evaluate = next(tool for tool in tools if isinstance(tool, StartEvaluateHandler))
+    create_server.assert_not_called()
+    assert type(tools) is tuple
+    assert start_evaluate.start_ralph_handler is None
 
 
 @pytest.mark.parametrize(
@@ -442,6 +471,82 @@ def test_runtime_factory_reuses_configured_parent_owned_convergence_graph(
     assert start_execute._event_store is start_evaluate._event_store
     assert execute.seed_handoff_registry is start_execute.seed_handoff_registry
     assert execute.seed_handoff_registry is start_evaluate.seed_handoff_registry
+
+
+@pytest.mark.parametrize(
+    ("runtime_backend", "opencode_mode"),
+    [("codex", None), ("hermes", None), ("opencode", "plugin")],
+)
+def test_builtin_composition_reuses_canonicalized_runtime_owner(
+    runtime_backend: str,
+    opencode_mode: str | None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Handle aliases such as codex_cli must not materialize a nested runtime."""
+    runtime = _builtin_runtime(runtime_backend, opencode_mode)
+
+    def unexpected_runtime_factory(**_: Any) -> Any:
+        raise AssertionError("configured composition replaced its injected runtime owner")
+
+    monkeypatch.setattr(
+        "ouroboros.orchestrator.create_agent_runtime",
+        unexpected_runtime_factory,
+    )
+
+    handlers = runtime._get_builtin_mcp_handlers()
+
+    assert handlers
+    assert runtime._builtin_mcp_tool_composition is not None
+
+
+@pytest.mark.parametrize(
+    ("runtime_backend", "opencode_mode"),
+    [("codex", None), ("hermes", None), ("opencode", "plugin")],
+)
+async def test_builtin_runtime_owns_and_shuts_down_composed_resources(
+    runtime_backend: str,
+    opencode_mode: str | None,
+) -> None:
+    runtime = _builtin_runtime(runtime_backend, opencode_mode)
+    runtime._get_builtin_mcp_handlers()
+    composition = runtime._builtin_mcp_tool_composition
+    assert composition is not None
+    close_order: list[str] = []
+
+    async def drain() -> None:
+        close_order.append("drain")
+
+    async def shutdown() -> None:
+        close_order.append("shutdown")
+
+    composition.server_owner.job_manager.drain = AsyncMock(side_effect=drain)
+    composition.server_owner.shutdown = AsyncMock(side_effect=shutdown)
+
+    await runtime.aclose()
+    await composition.shutdown()
+
+    composition.server_owner.job_manager.drain.assert_awaited_once()
+    composition.server_owner.shutdown.assert_awaited_once()
+    assert close_order == ["drain", "shutdown"]
+    assert runtime._builtin_mcp_handlers is None
+    assert runtime._builtin_mcp_tool_composition is None
+    assert runtime.aclose is None
+
+
+async def test_builtin_runtime_preserves_composition_owner_when_shutdown_fails() -> None:
+    runtime = _builtin_runtime("codex")
+    handlers = runtime._get_builtin_mcp_handlers()
+    composition = runtime._builtin_mcp_tool_composition
+    assert composition is not None
+    composition.server_owner.job_manager.drain = AsyncMock(side_effect=RuntimeError("drain"))
+    composition.server_owner.shutdown = AsyncMock()
+
+    with pytest.raises(RuntimeError, match="drain"):
+        await runtime.aclose()
+
+    composition.server_owner.shutdown.assert_not_awaited()
+    assert runtime._builtin_mcp_handlers is handlers
+    assert runtime._builtin_mcp_tool_composition is composition
 
 
 @pytest.mark.parametrize("runtime_backend", ["codex", "hermes"])

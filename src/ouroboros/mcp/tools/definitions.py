@@ -476,9 +476,10 @@ def get_ouroboros_tools(
     resolved_manager, resolved_prefix = _resolve_bridge_fields(
         context, mcp_manager, mcp_tool_prefix
     )
-    needs_configured_runtime_graph = (
-        runtime_adapter is not None and runtime_backend in {"codex", "hermes"}
-    ) or (runtime_backend == "opencode" and opencode_mode == "plugin")
+    needs_configured_runtime_graph = runtime_adapter is not None and (
+        runtime_backend in {"codex", "hermes"}
+        or (runtime_backend == "opencode" and opencode_mode == "plugin")
+    )
     if needs_configured_runtime_graph and (
         resolved_manager is None or (context is not None and context.mcp_bridge is not None)
     ):
