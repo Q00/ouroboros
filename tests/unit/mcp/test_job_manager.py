@@ -16,6 +16,7 @@ from ouroboros.events.lineage import lineage_generation_watchdog_decision
 from ouroboros.mcp import job_manager as job_manager_module
 from ouroboros.mcp.job_manager import JobLinks, JobManager, JobSnapshot, JobStatus
 from ouroboros.mcp.tools import job_handlers as job_handlers_module
+from ouroboros.mcp.tools import job_wait_guard as job_wait_guard_module
 from ouroboros.mcp.tools.job_handlers import (
     JobResultHandler,
     JobStatusHandler,
@@ -1564,7 +1565,7 @@ class TestJobManager:
                 stopped.set()
 
         outer = asyncio.create_task(
-            job_handlers_module._await_job_wait_branch(
+            job_wait_guard_module.await_job_wait_branch(
                 _blocking_wait(),
                 timeout=60,
                 job_id="job_cancel_wait",
@@ -4384,11 +4385,30 @@ class TestJobManager:
         assert result.value.meta["cursor"] == fresh_snapshot.cursor
         assert "live_snapshot" not in result.value.meta
 
-    async def test_job_wait_wall_clock_timeout_returns_pollable_result(
+    async def test_job_wait_zero_timeout_returns_delayed_authoritative_snapshot(
         self, tmp_path, monkeypatch
     ) -> None:
         store = _build_store(tmp_path)
         monkeypatch.setattr(job_handlers_module, "_JOB_WAIT_RESPONSE_GRACE_SECONDS", 0.01)
+        snapshot = JobSnapshot(
+            job_id="job_wait_slow",
+            job_type="auto",
+            status=JobStatus.RUNNING,
+            message="Running auto",
+            created_at=datetime(2026, 4, 22, tzinfo=UTC),
+            updated_at=datetime(2026, 4, 22, tzinfo=UTC),
+            cursor=4,
+            links=JobLinks(session_id="auto_slow_snapshot"),
+        )
+
+        async def forbidden_long_poll_guard(*_args, **_kwargs):
+            raise AssertionError("zero-time snapshot reads must bypass the long-poll guard")
+
+        monkeypatch.setattr(
+            job_wait_guard_module,
+            "await_job_wait_branch",
+            forbidden_long_poll_guard,
+        )
 
         class SlowJobManager:
             async def wait_for_change(
@@ -4401,27 +4421,37 @@ class TestJobManager:
                 assert job_id == "job_wait_slow"
                 assert cursor == 0
                 assert timeout_seconds == 0
-                await asyncio.sleep(1)
-                raise AssertionError("job_wait should time out before this returns")
+                await asyncio.sleep(1.05)
+                return snapshot, False
 
         handler = JobWaitHandler(event_store=store, job_manager=SlowJobManager())
-        started = asyncio.get_running_loop().time()
         result = await handler.handle({"job_id": "job_wait_slow", "timeout_seconds": 0})
-        elapsed = asyncio.get_running_loop().time() - started
 
         assert result.is_ok
-        assert elapsed < 0.5
         assert result.value.is_error is False
         assert result.value.meta["job_id"] == "job_wait_slow"
-        assert result.value.meta["wait_timed_out"] is True
+        assert result.value.meta["cursor"] == 4
+        assert result.value.meta["status"] == JobStatus.RUNNING.value
         assert result.value.meta["result_available"] is False
+        assert "job_wait timed out before producing a snapshot" not in result.value.text_content
 
     async def test_job_wait_timeout_does_not_wait_for_cancel_resistant_branch(
         self, tmp_path, monkeypatch
     ) -> None:
         store = _build_store(tmp_path)
-        monkeypatch.setattr(job_handlers_module, "_JOB_WAIT_RESPONSE_GRACE_SECONDS", 0.01)
         released = asyncio.Event()
+        original_guard = job_wait_guard_module.await_job_wait_branch
+
+        async def short_guard(awaitable, *, timeout: float, job_id: str, branch: str):
+            assert timeout == 2.0
+            return await original_guard(
+                awaitable,
+                timeout=0.01,
+                job_id=job_id,
+                branch=branch,
+            )
+
+        monkeypatch.setattr(job_wait_guard_module, "await_job_wait_branch", short_guard)
 
         class CancelResistantJobManager:
             async def wait_for_change(
@@ -4433,7 +4463,7 @@ class TestJobManager:
             ) -> tuple[JobSnapshot, bool]:
                 assert job_id == "job_wait_cancel_resistant"
                 assert cursor == 0
-                assert timeout_seconds == 0
+                assert timeout_seconds == 1
                 try:
                     await asyncio.sleep(1)
                 except asyncio.CancelledError:
@@ -4443,7 +4473,7 @@ class TestJobManager:
 
         handler = JobWaitHandler(event_store=store, job_manager=CancelResistantJobManager())
         started = asyncio.get_running_loop().time()
-        result = await handler.handle({"job_id": "job_wait_cancel_resistant", "timeout_seconds": 0})
+        result = await handler.handle({"job_id": "job_wait_cancel_resistant", "timeout_seconds": 1})
         elapsed = asyncio.get_running_loop().time() - started
         released.set()
         await asyncio.sleep(0)
