@@ -333,12 +333,10 @@ Arguments:
     [from-data] active subscriptions by plan, last 90 days: standard 12,480 / premium 3,120.
 ```
 
-**One call, not two.** The server records the answer, then the evidence, then
-generates the next question — so the evidence reaches the generator in time to
-inform that question, which is the only reason to record it. Sent on a later
-call it arrives after the next question was already written, and it lands in the
-round stream at the point where the pending question is, which is how a decision
-ends up filed against the evidence instead of against its question.
+**One call, not two.** Evidence recorded after the answer call has missed the
+question it exists to inform: that call already wrote the next one. Sending it
+later is not a slower version of this — it is a different thing, recorded
+against a decision it was not weighed for.
 
 **What to put there.** The lanes' findings as they reported them: no conclusion
 of your own, and nothing from a no-op lane — there was nothing weighed. If both
