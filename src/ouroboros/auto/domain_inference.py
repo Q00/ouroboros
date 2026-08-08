@@ -739,6 +739,10 @@ _WEB_APP_ARTIFACT_PHRASE_RE = re.compile(
     r"\b(?:web[\s\-]?app(?:lication)?s?|webapps?|websites?|web\s+uis?|frontends?|"
     r"front[\s\-]ends?|single[\s\-]page\s+app(?:lication)?s?)\b"
 )
+_UI_PRODUCT_HEAD_FRAGMENT = (
+    r"(?:apps?|applications?|webapps?|uis?|interfaces?|pages?|"
+    r"frontends?|sites?|websites?|dashboards?|consoles?|portals?)"
+)
 # Browser-qualified UI product heads own the artifact the way the literal
 # web-app vocabulary does (#1813 R44): in "browser-based admin portal" the
 # browser qualifier is the web signal and the UI noun is the produced
@@ -749,8 +753,33 @@ _WEB_APP_ARTIFACT_PHRASE_RE = re.compile(
 _BROWSER_QUALIFIED_UI_HEAD_RE = re.compile(
     rf"\b{_WEB_APP_GOAL_SIGNAL_FRAGMENT}"
     r"(?:[\s\-]+(?!(?:and|or|nor|but|without|with|for|about|that|which|not|no)\b)[\w'’]+){0,3}?"
-    r"[\s\-]+(?:apps?|applications?|webapps?|uis?|interfaces?|pages?|"
-    r"frontends?|sites?|websites?|dashboards?|consoles?|portals?)[\s.!?]*$"
+    rf"[\s\-]+{_UI_PRODUCT_HEAD_FRAGMENT}[\s.!?]*$"
+)
+# Ownership is word-order independent (#1813 R45): a postnominal
+# runtime/availability qualifier ("an admin portal for the browser",
+# "... that runs in the browser", "... accessible from a browser") owns
+# the artifact when the goal's OWN head is a UI product noun and the
+# browser reference is the execution environment (bare browser tokens —
+# web-app targets stay consumer relationships, R44). The head must sit in
+# the goal's first noun phrase: a relativizer or preposition before it
+# means the UI noun belongs to another artifact's clause ("a CLI that
+# opens a page in the browser"), and an artifact noun between head and
+# qualifier re-heads the phrase ("an admin portal generator for the
+# browser").
+_OTHER_ARTIFACT_NOUN_FRAGMENT = (
+    r"(?:sdks?|librar(?:y|ies)|clis?|tools?|toolkits?|packages?|apis?|"
+    r"services?|extensions?|plugins?|generators?|scaffolders?|crawlers?|"
+    r"scrapers?|scanners?|suites?|pipelines?|companions?|bots?|scripts?|"
+    r"reports?|clients?|servers?|daemons?|wrappers?|adapters?)"
+)
+_POSTNOMINAL_BROWSER_QUALIFIER_RE = re.compile(
+    r"^(?:(?!(?:that|which|who|to|for|of|from|with|without|via|through|by|on|in|at|"
+    r"and|or|nor|but)\b)[\w'’\-]+\s+){0,5}?"
+    rf"{_UI_PRODUCT_HEAD_FRAGMENT}\s+"
+    r"(?:(?:that|which)\s+)?"
+    rf"(?:(?!(?:not|no|never|cannot|isn[’']?t|aren[’']?t|won[’']?t|can[’']?t|"
+    rf"doesn[’']?t|don[’']?t|{_OTHER_ARTIFACT_NOUN_FRAGMENT})\b)[\w'’\-]+\s+){{0,4}}?"
+    r"(?:in|inside|within|for|from|through|via|on)\s+(?:an?\s+|the\s+)?browsers?\b"
 )
 
 
@@ -814,6 +843,14 @@ def _goal_artifact_head_is_web_app(goal_text: str) -> bool:
     # otherwise behead a coordinated denial at its first comma and leave
     # the surviving alternatives looking affirmative.
     core = _strip_negated_signals(goal_text, _WEB_APP_GOAL_SIGNAL_FRAGMENT)
+    # Postnominal qualifiers are consulted BEFORE clause stripping (#1813
+    # R45) — subject-clause and relational strips would otherwise remove
+    # the very qualifier ("for the browser", "that runs in the browser")
+    # that carries ownership. Similarity modifiers are normalized first so
+    # "browser-like" cannot qualify.
+    postnominal_core = _WEB_SIMILARITY_MODIFIER_RE.sub(" ", core).strip()
+    if _POSTNOMINAL_BROWSER_QUALIFIER_RE.search(postnominal_core):
+        return True
     core = _strip_consumed_dependencies(_SUBJECT_CLAUSE_RE.sub(" ", core))
     # "to test/analyze/deploy a web app" names the target of another
     # artifact, not the produced one (#1813 R28), and participial

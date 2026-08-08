@@ -2930,3 +2930,43 @@ def test_qualified_ui_heads_respect_relations_and_finality(goal: str) -> None:
     _seed_section(ledger, "runtime_context", value="Local shell / terminal")
     result = derive_domain_from_ledger(ledger)
     assert TaskClass.WEB_APP not in result.classes
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
+        "Build an admin portal for the browser",
+        "Build an admin portal that runs in the browser",
+        "Build an admin console intended for browser use",
+        "Build a customer portal accessible from a browser",
+        "Build a billing dashboard available in the browser",
+        "Build an account console served through the browser",
+    ],
+)
+def test_postnominal_browser_qualifiers_own_the_artifact(goal: str) -> None:
+    """R45 probe: ownership is word-order independent — a UI product head
+    followed by a browser runtime/availability qualifier owns the
+    artifact even when the outputs use no widget-catalog wording."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value="Role management and account administration")
+    _seed_section(ledger, "runtime_context", value="Browser")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP
+
+
+@pytest.mark.parametrize(
+    ("goal", "runtime"),
+    [
+        ("Build an admin portal generator for the browser", "Local shell / terminal"),
+        ("Build an admin portal that does not run in the browser", "Native desktop runtime"),
+    ],
+)
+def test_postnominal_qualifiers_respect_reheading_and_negation(goal: str, runtime: str) -> None:
+    """R45 guard: an artifact noun between head and qualifier re-heads
+    the phrase, and a negated runtime qualifier is not ownership."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value="Deterministic generation logs")
+    _seed_section(ledger, "runtime_context", value=runtime)
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes
