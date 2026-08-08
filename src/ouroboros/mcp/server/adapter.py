@@ -1664,6 +1664,7 @@ def create_ouroboros_server(
         StartEvolveStepHandler,
         StartExecuteSeedHandler,
         StartRalphHandler,
+        create_artifact_fetch_handler,
         create_fanout_handler,
     )
     from ouroboros.mcp.tools.fanout import FanoutRegistry
@@ -2497,6 +2498,7 @@ def create_ouroboros_server(
             fanout_registry=fanout_registry,
         ),
         create_fanout_handler(fanout_registry, effective_cwd, event_store),
+        create_artifact_fetch_handler(effective_cwd),
         evolve_step,
         StartEvolveStepHandler(
             evolve_handler=evolve_step,
