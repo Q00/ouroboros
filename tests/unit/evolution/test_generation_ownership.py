@@ -29,6 +29,7 @@ from ouroboros.evolution.convergence import ConvergenceSignal
 from ouroboros.evolution.generation_claims import (
     DurableStepClaims,
     LocalStepClaims,
+    current_step_fence,
     owned_lineage_step,
     step_claims_for,
 )
@@ -262,12 +263,31 @@ async def test_fenced_cancellation_appends_no_lineage_events(tmp_path, monkeypat
     store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'evolve-fenced-writes.db'}")
     await store.initialize()
     try:
-        # A short lease keeps the default heartbeat (lease/6) fast enough
-        # for the loss to be observed promptly and deterministically. The
-        # first refresh (the creation append's ownership gate) succeeds; the
-        # heartbeat then observes the loss.
-        claims = _RecordingClaims(refresh_results=[True, False], lease_seconds=0.6)
+        loss_requested = asyncio.Event()
+        loss_observed = asyncio.Event()
+
+        class _ControlledLossClaims(_RecordingClaims):
+            """Keep ownership until the executor barrier requests its loss."""
+
+            async def refresh(self, lineage_id: str, claim_token: str) -> bool:
+                still_owner = not loss_requested.is_set()
+                if not still_owner:
+                    loss_observed.set()
+                return still_owner
+
+        # Refresh call order is intentionally irrelevant. Under xdist load
+        # the heartbeat may run before the lineage-created ownership gate;
+        # the old scripted [True, False] sequence therefore fenced before
+        # the executor barrier and made the test wait forever for `entered`.
+        claims = _ControlledLossClaims(lease_seconds=60.0)
         monkeypatch.setattr(loop_module, "step_claims_for", lambda _store: claims)
+        monkeypatch.setattr(
+            loop_module,
+            "owned_lineage_step",
+            lambda backend, lineage_id: owned_lineage_step(
+                backend, lineage_id, heartbeat_interval=0.01
+            ),
+        )
 
         config = EvolutionaryLoopConfig(
             max_generations=10,
@@ -290,9 +310,11 @@ async def test_fenced_cancellation_appends_no_lineage_events(tmp_path, monkeypat
         owner = asyncio.create_task(
             loop.evolve_step("lineage-fenced-writes", initial_seed=_make_seed())
         )
-        await asyncio.wait_for(entered.wait(), timeout=5)
+        await asyncio.wait_for(entered.wait(), timeout=30)
+        loss_requested.set()
+        await asyncio.wait_for(loss_observed.wait(), timeout=30)
 
-        owner_result = await asyncio.wait_for(owner, timeout=10)
+        owner_result = await asyncio.wait_for(owner, timeout=30)
         assert owner_result.is_err
 
         events = await store.replay_lineage("lineage-fenced-writes")
@@ -320,8 +342,18 @@ async def test_lease_lost_before_completion_append_refuses_the_write(tmp_path, m
     store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'evolve-inflight.db'}")
     await store.initialize()
     try:
-        claims = DurableStepClaims(store.database_url, lease_seconds=0.6)
+        # Silence the heartbeat so this regression controls both reclaim
+        # phases directly. It tests the commit-time token fence, not the
+        # separate heartbeat-delivery contract exercised below.
+        claims = DurableStepClaims(store.database_url, lease_seconds=600.0)
         monkeypatch.setattr(loop_module, "step_claims_for", lambda _store: claims)
+        monkeypatch.setattr(
+            loop_module,
+            "owned_lineage_step",
+            lambda backend, lineage_id: owned_lineage_step(
+                backend, lineage_id, heartbeat_interval=3600.0
+            ),
+        )
 
         executions: list[int] = []
         entered = asyncio.Event()
@@ -340,11 +372,11 @@ async def test_lease_lost_before_completion_append_refuses_the_write(tmp_path, m
         async with engine.begin() as conn:
             await conn.execute(sa_update(lineage_step_claims_table).values(refreshed_at=0.0))
         assert await claims.acquire("lineage-inflight", "reclaimer") is False
-        await asyncio.sleep(0.15)  # grace = lease/6 = 0.1s
+        await _rewind_claim(claims, refreshed_at=0.0, revoked_at=0.0)
         assert await claims.acquire("lineage-inflight", "reclaimer") is True
 
         stolen.set()
-        owner_result = await asyncio.wait_for(owner, timeout=10)
+        owner_result = await asyncio.wait_for(owner, timeout=30)
         assert owner_result.is_err, "a stale owner must not report a persisted completion"
 
         events = await store.replay_lineage("lineage-inflight")
@@ -418,14 +450,18 @@ async def test_abandoned_nonterminal_generation_is_resumed_not_skipped(tmp_path)
         await store.close()
 
 
+@pytest.mark.parametrize("_attempt", range(8))
 @pytest.mark.asyncio
-async def test_revocation_fences_the_owner_before_takeover(tmp_path, monkeypatch) -> None:
+async def test_revocation_fences_the_owner_before_takeover(
+    tmp_path, monkeypatch, _attempt: int
+) -> None:
     """Phase one of a reclaim stops the owner inside the grace window.
 
     A revoked lease refuses the owner's refresh, so a scheduling owner is
     fenced and aborted before the reclaimer's takeover CAS can succeed —
     the successor never runs alongside the stale executor.
     """
+    from sqlalchemy import select as sa_select
     from sqlalchemy import update as sa_update
 
     from ouroboros.evolution import loop as loop_module
@@ -437,7 +473,24 @@ async def test_revocation_fences_the_owner_before_takeover(tmp_path, monkeypatch
     try:
         # Keep expiry far beyond scheduler noise; drive revocation explicitly
         # below while retaining a fast heartbeat for prompt fence delivery.
-        claims = DurableStepClaims(store.database_url, lease_seconds=60.0)
+        class _ObservableClaims(DurableStepClaims):
+            """Pause the owner immediately before its durable heartbeat."""
+
+            def __init__(self, database_url: str) -> None:
+                super().__init__(database_url, lease_seconds=60.0)
+                self.heartbeat_entered = asyncio.Event()
+                self.release_heartbeat = asyncio.Event()
+                self.revocation_observed = asyncio.Event()
+
+            async def refresh(self, lineage_id: str, claim_token: str) -> bool:
+                self.heartbeat_entered.set()
+                await self.release_heartbeat.wait()
+                still_owner = await super().refresh(lineage_id, claim_token)
+                if not still_owner:
+                    self.revocation_observed.set()
+                return still_owner
+
+        claims = _ObservableClaims(store.database_url)
         monkeypatch.setattr(loop_module, "step_claims_for", lambda _store: claims)
         monkeypatch.setattr(
             loop_module,
@@ -456,16 +509,58 @@ async def test_revocation_fences_the_owner_before_takeover(tmp_path, monkeypatch
             owner_loop.evolve_step("lineage-revoke", initial_seed=_make_seed())
         )
         await asyncio.wait_for(entered.wait(), timeout=5)
+        await asyncio.wait_for(claims.heartbeat_entered.wait(), timeout=5)
 
         engine = await claims._engine_once()
+        async with engine.connect() as conn:
+            owner_row = (
+                await conn.execute(
+                    sa_select(
+                        lineage_step_claims_table.c.claim_token,
+                        lineage_step_claims_table.c.revoking_token,
+                        lineage_step_claims_table.c.revoked_at,
+                    ).where(lineage_step_claims_table.c.lineage_id == "lineage-revoke")
+                )
+            ).one()
+        owner_token = owner_row.claim_token
+        assert owner_row.revoking_token is None
+        assert owner_row.revoked_at is None
+
+        # The owner heartbeat is paused before its durable refresh, so the
+        # exact row age below cannot be raced back to fresh before phase one.
         async with engine.begin() as conn:
-            await conn.execute(sa_update(lineage_step_claims_table).values(refreshed_at=0.0))
+            await conn.execute(
+                sa_update(lineage_step_claims_table)
+                .where(lineage_step_claims_table.c.lineage_id == "lineage-revoke")
+                .values(refreshed_at=0.0)
+            )
         assert await claims.acquire("lineage-revoke", "reclaimer") is False, (
             "reclaim starts with revocation, never immediate takeover"
         )
 
-        # The owner's next heartbeat observes the revocation and aborts the
-        # blocked generation — before the grace elapses and any takeover.
+        # `False` alone is ambiguous: a fresh live owner is also denied. Prove
+        # phase one from the durable row before allowing the heartbeat to run.
+        async with engine.connect() as conn:
+            revoking_row = (
+                await conn.execute(
+                    sa_select(
+                        lineage_step_claims_table.c.claim_token,
+                        lineage_step_claims_table.c.revoking_token,
+                        lineage_step_claims_table.c.revoked_at,
+                    ).where(lineage_step_claims_table.c.lineage_id == "lineage-revoke")
+                )
+            ).one()
+        assert revoking_row.claim_token == owner_token
+        assert revoking_row.revoking_token == "reclaimer"
+        assert revoking_row.revoked_at is not None
+
+        # The successor stays denied while the owner is still running. The
+        # owner's release below is the termination acknowledgement, not the
+        # passage of a wall-clock grace period.
+        assert await claims.acquire("lineage-revoke", "reclaimer") is False
+
+        claims.release_heartbeat.set()
+        await asyncio.wait_for(claims.revocation_observed.wait(), timeout=5)
         owner_result = await asyncio.wait_for(owner, timeout=5)
         assert owner_result.is_err, "a revoked owner must not report success"
         assert executions == [1]
@@ -490,17 +585,7 @@ async def test_denied_caller_cannot_clear_another_attempts_fence(tmp_path, monke
     store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'evolve-fence-race.db'}")
     await store.initialize()
     try:
-        claims = _RecordingClaims(refresh_results=[True, False], lease_seconds=0.6)
-        acquisitions = {"n": 0}
-        real_acquire = claims.acquire
-
-        async def scripted_acquire(lineage_id: str, claim_token: str) -> bool:
-            acquisitions["n"] += 1
-            if acquisitions["n"] == 1:
-                return await real_acquire(lineage_id, claim_token)
-            return False
-
-        claims.acquire = scripted_acquire  # type: ignore[method-assign]
+        claims = _ControllableFenceClaims(lease_seconds=0.6)
         monkeypatch.setattr(loop_module, "step_claims_for", lambda _store: claims)
 
         config = EvolutionaryLoopConfig(
@@ -510,15 +595,27 @@ async def test_denied_caller_cannot_clear_another_attempts_fence(tmp_path, monke
         )
         loop = EvolutionaryLoop(event_store=store, config=config)
         entered = asyncio.Event()
+        cancellation_entered = asyncio.Event()
         denied_done = asyncio.Event()
+        executor_entries: list[str] = []
+        owner_fence: Any = None
 
         async def _blocked_phases(**kwargs: Any) -> Result[GenerationResult, Any]:
+            nonlocal owner_fence
+            fence = current_step_fence()
+            assert fence is not None, "the owner's executor must inherit its attempt fence"
+            assert not fence.lost.is_set(), "ownership must remain valid through executor entry"
+            owner_fence = fence
+            executor_entries.append(fence.claim_token)
             entered.set()
             try:
                 await asyncio.Event().wait()
             except asyncio.CancelledError:
                 # Hold the cancellation window open until the denied caller
                 # has come and gone, reproducing the add/discard race shape.
+                assert current_step_fence() is fence
+                assert fence.lost.is_set(), "executor cancellation must follow observed lease loss"
+                cancellation_entered.set()
                 await denied_done.wait()
                 raise
             raise AssertionError("unreachable")
@@ -529,13 +626,41 @@ async def test_denied_caller_cannot_clear_another_attempts_fence(tmp_path, monke
             loop.evolve_step("lineage-fence-race", initial_seed=_make_seed())
         )
         await asyncio.wait_for(entered.wait(), timeout=5)
+        assert owner_fence is not None
+        assert executor_entries == [owner_fence.claim_token]
+        assert claims.acquire_attempts == [("lineage-fence-race", owner_fence.claim_token)]
 
-        # The lost lease fires on the first heartbeat and the abort begins;
-        # a second caller on the same loop is denied while it unwinds.
-        await asyncio.sleep(0.15)
-        denied = await loop.evolve_step("lineage-fence-race", initial_seed=_make_seed())
-        assert denied.is_err
-        denied_done.set()
+        # Ownership remains provably valid through executor entry. Request the
+        # loss explicitly, then observe both the rejecting refresh and the
+        # cancellation it triggers before introducing the denied caller.
+        claims.request_loss()
+        await asyncio.wait_for(claims.loss_observed.wait(), timeout=5)
+        await asyncio.wait_for(cancellation_entered.wait(), timeout=5)
+        assert owner_fence.lost.is_set()
+        assert not owner.done(), "the cancellation handler must remain open for the denied caller"
+
+        # The stale attempt is now fenced but deliberately still unwinding. A
+        # second caller on the same loop must be denied without disturbing it.
+        try:
+            denied = await loop.evolve_step(
+                "lineage-fence-race", initial_seed=_make_seed("seed-denied")
+            )
+            assert denied.is_err
+            assert not owner.done()
+            assert owner_fence.lost.is_set()
+            assert executor_entries == [owner_fence.claim_token], (
+                "the denied caller must never enter the executor"
+            )
+            assert claims.acquire_attempts == [("lineage-fence-race", owner_fence.claim_token)], (
+                "the outer flight must deny the second caller before lease acquisition"
+            )
+
+            events_while_fenced = await store.replay_lineage("lineage-fence-race")
+            assert not any(
+                event.type == "lineage.generation.failed" for event in events_while_fenced
+            ), "the fenced attempt must append no failure while cancellation is still open"
+        finally:
+            denied_done.set()
 
         owner_result = await asyncio.wait_for(owner, timeout=10)
         assert owner_result.is_err
@@ -739,16 +864,76 @@ async def test_takeover_waits_for_the_stale_attempt_to_stop(tmp_path, monkeypatc
     termination acknowledgement.
     """
     from sqlalchemy import select as sa_select
+    from sqlalchemy import update as sa_update
 
     from ouroboros.evolution import loop as loop_module
     from ouroboros.evolution.generation_claims import DurableStepClaims
     from ouroboros.persistence.schema import lineage_step_claims_table
 
+    class _ObservableDurableClaims(DurableStepClaims):
+        """Expose barriers around the real durable refresh and release operations."""
+
+        def __init__(self, database_url: str) -> None:
+            super().__init__(database_url, lease_seconds=60.0)
+            self.refresh_entered = asyncio.Event()
+            self.refresh_allowed = asyncio.Event()
+            self.loss_observed = asyncio.Event()
+            self.fenced_beat_observed = asyncio.Event()
+            self.hold_fenced_beat = asyncio.Event()
+            self.release_entered = asyncio.Event()
+            self.release_allowed = asyncio.Event()
+            self.fenced_before: Any = None
+            self.fenced_after: Any = None
+
+        async def claim_row(self, lineage_id: str) -> Any:
+            engine = await self._engine_once()
+            async with engine.connect() as conn:
+                return (
+                    await conn.execute(
+                        sa_select(
+                            lineage_step_claims_table.c.claim_token,
+                            lineage_step_claims_table.c.refreshed_at,
+                            lineage_step_claims_table.c.revoking_token,
+                            lineage_step_claims_table.c.revoked_at,
+                        ).where(lineage_step_claims_table.c.lineage_id == lineage_id)
+                    )
+                ).one()
+
+        async def refresh(self, lineage_id: str, claim_token: str) -> bool:
+            self.refresh_entered.set()
+            await self.refresh_allowed.wait()
+            still_owner = await super().refresh(lineage_id, claim_token)
+            if not still_owner:
+                self.loss_observed.set()
+            return still_owner
+
+        async def refresh_fenced(self, lineage_id: str, claim_token: str) -> bool:
+            self.fenced_before = await self.claim_row(lineage_id)
+            refreshed = await super().refresh_fenced(lineage_id, claim_token)
+            self.fenced_after = await self.claim_row(lineage_id)
+            self.fenced_beat_observed.set()
+            # Keep this first real fenced beat in-flight so no later beat can
+            # race the row assertions below. The owner finalizer cancels it.
+            await self.hold_fenced_beat.wait()
+            return refreshed
+
+        async def release(self, lineage_id: str, claim_token: str) -> None:
+            self.release_entered.set()
+            await self.release_allowed.wait()
+            await super().release(lineage_id, claim_token)
+
     store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'evolve-liveness.db'}")
     await store.initialize()
     try:
-        claims = DurableStepClaims(store.database_url, lease_seconds=0.6)
+        claims = _ObservableDurableClaims(store.database_url)
         monkeypatch.setattr(loop_module, "step_claims_for", lambda _store: claims)
+        monkeypatch.setattr(
+            loop_module,
+            "owned_lineage_step",
+            lambda backend, lineage_id: owned_lineage_step(
+                backend, lineage_id, heartbeat_interval=0.01
+            ),
+        )
 
         config = EvolutionaryLoopConfig(
             max_generations=10,
@@ -757,13 +942,24 @@ async def test_takeover_waits_for_the_stale_attempt_to_stop(tmp_path, monkeypatc
         )
         loop = EvolutionaryLoop(event_store=store, config=config)
         entered = asyncio.Event()
+        cancellation_entered = asyncio.Event()
         finish = asyncio.Event()
+        owner_fence: Any = None
+        executor_entries: list[str] = []
 
         async def _resistant_run(**kwargs: Any) -> Result[GenerationResult, Any]:
+            nonlocal owner_fence
+            fence = current_step_fence()
+            assert fence is not None
+            assert not fence.lost.is_set()
+            owner_fence = fence
+            executor_entries.append(fence.claim_token)
             entered.set()
             try:
                 await asyncio.Event().wait()
             except asyncio.CancelledError:
+                assert fence.lost.is_set()
+                cancellation_entered.set()
                 await finish.wait()  # stale work keeps running past the abort
             return Result.ok(_completed_result(kwargs["generation_number"], kwargs["current_seed"]))
 
@@ -771,40 +967,87 @@ async def test_takeover_waits_for_the_stale_attempt_to_stop(tmp_path, monkeypatc
 
         owner = asyncio.create_task(loop.evolve_step("lineage-liveness", initial_seed=_make_seed()))
         await asyncio.wait_for(entered.wait(), timeout=5)
+        assert owner_fence is not None
+        assert executor_entries == [owner_fence.claim_token]
+        await asyncio.wait_for(claims.refresh_entered.wait(), timeout=5)
 
-        # Expire the lease and mark the revocation; the owner's heartbeat
-        # observes it, fences, and switches to the lingering liveness beat.
-        await _rewind_claim(claims, refreshed_at=0.0)
-        assert await claims.acquire("lineage-liveness", "reclaimer") is False
-
-        # Wait until a lingering beat has provably refreshed the row.
+        # Pause the real owner heartbeat before its durable refresh, then
+        # expire the exact row and drive production phase-one revocation.
         engine = await claims._engine_once()
-        for _ in range(100):
-            async with engine.connect() as conn:
-                refreshed_at = await conn.scalar(
-                    sa_select(lineage_step_claims_table.c.refreshed_at)
+        async with engine.begin() as conn:
+            await conn.execute(
+                sa_update(lineage_step_claims_table)
+                .where(
+                    lineage_step_claims_table.c.lineage_id == "lineage-liveness",
+                    lineage_step_claims_table.c.claim_token == owner_fence.claim_token,
                 )
-            if refreshed_at and refreshed_at > 1.0:
-                break
-            await asyncio.sleep(0.05)
-        else:
-            raise AssertionError("the fenced owner never produced a liveness beat")
+                .values(refreshed_at=0.0)
+            )
+        assert await claims.acquire("lineage-liveness", "reclaimer") is False
+        revoking_row = await claims.claim_row("lineage-liveness")
+        assert revoking_row.claim_token == owner_fence.claim_token
+        assert revoking_row.revoking_token == "reclaimer"
+        assert revoking_row.revoked_at is not None
 
-        # Even with the revocation aged past the grace, the live stale
-        # attempt blocks the takeover.
-        await _rewind_claim(claims, revoked_at=0.0)
+        # The paused production refresh now observes the durable revocation,
+        # fires the fence, and moves into the real fenced-liveness heartbeat.
+        claims.refresh_allowed.set()
+        await asyncio.wait_for(claims.loss_observed.wait(), timeout=5)
+        await asyncio.wait_for(cancellation_entered.wait(), timeout=5)
+        await asyncio.wait_for(claims.fenced_beat_observed.wait(), timeout=5)
+        assert owner_fence.lost.is_set()
+        assert not owner.done(), "stale work must still be running in its cancellation handler"
+        assert executor_entries == [owner_fence.claim_token]
+
+        # Production refresh_fenced must update only liveness: the owner and
+        # revocation markers survive while refreshed_at becomes current.
+        assert claims.fenced_before.claim_token == owner_fence.claim_token
+        assert claims.fenced_before.revoking_token == "reclaimer"
+        assert claims.fenced_before.revoked_at is not None
+        assert claims.fenced_after.claim_token == owner_fence.claim_token
+        assert claims.fenced_after.revoking_token == "reclaimer"
+        assert claims.fenced_after.revoked_at == claims.fenced_before.revoked_at
+        assert claims.fenced_after.refreshed_at > claims.fenced_before.refreshed_at
+
+        # Make revocation old enough for phase two without touching the fresh
+        # liveness timestamp. Production acquire must still deny takeover.
+        fenced_refreshed_at = claims.fenced_after.refreshed_at
+        async with engine.begin() as conn:
+            await conn.execute(
+                sa_update(lineage_step_claims_table)
+                .where(
+                    lineage_step_claims_table.c.lineage_id == "lineage-liveness",
+                    lineage_step_claims_table.c.claim_token == owner_fence.claim_token,
+                )
+                .values(revoked_at=0.0)
+            )
+        aged_revocation_row = await claims.claim_row("lineage-liveness")
+        assert aged_revocation_row.refreshed_at == fenced_refreshed_at
+        assert aged_revocation_row.revoking_token == "reclaimer"
+        assert aged_revocation_row.revoked_at == 0.0
         assert await claims.acquire("lineage-liveness", "reclaimer") is False, (
             "takeover succeeded while the stale attempt was provably alive"
         )
+        assert executor_entries == [owner_fence.claim_token]
 
-        # Let the stale work stop; its release acknowledges termination.
+        # Let stale work stop, but pause the release itself so the test proves
+        # that termination acknowledgement — not executor return — opens the
+        # takeover gate.
         finish.set()
+        await asyncio.wait_for(claims.release_entered.wait(), timeout=5)
+        assert not owner.done(), "the owner must remain held until release acknowledges termination"
+        assert await claims.acquire("lineage-liveness", "reclaimer") is False
+        assert executor_entries == [owner_fence.claim_token]
+
+        claims.release_allowed.set()
         owner_result = await asyncio.wait_for(owner, timeout=10)
         assert owner_result.is_err
 
         assert await claims.acquire("lineage-liveness", "reclaimer") is True, (
             "the released claim must be acquirable after termination"
         )
+        assert executor_entries == [owner_fence.claim_token]
+        await claims.release("lineage-liveness", "reclaimer")
     finally:
         await store.close()
 
@@ -957,6 +1200,38 @@ class _RecordingClaims:
 
     async def release(self, lineage_id: str, claim_token: str) -> None:
         self.released.append(lineage_id)
+
+
+class _ControllableFenceClaims(_RecordingClaims):
+    """Keep ownership valid until a test explicitly asks the heartbeat to lose it."""
+
+    def __init__(self, *, lease_seconds: float) -> None:
+        super().__init__(lease_seconds=lease_seconds)
+        self.loss_requested = asyncio.Event()
+        self.loss_observed = asyncio.Event()
+        self.acquire_attempts: list[tuple[str, str]] = []
+        self._owner_token: str | None = None
+
+    async def acquire(self, lineage_id: str, claim_token: str) -> bool:
+        self.acquire_attempts.append((lineage_id, claim_token))
+        if self._owner_token is not None:
+            return False
+        self._owner_token = claim_token
+        return True
+
+    async def refresh(self, lineage_id: str, claim_token: str) -> bool:
+        assert claim_token == self._owner_token
+        if self.loss_requested.is_set():
+            self.loss_observed.set()
+            return False
+        return True
+
+    async def release(self, lineage_id: str, claim_token: str) -> None:
+        assert claim_token == self._owner_token
+        await super().release(lineage_id, claim_token)
+
+    def request_loss(self) -> None:
+        self.loss_requested.set()
 
 
 class TestOwnedLineageStep:

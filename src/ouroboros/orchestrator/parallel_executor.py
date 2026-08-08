@@ -77,6 +77,7 @@ from ouroboros.harness.claim_term_guard import strict_deterministic_claim_term_g
 from ouroboros.harness.deliver_gate import (
     DeliverEvidenceClaim,
     DeliverEvidenceFact,
+    _journal_entry_proves_command_artifact,
     evaluate_deliver_claim,
     load_ac_evidence_manifest,
 )
@@ -1438,7 +1439,9 @@ def _standard_deliver_facts(
                 continue
             seen.add(dedupe_key)
             matches = (
-                _matching_journal_entries(manifest, field=field, value=match_value)
+                _matching_journal_entries(
+                    manifest, field=field, value=match_value, task_cwd=task_cwd
+                )
                 if eligible
                 else ()
             )
@@ -1490,6 +1493,7 @@ def _matching_journal_entries(
     *,
     field: str,
     value: str,
+    task_cwd: str | None = None,
 ) -> tuple[EvidenceEntry, ...]:
     matches: list[EvidenceEntry] = []
     for entry in manifest.entries:
@@ -1498,6 +1502,11 @@ def _matching_journal_entries(
         payload = entry.payload
         tool_name = payload.get("tool_name")
         if field == "files_touched":
+            if tool_name == "Bash" and _journal_entry_proves_command_artifact(
+                entry, relative_path=value, task_cwd=task_cwd
+            ):
+                matches.append(entry)
+                continue
             if tool_name not in _FILE_MUTATION_TOOLS:
                 continue
             observed = payload.get("workspace_relative_path")
