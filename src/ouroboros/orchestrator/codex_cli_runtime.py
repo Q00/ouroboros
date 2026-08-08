@@ -8,7 +8,6 @@ from collections.abc import AsyncIterator, Mapping
 import contextlib
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
-from enum import StrEnum
 import hashlib
 import json
 import math
@@ -17,7 +16,7 @@ from pathlib import Path
 import re
 import shlex
 import stat
-import subprocess
+import subprocess  # noqa: F401  # compatibility: tests patch this shared module
 import sys
 import tempfile
 import tomllib
@@ -51,6 +50,18 @@ from ouroboros.orchestrator.adapter import (
     TaskResult,
     resolve_worker_cwd,
     worker_cwd_failure_message,
+)
+from ouroboros.orchestrator.cli_version_attestation import (
+    CliExecutableVersionAttestation,
+    CliExecutableVersionState,
+    compare_cli_executable_version_attestations,
+    probe_cli_executable_version_attestation,
+    read_cli_executable_content_identity,
+    read_cli_executable_filesystem_identity,
+    read_cli_executable_generation_identity,
+    read_cli_executable_symlink_generation_identity,
+    read_cli_executable_symlink_identity,
+    require_unchanged_cli_version_attestation,
 )
 from ouroboros.orchestrator.frugality_runtime_attestation import (
     attested_codex_child_environment,
@@ -216,28 +227,8 @@ _ITEM_FAILURE_STATUSES = frozenset(
 _ITEM_SUCCESS_STATUSES = frozenset({"completed", "success", "succeeded"})
 
 
-class _CliExecutableVersionState(StrEnum):
-    """Outcome of probing or comparing one CLI version attestation.
-
-    Probe unavailability is deliberately not represented by ``None``.  A
-    timeout and an execution failure have different operational meaning, and
-    neither is positive evidence that an executable stayed the same.  The
-    ``CHANGED`` state is produced only by comparing two successful probes.
-    """
-
-    VERIFIED = "verified"
-    TIMED_OUT = "timed_out"
-    EXECUTION_FAILED = "execution_failed"
-    CHANGED = "changed"
-
-
-@dataclass(frozen=True, slots=True)
-class _CliExecutableVersionAttestation:
-    """Structured version evidence for the selected CLI executable."""
-
-    state: _CliExecutableVersionState
-    identity: str | None = None
-    filesystem_identity: tuple[int, int] | None = None
+_CliExecutableVersionState = CliExecutableVersionState
+_CliExecutableVersionAttestation = CliExecutableVersionAttestation
 
 
 @dataclass(frozen=True, slots=True)
@@ -545,128 +536,37 @@ class CodexCliRuntime:
         return self._cli_executable_version_attestation().identity
 
     def _cli_executable_version_attestation(self) -> _CliExecutableVersionAttestation:
-        """Return explicit success, timeout, or execution-failure evidence.
-
-        The probe remains bounded, but a transient failure is preserved as its
-        own state instead of being collapsed to ``None``.  Callers can therefore
-        fail closed without reporting an unchanged executable as mutated.
-        """
-        executable_path = self._cli_executable_identity()
-        if executable_path is None:
-            return _CliExecutableVersionAttestation(_CliExecutableVersionState.EXECUTION_FAILED)
-        filesystem_identity = self._cli_executable_filesystem_identity()
-        if filesystem_identity is None:
-            return _CliExecutableVersionAttestation(_CliExecutableVersionState.EXECUTION_FAILED)
-        content_digest = self._cli_executable_content_identity()
-        if content_digest is None:
-            return _CliExecutableVersionAttestation(_CliExecutableVersionState.EXECUTION_FAILED)
-        symlink_identity = self._cli_executable_symlink_identity()
-        try:
-            result = subprocess.run(
-                [executable_path, "--version"],
-                capture_output=True,
-                text=True,
-                timeout=2,
-                check=False,
-            )
-        except subprocess.TimeoutExpired:
-            return _CliExecutableVersionAttestation(_CliExecutableVersionState.TIMED_OUT)
-        except (OSError, UnicodeError):
-            return _CliExecutableVersionAttestation(_CliExecutableVersionState.EXECUTION_FAILED)
-        version_output = (result.stdout or result.stderr).strip()
-        if result.returncode != 0 or not version_output:
-            return _CliExecutableVersionAttestation(_CliExecutableVersionState.EXECUTION_FAILED)
-        # The content read and version subprocess span multiple syscalls. An
-        # atomic replacement during that window would otherwise produce a
-        # mixed attestation. Only publish evidence when the effective target's
-        # device/inode pair is stable across the entire probe.
-        if self._cli_executable_filesystem_identity() != filesystem_identity:
-            return _CliExecutableVersionAttestation(_CliExecutableVersionState.EXECUTION_FAILED)
-        return _CliExecutableVersionAttestation(
-            _CliExecutableVersionState.VERIFIED,
-            self._hash_json_payload(
-                {
-                    "content_sha256": content_digest,
-                    "filesystem": {
-                        "device": filesystem_identity[0],
-                        "inode": filesystem_identity[1],
-                    },
-                    "symlink": symlink_identity,
-                    "version_output": version_output,
-                }
-            ),
-            filesystem_identity,
+        """Return bounded evidence for one stable executable generation."""
+        return probe_cli_executable_version_attestation(
+            self._cli_executable_identity(),
+            filesystem_identity=self._cli_executable_filesystem_identity,
+            filesystem_generation_identity=self._cli_executable_generation_identity,
+            content_identity=self._cli_executable_content_identity,
+            symlink_identity=self._cli_executable_symlink_identity,
+            symlink_generation_identity=self._cli_executable_symlink_generation_identity,
+            hash_payload=self._hash_json_payload,
         )
 
     def _cli_executable_filesystem_identity(self) -> tuple[int, int] | None:
-        """Return the effective executable target's stable device/inode pair.
+        return read_cli_executable_filesystem_identity(self._cli_executable_identity())
 
-        ``Path.stat`` follows a launch-path symlink, so replacing either a
-        direct executable or its symlink target changes this identity even
-        when replacement bytes and ``--version`` output are identical.
-        """
-        executable_path = self._cli_executable_identity()
-        if executable_path is None:
-            return None
-        try:
-            executable_stat = Path(executable_path).stat()
-        except OSError:
-            return None
-        return executable_stat.st_dev, executable_stat.st_ino
+    def _cli_executable_generation_identity(self) -> tuple[int, int, int, int, int] | None:
+        return read_cli_executable_generation_identity(self._cli_executable_identity())
 
-    @staticmethod
-    def _compare_cli_executable_version_attestations(
-        initialized: _CliExecutableVersionAttestation,
-        current: _CliExecutableVersionAttestation,
-    ) -> _CliExecutableVersionState:
-        """Compare positive evidence without equating two missing probes."""
-        if initialized.state is not _CliExecutableVersionState.VERIFIED:
-            return initialized.state
-        if current.state is not _CliExecutableVersionState.VERIFIED:
-            return current.state
-        if (
-            initialized.identity is None
-            or current.identity is None
-            or initialized.filesystem_identity is None
-            or current.filesystem_identity is None
-        ):
-            return _CliExecutableVersionState.EXECUTION_FAILED
-        if initialized.filesystem_identity != current.filesystem_identity:
-            return _CliExecutableVersionState.CHANGED
-        if initialized.identity == current.identity:
-            return _CliExecutableVersionState.VERIFIED
-        return _CliExecutableVersionState.CHANGED
+    _compare_cli_executable_version_attestations = staticmethod(
+        compare_cli_executable_version_attestations
+    )
 
     def _cli_executable_symlink_identity(self) -> dict[str, str] | None:
-        """Return launch-path symlink target identity without dereferencing it away."""
-        executable_path = self._cli_executable_identity()
-        if executable_path is None:
-            return None
-        path = Path(executable_path)
-        try:
-            if not path.is_symlink():
-                return None
-            raw_target = os.readlink(path)
-        except OSError:
-            return None
-        target_path = Path(raw_target)
-        if not target_path.is_absolute():
-            target_path = path.parent / target_path
-        return {
-            "raw_target": raw_target,
-            "resolved_target": str(target_path.expanduser().absolute()),
-        }
+        return read_cli_executable_symlink_identity(self._cli_executable_identity())
+
+    def _cli_executable_symlink_generation_identity(
+        self,
+    ) -> tuple[int, int, int, int, int] | None:
+        return read_cli_executable_symlink_generation_identity(self._cli_executable_identity())
 
     def _cli_executable_content_identity(self) -> str | None:
-        """Return the selected CLI byte digest without executing it."""
-        executable_path = self._cli_executable_identity()
-        if executable_path is None:
-            return None
-        try:
-            executable_bytes = Path(executable_path).read_bytes()
-        except OSError:
-            return None
-        return hashlib.sha256(executable_bytes).hexdigest()
+        return read_cli_executable_content_identity(self._cli_executable_identity())
 
     def _resolve_skills_dir(self, skills_dir: str | Path | None) -> Path | None:
         """Resolve an optional explicit skill override directory for intercept metadata."""
@@ -1247,44 +1147,10 @@ class CodexCliRuntime:
                 "Codex CLI executable changed after runtime initialization; "
                 "start a new execution session"
             )
-        initialized = self._cli_executable_version_attestation_snapshot
-        if initialized is None:
-            raise RuntimeError(
-                f"{self._display_name} version attestation was not captured during "
-                "runtime initialization; start a new execution session"
-            )
-        if initialized.state is _CliExecutableVersionState.TIMED_OUT:
-            raise RuntimeError(
-                f"{self._display_name} version attestation timed out during runtime "
-                "initialization; execution is blocked without claiming executable drift; "
-                "start a new execution session"
-            )
-        if initialized.state is _CliExecutableVersionState.EXECUTION_FAILED:
-            raise RuntimeError(
-                f"{self._display_name} version attestation failed during runtime "
-                "initialization; execution is blocked without claiming executable drift; "
-                "start a new execution session"
-            )
-
-        current = self._cli_executable_version_attestation()
-        comparison = self._compare_cli_executable_version_attestations(initialized, current)
-        if comparison is _CliExecutableVersionState.VERIFIED:
-            return
-        if comparison is _CliExecutableVersionState.TIMED_OUT:
-            raise RuntimeError(
-                f"{self._display_name} version attestation timed out while verifying the "
-                "executable; execution is blocked without claiming executable drift; retry "
-                "the execution or start a new execution session"
-            )
-        if comparison is _CliExecutableVersionState.EXECUTION_FAILED:
-            raise RuntimeError(
-                f"{self._display_name} version attestation failed while verifying the "
-                "executable; execution is blocked without claiming executable drift; retry "
-                "the execution or start a new execution session"
-            )
-        raise RuntimeError(
-            f"{self._display_name} executable version changed after runtime initialization; "
-            "start a new execution session"
+        require_unchanged_cli_version_attestation(
+            self._display_name,
+            self._cli_executable_version_attestation_snapshot,
+            self._cli_executable_version_attestation,
         )
 
     def _fingerprint_skill_dispatch_registry(self) -> str | None:

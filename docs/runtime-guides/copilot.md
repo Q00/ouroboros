@@ -158,8 +158,9 @@ version-attestation policy as Codex: initialization-time probe failure blocks
 the runtime because no positive baseline exists; a later timeout or execution
 failure blocks only the current attempt and is not reported as executable
 drift; only two successful, different attestations confirm a version change.
-This ensures that two missing `copilot --version` results never authorize a
-launch under load.
+Path, content, symlink, device/inode, or probe-window generation drift can fail
+closed before a second successful version probe. This ensures that two missing
+`copilot --version` results never authorize a launch under load.
 
 ### MCP registration
 

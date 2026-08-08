@@ -229,9 +229,10 @@ evidence with confirmed drift:
 - A timeout or execution failure during a later check blocks that attempt but
   is reported as unavailable attestation evidence; the same runtime may be
   retried.
-- Executable drift is reported only when two successful attestations differ.
-  Two missing attestations never count as proof that the executable is
-  unchanged.
+- Version drift is reported only when two successful version attestations
+  differ. Path, content, symlink, device/inode, or probe-window generation
+  drift can fail closed before a second successful version probe. Two missing
+  attestations never count as proof that the executable is unchanged.
 
 The Copilot runtime inherits the same attestation and comparison policy.
 

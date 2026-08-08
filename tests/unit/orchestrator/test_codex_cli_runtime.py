@@ -443,6 +443,61 @@ def test_check_time_execution_failure_is_not_reported_as_drift(
     assert "executable changed" not in str(excinfo.value)
 
 
+def test_in_place_mutation_during_version_probe_is_not_authorized(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cli_path = tmp_path / "codex"
+    original = "#!/bin/sh\necho codex 1.0\n"
+    cli_path.write_text(original, encoding="utf-8")
+    cli_path.chmod(0o755)
+    runtime = CodexCliRuntime(cli_path=cli_path, cwd=tmp_path, model="gpt-5")
+    original_inode = cli_path.stat().st_ino
+
+    def mutate_during_probe(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        cli_path.write_text("#!/bin/sh\necho compromised\n", encoding="utf-8")
+        return subprocess.CompletedProcess(args, 0, stdout="codex 1.0\n", stderr="")
+
+    monkeypatch.setattr(codex_cli_runtime_module.subprocess, "run", mutate_during_probe)
+    with pytest.raises(RuntimeError, match="failed while verifying") as excinfo:
+        runtime._build_command(str(tmp_path / "last-message"))
+
+    assert "executable changed" not in str(excinfo.value)
+    assert cli_path.stat().st_ino == original_inode
+    assert cli_path.read_text(encoding="utf-8") != original
+
+
+def test_in_place_aba_during_version_probe_is_not_authorized(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cli_path = tmp_path / "codex"
+    original = "#!/bin/sh\necho codex 1.0\n"
+    cli_path.write_text(original, encoding="utf-8")
+    cli_path.chmod(0o755)
+    runtime = CodexCliRuntime(cli_path=cli_path, cwd=tmp_path, model="gpt-5")
+    original_inode = cli_path.stat().st_ino
+
+    def mutate_and_restore_during_probe(
+        args: list[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        cli_path.write_text("#!/bin/sh\necho compromised\n", encoding="utf-8")
+        cli_path.write_text(original, encoding="utf-8")
+        return subprocess.CompletedProcess(args, 0, stdout="codex 1.0\n", stderr="")
+
+    monkeypatch.setattr(
+        codex_cli_runtime_module.subprocess,
+        "run",
+        mutate_and_restore_during_probe,
+    )
+    with pytest.raises(RuntimeError, match="failed while verifying") as excinfo:
+        runtime._build_command(str(tmp_path / "last-message"))
+
+    assert "executable changed" not in str(excinfo.value)
+    assert cli_path.stat().st_ino == original_inode
+    assert cli_path.read_text(encoding="utf-8") == original
+
+
 def test_repeated_probe_timeouts_never_converge_to_false_drift(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
