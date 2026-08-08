@@ -52,6 +52,7 @@ from ouroboros.mcp.tools.execution_handlers import (
 from ouroboros.mcp.tools.fanout_handler import (  # noqa: F401
     create_artifact_fetch_handler,
     create_fanout_handler,
+    create_fanout_handlers,
 )
 from ouroboros.mcp.tools.job_handlers import (
     CancelExecutionHandler,

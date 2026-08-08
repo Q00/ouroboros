@@ -310,9 +310,20 @@ def create_artifact_fetch_handler(project_dir: Any) -> FetchArtifactHandler:
     )
 
 
+def create_fanout_handlers(
+    fanout_registry: FanoutRegistry,
+    project_dir: Any,
+    event_store: Any,
+) -> tuple[SubmitFanoutResultsHandler, FetchArtifactHandler]:
+    """Build the paired submit/fetch production boundary for one workspace."""
+    submit = create_fanout_handler(fanout_registry, project_dir, event_store)
+    return submit, FetchArtifactHandler(disposable_memory=submit.disposable_memory)
+
+
 __all__ = [
     "FetchArtifactHandler",
     "SubmitFanoutResultsHandler",
     "create_artifact_fetch_handler",
     "create_fanout_handler",
+    "create_fanout_handlers",
 ]
