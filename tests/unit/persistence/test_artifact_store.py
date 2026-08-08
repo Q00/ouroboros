@@ -14,7 +14,13 @@ from typing import Any
 import pytest
 
 from ouroboros.core.disposable_memory import MAX_DISPOSABLE_ARTIFACT_BYTES
-from ouroboros.persistence.artifact_binding import lifecycle_epoch_prefix
+from ouroboros.persistence.artifact_binding import (
+    LifecycleState,
+    encode_record,
+    lifecycle_epoch_path,
+    lifecycle_epoch_prefix,
+    lifecycle_epoch_record,
+)
 from ouroboros.persistence.artifact_schema import MANIFEST_MAX_BYTES
 import ouroboros.persistence.artifact_store as artifact_store_module
 from ouroboros.persistence.artifact_store import (
@@ -1387,6 +1393,88 @@ def test_terminal_epoch_before_head_crash_recovers_forward(
     assert json.loads(head_path.read_text(encoding="utf-8"))["sequence"] == 1
     assert terminal_path.is_file()
     assert _manifest(store, "CONTRACT1")["events"][-1]["type"] == "artifact.tombstoned"
+    assert blob_path.exists()
+
+
+def test_multiple_uncommitted_lifecycle_successors_fail_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _store(tmp_path)
+    envelope = _put(
+        store,
+        "CONTRACT1",
+        {"retention": "committed protection"},
+        active=True,
+        retain_until=NOW + timedelta(days=365),
+    )
+    manifest_path = store._manifest_path("CONTRACT1")
+    committed_manifest = manifest_path.read_bytes()
+    head_path = store._anchor_path("CONTRACT1").with_suffix(".lifecycle.head")
+    committed_head = head_path.read_bytes()
+    blob_path = _blob_path(store, envelope.artifact_ref)
+    _age(blob_path, days=100)
+    original_write = store._write_record_locked
+
+    def fail_head_update(
+        path: Path,
+        payload: bytes,
+        *,
+        stable: bool,
+        authority_check: Any,
+        replace_existing: bool = False,
+    ) -> None:
+        if path == head_path and replace_existing:
+            raise OSError("leave one uncommitted successor")
+        original_write(
+            path,
+            payload,
+            stable=stable,
+            authority_check=authority_check,
+            replace_existing=replace_existing,
+        )
+
+    monkeypatch.setattr(store, "_write_record_locked", fail_head_update)
+    with pytest.raises(OSError, match="uncommitted successor"):
+        store.set_contract_retention(
+            "CONTRACT1",
+            active=True,
+            retain_until=NOW + timedelta(days=365),
+            now=NOW + timedelta(hours=1),
+        )
+    monkeypatch.undo()
+
+    authority = store._read_authority_locked("CONTRACT1")
+    assert authority is not None
+    first_epoch = json.loads(_lifecycle_epochs(store, "CONTRACT1")[0].read_text())
+    first_digest = hashlib.sha256(encode_record(first_epoch)).hexdigest()
+    first_state = LifecycleState(
+        active=first_epoch["active"],
+        retain_until=first_epoch["retain_until"],
+        updated_at=first_epoch["timestamp"],
+        terminal=None,
+        sequence=1,
+        head_sha256=first_digest,
+    )
+    second_epoch = lifecycle_epoch_record(
+        authority,
+        first_state,
+        timestamp=(NOW + timedelta(hours=2)).isoformat(),
+        active=False,
+        retain_until=(NOW - timedelta(days=1)).isoformat(),
+    )
+    second_payload = encode_record(second_epoch)
+    second_digest = hashlib.sha256(second_payload).hexdigest()
+    lifecycle_epoch_path(
+        store._anchor_path("CONTRACT1"),
+        sequence=2,
+        digest=second_digest,
+    ).write_bytes(second_payload)
+
+    with pytest.raises(ArtifactManifestError, match="lifecycle authority"):
+        store.prune(ttl=timedelta(days=90), apply=True, now=NOW)
+    assert manifest_path.read_bytes() == committed_manifest
+    assert head_path.read_bytes() == committed_head
     assert blob_path.exists()
 
 

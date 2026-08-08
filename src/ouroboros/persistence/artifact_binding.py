@@ -534,6 +534,8 @@ def read_lifecycle_state(
         raise ValueError("lifecycle epoch chain is shorter than its committed head")
     if not committed_head_matches:
         raise ValueError("lifecycle epoch chain does not match its committed head")
+    if state.sequence > expected_head["sequence"] + 1:
+        raise ValueError("lifecycle epoch chain has multiple uncommitted successors")
     if state.sequence > expected_head["sequence"]:
         _write_lifecycle_head(
             store,
