@@ -8,6 +8,7 @@ from contextlib import suppress
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 import inspect
+from pathlib import Path
 import re
 import threading
 import time
@@ -55,6 +56,7 @@ from ouroboros.auto.recovery_plan import (
 from ouroboros.auto.reference_candidate_bridge import (
     apply_requirement_distillation_to_ledger,
 )
+from ouroboros.auto.seed_preflight import run_seed_preflight
 from ouroboros.auto.seed_repairer import SeedRepairer
 from ouroboros.auto.seed_reviewer import SeedReview, SeedReviewer
 from ouroboros.auto.state import (
@@ -111,13 +113,31 @@ _RECOVERY_BLOCKED_CHOICES: str = (
     "be edited mid-session); (2) abandon this session"
 )
 
+# Bounded in-process retry for transient tool failures (timeout, raised
+# exception, transient ``.error`` result). Vision #1157: a one-shot
+# infrastructure hiccup must not terminate an auto session as BLOCKED when
+# the same call is idempotently re-enterable (the --resume path already
+# re-enters these phases). Retries never consume repair/evaluate budgets.
+_TRANSIENT_TOOL_ATTEMPTS: int = 3
+_TRANSIENT_RETRY_BACKOFF_SECONDS: tuple[float, ...] = (1.0, 5.0)
+
 
 class SeedQaRepairMappingError(RuntimeError):
-    def __init__(self, feedback: tuple[str, ...]) -> None:
+    def __init__(
+        self,
+        feedback: tuple[str, ...],
+        *,
+        code: str = "seed_qa_feedback_unmapped",
+        message: str | None = None,
+    ) -> None:
         self.feedback: tuple[str, ...] = feedback
+        self.code: str = code
         super().__init__(
-            "Seed QA feedback could not be mapped to a bounded repair; "
-            "manual Seed revision is required"
+            message
+            or (
+                "Seed QA feedback could not be mapped to a bounded repair; "
+                "manual Seed revision is required"
+            )
         )
 
 
@@ -526,6 +546,27 @@ class AutoPipeline:
                 ),
                 event_store=getattr(self.interview_driver, "event_store", None),
             )
+            if result.status in {"blocked", "failed"}:
+                # Silent-block fix: a blocked pipeline still terminates its
+                # background *job* as COMPLETED ("Job complete"), so without a
+                # dedicated attention event nothing wakes a
+                # ``wait_for="attention_or_ac_change"`` observer and the block
+                # goes unannounced. Emit one typed event per outermost
+                # terminal so every block class — not just the Seed gates —
+                # reaches the attention relay.
+                await self._emit_runtime_event(
+                    "auto.session.blocked",
+                    state.auto_session_id,
+                    {
+                        "schema_version": 1,
+                        "auto_session_id": state.auto_session_id,
+                        "status": result.status,
+                        "stop_reason_code": state.last_error_code,
+                        "tool_name": state.last_tool_name,
+                        "blocker": (result.blocker or "")[:320],
+                        "resume_capability": result.resume_capability.value,
+                    },
+                )
         return result
 
     async def _run_pipeline(self, state: AutoPipelineState) -> AutoPipelineResult:
@@ -1311,6 +1352,12 @@ class AutoPipeline:
                 state.mark_blocked(blocker, tool_name="grade_gate")
                 self._save(state)
                 return self._result(state, ledger, review=review, blocker=blocker)
+
+            preflight_blocked = await self._run_seed_preflight_gate(
+                state, ledger, seed, review=review
+            )
+            if preflight_blocked is not None:
+                return preflight_blocked
 
             seed_qa, seed, review = await self._run_seed_qa_gate(state, ledger, seed, review=review)
             if seed_qa is not None:
@@ -2788,6 +2835,53 @@ class AutoPipeline:
         self._save(state)
         return msg
 
+    async def _run_seed_preflight_gate(
+        self,
+        state: AutoPipelineState,
+        ledger: SeedDraftLedger,
+        seed: Seed,
+        *,
+        review: SeedReview | None,
+    ) -> AutoPipelineResult | None:
+        """Deterministically verify the Seed's executability claims before QA/RUN.
+
+        The LLM Seed QA judge cannot notice that a claimed verify script does
+        not exist or that an environment variable has no binding. This gate
+        checks those claims against the filesystem and blocks with the open
+        questions a human must answer — a fabricated verification harness must
+        not reach RUN, and the repair is missing facts, not another rewrite.
+        """
+        workspace_root: Path | None = None
+        if state.cwd:
+            candidate = Path(state.cwd).expanduser()
+            if candidate.is_dir():
+                workspace_root = candidate
+        report = run_seed_preflight(seed, workspace_root=workspace_root)
+        if report.passed:
+            return None
+        questions = list(report.open_questions)[:8]
+        await self._emit_runtime_event(
+            "auto.seed_preflight.blocked",
+            state.auto_session_id,
+            {
+                "schema_version": 1,
+                "auto_session_id": state.auto_session_id,
+                "seed_id": seed.metadata.seed_id,
+                "codes": [finding.code for finding in report.blocking_findings][:8],
+                "open_questions": questions,
+            },
+        )
+        blocker = (
+            f"Seed preflight found {len(report.blocking_findings)} unexecutable contract "
+            "claim(s); answer these open questions, revise the Seed, and resume: "
+            + " | ".join(questions)
+        )
+        state.mark_blocked(
+            blocker, tool_name="seed_preflight", error_code="seed_preflight_unexecutable"
+        )
+        self._save(state)
+        return self._result(state, ledger, review=review, blocker=blocker)
+
     async def _run_seed_qa_gate(
         self,
         state: AutoPipelineState,
@@ -2804,48 +2898,64 @@ class AutoPipeline:
         current_review = review
         max_attempts = max(1, int(state.max_repair_rounds or 1))
         for attempt in range(1, max_attempts + 1):
-            timeout = self._deadline_capped_timeout(
-                state, state.phase_timeout_seconds(AutoPhase.EVALUATE)
-            )
-            try:
-                qa_result = await asyncio.wait_for(
-                    self.seed_qa_evaluator(current_seed, ledger), timeout=timeout
+            qa_result = None
+            transient_failure: str | None = None
+            for transient_attempt in range(_TRANSIENT_TOOL_ATTEMPTS):
+                if transient_attempt:
+                    backoff = _TRANSIENT_RETRY_BACKOFF_SECONDS[
+                        min(transient_attempt - 1, len(_TRANSIENT_RETRY_BACKOFF_SECONDS) - 1)
+                    ]
+                    await asyncio.sleep(backoff)
+                timeout = self._deadline_capped_timeout(
+                    state, state.phase_timeout_seconds(AutoPhase.EVALUATE)
                 )
-            except TimeoutError:
-                if self._enforce_deadline(state):
-                    return (
-                        self._result(
-                            state, ledger, review=current_review, blocker=state.last_error
-                        ),
-                        current_seed,
-                        current_review,
+                try:
+                    candidate = await asyncio.wait_for(
+                        self.seed_qa_evaluator(current_seed, ledger), timeout=timeout
                     )
-                state.mark_blocked(
-                    f"Seed QA timed out after {timeout:.0f}s",
-                    tool_name="seed_qa",
-                )
-                self._save(state)
-                return (
-                    self._result(state, ledger, review=current_review, blocker=state.last_error),
-                    current_seed,
-                    current_review,
-                )
-            except Exception as exc:
-                state.mark_blocked(
-                    f"Seed QA raised {type(exc).__name__}",
-                    tool_name="seed_qa",
-                )
-                self._save(state)
-                return (
-                    self._result(state, ledger, review=current_review, blocker=state.last_error),
-                    current_seed,
-                    current_review,
-                )
+                except TimeoutError:
+                    if self._enforce_deadline(state):
+                        return (
+                            self._result(
+                                state, ledger, review=current_review, blocker=state.last_error
+                            ),
+                            current_seed,
+                            current_review,
+                        )
+                    transient_failure = f"Seed QA timed out after {timeout:.0f}s"
+                    continue
+                except Exception as exc:
+                    transient_failure = f"Seed QA raised {type(exc).__name__}"
+                    continue
 
-            if qa_result.error:
+                if candidate.error:
+                    transient_failure = "Seed QA reported a transient evaluator error"
+                    continue
+
+                qa_result = candidate
+                transient_failure = None
+                break
+
+            if qa_result is None:
+                await self._emit_runtime_event(
+                    "auto.seed_qa.blocked",
+                    state.auto_session_id,
+                    {
+                        "schema_version": 1,
+                        "auto_session_id": state.auto_session_id,
+                        "seed_id": current_seed.metadata.seed_id,
+                        "attempts": _TRANSIENT_TOOL_ATTEMPTS,
+                        "verdict": state.last_qa_verdict or "fail",
+                        "score": float(state.last_qa_score or 0.0),
+                        "differences": list(state.last_qa_differences[:5]),
+                        "suggestions": list(state.last_qa_suggestions[:5]),
+                        "reason": "seed_qa_transient_exhausted",
+                    },
+                )
                 state.mark_blocked(
-                    "Seed QA reported a transient evaluator error",
+                    transient_failure or "Seed QA failed after transient retries",
                     tool_name="seed_qa",
+                    error_code="seed_qa_transient_exhausted",
                 )
                 self._save(state)
                 return (
@@ -2896,13 +3006,13 @@ class AutoPipeline:
                             "score": float(qa_result.score),
                             "differences": state.last_qa_differences[:5],
                             "suggestions": state.last_qa_suggestions[:5],
-                            "reason": "seed_qa_feedback_unmapped",
+                            "reason": exc.code,
                         },
                     )
                     state.mark_blocked(
                         str(exc),
                         tool_name="seed_qa",
-                        error_code="seed_qa_feedback_unmapped",
+                        error_code=exc.code,
                     )
                     self._save(state)
                     return (
@@ -3266,42 +3376,50 @@ class AutoPipeline:
         # ``"evaluator timed out"`` instead of the canonical
         # ``pipeline_timeout`` blocker every other long-running phase
         # produces.
-        capped_timeout = self._deadline_capped_timeout(state, phase_timeout)
-        try:
-            eval_result = await asyncio.wait_for(
-                self.evaluator(seed, artifact), timeout=capped_timeout
-            )
-        except TimeoutError:
-            # If the deadline expired during the call, surface the canonical
-            # pipeline-timeout blocker so resume / status surfaces see the
-            # same shape as every other deadline trip in the pipeline.
-            if self._enforce_deadline(state):
-                return self._result(
-                    state,
-                    ledger,
-                    review=review,
-                    blocker=state.last_error,
-                    run_subagent=run_subagent,
+        eval_result = None
+        transient_failure: str | None = None
+        for transient_attempt in range(_TRANSIENT_TOOL_ATTEMPTS):
+            if transient_attempt:
+                backoff = _TRANSIENT_RETRY_BACKOFF_SECONDS[
+                    min(transient_attempt - 1, len(_TRANSIENT_RETRY_BACKOFF_SECONDS) - 1)
+                ]
+                await asyncio.sleep(backoff)
+            capped_timeout = self._deadline_capped_timeout(state, phase_timeout)
+            try:
+                candidate = await asyncio.wait_for(
+                    self.evaluator(seed, artifact), timeout=capped_timeout
                 )
-            state.mark_blocked(
-                f"evaluator timed out after {capped_timeout:.0f}s",
-                tool_name="evaluator",
-            )
-            self._save(state)
-            return self._result(
-                state, ledger, review=review, blocker=state.last_error, run_subagent=run_subagent
-            )
-        except Exception as exc:
-            state.mark_blocked(f"evaluator raised: {exc}", tool_name="evaluator")
-            self._save(state)
-            return self._result(
-                state, ledger, review=review, blocker=state.last_error, run_subagent=run_subagent
-            )
+            except TimeoutError:
+                # If the deadline expired during the call, surface the canonical
+                # pipeline-timeout blocker so resume / status surfaces see the
+                # same shape as every other deadline trip in the pipeline.
+                if self._enforce_deadline(state):
+                    return self._result(
+                        state,
+                        ledger,
+                        review=review,
+                        blocker=state.last_error,
+                        run_subagent=run_subagent,
+                    )
+                transient_failure = f"evaluator timed out after {capped_timeout:.0f}s"
+                continue
+            except Exception as exc:
+                transient_failure = f"evaluator raised: {exc}"
+                continue
 
-        if eval_result.error:
+            if candidate.error:
+                transient_failure = f"evaluator reported transient error: {candidate.error}"
+                continue
+
+            eval_result = candidate
+            transient_failure = None
+            break
+
+        if eval_result is None:
             state.mark_blocked(
-                f"evaluator reported transient error: {eval_result.error}",
+                transient_failure or "evaluator failed after transient retries",
                 tool_name="evaluator",
+                error_code="evaluator_transient_exhausted",
             )
             self._save(state)
             return self._result(
@@ -3683,45 +3801,53 @@ class AutoPipeline:
 
         run_artifact = state.evaluate_artifact or ""
         phase_timeout = state.phase_timeout_seconds(AutoPhase.UNSTUCK_LATERAL)
-        capped_timeout = self._deadline_capped_timeout(state, phase_timeout)
-        try:
-            lateral_result = await asyncio.wait_for(
-                self.lateral_thinker(
-                    persona=persona,
-                    qa_differences=qa_differences,
-                    qa_suggestions=qa_suggestions,
-                    run_artifact=run_artifact,
-                ),
-                timeout=capped_timeout,
-            )
-        except TimeoutError:
-            if self._enforce_deadline(state):
-                return self._result(
-                    state,
-                    ledger,
-                    review=review,
-                    blocker=state.last_error,
-                    run_subagent=run_subagent,
+        lateral_result = None
+        transient_failure: str | None = None
+        for transient_attempt in range(_TRANSIENT_TOOL_ATTEMPTS):
+            if transient_attempt:
+                backoff = _TRANSIENT_RETRY_BACKOFF_SECONDS[
+                    min(transient_attempt - 1, len(_TRANSIENT_RETRY_BACKOFF_SECONDS) - 1)
+                ]
+                await asyncio.sleep(backoff)
+            capped_timeout = self._deadline_capped_timeout(state, phase_timeout)
+            try:
+                candidate = await asyncio.wait_for(
+                    self.lateral_thinker(
+                        persona=persona,
+                        qa_differences=qa_differences,
+                        qa_suggestions=qa_suggestions,
+                        run_artifact=run_artifact,
+                    ),
+                    timeout=capped_timeout,
                 )
-            state.mark_blocked(
-                f"lateral_thinker timed out after {capped_timeout:.0f}s",
-                tool_name="lateral_thinker",
-            )
-            self._save(state)
-            return self._result(
-                state, ledger, review=review, blocker=state.last_error, run_subagent=run_subagent
-            )
-        except Exception as exc:
-            state.mark_blocked(f"lateral_thinker raised: {exc}", tool_name="lateral_thinker")
-            self._save(state)
-            return self._result(
-                state, ledger, review=review, blocker=state.last_error, run_subagent=run_subagent
-            )
+            except TimeoutError:
+                if self._enforce_deadline(state):
+                    return self._result(
+                        state,
+                        ledger,
+                        review=review,
+                        blocker=state.last_error,
+                        run_subagent=run_subagent,
+                    )
+                transient_failure = f"lateral_thinker timed out after {capped_timeout:.0f}s"
+                continue
+            except Exception as exc:
+                transient_failure = f"lateral_thinker raised: {exc}"
+                continue
 
-        if lateral_result.error:
+            if candidate.error:
+                transient_failure = f"lateral_thinker reported transient error: {candidate.error}"
+                continue
+
+            lateral_result = candidate
+            transient_failure = None
+            break
+
+        if lateral_result is None:
             state.mark_blocked(
-                f"lateral_thinker reported transient error: {lateral_result.error}",
+                transient_failure or "lateral_thinker failed after transient retries",
                 tool_name="lateral_thinker",
+                error_code="lateral_transient_exhausted",
             )
             self._save(state)
             return self._result(
@@ -4770,12 +4896,22 @@ def _recoverable_phase_for_tool(tool_name: str | None) -> AutoPhase | None:
         return AutoPhase.INTERVIEW
     if tool_name == "seed_generator":
         return AutoPhase.SEED_GENERATION
-    if tool_name in {"seed_saver", "grade_gate", "seed_loader", "seed_repairer", "seed_qa"}:
+    if tool_name in {
+        "seed_saver",
+        "grade_gate",
+        "seed_loader",
+        "seed_repairer",
+        "seed_qa",
+        "seed_preflight",
+        "seed_reviewer",
+    }:
         # ``seed_repairer`` joins this set so a repair-phase timeout (the
         # outer ``asyncio.wait_for`` around ``repairer.converge`` inside
         # AutoPipeline.run) is recoverable on ``--resume``: the only sensible
         # restart is the REVIEW phase, which re-invokes the bounded repairer.
         # Without this entry a transient timeout becomes a permanent dead end.
+        # ``seed_reviewer`` gets the same treatment: the pre-run review
+        # timeout blocks with that tool name and is an equally pure transient.
         return AutoPhase.REVIEW
     if tool_name == "run_starter":
         return AutoPhase.RUN
@@ -4918,15 +5054,12 @@ def _seed_with_seed_qa_lateral_feedback(
         for constraint in seed.constraints
         if not _is_seed_qa_diagnostic_constraint(constraint)
     )
+    del qa_result
     metadata_updates: dict[str, Any] = {
         "seed_id": f"seed_{uuid4().hex[:12]}",
         "created_at": datetime.now(UTC),
         "parent_seed_id": seed.metadata.seed_id,
     }
-    if _requests_seed_qa_ambiguity_repair(qa_result):
-        metadata_updates["ambiguity_score"] = min(
-            seed.metadata.ambiguity_score, _SEED_QA_AMBIGUITY_REPAIR_SCORE
-        )
     return seed.model_copy(
         update={
             "constraints": tuple(dict.fromkeys((*existing_constraints, *normalized_feedback))),
@@ -4949,10 +5082,6 @@ def _seed_with_seed_qa_feedback(seed: Seed, qa_result: EvaluateResult, *, attemp
         "created_at": datetime.now(UTC),
         "parent_seed_id": seed.metadata.seed_id,
     }
-    if _requests_seed_qa_ambiguity_repair(qa_result):
-        metadata_updates["ambiguity_score"] = min(
-            seed.metadata.ambiguity_score, _SEED_QA_AMBIGUITY_REPAIR_SCORE
-        )
     return seed.model_copy(
         update={
             "constraints": tuple(dict.fromkeys((*existing_constraints, *normalized_feedback))),
@@ -4973,7 +5102,6 @@ def _is_seed_qa_diagnostic_constraint(constraint: str) -> bool:
     )
 
 
-_SEED_QA_AMBIGUITY_REPAIR_SCORE = 0.19
 _SEED_QA_DIAGNOSTIC_PREFIX_RE = re.compile(
     r"\[seed qa(?: lateral)? repair attempt [^\]]+\]\s*",
     re.IGNORECASE,
@@ -5097,9 +5225,22 @@ def _normalized_seed_qa_feedback(qa_result: EvaluateResult) -> tuple[str, ...]:
     lowered = "\n".join(feedback).casefold()
     if re.search(r"\bexit[_\s-]*conditions?\b", lowered):
         raise SeedQaRepairMappingError(feedback)
-    repairs: list[str] = []
     if _requests_seed_qa_ambiguity_repair(qa_result):
-        repairs.append("Seed metadata must satisfy the readiness gate: ambiguity_score <= 0.20.")
+        # A constraint patch cannot lower interview-derived ambiguity; the
+        # only honest resolution is more facts. Historically this path forced
+        # ``metadata.ambiguity_score`` down to pass the gate numerically —
+        # that gamed the score without reducing ambiguity, so it now blocks
+        # with the real feedback instead.
+        raise SeedQaRepairMappingError(
+            feedback,
+            code="seed_qa_ambiguity_unrepairable",
+            message=(
+                "Seed QA requires ambiguity_score <= 0.20, which a constraint patch "
+                "cannot deliver; resume the interview to resolve the ambiguity or "
+                "revise the Seed manually"
+            ),
+        )
+    repairs: list[str] = []
     if "non_goals" in lowered or "non-goals" in lowered or "runtime_context" in lowered:
         repairs.append(
             "Preserve ledger non-goals and runtime context in executable Seed surfaces; "
@@ -5150,11 +5291,31 @@ def _requests_seed_qa_ambiguity_repair(qa_result: EvaluateResult) -> bool:
     return False
 
 
+# Feedback items that indicate injected/verbatim prompt content rather than
+# reviewer substance: raw-prompt echoes, instruction-override phrasing, and
+# exfiltration surfaces (email addresses, URLs). Durable state must never
+# carry these — they would flow into status surfaces and lateral prompts.
+_SEED_QA_SENSITIVE_RE = re.compile(
+    r"(?i)\braw prompt\b|\bignore (?:all )?previous\b|[\w.+-]+@[\w-]+\.[\w.-]+|\w+://\S+"
+)
+
+
 def _safe_seed_qa_evidence(feedback: tuple[str, ...]) -> list[str]:
-    count = len(feedback[:5])
-    if count == 0:
-        return []
-    return [f"{count} Seed QA feedback item(s) withheld from durable state"]
+    """Sanitize QA feedback for durable state without discarding its substance.
+
+    Earlier revisions replaced the feedback with a "N item(s) withheld" counter,
+    which left BLOCKED sessions with no way to learn what QA actually objected
+    to. Persisting the *sanitized* items — transcript/diagnostic prose stripped,
+    injection-indicative items dropped entirely, length-bounded — keeps durable
+    state clean while keeping the evidence real.
+    """
+    items: list[str] = []
+    for raw in feedback[:5]:
+        cleaned = _clean_seed_qa_repair_text(raw, limit=240)
+        if not cleaned or _SEED_QA_SENSITIVE_RE.search(cleaned):
+            continue
+        items.append(cleaned)
+    return items
 
 
 def _safe_seed_qa_verdict(verdict: str) -> str:

@@ -25,6 +25,7 @@ from ouroboros.auto.lateral_routing import (
     classify_qa_failure_to_pattern,
     select_persona_for_qa_failure,
 )
+import ouroboros.auto.pipeline as pipeline_module
 from ouroboros.auto.pipeline import (
     AutoPipeline,
     SeedQaRepairMappingError,
@@ -97,7 +98,6 @@ def test_seed_qa_feedback_does_not_pollute_constraints_with_diagnostics() -> Non
         score=0.52,
         verdict="revise",
         differences=(
-            "metadata.ambiguity_score is 0.206, exceeding the required readiness gate of <= 0.20.",
             "The constraints section is polluted with pasted lateral repair and QA diagnostic text.",
         ),
         suggestions=(
@@ -112,7 +112,8 @@ def test_seed_qa_feedback_does_not_pollute_constraints_with_diagnostics() -> Non
     assert "QA differences:" not in constraints
     assert "[seed qa lateral repair attempt" not in constraints
     assert "omit QA or lateral diagnostic prose" in constraints
-    assert repaired.metadata.ambiguity_score == 0.19
+    # Repair never rewrites interview-derived ambiguity to game the gate.
+    assert repaired.metadata.ambiguity_score == 0.206
     assert repaired.metadata.parent_seed_id == "seed_dirty"
 
 
@@ -224,7 +225,14 @@ def test_seed_qa_lateral_feedback_does_not_trip_intent_guard_pollution() -> None
         "metadata.ambiguity_score remains above 0.20 and exceeds the readiness gate",
     ),
 )
-def test_seed_qa_lateral_feedback_applies_typed_ambiguity_repair(difference: str) -> None:
+def test_seed_qa_ambiguity_feedback_is_unrepairable_and_blocks(difference: str) -> None:
+    """A constraint patch cannot lower interview-derived ambiguity.
+
+    The old behavior forced ``metadata.ambiguity_score`` down to 0.19 so the
+    re-judge would pass numerically — score gaming. The typed ambiguity
+    request must now raise so the pipeline blocks with the real feedback and
+    routes the gap back to the interview/operator.
+    """
     seed = _build_seed().model_copy(
         update={"metadata": SeedMetadata(seed_id="seed_ambiguous", ambiguity_score=0.206)}
     )
@@ -241,14 +249,17 @@ def test_seed_qa_lateral_feedback_applies_typed_ambiguity_repair(difference: str
         text="Treat every CSV cell as a string.",
     )
 
-    repaired = _seed_with_seed_qa_lateral_feedback(
+    with pytest.raises(SeedQaRepairMappingError) as exc_info:
+        _seed_with_seed_qa_feedback(seed, qa_result, attempt=1)
+    assert exc_info.value.code == "seed_qa_ambiguity_unrepairable"
+
+    lateral = _seed_with_seed_qa_lateral_feedback(
         seed,
         lateral_result,
         qa_result=qa_result,
         attempt=1,
     )
-
-    assert repaired.metadata.ambiguity_score == 0.19
+    assert lateral.metadata.ambiguity_score == 0.206
 
 
 @pytest.mark.parametrize(
@@ -1003,7 +1014,12 @@ async def test_pipeline_lateral_skipped_when_complete_product_false(tmp_path) ->
 
 
 @pytest.mark.asyncio
-async def test_pipeline_lateral_timeout_blocks_with_recoverable_tool_name(tmp_path) -> None:
+async def test_pipeline_lateral_timeout_blocks_with_recoverable_tool_name(
+    tmp_path, monkeypatch
+) -> None:
+    # Vision #1157: a persistent timeout now exhausts the bounded in-process
+    # transient retry before blocking. Zero the backoff so the test stays fast.
+    monkeypatch.setattr(pipeline_module, "_TRANSIENT_RETRY_BACKOFF_SECONDS", (0.0,))
     state = _state_at_run_phase(tmp_path)
     state.timeout_seconds_by_phase[AutoPhase.UNSTUCK_LATERAL.value] = 1
     state.last_recovery_plan = _stale_recovery_plan()
@@ -1030,11 +1046,13 @@ async def test_pipeline_lateral_timeout_blocks_with_recoverable_tool_name(tmp_pa
     assert result.status == "blocked"
     assert state.last_tool_name == "lateral_thinker"
     assert "timed out" in (state.last_error or "")
+    assert state.last_error_code == "lateral_transient_exhausted"
     assert state.last_recovery_plan is None
 
 
 @pytest.mark.asyncio
-async def test_pipeline_lateral_handler_error_blocks(tmp_path) -> None:
+async def test_pipeline_lateral_handler_error_blocks(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(pipeline_module, "_TRANSIENT_RETRY_BACKOFF_SECONDS", (0.0,))
     state = _state_at_run_phase(tmp_path)
     state.last_recovery_plan = _stale_recovery_plan()
 
@@ -1064,6 +1082,7 @@ async def test_pipeline_lateral_handler_error_blocks(tmp_path) -> None:
     assert result.status == "blocked"
     assert state.last_tool_name == "lateral_thinker"
     assert "lateral_think tool unreachable" in (state.last_error or "")
+    assert state.last_error_code == "lateral_transient_exhausted"
     assert state.last_recovery_plan is None
 
 

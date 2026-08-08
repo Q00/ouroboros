@@ -264,11 +264,15 @@ class HandlerRunStarter:
             "cwd": self.cwd,
             "use_worktree": self.use_worktree,
             "efficiency_mode": self.efficiency_mode,
-            # Auto owns its own RALPH_HANDOFF and final-evaluation path. Keep
-            # the run handoff from adding a second evaluation owner or a
-            # competing run-session Ralph lineage.
-            "auto_evaluate": False,
-            "auto_evolve": False,
+            # Default-mode Auto completes at run handoff without running its
+            # own evaluation pass, so run->evaluate->evolve convergence is
+            # delegated to the server-side successor chain (#1916) under the
+            # operator's execution.auto_evaluate / auto_evolve config. Omit
+            # both keys entirely so snapshot_run_successor_policy falls back
+            # to that config instead of being forced off. Contrast with
+            # HandlerSynchronousRunStarter below, which still opts out
+            # because the complete-product pipeline owns EVALUATE and
+            # RALPH_HANDOFF itself.
         }
         if self.frugality_assurance_explicit:
             arguments["frugality_assurance"] = self.frugality_assurance
@@ -330,7 +334,10 @@ class HandlerSynchronousRunStarter:
                     "cwd": self.cwd,
                     "skip_qa": self.skip_qa,
                     # Complete-product Auto owns Ralph and the final formal
-                    # evaluation after the run artifact is available.
+                    # evaluation after the run artifact is available. This
+                    # opt-out is complete-product-only: the default-mode
+                    # HandlerRunStarter above now delegates convergence to
+                    # the server-side successor chain instead.
                     "auto_evaluate": False,
                     "auto_evolve": False,
                 },

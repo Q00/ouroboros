@@ -124,6 +124,13 @@ _EVENT_STORE_EMIT_TIMEOUT_SECONDS = 1.0
 INTERVIEW_SAFE_DEFAULT_SYNTHESIS_STOP_REASON_CODE = "interview_safe_default_synthesis_incomplete"
 BACKEND_READY_AMBIGUITY_THRESHOLD = 0.20
 
+# Bounded in-process retry for transient interview-backend failures.
+# One flaky round must not discard the remaining interview budget
+# (Vision #1157); --resume already re-enters these calls idempotently,
+# so an immediate bounded retry is strictly safer than blocking.
+_INTERVIEW_TRANSIENT_ATTEMPTS: int = 3
+_INTERVIEW_TRANSIENT_BACKOFF_SECONDS: tuple[float, ...] = (1.0, 5.0)
+
 # Stagnation-driven lateral concretization (interview convergence).
 # The auto-answerer fills gaps with generic conservative answers, so the
 # ambiguity scorer frequently oscillates around a plateau (~0.5) instead of
@@ -471,6 +478,13 @@ class AutoInterviewDriver:
         while self._pending_emit_tasks:
             pending = list(self._pending_emit_tasks)
             await asyncio.gather(*pending, return_exceptions=True)
+            # A task can be done while its ``call_soon``-scheduled ``discard``
+            # callback has not run yet — notably during event-loop shutdown,
+            # when scheduled callbacks are no longer serviced and awaiting the
+            # already-done gather future returns without yielding. Without
+            # this explicit removal the while-loop busy-spins forever on a
+            # set that can no longer shrink (uninterruptible 100%-CPU hang).
+            self._pending_emit_tasks.difference_update(task for task in pending if task.done())
 
     def _emit(self, state: AutoPipelineState) -> None:
         """Emit a progress snapshot for the current state via the callback.
@@ -639,9 +653,10 @@ class AutoInterviewDriver:
                     )
                 else:
                     interview_tool_name = "interview.resume"
+                    resume_session_id = state.interview_session_id
                     turn = _validate_turn(
-                        await self._with_timeout(
-                            self.backend.resume(state.interview_session_id),
+                        await self._with_transient_retry(
+                            lambda: self.backend.resume(resume_session_id),
                             state,
                             tool_name=interview_tool_name,
                         )
@@ -651,8 +666,10 @@ class AutoInterviewDriver:
             else:
                 preassigned_id = _generate_interview_id()
                 turn = _validate_turn(
-                    await self._with_timeout(
-                        self.backend.start(state.goal, cwd=state.cwd, interview_id=preassigned_id),
+                    await self._with_transient_retry(
+                        lambda: self.backend.start(
+                            state.goal, cwd=state.cwd, interview_id=preassigned_id
+                        ),
                         state,
                         tool_name=interview_tool_name,
                     )
@@ -677,12 +694,15 @@ class AutoInterviewDriver:
             )
         except TimeoutError as exc:
             self._record_evidence_based_session_id(state, exc, preassigned_id)
-            if interview_tool_name == "interview.start":
-                fallback = await self._try_close_after_backend_start_failure(state, ledger, exc)
-                if fallback is not None:
-                    return fallback
+            fallback = await self._try_close_after_backend_start_failure(state, ledger, exc)
+            if fallback is not None:
+                return fallback
             message = str(exc)
-            state.mark_blocked(message, tool_name=interview_tool_name)
+            state.mark_blocked(
+                message,
+                tool_name=interview_tool_name,
+                error_code="interview_backend_transient_exhausted",
+            )
             record_authoring_backend(state)
             self._save(state)
             return AutoInterviewResult(
@@ -691,12 +711,15 @@ class AutoInterviewDriver:
         except Exception as exc:
             self._record_evidence_based_session_id(state, exc, preassigned_id)
             action = "resume" if interview_tool_name == "interview.resume" else "start"
-            if action == "start":
-                fallback = await self._try_close_after_backend_start_failure(state, ledger, exc)
-                if fallback is not None:
-                    return fallback
+            fallback = await self._try_close_after_backend_start_failure(state, ledger, exc)
+            if fallback is not None:
+                return fallback
             blocker = f"interview {action} failed: {exc}"
-            state.mark_blocked(blocker, tool_name=interview_tool_name)
+            state.mark_blocked(
+                blocker,
+                tool_name=interview_tool_name,
+                error_code="interview_backend_transient_exhausted",
+            )
             record_authoring_backend(state)
             self._save(state)
             return AutoInterviewResult(
@@ -1250,11 +1273,12 @@ class AutoInterviewDriver:
         # cleanly) or returns the same blocker.
         self.answerer.apply(answer, ledger, question=question_for_record)
 
+        answer_session_id = turn.session_id
         try:
             turn = _validate_turn(
-                await self._with_timeout(
-                    self.backend.answer(
-                        turn.session_id,
+                await self._with_transient_retry(
+                    lambda: self.backend.answer(
+                        answer_session_id,
                         answer.prefixed_text,
                         last_question=question_for_record,
                     ),
@@ -1268,7 +1292,11 @@ class AutoInterviewDriver:
             # above). Persist only the blocker context; the next resume
             # re-computes the answer from the pre-answer ledger.
             message = str(exc)
-            state.mark_blocked(message, tool_name="interview.answer")
+            state.mark_blocked(
+                message,
+                tool_name="interview.answer",
+                error_code="interview_round_transient_exhausted",
+            )
             record_authoring_backend(state)
             self._save(state)
             return _InterviewRoundOutcome(
@@ -1281,7 +1309,11 @@ class AutoInterviewDriver:
             )
         except Exception as exc:
             blocker = f"interview answer failed: {exc}"
-            state.mark_blocked(blocker, tool_name="interview.answer")
+            state.mark_blocked(
+                blocker,
+                tool_name="interview.answer",
+                error_code="interview_round_transient_exhausted",
+            )
             record_authoring_backend(state)
             self._save(state)
             return _InterviewRoundOutcome(
@@ -1346,14 +1378,16 @@ class AutoInterviewDriver:
         ledger: SeedDraftLedger,
         exc: Exception,
     ) -> AutoInterviewResult | None:
-        """Close from deterministic ledger evidence when backend start is unavailable.
+        """Close from deterministic ledger evidence when the backend is unavailable.
 
-        A start-time provider/config failure means the LLM interview never
-        produced a question, but it does not invalidate facts already present
-        in the initial goal or facts that the audited safe-default policy can
-        fill for benign local tasks. When those facts make the ledger complete,
-        proceed without a persisted interview transcript; the pipeline's ledger
-        Seed generator owns the next phase.
+        Called after a ``interview.start`` OR ``interview.resume`` failure
+        (post-retry) whose message matches ``_is_authoring_backend_unavailable``.
+        Either failure means the LLM interview cannot produce another
+        question, but it does not invalidate facts already present in the
+        initial goal or facts that the audited safe-default policy can fill
+        for benign local tasks. When those facts make the ledger complete,
+        proceed without a persisted interview transcript; the pipeline's
+        ledger Seed generator owns the next phase.
         """
         if not _is_authoring_backend_unavailable(exc):
             return None
@@ -2167,6 +2201,36 @@ class AutoInterviewDriver:
                 f"(policy: state.timeout_seconds_by_phase[interview])"
             )
             raise TimeoutError(msg) from exc
+
+    async def _with_transient_retry(
+        self,
+        make_awaitable: Callable[[], Awaitable[InterviewTurn]],
+        state: AutoPipelineState,
+        *,
+        tool_name: str,
+    ) -> InterviewTurn:
+        """Bounded in-process retry around a single interview-backend call.
+
+        ``make_awaitable`` is a zero-arg factory rather than an already-created
+        awaitable because a coroutine can only be awaited once; each retry
+        attempt needs a fresh one. Callers must not observe any state mutation
+        from a failed attempt — only the final success (or the exhausted
+        exception, re-raised with its original type so existing
+        ``TimeoutError`` vs. generic ``Exception`` handling at the call sites
+        is unaffected) leaves this method.
+        """
+        for attempt in range(1, _INTERVIEW_TRANSIENT_ATTEMPTS + 1):
+            try:
+                return await self._with_timeout(make_awaitable(), state, tool_name=tool_name)
+            except Exception:
+                if attempt == _INTERVIEW_TRANSIENT_ATTEMPTS:
+                    raise
+                backoff = _INTERVIEW_TRANSIENT_BACKOFF_SECONDS[
+                    min(attempt - 1, len(_INTERVIEW_TRANSIENT_BACKOFF_SECONDS) - 1)
+                ]
+                if backoff:
+                    await asyncio.sleep(backoff)
+        raise AssertionError("unreachable: loop always returns or raises on last attempt")
 
     def _ensure_interview_phase(self, state: AutoPipelineState) -> None:
         if state.phase == AutoPhase.CREATED:

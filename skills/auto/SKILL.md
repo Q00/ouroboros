@@ -96,8 +96,27 @@ ask or send either argument; Auto restores the persisted contract.
 2. Runs bounded Socratic interview rounds with source-tagged auto answers.
 3. Generates a Seed.
 4. Reviews and repairs until A-grade or blocked.
-5. Starts execution only after A-grade.
-6. When `complete_product=true`, chains RUN → RALPH_HANDOFF after a successful run handoff and waits for a terminal Ralph status so a single invocation iterates Ralph until QA passes, convergence, or a budget bound trips. A QA-pass on the executed product completes the auto session; recognized failure modes (`iteration_timeout`, `wall_clock_exhausted`, `oscillation_detected`, `grade_regressing`, `max_generations reached`) block the auto session with the matching `stop_reason` in `last_error` so operators can resume after the cause is addressed.
+5. Runs a deterministic Seed preflight (do the claimed scripts/paths exist,
+   are verify-command env vars bound?) and then the pre-run Seed QA gate.
+   A preflight or unrepairable QA block surfaces **open questions** in the
+   blocker and the `auto.seed_preflight.blocked` / `auto.seed_qa.blocked`
+   events. On any `blocked` terminal, apply this host playbook keyed on
+   `stop_reason_code`:
+   - **Transient-exhausted codes** (`seed_qa_transient_exhausted`,
+     `evaluator_transient_exhausted`, `lateral_transient_exhausted`): a
+     provider/backend fault, not a content problem — `--resume` once
+     automatically; only surface it to the user if it blocks again on the
+     same code.
+   - **Fact-gap codes** (`seed_preflight_unexecutable`,
+     `seed_qa_feedback_unmapped`, `seed_qa_ambiguity_unrepairable`):
+     present the open questions to the user as concrete, answerable
+     questions on one screen (multiple-choice where possible) — never ask
+     the user to hand-edit the Seed YAML as the first option. Check the
+     interview ledger first — only ask the user what the ledger does not
+     already answer — then apply the answers to the saved Seed and
+     `--resume`. Never invent the missing facts.
+6. Starts execution only after A-grade.
+7. When `complete_product=true`, chains RUN → RALPH_HANDOFF after a successful run handoff and waits for a terminal Ralph status so a single invocation iterates Ralph until QA passes, convergence, or a budget bound trips. A QA-pass on the executed product completes the auto session; recognized failure modes (`iteration_timeout`, `wall_clock_exhausted`, `oscillation_detected`, `grade_regressing`, `max_generations reached`) block the auto session with the matching `stop_reason` in `last_error` so operators can resume after the cause is addressed.
 
 ## Background monitoring UX
 
@@ -242,8 +261,23 @@ For `attention_required`, treat `recommended_host_actions` as authoritative:
 | Ralph | `oscillation_detected` | blocker text + (future) `result.stop_reason_code` | Ralph oscillated between two grade states without making progress. |
 | Ralph | `grade_regressing` | blocker text + (future) `result.stop_reason_code` | A subsequent Ralph generation produced a strictly worse grade than its predecessor. |
 | Ralph | `max_generations reached` | blocker text + (future) `result.stop_reason_code` | Ralph hit its configured generation cap before reaching A grade. |
+| Seed gate | `seed_preflight_unexecutable` | `last_error_code`, `result.stop_reason_code` | Deterministic Seed preflight found fabricated or unbound contract claims (missing claimed script, unresolvable brownfield path, unbound `$VAR` in a verify command). The blocker and the `auto.seed_preflight.blocked` event carry the open questions; answer them, revise the Seed, and `--resume` (re-enters REVIEW). |
+| Seed gate | `seed_qa_feedback_unmapped` | `last_error_code`, `result.stop_reason_code` | Pre-run Seed QA failed with feedback the bounded repair mapper cannot translate into a safe constraint patch; manual Seed revision is required. Evidence is persisted sanitized (not withheld) on `last_qa_differences` / `last_qa_suggestions`. |
+| Seed gate | `seed_qa_ambiguity_unrepairable` | `last_error_code`, `result.stop_reason_code` | Seed QA demanded `ambiguity_score <= 0.20`. A constraint patch cannot lower interview-derived ambiguity (and the engine no longer rewrites the score to pass the gate), so the session blocks: resolve the ambiguity via the interview or manual Seed revision, then `--resume`. |
+| Seed gate | `seed_qa_transient_exhausted` | `last_error_code`, `result.stop_reason_code` | Pre-run Seed QA hit a transient provider/backend fault (rate limit, timeout, transport error) on all 3 bounded in-process retry attempts. Not a content problem — `--resume` re-enters the same `seed_qa` phase and retries the same bounded attempts (idempotent). |
+| Evaluate | `evaluator_transient_exhausted` | `last_error_code`, `result.stop_reason_code` | The post-run evaluator hit a transient provider/backend fault on all 3 bounded in-process retry attempts. `--resume` re-enters the evaluate phase and retries (idempotent). |
+| Lateral | `lateral_transient_exhausted` | `last_error_code`, `result.stop_reason_code` | The unstuck-lateral persona call hit a transient provider/backend fault on all 3 bounded in-process retry attempts. `--resume` re-enters the lateral phase and retries (idempotent). |
 
 Blockers without a canonical code keep using the free-form ``last_error`` text. Ralph-layer codes are surfaced via blocker text today; their result-envelope promotion is tracked as a follow-up.
+
+The three `*_transient_exhausted` codes are distinct from every other row in this
+table: they fire only after 3 in-process retry attempts already failed on a
+provider/backend fault, not on a content or spec problem. The first host
+action is always to `--resume` once automatically — it re-enters the same
+phase and retries the same bounded attempts — and only surface the block to
+the user if it recurs on the same code. Every other code in this table is a
+fact gap or a specification problem that a retry cannot fix; those require
+answers, not a resume.
 
 ### Interview closure mode taxonomy
 

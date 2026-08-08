@@ -167,6 +167,16 @@ explicitly loaded before use. Do this before preparing input or calling Ralph:
    Say "currently running with" because later generations may escalate or switch
    harnesses. Never forward raw commands or model reasoning.
 
+   When a new generation starts, do not just report the generation number —
+   `lineage.generation.started` carries an `ac_focus` block
+   (`active_ac_indices`, `frozen_ac_indices`, `active_ac_descriptions`,
+   `reason`). Report WHAT the generation is redoing, e.g.
+   "Gen 7: 2/5 AC 재작업 — 'CSV export writes summary.csv', 'CLI exits 0 on
+   --help' (3 AC는 이전 PASS 증거로 frozen)". When `ac_focus` is absent or
+   every AC is active with reason "initial/full generation", say the full AC
+   graph is being executed. Never quote verify commands or expected outputs —
+   descriptions only.
+
    When the user asks a live AC a read-only question or provides additive intent,
    reload `+ouroboros session signal`, call
    `ouroboros_session_signal_targets` for the observed execution, and select the

@@ -17,6 +17,7 @@ import pytest
 from ouroboros.auto.adapters import EvaluateResult, HandlerEvaluator, HandlerSeedQAEvaluator
 from ouroboros.auto.grading import GradeResult, SeedGrade
 from ouroboros.auto.interview_driver import AutoInterviewResult
+import ouroboros.auto.pipeline as pipeline_module
 from ouroboros.auto.pipeline import AutoPipeline
 from ouroboros.auto.seed_reviewer import SeedReview, SeedReviewer
 from ouroboros.auto.state import (
@@ -254,7 +255,10 @@ async def test_pipeline_evaluate_fail_transitions_to_blocked(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_pipeline_evaluate_timeout_blocks(tmp_path) -> None:
+async def test_pipeline_evaluate_timeout_blocks(tmp_path, monkeypatch) -> None:
+    # Vision #1157: a persistent timeout now exhausts the bounded in-process
+    # transient retry before blocking. Zero the backoff so the test stays fast.
+    monkeypatch.setattr(pipeline_module, "_TRANSIENT_RETRY_BACKOFF_SECONDS", (0.0,))
     state = _state_at_run_phase(tmp_path)
     state.timeout_seconds_by_phase[AutoPhase.EVALUATE.value] = 1
 
@@ -277,12 +281,14 @@ async def test_pipeline_evaluate_timeout_blocks(tmp_path) -> None:
     assert result.status == "blocked"
     assert state.last_tool_name == "evaluator"
     assert "timed out" in (state.last_error or "")
+    assert state.last_error_code == "evaluator_transient_exhausted"
     # No verdict was captured because the call timed out
     assert state.last_qa_verdict is None
 
 
 @pytest.mark.asyncio
-async def test_pipeline_evaluate_handler_error_blocks(tmp_path) -> None:
+async def test_pipeline_evaluate_handler_error_blocks(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(pipeline_module, "_TRANSIENT_RETRY_BACKOFF_SECONDS", (0.0,))
     state = _state_at_run_phase(tmp_path)
 
     async def transient_evaluator(seed: Seed, artifact: str) -> EvaluateResult:  # noqa: ARG001
@@ -305,6 +311,7 @@ async def test_pipeline_evaluate_handler_error_blocks(tmp_path) -> None:
     assert result.status == "blocked"
     assert state.last_tool_name == "evaluator"
     assert "QA service unreachable" in (state.last_error or "")
+    assert state.last_error_code == "evaluator_transient_exhausted"
 
 
 # ---------------------------------------------------------------------------
@@ -821,10 +828,11 @@ def test_recoverable_phase_for_evaluator_tool() -> None:
 
 
 @pytest.mark.asyncio
-async def test_evaluator_timeout_persists_artifact_for_resume(tmp_path) -> None:
+async def test_evaluator_timeout_persists_artifact_for_resume(tmp_path, monkeypatch) -> None:
     """After an evaluator timeout, ``state.evaluate_artifact`` must hold the
     artifact text so ``--resume`` can re-grade it instead of falling into
     the "no cached verdict and no artifact" BLOCKED branch."""
+    monkeypatch.setattr(pipeline_module, "_TRANSIENT_RETRY_BACKOFF_SECONDS", (0.0,))
     state = _state_at_run_phase(tmp_path)
     state.timeout_seconds_by_phase[AutoPhase.EVALUATE.value] = 1
 
@@ -850,11 +858,17 @@ async def test_evaluator_timeout_persists_artifact_for_resume(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_resume_after_evaluator_timeout_re_runs_with_persisted_artifact(tmp_path) -> None:
-    """Simulating the full resume contract: an evaluator that times out on
-    first call, then succeeds on a retry. The persisted artifact allows
+async def test_resume_after_evaluator_timeout_re_runs_with_persisted_artifact(
+    tmp_path, monkeypatch
+) -> None:
+    """Simulating the full resume contract: an evaluator that keeps timing
+    out through the entire bounded in-process transient retry (Vision #1157;
+    a single one-shot timeout now self-heals inside ``_run_evaluate`` and no
+    longer reaches BLOCKED — see ``test_pipeline_transient_retry.py``), then
+    succeeds on a manual ``--resume``. The persisted artifact allows
     ``_run_evaluate`` to re-grade on resume — the recovery path that the
     earlier review iteration silently broke."""
+    monkeypatch.setattr(pipeline_module, "_TRANSIENT_RETRY_BACKOFF_SECONDS", (0.0,))
     state = _state_at_run_phase(tmp_path)
     state.timeout_seconds_by_phase[AutoPhase.EVALUATE.value] = 1
     call_count = 0
@@ -862,7 +876,7 @@ async def test_resume_after_evaluator_timeout_re_runs_with_persisted_artifact(tm
     async def flaky_evaluator(seed: Seed, artifact: str) -> EvaluateResult:  # noqa: ARG001
         nonlocal call_count
         call_count += 1
-        if call_count == 1:
+        if call_count <= pipeline_module._TRANSIENT_TOOL_ATTEMPTS:
             await asyncio.sleep(10)  # times out
         return EvaluateResult(
             passed=True, score=0.91, verdict="pass", differences=(), suggestions=()
@@ -878,11 +892,12 @@ async def test_resume_after_evaluator_timeout_re_runs_with_persisted_artifact(tm
         evaluator=flaky_evaluator,
     )
 
-    # First call → evaluator times out → BLOCKED but artifact persisted
+    # First call → the transient retry exhausts on repeated timeouts →
+    # BLOCKED but artifact persisted.
     await pipeline.run(state)
     assert state.phase is AutoPhase.BLOCKED
     assert state.evaluate_artifact == "durable ralph artifact"
-    assert call_count == 1
+    assert call_count == pipeline_module._TRANSIENT_TOOL_ATTEMPTS
 
     # Simulate resume by re-entering EVALUATE directly (production resume
     # uses ``_recoverable_phase_for_tool("evaluator") == EVALUATE`` which we
@@ -901,7 +916,7 @@ async def test_resume_after_evaluator_timeout_re_runs_with_persisted_artifact(tm
     )
     assert result.status == "complete"
     assert state.last_qa_verdict == "pass"
-    assert call_count == 2  # evaluator was re-invoked with the persisted artifact
+    assert call_count == pipeline_module._TRANSIENT_TOOL_ATTEMPTS + 1
 
 
 def test_state_round_trips_evaluate_artifact(tmp_path) -> None:
