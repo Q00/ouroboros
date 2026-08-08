@@ -18,15 +18,24 @@ partial message list must remain visible for teardown.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
+import errno
 import os
 from pathlib import Path
 import stat
+import threading
 import time
 from typing import TYPE_CHECKING, Any
 
 import anyio
 
+from ouroboros.core.filesystem_capability import (
+    DirectoryChainFingerprint,
+    NoFollowDirectoryChain,
+    nofollow_directory_capabilities_available,
+    open_nofollow_directory_chain,
+)
 from ouroboros.orchestrator.adapter import AgentMessage, RuntimeHandle
 from ouroboros.orchestrator.evidence.claims import (
     _runtime_message_command_values,
@@ -41,7 +50,10 @@ from ouroboros.orchestrator.evidence.runtime_metadata import (
     HEARTBEAT_INTERVAL_SECONDS,
     STALL_TIMEOUT_SECONDS,
 )
-from ouroboros.orchestrator.runtime_message_projection import project_runtime_message
+from ouroboros.orchestrator.runtime_message_projection import (
+    message_tool_name,
+    project_runtime_message,
+)
 
 if TYPE_CHECKING:
     from ouroboros.orchestrator.execution_runtime_scope import (
@@ -74,34 +86,157 @@ class LeafDispatchState:
 class _PendingBashTarget:
     """Execution-span lease on one lexical shell receiver parent."""
 
-    parent_fd: int | None
+    directory_chain: NoFollowDirectoryChain | None
     leaf_name: str
     reported_path: str
+    workspace_relative_path: str
     pre_fingerprint: tuple[int, int, int, int, int, int] | None
+    workspace_fingerprint: DirectoryChainFingerprint
+
+    @property
+    def parent_fd(self) -> int | None:
+        """Return the final held parent fd while this lease owns its chain."""
+        if self.directory_chain is None:
+            return None
+        return self.directory_chain.leaf_fd
+
+    @property
+    def descriptor_count(self) -> int:
+        """Return the descriptors held by this receiver lease."""
+        return self.directory_chain.descriptor_count if self.directory_chain is not None else 0
+
+
+_MAX_BASH_FILESYSTEM_EFFECTS = 128
+_MAX_BASH_PROVENANCE_FDS = 64
+_BASH_PROVENANCE_FD_LIMIT_DIVISOR = 4
+_MIN_RUNTIME_FD_HEADROOM = 16
+_BASH_PROVENANCE_FD_LOCK = threading.Lock()
+
+
+class _BashProvenanceFDBudgetExceeded(Exception):
+    """Signal that a command capture must be abandoned as one unit."""
+
+
+def _bash_soft_fd_limit() -> int | None:
+    """Return the process soft fd limit when it is safely observable."""
+    try:
+        soft_limit = os.sysconf("SC_OPEN_MAX")
+    except (AttributeError, OSError, ValueError):
+        return None
+    if not isinstance(soft_limit, int) or soft_limit <= 0:
+        return None
+    return soft_limit
+
+
+def _bash_provenance_fd_budget() -> int:
+    """Return one conservative per-tracker cap below the process soft limit."""
+    soft_limit = _bash_soft_fd_limit()
+    if soft_limit is None:
+        return 0
+    return min(_MAX_BASH_PROVENANCE_FDS, soft_limit // _BASH_PROVENANCE_FD_LIMIT_DIVISOR)
+
+
+def _bash_open_fd_count() -> int | None:
+    """Count process descriptors without retaining the enumeration handle."""
+    for candidate in (Path("/proc/self/fd"), Path("/dev/fd")):
+        if not candidate.exists():
+            continue
+        try:
+            with os.scandir(candidate) as entries:
+                return sum(1 for _entry in entries)
+        except OSError:
+            continue
+    return None
+
+
+def _bash_provenance_headroom_available(required_fds: int) -> bool:
+    """Keep at least half the process limit free for runtime and pipe I/O."""
+    soft_limit = _bash_soft_fd_limit()
+    open_fds = _bash_open_fd_count()
+    if soft_limit is None or open_fds is None or required_fds < 0:
+        return False
+    reserved_headroom = max(_MIN_RUNTIME_FD_HEADROOM, soft_limit // 2)
+    return open_fds + required_fds <= soft_limit - reserved_headroom
+
+
+def _absolute_directory_fd_count(path: str | os.PathLike[str]) -> int:
+    """Return descriptors required for a root-anchored absolute directory walk."""
+    return len(Path(os.path.abspath(path)).parts)
 
 
 def _pending_bash_filesystem_targets(
     message: AgentMessage,
     *,
     task_cwd: str | None,
+    workspace_chain: NoFollowDirectoryChain | None = None,
+    target_fd_budget: int | None = None,
 ) -> tuple[_PendingBashTarget, ...]:
     """Lease Bash receiver parents and capture pre-execution file identity."""
+    with _BASH_PROVENANCE_FD_LOCK:
+        return _pending_bash_filesystem_targets_locked(
+            message,
+            task_cwd=task_cwd,
+            workspace_chain=workspace_chain,
+            target_fd_budget=target_fd_budget,
+        )
+
+
+def _pending_bash_filesystem_targets_locked(
+    message: AgentMessage,
+    *,
+    task_cwd: str | None,
+    workspace_chain: NoFollowDirectoryChain | None,
+    target_fd_budget: int | None,
+) -> tuple[_PendingBashTarget, ...]:
+    """Lease receivers while process-wide provenance admission is serialized."""
     if message.tool_name != "Bash" or _runtime_message_is_tool_completion(message):
         return ()
     effective_cwd = _runtime_message_effective_cwd(message, task_cwd=task_cwd)
-    if effective_cwd is None:
+    if effective_cwd is None or task_cwd is None:
         return ()
+    owned_workspace_chain: NoFollowDirectoryChain | None = None
+    if workspace_chain is None:
+        total_budget = _bash_provenance_fd_budget()
+        workspace_fd_count = _absolute_directory_fd_count(task_cwd)
+        if workspace_fd_count > total_budget or not _bash_provenance_headroom_available(
+            workspace_fd_count
+        ):
+            return ()
+        try:
+            owned_workspace_chain = open_nofollow_directory_chain(Path(os.path.abspath(task_cwd)))
+        except (OSError, RuntimeError, ValueError):
+            return ()
+        workspace_chain = owned_workspace_chain
+        target_fd_budget = total_budget - workspace_chain.descriptor_count
+    elif target_fd_budget is None:
+        target_fd_budget = _bash_provenance_fd_budget()
     targets: list[_PendingBashTarget] = []
-    for command in _runtime_message_command_values(message):
-        for target in _shell_command_mutation_targets(command):
-            pending = _lease_bash_target(
-                target,
-                task_cwd=task_cwd,
-                effective_cwd=effective_cwd,
-            )
-            if pending is not None:
-                targets.append(pending)
-    return tuple(targets)
+    try:
+        for command in _runtime_message_command_values(message):
+            for target in _shell_command_mutation_targets(command):
+                try:
+                    pending = _lease_bash_target(
+                        target,
+                        task_cwd=task_cwd,
+                        effective_cwd=effective_cwd,
+                        workspace_chain=workspace_chain,
+                        fd_budget=target_fd_budget,
+                    )
+                except _BashProvenanceFDBudgetExceeded:
+                    _close_pending_targets(tuple(targets))
+                    return ()
+                if pending is not None:
+                    targets.append(pending)
+                    target_fd_budget -= pending.descriptor_count
+                    if len(targets) > _MAX_BASH_FILESYSTEM_EFFECTS or len(
+                        {item.workspace_relative_path for item in targets}
+                    ) != len(targets):
+                        _close_pending_targets(tuple(targets))
+                        return ()
+        return tuple(targets)
+    finally:
+        if owned_workspace_chain is not None:
+            owned_workspace_chain.close()
 
 
 def _lease_bash_target(
@@ -109,17 +244,13 @@ def _lease_bash_target(
     *,
     task_cwd: str,
     effective_cwd: str,
+    workspace_chain: NoFollowDirectoryChain,
+    fd_budget: int,
 ) -> _PendingBashTarget | None:
     """Open a no-follow dirfd chain that survives path-component replacement."""
-    parent_fd: int | None = None
+    directory_chain: NoFollowDirectoryChain | None = None
     try:
-        if (
-            not hasattr(os, "O_DIRECTORY")
-            or not hasattr(os, "O_NOFOLLOW")
-            or os.open not in os.supports_dir_fd
-            or os.stat not in os.supports_dir_fd
-            or os.stat not in os.supports_follow_symlinks
-        ):
+        if not nofollow_directory_capabilities_available():
             return None
         workspace = Path(os.path.abspath(task_cwd))
         candidate = Path(target)
@@ -131,36 +262,42 @@ def _lease_bash_target(
         relative = absolute.relative_to(workspace)
         if not relative.parts or relative.name in {"", ".", ".."}:
             return None
-        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
-        parent_fd = os.open(workspace, flags)
-        for part in relative.parts[:-1]:
-            if part in {"", ".", ".."}:
-                return None
-            next_fd = os.open(part, flags, dir_fd=parent_fd)
-            os.close(parent_fd)
-            parent_fd = next_fd
+        required_fds = workspace_chain.descriptor_count + len(relative.parts[:-1])
+        if required_fds > fd_budget or not _bash_provenance_headroom_available(required_fds):
+            raise _BashProvenanceFDBudgetExceeded
+        directory_chain = open_nofollow_directory_chain(
+            workspace,
+            relative_components=relative.parts[:-1],
+        )
+        if not workspace_chain.matches_opened_prefix(directory_chain):
+            return None
+        workspace_fingerprint = workspace_chain.fingerprint()
+        parent_fd = directory_chain.leaf_fd
         try:
             pre = os.stat(relative.name, dir_fd=parent_fd, follow_symlinks=False)
         except FileNotFoundError:
             pre_fingerprint = None
         else:
             pre_fingerprint = _stat_fingerprint(pre)
-        leased_fd = parent_fd
-        parent_fd = None
-        return _PendingBashTarget(
-            parent_fd=leased_fd,
+        pending = _PendingBashTarget(
+            directory_chain=directory_chain,
             leaf_name=relative.name,
             reported_path=target,
+            workspace_relative_path=relative.as_posix(),
             pre_fingerprint=pre_fingerprint,
+            workspace_fingerprint=workspace_fingerprint,
         )
-    except (OSError, RuntimeError, ValueError):
+        directory_chain = None
+        return pending
+    except OSError as exc:
+        if exc.errno in {errno.EMFILE, errno.ENFILE}:
+            raise _BashProvenanceFDBudgetExceeded from exc
+        return None
+    except (RuntimeError, ValueError):
         return None
     finally:
-        if parent_fd is not None:
-            try:
-                os.close(parent_fd)
-            except OSError:
-                pass
+        if directory_chain is not None:
+            directory_chain.close()
 
 
 def _stat_fingerprint(value: os.stat_result) -> tuple[int, int, int, int, int, int]:
@@ -183,7 +320,8 @@ def _attach_bash_filesystem_effects(
     effects: list[dict[str, object]] = []
     for target in targets:
         parent_fd = target.parent_fd
-        if parent_fd is None:
+        directory_chain = target.directory_chain
+        if parent_fd is None or directory_chain is None:
             continue
         try:
             try:
@@ -206,13 +344,28 @@ def _attach_bash_filesystem_effects(
                     or post_fingerprint == target.pre_fingerprint
                 ):
                     continue
+            if not directory_chain.postvalidate():
+                continue
             effects.append(
                 {
                     "capture": "ouroboros.leaf-dispatch.v1",
                     "path": target.reported_path,
+                    "workspace_relative_path": target.workspace_relative_path,
+                    "workspace_chain": [
+                        {
+                            "name": name,
+                            "st_dev": device,
+                            "st_ino": inode,
+                            "st_mode": mode,
+                        }
+                        for name, device, inode, mode in target.workspace_fingerprint
+                    ],
                     "st_dev": identity.st_dev,
                     "st_ino": identity.st_ino,
                     "st_mode": identity.st_mode,
+                    "st_size": identity.st_size,
+                    "st_mtime_ns": identity.st_mtime_ns,
+                    "st_ctime_ns": identity.st_ctime_ns,
                 }
             )
         finally:
@@ -225,24 +378,70 @@ def _attach_bash_filesystem_effects(
     )
 
 
-def _strip_internal_filesystem_effects(message: AgentMessage) -> AgentMessage:
-    """Remove adapter-supplied provenance reserved for local lease capture."""
-    if "filesystem_effects" not in message.data:
+def _strip_internal_filesystem_effects(
+    message: AgentMessage,
+    *,
+    force_snapshot: bool = False,
+) -> AgentMessage:
+    """Sever adapter data ownership and remove its reserved provenance field."""
+    if (
+        not force_snapshot
+        and message_tool_name(message) != "Bash"
+        and not _runtime_message_is_tool_completion(message)
+        and "filesystem_effects" not in message.data
+    ):
         return message
-    sanitized = dict(message.data)
-    sanitized.pop("filesystem_effects", None)
+    sanitized = {
+        key: _snapshot_adapter_value(value)
+        for key, value in message.data.items()
+        if key != "filesystem_effects"
+    }
     return replace(message, data=sanitized)
 
 
+def _snapshot_adapter_value(value: object) -> object:
+    """Recursively copy plain containers used by provenance-sensitive metadata."""
+    if isinstance(value, Mapping):
+        return {key: _snapshot_adapter_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_snapshot_adapter_value(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_snapshot_adapter_value(item) for item in value)
+    if isinstance(value, set):
+        return {_snapshot_adapter_value(item) for item in value}
+    if isinstance(value, frozenset):
+        return frozenset(_snapshot_adapter_value(item) for item in value)
+    if isinstance(value, bytearray):
+        return bytes(value)
+    return value
+
+
+def _runtime_message_has_malformed_tool_call_aliases(message: AgentMessage) -> bool:
+    """Reject present correlation aliases that are not non-blank strings."""
+    containers: list[Mapping[str, object]] = [message.data]
+    message_meta = message.data.get("meta")
+    if isinstance(message_meta, Mapping):
+        containers.append(message_meta)
+    tool_result = message.data.get("tool_result")
+    if isinstance(tool_result, Mapping):
+        containers.append(tool_result)
+        result_meta = tool_result.get("meta")
+        if isinstance(result_meta, Mapping):
+            containers.append(result_meta)
+    return any(
+        key in container
+        and (not isinstance(container[key], str) or not str(container[key]).strip())
+        for container in containers
+        for key in ("tool_call_id", "tool_use_id", "call_id")
+    )
+
+
 def _close_pending_target(target: _PendingBashTarget) -> None:
-    fd = target.parent_fd
-    if fd is None:
+    directory_chain = target.directory_chain
+    if directory_chain is None:
         return
-    target.parent_fd = None
-    try:
-        os.close(fd)
-    except OSError:
-        pass
+    target.directory_chain = None
+    directory_chain.close()
 
 
 def _close_pending_targets(targets: tuple[_PendingBashTarget, ...]) -> None:
@@ -255,21 +454,63 @@ class _BashFilesystemLeaseTracker:
 
     def __init__(self, *, task_cwd: str | None) -> None:
         self._task_cwd = task_cwd
+        self._provenance_fd_budget = _bash_provenance_fd_budget()
+        self._workspace_chain: NoFollowDirectoryChain | None = None
         self._pending_by_id: dict[str, tuple[_PendingBashTarget, ...]] = {}
         self._seen_call_ids: set[str] = set()
+        self._pending_bash_call_ids: set[str] = set()
         self._idless: tuple[_PendingBashTarget, ...] | None = None
         self._idless_active = False
+        self._idless_bash_active = False
+        self._idless_tool_name: str | None = None
 
     def __enter__(self) -> _BashFilesystemLeaseTracker:
+        if self._task_cwd is not None and self._workspace_chain is None:
+            workspace_fd_count = _absolute_directory_fd_count(self._task_cwd)
+            with _BASH_PROVENANCE_FD_LOCK:
+                if workspace_fd_count > self._provenance_fd_budget or not (
+                    _bash_provenance_headroom_available(workspace_fd_count)
+                ):
+                    return self
+                try:
+                    self._workspace_chain = open_nofollow_directory_chain(
+                        Path(os.path.abspath(self._task_cwd))
+                    )
+                except (OSError, RuntimeError, ValueError):
+                    self._workspace_chain = None
         return self
 
     def __exit__(self, *_exc_info: object) -> None:
         self.close()
 
+    def _poison_pending_named_bash_leases(self) -> None:
+        """Close every active named Bash lease without making it reusable."""
+        for pending_id in tuple(self._pending_bash_call_ids):
+            _close_pending_targets(self._pending_by_id.pop(pending_id, ()))
+            self._seen_call_ids.add(pending_id)
+            self._pending_by_id[pending_id] = ()
+        self._pending_bash_call_ids.clear()
+
+    def _held_provenance_fd_count(self) -> int:
+        """Count every workspace and receiver descriptor owned by this tracker."""
+        count = self._workspace_chain.descriptor_count if self._workspace_chain else 0
+        count += sum(
+            target.descriptor_count
+            for targets in self._pending_by_id.values()
+            for target in targets
+        )
+        if self._idless is not None:
+            count += sum(target.descriptor_count for target in self._idless)
+        return count
+
     def observe(self, message: AgentMessage) -> AgentMessage:
         """Lease calls, attach completion effects, and reject ambiguous pairing."""
-        message = _strip_internal_filesystem_effects(message)
-        if _runtime_message_has_conflicting_tool_call_ids(message):
+        message = _strip_internal_filesystem_effects(
+            message,
+            force_snapshot=bool(self._pending_bash_call_ids) or self._idless_bash_active,
+        )
+        malformed_alias = _runtime_message_has_malformed_tool_call_aliases(message)
+        if malformed_alias or _runtime_message_has_conflicting_tool_call_ids(message):
             # Every alias named by an ambiguous message is poisoned. Close any
             # prior lease it could otherwise consume, and retain an empty
             # sentinel so a later call/result cannot revive or donate one.
@@ -277,12 +518,34 @@ class _BashFilesystemLeaseTracker:
                 _close_pending_targets(self._pending_by_id.pop(conflicting_id, ()))
                 self._seen_call_ids.add(conflicting_id)
                 self._pending_by_id[conflicting_id] = ()
+                self._pending_bash_call_ids.discard(conflicting_id)
+            if malformed_alias and not _runtime_message_tool_call_ids(message):
+                is_bash_candidate = (
+                    _runtime_message_is_tool_completion(message)
+                    or message_tool_name(message) == "Bash"
+                )
+                if is_bash_candidate:
+                    self._poison_pending_named_bash_leases()
+                    _close_pending_targets(self._idless or ())
+                    self._idless = ()
+                    self._idless_active = True
+                    self._idless_bash_active = False
+                    self._idless_tool_name = None
             return message
         call_id = _runtime_message_tool_call_id(message)
-        if message.tool_name is not None and not _runtime_message_is_tool_completion(message):
+        tool_name = message_tool_name(message)
+        if tool_name is not None and not _runtime_message_is_tool_completion(message):
             targets = (
-                _pending_bash_filesystem_targets(message, task_cwd=self._task_cwd)
-                if message.tool_name == "Bash"
+                _pending_bash_filesystem_targets(
+                    message,
+                    task_cwd=self._task_cwd,
+                    workspace_chain=self._workspace_chain,
+                    target_fd_budget=max(
+                        0,
+                        self._provenance_fd_budget - self._held_provenance_fd_count(),
+                    ),
+                )
+                if tool_name == "Bash" and self._workspace_chain is not None
                 else ()
             )
             if call_id is not None:
@@ -290,26 +553,52 @@ class _BashFilesystemLeaseTracker:
                     _close_pending_targets(self._pending_by_id.get(call_id, ()))
                     _close_pending_targets(targets)
                     self._pending_by_id[call_id] = ()
+                    self._pending_bash_call_ids.discard(call_id)
                 else:
                     self._seen_call_ids.add(call_id)
                     self._pending_by_id[call_id] = targets
+                    if tool_name == "Bash":
+                        self._pending_bash_call_ids.add(call_id)
             elif not self._idless_active:
                 self._idless_active = True
                 self._idless = targets
+                self._idless_bash_active = tool_name == "Bash"
+                self._idless_tool_name = tool_name
             else:
                 _close_pending_targets(self._idless or ())
                 _close_pending_targets(targets)
                 self._idless = ()
+                self._idless_bash_active = False
+                self._idless_tool_name = None
             return message
         if not _runtime_message_is_tool_completion(message):
             return message
         if call_id is not None:
             targets = self._pending_by_id.pop(call_id, ())
+            self._pending_bash_call_ids.discard(call_id)
         else:
+            unique_idless_tool = self._idless_tool_name if self._idless_active else None
+            normalized_completion_tool = (
+                tool_name.strip() if isinstance(tool_name, str) and tool_name.strip() else None
+            )
+            orphan_bash_completion = normalized_completion_tool == "Bash" or (
+                normalized_completion_tool is None and unique_idless_tool is None
+            )
+            if orphan_bash_completion and unique_idless_tool != "Bash":
+                # A terminal that cannot be assigned to one active id-less Bash
+                # call could belong to any concurrent named Bash call.  It
+                # closes every such authority boundary; a later matching ID
+                # must not extend or revive one of their receiver leases.
+                self._poison_pending_named_bash_leases()
             targets = self._idless or ()
             self._idless = None
             self._idless_active = False
-        if message.tool_name not in {None, "Bash"}:
+            self._idless_bash_active = False
+            self._idless_tool_name = None
+        normalized_tool_name = (
+            tool_name.strip() if isinstance(tool_name, str) and tool_name.strip() else None
+        )
+        if normalized_tool_name not in {None, "Bash"}:
             _close_pending_targets(targets)
             return message
         return _attach_bash_filesystem_effects(message, targets) if targets else message
@@ -320,10 +609,16 @@ class _BashFilesystemLeaseTracker:
             _close_pending_targets(targets)
         self._pending_by_id.clear()
         self._seen_call_ids.clear()
+        self._pending_bash_call_ids.clear()
         if self._idless is not None:
             _close_pending_targets(self._idless)
             self._idless = None
         self._idless_active = False
+        self._idless_bash_active = False
+        self._idless_tool_name = None
+        if self._workspace_chain is not None:
+            self._workspace_chain.close()
+            self._workspace_chain = None
 
 
 def _correlated_tool_result_name(

@@ -698,11 +698,13 @@ def test_durable_claim_coalesces_distinct_processes(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_expired_owner_fails_closed_without_implicit_takeover(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A crashed writer requires recovery instead of silently duplicating work."""
+    from sqlalchemy import update as sa_update
+
+    from ouroboros.persistence.schema import lineage_advancement_claims_table
+
     first_store, second_store = await _stores(tmp_path / "expired-writer.db")
-    monkeypatch.setattr(lineage_claims, "DEFAULT_LEASE_SECONDS", 0.03)
     executed = False
 
     async def forbidden_operation() -> str:
@@ -720,6 +722,23 @@ async def test_expired_owner_fails_closed_without_implicit_takeover(
             request_key="request-2",
         )
         assert claim is not None and claim.acquired
+
+        # Model a crashed owner's expired row directly. A 30 ms global lease
+        # made both the stale claim *and the recovery attempt* depend on host
+        # scheduling; under xdist the recovered owner could expire before it
+        # published. Explicit aging isolates the fail-closed observation while
+        # preserving the production lease for the post-recovery operation.
+        assert first_store._engine is not None
+        async with first_store._engine.begin() as connection:
+            await connection.execute(
+                sa_update(lineage_advancement_claims_table)
+                .where(
+                    lineage_advancement_claims_table.c.scope == "evolve-core",
+                    lineage_advancement_claims_table.c.lineage_id == "lineage",
+                    lineage_advancement_claims_table.c.owner_id == "crashed-owner",
+                )
+                .values(lease_expires_at_ms=0)
+            )
 
         with pytest.raises(RuntimeError, match="recover_expired_claim=true"):
             await asyncio.wait_for(

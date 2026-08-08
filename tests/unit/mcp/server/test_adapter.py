@@ -33,7 +33,6 @@ from ouroboros.mcp.server.adapter import (
     _validate_parameter_constraints,
     validate_transport,
 )
-from ouroboros.mcp.tools import job_handlers as job_handlers_module
 from ouroboros.mcp.tools.job_handlers import JobResultHandler, JobWaitHandler
 from ouroboros.mcp.types import (
     ContentType,
@@ -1299,11 +1298,10 @@ class TestMCPServerAdapterTools:
         finally:
             await store.close()
 
-    async def test_call_tool_job_wait_timeout_then_job_result_recovers_terminal_snapshot(
-        self, tmp_path, monkeypatch
+    async def test_call_tool_job_wait_delayed_zero_snapshot_then_result_recovers_terminal(
+        self, tmp_path
     ) -> None:
-        """A bounded wait response can be followed by adapter-routed terminal result fetch."""
-        monkeypatch.setattr(job_handlers_module, "_JOB_WAIT_RESPONSE_GRACE_SECONDS", 0.01)
+        """A delayed zero-time snapshot still composes with a later terminal result."""
         store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'jobs.db'}")
         await store.initialize()
         try:
@@ -1346,7 +1344,7 @@ class TestMCPServerAdapterTools:
                     assert job_id == running.job_id
                     assert cursor == 4
                     assert timeout_seconds == 0
-                    await asyncio.sleep(1)
+                    await asyncio.sleep(1.05)
                     return running, False
 
             manager = RecoveringJobManager()
@@ -1362,7 +1360,9 @@ class TestMCPServerAdapterTools:
             result = await adapter.call_tool("ouroboros_job_result", {"job_id": running.job_id})
 
             assert wait_result.is_ok
-            assert wait_result.value.meta["wait_timed_out"] is True
+            assert "wait_timed_out" not in wait_result.value.meta
+            assert wait_result.value.meta["lifecycle_status"] == "running"
+            assert wait_result.value.meta["cursor"] == 4
             assert wait_result.value.meta["result_available"] is False
             assert result.is_ok
             assert result.value.text_content == "terminal result"

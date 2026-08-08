@@ -31,6 +31,10 @@ from ouroboros.mcp.tools.attention_relay import (
     RELAY_SOURCE_EVENT_TYPES,
     classify_relay_events,
 )
+from ouroboros.mcp.tools.job_wait_guard import (
+    JOB_WAIT_GUARD_VERSION,
+    await_job_wait_request,
+)
 from ouroboros.mcp.types import (
     ContentType,
     MCPContentItem,
@@ -54,7 +58,6 @@ log = structlog.get_logger(__name__)
 
 _DEFAULT_JOB_VIEW = "full"
 _MAX_JOB_WAIT_TIMEOUT_SECONDS = 5
-_JOB_WAIT_GUARD_VERSION = "detached-branch-timeout-v2"
 _JOB_WAIT_RESPONSE_GRACE_SECONDS = 1.0
 _JOB_WAIT_EXECUTION_SCAN_TIMEOUT_SECONDS = 1.0
 _JOB_WAIT_RENDER_TIMEOUT_SECONDS = 2.0
@@ -231,69 +234,6 @@ def _job_wait_internal_timeout_result(
             "result_available": False,
         },
     )
-
-
-def _consume_detached_wait_task(task: asyncio.Task[Any]) -> None:
-    try:
-        task.result()
-    except asyncio.CancelledError:
-        pass
-    except Exception:
-        log.warning("mcp.tool.job_wait.detached_wait_failed", exc_info=True)
-
-
-async def _await_job_wait_branch(
-    awaitable: Any,
-    *,
-    timeout: float,
-    job_id: str,
-    branch: str,
-) -> Any:
-    """Await a job wait branch without waiting for slow cancellation cleanup."""
-    log.debug(
-        "mcp.tool.job_wait.guard.enter",
-        job_id=job_id,
-        branch=branch,
-        timeout_seconds=timeout,
-        guard_version=_JOB_WAIT_GUARD_VERSION,
-        pid=os.getpid(),
-    )
-    task = asyncio.create_task(awaitable)
-    log.debug(
-        "mcp.tool.job_wait.guard.task_created",
-        job_id=job_id,
-        branch=branch,
-        guard_version=_JOB_WAIT_GUARD_VERSION,
-        pid=os.getpid(),
-    )
-    try:
-        done, _pending = await asyncio.wait({task}, timeout=timeout)
-    except asyncio.CancelledError:
-        task.cancel()
-        task.add_done_callback(_consume_detached_wait_task)
-        raise
-    log.debug(
-        "mcp.tool.job_wait.guard.wait_returned",
-        job_id=job_id,
-        branch=branch,
-        done=task in done,
-        guard_version=_JOB_WAIT_GUARD_VERSION,
-        pid=os.getpid(),
-    )
-    if task in done:
-        return task.result()
-
-    task.cancel()
-    task.add_done_callback(_consume_detached_wait_task)
-    log.debug(
-        "mcp.tool.job_wait.wait.branch_timeout",
-        job_id=job_id,
-        branch=branch,
-        timeout_seconds=timeout,
-        guard_version=_JOB_WAIT_GUARD_VERSION,
-        pid=os.getpid(),
-    )
-    raise TimeoutError
 
 
 async def _query_all_execution_subtask_events(
@@ -1466,7 +1406,7 @@ class JobWaitHandler:
             stream=stream,
             wait_for=wait_for,
             wait_response_timeout=wait_response_timeout,
-            guard_version=_JOB_WAIT_GUARD_VERSION,
+            guard_version=JOB_WAIT_GUARD_VERSION,
             pid=os.getpid(),
         )
 
@@ -1517,7 +1457,7 @@ class JobWaitHandler:
                         asyncio.get_running_loop().time() - started_at,
                         3,
                     ),
-                    guard_version=_JOB_WAIT_GUARD_VERSION,
+                    guard_version=JOB_WAIT_GUARD_VERSION,
                     pid=os.getpid(),
                 )
                 return Result.ok(result)
@@ -1539,14 +1479,15 @@ class JobWaitHandler:
                     stream_events,
                     stream_cursor,
                     stream_has_more,
-                ) = await _await_job_wait_branch(
+                ) = await await_job_wait_request(
                     self._wait_for_linked_change(
                         job_id,
                         cursor=cursor,
                         timeout_seconds=timeout_seconds,
                         wait_for=wait_for,
                     ),
-                    timeout=wait_response_timeout,
+                    timeout_seconds=timeout_seconds,
+                    response_timeout=wait_response_timeout,
                     job_id=job_id,
                     branch="linked",
                 )
@@ -1567,14 +1508,15 @@ class JobWaitHandler:
                     changed,
                     stream_cursor,
                     meaningful_execution_changed,
-                ) = await _await_job_wait_branch(
+                ) = await await_job_wait_request(
                     self._wait_for_meaningful_change(
                         job_id,
                         cursor=cursor,
                         timeout_seconds=timeout_seconds,
                         wait_for=wait_for,
                     ),
-                    timeout=wait_response_timeout,
+                    timeout_seconds=timeout_seconds,
+                    response_timeout=wait_response_timeout,
                     job_id=job_id,
                     branch="meaningful",
                 )
@@ -1591,13 +1533,14 @@ class JobWaitHandler:
                     wait_for=wait_for,
                     wait_response_timeout=wait_response_timeout,
                 )
-                snapshot, changed = await _await_job_wait_branch(
+                snapshot, changed = await await_job_wait_request(
                     self._job_manager.wait_for_change(
                         job_id,
                         cursor=cursor,
                         timeout_seconds=timeout_seconds,
                     ),
-                    timeout=wait_response_timeout,
+                    timeout_seconds=timeout_seconds,
+                    response_timeout=wait_response_timeout,
                     job_id=job_id,
                     branch="raw",
                 )

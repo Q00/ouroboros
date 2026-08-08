@@ -13,8 +13,13 @@ from ouroboros.core.session_signal import (
     SessionSignalState,
 )
 from ouroboros.core.session_signal_projection import SessionSignalProjection
+from ouroboros.events.base import BaseEvent
 from ouroboros.mcp.tools.synapse_handler import SynapseSignalHandler, SynapseTargetsHandler
-from ouroboros.orchestrator.synapse import SessionSignalHub, SessionSignalTarget
+from ouroboros.orchestrator.synapse import (
+    SessionSignalHub,
+    SessionSignalMailbox,
+    SessionSignalTarget,
+)
 
 
 @dataclass
@@ -40,6 +45,24 @@ class _Mailbox:
             event_ids=("evt_1",),
             reply=self.reply,
         )
+
+
+@dataclass
+class _Store:
+    events: list[BaseEvent] = field(default_factory=list)
+
+    async def replay(self, aggregate_type: str, aggregate_id: str) -> list[BaseEvent]:
+        return [
+            event
+            for event in self.events
+            if event.aggregate_type == aggregate_type and event.aggregate_id == aggregate_id
+        ]
+
+    async def append(self, event: BaseEvent) -> None:
+        self.events.append(event)
+
+    async def append_batch(self, events: list[BaseEvent]) -> None:
+        self.events.extend(events)
 
 
 def _arguments(**overrides: object) -> dict[str, object]:
@@ -68,6 +91,96 @@ def test_definition_exposes_clean_room_vocabulary() -> None:
     assert params["fallback_mode"].enum == ("after_turn",)
     assert params["source"].enum == ("user", "conductor", "worker")
     assert params["contract_effect"].enum == ("additive", "specification_change")
+
+
+def test_public_schema_distinguishes_shipped_reserved_and_fallback_modes() -> None:
+    signal = SynapseSignalHandler(_Mailbox()).definition  # type: ignore[arg-type]
+    targets = SynapseTargetsHandler(SessionSignalHub()).definition
+    schema = signal.to_input_schema()
+    mode = schema["properties"]["mode"]
+    fallback = schema["properties"]["fallback_mode"]
+    description = signal.description
+
+    assert "advertise and apply only inform and after_turn" in description
+    assert "direct requested modes require" in description
+    assert "redirect and replace remain reserved" in description
+    assert "redirect nevertheless remains a valid requested mode" in description
+    assert "fallback_mode=after_turn must be present" in description
+    assert "effective queued mode" in description
+    assert "unsupported requests fail closed" in description
+    assert "selected exact attempt's live capabilities" in description
+    assert mode["enum"] == ["inform", "after_turn", "redirect", "replace"]
+    assert "For the direct path" in mode["description"]
+    assert "For the sole fallback path" in mode["description"]
+    assert "redirect may be requested while omitted from discovery" in mode["description"]
+    assert "effective mode is then after_turn" in mode["description"]
+    assert "advertise/effect only inform and after_turn" in mode["description"]
+    assert "ouroboros_session_signal_targets" in mode["description"]
+    assert fallback["enum"] == ["after_turn"]
+    assert "Explicit redirect-only fallback" in fallback["description"]
+    assert "live SessionSignal capabilities" in targets.description
+    assert "Advertised modes are valid direct requested modes" in targets.description
+    assert "redirect may be requested while omitted from discovery" in targets.description
+    assert "effective queued mode is after_turn" in targets.description
+    assert "other unsupported requests fail closed" in targets.description
+    assert "select only an advertised mode" not in targets.description
+
+
+@pytest.mark.asyncio
+async def test_public_discovery_guidance_and_mailbox_share_redirect_fallback_contract() -> None:
+    store = _Store()
+    hub = SessionSignalHub()
+    target = SessionSignalTarget(
+        execution_id="exec_1",
+        session_scope_id="scope_1",
+        session_attempt_id="scope_1_attempt_1",
+        runtime_backend="codex_cli",
+        capabilities=SessionSignalCapabilities(
+            after_turn_delivery=True,
+            checkpoint_redirect=False,
+        ),
+    )
+    hub.register(target)
+    mailbox = SessionSignalMailbox(store, hub, delivery_queue=hub)  # type: ignore[arg-type]
+    signal_handler = SynapseSignalHandler(mailbox)
+    targets_handler = SynapseTargetsHandler(hub)
+
+    discovered = await targets_handler.handle({"execution_id": "exec_1"})
+    queued = await signal_handler.handle(_arguments())
+    rejected = await signal_handler.handle(
+        _arguments(fallback_mode=None, idempotency_key="turn_8_scope_1")
+    )
+
+    assert discovered.is_ok
+    assert "[modes: after_turn]" in discovered.value.text_content
+    capabilities = discovered.value.meta["targets"][0]["capabilities"]
+    assert capabilities["after_turn_delivery"] is True
+    assert capabilities["checkpoint_redirect"] is False
+    mode_description = next(
+        parameter.description
+        for parameter in signal_handler.definition.parameters
+        if parameter.name == "mode"
+    )
+    assert "redirect may be requested while omitted from discovery" in mode_description
+    assert "redirect may be requested while omitted from discovery" in (
+        targets_handler.definition.description
+    )
+    assert queued.is_ok
+    assert queued.value.meta["requested_mode"] == "redirect"
+    assert queued.value.meta["effective_mode"] == "after_turn"
+    pending = hub.pop_pending(target)
+    assert pending is not None
+    assert pending.signal.mode is SessionSignalMode.REDIRECT
+    assert pending.effective_mode is SessionSignalMode.AFTER_TURN
+    assert rejected.is_ok
+    assert rejected.value.is_error is True
+    assert rejected.value.meta["state"] == "rejected"
+    assert rejected.value.meta["effective_mode"] is None
+    rejected_events = await store.replay(
+        "session_signal",
+        rejected.value.meta["signal_id"],
+    )
+    assert rejected_events[-1].data["rejection_code"] == "capability_unsupported"
 
 
 @pytest.mark.asyncio
