@@ -3901,6 +3901,43 @@ def test_relational_component_targets_own_their_surfaces(goal: str) -> None:
 @pytest.mark.parametrize(
     "goal",
     [
+        "Build a desktop dashboard focused on browser crashes",
+        "Build a desktop dashboard centered on browser security findings",
+        "Build a desktop dashboard devoted to web app incident reports",
+    ],
+)
+def test_topical_predicates_are_not_browser_context(goal: str) -> None:
+    """R70 guard: an adjective/participle plus its preposition opens a
+    topic — everything to the clause boundary is subject matter."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value="Interactive charts with a filters panel")
+    _seed_section(ledger, "runtime_context", value="Desktop application")
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
+        "Build the preferences UI exposed through a browser extension",
+        "Build a settings page hosted through a browser extension",
+        "Build a settings page associated with the installed browser extension",
+    ],
+)
+def test_participial_component_relations_own_their_surfaces(goal: str) -> None:
+    """R70 guard: participial relations (exposed through, hosted
+    through, associated with) reach the component like the bare
+    prepositions, while bare "with" stays outside the veto."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value="Settings panel with save button")
+    _seed_section(ledger, "runtime_context", value="Runs in browsers")
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
         "The product is an admin portal that runs in browsers",
         "The deliverable is an admin portal available in browsers",
     ],

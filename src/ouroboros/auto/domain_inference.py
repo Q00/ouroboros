@@ -1200,6 +1200,18 @@ def _ledger_has_browser_context(ledger: SeedDraftLedger) -> bool:
         " ",
         goal_for_context,
     )
+    # Topical predicates relate the artifact to its subject (#1813 R70):
+    # "focused on browser crashes", "devoted to web app incident
+    # reports" — an adjective/participle plus its preposition opens a
+    # topic, and everything to the clause boundary is subject matter.
+    goal_for_context = re.sub(
+        r"\b(?:focused|focusing|centered|centering|centred|centring|"
+        r"devoted|dedicated|sourced|based|oriented|concentrated|"
+        r"concentrating|specialized|specializing|specialised|"
+        r"specialising|revolving)\s+(?:on|around|to|from|upon|in)\b[^,.;]*",
+        " ",
+        goal_for_context,
+    )
     # A browser word re-headed by a data/measurement noun is subject
     # matter (#1813 R69): "browser usage metrics", "browser adoption
     # trends" describe what the artifact reports on.
@@ -1278,9 +1290,13 @@ _INSPECTION_TOOL_GOAL_RE = re.compile(
 # trailing rejection keeps audiences ("for extension developers")
 # outside the veto.
 _GOAL_COMPONENT_TARGET_RE = re.compile(
-    # Any relational introduction reaches the component (#1813 R69):
-    # prepositions, "attached/belonging TO", "used BY", "alongside".
-    r"\b(?:for|of|in|inside|within|into|to|by|alongside|beside)\s+"
+    # Any relational introduction reaches the component (#1813 R69/R70):
+    # bare prepositions, "attached/belonging TO", "used BY", and
+    # participial relations ("exposed THROUGH", "associated WITH") —
+    # bare "with" stays outside so a co-produced component is not
+    # swallowed.
+    r"\b(?:(?:[\w\-'’]+(?:ed|ing)\s+)?(?:for|of|in|inside|within|into|to|"
+    r"by|alongside|beside)|[\w\-'’]+(?:ed|ing)\s+(?:through|with|from))\s+"
     r"(?:(?:an?|the|our|my|your|their|its)\s+)?(?:[\w\-'’]+\s+){0,3}?"
     r"(?:extensions?|plugins?|add[\s\-]?ons?|addons?|sidebars?|popups?|"
     r"toolbars?|overlays?|devtools?)\b"
