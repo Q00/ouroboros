@@ -387,6 +387,140 @@ async def test_start_evolve_links_generation_selected_after_interleaving(
         await store.close()
 
 
+@pytest.mark.asyncio
+async def test_start_evolve_rejects_active_same_lineage_owner_without_waiting() -> None:
+    """The background Start receipt never waits behind a long-running owner."""
+    store = await create_event_store()
+    lineage_id = "lin_start_existing_owner"
+    seed = make_seed(seed_id="seed_start_existing_owner")
+    loop = make_loop(store)
+    loop.evolve_step = AsyncMock(side_effect=AssertionError("contender must not execute"))
+    evolve = EvolveStepHandler(evolutionary_loop=loop, event_store=store)
+    manager = JobManager(store)
+    start = StartEvolveStepHandler(
+        evolve_handler=evolve,
+        event_store=store,
+        job_manager=manager,
+    )
+    claim = await lineage_claims.try_acquire(
+        store,
+        scope="evolve-handler",
+        lineage_id=lineage_id,
+        generation_number=1,
+        owner_id="existing-long-running-owner",
+        request_key="existing-request",
+    )
+    assert claim is not None and claim.acquired
+    try:
+        result = await asyncio.wait_for(
+            start.handle(
+                {
+                    "lineage_id": lineage_id,
+                    "seed_content": json.dumps(seed.to_dict()),
+                    "execute": False,
+                }
+            ),
+            timeout=0.25,
+        )
+
+        assert result.is_err
+        assert result.error.error_code == "evolve_lineage_busy"
+        assert result.error.is_retriable is True
+        loop.evolve_step.assert_not_awaited()
+        observed = await lineage_claims.observe(
+            store,
+            scope="evolve-handler",
+            lineage_id=lineage_id,
+        )
+        assert observed is not None
+        assert observed.owner_id == "existing-long-running-owner"
+        assert not observed.completed
+    finally:
+        await lineage_claims.release(
+            store,
+            scope="evolve-handler",
+            lineage_id=lineage_id,
+            owner_id="existing-long-running-owner",
+        )
+        await manager.drain(grace_seconds=0.1)
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_start_evolve_contention_race_returns_bounded_structured_conflict(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A claim acquired after the precheck cannot stall or leak a Start job."""
+    from ouroboros.mcp.tools import evolve_start_claim
+
+    store = await create_event_store()
+    lineage_id = "lin_start_claim_race"
+    seed = make_seed(seed_id="seed_start_claim_race")
+    loop = make_loop(store)
+    loop.evolve_step = AsyncMock(side_effect=AssertionError("contender must not execute"))
+    evolve = EvolveStepHandler(evolutionary_loop=loop, event_store=store)
+    manager = JobManager(store)
+    start = StartEvolveStepHandler(
+        evolve_handler=evolve,
+        event_store=store,
+        job_manager=manager,
+    )
+    original_observe = lineage_claims.observe
+    raced = False
+
+    async def acquire_after_precheck(*args, **kwargs):  # type: ignore[no-untyped-def]
+        nonlocal raced
+        if kwargs.get("scope") == "evolve-handler" and not raced:
+            raced = True
+            claim = await lineage_claims.try_acquire(
+                store,
+                scope="evolve-handler",
+                lineage_id=lineage_id,
+                generation_number=1,
+                owner_id="race-winner",
+                request_key="race-winner-request",
+            )
+            assert claim is not None and claim.acquired
+            return None
+        return await original_observe(*args, **kwargs)
+
+    monkeypatch.setattr(lineage_claims, "observe", acquire_after_precheck)
+    monkeypatch.setattr(evolve_start_claim, "_CLAIM_PREPARATION_TIMEOUT_SECONDS", 0.02)
+    try:
+        result = await asyncio.wait_for(
+            start.handle(
+                {
+                    "lineage_id": lineage_id,
+                    "seed_content": json.dumps(seed.to_dict()),
+                    "execute": False,
+                }
+            ),
+            timeout=0.25,
+        )
+
+        assert result.is_err
+        assert result.error.error_code == "evolve_lineage_busy"
+        assert result.error.is_retriable is True
+        loop.evolve_step.assert_not_awaited()
+        observed = await original_observe(
+            store,
+            scope="evolve-handler",
+            lineage_id=lineage_id,
+        )
+        assert observed is not None and observed.owner_id == "race-winner"
+        assert manager._reserved_job_ids == set()
+        assert await store.query_events(event_type="mcp.job.created") == []
+    finally:
+        await lineage_claims.release(
+            store,
+            scope="evolve-handler",
+            lineage_id=lineage_id,
+            owner_id="race-winner",
+        )
+        await manager.drain(grace_seconds=0.1)
+        await store.close()
+
+
 def create_clean_git_project(path: Path) -> Path:
     """Create one committed project for public benchmark-control tests."""
     path.mkdir()

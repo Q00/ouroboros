@@ -9,10 +9,26 @@ from typing import Protocol, cast
 
 from ouroboros.core.types import Result
 from ouroboros.evolution import loop_support
-from ouroboros.mcp.errors import MCPServerError
+from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.job_manager import JobLinks
 from ouroboros.mcp.tools.background import WorkFn
 from ouroboros.mcp.types import MCPToolResult
+
+_CLAIM_PREPARATION_TIMEOUT_SECONDS = 1.0
+
+
+def evolve_lineage_busy_error(lineage_id: str) -> MCPToolError:
+    """Return the bounded Start-surface conflict for an owned lineage."""
+    return MCPToolError(
+        (
+            f"Lineage {lineage_id!r} already has an active evolve request. "
+            "Wait for that owner to finish, then retry instead of starting a duplicate."
+        ),
+        tool_name="ouroboros_start_evolve_step",
+        error_code="evolve_lineage_busy",
+        is_retriable=True,
+        details={"lineage_id": lineage_id},
+    )
 
 
 class ClaimableEvolveHandler(Protocol):
@@ -63,7 +79,11 @@ class PreparedEvolveClaim:
         done, _pending = await asyncio.wait(
             waiters,
             return_when=asyncio.FIRST_COMPLETED,
+            timeout=_CLAIM_PREPARATION_TIMEOUT_SECONDS,
         )
+        if not done:
+            await self.abort()
+            raise evolve_lineage_busy_error(self._lineage_id)
         if self._task in done and not claimed.done():
             result = self._task.result()
             if result.is_err:

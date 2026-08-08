@@ -36,7 +36,10 @@ from ouroboros.events.session_signal import (
     create_session_signal_requested_event,
 )
 from ouroboros.persistence.event_store import EventStore
-from ouroboros.persistence.session_signal_store import admit_if_target_active
+from ouroboros.persistence.session_signal_store import (
+    admit_if_target_active,
+    runtime_attempt_guard_state,
+)
 
 _ACTIVE_RUNTIME_EVENTS = frozenset(
     {
@@ -49,6 +52,7 @@ _TERMINAL_RUNTIME_EVENTS = frozenset(
     {
         "execution.session.completed",
         "execution.session.failed",
+        "execution.session.cancelled",
     }
 )
 _RUNTIME_LIFECYCLE_EVENTS = _ACTIVE_RUNTIME_EVENTS | _TERMINAL_RUNTIME_EVENTS
@@ -497,6 +501,20 @@ class EventStoreSessionSignalTargetResolver:
         status = await status_reader(execution_id)
         return isinstance(status, str) and status in _TERMINAL_JOB_STATUSES
 
+    async def _guard_is_terminal(self, event: object, *, execution_id: str) -> bool:
+        data = getattr(event, "data", {})
+        if not isinstance(data, dict):
+            return False
+        scope_id = data.get("session_scope_id")
+        attempt_id = data.get("session_attempt_id")
+        if not isinstance(scope_id, str) or not isinstance(attempt_id, str):
+            return False
+        state = await runtime_attempt_guard_state(
+            self.event_store,
+            identity=(execution_id, scope_id, attempt_id),
+        )
+        return state is False
+
     @staticmethod
     def _runtime_backend(event: object) -> str:
         data = getattr(event, "data", {})
@@ -596,11 +614,13 @@ class EventStoreSessionSignalTargetResolver:
             if isinstance(scope, str) and scope and scope not in latest_by_scope:
                 latest_by_scope[scope] = event
 
-        targets = [
-            self._target_from_event(event, execution_id=execution_id)
-            for event in latest_by_scope.values()
-            if event.type in _ACTIVE_RUNTIME_EVENTS
-        ]
+        targets = []
+        for event in latest_by_scope.values():
+            if event.type not in _ACTIVE_RUNTIME_EVENTS:
+                continue
+            if await self._guard_is_terminal(event, execution_id=execution_id):
+                continue
+            targets.append(self._target_from_event(event, execution_id=execution_id))
         return tuple(
             sorted(
                 targets,
@@ -652,6 +672,11 @@ class EventStoreSessionSignalTargetResolver:
             raise SessionSignalTargetError(
                 "target_not_active",
                 "The exact runtime attempt is not active.",
+            )
+        if await self._guard_is_terminal(latest, execution_id=signal.expected_execution_id):
+            raise SessionSignalTargetError(
+                "target_terminal",
+                "The exact runtime attempt is already terminal.",
             )
         return self._target_from_event(latest, execution_id=signal.expected_execution_id)
 

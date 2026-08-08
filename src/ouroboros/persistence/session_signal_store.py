@@ -24,7 +24,13 @@ from ouroboros.persistence.schema import events_table, session_signal_target_gua
 _ACTIVE_EVENTS = frozenset(
     {"execution.session.started", "execution.session.resumed", "execution.session.recovered"}
 )
-_TERMINAL_EVENTS = frozenset({"execution.session.completed", "execution.session.failed"})
+_TERMINAL_EVENTS = frozenset(
+    {
+        "execution.session.completed",
+        "execution.session.failed",
+        "execution.session.cancelled",
+    }
+)
 
 
 def _engine(event_store: object) -> AsyncEngine | None:
@@ -87,9 +93,18 @@ async def runtime_attempt_is_active(
     identity: tuple[str, str, str],
 ) -> bool:
     """Project whether one exact durable runtime attempt still owns delivery."""
+    return await runtime_attempt_guard_state(event_store, identity=identity) is True
+
+
+async def runtime_attempt_guard_state(
+    event_store: object,
+    *,
+    identity: tuple[str, str, str],
+) -> bool | None:
+    """Read an exact attempt guard without inventing authority when absent."""
     engine = _engine(event_store)
     if engine is None:
-        return False
+        return None
     async with engine.connect() as connection:
         active = await connection.scalar(
             select(session_signal_target_guards_table.c.active).where(
@@ -98,7 +113,7 @@ async def runtime_attempt_is_active(
                 session_signal_target_guards_table.c.session_attempt_id == identity[2],
             )
         )
-    return active is True
+    return active if isinstance(active, bool) else None
 
 
 async def _append_runtime_lifecycle(
@@ -118,16 +133,24 @@ async def _append_runtime_lifecycle(
             "updated_at": datetime.now(UTC),
         }
         statement = sqlite_insert(session_signal_target_guards_table).values(**guard_values)
-        await conn.execute(
-            statement.on_conflict_do_update(
-                index_elements=["execution_id", "session_scope_id", "session_attempt_id"],
-                set_={
-                    "active": guard_values["active"],
-                    "lifecycle_event_id": event.id,
-                    "updated_at": guard_values["updated_at"],
-                },
-            )
+        # A terminal exact-attempt guard is absorbing.  A delayed provider
+        # callback may still append its immutable lifecycle telemetry, but it
+        # must never reopen delivery authority after shutdown.
+        update_where = (
+            session_signal_target_guards_table.c.active.is_(True)
+            if event.type in _ACTIVE_EVENTS
+            else None
         )
+        upsert = statement.on_conflict_do_update(
+            index_elements=["execution_id", "session_scope_id", "session_attempt_id"],
+            set_={
+                "active": guard_values["active"],
+                "lifecycle_event_id": event.id,
+                "updated_at": guard_values["updated_at"],
+            },
+            where=update_where,
+        )
+        await conn.execute(upsert)
         await conn.execute(events_table.insert().values(**event.to_db_dict()))
         if event.type in _TERMINAL_EVENTS:
             for terminal_event in await _pending_terminal_events(conn, identity, event):

@@ -48,7 +48,10 @@ from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.job_manager import JobLinks, JobManager
 from ouroboros.mcp.tools.background import start_background_tool_job
 from ouroboros.mcp.tools.bridge_mixin import BridgeAwareMixin
-from ouroboros.mcp.tools.evolve_start_claim import PreparedEvolveClaim
+from ouroboros.mcp.tools.evolve_start_claim import (
+    PreparedEvolveClaim,
+    evolve_lineage_busy_error,
+)
 from ouroboros.mcp.tools.job_observer import build_job_observer_contract
 from ouroboros.mcp.tools.subagent import (
     DELEGATED_TO_PLUGIN,
@@ -1658,6 +1661,20 @@ class StartEvolveStepHandler:
         # Fall-through: real background job path. The shared pipeline owns the
         # ``should_cancel()`` pre-work guard, so the runner only does the work.
         await self._event_store.initialize()
+        if isinstance(self._event_store, EventStore):
+            from ouroboros.persistence import lineage_claims
+
+            existing_claim = await lineage_claims.observe(
+                self._event_store,
+                scope="evolve-handler",
+                lineage_id=str(lineage_id),
+            )
+            if (
+                existing_claim is not None
+                and not existing_claim.completed
+                and existing_claim.lease_expires_at_ms > int(time.time() * 1000)
+            ):
+                return Result.err(evolve_lineage_busy_error(str(lineage_id)))
         supports_claimed_handoff = (
             isinstance(self._event_store, EventStore)
             and getattr(self._evolve_handler, "evolutionary_loop", None) is not None
@@ -1691,26 +1708,29 @@ class StartEvolveStepHandler:
                 raise RuntimeError(str(result.error))
             return result.value
 
-        snapshot = await start_background_tool_job(
-            job_manager=self._job_manager,
-            event_store=self._event_store,
-            job_type="evolve_step",
-            intent="evolve_step",
-            process_scope=f"evolve_step:{lineage_id}",
-            initial_message=f"Queued evolve_step for {lineage_id}",
-            links=JobLinks(lineage_id=lineage_id, execution_id=execution_id),
-            work_fn=_runner,
-            cancelled_text="evolve_step cancelled before restart work began.",
-            detached_tool_name="ouroboros_start_evolve_step",
-            detached_arguments=arguments,
-            runtime_backend=self.agent_runtime_backend,
-            opencode_mode=self.opencode_mode,
-            prepare_inline=prepared_claim.prepare if supports_claimed_handoff else None,
-            on_cancel_before_work=prepared_claim.abort if supports_claimed_handoff else None,
-            on_enqueue_failure=(
-                prepared_claim.abort_on_failure if supports_claimed_handoff else None
-            ),
-        )
+        try:
+            snapshot = await start_background_tool_job(
+                job_manager=self._job_manager,
+                event_store=self._event_store,
+                job_type="evolve_step",
+                intent="evolve_step",
+                process_scope=f"evolve_step:{lineage_id}",
+                initial_message=f"Queued evolve_step for {lineage_id}",
+                links=JobLinks(lineage_id=lineage_id, execution_id=execution_id),
+                work_fn=_runner,
+                cancelled_text="evolve_step cancelled before restart work began.",
+                detached_tool_name="ouroboros_start_evolve_step",
+                detached_arguments=arguments,
+                runtime_backend=self.agent_runtime_backend,
+                opencode_mode=self.opencode_mode,
+                prepare_inline=prepared_claim.prepare if supports_claimed_handoff else None,
+                on_cancel_before_work=prepared_claim.abort if supports_claimed_handoff else None,
+                on_enqueue_failure=(
+                    prepared_claim.abort_on_failure if supports_claimed_handoff else None
+                ),
+            )
+        except MCPToolError as exc:
+            return Result.err(exc)
 
         text = (
             f"Started background evolve_step.\n\n"
