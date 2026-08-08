@@ -654,6 +654,7 @@ def get_ouroboros_tools(
             llm_backend=llm_backend,
             agent_runtime_backend=runtime_backend,
             opencode_mode=opencode_mode,
+            fanout_registry=fanout_registry,
         ),
         QAHandler(
             llm_backend=llm_backend,

@@ -28,7 +28,7 @@ from typing import Any
 import structlog
 
 from ouroboros.backends import backend_supports_tool_envelope
-from ouroboros.bigbang.answer_provenance import extraction_rounds
+from ouroboros.bigbang.answer_provenance import classify_answer_provenance, extraction_rounds
 from ouroboros.bigbang.interview import (
     InterviewRound,
     InterviewState,
@@ -45,10 +45,14 @@ from ouroboros.core.owner_only import secure_directory, write_owner_only
 from ouroboros.core.pm_snapshot import refresh_pm_snapshot_worktrees
 from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
+from ouroboros.mcp.tools.advisory_dispatch import append_question_advisory_dispatch
+from ouroboros.mcp.tools.fanout import FanoutRegistry
+from ouroboros.mcp.tools.question_advisory import attach_question_advisory
 from ouroboros.mcp.tools.subagent import (
     DELEGATED_TO_SUBAGENT,
     build_pm_interview_subagent,
     dispatch_plugin_terminal,
+    resolve_subagent_dispatch,
     should_dispatch_via_plugin,
 )
 from ouroboros.mcp.types import (
@@ -58,6 +62,10 @@ from ouroboros.mcp.types import (
     MCPToolParameter,
     MCPToolResult,
     ToolInputType,
+)
+from ouroboros.orchestrator.capabilities.pm_schemas import (
+    PM_EVIDENCE_ROUND_QUESTION,
+    pm_repository_roster,
 )
 from ouroboros.persistence.brownfield import BrownfieldRepo, BrownfieldStore
 from ouroboros.persistence.event_store import EventStore
@@ -348,6 +356,35 @@ class PMInterviewHandler:
     event_store: EventStore | None = field(default=None, repr=False)
     agent_runtime_backend: str | None = field(default=None, repr=False)
     opencode_mode: str | None = field(default=None, repr=False)
+    fanout_registry: FanoutRegistry | None = field(default=None, repr=False)
+
+    def _attach_advisory(self, meta: dict[str, Any], session_id: str, question: str) -> None:
+        """Attach the evidence lanes to one PM turn that shows ``question``.
+
+        The lanes, their contracts and their requiredness all come from this
+        tool's catalog in the capability registry, through the same fan-out the
+        interview runs. Nothing here is PM-shaped except the roster, which is
+        the boundary PM's code lane is bounded by.
+
+        The roster is read from persisted PM meta rather than from the engine,
+        because two of the four question turns run on a session loaded from disk
+        and have no engine state to read it from. Reading one source on all four
+        is what keeps the roster from depending on how the turn was reached.
+        """
+        pm_meta = _load_pm_meta(session_id, data_dir=self.data_dir)
+        attach_question_advisory(
+            meta,
+            tool_name="ouroboros_pm_interview",
+            session_id=session_id,
+            question=question,
+            repository_roster=pm_repository_roster(
+                pm_meta.get("brownfield_repos") if pm_meta else None
+            ),
+            dispatch_mode=resolve_subagent_dispatch(self.agent_runtime_backend, self.opencode_mode),
+            runtime_backend=self.agent_runtime_backend,
+            opencode_mode=self.opencode_mode,
+            fanout_registry=self.fanout_registry,
+        )
 
     @property
     def definition(self) -> MCPToolDefinition:
@@ -920,6 +957,7 @@ class PMInterviewHandler:
             "pending_reframe": pending_reframe,
             **diff,
         }
+        self._attach_advisory(meta, state.interview_id, question)
 
         log.info(
             "pm_handler.started",
@@ -956,7 +994,7 @@ class PMInterviewHandler:
                 content=(
                     MCPContentItem(
                         type=ContentType.TEXT,
-                        text=start_text,
+                        text=append_question_advisory_dispatch(start_text, meta),
                     ),
                 ),
                 is_error=False,
@@ -1159,32 +1197,106 @@ class PMInterviewHandler:
         is_deferred = classification == "deferred"
         skip_eligible = is_decide_later or is_deferred
 
+        resume_meta: dict[str, Any] = {
+            "session_id": session_id,
+            "status": "interview_started",
+            "question": first_question,
+            "is_brownfield": state.is_brownfield,
+            "idempotent": True,
+            "classification": classification,
+            "skip_eligible": skip_eligible,
+        }
+        # A resumed question is shown to the user like any other, so it carries
+        # the lanes like any other. This is the turn where the "every question"
+        # rule would otherwise fail quietly: the answer that follows looks
+        # identical whether or not evidence was ever fetched for it.
+        self._attach_advisory(resume_meta, session_id, first_question)
+
         return Result.ok(
             MCPToolResult(
                 content=(
                     MCPContentItem(
                         type=ContentType.TEXT,
-                        text=(
-                            f"PM interview started. Session ID: {session_id}\n\n{first_question}"
+                        text=append_question_advisory_dispatch(
+                            f"PM interview started. Session ID: {session_id}\n\n{first_question}",
+                            resume_meta,
                         ),
                     ),
                 ),
                 is_error=False,
-                meta={
-                    "session_id": session_id,
-                    "status": "interview_started",
-                    "question": first_question,
-                    "is_brownfield": state.is_brownfield,
-                    "idempotent": True,
-                    "classification": classification,
-                    "skip_eligible": skip_eligible,
-                },
+                meta=resume_meta,
             )
         )
 
     # ──────────────────────────────────────────────────────────────
     # Answer (resume + record)
     # ──────────────────────────────────────────────────────────────
+
+    async def _record_evidence_round(
+        self,
+        engine: PMInterviewEngine,
+        state: InterviewState,
+        session_id: str,
+        answer: str,
+        cwd: str,
+    ) -> Result[MCPToolResult, MCPServerError]:
+        """Append what the person weighed, without answering anything.
+
+        The round carries a fixed question text so consumers can tell it from
+        one the person was asked, and its answer is an adopted fact, so
+        requirement extraction withholds it while question generation still
+        sees it. No new question is generated: the pending one was never
+        consumed and is still the question waiting for a decision.
+        """
+        state.rounds.append(
+            InterviewRound(
+                round_number=state.current_round_number,
+                question=PM_EVIDENCE_ROUND_QUESTION,
+                user_response=answer,
+            )
+        )
+        state.mark_updated()
+        save_result = await engine.save_state(state)
+        if isinstance(save_result, Result) and save_result.is_err:
+            return Result.err(
+                MCPToolError(
+                    f"Failed to persist evidence: {save_result.error}",
+                    tool_name="ouroboros_pm_interview",
+                )
+            )
+        _save_pm_meta(session_id, engine, cwd=cwd, data_dir=self.data_dir)
+
+        pending = next((r for r in reversed(state.rounds) if r.user_response is None), None)
+        log.info(
+            "pm_handler.evidence_recorded",
+            session_id=session_id,
+            has_pending_question=pending is not None,
+        )
+        return Result.ok(
+            MCPToolResult(
+                content=(
+                    MCPContentItem(
+                        type=ContentType.TEXT,
+                        text=(
+                            "Evidence recorded. It informs the next question and is "
+                            "withheld from requirement extraction."
+                        ),
+                    ),
+                ),
+                is_error=False,
+                meta={
+                    "session_id": session_id,
+                    "evidence_recorded": True,
+                    "is_complete": False,
+                    # Named ``pending_question``, not ``question``. The host
+                    # treats every response carrying a question as a turn to
+                    # show and fan out around; this one is an acknowledgement
+                    # of a record, and the question it names is the one already
+                    # on screen. Reusing the key would ask it twice.
+                    "pending_question": pending.question if pending else None,
+                },
+            )
+        )
 
     async def _handle_answer(
         self,
@@ -1239,33 +1351,35 @@ class PMInterviewHandler:
                     f'answer="[deferred]" with session_id="{session_id}".'
                 )
 
+            pending_meta: dict[str, Any] = {
+                "session_id": session_id,
+                "input_type": "freeText",
+                "response_param": "answer",
+                "question": pending_question,
+                "is_complete": False,
+                "classification": classification,
+                "skip_eligible": skip_eligible,
+                "deferred_this_round": [],
+                "decide_later_this_round": [],
+                "interview_complete": False,
+                "pending_reframe": pending_reframe,
+                "new_deferred": [],
+                "new_decide_later": [],
+                "deferred_count": 0,
+                "decide_later_count": len(engine.deferred_items) + len(engine.decide_later_items),
+            }
+            self._attach_advisory(pending_meta, session_id, pending_question)
+
             return Result.ok(
                 MCPToolResult(
                     content=(
                         MCPContentItem(
                             type=ContentType.TEXT,
-                            text=pending_text,
+                            text=append_question_advisory_dispatch(pending_text, pending_meta),
                         ),
                     ),
                     is_error=False,
-                    meta={
-                        "session_id": session_id,
-                        "input_type": "freeText",
-                        "response_param": "answer",
-                        "question": pending_question,
-                        "is_complete": False,
-                        "classification": classification,
-                        "skip_eligible": skip_eligible,
-                        "deferred_this_round": [],
-                        "decide_later_this_round": [],
-                        "interview_complete": False,
-                        "pending_reframe": pending_reframe,
-                        "new_deferred": [],
-                        "new_decide_later": [],
-                        "deferred_count": 0,
-                        "decide_later_count": len(engine.deferred_items)
-                        + len(engine.decide_later_items),
-                    },
+                    meta=pending_meta,
                 )
             )
 
@@ -1285,6 +1399,14 @@ class PMInterviewHandler:
                 )
             )
         if answer and state.rounds:
+            # An adopted fact never fills a question. Recording it appends its
+            # own round and leaves the pending question pending, so the evidence
+            # a lane found cannot arrive as somebody's answer no matter what
+            # order a host calls in — which is what RFC #1937 decision 3 claims,
+            # made true here rather than left to the caller to honour.
+            if classify_answer_provenance(answer) == "observation":
+                return await self._record_evidence_round(engine, state, session_id, answer, cwd)
+
             last_question = state.rounds[-1].question
             if state.rounds[-1].user_response is None:
                 state.rounds.pop()
@@ -1524,6 +1646,7 @@ class PMInterviewHandler:
             "pending_reframe": pending_reframe,
             **diff,
         }
+        self._attach_advisory(response_meta, session_id, question)
 
         log.info(
             "pm_handler.question_asked",
@@ -1556,7 +1679,7 @@ class PMInterviewHandler:
                 content=(
                     MCPContentItem(
                         type=ContentType.TEXT,
-                        text=response_text,
+                        text=append_question_advisory_dispatch(response_text, response_meta),
                     ),
                 ),
                 is_error=False,

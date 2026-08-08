@@ -306,3 +306,43 @@ class TestSecurityLayer:
 
         assert result.is_err
         assert "dangerous" in str(result.error).lower()
+
+
+class TestFreetextInsideContainers:
+    """A freetext field is freetext wherever it sits in the argument tree."""
+
+    def test_fanout_result_content_may_quote_source(self) -> None:
+        """Lane findings quote code, and code contains semicolons.
+
+        Judged by the root key alone this arrived as ``results[0].content`` and
+        was rejected under the container's name, so the only way through was to
+        reword the finding — which makes the record say something the lane never
+        said.
+        """
+        validator = InputValidator()
+        result = validator.validate(
+            "ouroboros_submit_fanout_results",
+            {
+                "session_id": "s1",
+                "fanout_id": "fanout_abc",
+                "correlation_key": "context.lane_id",
+                "results": [
+                    {
+                        "key": "code_context",
+                        "content": {
+                            "answer_text": "int limit = 999; return limit;",
+                        },
+                    }
+                ],
+            },
+        )
+
+        assert result.is_ok, result
+
+    def test_a_non_freetext_field_inside_a_container_is_still_checked(self) -> None:
+        """Containment does not launder a field that was never freetext."""
+        validator = InputValidator()
+        result = validator.validate("tool", {"results": [{"name": "safe; rm -rf /tmp"}]})
+
+        assert result.is_err
+        assert "Shell metacharacter" in str(result.error)

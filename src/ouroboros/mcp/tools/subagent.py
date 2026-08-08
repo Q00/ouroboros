@@ -1303,166 +1303,19 @@ Continue the interview."""
 def build_interview_question_advisory_subagents(
     request: Mapping[str, Any],
 ) -> list[SubagentPayload]:
-    """Build per-lane advisory subagents for an interview question.
+    """Build the interview's advisory payloads. Kept for existing importers.
 
-    The parent session owns the user-facing question. These payloads are an
-    assist layer: independent child contexts inspect code, check current facts
-    when needed, challenge ambiguity, and make the answer easier to provide.
+    The builder moved to ``question_advisory``, which serves every tool that
+    declares a catalog rather than this one. The name stays reachable here on
+    the same terms the fan-out extraction kept its re-exports: a caller that
+    imported it before this split still gets the same payloads, byte for byte.
+
+    Imported inside the call because ``question_advisory`` imports the payload
+    primitives from this module.
     """
-    session_id = str(request.get("session_id") or "")
-    question_identity = str(request.get("question_identity") or "")
-    question = str(request.get("question") or "")
-    if not session_id:
-        raise ValueError("request.session_id must not be empty")
-    if not question_identity:
-        raise ValueError("request.question_identity must not be empty")
-    if not question:
-        raise ValueError("request.question must not be empty")
+    from ouroboros.mcp.tools.question_advisory import build_question_advisory_subagents
 
-    raw_lanes = request.get("lanes")
-    if not isinstance(raw_lanes, (list, tuple)) or not raw_lanes:
-        raise ValueError("request.lanes must be a non-empty list")
-
-    bounded_question = _truncate_head(question, _INTERVIEW_ADVISORY_MAX_QUESTION_CHARS)
-    code_request_json = _bounded_json(
-        request.get("code_investigation_request"),
-        _INTERVIEW_ADVISORY_MAX_JSON_CHARS,
-    )
-    synthesis_contract = request.get("synthesis_contract")
-    synthesis_contract_json = _bounded_json(
-        synthesis_contract,
-        _INTERVIEW_ADVISORY_MAX_JSON_CHARS,
-    )
-    ambiguity_score = request.get("ambiguity_score")
-    milestone = request.get("milestone")
-
-    payloads: list[SubagentPayload] = []
-    seen: set[str] = set()
-    for raw_lane in raw_lanes:
-        if not isinstance(raw_lane, Mapping):
-            continue
-        lane_id = str(raw_lane.get("lane_id") or "").strip()
-        capability = str(raw_lane.get("capability") or "").strip()
-        if not lane_id or lane_id in seen:
-            continue
-        seen.add(lane_id)
-
-        persona = str(raw_lane.get("persona") or "").strip()
-        # ``read_data`` stays out of the researcher set even though the lane
-        # investigates now (#1825). The reason changed: it is no longer that
-        # the lane only names reads, it is that ``agents/researcher.md`` carries
-        # its own ``## OUTPUT`` section -- "states what was unknown, shows what
-        # evidence was gathered, presents a hypothesis" -- which is the
-        # free-form shape this lane's closed contract rejects. Handing it a
-        # persona that prescribes a different output is the defect
-        # ``_advisory_output_section`` exists to prevent, reintroduced from the
-        # persona side. This lane's own prompt already tells it to go and
-        # measure, so the persona buys nothing and costs a contradiction.
-        agent = persona or (
-            "researcher" if capability in {"inspect_code", "web_research"} else "general"
-        )
-        purpose = str(raw_lane.get("purpose") or "Help answer the interview question.").strip()
-        required = bool(raw_lane.get("required"))
-
-        if lane_id == "code_context":
-            lane_task = (
-                "Inspect the local repository for facts that directly answer or "
-                "constrain the question. Use exact file/config evidence. Do not "
-                "make product decisions. If the code does not answer it, say so."
-            )
-            extra = f"## Code Investigation Request\n```json\n{code_request_json}\n```"
-        elif lane_id == "web_context":
-            lane_task = (
-                "Decide whether current external knowledge is needed. If yes, "
-                "research the minimum necessary current facts and cite sources. "
-                "If no current web facts are needed, return that no-op finding."
-            )
-            extra = "Use web research only when the answer depends on current external facts."
-        elif lane_id == "data_context":
-            lane_task = _data_context_lane_task()
-            extra = _data_context_lane_brief(raw_lane.get("answer_contract"))
-        elif lane_id == "ambiguity_contrarian":
-            lane_task = (
-                "Challenge the question and the likely answer. Identify hidden "
-                "assumptions, overloaded terms, missing constraints, and decisions "
-                "the human might accidentally skip."
-            )
-            extra = "Lean into the contrarian role, but keep the advice user-safe and actionable."
-        elif lane_id == "answer_simplifier":
-            lane_task = (
-                "Turn the question into an easy response surface: 2-3 concrete "
-                "answer options or one recommended draft the user can approve or edit."
-            )
-            extra = "Prefer concise choices over a broad essay."
-        elif lane_id == "architecture_implications":
-            lane_task = (
-                "Check whether the answer would affect system shape, ownership, "
-                "interfaces, rollout, data model, or verification strategy."
-            )
-            extra = "Only raise architecture implications that materially affect implementation."
-        else:
-            lane_task = "Help the parent session answer this interview question."
-            extra = ""
-
-        prompt = f"""## Task
-You are an Ouroboros interview advisory subagent.
-
-The parent session has already shown the interview question to the user. Your job
-is to help the user answer it; do not answer on behalf of the user unless the
-answer is a descriptive fact with clear evidence.
-
-## Interview Question
-{bounded_question}
-
-## Session
-- session_id: {session_id}
-- question_identity: {question_identity}
-- ambiguity_score: {ambiguity_score}
-- milestone: {milestone}
-
-## Advisory Lane
-- lane_id: {lane_id}
-- capability: {capability}
-- required: {str(required).lower()}
-- purpose: {purpose}
-
-## Lane Task
-{lane_task}
-
-{extra}
-
-## Synthesis Contract
-```json
-{synthesis_contract_json}
-```
-
-{_advisory_output_section(raw_lane.get("answer_contract"))}"""
-
-        payloads.append(
-            build_subagent_payload(
-                tool_name="ouroboros_interview",
-                title=f"Interview advisory: {lane_id}",
-                agent=agent,
-                prompt=prompt,
-                context={
-                    "session_id": session_id,
-                    "question_identity": question_identity,
-                    "question": question,
-                    "lane_id": lane_id,
-                    "capability": capability,
-                    "required": required,
-                    "persona": persona or None,
-                    "user_question_first": bool(request.get("user_question_first")),
-                    "synthesis_contract": dict(synthesis_contract)
-                    if isinstance(synthesis_contract, Mapping)
-                    else {},
-                },
-            )
-        )
-
-    if not payloads:
-        raise ValueError("request.lanes did not contain any valid advisory lanes")
-    return payloads
+    return build_question_advisory_subagents(request)
 
 
 def build_ambiguity_dimension_fanout(
