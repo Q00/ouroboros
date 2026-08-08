@@ -1,29 +1,52 @@
 """Schemas for the PM interview's advisory lanes (RFC Q00/ouroboros#1937).
 
 The PM interview fans out the same way the regular interview does, with two
-deliberate differences that both fall out of one sentence: *a lane's output is
-material for the PM's answer and can never become the answer.*
+deliberate differences that both fall out of one sentence: *a confirmed fact may
+occupy a round of its own; an unconfirmed one may not become anything.*
 
 **Two lanes, not six.** Only the lanes that fetch evidence carry over — what the
 code does today, and what the data says. A lane that critiques the question or
 narrows it into options produces a draft judgment, not evidence, and a draft
 wears the face of material while standing in for the decision.
 
-**No answer path, so no confirmation.** The regular interview's code-fact
-contract carries an ``answer_prefix``, and because a lane's output can be the
-answer there, a chain follows it: a confirmation flag, an exception to it, and a
-confidence grade deciding which answers earn the exception. That chain is
-justified there — the person being asked usually wrote the code. PM has no such
-premise, so the chain is not inherited. It is not replaced by a stricter version
-of itself either: neither contract here has a field an answer could be spelled
-in, which is why there is no rule saying one must not be. The same move the data
-lane made when a typed read request replaced its free-text query field
-(#1754/#1825) — the prohibition is retired by removing the place, not by growing
-the list of things forbidden.
+**One answer path, and no exception to its confirmation.** The regular
+interview's code-fact contract carries an ``answer_prefix``, and a chain follows
+it: a confirmation flag, an exception to that flag
+(``[from-code][auto-confirmed]``), and a confidence grade deciding which answers
+earn the exception. That exception is justified there — the person being asked
+usually wrote the code — and PM has no such premise, so PM does not inherit it.
+
+What PM inherits is the rest: the same ``answer_prefix`` field, under an enum
+holding exactly one element. ``[from-code][auto-confirmed]`` is therefore not
+forbidden here; it is unspellable. The prohibition is retired by removing the
+place rather than by growing the list of things forbidden — the same move the
+data lane made when a typed read request replaced its free-text query field
+(#1754/#1825).
+
+Two doors were the alternative, and the cost was measured. PM originally kept
+no answer path at all and grew a second entrance for findings — an ``evidence``
+parameter no sibling tool has. Two entrances meant two sets of rules for the
+same payload, and seven review rounds found the same class of silent loss at a
+new address each time. One door with a one-element enum is what closed it.
+
+**What holds when a host skips the confirmation anyway.** The prompt is shown by
+the host, so the contract can ask for it but not perform it. The guarantee that
+does not depend on the host is downstream and structural: any answer opening
+with ``[from-code]`` settles as ``provenance="observation"`` where it enters, so
+requirement extraction reads :data:`~ouroboros.bigbang.answer_provenance.
+WITHHELD_ANSWER_NOTE` in its place and completion counts only rounds whose
+provenance is ``"user"``. An unconfirmed forward costs a question turn; it
+cannot become a PRD requirement and cannot end the interview.
+
+**The forwarded text is composed from ``evidence[]``, not from a free-text
+field.** There is deliberately no ``answer_text`` here. Every claim the host
+forwards therefore carries the ``repo_id`` it was checked against and a
+repository-relative ``path``, which a prose field would have let it shed.
 
 ``data_context`` is reused verbatim from the interview. It already works this
 way: no confirmation, no grade, closed answer states, and no ``[from-data]``
-answer path. The new surface is exactly one contract, for the code lane.
+answer path — measurements are shown beside the question and the answer is the
+user's own words. The new surface is exactly one contract, for the code lane.
 """
 
 from __future__ import annotations
@@ -199,12 +222,16 @@ def _pm_code_context_answer_contract() -> dict[str, Any]:
     is why I found nothing", which is two answers in one object and neither
     checkable.
 
-    There is no ``answer_prefix``, no ``requires_user_confirmation``, and no
-    confidence grade. Their absence is the enforcement: a child cannot mark this
-    output as the interview answer because the shape holds no field that says
-    so, and the shape is closed, so it cannot add one. A rule forbidding it would
-    read as authoritative while being enforced by nothing -- three of #1825's
-    findings were guarantees stated where nothing made them true.
+    ``answer_prefix`` exists only in the found state, under an enum of one
+    element, and there is no confidence grade beside it. The enum is the
+    enforcement: a child cannot mark this output as skipping confirmation
+    because ``[from-code][auto-confirmed]`` is not a value this field can hold,
+    and the shape is closed, so it cannot add a field that says so another way.
+    A rule forbidding the prefix would read as authoritative while being
+    enforced by nothing -- three of #1825's findings were guarantees stated
+    where nothing made them true. The no-policy state has no ``answer_prefix``
+    property at all, for the same reason it carries no evidence: there is
+    nothing to forward.
 
     ``examined_repository_ids`` is required in both states, empty list included.
     It is what keeps the lane's reporting about itself: "no policy found" means
@@ -271,6 +298,9 @@ def _pm_code_context_answer_contract() -> dict[str, Any]:
             "policy_found",
             "examined_repository_ids",
             "evidence",
+            "answer_prefix",
+            "requires_user_confirmation",
+            "user_confirmation_prompt",
         ],
         "properties": {
             "question_identity": identity_property,
@@ -280,6 +310,37 @@ def _pm_code_context_answer_contract() -> dict[str, Any]:
                 "description": "The examined repositories implement policy bearing on this question.",
             },
             "examined_repository_ids": examined_property,
+            "answer_prefix": {
+                "type": "string",
+                "enum": ["[from-code]"],
+                "description": (
+                    "The prefix the host puts on this finding when the user "
+                    "confirms it. One value, and that is the whole of the "
+                    "confirmation policy: the interview's "
+                    "'[from-code][auto-confirmed]' cannot be spelled here, so "
+                    "no output of this lane can declare itself exempt from "
+                    "being confirmed."
+                ),
+            },
+            "requires_user_confirmation": {
+                "const": True,
+                "description": (
+                    "Always true. Named as the interview names it so one host "
+                    "code path serves both tools, and constant because the "
+                    "premise that earns an exception there -- the person being "
+                    "asked usually wrote the code -- is not a premise a PRD has."
+                ),
+            },
+            "user_confirmation_prompt": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 600,
+                "description": (
+                    "What to ask the user before forwarding this finding. "
+                    "Required, because a confirmation step with no text to show "
+                    "is one the host is free to skip silently."
+                ),
+            },
             "evidence": {
                 "type": "array",
                 "minItems": 1,
@@ -310,7 +371,12 @@ def _pm_code_context_answer_contract() -> dict[str, Any]:
             "If two repositories implement different policies, carry both; the "
             "disagreement is what the PM most needs to see. Evidence from outside "
             "the roster is not evidence: say so in your finding so the PM can add "
-            "the repository, and do not put it in evidence."
+            "the repository, and do not put it in evidence. When you carry a "
+            "policy, set answer_prefix to [from-code] and write "
+            "user_confirmation_prompt as the question the user should be asked "
+            "before your finding is recorded on their behalf -- the finding is "
+            "recorded as an adopted fact, never as their decision, and the "
+            "decision is what they write on the question that follows."
         ),
     }
 
@@ -365,24 +431,28 @@ def _pm_question_advisory_fanout_metadata() -> dict[str, Any]:
         "payload_title_prefix": "PM advisory",
         "allowed_capabilities": ["inspect_code", "read_data"],
         "question_heading": "## PM Question",
-        # The counterpart of the interview's, and the sentence that differs: a
-        # finding here is never the answer, under any evidence quality.
+        # The counterpart of the interview's, and the sentence that differs: no
+        # quality of evidence lets a finding here skip the user.
         "task_preamble": (
             "You are an Ouroboros PM interview advisory subagent.\n"
             "\n"
             "The parent session has already shown the PM question to the user. "
-            "Your job is to\nput evidence beside that question. Never answer on "
+            "Your job is to\nreport what the system does today. Never decide on "
             "behalf of the user, however\nclear your finding is: a PRD asks what "
-            "the system should do and you can only\nreport what it does."
+            "the system should do and you can only\nreport what it does. Your "
+            "finding is shown to the user for confirmation, and it\nis recorded "
+            "as an adopted fact -- never as their decision."
         ),
         # Unconditional, unlike the interview's. There is no configuration of
-        # evidence quality that lets a finding here become the answer, so the
-        # rule the child reads must not be phrased as a condition it evaluates.
+        # evidence quality that lets a finding here reach the record without the
+        # user seeing it, so the rule the child reads must not be phrased as a
+        # condition it evaluates.
         "child_answer_rule": (
-            "Never answer on behalf of the user, however clear your finding is. "
+            "Never decide on behalf of the user, however clear your finding is. "
             "A PRD asks what the system should do and you can only report what "
-            "it does; your output is put beside the question, and the answer is "
-            "whatever the user writes in their own words."
+            "it does. Your finding is confirmed by the user and then recorded as "
+            "an adopted fact; the decision is what they write in their own words "
+            "on the question that follows."
         ),
         "dispatch_timing": "after_question_is_visible_to_user",
         "parallel_preference": "parallel_when_runtime_supports_subagents",
@@ -408,10 +478,14 @@ def _pm_question_advisory_fanout_metadata() -> dict[str, Any]:
         },
         "runtime_instruction": (
             "Show the PM question to the user first, then fan out the code-policy "
-            "and data lanes. Put what they return beside the question as material "
-            "for the user's judgment. There is no answer prefix to forward and no "
-            "confirmation step: the answer is whatever the user writes in their "
-            "own words, and a lane's finding never takes its place."
+            "and data lanes. A code lane that carries a policy returns "
+            "answer_prefix [from-code] and a confirmation prompt: show that "
+            "prompt, and only if the user confirms, send the finding as the "
+            "answer with its [from-code] prefix. It is recorded as an adopted "
+            "fact -- withheld from requirement extraction, not counted toward "
+            "completion -- and the server returns the next question, which is "
+            "the one the user answers in their own words. There is no prefix "
+            "that skips the confirmation."
         ),
     }
 

@@ -961,10 +961,11 @@ class PMInterviewEngine:
         """
         # Count decisions, not rounds. Completion asks how many times the person
         # has judged, and a round is not evidence of that: pending rounds have no
-        # answer yet, the initial-context summary is a recovery artefact, and an
-        # adopted fact recorded beside a decision is material the person weighed
-        # rather than a second judgment. Counting those would score readiness a
-        # turn early for every question that carried evidence.
+        # answer yet, the initial-context summary is a recovery artefact, and a
+        # confirmed lane finding occupies a round while being a fact the person
+        # adopted rather than a judgment they made. Counting those would score
+        # readiness a turn early for every question the lanes reported on — and
+        # it is what lets a finding take a round of its own safely at all.
         answered_rounds = sum(
             1
             for r in state.rounds
@@ -1229,20 +1230,16 @@ class PMInterviewEngine:
         # Question lines are unchanged either way: an observation reaching a
         # later question is where it was collected to arrive.
         if withhold_observations:
-            rendered = [(item.question, item.answer, None) for item in extraction_rounds(state)]
+            rendered = [(item.question, item.answer) for item in extraction_rounds(state)]
         else:
-            rendered = [(r.question, r.user_response, r.evidence) for r in state.rounds]
+            rendered = [(r.question, r.user_response) for r in state.rounds]
 
-        for question, answer, evidence in rendered:
+        for question, answer in rendered:
             if question == INITIAL_CONTEXT_SUMMARY_QUESTION:
                 continue
             parts.append(f"\nQ: {question}")
             if answer:
                 parts.append(f"A: {answer}")
-            # Withheld when extracting, for the reason the answer's provenance is:
-            # what the person weighed is not what they decided.
-            if evidence:
-                parts.append(f"Weighed against: {evidence}")
 
         return "\n".join(parts)
 

@@ -13,11 +13,14 @@ from typing import Any
 
 import pytest
 
+from ouroboros.bigbang.interview import InterviewRound, InterviewState
+from ouroboros.core.types import Result as CoreResult
 from ouroboros.mcp.tools.fanout import (
     FANOUT_KIND_QUESTION_ADVISORY,
     FanoutRegistry,
     submit_fanout_results,
 )
+from ouroboros.mcp.tools.pm_handler import PMInterviewHandler
 from ouroboros.mcp.tools.question_advisory import (
     attach_question_advisory,
     build_question_advisory_subagents,
@@ -31,6 +34,86 @@ from ouroboros.orchestrator.capabilities.pm_schemas import (
 )
 
 QUESTION = "What happens today when a subscription lapses mid-period?"
+
+
+def _found_policy(roster: list[dict[str, str]], **overrides: Any) -> dict[str, Any]:
+    """Return a well-formed ``policy_found`` answer for the code lane.
+
+    Built in one place because the found state is the one that carries the
+    forwarding fields: a test that spells them out by hand records today's
+    contract in a dozen places, and the last round's lesson is that a payload
+    with more than one spelling is a payload whose rules stop agreeing.
+    """
+    payload: dict[str, Any] = {
+        "question_identity": stable_pm_question_identity(QUESTION),
+        "lane_id": "code_context",
+        "policy_found": True,
+        "examined_repository_ids": [roster[0]["repo_id"]] if roster else [],
+        "answer_prefix": "[from-code]",
+        "requires_user_confirmation": True,
+        "user_confirmation_prompt": "Record this finding as what the code does today?",
+        "evidence": [
+            {
+                "repo_id": roster[0]["repo_id"] if roster else "api-12345678",
+                "path": "src/billing.py",
+                "policy_claim": "grace period applies",
+            }
+        ],
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _stub_engine(state: InterviewState, questions: tuple[str, ...] = ()) -> Any:
+    """A PM engine that loads, records and asks, and does nothing else.
+
+    One stub for the whole file rather than a copy per test. The copies were
+    where the two runtimes drifted apart the first time this was built, and a
+    test suite that reproduces the drift cannot notice it.
+    """
+    upcoming = iter(questions)
+
+    class _Engine:
+        codebase_context = ""
+        _selected_brownfield_repos: list[dict[str, str]] = []
+        deferred_items: list[str] = []
+        decide_later_items: list[str] = []
+        classifications: list[Any] = []
+
+        async def load_state(self, _sid: str) -> Any:
+            return CoreResult.ok(state)
+
+        async def save_state(self, s: InterviewState) -> Any:
+            return CoreResult.ok(s)
+
+        async def record_response(self, s: InterviewState, answer: str, question: str) -> Any:
+            s.record_answer(question, answer)
+            return CoreResult.ok(s)
+
+        async def ask_next_question(self, _s: InterviewState) -> Any:
+            return CoreResult.ok(next(upcoming))
+
+        async def check_completion(self, _s: InterviewState) -> None:
+            return None
+
+        def get_pending_reframe(self) -> None:
+            return None
+
+        def get_last_classification(self) -> None:
+            return None
+
+        def restore_meta(self, _m: Any) -> None:
+            return None
+
+        def compute_deferred_diff(self, _a: int, _b: int) -> dict[str, Any]:
+            return {
+                "new_deferred": [],
+                "new_decide_later": [],
+                "deferred_count": 0,
+                "decide_later_count": 0,
+            }
+
+    return _Engine()
 
 
 @pytest.fixture
@@ -118,51 +201,91 @@ def test_no_lane_produces_a_recommended_draft() -> None:
     assert contract["preserve_user_agency"] is True
 
 
-# ── Decision 2: no path to becoming the answer ───────────────────────────
+# ── Decision 2: one door in, and no prefix that skips the person ─────────
 
 
-def test_neither_contract_holds_a_field_an_answer_could_be_spelled_in() -> None:
-    """The enforcement is absence, so absence is what is asserted.
+def test_no_tool_parameter_holds_a_finding_beside_the_answer() -> None:
+    """A finding enters where every answer enters, and there is no second door.
 
-    ``answer_prefix``, ``requires_user_confirmation`` and a confidence grade are
-    the three fields the interview's code-fact contract uses to let a lane's
-    output become the answer. None exists here, and both states are closed, so
-    a child cannot add one.
+    This is an absence, so it has no failing behaviour to point at later: put the
+    parameter back and nothing breaks until a host uses it, which is exactly how
+    the two-door shape survived six review rounds. Pinned here instead.
+
+    Asserted against the sibling tool as well, because "PM has a parameter the
+    interview does not" was the whole diagnosis.
+    """
+    from ouroboros.mcp.tools.definitions import InterviewHandler
+
+    pm_params = {
+        param.name for param in PMInterviewHandler(data_dir=Path("/x")).definition.parameters
+    }
+    interview_params = {param.name for param in InterviewHandler().definition.parameters}
+
+    assert "evidence" not in pm_params
+    assert "evidence" not in interview_params
+    assert {"answer", "last_question"} <= pm_params
+
+
+def test_the_only_answer_prefix_is_the_one_that_has_to_be_confirmed() -> None:
+    """Auto-confirm is unspellable rather than forbidden.
+
+    The interview's exception, ``[from-code][auto-confirmed]``, rests on the
+    premise that the person being asked wrote the code. A PRD has no such
+    premise, so PM keeps the field and drops the exception by giving the enum
+    one element — there is no rule to find, and nothing to reword past.
+
+    The confidence grade goes with it: a grade exists to decide which answers
+    earn the exception, and there is no exception to earn.
     """
     schema = pm_code_context_answer_contract()["response_model_schema"]
+    found = next(s for s in schema["oneOf"] if s["properties"]["policy_found"]["const"] is True)
+    no_policy = next(
+        s for s in schema["oneOf"] if s["properties"]["policy_found"]["const"] is False
+    )
+
+    assert found["properties"]["answer_prefix"]["enum"] == ["[from-code]"]
+    assert found["properties"]["requires_user_confirmation"]["const"] is True
+    assert "confidence" not in found["properties"]
+    assert {"answer_prefix", "requires_user_confirmation", "user_confirmation_prompt"} <= set(
+        found["required"]
+    )
+    # Nothing to forward, so no way to say how to forward it.
+    assert "answer_prefix" not in no_policy["properties"]
+    # And no free-text answer field: what the host forwards is composed from
+    # ``evidence[]``, so every claim keeps the repo_id it was checked against.
     for state in schema["oneOf"]:
         assert state["additionalProperties"] is False
-        assert not {
-            "answer_prefix",
-            "requires_user_confirmation",
-            "confidence",
-        } & set(state["properties"])
+        assert "answer_text" not in state["properties"]
 
 
-def test_an_answer_prefix_is_rejected_at_re_entry(
+def test_the_confirmed_prefix_is_accepted_and_the_auto_confirmed_one_is_not(
     registry: FanoutRegistry, roster: list[dict[str, str]]
 ) -> None:
-    meta = _attach(registry, roster)
+    """Both directions, because the enum has to admit as well as refuse."""
+    accepted = _submit(registry, _attach(registry, roster), _found_policy(roster))
+    assert accepted["status"] == "complete"
+
+    refused = _submit(
+        registry,
+        _attach(registry, roster, session_id="pm-2"),
+        _found_policy(roster, answer_prefix="[from-code][auto-confirmed]"),
+        session_id="pm-2",
+    )
+    assert refused["status"] == "partial"
+    assert "answer_prefix" in str(refused["contract_violations"]["code_context"])
+
+
+def test_a_finding_that_declares_itself_pre_confirmed_is_rejected(
+    registry: FanoutRegistry, roster: list[dict[str, str]]
+) -> None:
+    """The flag is constant, so the lane cannot lower it either."""
     result = _submit(
         registry,
-        meta,
-        {
-            "question_identity": stable_pm_question_identity(QUESTION),
-            "lane_id": "code_context",
-            "policy_found": True,
-            "examined_repository_ids": [roster[0]["repo_id"]],
-            "answer_prefix": "[from-code][auto-confirmed]",
-            "evidence": [
-                {
-                    "repo_id": roster[0]["repo_id"],
-                    "path": "src/billing.py",
-                    "policy_claim": "grace period applies",
-                }
-            ],
-        },
+        _attach(registry, roster),
+        _found_policy(roster, requires_user_confirmation=False),
     )
     assert result["status"] == "partial"
-    assert "additionalProperties" in str(result["contract_violations"]["code_context"])
+    assert "requires_user_confirmation" in str(result["contract_violations"]["code_context"])
 
 
 # ── Decision 3: the lane speaks about itself ─────────────────────────────
@@ -236,19 +359,16 @@ def test_evidence_from_outside_the_roster_is_rejected(
     result = _submit(
         registry,
         meta,
-        {
-            "question_identity": stable_pm_question_identity(QUESTION),
-            "lane_id": "code_context",
-            "policy_found": True,
-            "examined_repository_ids": [roster[0]["repo_id"]],
-            "evidence": [
+        _found_policy(
+            roster,
+            evidence=[
                 {
                     "repo_id": "elsewhere-deadbeef",
                     "path": "src/x.py",
                     "policy_claim": "something",
                 }
             ],
-        },
+        ),
     )
     assert result["status"] == "partial"
     assert "not in this session's roster" in str(result["contract_violations"]["code_context"])
@@ -286,12 +406,10 @@ def test_cross_repo_disagreement_survives_as_structure(
     result = _submit(
         registry,
         meta,
-        {
-            "question_identity": stable_pm_question_identity(QUESTION),
-            "lane_id": "code_context",
-            "policy_found": True,
-            "examined_repository_ids": [roster[0]["repo_id"], roster[1]["repo_id"]],
-            "evidence": [
+        _found_policy(
+            roster,
+            examined_repository_ids=[roster[0]["repo_id"], roster[1]["repo_id"]],
+            evidence=[
                 {
                     "repo_id": roster[0]["repo_id"],
                     "path": "src/billing.py",
@@ -303,7 +421,7 @@ def test_cross_repo_disagreement_survives_as_structure(
                     "policy_claim": "access is revoked immediately",
                 },
             ],
-        },
+        ),
     )
     assert result["status"] == "complete"
     evidence = [
@@ -442,133 +560,136 @@ def test_a_question_with_no_roster_still_gets_its_lanes(registry: FanoutRegistry
     ]
 
 
-# ── Decision 3: a finding is recorded after the decision, never before ────
+# ── Decision 3: a confirmed finding takes a round; nothing else records ───
+#
+# The shape these tests pin is ``ouroboros_interview``'s, arrived at after six
+# rounds of the other one. A confirmed ``[from-code]`` finding is sent as the
+# answer — one parameter, the one every answer uses — and occupies the round it
+# was fetched for. Its provenance, not a branch in the handler, is what keeps it
+# out of requirements and out of the completion count, and the decision the
+# person makes lands on the question generated next.
 
 
 @pytest.mark.asyncio
-async def test_answer_evidence_answer_keeps_each_answer_on_its_own_question(tmp_path: Path) -> None:
-    """Evidence is a field on the round it informed, never a round of its own.
+async def test_a_confirmed_finding_takes_its_own_round_and_the_decision_takes_the_next(
+    tmp_path: Path,
+) -> None:
+    """The property the whole shape rests on, end to end through the handler.
 
-    Given its own round it is an answered entry sitting behind an unanswered
-    question, and every consumer reading "the trailing round is the pending one"
-    then files the next decision against a question nobody asked. Three stored
-    sessions carry exactly that damage. As a field the misreading has nothing to
-    read.
+    Two calls, two rounds, and the second round is the person's. What is checked
+    is that the finding did not consume the decision's place and the decision
+    did not land on the finding's question.
     """
-    from ouroboros.bigbang.interview import InterviewRound, InterviewState
-    from ouroboros.core.types import Result as CoreResult
-    from ouroboros.mcp.tools.pm_handler import PMInterviewHandler
-
     handler = PMInterviewHandler(data_dir=tmp_path, agent_runtime_backend="claude")
-    state = InterviewState(interview_id="pm-field", initial_context="ctx")
-    questions = iter(["Q2", "Q3"])
-
-    class _Engine:
-        codebase_context = ""
-        _selected_brownfield_repos: list[dict[str, str]] = []
-        deferred_items: list[str] = []
-        decide_later_items: list[str] = []
-        classifications: list[Any] = []
-
-        async def load_state(self, _sid: str) -> Any:
-            return CoreResult.ok(state)
-
-        async def save_state(self, s: InterviewState) -> Any:
-            return CoreResult.ok(s)
-
-        async def record_response(self, s: InterviewState, answer: str, question: str) -> Any:
-            s.record_answer(question, answer)
-            return CoreResult.ok(s)
-
-        async def ask_next_question(self, _s: InterviewState) -> Any:
-            return CoreResult.ok(next(questions))
-
-        async def check_completion(self, _s: InterviewState) -> None:
-            return None
-
-        def get_pending_reframe(self) -> None:
-            return None
-
-        def get_last_classification(self) -> None:
-            return None
-
-        def restore_meta(self, _m: Any) -> None:
-            return None
-
-        def compute_deferred_diff(self, _a: int, _b: int) -> dict[str, Any]:
-            return {
-                "new_deferred": [],
-                "new_decide_later": [],
-                "deferred_count": 0,
-                "decide_later_count": 0,
-            }
-
-    engine = _Engine()
+    state = InterviewState(interview_id="pm-shape", initial_context="ctx")
     state.rounds.append(InterviewRound(round_number=1, question="Q1", user_response=None))
+    engine = _stub_engine(state, ("Q2", "Q3"))
 
     first = await handler._handle_answer(
-        engine, "pm-field", "counted by service date", str(tmp_path), evidence="[from-code] api: x"
+        engine, "pm-shape", "[from-code] api: counted by service date", str(tmp_path)
     )
     assert first.is_ok
-
-    # One question answered, one asked. The evidence added no round.
     assert [r.question for r in state.rounds] == ["Q1", "Q2"]
-    answered = state.rounds[0]
-    assert answered.user_response == "counted by service date"
-    assert answered.evidence == "[from-code] api: x"
-    assert state.rounds[1].evidence is None
+    assert state.rounds[0].user_response == "[from-code] api: counted by service date"
+    assert state.rounds[0].provenance == "observation"
 
-    # And the next decision lands on its own question, not on anything behind it.
     second = await handler._handle_answer(
-        engine, "pm-field", "cancellations free the slot", str(tmp_path)
+        engine, "pm-shape", "cancellations free the slot", str(tmp_path)
     )
     assert second.is_ok
     assert state.rounds[1].user_response == "cancellations free the slot"
+    assert state.rounds[1].provenance == "user"
     assert [r.question for r in state.rounds if r.user_response is None] == ["Q3"]
 
 
-def test_no_round_is_ever_created_for_evidence() -> None:
-    """The reviewer asked for a reconnect regression over evidence trailing a
-    pending question. That state can no longer be built, which is a stronger
-    answer than handling it: what is pinned here is its absence.
-    """
-    from ouroboros.bigbang.interview import InterviewRound, InterviewState
-    from ouroboros.mcp.tools.pm_handler import _attach_evidence, _pending_round
+@pytest.mark.asyncio
+async def test_an_answer_with_no_question_to_belong_to_is_refused(tmp_path: Path) -> None:
+    """Case A, and the reason it is not an observation-only rule.
 
-    state = InterviewState(interview_id="pm-none", initial_context="ctx")
+    Before this, an observation arriving with nothing pending took a side path
+    that returned ``evidence_recorded=true`` while persisting nothing — success
+    reported for a write that did not happen. The repair is not a filter on that
+    side path but the removal of it: every answer needs a question, and when
+    none is pending the caller is asked for one. Revert the guard and this test
+    goes back to passing with an unchanged transcript.
+    """
+    handler = PMInterviewHandler(data_dir=tmp_path, agent_runtime_backend="claude")
+    state = InterviewState(interview_id="pm-caseA", initial_context="ctx")
     state.rounds.append(InterviewRound(round_number=1, question="Q1", user_response="A1"))
-    state.rounds.append(InterviewRound(round_number=2, question="Q2", user_response=None))
+    engine = _stub_engine(state, ("Q2",))
 
-    _attach_evidence(state, state.rounds[0], "[from-code] x")
+    for answer in ("[from-code] api: counted by service date", "a plain decision"):
+        result = await handler._handle_answer(engine, "pm-caseA", answer, str(tmp_path))
+        assert result.is_err, answer
+        assert "last_question" in str(result.error)
 
-    assert len(state.rounds) == 2
-    pending = _pending_round(state)
-    assert pending is not None and pending.question == "Q2"
-
-
-def test_an_observation_in_the_answer_slot_attaches_without_answering() -> None:
-    """The guard path: a finding sent where a decision goes cannot become one."""
-    from ouroboros.bigbang.interview import InterviewRound, InterviewState
-    from ouroboros.mcp.tools.pm_handler import _attach_evidence, _pending_round
-
-    state = InterviewState(interview_id="pm-guard", initial_context="ctx")
-    state.rounds.append(InterviewRound(round_number=1, question="Q1", user_response=None))
-
-    pending = _pending_round(state)
-    _attach_evidence(state, pending, "[from-code] api: x")
-
-    assert state.rounds[0].user_response is None
-    assert state.rounds[0].evidence == "[from-code] api: x"
+    # Nothing was written under the question somebody already answered.
+    assert [(r.question, r.user_response) for r in state.rounds] == [("Q1", "A1")]
 
 
-def test_evidence_reaches_question_generation_but_not_requirement_extraction() -> None:
-    """The asymmetry survived the move off rounds; it is now the field's own.
+@pytest.mark.asyncio
+async def test_the_same_answer_is_accepted_when_it_names_its_question(tmp_path: Path) -> None:
+    """The other direction: the guard asks for a question, it does not block.
 
-    Writing the next question needs to know what was already weighed. Distilling
-    requirements must not, or the PM's system as it stands gets written down as
-    the PM's decision — which is the promotion #1755 closed.
+    Without this, "refuse when nothing is pending" would be satisfied by
+    refusing everything, and the reopen path — a question the host asked after
+    the interview went quiet — would be closed with no test noticing.
     """
-    from ouroboros.bigbang.interview import InterviewRound, InterviewState
+    handler = PMInterviewHandler(data_dir=tmp_path, agent_runtime_backend="claude")
+    state = InterviewState(interview_id="pm-caseA2", initial_context="ctx")
+    state.rounds.append(InterviewRound(round_number=1, question="Q1", user_response="A1"))
+    engine = _stub_engine(state, ("Q2",))
+
+    result = await handler._handle_answer(
+        engine,
+        "pm-caseA2",
+        "a plain decision",
+        str(tmp_path),
+        last_question="Q1b, asked by the host",
+    )
+
+    assert result.is_ok
+    assert [(r.question, r.user_response) for r in state.rounds if r.user_response] == [
+        ("Q1", "A1"),
+        ("Q1b, asked by the host", "a plain decision"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_no_second_field_can_carry_a_finding_past_the_answer(tmp_path: Path) -> None:
+    """Case B, closed by the combination not existing rather than by a rule.
+
+    The ambiguous call was ``answer="[from-code] ..."`` plus a separate
+    ``evidence`` argument: the handler read one and dropped the other. The
+    schema no longer offers the second field, so the call cannot be built — and
+    an argument the tool never declared is ignored rather than silently stored.
+    """
+    handler = PMInterviewHandler(data_dir=tmp_path, agent_runtime_backend="claude")
+    state = InterviewState(interview_id="pm-caseB", initial_context="ctx")
+    state.rounds.append(InterviewRound(round_number=1, question="Q1", user_response=None))
+    engine = _stub_engine(state, ("Q2",))
+    handler.pm_engine = engine  # type: ignore[assignment]
+
+    result = await handler.handle(
+        {
+            "session_id": "pm-caseB",
+            "answer": "[from-code] api: counted by service date",
+            "evidence": "SECOND-PAYLOAD",
+        }
+    )
+
+    assert result.is_ok
+    assert not any("SECOND-PAYLOAD" in (r.user_response or "") for r in state.rounds)
+    assert state.rounds[0].user_response == "[from-code] api: counted by service date"
+
+
+def test_a_finding_reaches_question_generation_but_not_requirement_extraction() -> None:
+    """The asymmetry the shape depends on, now carried by the round itself.
+
+    Writing the next question needs to know what was already established.
+    Distilling requirements must not, or what the system does today gets written
+    down as what the PM decided — the promotion #1755 closed.
+    """
     from ouroboros.mcp.tools.pm_handler import _format_pm_transcript
 
     state = InterviewState(interview_id="pm-wh", initial_context="ctx")
@@ -576,9 +697,11 @@ def test_evidence_reaches_question_generation_but_not_requirement_extraction() -
         InterviewRound(
             round_number=1,
             question="When does access end?",
-            user_response="at period end",
-            evidence="[from-code] billing-api: period end",
+            user_response="[from-code] billing-api: period end",
         )
+    )
+    state.rounds.append(
+        InterviewRound(round_number=2, question="What should it be?", user_response="at renewal")
     )
 
     for_generation = _format_pm_transcript(state, withhold_observations=False)
@@ -586,73 +709,72 @@ def test_evidence_reaches_question_generation_but_not_requirement_extraction() -
 
     assert "billing-api: period end" in for_generation
     assert "billing-api: period end" not in for_extraction
-    # The decision itself is in both: only what informed it is withheld.
-    assert "at period end" in for_extraction
+    assert "observation withheld" in for_extraction
+    # The decision itself is in both: only the adopted fact is withheld.
+    assert "at renewal" in for_extraction
+
+
+def test_a_finding_does_not_count_toward_readiness() -> None:
+    """Occupying a round is safe only because completion counts decisions.
+
+    ``check_completion`` filters on ``provenance == "user"``, so a lane
+    reporting on three questions cannot push a two-decision interview over the
+    minimum. This is the property that made the round-taking shape available at
+    all, so it is pinned against the engine rather than against the classifier.
+    """
+    from ouroboros.bigbang.pm_interview import MIN_ROUNDS_BEFORE_EARLY_EXIT
+
+    state = InterviewState(interview_id="pm-ready", initial_context="ctx")
+    for index in range(MIN_ROUNDS_BEFORE_EARLY_EXIT + 2):
+        state.rounds.append(
+            InterviewRound(
+                round_number=index + 1,
+                question=f"Q{index + 1}",
+                user_response="[from-code] api: a fact",
+            )
+        )
+
+    counted = sum(1 for r in state.rounds if r.user_response and r.provenance == "user")
+    assert counted == 0
+    assert all(r.provenance == "observation" for r in state.rounds)
 
 
 @pytest.mark.asyncio
-async def test_evidence_without_an_answer_is_refused(tmp_path: Path) -> None:
-    """There is no round evidence alone could belong to, so the call is refused.
+async def test_the_plugin_runtime_records_a_finding_the_same_way(tmp_path: Path) -> None:
+    """R-5: no asymmetry left to keep in step.
 
-    The decision it was weighed for is already recorded, and the only open round
-    is the *next* question — so storing it files a finding against a decision it
-    was never weighed for, and dropping it is the silent loss the plugin path was
-    blocked for. Neither is available, so the combination is invalid input.
-
-    This is not a gate on the person: an answer alone is always accepted, and
-    `skills/pm/SKILL.md` already tells hosts to discard evidence the user
-    answered past rather than re-open a settled decision with it.
+    The plugin branch calls ``record_answer`` for every answer and always did.
+    What changed is that this is now the whole of the behaviour on both
+    runtimes: the branch that used to read a second field there is gone, so the
+    two cannot drift by one of them being updated.
     """
-    from ouroboros.mcp.tools.pm_handler import PMInterviewHandler
+    from ouroboros.mcp.tools.pm_handler import _format_pm_transcript
 
-    handler = PMInterviewHandler(data_dir=tmp_path, agent_runtime_backend="claude")
+    state = InterviewState(interview_id="pm-plugin", initial_context="ctx")
+    state.rounds.append(InterviewRound(round_number=1, question="Q1", user_response=None))
+    state.record_answer("Q1", "[from-code] api: counted by service date")
 
-    result = await handler.handle(
-        {"session_id": "pm-late", "evidence": "[from-code] billing-api: period end"}
-    )
-
-    assert result.is_err
-    assert "same call as the answer" in str(result.error)
+    assert state.rounds[0].provenance == "observation"
+    assert len(state.rounds) == 1
+    # It rides the transcript to the child that writes the next question...
+    assert "counted by service date" in _format_pm_transcript(state)
+    # ...and is withheld from the child that produces requirements.
+    assert "counted by service date" not in _format_pm_transcript(state, withhold_observations=True)
 
 
 @pytest.mark.asyncio
-async def test_a_reconnect_carrying_no_evidence_is_still_allowed(tmp_path: Path) -> None:
-    """The refusal is about the combination, not about a missing answer.
+async def test_a_bare_reconnect_is_still_allowed(tmp_path: Path) -> None:
+    """``answer`` stays optional: a reconnect re-shows the pending question.
 
-    ``answer`` is optional: a bare reconnect re-shows the pending question and
-    must keep working, or the refusal above would have closed a normal path.
+    Kept from the refused-combination era, because the guard above is about a
+    missing *question* and this is the call with a missing *answer*. Blocking it
+    would close a normal path.
     """
-    from ouroboros.bigbang.interview import InterviewRound, InterviewState
-    from ouroboros.core.types import Result as CoreResult
-    from ouroboros.mcp.tools.pm_handler import PMInterviewHandler
-
     handler = PMInterviewHandler(data_dir=tmp_path, agent_runtime_backend="claude")
     state = InterviewState(interview_id="pm-rc2", initial_context="ctx")
     state.rounds.append(InterviewRound(round_number=1, question="Q1", user_response=None))
 
-    class _Engine:
-        codebase_context = ""
-        _selected_brownfield_repos: list[dict[str, str]] = []
-        deferred_items: list[str] = []
-        decide_later_items: list[str] = []
-        classifications: list[Any] = []
-
-        async def load_state(self, _sid: str) -> Any:
-            return CoreResult.ok(state)
-
-        async def save_state(self, s: InterviewState) -> Any:
-            return CoreResult.ok(s)
-
-        def get_pending_reframe(self) -> None:
-            return None
-
-        def get_last_classification(self) -> None:
-            return None
-
-        def restore_meta(self, _m: Any) -> None:
-            return None
-
-    result = await handler._handle_answer(_Engine(), "pm-rc2", None, str(tmp_path))
+    result = await handler._handle_answer(_stub_engine(state), "pm-rc2", None, str(tmp_path))
 
     assert result.is_ok
     assert result.value.meta["question"] == "Q1"
@@ -737,72 +859,3 @@ def test_no_constant_names_a_synthetic_round_any_more() -> None:
     import ouroboros.orchestrator.capabilities.pm_schemas as pm_schemas
 
     assert [name for name in dir(pm_schemas) if "EVIDENCE_ROUND" in name] == []
-
-
-@pytest.mark.asyncio
-async def test_with_nothing_pending_the_answer_lands_on_the_last_real_question(
-    tmp_path: Path,
-) -> None:
-    """The fallback needs no filter now, so this pins that it needs none.
-
-    Every round is a question the person was asked, so the trailing one is the
-    most recent such question by construction. This is the branch that used to
-    hand a decision to the evidence marker.
-    """
-    from ouroboros.bigbang.interview import InterviewRound, InterviewState
-    from ouroboros.core.types import Result as CoreResult
-    from ouroboros.mcp.tools.pm_handler import PMInterviewHandler
-
-    handler = PMInterviewHandler(data_dir=tmp_path, agent_runtime_backend="claude")
-    state = InterviewState(interview_id="pm-fb", initial_context="ctx")
-    # Nothing pending: the person answered, then answers again on a reconnect.
-    state.rounds.append(InterviewRound(round_number=1, question="Q1", user_response="A1"))
-
-    class _Engine:
-        codebase_context = ""
-        _selected_brownfield_repos: list[dict[str, str]] = []
-        deferred_items: list[str] = []
-        decide_later_items: list[str] = []
-        classifications: list[Any] = []
-
-        async def load_state(self, _sid: str) -> Any:
-            return CoreResult.ok(state)
-
-        async def save_state(self, s: InterviewState) -> Any:
-            return CoreResult.ok(s)
-
-        async def record_response(self, s: InterviewState, answer: str, question: str) -> Any:
-            s.record_answer(question, answer)
-            return CoreResult.ok(s)
-
-        async def ask_next_question(self, _s: InterviewState) -> Any:
-            return CoreResult.ok("Q2")
-
-        async def check_completion(self, _s: InterviewState) -> None:
-            return None
-
-        def get_pending_reframe(self) -> None:
-            return None
-
-        def get_last_classification(self) -> None:
-            return None
-
-        def restore_meta(self, _m: Any) -> None:
-            return None
-
-        def compute_deferred_diff(self, _a: int, _b: int) -> dict[str, Any]:
-            return {
-                "new_deferred": [],
-                "new_decide_later": [],
-                "deferred_count": 0,
-                "decide_later_count": 0,
-            }
-
-    result = await handler._handle_answer(_Engine(), "pm-fb", "revised: A1b", str(tmp_path))
-
-    assert result.is_ok
-    # Recorded against Q1 — the question the person was actually shown.
-    assert [(r.question, r.user_response) for r in state.rounds if r.user_response] == [
-        ("Q1", "A1"),
-        ("Q1", "revised: A1b"),
-    ]

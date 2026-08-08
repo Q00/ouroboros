@@ -169,7 +169,6 @@ def test_run_pm_interview_uses_interview_runtime_options_on_new_session() -> Non
         ) as mock_create,
         patch("ouroboros.cli.commands.pm._check_existing_pm_seeds", return_value=True),
         patch("ouroboros.cli.commands.pm._load_brownfield_from_db", return_value=[]),
-        patch("ouroboros.cli.commands.pm._select_repos", return_value=[]),
         patch("ouroboros.cli.commands.pm._save_cli_pm_meta"),
         patch(
             "ouroboros.cli.commands.pm.multiline_prompt_async",
@@ -195,10 +194,9 @@ def test_run_pm_interview_uses_interview_runtime_options_on_new_session() -> Non
     assert callable(factory_kwargs["on_message"])
     assert factory_kwargs["cwd"] == Path.cwd()
     mock_create.assert_called_once_with(llm_adapter=sentinel_adapter, model="default")
-    engine.ask_opening_and_start.assert_called_once_with(
-        user_response="Build a PM workflow",
-        brownfield_repos=None,
-    )
+    # No ``brownfield_repos`` argument at all: a registered roster is refused
+    # before this point, so there is never one to pass (RFC #1937 decision 9a).
+    engine.ask_opening_and_start.assert_called_once_with(user_response="Build a PM workflow")
 
 
 def test_pm_command_uses_backend_safe_default_model() -> None:

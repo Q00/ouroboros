@@ -339,27 +339,27 @@ class TestFreetextInsideContainers:
 
         assert result.is_ok, result
 
-    def test_pm_evidence_may_quote_source(self) -> None:
-        """``evidence`` carries what ``answer`` carried before the two split.
+    def test_a_pm_finding_may_quote_source(self) -> None:
+        """Lane findings quote source, and source contains ``;``.
 
-        Lane findings quote source, and source contains ``;``. Splitting the
-        field without splitting the exemption made the move itself a rejection:
-        the payload was identical, the field name was new, and the only way
-        through would have been to reword the finding.
+        They arrive in ``answer``, which is where every answer arrives. A
+        separate field was tried for one round and the exemption did not follow
+        it, so the move itself became a rejection — identical payload, new field
+        name, and the only way through was to reword the finding. With one field
+        there is nothing for the exemption to fall out of step with.
         """
         validator = InputValidator()
         result = validator.validate(
             "ouroboros_pm_interview",
             {
                 "session_id": "s1",
-                "answer": "counted by service date",
-                "evidence": "[from-code] src/checkout.ts: `revokeAccess(user);`",
+                "answer": "[from-code] src/checkout.ts: `revokeAccess(user);`",
             },
         )
 
         assert result.is_ok, result
 
-    def test_evidence_may_describe_code_in_the_words_code_is_described_in(self) -> None:
+    def test_a_finding_may_describe_code_in_the_words_code_is_described_in(self) -> None:
         """The exemption governs every lexical check, not only the last one.
 
         A faithful description of code says ``subprocess``, ``open(`` and
@@ -380,7 +380,7 @@ class TestFreetextInsideContainers:
         ):
             result = validator.validate(
                 "ouroboros_pm_interview",
-                {"session_id": "s1", "answer": "keep it", "evidence": finding},
+                {"session_id": "s1", "answer": finding},
             )
             assert result.is_ok, f"{finding} -> {result.error}"
 
