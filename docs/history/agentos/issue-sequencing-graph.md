@@ -1,3 +1,16 @@
+> [!WARNING]
+> **Immutable historical snapshot — non-normative.**
+>
+> - Snapshot date: 2026-05-29 18:40 KST
+> - Source commit: [`3dd8917eb32158fb526ce23620e898a2687480c6`](https://github.com/Q00/ouroboros/commit/3dd8917eb32158fb526ce23620e898a2687480c6)
+> - Original publication commit: [`4dbf76d2c615aba536e6fd7e7018bd61c88f1076`](https://github.com/Q00/ouroboros/commit/4dbf76d2c615aba536e6fd7e7018bd61c88f1076)
+> - Imported from: [GitHub issue #1291](https://github.com/Q00/ouroboros/issues/1291)
+> - Current sequencing SSOT: [GitHub issue #961](https://github.com/Q00/ouroboros/issues/961)
+>
+> The content below is preserved as point-in-time evidence. Do not refresh its
+> issue states, sequencing graph, or recommendations, and do not use it as
+> current planning policy.
+
 # AgentOS Issue Sequencing Graph
 
 > Snapshot documentation imported from #1291. This page is informational only; #961 remains the canonical AgentOS roadmap SSOT, and #1256 remains the product-policy SSOT for the `ooo auto` closure ladder.
