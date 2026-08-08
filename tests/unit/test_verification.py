@@ -1556,6 +1556,352 @@ class TestSpecVerifier:
 
         assert summary.verified_count == 1
 
+    @pytest.mark.parametrize(
+        ("pattern", "content"),
+        [
+            (r".", "print('hello')\n"),
+            (r".+", "print('hello')\n"),
+            (r"[\s\S]", "print('hello')\n"),
+            (r"[A-Z]\w*", "Unrelated = object()\n"),
+            (r"\b", "print('hello')\n"),
+            (r"(?=m)", "print('hello')\n"),
+            (r"class\s+\w+", "class Unrelated:\n    pass\n"),
+            (r"interface\s+\w+", "interface Unrelated {}\n"),
+            (r"pub\s+trait\s+\w+", "pub trait Unrelated {}\n"),
+        ],
+        ids=[
+            "one-character",
+            "whole-input",
+            "any-character",
+            "generic-identifier",
+            "word-boundary",
+            "unrelated-lookahead",
+            "generic-class",
+            "generic-interface",
+            "generic-trait",
+        ],
+    )
+    def test_unrelated_model_regex_cannot_overturn_an_honest_agent_failure(
+        self, pattern: str, content: str
+    ) -> None:
+        """A match is evidence only when its subject contains the actual AC target."""
+        project = self._create_project({"main.py": content})
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="MUST define a CameraProvider interface",
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern=pattern,
+            expected_value="CameraProvider",
+            file_hint="*.py",
+            evidence_targets=("CameraProvider",),
+            input_binding_required=True,
+        )
+
+        summary = SpecVerifier(project_dir=project).verify_all(
+            (assertion,), agent_results={0: False}
+        )
+
+        result = summary.reports[0].results[0]
+        assert summary.reports[0].verified_pass is False
+        assert summary.failed_count == 1
+        assert summary.discrepancy_count == 0, "the honest FAIL must remain an honest FAIL"
+        assert result.evidence_source == ""
+        assert result.evidence_target == ""
+        assert "criterion-bound" in result.detail
+
+    @pytest.mark.parametrize("pattern", [r"(?=CameraProvider)", r"class\s+\w+"])
+    def test_target_bound_zero_width_and_generic_patterns_remain_real_evidence(
+        self, pattern: str
+    ) -> None:
+        """The gate binds evidence to input; it does not require a consuming regex span."""
+        project = self._create_project({"main.py": "class CameraProvider:\n    pass\n"})
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="MUST define a CameraProvider interface",
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern=pattern,
+            expected_value="CameraProvider",
+            file_hint="*.py",
+            evidence_targets=("CameraProvider",),
+            input_binding_required=True,
+        )
+
+        summary = SpecVerifier(project_dir=project).verify_all((assertion,))
+
+        result = summary.reports[0].results[0]
+        assert result.verified is True
+        assert result.evidence_source == "file_content"
+        assert result.evidence_target == "CameraProvider"
+        assert result.file_path.endswith("main.py")
+
+    @pytest.mark.parametrize(
+        "content",
+        [
+            "class CameraProvider_fake:\n    pass\n",
+            "class Fake_CameraProvider:\n    pass\n",
+            "class CameraProvider$Fake:\n    pass\n",
+            "class Fake$CameraProvider:\n    pass\n",
+            "class cameraprovider:\n    pass\n",
+            "가짜카메라값 = object()\n",
+        ],
+        ids=[
+            "identifier-suffix",
+            "identifier-prefix",
+            "dollar-suffix",
+            "dollar-prefix",
+            "case-variant",
+            "unicode-embedding",
+        ],
+    )
+    def test_structural_target_must_be_a_complete_unicode_identifier(self, content: str) -> None:
+        """A target embedded in an identifier is unrelated evidence."""
+        target = "카메라" if "카메라" in content else "CameraProvider"
+        project = self._create_project({"main.py": content})
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text=f"MUST define a {target} interface",
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern=re.escape(target),
+            expected_value=target,
+            file_hint="*.py",
+            evidence_targets=(target,),
+            input_binding_required=True,
+        )
+
+        summary = SpecVerifier(project_dir=project).verify_all((assertion,))
+
+        result = summary.reports[0].results[0]
+        assert result.verified is False
+        assert result.evidence_target == ""
+        assert "criterion-bound" in result.detail
+
+    def test_t1_prose_target_cannot_bind_an_arbitrary_snake_case_component(self) -> None:
+        """Prose-to-snake inference is not trusted evidence provenance."""
+        project = self._create_project({"config.py": "WARMUP_FRAMES = 10\n"})
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="Warmup frames should be 10",
+            tier=VerificationTier.T1_CONSTANT,
+            pattern=r"WARMUP_FRAMES\s*=\s*",
+            expected_value="10",
+            file_hint="*.py",
+            input_binding_required=True,
+        )
+
+        summary = SpecVerifier(project_dir=project).verify_all((assertion,))
+
+        assert summary.verified_count == 0
+        assert "No criterion-bound target" in summary.reports[0].results[0].detail
+
+    @pytest.mark.parametrize(
+        "content",
+        ["NOT_MAX_RETRIES = 5\n", "MAX_RETRIES_EXTRA = 5\n", "max_retries = 5\n"],
+        ids=["identifier-prefix", "identifier-suffix", "case-variant"],
+    )
+    def test_t1_exact_identifier_cannot_bind_inside_an_unrelated_identifier(
+        self, content: str
+    ) -> None:
+        project = self._create_project({"config.py": content})
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="MUST set MAX_RETRIES to 5",
+            tier=VerificationTier.T1_CONSTANT,
+            pattern=r"(?i)(?:NOT_)?MAX_RETRIES(?:_EXTRA)?\s*=\s*",
+            expected_value="5",
+            file_hint="*.py",
+            evidence_targets=("MAX_RETRIES",),
+            input_binding_required=True,
+        )
+
+        summary = SpecVerifier(project_dir=project).verify_all((assertion,))
+
+        assert summary.verified_count == 0
+        assert "criterion-bound" in summary.reports[0].results[0].detail
+
+    @pytest.mark.parametrize(
+        "identifier",
+        [
+            "CameraProvider\u0301",
+            "CameraProvider\u200c",
+            "CameraProvider\u200d",
+            "CameraProvider·",
+            "Fake\u0301CameraProvider",
+            "Fake\u200cCameraProvider",
+            "Fake\u200dCameraProvider",
+            "Fake·CameraProvider",
+        ],
+        ids=[
+            "combining-suffix",
+            "zwnj-suffix",
+            "zwj-suffix",
+            "middle-dot-suffix",
+            "combining-prefix",
+            "zwnj-prefix",
+            "zwj-prefix",
+            "middle-dot-prefix",
+        ],
+    )
+    def test_unicode_identifier_continuation_cannot_extend_structural_target(
+        self, identifier: str
+    ) -> None:
+        project = self._create_project({"main.py": f"class {identifier}:\n    pass\n"})
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="MUST define a CameraProvider interface",
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern=r"class\s+.+",
+            expected_value="CameraProvider",
+            file_hint="*.py",
+            evidence_targets=("CameraProvider",),
+            input_binding_required=True,
+        )
+
+        summary = SpecVerifier(project_dir=project).verify_all((assertion,))
+
+        assert summary.verified_count == 0
+        assert summary.reports[0].results[0].evidence_target == ""
+
+    @pytest.mark.parametrize(
+        ("content", "verified"),
+        [
+            ("--verbose\n", True),
+            ("not--verbose\n", False),
+            ("x--verbose-extra\n", False),
+            ("---verbose\n", False),
+            ("--VERBOSE\n", False),
+        ],
+        ids=[
+            "exact-flag",
+            "identifier-prefix",
+            "extended-flag",
+            "hyphen-prefix",
+            "case-variant",
+        ],
+    )
+    def test_flag_target_requires_a_complete_cli_token(self, content: str, verified: bool) -> None:
+        project = self._create_project({"help.txt": content})
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="CLI accepts --verbose flag",
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern=r".+",
+            expected_value="--verbose",
+            file_hint="*.txt",
+            evidence_targets=("--verbose",),
+            input_binding_required=True,
+        )
+
+        summary = SpecVerifier(project_dir=project).verify_all((assertion,))
+
+        assert bool(summary.verified_count) is verified
+        assert summary.reports[0].results[0].evidence_target == ("--verbose" if verified else "")
+
+    @pytest.mark.parametrize(
+        ("target", "content", "verified"),
+        [
+            ("foo.bar", "foo.bar\n", True),
+            ("foo.bar", "foo.bar.baz\n", False),
+            ("foo.bar", "x/foo.bar\n", False),
+            ("foo.bar", "foo.bar+extra\n", False),
+            ("foo:bar", "foo:bar\n", True),
+            ("foo:bar", "foo:bar:baz\n", False),
+            ("foo-bar", "foo-bar\n", True),
+            ("foo-bar", "foo-bar-baz\n", False),
+            ("foo-bar", "not-foo-bar\n", False),
+            ("v1.2.3", "v1.2.3\n", True),
+            ("v1.2.3", "v1.2.3.4\n", False),
+            ("v1.2.3", "v1.2.3-rc1\n", False),
+            ("v1.2.3", "v1.2.3+build\n", False),
+            ("pkg/name", "pkg/name\n", True),
+            ("pkg/name", "@pkg/name\n", False),
+            ("1.2.3", "1.2.3\n", True),
+            ("1.2.3", "1.2.3.4\n", False),
+            ("42", "42\n", True),
+            ("42", "42.0\n", False),
+        ],
+    )
+    def test_structured_literal_rejects_separator_token_extensions(
+        self, target: str, content: str, verified: bool
+    ) -> None:
+        project = self._create_project({"evidence.txt": content})
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text=f"MUST expose `{target}`",
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern=r".+",
+            expected_value=target,
+            file_hint="*.txt",
+            evidence_targets=(target,),
+            input_binding_required=True,
+        )
+
+        summary = SpecVerifier(project_dir=project).verify_all((assertion,))
+
+        assert bool(summary.verified_count) is verified
+        assert summary.reports[0].results[0].evidence_target == (target if verified else "")
+
+    @pytest.mark.parametrize(
+        ("relative_path", "verified"),
+        [
+            ("pkg/CameraProvider.py", True),
+            ("other/CameraProvider.py", False),
+            ("x/pkg/CameraProvider.py", False),
+            ("pkg/CameraProvider.py.bak", False),
+            ("Pkg/CameraProvider.py", False),
+        ],
+        ids=[
+            "exact-qualified-path",
+            "wrong-directory",
+            "prefixed-path",
+            "suffixed-path",
+            "case-variant",
+        ],
+    )
+    def test_qualified_file_target_binds_to_project_relative_path(
+        self, relative_path: str, verified: bool
+    ) -> None:
+        project = self._create_project({relative_path: "# provider\n"})
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="MUST create file pkg/CameraProvider.py",
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern=r".+CameraProvider\.py",
+            expected_value="pkg/CameraProvider.py",
+            file_hint="**/*",
+            evidence_targets=("pkg/CameraProvider.py",),
+            input_binding_required=True,
+        )
+
+        summary = SpecVerifier(project_dir=project).verify_all((assertion,))
+
+        assert bool(summary.verified_count) is verified
+        result = summary.reports[0].results[0]
+        assert result.evidence_target == ("pkg/CameraProvider.py" if verified else "")
+
+    @pytest.mark.parametrize(
+        ("filename", "verified"),
+        [("CameraProvider.py", True), ("cameraprovider.py", False)],
+        ids=["exact-case", "case-variant"],
+    )
+    def test_unqualified_filename_target_preserves_exact_case(
+        self, filename: str, verified: bool
+    ) -> None:
+        project = self._create_project({filename: "# provider\n"})
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="MUST create file CameraProvider.py",
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern=r"(?i)CameraProvider\.py",
+            expected_value="CameraProvider.py",
+            file_hint="*.py",
+            evidence_targets=("CameraProvider.py",),
+            input_binding_required=True,
+        )
+
+        summary = SpecVerifier(project_dir=project).verify_all((assertion,))
+
+        assert bool(summary.verified_count) is verified
+
 
 # -- Extractor Tests --
 
@@ -1565,7 +1911,7 @@ _GOOD_EXTRACTION = json.dumps(
             "ac_index": 0,
             "tier": "t2_structural",
             "pattern": "class Foo",
-            "expected_value": "",
+            "expected_value": "Foo",
             "file_hint": "*.py",
             "description": "",
         }
@@ -1630,6 +1976,63 @@ class TestAssertionExtractor:
         assert len(assertions) == 1
         assert assertions[0].tier == VerificationTier.T1_CONSTANT
         assert assertions[0].expected_value == "10"
+        assert assertions[0].input_binding_required is True
+        assert assertions[0].evidence_targets == ("WARMUP_FRAMES",)
+
+    @pytest.mark.asyncio
+    async def test_model_fields_cannot_redirect_evidence_away_from_the_input_ac(self) -> None:
+        """The extractor replaces model provenance with the indexed caller input."""
+        extractor = self._make_extractor(
+            [
+                {
+                    "ac_index": 0,
+                    "ac_text": "main.py exists",
+                    "tier": "t2_structural",
+                    "pattern": r".+",
+                    "expected_value": "CameraProvider",
+                    "file_hint": "*.py",
+                    "description": "Any file is enough",
+                }
+            ]
+        )
+
+        result = await extractor.extract(
+            "seed_bound_provenance", ("MUST define a CameraProvider interface",)
+        )
+
+        assert result.is_ok and len(result.value) == 1
+        assertion = result.value[0]
+        assert assertion.ac_text == "MUST define a CameraProvider interface"
+        assert assertion.evidence_targets == ("CameraProvider",)
+        assert assertion.input_binding_required is True
+
+        project = TestSpecVerifier()._create_project({"main.py": "class Unrelated:\n    pass\n"})
+        verification = SpecVerifier(project_dir=project).verify_all(
+            (assertion,), agent_results={0: False}
+        )
+        assert verification.reports[0].verified_pass is False
+        assert verification.reports[0].results[0].evidence_target == ""
+
+    @pytest.mark.asyncio
+    async def test_t1_expected_value_absent_from_the_input_ac_fails_closed(self) -> None:
+        """A model cannot choose the value whose presence will later be verified."""
+        extractor = self._make_extractor(
+            [
+                {
+                    "ac_index": 0,
+                    "tier": "t1_constant",
+                    "pattern": r"MAX_RETRIES\s*=\s*",
+                    "expected_value": "5",
+                    "file_hint": "*.py",
+                    "description": "redirect the expected value",
+                }
+            ]
+        )
+
+        result = await extractor.extract("seed_unbound_expected", ("MAX_RETRIES must be seven",))
+
+        assert result.is_ok
+        assert result.value == ()
 
     @pytest.mark.asyncio
     async def test_t1_assertion_requires_expected_value_before_verifier(self) -> None:
@@ -1656,6 +2059,245 @@ class TestAssertionExtractor:
         )
         assert summary.total_assertions == 0
         assert summary.verified_count == 0
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("expected_value", ["", "interface", "Python", "cameraprovider"])
+    async def test_t2_model_cannot_choose_or_omit_the_structural_target(
+        self, expected_value: str
+    ) -> None:
+        """T2 evidence must name the deterministic structural target from the AC."""
+        extractor = self._make_extractor(
+            [
+                {
+                    "ac_index": 0,
+                    "tier": "t2_structural",
+                    "pattern": rf"{re.escape(expected_value)}" if expected_value else r".+",
+                    "expected_value": expected_value,
+                    "file_hint": "*.py",
+                    "description": "redirect structural evidence",
+                }
+            ]
+        )
+
+        result = await extractor.extract(
+            f"seed_t2_redirect_{expected_value}",
+            ("MUST define a CameraProvider interface in a Python project",),
+        )
+
+        assert result.is_ok
+        assert result.value == ()
+
+    @pytest.mark.asyncio
+    async def test_t1_target_is_bound_to_the_expected_value_clause(self) -> None:
+        """A nearby unrelated term cannot replace the constant being specified."""
+        extractor = self._make_extractor(
+            [
+                {
+                    "ac_index": 0,
+                    "tier": "t1_constant",
+                    "pattern": r"Python\s*=\s*",
+                    "expected_value": "5",
+                    "file_hint": "*.py",
+                    "description": "redirect to a language name",
+                }
+            ]
+        )
+        result = await extractor.extract(
+            "seed_t1_clause_binding",
+            ("MUST set MAX_RETRIES to 5 in Python config",),
+        )
+
+        assert result.is_ok and len(result.value) == 1
+        assert result.value[0].evidence_targets == ("MAX_RETRIES",)
+
+        project = TestSpecVerifier()._create_project({"config.py": "Python = 5\n"})
+        summary = SpecVerifier(project_dir=project).verify_all(result.value)
+        assert summary.verified_count == 0
+        assert "criterion-bound" in summary.reports[0].results[0].detail
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("ac_text", "pattern"),
+        [
+            ("There must be 5 retries", r"There\s*=\s*"),
+            ("At most 5 retries", r"most\s*=\s*"),
+            ("Warmup frames should be 10", r"NOT_FRAMES\s*=\s*"),
+            ("Retry count should be 5", r"UNRELATED_COUNT\s*=\s*"),
+        ],
+        ids=["existential", "quantifier", "snake-suffix", "generic-component"],
+    )
+    async def test_vague_t1_prose_has_no_trusted_code_target(
+        self, ac_text: str, pattern: str
+    ) -> None:
+        expected = "10" if "10" in ac_text else "5"
+        extractor = self._make_extractor(
+            [
+                {
+                    "ac_index": 0,
+                    "tier": "t1_constant",
+                    "pattern": pattern,
+                    "expected_value": expected,
+                    "file_hint": "*.py",
+                    "description": "fabricate a prose-bound constant",
+                }
+            ]
+        )
+
+        result = await extractor.extract(f"vague_{pattern}", (ac_text,))
+
+        assert result.is_ok
+        assert result.value == ()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("redirect", ["named", "shall"])
+    async def test_t2_scaffolding_cannot_replace_the_structural_identifier(
+        self, redirect: str
+    ) -> None:
+        ac_text = (
+            "MUST create an interface named CameraProvider"
+            if redirect == "named"
+            else "The interface shall be CameraProvider"
+        )
+        extractor = self._make_extractor(
+            [
+                {
+                    "ac_index": 0,
+                    "tier": "t2_structural",
+                    "pattern": redirect,
+                    "expected_value": redirect,
+                    "file_hint": "*.py",
+                    "description": "redirect to scaffolding",
+                }
+            ]
+        )
+
+        result = await extractor.extract(f"t2_scaffold_{redirect}", (ac_text,))
+
+        assert result.is_ok
+        assert result.value == ()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("ac_text", "expected", "pattern"),
+        [
+            (
+                "MUST create an interface named CameraProvider",
+                "CameraProvider",
+                r"CameraProvider",
+            ),
+            ("The interface shall be CameraProvider", "CameraProvider", r"CameraProvider"),
+            ("CLI accepts --verbose flag", "--verbose", r"--verbose"),
+            (
+                "MUST create file pkg/CameraProvider.py",
+                "pkg/CameraProvider.py",
+                r"CameraProvider\.py",
+            ),
+            ("MUST expose `foo.bar`", "foo.bar", r".+"),
+            ("MUST expose `42`", "42", r".+"),
+        ],
+        ids=[
+            "named-interface",
+            "shall-interface",
+            "exact-flag",
+            "qualified-path",
+            "quoted-dotted",
+            "quoted-numeric",
+        ],
+    )
+    async def test_conservative_structural_grammar_keeps_exact_literals(
+        self, ac_text: str, expected: str, pattern: str
+    ) -> None:
+        extractor = self._make_extractor(
+            [
+                {
+                    "ac_index": 0,
+                    "tier": "t2_structural",
+                    "pattern": pattern,
+                    "expected_value": expected,
+                    "file_hint": "*.py",
+                    "description": "honest structural target",
+                }
+            ]
+        )
+
+        result = await extractor.extract(f"honest_{expected}", (ac_text,))
+
+        assert result.is_ok and len(result.value) == 1
+        assert result.value[0].evidence_targets == (expected,)
+
+    @pytest.mark.asyncio
+    async def test_unsupported_leading_dot_literal_fails_closed(self) -> None:
+        extractor = self._make_extractor(
+            [
+                {
+                    "ac_index": 0,
+                    "tier": "t2_structural",
+                    "pattern": r"\.env",
+                    "expected_value": ".env",
+                    "file_hint": "*",
+                    "description": "leading-dot file",
+                }
+            ]
+        )
+
+        result = await extractor.extract("leading_dot", ("MUST create file `.env`",))
+
+        assert result.is_ok
+        assert result.value == ()
+
+    @pytest.mark.asyncio
+    async def test_flag_expected_value_must_preserve_the_exact_cli_literal(self) -> None:
+        extractor = self._make_extractor(
+            [
+                {
+                    "ac_index": 0,
+                    "tier": "t2_structural",
+                    "pattern": "verbose",
+                    "expected_value": "verbose",
+                    "file_hint": "*.txt",
+                    "description": "drop the flag delimiters",
+                }
+            ]
+        )
+
+        result = await extractor.extract("flag_redirect", ("CLI accepts --verbose flag",))
+
+        assert result.is_ok
+        assert result.value == ()
+
+    @pytest.mark.asyncio
+    async def test_multiple_constants_bind_to_their_nearest_symbols(self) -> None:
+        """Each extracted scalar maps to its own declaration in a compound AC."""
+        extractor = self._make_extractor(
+            [
+                {
+                    "ac_index": 0,
+                    "tier": "t1_constant",
+                    "pattern": r"WARMUP\s*=\s*",
+                    "expected_value": "10",
+                    "file_hint": "*.py",
+                    "description": "warmup",
+                },
+                {
+                    "ac_index": 0,
+                    "tier": "t1_constant",
+                    "pattern": r"FPS\s*=\s*",
+                    "expected_value": "30",
+                    "file_hint": "*.py",
+                    "description": "fps",
+                },
+            ]
+        )
+
+        result = await extractor.extract(
+            "seed_compound_constants", ("MUST set WARMUP=10 and FPS=30",)
+        )
+
+        assert result.is_ok
+        assert [item.evidence_targets for item in result.value] == [("WARMUP",), ("FPS",)]
+        project = TestSpecVerifier()._create_project({"config.py": "WARMUP = 10\nFPS = 30\n"})
+        summary = SpecVerifier(project_dir=project).verify_all(result.value)
+        assert summary.verified_count == 2
 
     @pytest.mark.asyncio
     async def test_wrapped_invalid_regex_assertion_rejected_before_verifier(self) -> None:
@@ -1752,15 +2394,15 @@ class TestAssertionExtractor:
         assert "No files matched hint" in summary.reports[0].results[0].detail
 
     @pytest.mark.asyncio
-    async def test_caches_by_seed_id(self) -> None:
-        """Second call with same seed_id returns cached results."""
+    async def test_caches_by_seed_id_and_criterion_content(self) -> None:
+        """An unchanged seed input reuses the same extracted result."""
         extractor = self._make_extractor(
             [
                 {
                     "ac_index": 0,
                     "tier": "t2_structural",
                     "pattern": "class Foo",
-                    "expected_value": "",
+                    "expected_value": "Foo",
                     "file_hint": "*.py",
                     "description": "",
                 }
@@ -1772,6 +2414,47 @@ class TestAssertionExtractor:
         assert r1.value is r2.value
         # LLM called only once
         extractor.llm_adapter.complete.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_changed_criteria_with_same_seed_id_do_not_reuse_stale_assertions(
+        self,
+    ) -> None:
+        """Criterion content participates in the cache identity."""
+        first = json.dumps(
+            [
+                {
+                    "ac_index": 0,
+                    "tier": "t2_structural",
+                    "pattern": "class Foo",
+                    "expected_value": "Foo",
+                    "file_hint": "*.py",
+                    "description": "",
+                }
+            ]
+        )
+        second = json.dumps(
+            [
+                {
+                    "ac_index": 0,
+                    "tier": "t2_structural",
+                    "pattern": "class Bar",
+                    "expected_value": "Bar",
+                    "file_hint": "*.py",
+                    "description": "",
+                }
+            ]
+        )
+        extractor = self._make_extractor_sequence(first, second)
+
+        foo = await extractor.extract("same_seed", ("Has class Foo",))
+        bar = await extractor.extract("same_seed", ("Has class Bar",))
+
+        assert foo.is_ok and bar.is_ok
+        assert foo.value[0].ac_text == "Has class Foo"
+        assert foo.value[0].evidence_targets == ("Foo",)
+        assert bar.value[0].ac_text == "Has class Bar"
+        assert bar.value[0].evidence_targets == ("Bar",)
+        assert extractor.llm_adapter.complete.await_count == 2
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -1872,7 +2555,7 @@ class TestAssertionExtractor:
                         "ac_index": 0,
                         "tier": "t2_structural",
                         "pattern": "class Foo",
-                        "expected_value": "",
+                        "expected_value": "Foo",
                         "file_hint": "*.py",
                         "description": "",
                     },

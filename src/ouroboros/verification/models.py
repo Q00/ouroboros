@@ -37,6 +37,10 @@ class SpecAssertion(BaseModel, frozen=True):
     expected_value: str = ""
     file_hint: str = ""
     description: str = ""
+    evidence_targets: tuple[str, ...] = ()
+    """Targets deterministically copied from the caller-authored AC."""
+    input_binding_required: bool = False
+    """Whether this assertion crossed the model-extraction trust boundary."""
 
 
 class SpecVerificationResult(BaseModel, frozen=True):
@@ -48,6 +52,10 @@ class SpecVerificationResult(BaseModel, frozen=True):
     file_path: str = ""
     discrepancy: bool = False
     detail: str = ""
+    evidence_source: str = ""
+    """Where passing evidence came from: ``filename`` or ``file_content``."""
+    evidence_target: str = ""
+    """Caller-authored acceptance-criterion literal bound to that evidence."""
 
 
 class ACVerificationReport(BaseModel, frozen=True):

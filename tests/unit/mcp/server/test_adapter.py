@@ -497,6 +497,436 @@ Parallel Execution Verification Report
         assert summary.approval_status == "rejected"
         assert summary.run_verdict == "FAIL"
 
+    @pytest.mark.parametrize(
+        "pattern",
+        [r".+", r"\b", r"(?=m)", r"class\s+\w+"],
+        ids=["consuming", "boundary", "lookahead", "generic-declaration"],
+    )
+    def test_unrelated_regex_evidence_cannot_publish_a_formal_pass(
+        self, tmp_path: Any, pattern: str
+    ) -> None:
+        """Input-unbound model matches stay failed at the formal verdict boundary."""
+        ac_text = "MUST define a CameraProvider interface"
+        (tmp_path / "main.py").write_text("class Unrelated:\n    pass\n")
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text=ac_text,
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern=pattern,
+            expected_value="CameraProvider",
+            file_hint="*.py",
+            evidence_targets=("CameraProvider",),
+            input_binding_required=True,
+        )
+        verification = SpecVerifier(project_dir=str(tmp_path)).verify_all(
+            (assertion,), agent_results={0: False}
+        )
+        mechanical = EvaluationSummary(
+            final_approved=True,
+            highest_stage_passed=2,
+            task_results=(
+                TaskResult(
+                    task_index=0,
+                    task_content=ac_text,
+                    status="completed",
+                    completed=True,
+                    source_ac_index=0,
+                    execution_method="legacy_parallel_report",
+                ),
+            ),
+            execution_completion_status="completed",
+            approval_status="approved",
+        )
+
+        summary = _evaluation_summary_from_spec_verification(mechanical, verification)
+
+        assert summary is not None
+        assert summary.ac_results[0].passed is False
+        assert summary.ac_results[0].final_verdict != "pass"
+        assert "criterion-bound" in summary.ac_results[0].evidence
+        assert summary.final_approved is False
+        assert summary.score == 0.0
+        assert summary.run_verdict == "FAIL"
+
+    def test_t1_identifier_component_cannot_publish_a_formal_pass(self, tmp_path: Any) -> None:
+        """An exact criterion key cannot bind inside an unrelated snake identifier."""
+        ac_text = "MUST set MAX_RETRIES to 5"
+        (tmp_path / "config.py").write_text("NOT_MAX_RETRIES = 5\n")
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text=ac_text,
+            tier=VerificationTier.T1_CONSTANT,
+            pattern=r"NOT_MAX_RETRIES\s*=\s*",
+            expected_value="5",
+            file_hint="*.py",
+            evidence_targets=("MAX_RETRIES",),
+            input_binding_required=True,
+        )
+        verification = SpecVerifier(project_dir=str(tmp_path)).verify_all(
+            (assertion,), agent_results={0: True}
+        )
+        mechanical = EvaluationSummary(
+            final_approved=True,
+            highest_stage_passed=2,
+            task_results=(
+                TaskResult(
+                    task_index=0,
+                    task_content=ac_text,
+                    status="completed",
+                    completed=True,
+                    source_ac_index=0,
+                ),
+            ),
+            execution_completion_status="completed",
+            approval_status="approved",
+        )
+
+        summary = _evaluation_summary_from_spec_verification(mechanical, verification)
+
+        assert summary is not None
+        assert verification.reports[0].verified_pass is False
+        assert summary.final_approved is False
+        assert summary.ac_results[0].passed is False
+        assert "criterion-bound" in summary.ac_results[0].evidence
+        assert summary.run_verdict == "FAIL"
+
+    @pytest.mark.parametrize(
+        ("content", "approved"),
+        [
+            ("--verbose\n", True),
+            ("not--verbose\n", False),
+            ("x--verbose-extra\n", False),
+            ("--VERBOSE\n", False),
+        ],
+        ids=["exact-flag", "identifier-prefix", "extended-flag", "case-variant"],
+    )
+    def test_flag_substrings_cannot_publish_a_formal_pass(
+        self, tmp_path: Any, content: str, approved: bool
+    ) -> None:
+        ac_text = "CLI accepts --verbose flag"
+        (tmp_path / "help.txt").write_text(content)
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text=ac_text,
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern=r".+",
+            expected_value="--verbose",
+            file_hint="*.txt",
+            evidence_targets=("--verbose",),
+            input_binding_required=True,
+        )
+        verification = SpecVerifier(project_dir=str(tmp_path)).verify_all(
+            (assertion,), agent_results={0: True}
+        )
+        mechanical = EvaluationSummary(
+            final_approved=True,
+            highest_stage_passed=2,
+            task_results=(
+                TaskResult(
+                    task_index=0,
+                    task_content=ac_text,
+                    status="completed",
+                    completed=True,
+                    source_ac_index=0,
+                ),
+            ),
+            execution_completion_status="completed",
+            approval_status="approved",
+        )
+
+        summary = _evaluation_summary_from_spec_verification(mechanical, verification)
+
+        assert summary is not None
+        assert summary.final_approved is approved
+        assert summary.ac_results[0].passed is approved
+        assert summary.run_verdict == ("PASS" if approved else "FAIL")
+
+    @pytest.mark.parametrize(
+        (
+            "tier",
+            "ac_text",
+            "filename",
+            "content",
+            "pattern",
+            "expected",
+            "target",
+            "approved",
+        ),
+        [
+            (
+                VerificationTier.T2_STRUCTURAL,
+                "MUST define a CameraProvider interface",
+                "main.py",
+                "class CameraProvider:\n    pass\n",
+                r"(?i)class\s+cameraprovider",
+                "CameraProvider",
+                "CameraProvider",
+                True,
+            ),
+            (
+                VerificationTier.T2_STRUCTURAL,
+                "MUST define a CameraProvider interface",
+                "main.py",
+                "class cameraprovider:\n    pass\n",
+                r"(?i)class\s+cameraprovider",
+                "CameraProvider",
+                "CameraProvider",
+                False,
+            ),
+            (
+                VerificationTier.T1_CONSTANT,
+                "MUST set MAX_RETRIES to 5",
+                "main.py",
+                "MAX_RETRIES = 5\n",
+                r"(?i)max_retries\s*=\s*",
+                "5",
+                "MAX_RETRIES",
+                True,
+            ),
+            (
+                VerificationTier.T1_CONSTANT,
+                "MUST set MAX_RETRIES to 5",
+                "main.py",
+                "max_retries = 5\n",
+                r"(?i)max_retries\s*=\s*",
+                "5",
+                "MAX_RETRIES",
+                False,
+            ),
+            (
+                VerificationTier.T2_STRUCTURAL,
+                "MUST create file CameraProvider.py",
+                "CameraProvider.py",
+                "# provider\n",
+                r"(?i)CameraProvider\.py",
+                "CameraProvider.py",
+                "CameraProvider.py",
+                True,
+            ),
+            (
+                VerificationTier.T2_STRUCTURAL,
+                "MUST create file CameraProvider.py",
+                "cameraprovider.py",
+                "# provider\n",
+                r"(?i)CameraProvider\.py",
+                "CameraProvider.py",
+                "CameraProvider.py",
+                False,
+            ),
+        ],
+        ids=[
+            "symbol-exact",
+            "symbol-case",
+            "constant-exact",
+            "constant-case",
+            "filename-exact",
+            "filename-case",
+        ],
+    )
+    def test_code_evidence_identity_is_case_sensitive_at_formal_boundary(
+        self,
+        tmp_path: Any,
+        tier: VerificationTier,
+        ac_text: str,
+        filename: str,
+        content: str,
+        pattern: str,
+        expected: str,
+        target: str,
+        approved: bool,
+    ) -> None:
+        (tmp_path / filename).write_text(content)
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text=ac_text,
+            tier=tier,
+            pattern=pattern,
+            expected_value=expected,
+            file_hint="*.py",
+            evidence_targets=(target,),
+            input_binding_required=True,
+        )
+        verification = SpecVerifier(project_dir=str(tmp_path)).verify_all(
+            (assertion,), agent_results={0: True}
+        )
+        mechanical = EvaluationSummary(
+            final_approved=True,
+            highest_stage_passed=2,
+            task_results=(
+                TaskResult(
+                    task_index=0,
+                    task_content=ac_text,
+                    status="completed",
+                    completed=True,
+                    source_ac_index=0,
+                ),
+            ),
+            execution_completion_status="completed",
+            approval_status="approved",
+        )
+
+        summary = _evaluation_summary_from_spec_verification(mechanical, verification)
+
+        assert summary is not None
+        assert summary.final_approved is approved
+        assert summary.ac_results[0].passed is approved
+        assert summary.run_verdict == ("PASS" if approved else "FAIL")
+
+    @pytest.mark.parametrize(
+        ("relative_path", "approved"),
+        [
+            ("pkg/CameraProvider.py", True),
+            ("x/pkg/CameraProvider.py", False),
+            ("pkg/CameraProvider.py.bak", False),
+            ("Pkg/CameraProvider.py", False),
+        ],
+        ids=["exact-path", "prefixed-path", "suffixed-path", "case-variant"],
+    )
+    def test_qualified_path_substrings_cannot_publish_a_formal_pass(
+        self, tmp_path: Any, relative_path: str, approved: bool
+    ) -> None:
+        ac_text = "MUST create file pkg/CameraProvider.py"
+        candidate = tmp_path / relative_path
+        candidate.parent.mkdir(parents=True, exist_ok=True)
+        candidate.write_text("# provider\n")
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text=ac_text,
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern=r".+CameraProvider\.py",
+            expected_value="pkg/CameraProvider.py",
+            file_hint="**/*",
+            evidence_targets=("pkg/CameraProvider.py",),
+            input_binding_required=True,
+        )
+        verification = SpecVerifier(project_dir=str(tmp_path)).verify_all(
+            (assertion,), agent_results={0: True}
+        )
+        mechanical = EvaluationSummary(
+            final_approved=True,
+            highest_stage_passed=2,
+            task_results=(
+                TaskResult(
+                    task_index=0,
+                    task_content=ac_text,
+                    status="completed",
+                    completed=True,
+                    source_ac_index=0,
+                ),
+            ),
+            execution_completion_status="completed",
+            approval_status="approved",
+        )
+
+        summary = _evaluation_summary_from_spec_verification(mechanical, verification)
+
+        assert summary is not None
+        assert summary.final_approved is approved
+        assert summary.ac_results[0].passed is approved
+        assert summary.run_verdict == ("PASS" if approved else "FAIL")
+
+    def test_bound_zero_width_evidence_keeps_auditable_formal_provenance(
+        self, tmp_path: Any
+    ) -> None:
+        """A real target may verify without consuming it, and names its provenance."""
+        ac_text = "MUST define a CameraProvider interface"
+        (tmp_path / "main.py").write_text("class CameraProvider:\n    pass\n")
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text=ac_text,
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern=r"(?=CameraProvider)",
+            expected_value="CameraProvider",
+            file_hint="*.py",
+            evidence_targets=("CameraProvider",),
+            input_binding_required=True,
+        )
+        verification = SpecVerifier(project_dir=str(tmp_path)).verify_all((assertion,))
+        mechanical = EvaluationSummary(
+            final_approved=False,
+            highest_stage_passed=2,
+            task_results=(
+                TaskResult(
+                    task_index=0,
+                    task_content=ac_text,
+                    status="completed",
+                    completed=True,
+                    source_ac_index=0,
+                    execution_method="legacy_parallel_report",
+                ),
+            ),
+            execution_completion_status="completed",
+            approval_status="not_evaluated",
+        )
+
+        summary = _evaluation_summary_from_spec_verification(mechanical, verification)
+
+        result = verification.reports[0].results[0]
+        assert result.evidence_source == "file_content"
+        assert result.evidence_target == "CameraProvider"
+        assert summary is not None and summary.ac_results[0].passed is True
+        assert (
+            "criterion target 'CameraProvider' from file content" in summary.ac_results[0].evidence
+        )
+
+    def test_stale_verifier_report_cannot_publish_a_formal_pass(self) -> None:
+        """Report text must exactly match both task and Seed criterion provenance."""
+        report_text = "MUST define a CameraProvider interface"
+        trusted_text = "MUST define a PaymentProvider interface"
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text=report_text,
+            tier=VerificationTier.T2_STRUCTURAL,
+            pattern="CameraProvider",
+            expected_value="CameraProvider",
+        )
+        verification = SpecVerificationSummary.from_reports(
+            (
+                ACVerificationReport(
+                    ac_index=0,
+                    ac_text=report_text,
+                    results=(
+                        SpecVerificationResult(
+                            assertion=assertion,
+                            verified=True,
+                            detail="Found structure 'CameraProvider'",
+                        ),
+                    ),
+                    agent_reported_pass=True,
+                ),
+            ),
+            project_dir="/tmp/project",
+        )
+        mechanical = EvaluationSummary(
+            final_approved=True,
+            highest_stage_passed=2,
+            task_results=(
+                TaskResult(
+                    task_index=0,
+                    task_content=trusted_text,
+                    status="completed",
+                    completed=True,
+                    source_ac_index=0,
+                    execution_method="legacy_parallel_report",
+                ),
+            ),
+            execution_completion_status="completed",
+            approval_status="approved",
+        )
+        seed = SimpleNamespace(acceptance_criteria=(trusted_text,))
+
+        summary = _evaluation_summary_from_spec_verification(mechanical, verification, seed)
+
+        assert summary is not None
+        assert summary.final_approved is False
+        assert summary.approval_status == "rejected"
+        assert summary.ac_results[0].passed is False
+        assert summary.ac_results[0].ac_content == trusted_text
+        assert "provenance mismatch" in summary.ac_results[0].evidence
+        assert "mechanical task" in summary.ac_results[0].evidence
+        assert "seed" in summary.ac_results[0].evidence
+        assert summary.run_verdict == "FAIL"
+
     def test_spec_verification_promotes_checked_reports_to_formal_ac_results(self) -> None:
         """Verifier-checked reports become formal AC verdicts without synthetic drift."""
         mechanical = EvaluationSummary(

@@ -19,6 +19,11 @@ import re
 from re import _parser as regex_parser
 from typing import NamedTuple
 
+from ouroboros.verification.binding import (
+    acceptance_targets,
+    literal_is_bound,
+    literal_spans,
+)
 from ouroboros.verification.models import (
     ACVerificationReport,
     SpecAssertion,
@@ -840,6 +845,74 @@ class SpecVerifier:
             # T3/T4: skip verification
             return None
 
+    def _evidence_targets(self, assertion: SpecAssertion) -> tuple[str, ...]:
+        """Return targets derived from the caller-authored criterion.
+
+        The extraction model controls the regex, hint, expected value, and
+        description. None of those may redirect evidence away from ``ac_text``.
+        For T2 an expected name is preferred only after proving it occurs in the
+        actual AC; otherwise targets are derived from that AC directly. T1 binds
+        the declaration/key here and checks the scalar separately.
+        """
+        if assertion.evidence_targets and all(
+            literal_is_bound(assertion.ac_text, target) for target in assertion.evidence_targets
+        ):
+            return assertion.evidence_targets
+        targets = acceptance_targets(
+            assertion.ac_text,
+            assertion.expected_value,
+            prefer_expected=assertion.tier == VerificationTier.T2_STRUCTURAL,
+        )
+        if (
+            not targets
+            and assertion.file_hint
+            and not any(char in assertion.file_hint for char in "*?[")
+            and assertion.file_hint.casefold() in assertion.ac_text.casefold()
+        ):
+            return (assertion.file_hint,)
+        return targets
+
+    def _find_bound_match(
+        self,
+        pattern: re.Pattern,
+        searched_text: str,
+        assertion: SpecAssertion,
+        *,
+        binding_text: str | None = None,
+    ) -> tuple[re.Match, str] | None:
+        """Find a regex match that is grounded in the acceptance-criterion input.
+
+        A compiling, non-nullable regex is still model output. It becomes
+        evidence only when the subject it matched contains a literal target from
+        the caller's actual AC. For consuming matches the target must overlap
+        the matched span. Zero-width lookarounds are preserved by requiring the
+        target in their asserted subject; this keeps discriminating lookaheads
+        valid while ``\\b`` and ``(?=m)`` cannot verify an unrelated filename.
+
+        ``binding_text`` is used for whole-file blank evidence: the regex proves
+        content is absent, while the criterion target binds that proof to the
+        project-relative file name.
+        """
+        if not assertion.input_binding_required:
+            return next(((match, "") for match in pattern.finditer(searched_text)), None)
+        targets = self._evidence_targets(assertion)
+        if not targets:
+            return None
+        bound_subject = searched_text if binding_text is None else binding_text
+        for match in pattern.finditer(searched_text):
+            for target in targets:
+                spans = literal_spans(bound_subject, target)
+                if not spans:
+                    continue
+                if binding_text is not None or match.start() == match.end():
+                    return match, target
+                if any(start < match.end() and end > match.start() for start, end in spans):
+                    return match, target
+        return None
+
+    def _relative_file(self, file_path: str) -> str:
+        return os.path.relpath(file_path, self.project_dir).replace(os.sep, "/")
+
     def _verify_constant(self, assertion: SpecAssertion) -> SpecVerificationResult:
         """Verify a T1 constant/config assertion by searching source files."""
         if not assertion.pattern:
@@ -848,6 +921,29 @@ class SpecVerifier:
                 verified=False,
                 discrepancy=True,
                 detail="No pattern to verify",
+            )
+
+        blank_subject_contract = _matches_only_a_blank_subject(assertion.pattern)
+        if (
+            assertion.input_binding_required
+            and not blank_subject_contract
+            and (
+                not assertion.expected_value.strip()
+                or not literal_is_bound(assertion.ac_text, assertion.expected_value)
+            )
+        ):
+            return SpecVerificationResult(
+                assertion=assertion,
+                verified=False,
+                discrepancy=True,
+                detail="Expected value is absent from the acceptance-criterion input",
+            )
+        if assertion.input_binding_required and not self._evidence_targets(assertion):
+            return SpecVerificationResult(
+                assertion=assertion,
+                verified=False,
+                discrepancy=True,
+                detail="No criterion-bound target is available for verification",
             )
 
         files = self._find_files(assertion.file_hint)
@@ -875,8 +971,16 @@ class SpecVerifier:
             if content is None:
                 continue
 
-            match = pattern.search(content)
-            if match:
+            bound = self._find_bound_match(pattern, content, assertion)
+            if bound is None and blank_subject_contract:
+                bound = self._find_bound_match(
+                    pattern,
+                    content,
+                    assertion,
+                    binding_text=self._relative_file(file_path),
+                )
+            if bound:
+                match, evidence_target = bound
                 # Extract the value after the pattern
                 actual = self._extract_value_after_match(content, match)
                 if assertion.expected_value:
@@ -887,9 +991,16 @@ class SpecVerifier:
                         actual_value=actual,
                         file_path=file_path,
                         discrepancy=not verified,
+                        evidence_source="file_content",
+                        evidence_target=evidence_target,
                         detail=(
                             f"Expected '{assertion.expected_value}', "
                             f"found '{actual}' in {os.path.basename(file_path)}"
+                            + (
+                                f"; criterion target '{evidence_target}' from file content"
+                                if evidence_target
+                                else ""
+                            )
                         ),
                     )
                 else:
@@ -899,7 +1010,16 @@ class SpecVerifier:
                         verified=True,
                         actual_value=actual,
                         file_path=file_path,
-                        detail=f"Pattern found in {os.path.basename(file_path)}",
+                        evidence_source="file_content",
+                        evidence_target=evidence_target,
+                        detail=(
+                            f"Pattern found in {os.path.basename(file_path)}"
+                            + (
+                                f"; criterion target '{evidence_target}' from file content"
+                                if evidence_target
+                                else ""
+                            )
+                        ),
                     )
 
         # Pattern not found in any file
@@ -907,7 +1027,7 @@ class SpecVerifier:
             assertion=assertion,
             verified=False,
             discrepancy=True,
-            detail=f"Pattern '{assertion.pattern}' not found in {len(files)} files",
+            detail=f"No criterion-bound pattern evidence found in {len(files)} files",
         )
 
     def _verify_structural(self, assertion: SpecAssertion) -> SpecVerificationResult:
@@ -920,7 +1040,27 @@ class SpecVerifier:
                 detail="No pattern to verify",
             )
 
+        if assertion.input_binding_required and not self._evidence_targets(assertion):
+            return SpecVerificationResult(
+                assertion=assertion,
+                verified=False,
+                discrepancy=True,
+                detail="No criterion-bound target is available for verification",
+            )
+
         files = self._find_files(assertion.file_hint)
+        evidence_targets = self._evidence_targets(assertion)
+        qualified_paths = tuple(target for target in evidence_targets if "/" in target)
+        strict_qualified_paths = (
+            qualified_paths
+            if (
+                assertion.input_binding_required
+                and assertion.expected_value.strip()
+                and re.search(r"\b(?:file|directory)\b", assertion.ac_text, re.IGNORECASE)
+            )
+            else ()
+        )
+        blank_subject_contract = _matches_only_a_blank_subject(assertion.pattern)
 
         # First check: does the pattern match any filename?
         name_pattern = self._safe_compile(assertion.pattern, re.IGNORECASE)
@@ -928,13 +1068,42 @@ class SpecVerifier:
         if name_pattern:
             for file_path in files:
                 basename = os.path.basename(file_path)
-                if name_pattern.search(basename):
+                relative_file = self._relative_file(file_path)
+                if strict_qualified_paths and not any(
+                    relative_file == target for target in strict_qualified_paths
+                ):
+                    continue
+                filename_subject = relative_file if qualified_paths else basename
+                bound = self._find_bound_match(
+                    name_pattern,
+                    filename_subject,
+                    assertion,
+                )
+                if bound:
+                    _match, evidence_target = bound
                     return SpecVerificationResult(
                         assertion=assertion,
                         verified=True,
                         file_path=file_path,
-                        detail=f"Found file: {basename}",
+                        evidence_source="filename",
+                        evidence_target=evidence_target,
+                        detail=(
+                            f"Found file: {basename}"
+                            + (
+                                f"; criterion target '{evidence_target}' from filename"
+                                if evidence_target
+                                else ""
+                            )
+                        ),
                     )
+
+        if strict_qualified_paths and not blank_subject_contract:
+            return SpecVerificationResult(
+                assertion=assertion,
+                verified=False,
+                discrepancy=True,
+                detail="No exact project-relative path matched the criterion target",
+            )
 
         # Second check: search file contents for class/function/interface
         content_pattern = self._safe_compile(
@@ -949,22 +1118,48 @@ class SpecVerifier:
             )
 
         for file_path in files:
+            if strict_qualified_paths and not any(
+                self._relative_file(file_path) == target for target in strict_qualified_paths
+            ):
+                continue
             content = self._read_file(file_path)
             if content is None:
                 continue
-            if content_pattern.search(content):
+            bound = self._find_bound_match(content_pattern, content, assertion)
+            # Preserve #1837's exact named-file blank-subject contract: the
+            # pattern proves the file contents and the criterion target binds to
+            # the project-relative file name rather than to content that, by
+            # definition, is absent.
+            if bound is None and blank_subject_contract:
+                bound = self._find_bound_match(
+                    content_pattern,
+                    content,
+                    assertion,
+                    binding_text=self._relative_file(file_path),
+                )
+            if bound:
+                _match, evidence_target = bound
                 return SpecVerificationResult(
                     assertion=assertion,
                     verified=True,
                     file_path=file_path,
-                    detail=f"Pattern found in {os.path.basename(file_path)}",
+                    evidence_source="file_content",
+                    evidence_target=evidence_target,
+                    detail=(
+                        f"Pattern found in {os.path.basename(file_path)}"
+                        + (
+                            f"; criterion target '{evidence_target}' from file content"
+                            if evidence_target
+                            else ""
+                        )
+                    ),
                 )
 
         return SpecVerificationResult(
             assertion=assertion,
             verified=False,
             discrepancy=True,
-            detail=f"Structure '{assertion.pattern}' not found in {len(files)} files",
+            detail=f"No criterion-bound structure evidence found in {len(files)} files",
         )
 
     def _find_files(self, file_hint: str) -> list[str]:
