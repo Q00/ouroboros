@@ -4143,6 +4143,43 @@ class TestCodexSetup:
         assert "consensus_judge" not in config_dict["llm_role_profiles"]
         assert "ontology_analysis" not in config_dict["llm_role_profiles"]
 
+    def test_setup_codex_update_refresh_preserves_split_llm_backend(self, tmp_path: Path) -> None:
+        """Updater refreshes Codex integration without rerouting LLM traffic."""
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        config_path.write_text(
+            yaml.safe_dump(
+                {
+                    "orchestrator": {"runtime_backend": "codex"},
+                    "llm": {"backend": "litellm", "qa_model": "openai/gpt-5.4"},
+                },
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch("ouroboros.cli.commands.setup._install_codex_artifacts"),
+            patch("ouroboros.cli.commands.setup._register_codex_mcp_server"),
+            patch("ouroboros.cli.commands.setup._register_codex_worker_profile"),
+        ):
+            assert (
+                setup_cmd._setup_codex(
+                    "/usr/local/bin/codex",
+                    preserve_existing_llm=True,
+                )
+                is True
+            )
+
+        config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert config_dict["orchestrator"]["runtime_backend"] == "codex"
+        assert config_dict["orchestrator"]["codex_cli_path"] == "/usr/local/bin/codex"
+        assert config_dict["llm"]["backend"] == "litellm"
+        assert config_dict["llm"]["qa_model"] == "openai/gpt-5.4"
+
     def test_setup_codex_clears_execute_default_model_when_execute_switches_to_codex(
         self, tmp_path: Path
     ) -> None:
