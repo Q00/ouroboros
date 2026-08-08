@@ -77,6 +77,7 @@ class LeafDispatchState:
     runtime_handle: RuntimeHandle | None
     ac_session_id: str | None = None
     message_count: int = 0
+    lifecycle_event_count: int = 0
     final_message: str = ""
     success: bool = False
     stalled: bool = False
@@ -761,6 +762,7 @@ class LeafDispatcher:
                                 session_id=state.ac_session_id,
                                 orchestrator_session_id=session_id,
                             )
+                            state.lifecycle_event_count += 1
                             emitted_recovery_turn_ids.add(replacement_turn_id)
 
                 state.messages.append(message)
@@ -806,6 +808,7 @@ class LeafDispatcher:
                         orchestrator_session_id=session_id,
                     )
                     lifecycle_emitted = True
+                    state.lifecycle_event_count += 1
                     executor._remember_ac_runtime_handle(
                         ac_index,
                         state.runtime_handle,

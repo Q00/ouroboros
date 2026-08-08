@@ -36,6 +36,7 @@ from ouroboros.core.seed import (
 )
 from ouroboros.core.types import Result
 from ouroboros.core.worktree import TaskWorkspace, WorktreeError
+from ouroboros.events.base import BaseEvent
 from ouroboros.events.lineage import (
     lineage_created,
     lineage_generation_completed,
@@ -57,7 +58,14 @@ from ouroboros.evolution.projector import LineageProjector
 from ouroboros.evolution.reflect import ACPatch, ReflectOutput
 from ouroboros.evolution.watchdog import GenerationWatchdogTimeout
 from ouroboros.evolution.wonder import WonderOutput
+from ouroboros.mcp.errors import MCPToolError
+from ouroboros.mcp.job_manager import JobManager, JobStatus
 from ouroboros.mcp.server.adapter import _extract_feedback_metadata_from_artifact
+from ouroboros.mcp.tools.evolution_handlers import EvolveStepHandler, StartEvolveStepHandler
+from ouroboros.mcp.tools.synapse_handler import SynapseTargetsHandler
+from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
+from ouroboros.orchestrator.synapse import EventStoreSessionSignalTargetResolver
+from ouroboros.persistence import lineage_claims
 from ouroboros.persistence.event_store import EventStore
 
 # -- Helpers --
@@ -236,6 +244,492 @@ async def seed_events_for_gen1(
             seed_json=json.dumps(seed.to_dict()),
         )
     )
+
+
+@pytest.mark.asyncio
+async def test_start_evolve_links_generation_selected_after_interleaving(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The public job identity follows the durable core claim, not stale planning."""
+    store = await create_event_store()
+    lineage_id = "lin_start_claim_interleaving"
+    initial = make_seed(seed_id="seed_start_claim_initial")
+    successor = make_seed(
+        seed_id="seed_start_claim_successor",
+        parent_seed_id=initial.metadata.seed_id,
+    )
+    generation_result = GenerationResult(
+        generation_number=2,
+        seed=successor,
+        evaluation_summary=make_eval_summary(),
+        phase=GenerationPhase.COMPLETED,
+        success=True,
+    )
+    loop = make_loop(store)
+    generation_started = asyncio.Event()
+    release_generation = asyncio.Event()
+
+    async def run_generation(**kwargs):  # type: ignore[no-untyped-def]
+        generation_number = kwargs["generation_number"]
+        execution_id = loop_support.generation_execution_id(lineage_id, generation_number)
+        await store.append(
+            BaseEvent(
+                type="execution.session.started",
+                aggregate_type="execution",
+                aggregate_id=f"{execution_id}:ac:0",
+                data={
+                    "execution_id": execution_id,
+                    "session_scope_id": f"{execution_id}:ac:0",
+                    "session_attempt_id": f"{execution_id}:ac:0:attempt:1",
+                    "runtime_backend": "codex",
+                    "ac_index": 0,
+                    "acceptance_criterion": "Tasks can be created",
+                },
+            )
+        )
+        generation_started.set()
+        await release_generation.wait()
+        return Result.ok(generation_result)
+
+    loop._run_generation = AsyncMock(side_effect=run_generation)
+    manager = JobManager(store)
+    evolve = EvolveStepHandler(
+        evolutionary_loop=loop,
+        event_store=store,
+        agent_runtime_backend="codex",
+    )
+    start = StartEvolveStepHandler(
+        evolve_handler=evolve,
+        event_store=store,
+        job_manager=manager,
+        agent_runtime_backend="codex",
+    )
+    original_planned = loop_support.planned_evolve_generation
+    core_planning = asyncio.Event()
+    release_core_planning = asyncio.Event()
+    planning_calls = 0
+
+    async def interleaved_planning(*args, **kwargs):  # type: ignore[no-untyped-def]
+        nonlocal planning_calls
+        planning_calls += 1
+        if planning_calls == 2:
+            core_planning.set()
+            await release_core_planning.wait()
+        return await original_planned(*args, **kwargs)
+
+    monkeypatch.setattr(loop_support, "planned_evolve_generation", interleaved_planning)
+    start_task = asyncio.create_task(
+        start.handle(
+            {
+                "lineage_id": lineage_id,
+                "seed_content": json.dumps(initial.to_dict()),
+                "execute": False,
+            }
+        )
+    )
+    try:
+        await asyncio.wait_for(core_planning.wait(), timeout=1.0)
+        await seed_events_for_gen1(store, lineage_id, initial, make_eval_summary(False))
+        release_core_planning.set()
+        started = await asyncio.wait_for(start_task, timeout=2.0)
+
+        assert started.is_ok
+        expected = f"evolve:{lineage_id}:generation:2"
+        stale = f"evolve:{lineage_id}:generation:1"
+        assert started.value.meta["execution_id"] == expected
+        assert started.value.meta["job_observer"]["execution_id"] == expected
+        assert started.value.structured_content["execution_id"] == expected
+
+        await asyncio.wait_for(generation_started.wait(), timeout=1.0)
+        targets = SynapseTargetsHandler(EventStoreSessionSignalTargetResolver(store))
+        discovered = await targets.handle({"execution_id": expected})
+        assert discovered.is_ok
+        assert discovered.value.meta["active_target_count"] == 1
+        assert discovered.value.meta["targets"][0]["execution_id"] == expected
+
+        release_generation.set()
+
+        job_id = started.value.meta["job_id"]
+        snapshot = await manager.get_snapshot(job_id)
+        for _ in range(100):
+            if snapshot.is_terminal:
+                break
+            await asyncio.sleep(0.01)
+            snapshot = await manager.get_snapshot(job_id)
+        assert snapshot.status == JobStatus.COMPLETED
+        assert snapshot.links.execution_id == expected
+        assert loop._run_generation.call_args.kwargs["generation_number"] == 2
+
+        job_events, _ = await store.get_events_after("job", job_id, last_row_id=0)
+        created = next(event for event in job_events if event.type == "mcp.job.created")
+        assert created.data["links"]["execution_id"] == expected
+        assert stale not in json.dumps(created.data)
+
+        handler_receipt = await lineage_claims.observe(
+            store,
+            scope="evolve-handler",
+            lineage_id=lineage_id,
+        )
+        core_receipt = await lineage_claims.observe(
+            store,
+            scope="evolve-core",
+            lineage_id=lineage_id,
+        )
+        assert handler_receipt is not None and handler_receipt.completed
+        assert core_receipt is not None and core_receipt.completed
+        assert handler_receipt.generation_number == core_receipt.generation_number == 2
+    finally:
+        release_core_planning.set()
+        release_generation.set()
+        if not start_task.done():
+            start_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await start_task
+        await manager.drain(grace_seconds=0.1)
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_start_evolve_malformed_seed_preserves_typed_preclaim_error() -> None:
+    """A pre-claim validation error stays typed and leaves no active job or claim."""
+    store = await create_event_store()
+    lineage_id = "lin_start_malformed_seed"
+    loop = make_loop(store)
+    loop.evolve_step = AsyncMock(side_effect=AssertionError("malformed seed must not execute"))
+    evolve = EvolveStepHandler(evolutionary_loop=loop, event_store=store)
+    manager = JobManager(store)
+    start = StartEvolveStepHandler(
+        evolve_handler=evolve,
+        event_store=store,
+        job_manager=manager,
+    )
+
+    try:
+        result = await start.handle(
+            {
+                "lineage_id": lineage_id,
+                "seed_content": "goal: [unterminated",
+                "execute": False,
+            }
+        )
+
+        assert result.is_err
+        assert isinstance(result.error, MCPToolError)
+        assert result.error.tool_name == "ouroboros_evolve_step"
+        assert result.error.message.startswith("Failed to parse seed_content:")
+        loop.evolve_step.assert_not_awaited()
+        assert manager._reserved_job_ids == set()
+        assert await store.query_events(event_type="mcp.job.created") == []
+
+        handler_claim = await lineage_claims.observe(
+            store,
+            scope="evolve-handler",
+            lineage_id=lineage_id,
+        )
+        core_claim = await lineage_claims.observe(
+            store,
+            scope="evolve-core",
+            lineage_id=lineage_id,
+        )
+        assert handler_claim is not None and handler_claim.completed
+        assert core_claim is None
+    finally:
+        await manager.drain(grace_seconds=0.1)
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_start_evolve_rejects_active_same_lineage_owner_without_waiting() -> None:
+    """The background Start receipt never waits behind a long-running owner."""
+    store = await create_event_store()
+    lineage_id = "lin_start_existing_owner"
+    seed = make_seed(seed_id="seed_start_existing_owner")
+    loop = make_loop(store)
+    loop.evolve_step = AsyncMock(side_effect=AssertionError("contender must not execute"))
+    evolve = EvolveStepHandler(evolutionary_loop=loop, event_store=store)
+    manager = JobManager(store)
+    start = StartEvolveStepHandler(
+        evolve_handler=evolve,
+        event_store=store,
+        job_manager=manager,
+    )
+    claim = await lineage_claims.try_acquire(
+        store,
+        scope="evolve-handler",
+        lineage_id=lineage_id,
+        generation_number=1,
+        owner_id="existing-long-running-owner",
+        request_key="existing-request",
+    )
+    assert claim is not None and claim.acquired
+    try:
+        result = await asyncio.wait_for(
+            start.handle(
+                {
+                    "lineage_id": lineage_id,
+                    "seed_content": json.dumps(seed.to_dict()),
+                    "execute": False,
+                }
+            ),
+            timeout=0.25,
+        )
+
+        assert result.is_err
+        assert result.error.error_code == "evolve_lineage_busy"
+        assert result.error.is_retriable is True
+        loop.evolve_step.assert_not_awaited()
+        observed = await lineage_claims.observe(
+            store,
+            scope="evolve-handler",
+            lineage_id=lineage_id,
+        )
+        assert observed is not None
+        assert observed.owner_id == "existing-long-running-owner"
+        assert not observed.completed
+    finally:
+        await lineage_claims.release(
+            store,
+            scope="evolve-handler",
+            lineage_id=lineage_id,
+            owner_id="existing-long-running-owner",
+        )
+        await manager.drain(grace_seconds=0.1)
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_start_evolve_contention_race_returns_bounded_structured_conflict(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A claim acquired after the precheck cannot stall or leak a Start job."""
+    from ouroboros.mcp.tools import evolve_start_claim
+
+    store = await create_event_store()
+    lineage_id = "lin_start_claim_race"
+    seed = make_seed(seed_id="seed_start_claim_race")
+    loop = make_loop(store)
+    loop.evolve_step = AsyncMock(side_effect=AssertionError("contender must not execute"))
+    evolve = EvolveStepHandler(evolutionary_loop=loop, event_store=store)
+    manager = JobManager(store)
+    start = StartEvolveStepHandler(
+        evolve_handler=evolve,
+        event_store=store,
+        job_manager=manager,
+    )
+    original_observe = lineage_claims.observe
+    raced = False
+
+    async def acquire_after_precheck(*args, **kwargs):  # type: ignore[no-untyped-def]
+        nonlocal raced
+        if kwargs.get("scope") == "evolve-handler" and not raced:
+            raced = True
+            claim = await lineage_claims.try_acquire(
+                store,
+                scope="evolve-handler",
+                lineage_id=lineage_id,
+                generation_number=1,
+                owner_id="race-winner",
+                request_key="race-winner-request",
+            )
+            assert claim is not None and claim.acquired
+            return None
+        return await original_observe(*args, **kwargs)
+
+    monkeypatch.setattr(lineage_claims, "observe", acquire_after_precheck)
+    monkeypatch.setattr(evolve_start_claim, "_CLAIM_PREPARATION_TIMEOUT_SECONDS", 0.02)
+    try:
+        result = await asyncio.wait_for(
+            start.handle(
+                {
+                    "lineage_id": lineage_id,
+                    "seed_content": json.dumps(seed.to_dict()),
+                    "execute": False,
+                }
+            ),
+            timeout=0.25,
+        )
+
+        assert result.is_err
+        assert result.error.error_code == "evolve_lineage_busy"
+        assert result.error.is_retriable is True
+        loop.evolve_step.assert_not_awaited()
+        observed = await original_observe(
+            store,
+            scope="evolve-handler",
+            lineage_id=lineage_id,
+        )
+        assert observed is not None and observed.owner_id == "race-winner"
+        assert manager._reserved_job_ids == set()
+        assert await store.query_events(event_type="mcp.job.created") == []
+    finally:
+        await lineage_claims.release(
+            store,
+            scope="evolve-handler",
+            lineage_id=lineage_id,
+            owner_id="race-winner",
+        )
+        await manager.drain(grace_seconds=0.1)
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_start_evolve_preacceptance_cancellation_aborts_prepared_claim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Caller cancellation before enqueue ownership releases the held claim."""
+    store = await create_event_store()
+    lineage_id = "lin_start_cancel_before_acceptance"
+    manager = JobManager(store)
+    claim_prepared = asyncio.Event()
+    claim_cancelled = asyncio.Event()
+    release_claim_cleanup = asyncio.Event()
+    enqueue_started = asyncio.Event()
+
+    class ControlledEvolveHandler:
+        evolutionary_loop = object()
+
+        async def handle(self, _arguments, *, on_generation_claimed=None):  # type: ignore[no-untyped-def]
+            assert on_generation_claimed is not None
+            try:
+                claim_prepared.set()
+                await on_generation_claimed(7)
+                raise AssertionError("unaccepted prepared claim must not run")
+            except asyncio.CancelledError:
+                claim_cancelled.set()
+                await release_claim_cleanup.wait()
+                raise
+
+    async def block_before_acceptance(**_kwargs):  # type: ignore[no-untyped-def]
+        enqueue_started.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    monkeypatch.setattr(manager, "start_job", block_before_acceptance)
+    start = StartEvolveStepHandler(
+        evolve_handler=ControlledEvolveHandler(),  # type: ignore[arg-type]
+        event_store=store,
+        job_manager=manager,
+        agent_runtime_backend="codex",
+    )
+    pending = asyncio.create_task(start.handle({"lineage_id": lineage_id, "execute": False}))
+    try:
+        await asyncio.wait_for(claim_prepared.wait(), timeout=1.0)
+        await asyncio.wait_for(enqueue_started.wait(), timeout=1.0)
+        pending.cancel()
+        await asyncio.wait_for(claim_cancelled.wait(), timeout=1.0)
+        pending.cancel()
+        await asyncio.sleep(0)
+        assert not pending.done()
+        release_claim_cleanup.set()
+
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+
+        assert manager._started_job_ids == set()
+        assert manager._tasks == {}
+        assert manager._runner_tasks == {}
+        assert await store.query_events(event_type="mcp.job.created") == []
+    finally:
+        release_claim_cleanup.set()
+        if not pending.done():
+            pending.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await pending
+        await manager.drain(grace_seconds=0.1)
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_start_evolve_postacceptance_cancellation_preserves_claim_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Once accepted, caller cancellation cannot abort the runner-owned claim."""
+    store = await create_event_store()
+    lineage_id = "lin_start_cancel_after_acceptance"
+    expected_execution_id = f"evolve:{lineage_id}:generation:7"
+    manager = JobManager(store)
+    accepted = asyncio.Event()
+    work_started = asyncio.Event()
+    release_work = asyncio.Event()
+    claim_cancelled = asyncio.Event()
+    original_start_job = manager.start_job
+
+    class ControlledEvolveHandler:
+        evolutionary_loop = object()
+
+        async def handle(self, _arguments, *, on_generation_claimed=None):  # type: ignore[no-untyped-def]
+            assert on_generation_claimed is not None
+            try:
+                await on_generation_claimed(7)
+                work_started.set()
+                await release_work.wait()
+                return Result.ok(
+                    MCPToolResult(
+                        content=(
+                            MCPContentItem(
+                                type=ContentType.TEXT,
+                                text="generation completed",
+                            ),
+                        ),
+                        is_error=False,
+                        meta={"generation_number": 7},
+                    )
+                )
+            except asyncio.CancelledError:
+                claim_cancelled.set()
+                raise
+
+    async def block_after_acceptance(**kwargs):  # type: ignore[no-untyped-def]
+        await original_start_job(**kwargs)
+        accepted.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    monkeypatch.setattr(manager, "start_job", block_after_acceptance)
+    start = StartEvolveStepHandler(
+        evolve_handler=ControlledEvolveHandler(),  # type: ignore[arg-type]
+        event_store=store,
+        job_manager=manager,
+        agent_runtime_backend="codex",
+    )
+    pending = asyncio.create_task(start.handle({"lineage_id": lineage_id, "execute": False}))
+    try:
+        await asyncio.wait_for(accepted.wait(), timeout=1.0)
+        await asyncio.wait_for(work_started.wait(), timeout=1.0)
+        job_id = next(iter(manager._started_job_ids))
+        job_task = manager._tasks[job_id]
+        runner_task = manager._runner_tasks[job_id]
+
+        pending.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+
+        await asyncio.sleep(0)
+        assert not claim_cancelled.is_set()
+        assert not runner_task.cancelled()
+        assert not runner_task.done()
+        assert not job_task.cancelled()
+        snapshot = await manager.get_snapshot(job_id)
+        assert snapshot.links.execution_id == expected_execution_id
+
+        job_events, _ = await store.get_events_after("job", job_id, last_row_id=0)
+        created = next(event for event in job_events if event.type == "mcp.job.created")
+        assert created.data["links"]["execution_id"] == expected_execution_id
+
+        release_work.set()
+        await asyncio.wait_for(asyncio.shield(job_task), timeout=1.0)
+        completed = await manager.get_snapshot(job_id)
+        assert completed.status == JobStatus.COMPLETED
+        assert completed.links.execution_id == expected_execution_id
+        assert not claim_cancelled.is_set()
+    finally:
+        release_work.set()
+        if not pending.done():
+            pending.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await pending
+        await manager.drain(grace_seconds=0.1)
+        await store.close()
 
 
 def create_clean_git_project(path: Path) -> Path:

@@ -18,16 +18,22 @@ from ouroboros.core.types import Result
 from ouroboros.mcp.detached_jobs import (
     DetachedJobAcceptanceTimeout,
     DetachedJobRequest,
+    decode_tool_error_rejection,
+    encode_tool_error_rejection,
     launch_detached_job,
+    status_path_for,
+    write_private_json,
 )
 from ouroboros.mcp.errors import MCPToolError
 from ouroboros.mcp.job_manager import JobLinks, JobManager, JobStatus
+from ouroboros.mcp.server.adapter import create_ouroboros_server
 from ouroboros.mcp.tools.background import start_background_tool_job
 from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
 from ouroboros.orchestrator.heartbeat import is_process_identity_alive
 from ouroboros.orchestrator.persisted_process_identity import (
     persisted_process_owner_alive,
 )
+from ouroboros.persistence import lineage_claims
 from ouroboros.persistence.event_store import EventStore
 
 _LAUNCH_PARENT = textwrap.dedent(
@@ -84,6 +90,178 @@ async def _wait_terminal(
         if asyncio.get_running_loop().time() >= deadline:
             raise AssertionError(f"job {job_id} did not become terminal")
         await asyncio.sleep(0.05)
+
+
+def test_detached_tool_error_rejection_round_trips_only_typed_fields() -> None:
+    error = MCPToolError(
+        "seed rejected",
+        server_name="ouroboros-mcp",
+        tool_name="ouroboros_evolve_step",
+        error_code="invalid_seed",
+        is_retriable=True,
+        details={"lineage_id": "lin_1", "reasons": ["syntax"]},
+    )
+
+    payload = encode_tool_error_rejection(error)
+    restored = decode_tool_error_rejection(payload)
+
+    assert type(restored) is MCPToolError
+    assert restored.message == error.message
+    assert restored.server_name == error.server_name
+    assert restored.tool_name == error.tool_name
+    assert restored.error_code == error.error_code
+    assert restored.is_retriable is error.is_retriable
+    assert restored.details == error.details
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda payload: payload.update(protocol="python.exception"),
+        lambda payload: payload.update(exception_type="builtins.SystemExit"),
+        lambda payload: payload.update(version=2),
+        lambda payload: payload.update(message={"not": "text"}),
+        lambda payload: payload.update(server_name=7),
+        lambda payload: payload.update(tool_name=["ouroboros_evolve_step"]),
+        lambda payload: payload.update(error_code=500),
+        lambda payload: payload.update(is_retriable="false"),
+        lambda payload: payload.update(details=["not", "an", "object"]),
+    ],
+)
+def test_detached_tool_error_rejection_rejects_malformed_artifacts(mutate) -> None:  # type: ignore[no-untyped-def]
+    payload = encode_tool_error_rejection(MCPToolError("seed rejected"))
+    mutate(payload)
+
+    with pytest.raises(ValueError):
+        decode_tool_error_rejection(payload)
+
+
+def test_detached_tool_error_rejection_rejects_non_json_details() -> None:
+    error = MCPToolError("seed rejected", details={"unsafe": object()})
+
+    with pytest.raises(ValueError, match="JSON-safe"):
+        encode_tool_error_rejection(error)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("spoof", ["job_id", "worker_pid", "request_tool_name"])
+async def test_detached_launcher_fails_closed_and_cleans_spoofed_rejection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    spoof: str,
+) -> None:
+    """A swapped or malformed artifact is never reconstructed as a trusted error."""
+    from ouroboros.mcp import detached_jobs
+
+    database_url = f"sqlite+aiosqlite:///{tmp_path / 'events.db'}"
+    store = EventStore(database_url)
+    manager = JobManager(store, durable_jobs=True)
+    job_id = await manager.allocate_job_id()
+    state_dir = tmp_path / "detached-jobs"
+    monkeypatch.setattr(detached_jobs, "detached_jobs_dir", lambda: state_dir)
+
+    class FakeProcess:
+        pid = 4242
+
+        @staticmethod
+        def poll() -> int:
+            return 0
+
+    def fake_spawn(request_path: Path, *, cwd: str) -> FakeProcess:
+        del cwd
+        payload = {
+            "state": "rejected",
+            "worker_pid": FakeProcess.pid,
+            "job_id": job_id,
+            "request_tool_name": "ouroboros_start_evolve_step",
+            "rejection": encode_tool_error_rejection(MCPToolError("seed rejected")),
+        }
+        if spoof == "job_id":
+            payload["job_id"] = "job_swapped"
+        elif spoof == "worker_pid":
+            payload["worker_pid"] = 9999
+        else:
+            payload["request_tool_name"] = "ouroboros_start_execute_seed"
+        write_private_json(status_path_for(request_path), payload, exclusive=False)
+        return FakeProcess()
+
+    monkeypatch.setattr(detached_jobs, "_spawn_worker", fake_spawn)
+    request = DetachedJobRequest(
+        job_id=job_id,
+        tool_name="ouroboros_start_evolve_step",
+        arguments={"lineage_id": "lin_spoof"},
+        database_url=database_url,
+        cwd=str(Path.cwd()),
+    )
+
+    try:
+        with pytest.raises(RuntimeError, match="Detached worker rejection|Malformed"):
+            await launch_detached_job(
+                job_manager=manager,
+                event_store=store,
+                request=request,
+            )
+        assert manager._reserved_job_ids == set()
+        assert not state_dir.joinpath(f"{job_id}.json").exists()
+        assert not state_dir.joinpath(f"{job_id}.status.json").exists()
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_production_detached_evolve_rejects_malformed_seed_before_job_acceptance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The default file-backed server returns the worker's typed preclaim error."""
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("OUROBOROS_DASHBOARD", "0")
+    database_url = f"sqlite+aiosqlite:///{tmp_path / 'events.db'}"
+    store = EventStore(database_url)
+    server = create_ouroboros_server(
+        event_store=store,
+        opencode_mode="subprocess",
+    )
+    lineage_id = "lin_detached_malformed_seed"
+
+    try:
+        result = await server.call_tool(
+            "ouroboros_start_evolve_step",
+            {
+                "lineage_id": lineage_id,
+                "seed_content": "goal: [unterminated",
+                "execute": False,
+            },
+        )
+
+        assert result.is_err
+        assert type(result.error) is MCPToolError
+        assert result.error.message.startswith("Failed to parse seed_content:")
+        assert result.error.server_name is None
+        assert result.error.tool_name == "ouroboros_evolve_step"
+        assert result.error.error_code is None
+        assert result.error.is_retriable is False
+        assert result.error.details == {}
+        assert server.job_manager._reserved_job_ids == set()
+        assert await store.query_events(event_type="mcp.job.created") == []
+
+        handler_claim = await lineage_claims.observe(
+            store,
+            scope="evolve-handler",
+            lineage_id=lineage_id,
+        )
+        core_claim = await lineage_claims.observe(
+            store,
+            scope="evolve-core",
+            lineage_id=lineage_id,
+        )
+        assert handler_claim is not None and handler_claim.completed
+        assert core_claim is None
+
+        state_dir = tmp_path / "home" / ".ouroboros" / "detached-jobs"
+        assert list(state_dir.glob("*")) == []
+    finally:
+        await server.shutdown()
 
 
 def test_reaper_registration_failure_does_not_reject_spawned_worker(

@@ -305,7 +305,9 @@ class SynapseTargetsHandler:
                 MCPToolParameter(
                     name="execution_id",
                     type=ToolInputType.STRING,
-                    description="Execution ID returned by run/auto start or its job observer.",
+                    description=(
+                        "Execution ID returned by run/auto/evolve/ralph start or its job observer."
+                    ),
                 ),
             ),
         )

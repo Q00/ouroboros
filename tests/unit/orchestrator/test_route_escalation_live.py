@@ -2747,7 +2747,13 @@ async def test_live_pre_entry_sibling_remains_pending_across_route_pause(
             event_type="execution.ac.uncertain_handoff_required",
             limit=3,
         )
+        failed_lifecycles = await store.query_execution_related_events(
+            "execution-live-pre-entry-sibling",
+            event_type="execution.session.failed",
+            limit=10,
+        )
         assert handoffs == []
+        assert not [event for event in failed_lifecycles if event.data.get("ac_index") == 1]
         assert first_provider_entered.is_set()
         assert calls == ["first"]
 

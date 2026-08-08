@@ -85,6 +85,73 @@ class TestEventStoreInitialization:
         await store.initialize()  # Should not raise
         await store.close()
 
+    async def test_repeated_initialize_settles_schema_transaction_before_cancellation(
+        self,
+        monkeypatch,
+    ) -> None:
+        """A bounded caller cannot abandon repeated create_all mid-transaction."""
+        from sqlalchemy import event as sa_event
+        from sqlalchemy.ext.asyncio import AsyncConnection
+
+        from ouroboros.persistence import lineage_claims
+
+        store = EventStore("sqlite+aiosqlite:///:memory:")
+        await store.initialize()
+        engine = store._engine
+        assert engine is not None
+        schema_started = asyncio.Event()
+        release_schema = asyncio.Event()
+        invalidations: list[BaseException | None] = []
+        original_run_sync = AsyncConnection.run_sync
+
+        async def gated_run_sync(connection, function, *args, **kwargs):  # type: ignore[no-untyped-def]
+            schema_started.set()
+            await release_schema.wait()
+            return await original_run_sync(connection, function, *args, **kwargs)
+
+        monkeypatch.setattr(AsyncConnection, "run_sync", gated_run_sync)
+        sa_event.listen(
+            engine.sync_engine,
+            "invalidate",
+            lambda _connection, _record, error: invalidations.append(error),
+        )
+        pending = asyncio.create_task(store.initialize())
+        try:
+            await asyncio.wait_for(schema_started.wait(), timeout=1.0)
+            pending.cancel()
+            pending.cancel()
+            await asyncio.sleep(0)
+            assert not pending.done()
+
+            release_schema.set()
+            with pytest.raises(asyncio.CancelledError):
+                await pending
+
+            assert engine.sync_engine.pool.checkedout() == 0
+            assert invalidations == []
+            claim = await lineage_claims.try_acquire(
+                store,
+                scope="initialize-cancel",
+                lineage_id="post-initialize-cancel",
+                generation_number=1,
+                owner_id="owner",
+                request_key="request",
+            )
+            assert claim is not None and claim.acquired
+            await lineage_claims.release(
+                store,
+                scope="initialize-cancel",
+                lineage_id="post-initialize-cancel",
+                owner_id="owner",
+            )
+        finally:
+            release_schema.set()
+            if not pending.done():
+                pending.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await pending
+            await store.close()
+
     async def test_in_memory_store_shares_schema_across_concurrent_connections(self) -> None:
         """`:memory:` stores must not lose schema across async connection checkout."""
         store = EventStore("sqlite+aiosqlite:///:memory:")

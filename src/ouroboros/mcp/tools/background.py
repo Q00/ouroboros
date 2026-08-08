@@ -138,6 +138,8 @@ async def start_background_tool_job(
     on_detaching: Callable[[], Awaitable[None]] | None = None,
     on_started: Callable[[JobSnapshot], Awaitable[None]] | None = None,
     on_enqueue_failure: Callable[[BaseException], Awaitable[None]] | None = None,
+    prepare_inline: (Callable[[], Awaitable[tuple[JobLinks, WorkFn]]] | None) = None,
+    on_cancel_before_work: Callable[[], Awaitable[None]] | None = None,
     acceptance_state: BackgroundJobAcceptanceState | None = None,
 ) -> JobSnapshot:
     """Run the shared allocate -> guard -> agent-process -> start_job pipeline.
@@ -172,6 +174,12 @@ async def start_background_tool_job(
             raises, *before* the exception is re-raised — used by auto to
             release its start lease.  The helper always closes the pending
             runner coroutine on failure regardless of this hook.
+        prepare_inline: Optional two-phase preparation invoked only in the
+            process that will own the inline runner. It may replace both the
+            durable job links and work function before ``mcp.job.created`` is
+            persisted. Detached accepting processes deliberately skip it.
+        on_cancel_before_work: Optional cleanup for state reserved by
+            ``prepare_inline`` when cancellation wins before the work starts.
         acceptance_state: Optional caller-owned phase tracker used to classify
             cancellation as definitive non-acceptance or potentially accepted
             ownership without exposing transport internals to the caller.
@@ -270,12 +278,25 @@ async def start_background_tool_job(
             await on_started(snapshot)
         return snapshot
 
+    inline_links = links
+    inline_work_fn = work_fn
+    if prepare_inline is not None:
+        try:
+            inline_links, inline_work_fn = await prepare_inline()
+        except BaseException as exc:
+            job_manager.abandon_reserved_job_id(job_id)
+            if on_enqueue_failure is not None:
+                await on_enqueue_failure(exc)
+            raise
+
     async def _guarded_runner(handle: AgentProcessHandle) -> MCPToolResult:
         # Uniform pre-work cancel guard: a job cancelled while still queued
         # must return a terminal cancelled result without starting work.
         if handle.should_cancel():
+            if on_cancel_before_work is not None:
+                await on_cancel_before_work()
             return make_cancelled_result(cancelled_text)
-        return await work_fn(handle)
+        return await inline_work_fn(handle)
 
     runner = run_with_agent_process(
         event_store=event_store,
@@ -291,7 +312,7 @@ async def start_background_tool_job(
             job_type=job_type,
             initial_message=initial_message,
             runner=runner,
-            links=links,
+            links=inline_links,
             job_id=job_id,
         )
     except BaseException as exc:
