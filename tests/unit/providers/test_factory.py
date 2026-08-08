@@ -278,6 +278,33 @@ class TestCreateLLMAdapter:
         assert isinstance(adapter, CodexCliLLMAdapter)
         assert adapter._cwd == "/tmp/project"
 
+    def test_codex_explicit_strict_mcp_config_is_forwarded(self) -> None:
+        """Nested MCP handlers can seal the Codex LLM-only child."""
+        adapter = create_llm_adapter(
+            backend="codex",
+            cli_path="codex",
+            use_case="interview",
+            allowed_tools=[],
+            strict_mcp_config=True,
+        )
+
+        assert isinstance(adapter, CodexCliLLMAdapter)
+        assert adapter._strict_mcp_config is True
+
+    def test_codex_interview_use_case_does_not_auto_enable_strict_mcp_config(
+        self,
+    ) -> None:
+        """Only nested MCP handlers opt in; ordinary Codex interviews do not."""
+        adapter = create_llm_adapter(
+            backend="codex",
+            cli_path="codex",
+            use_case="interview",
+            allowed_tools=[],
+        )
+
+        assert isinstance(adapter, CodexCliLLMAdapter)
+        assert adapter._strict_mcp_config is False
+
     def test_creates_codex_adapter_propagates_runtime_profile(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
