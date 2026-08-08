@@ -3289,3 +3289,59 @@ def test_migration_destinations_are_produced_artifacts(
     result = derive_domain_from_ledger(ledger)
     assert result.is_single
     assert result.single is expected
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
+        "Build an admin portal compatible with modern browsers",
+        "Build an admin portal available across modern browsers",
+        "Build an admin portal supporting modern browsers",
+    ],
+)
+def test_compatibility_declarations_with_browser_targets_own(goal: str) -> None:
+    """R53 probe: compatibility/support wording with a bare browser
+    target is environment ownership; web-app targets stay consumers."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value="Role management and account administration")
+    _seed_section(ledger, "runtime_context", value="Browser")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP
+
+
+@pytest.mark.parametrize(
+    ("goal", "outputs", "runtime", "expected"),
+    [
+        (
+            "Adapt the existing script to a CLI",
+            "Converted workflows with progress logs",
+            "Runs on developer machines",
+            TaskClass.CLI,
+        ),
+        (
+            "Promote the existing script to a CLI",
+            "Converted workflows with progress logs",
+            "Runs on developer machines",
+            TaskClass.CLI,
+        ),
+        (
+            "Adapt the old endpoint to a REST API",
+            "JSON responses with status codes",
+            "Containerized HTTP service",
+            TaskClass.WEB_SERVICE,
+        ),
+    ],
+)
+def test_destination_ownership_is_verb_independent(
+    goal: str, outputs: str, runtime: str, expected: TaskClass
+) -> None:
+    """R53 probe: destination ownership rests on structure — a
+    segment-initial non-production imperative with a definite object —
+    not on which transformation verb was chosen."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value=outputs)
+    _seed_section(ledger, "runtime_context", value=runtime)
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is expected

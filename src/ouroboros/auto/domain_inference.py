@@ -544,7 +544,10 @@ def _matches_web_service(ledger: SeedDraftLedger) -> bool:
     # REST API") keeps it produced even through via/through (#1813 W1).
     if _PRODUCED_SERVICE_RE.search(service_goal):
         return True
-    visible = _strip_consumed_dependencies(outputs + " " + service_goal)
+    # The sections are joined with a sentence boundary so the destination
+    # rule sees the goal's own imperative segment (#1813 R53) — keyword
+    # matching never legitimately spans the outputs/goal seam.
+    visible = _strip_consumed_dependencies(outputs + ". " + service_goal)
     # Response nouns describe service ownership only when a server-like
     # artifact governs a production verb (#1813 R37).  Browser clients also
     # display HTTP responses / JSON bodies, so those detached payload nouns
@@ -783,6 +786,7 @@ _POSTNOMINAL_PREDICATE_TOKEN = (
     r"opens?|opening|renders?|rendered|rendering|serves?|served|serving|"
     r"delivers?|delivered|displayed|shown|hosted|lives?|living|"
     r"executes?|executing|usable|useable|used|accessible|available|"
+    r"compatible|supported|"
     r"reachable|viewable|accessed|opened|intended|designed|meant|built|"
     r"made|optimized|optimised|tailored|deployed|published|distributed|"
     r"offered|provided)"
@@ -836,7 +840,13 @@ _POSTNOMINAL_BROWSER_QUALIFIER_RE = re.compile(
     r"displayed|delivered|operated|executed|loaded|viewed|reached|hosted|"
     r"accessible|available|usable|useable|reachable|viewable)\s+)?"
     r"(?:for\s+use\s+)?"
-    r"(?:in|inside|within|for|from|through|via|on)\s+"
+    # Compatibility/support declarations with a browser target are the
+    # same environment ownership (#1813 R53): "compatible with modern
+    # browsers", "available across browsers", "supporting browsers". The
+    # target below stays bare browser tokens, so web-app targets remain
+    # consumer relationships.
+    r"(?:in|inside|within|for|from|through|via|on|with|across|"
+    r"supports?|supporting)\s+"
     # Ordinary spelling variants are equivalent environments (#1813 R46):
     # "a web browser", "modern browsers".
     r"(?:(?:an?|the|any|all|every|most)\s+)?"
@@ -1249,16 +1259,32 @@ _PRENOMINAL_DEPENDENCY_CLIENT_RE = re.compile(
 )
 
 
-# Migration/conversion destinations are produced, not consumed (#1813
-# R52): in "convert the old tool to a CLI" the CLI is the RESULT of the
-# work, so the "to" phrase keeps its artifact. The check runs per match
-# against the immediately preceding words, so ordinary dependency "to"
-# targets keep stripping.
-_DESTINATION_VERB_TAIL_RE = re.compile(
-    r"\b(?:migrat\w*|convert\w*|port(?:s|ed|ing)?|rewrit\w*|rewrot\w*|"
-    r"transform\w*|turn(?:s|ed|ing)?|transition\w*|upgrad\w*|mov\w*|"
-    r"moderniz\w*|switch\w*|evolv\w*|consolidat\w*|graduat\w*)"
-    r"(?:\s+[\w\-'’]+){0,4}\s*$"
+# Destination ownership is structural (#1813 R52/R53): a segment-initial
+# imperative transforming an EXISTING artifact ("adapt the existing
+# script to a CLI", "migrate from a legacy script to a CLI") produces
+# its "to" artifact — no verb enumeration. Three markers carry the
+# distinction: the governing verb heads its segment; it is not a
+# production verb (production verbs CREATE their object, so their "to"
+# phrases stay relations of that object — "build a bridge to a REST
+# API"); and its object is definite or source-marked, because
+# transformation references something that already exists. Transfer
+# statements with indefinite objects ("submits credentials to a public
+# API") keep their dependency reading.
+_PRODUCTION_VERB_FRAGMENT = (
+    r"(?:build|builds|create|creates|make|makes|develop|develops|"
+    r"implement|implements|design|designs|write|writes|produce|produces|"
+    r"deliver|delivers|ship|ships|craft|crafts|construct|constructs|"
+    r"add|adds|expose|exposes|provide|provides|offer|offers|publish|"
+    r"publishes|host|hosts)"
+)
+_DESTINATION_CONTEXT_RE = re.compile(
+    r"^\s*(?:(?:i|we|you|please|kindly|help|me|us|let[’']?s|want|wants|"
+    r"wanted|need|needs|needed|would|like|to|going|plan|planning|aim|"
+    r"aiming|intend|intending|hope|hoping|trying|try)\s+){0,6}?"
+    rf"(?!{_PRODUCTION_VERB_FRAGMENT}\b)[a-z][\w\-]*\s+"
+    r"(?=(?:[\w\-'’]+\s+){0,5}?(?:the|this|that|these|those|our|my|your|"
+    r"its|it|them|from|existing|legacy|old|current|original)\b)"
+    r"(?:[\w\-'’]+\s+){0,6}$"
 )
 
 
@@ -1266,8 +1292,10 @@ def _strip_consumed_dependencies(text: str) -> str:
     """Remove relational and prenominal dependency/client declarations."""
 
     def _spare_destinations(match: re.Match[str]) -> str:
-        is_to_relation = re.match(r"to\s", match.group(0)) is not None
-        if is_to_relation and _DESTINATION_VERB_TAIL_RE.search(text[: match.start()]):
+        if re.match(r"to\s", match.group(0)) is None:
+            return " "
+        segment = re.split(r"[.;:!?]", text[: match.start()])[-1]
+        if _DESTINATION_CONTEXT_RE.match(segment):
             return match.group(0)
         return " "
 
