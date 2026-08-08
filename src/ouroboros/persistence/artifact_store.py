@@ -37,6 +37,7 @@ from ouroboros.persistence.artifact_binding import (
     binding_record,
     completion_path,
     completion_payload,
+    contract_path_component,
     encode_record,
     lifecycle_genesis_record,
     lifecycle_head_path,
@@ -752,7 +753,7 @@ class ContentAddressedArtifactStore:
 
     def _manifest_path(self, contract_id: str) -> Path:
         self._validate_project_boundary()
-        path = self._contracts_root / contract_id / _MANIFEST_FILENAME
+        path = self._contracts_root / contract_path_component(contract_id) / _MANIFEST_FILENAME
         _require_contained(path, root=self._contracts_root, label="artifact manifest")
         if _is_link_like(path.parent) or _is_link_like(path):
             raise ArtifactIntegrityError(
@@ -843,7 +844,7 @@ class ContentAddressedArtifactStore:
 
     def _contract_execution_lock_target(self, contract_id: str) -> Path:
         self._validate_project_boundary()
-        contract_root = self._contracts_root / contract_id
+        contract_root = self._contracts_root / contract_path_component(contract_id)
         target = contract_root / ".execution"
         lock_path = target.with_suffix(target.suffix + ".lock")
         if not target.is_relative_to(self._contracts_root):
@@ -961,7 +962,7 @@ class ContentAddressedArtifactStore:
                     operation="read",
                     details={"path": str(path)},
                 ) from exc
-            if path.parent.name != contract_id:
+            if path.parent.name != contract_path_component(contract_id):
                 raise ArtifactManifestError(
                     "Artifact manifest path does not match contract_id",
                     operation="read",

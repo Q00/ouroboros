@@ -142,6 +142,11 @@ def binding_path(root: Path, contract_id: str) -> Path:
     return root / f"{_digest(contract_id)}.json"
 
 
+def contract_path_component(contract_id: str) -> str:
+    """Map public contract identity to one portable filesystem component."""
+    return _digest(contract_id)
+
+
 def authority_prefix(store_root: Path) -> str:
     """Namespace anchors for one artifact store inside its trusted parent."""
     return f".ouroboros-artifact-authority-{_digest(str(store_root), length=24)}-"
@@ -906,6 +911,7 @@ __all__ = [
     "binding_record",
     "completion_path",
     "completion_payload",
+    "contract_path_component",
     "encode_record",
     "lifecycle_epoch_path",
     "lifecycle_epoch_prefix",

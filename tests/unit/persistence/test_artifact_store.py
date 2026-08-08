@@ -8,6 +8,7 @@ import json
 import multiprocessing
 import os
 from pathlib import Path
+import re
 from typing import Any
 
 import pytest
@@ -68,8 +69,12 @@ def _age(path: Path, *, days: int) -> None:
 
 
 def _manifest(store: ContentAddressedArtifactStore, contract_id: str) -> dict:
-    path = store.root / "contracts" / contract_id / "events.json"
+    path = store._manifest_path(contract_id)
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _contract_root(store: ContentAddressedArtifactStore, contract_id: str) -> Path:
+    return store._manifest_path(contract_id).parent
 
 
 def _lifecycle_epochs(
@@ -90,7 +95,7 @@ def _substitute_contract_artifact(
     """Replace a victim's reference with another valid contract's artifact."""
     victim_envelope = _put(store, victim, {"owner": "a"})
     source_envelope = _put(store, source, {"owner": "b", "payload": "different"})
-    victim_path = store.root / "contracts" / victim / "events.json"
+    victim_path = store._manifest_path(victim)
     victim_manifest = _manifest(store, victim)
     source_event = _manifest(store, source)["events"][0]
     victim_event = victim_manifest["events"][0]
@@ -192,11 +197,12 @@ def test_contract_lock_replacement_cannot_duplicate_dispatch(tmp_path: Path) -> 
     store = _store(tmp_path)
     contract_id = "CONTRACTLOCK"
     store.initialize()
+    lock_target = store._contract_execution_lock_target(contract_id)
 
     _assert_replaced_lock_authority_stays_held(
         store,
         store.contract_execution_lock(contract_id),
-        store.root / "contracts" / contract_id / ".execution.lock",
+        lock_target.with_suffix(lock_target.suffix + ".lock"),
         contract_id,
     )
 
@@ -265,7 +271,7 @@ def test_contract_parent_replacement_cannot_create_competing_authority(
     store = _store(tmp_path)
     contract_id = "CONTRACTPARENT"
     store.initialize()
-    contract_root = store.root / "contracts" / contract_id
+    contract_root = _contract_root(store, contract_id)
     displaced = tmp_path / "displaced-contract"
     lock = store.contract_execution_lock(contract_id)
 
@@ -621,7 +627,7 @@ def test_malformed_manifest_aborts_prune_fail_closed(tmp_path: Path) -> None:
     envelope = _put(store, "CONTRACT1", {"safe": True})
     path = _blob_path(store, envelope.artifact_ref)
     _age(path, days=100)
-    manifest_path = store.root / "contracts" / "CONTRACT1" / "events.json"
+    manifest_path = store._manifest_path("CONTRACT1")
     manifest_path.write_text("{broken", encoding="utf-8")
 
     with pytest.raises(ArtifactManifestError, match="fail-closed"):
@@ -637,7 +643,7 @@ def test_oversized_manifest_is_rejected_before_read(
 ) -> None:
     store = _store(tmp_path)
     _put(store, "CONTRACT1", {"safe": True})
-    manifest_path = store.root / "contracts" / "CONTRACT1" / "events.json"
+    manifest_path = store._manifest_path("CONTRACT1")
     manifest_path.write_bytes(b"{" + b" " * MANIFEST_MAX_BYTES)
     manifest_inode = manifest_path.stat().st_ino
     manifest_reads: list[int] = []
@@ -666,7 +672,7 @@ def test_manifest_read_rejects_contract_directory_swap(
 ) -> None:
     store = _store(tmp_path)
     _put(store, "CONTRACT1", {"real": True})
-    contract_dir = store.root / "contracts" / "CONTRACT1"
+    contract_dir = _contract_root(store, "CONTRACT1")
     manifest_path = contract_dir / "events.json"
     manifest_inode = manifest_path.stat().st_ino
     displaced = tmp_path / f"manifest-displaced-{operation}"
@@ -708,7 +714,7 @@ def test_manifest_rejects_and_preserves_forbidden_fields(
 ) -> None:
     store = _store(tmp_path)
     _put(store, "CONTRACT1", {"safe": True})
-    manifest_path = store.root / "contracts" / "CONTRACT1" / "events.json"
+    manifest_path = store._manifest_path("CONTRACT1")
     manifest = _manifest(store, "CONTRACT1")
     if forbidden_field == "body":
         manifest["body"] = {"must": "not persist"}
@@ -735,7 +741,7 @@ def test_manifest_rejects_and_preserves_forbidden_fields(
 def test_manifest_envelope_must_match_contract_and_artifact_ref(tmp_path: Path) -> None:
     store = _store(tmp_path)
     _put(store, "CONTRACT1", {"safe": True})
-    manifest_path = store.root / "contracts" / "CONTRACT1" / "events.json"
+    manifest_path = store._manifest_path("CONTRACT1")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     manifest["events"][0]["envelope"]["contract_id"] = "OTHER"
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
@@ -792,7 +798,7 @@ def test_missing_binding_cache_is_recovered_from_independent_authority(tmp_path:
 def test_durable_binding_without_manifest_fails_closed(tmp_path: Path) -> None:
     store = _store(tmp_path)
     envelope = _put(store, "CONTRACT1", {"safe": True})
-    manifest_path = store.root / "contracts" / "CONTRACT1" / "events.json"
+    manifest_path = store._manifest_path("CONTRACT1")
     manifest_path.unlink()
 
     with pytest.raises(ArtifactManifestError, match="binding"):
@@ -873,7 +879,7 @@ def test_binding_then_manifest_failure_recovers_on_identical_retry(
 
     assert store._anchor_path("CONTRACT1").is_file()
     assert store._binding_path("CONTRACT1").is_file()
-    assert not (store.root / "contracts" / "CONTRACT1" / "events.json").exists()
+    assert not store._manifest_path("CONTRACT1").exists()
 
     recovered = _put(store, "CONTRACT1", {"recoverable": True})
     assert store.fetch("CONTRACT1").envelope == recovered
@@ -1010,7 +1016,7 @@ def test_committed_tombstone_survives_unlink_failure_and_manifest_rollback(
         {"terminal": "must remain durable"},
         retain_until=NOW - timedelta(days=1),
     )
-    manifest_path = store.root / "contracts" / "CONTRACT1" / "events.json"
+    manifest_path = store._manifest_path("CONTRACT1")
     referenced_manifest = manifest_path.read_bytes()
     genesis_path = store._anchor_path("CONTRACT1").with_suffix(".lifecycle")
     referenced_genesis = genesis_path.read_bytes()
@@ -1069,7 +1075,7 @@ def test_tombstone_authority_recovers_manifest_write_failure_on_retry(
         retain_until=NOW - timedelta(days=1),
     )
     blob_path = _blob_path(store, envelope.artifact_ref)
-    manifest_path = store.root / "contracts" / "CONTRACT1" / "events.json"
+    manifest_path = store._manifest_path("CONTRACT1")
     referenced_manifest = manifest_path.read_bytes()
     _age(blob_path, days=100)
     original_write = store._write_manifest_locked
@@ -1113,7 +1119,7 @@ def test_lifecycle_head_recovers_terminal_record_write_failure(
         retain_until=NOW - timedelta(days=1),
     )
     blob_path = _blob_path(store, envelope.artifact_ref)
-    manifest_path = store.root / "contracts" / "CONTRACT1" / "events.json"
+    manifest_path = store._manifest_path("CONTRACT1")
     referenced_manifest = manifest_path.read_bytes()
     _age(blob_path, days=100)
     original_write = store._write_record_locked
@@ -1202,7 +1208,7 @@ def test_lifecycle_retention_authority_repairs_schema_valid_manifest_rollback(
     )
     blob_path = _blob_path(store, envelope.artifact_ref)
     _age(blob_path, days=100)
-    manifest_path = store.root / "contracts" / "CONTRACT1" / "events.json"
+    manifest_path = store._manifest_path("CONTRACT1")
     manifest = _manifest(store, "CONTRACT1")
     manifest["active"] = False
     manifest["retain_until"] = (NOW - timedelta(days=1)).isoformat()
@@ -1227,7 +1233,7 @@ def test_expected_head_rejects_retention_epoch_tail_erasure(tmp_path: Path) -> N
         {"retention": "tail must not disappear"},
         retain_until=NOW - timedelta(days=1),
     )
-    manifest_path = store.root / "contracts" / "CONTRACT1" / "events.json"
+    manifest_path = store._manifest_path("CONTRACT1")
     expired_manifest = manifest_path.read_bytes()
     store.set_contract_retention(
         "CONTRACT1",
@@ -1256,7 +1262,7 @@ def test_expected_head_rejects_terminal_epoch_tail_erasure(
         {"terminal": "tail must remain monotonic"},
         retain_until=NOW - timedelta(days=1),
     )
-    manifest_path = store.root / "contracts" / "CONTRACT1" / "events.json"
+    manifest_path = store._manifest_path("CONTRACT1")
     referenced_manifest = manifest_path.read_bytes()
     blob_path = _blob_path(store, envelope.artifact_ref)
     _age(blob_path, days=100)
@@ -1289,7 +1295,7 @@ def test_retention_epoch_before_head_crash_recovers_forward(
         {"retention": "head crash"},
         retain_until=NOW - timedelta(days=1),
     )
-    manifest_path = store.root / "contracts" / "CONTRACT1" / "events.json"
+    manifest_path = store._manifest_path("CONTRACT1")
     expired_manifest = manifest_path.read_bytes()
     head_path = store._anchor_path("CONTRACT1").with_suffix(".lifecycle.head")
     original_write = store._write_record_locked
@@ -1395,7 +1401,7 @@ def test_retention_epoch_recovers_manifest_write_failure(
         {"retention": "epoch first"},
         retain_until=NOW - timedelta(days=1),
     )
-    manifest_path = store.root / "contracts" / "CONTRACT1" / "events.json"
+    manifest_path = store._manifest_path("CONTRACT1")
     previous_manifest = manifest_path.read_bytes()
     original_write = store._write_manifest_locked
 
@@ -1454,7 +1460,7 @@ def test_tombstone_event_substitution_fails_closed(
         store.prune(ttl=timedelta(days=90), apply=True, now=NOW)
     monkeypatch.undo()
 
-    manifest_path = store.root / "contracts" / "CONTRACT1" / "events.json"
+    manifest_path = store._manifest_path("CONTRACT1")
     manifest = _manifest(store, "CONTRACT1")
     terminal_path = store._anchor_path("CONTRACT1").with_suffix(".tombstoned")
     terminal = json.loads(terminal_path.read_text(encoding="utf-8"))
@@ -1514,7 +1520,7 @@ def test_coordinated_terminal_epoch_projection_substitution_fails_closed(
         store.prune(ttl=timedelta(days=90), apply=True, now=NOW)
     monkeypatch.undo()
 
-    manifest_path = store.root / "contracts" / "CONTRACT1" / "events.json"
+    manifest_path = store._manifest_path("CONTRACT1")
     terminal_path = store._anchor_path("CONTRACT1").with_suffix(".tombstoned")
     epoch_path = _lifecycle_epochs(store, "CONTRACT1")[0]
     epoch = json.loads(epoch_path.read_text(encoding="utf-8"))
@@ -1732,7 +1738,7 @@ def test_directory_creation_never_follows_project_ancestor_swap(
     digest = hashlib.sha256(canonical_artifact_bytes(body)).hexdigest()
     if publication == "manifest":
         _put(store, "CONTRACT1", body)
-        creation_component = "CONTRACT2"
+        creation_component = hashlib.sha256(b"CONTRACT2").hexdigest()
     else:
         creation_component = digest[:2]
 
@@ -1770,7 +1776,7 @@ def test_directory_creation_never_follows_project_ancestor_swap(
     if publication == "body":
         rejected_path = displaced / "artifacts" / digest[:2] / f"{digest}.json"
     else:
-        rejected_path = displaced / "artifacts" / "contracts" / "CONTRACT2" / "events.json"
+        rejected_path = displaced / "artifacts" / "contracts" / creation_component / "events.json"
     assert not rejected_path.exists()
 
 
@@ -1787,7 +1793,7 @@ def test_publication_rejects_parent_swap_before_atomic_write(
     digest = hashlib.sha256(canonical_artifact_bytes(body)).hexdigest()
     if publication == "manifest":
         _put(store, "CONTRACT1", body)
-        publication_parent = store.root / "contracts" / "CONTRACT2"
+        publication_parent = _contract_root(store, "CONTRACT2")
     else:
         publication_parent = store.root / digest[:2]
 
@@ -1850,7 +1856,7 @@ def test_publication_revalidates_parent_handle_at_replace_boundary(
     digest = hashlib.sha256(canonical_artifact_bytes(body)).hexdigest()
     if publication == "manifest":
         _put(store, "CONTRACT1", body)
-        target_parent = store.root / "contracts" / "CONTRACT2"
+        target_parent = _contract_root(store, "CONTRACT2")
     else:
         target_parent = store.root / digest[:2]
 
@@ -1901,7 +1907,7 @@ def test_prune_manifest_update_restores_previous_file_after_parent_swap(
     )
     body_path = _blob_path(store, envelope.artifact_ref)
     _age(body_path, days=100)
-    manifest_parent = store.root / "contracts" / "CONTRACT1"
+    manifest_parent = _contract_root(store, "CONTRACT1")
     manifest_path = manifest_parent / "events.json"
     previous_manifest = manifest_path.read_bytes()
 
@@ -1943,6 +1949,71 @@ def test_path_unsafe_contract_id_is_rejected(tmp_path: Path) -> None:
     store = _store(tmp_path)
     with pytest.raises(ValueError, match="path-safe"):
         _put(store, "../escape", {"unsafe": True})
+
+
+@pytest.mark.parametrize(
+    "contract_id",
+    [f"fanout:{'a' * 64}", "CON", "trailing."],
+)
+def test_contract_id_uses_portable_hashed_filesystem_component(
+    tmp_path: Path,
+    contract_id: str,
+) -> None:
+    store = _store(tmp_path)
+    _put(store, contract_id, {"portable": contract_id})
+
+    component = store._manifest_path(contract_id).parent.name
+    assert component == hashlib.sha256(contract_id.encode("utf-8")).hexdigest()
+    assert re.fullmatch(r"[0-9a-f]{64}", component)
+    assert contract_id not in str(store._manifest_path(contract_id))
+    assert store._binding_path(contract_id).stem == component
+    assert contract_id not in store._anchor_path(contract_id).name
+    assert store._contract_execution_lock_target(contract_id).parent.name == component
+    with store.contract_execution_lock(contract_id):
+        pass
+    assert store.fetch(contract_id).body == {"portable": contract_id}
+    assert store.replay(contract_id).body == {"portable": contract_id}
+    assert store.prune(now=NOW).candidates == ()
+
+
+def test_case_distinct_contract_ids_do_not_alias_on_case_insensitive_paths(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    upper = _put(store, "CaseSensitive", {"owner": "upper"})
+    lower = _put(store, "casesensitive", {"owner": "lower"})
+
+    upper_component = store._manifest_path("CaseSensitive").parent.name
+    lower_component = store._manifest_path("casesensitive").parent.name
+    assert upper_component.casefold() != lower_component.casefold()
+    assert upper.artifact_ref != lower.artifact_ref
+    assert store.fetch("CaseSensitive").body == {"owner": "upper"}
+    assert store.fetch("casesensitive").body == {"owner": "lower"}
+    assert store.replay("CaseSensitive").body == {"owner": "upper"}
+    assert store.replay("casesensitive").body == {"owner": "lower"}
+    assert store.prune(now=NOW).candidates == ()
+
+
+@pytest.mark.parametrize("operation", ["fetch", "replay", "prune"])
+def test_legacy_raw_contract_directory_fails_closed(
+    tmp_path: Path,
+    operation: str,
+) -> None:
+    store = _store(tmp_path)
+    contract_id = "LEGACYCONTRACT"
+    envelope = _put(store, contract_id, {"legacy": "must not alias"})
+    portable_root = _contract_root(store, contract_id)
+    raw_root = store.root / "contracts" / contract_id
+    portable_root.rename(raw_root)
+
+    with pytest.raises(ArtifactManifestError, match="authority|binding|path"):
+        if operation == "fetch":
+            store.fetch(contract_id)
+        elif operation == "replay":
+            store.replay(contract_id)
+        else:
+            store.prune(now=NOW)
+    assert _blob_path(store, envelope.artifact_ref).exists()
 
 
 @pytest.mark.parametrize("linked_component", ["artifact_root", "contracts"])

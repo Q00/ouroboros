@@ -119,11 +119,17 @@ This RFC does **not** add a Python `multiprocessing` or `os.fork` layer.
   ab/                          # 2-level prefix avoids huge directories
     abc123<sha256>.json        # content-addressed result envelope body
   contracts/
-    01HXAB.../
+    <sha256(contract_id)>/       # portable; raw ID remains inside the manifest
       events.json              # optional per-contract event dump/manifest
 ```
 
 `artifact_ref = "sha256:abc123..."` (matches the result envelope shape in [#511](https://github.com/Q00/ouroboros/issues/511) D2). Event dumps are keyed by `contract_id`, not by body hash, so content dedup never overwrites per-contract history.
+The public contract ID remains byte-for-byte in the manifest and envelope, but
+its filesystem directory is the lowercase SHA-256 of that ID. This avoids
+Windows reserved/invalid components and case-insensitive aliasing without
+changing semantic identity. The raw-directory layout existed only on unmerged
+development snapshots; it is rejected fail-closed rather than auto-migrated,
+because case-colliding legacy directories cannot be migrated unambiguously.
 
 **Why content-addressed FS.**
 - **Auto-dedup.** Identical sub-agent results across contracts collapse to one file.

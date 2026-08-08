@@ -563,9 +563,9 @@ async def test_retry_rejects_cross_contract_manifest_substitution_without_execut
         duration_ms=1,
         events_emitted_count=0,
     )
-    manifest_path = service.artifact_store.root / "contracts" / victim / "events.json"
+    manifest_path = service.artifact_store._manifest_path(victim)
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    source_path = service.artifact_store.root / "contracts" / source / "events.json"
+    source_path = service.artifact_store._manifest_path(source)
     source_event = json.loads(source_path.read_text(encoding="utf-8"))["events"][0]
     manifest["events"][0]["artifact_ref"] = source_envelope.artifact_ref
     manifest["events"][0]["size_bytes"] = source_event["size_bytes"]
@@ -599,7 +599,7 @@ async def test_retry_rejects_binding_without_manifest_without_execution(tmp_path
         work_fn=child_work,
         contract_id=contract_id,
     )
-    manifest_path = service.artifact_store.root / "contracts" / contract_id / "events.json"
+    manifest_path = service.artifact_store._manifest_path(contract_id)
     manifest_path.unlink()
 
     with pytest.raises(ArtifactManifestError, match="binding"):
