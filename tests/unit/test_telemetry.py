@@ -82,6 +82,44 @@ class TestOptOut:
 
         assert telemetry.is_enabled() is False
 
+    def test_explicit_enable_cannot_override_persisted_opt_out(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        monkeypatch.setenv("OUROBOROS_POSTHOG_API_KEY", "phc_test")
+        monkeypatch.setenv("OUROBOROS_TELEMETRY", "1")
+        config_path = tmp_path / ".ouroboros" / "config.yaml"
+        config_path.parent.mkdir(parents=True)
+        config_path.write_text("telemetry:\n  enabled: false\n", encoding="utf-8")
+
+        assert get_telemetry_enabled() is False
+        assert telemetry.is_enabled() is False
+
+    def test_explicit_enable_cannot_override_malformed_config(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        monkeypatch.setenv("OUROBOROS_POSTHOG_API_KEY", "phc_test")
+        monkeypatch.setenv("OUROBOROS_TELEMETRY", "1")
+        config_path = tmp_path / ".ouroboros" / "config.yaml"
+        config_path.parent.mkdir(parents=True)
+        config_path.write_text("telemetry: [\n", encoding="utf-8")
+
+        assert get_telemetry_enabled() is False
+        assert telemetry.is_enabled() is False
+
+    def test_explicit_enable_with_absent_config_keeps_default_on(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("OUROBOROS_POSTHOG_API_KEY", "phc_test")
+        monkeypatch.setenv("OUROBOROS_TELEMETRY", "1")
+
+        assert get_telemetry_enabled() is True
+        assert telemetry.is_enabled() is True
+
     def test_dangling_config_symlink_fails_closed(
         self,
         monkeypatch: pytest.MonkeyPatch,

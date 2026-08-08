@@ -95,6 +95,48 @@ _prompt() {
 # no code/paths. Disable with DO_NOT_TRACK=1, OUROBOROS_TELEMETRY=0, or
 # telemetry.enabled: false in ~/.ouroboros/config.yaml.
 # The API key is a public write-only PostHog project key.
+
+# TELEMETRY.md declares ~/.ouroboros/.env a trusted persistent control
+# source; the application loader applies it at import. This standalone
+# installer must honor the same telemetry keys before any notice or capture,
+# so a persisted opt-out or destination override there holds during install.
+# Only the four allowlisted telemetry keys are read, and an already-set real
+# process environment value is never overridden (mirrors config/loader.py).
+_telemetry_load_user_env() {
+  local f="$HOME/.ouroboros/.env" line key value
+  { [ -f "$f" ] && [ -r "$f" ]; } || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line#"${line%%[![:space:]]*}"}"
+    case "$line" in ''|'#'*) continue ;; esac
+    case "$line" in 'export '*) line="${line#export }" ;; esac
+    case "$line" in *=*) ;; *) continue ;; esac
+    key="${line%%=*}"
+    key="${key%"${key##*[![:space:]]}"}"
+    case "$key" in
+      DO_NOT_TRACK|OUROBOROS_TELEMETRY|OUROBOROS_POSTHOG_API_KEY|OUROBOROS_POSTHOG_HOST) ;;
+      *) continue ;;
+    esac
+    value="${line#*=}"
+    value="${value#"${value%%[![:space:]]*}"}"
+    case "$value" in
+      \"*\") value="${value%\"}"; value="${value#\"}" ;;
+      \'*\') value="${value%\'}"; value="${value#\'}" ;;
+      *)
+        # Unquoted values follow dotenv grammar: an inline ` # comment` is
+        # not part of the value. Dropping it here matters for opt-outs --
+        # `OUROBOROS_TELEMETRY=0 # off` must parse as "0", not fail the
+        # flag match and silently keep collection on.
+        value="${value%%[[:space:]]#*}"
+        value="${value%"${value##*[![:space:]]}"}"
+        ;;
+    esac
+    [ -n "$value" ] || continue
+    eval "[ -z \"\${$key+x}\" ]" || continue
+    export "$key=$value"
+  done < "$f"
+}
+_telemetry_load_user_env
+
 PH_API_KEY="${OUROBOROS_POSTHOG_API_KEY:-phc_mSoetD4ExLDDCi3vNua635NhwRTgHfRaCG9WYNKmrvv5}"
 PH_HOST="${OUROBOROS_POSTHOG_HOST:-https://us.i.posthog.com}"
 
@@ -190,10 +232,10 @@ _telemetry_enabled() {
   [ -n "$PH_API_KEY" ] || return 1
   case "${DO_NOT_TRACK:-}" in 1|true|TRUE|True|on|yes) return 1 ;; esac
   case "${OUROBOROS_TELEMETRY:-}" in 0|false|FALSE|False|off|no) return 1 ;; esac
-  case "${OUROBOROS_TELEMETRY:-}" in
-    1|true|TRUE|True|on|yes) ;;
-    *) _telemetry_config_allows || return 1 ;;
-  esac
+  # OUROBOROS_TELEMETRY=1 is never an override: persisted opt-out and
+  # malformed configuration stay authoritative (TELEMETRY.md: any one
+  # disabling control wins), matching the application resolver.
+  _telemetry_config_allows || return 1
   command -v curl &>/dev/null || return 1
   return 0
 }
@@ -227,7 +269,7 @@ _telemetry_notice() {
   _blank
   _say "${BOLD}Anonymous usage stats help improve Ouroboros.${RESET}"
   _info "Collects commands, versions, and success rates — never code, prompts, or paths."
-  _info "Opt out: export OUROBOROS_TELEMETRY=0  |  details: TELEMETRY.md"
+  _info "Opt out: export OUROBOROS_TELEMETRY=0  |  details: https://github.com/Q00/ouroboros/blob/main/TELEMETRY.md"
 
   # Persist the one-time notice before the first collection attempt. Failure
   # is harmless: this run was disclosed and a later run will disclose again.

@@ -1441,23 +1441,28 @@ def get_opencode_mode() -> str | None:
 def get_telemetry_enabled() -> bool:
     """Whether anonymous usage telemetry may send events.
 
-    Priority:
-        1. DO_NOT_TRACK environment variable (any truthy value disables)
-        2. OUROBOROS_TELEMETRY environment variable (1/0, true/false, on/off)
-        3. config.yaml telemetry.enabled
-        4. True when configuration is valid (default: on, with first-run
-           notice and TELEMETRY.md contract)
+    Every control that can disable telemetry is resolved first; any one of
+    them wins unconditionally (TELEMETRY.md: "Any one of these disables
+    telemetry completely"):
 
-    Invalid or unreadable configuration fails closed. A privacy preference
-    can be present in a file whose unrelated field no longer validates; it is
-    never safe to turn collection back on merely because the full application
-    config could not be constructed.
+        1. DO_NOT_TRACK environment variable (any truthy value disables)
+        2. OUROBOROS_TELEMETRY=0/false/off/no
+        3. config.yaml telemetry.enabled: false
+        4. invalid or unreadable configuration (fails closed)
+
+    Only when no disabling source is present does telemetry run (default:
+    on, with first-run notice and TELEMETRY.md contract). An explicit
+    ``OUROBOROS_TELEMETRY=1`` is therefore never an override: it cannot
+    re-enable collection against a persisted opt-out or malformed
+    configuration. A privacy preference can be present in a file whose
+    unrelated field no longer validates; it is never safe to turn collection
+    back on merely because the full application config could not be
+    constructed.
     """
     if os.environ.get("DO_NOT_TRACK", "").strip().lower() in ("1", "true", "on", "yes"):
         return False
-    env = _env_flag("OUROBOROS_TELEMETRY")
-    if env is not None:
-        return env
+    if _env_flag("OUROBOROS_TELEMETRY") is False:
+        return False
     config_path = get_config_dir() / "config.yaml"
     # ``Path.exists()`` is false for a dangling symlink. Treat that as invalid
     # persisted configuration rather than the genuinely-absent default-on

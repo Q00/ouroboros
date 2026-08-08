@@ -400,7 +400,8 @@ _NOTICE = (
     "Ouroboros collects anonymous usage data (commands, versions, success rates - "
     "never code, prompts, or file contents) to guide improvements and to publish "
     "aggregate adoption stats.\n"
-    "Opt out anytime: export OUROBOROS_TELEMETRY=0  |  details: TELEMETRY.md"
+    "Opt out anytime: export OUROBOROS_TELEMETRY=0  |  details: "
+    "https://github.com/Q00/ouroboros/blob/main/TELEMETRY.md"
 )
 
 

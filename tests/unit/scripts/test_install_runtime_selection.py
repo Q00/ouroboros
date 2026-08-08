@@ -27,6 +27,7 @@ def _run_installer(
     include_uv: bool = True,
     local_repo: bool = True,
     env: dict[str, str] | None = None,
+    drop_env: tuple[str, ...] = (),
     fake_commands: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     bin_dir = tmp_path / "bin"
@@ -95,6 +96,12 @@ exit 0
     )
     if env:
         run_env.update(env)
+    # A set-but-empty process variable still counts as "set" for trusted
+    # ~/.ouroboros/.env precedence (mirrors config/loader.py), so tests that
+    # exercise the user env file must genuinely unset the suite-level
+    # OUROBOROS_TELEMETRY=0 rather than blank it.
+    for key in drop_env:
+        run_env.pop(key, None)
 
     return subprocess.run(
         ["bash", str(install_sh)],
@@ -267,6 +274,99 @@ def test_installer_unrelated_invalid_config_fails_closed(
     assert result.returncode == 0, result.stderr
     assert not (tmp_path / "telemetry.log").exists()
     assert "Anonymous usage stats help improve Ouroboros" not in result.stdout
+
+
+def test_installer_explicit_enable_cannot_override_persisted_opt_out(tmp_path: Path) -> None:
+    config = tmp_path / "home" / ".ouroboros" / "config.yaml"
+    config.parent.mkdir(parents=True)
+    config.write_text("telemetry:\n  enabled: false\n", encoding="utf-8")
+
+    result = _run_installer(
+        tmp_path,
+        env={"OUROBOROS_TELEMETRY": "1"},
+        fake_commands=_telemetry_fake_commands(tmp_path),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not (tmp_path / "telemetry.log").exists()
+    assert "Anonymous usage stats help improve Ouroboros" not in result.stdout
+
+
+def test_installer_explicit_enable_cannot_override_malformed_config(tmp_path: Path) -> None:
+    config = tmp_path / "home" / ".ouroboros" / "config.yaml"
+    config.parent.mkdir(parents=True)
+    config.write_text("telemetry: [\n", encoding="utf-8")
+
+    result = _run_installer(
+        tmp_path,
+        env={"OUROBOROS_TELEMETRY": "1"},
+        fake_commands=_telemetry_fake_commands(tmp_path),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not (tmp_path / "telemetry.log").exists()
+    assert "Anonymous usage stats help improve Ouroboros" not in result.stdout
+
+
+def test_installer_honors_user_env_opt_out(tmp_path: Path) -> None:
+    user_env = tmp_path / "home" / ".ouroboros" / ".env"
+    user_env.parent.mkdir(parents=True)
+    user_env.write_text("OUROBOROS_TELEMETRY=0 # persisted opt-out\n", encoding="utf-8")
+
+    result = _run_installer(
+        tmp_path,
+        drop_env=("OUROBOROS_TELEMETRY",),
+        fake_commands=_telemetry_fake_commands(tmp_path),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not (tmp_path / "telemetry.log").exists()
+    assert "Anonymous usage stats help improve Ouroboros" not in result.stdout
+
+
+def test_installer_honors_user_env_destination_override(tmp_path: Path) -> None:
+    user_env = tmp_path / "home" / ".ouroboros" / ".env"
+    user_env.parent.mkdir(parents=True)
+    user_env.write_text(
+        'export OUROBOROS_POSTHOG_HOST="https://telemetry-envfile.invalid"\n',
+        encoding="utf-8",
+    )
+
+    result = _run_installer(
+        tmp_path,
+        local_repo=False,
+        env={"OUROBOROS_TELEMETRY": ""},
+        fake_commands=_telemetry_fake_commands(tmp_path),
+    )
+
+    assert result.returncode == 0, result.stderr
+    captures = _wait_for_telemetry(tmp_path)
+    assert "https://telemetry-envfile.invalid/capture/" in captures
+    assert "us.i.posthog.com" not in captures
+
+
+def test_installer_process_env_wins_over_user_env_file(tmp_path: Path) -> None:
+    user_env = tmp_path / "home" / ".ouroboros" / ".env"
+    user_env.parent.mkdir(parents=True)
+    user_env.write_text(
+        "OUROBOROS_POSTHOG_HOST=https://telemetry-envfile.invalid\n",
+        encoding="utf-8",
+    )
+
+    result = _run_installer(
+        tmp_path,
+        local_repo=False,
+        env={
+            "OUROBOROS_TELEMETRY": "",
+            "OUROBOROS_POSTHOG_HOST": "https://telemetry-process.invalid",
+        },
+        fake_commands=_telemetry_fake_commands(tmp_path),
+    )
+
+    assert result.returncode == 0, result.stderr
+    captures = _wait_for_telemetry(tmp_path)
+    assert "https://telemetry-process.invalid/capture/" in captures
+    assert "telemetry-envfile.invalid" not in captures
 
 
 def test_installer_do_not_track_precedes_explicit_enable(tmp_path: Path) -> None:
