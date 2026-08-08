@@ -77,6 +77,19 @@ async def _record_start_failure(
         await manager.drain(grace_seconds=0.5)
 
 
+async def _compensate_unaccepted_start_failure(
+    manager: JobManager,
+    request: DetachedJobRequest,
+    error: str,
+) -> None:
+    """Record rejection without interrupting an accepted live owner."""
+    accepted_live_owner = manager.has_accepted_job(request.job_id) and manager.has_live_job_task(
+        request.job_id
+    )
+    if not accepted_live_owner:
+        await _record_start_failure(manager, request, error)
+
+
 async def _run_probe(manager: JobManager, request: DetachedJobRequest) -> None:
     """Internal process-lifetime probe used by integration tests."""
     delay_raw = request.arguments.get("delay_seconds", 0.2)
@@ -190,7 +203,7 @@ async def run_worker(request_path: Path) -> int:
             result = await handler.handle(dict(request.arguments))
             if result.is_err:
                 error = result.error.message
-                await _record_start_failure(manager, request, error)
+                await _compensate_unaccepted_start_failure(manager, request, error)
             else:
                 returned_job_id = result.value.meta.get("job_id")
                 if returned_job_id != request.job_id:
@@ -216,8 +229,9 @@ async def run_worker(request_path: Path) -> int:
             pass
         if manager is not None and request is not None:
             try:
-                await _record_start_failure(manager, request, error)
+                await _compensate_unaccepted_start_failure(manager, request, error)
                 await _wait_for_terminal(manager, request.job_id)
+                cleanup_artifacts = True
             except Exception:
                 pass
         return 1

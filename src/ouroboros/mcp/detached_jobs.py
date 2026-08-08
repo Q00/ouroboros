@@ -18,6 +18,7 @@ import asyncio
 import contextlib
 from dataclasses import asdict, dataclass
 import json
+import logging
 import os
 from pathlib import Path
 import subprocess
@@ -31,6 +32,8 @@ from ouroboros.persistence.event_store import EventStore
 _STARTUP_TIMEOUT_SECONDS = 20.0
 _POLL_INTERVAL_SECONDS = 0.05
 _STATE_DIR_NAME = "detached-jobs"
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -174,11 +177,24 @@ def _spawn_worker(request_path: Path, *, cwd: str) -> subprocess.Popen[bytes]:
     )
     # Reap the child if this MCP process remains alive.  If the MCP process
     # exits first, the detached worker is reparented and the OS reaps it.
-    threading.Thread(
-        target=process.wait,
-        name=f"ooo-detached-reaper-{process.pid}",
-        daemon=True,
-    ).start()
+    try:
+        threading.Thread(
+            target=process.wait,
+            name=f"ooo-detached-reaper-{process.pid}",
+            daemon=True,
+        ).start()
+    except BaseException:
+        # Popen already transferred ownership to an independent process. A
+        # best-effort local reaper failure must not report definitive launch
+        # rejection and allow a duplicate job to start.
+        try:
+            logger.warning(
+                "detached worker reaper registration failed after spawn",
+                extra={"worker_pid": process.pid},
+                exc_info=True,
+            )
+        except BaseException:
+            pass
     return process
 
 
@@ -190,26 +206,37 @@ async def launch_detached_job(
     startup_timeout_seconds: float = _STARTUP_TIMEOUT_SECONDS,
 ) -> JobSnapshot:
     """Spawn a durable owner and wait for its persisted acceptance receipt."""
-    if request.database_url != event_store.database_url:
-        raise ValueError("Detached worker request must use the accepting EventStore database URL")
-
-    request_path = request_path_for(request.job_id)
-    status_path = status_path_for(request_path)
-    for stale in (request_path, status_path):
-        try:
-            stale.unlink()
-        except FileNotFoundError:
-            pass
+    request_path: Path | None = None
+    status_path: Path | None = None
     try:
+        if request.database_url != event_store.database_url:
+            raise ValueError(
+                "Detached worker request must use the accepting EventStore database URL"
+            )
+        request_path = request_path_for(request.job_id)
+        status_path = status_path_for(request_path)
+        for stale in (request_path, status_path):
+            try:
+                stale.unlink()
+            except FileNotFoundError:
+                pass
         write_private_json(request_path, asdict(request), exclusive=True)
         process = _spawn_worker(request_path, cwd=request.cwd)
     except BaseException:
         job_manager.abandon_reserved_job_id(request.job_id)
-        try:
-            request_path.unlink()
-        except OSError:
-            pass
+        for artifact in (request_path, status_path):
+            if artifact is None:
+                continue
+            try:
+                artifact.unlink()
+            except OSError:
+                pass
         raise
+
+    # From successful Popen onward, the worker may accept independently. No
+    # ordinary receipt/read failure below is definitive launch rejection.
+    assert request_path is not None
+    assert status_path is not None
 
     deadline = asyncio.get_running_loop().time() + max(0.1, startup_timeout_seconds)
     while True:
@@ -218,20 +245,18 @@ async def launch_detached_job(
         except ValueError:
             pass
 
-        status = read_status(status_path)
-        if status is not None and status.get("state") == "failed":
-            error = str(status.get("error") or "detached worker failed before job acceptance")
-            job_manager.abandon_reserved_job_id(request.job_id)
-            for artifact in (request_path, status_path):
-                try:
-                    artifact.unlink()
-                except OSError:
-                    pass
-            raise RuntimeError(error)
-
         if process.poll() is not None:
-            # The reaper may already have consumed the exact return code; the
-            # worker status is authoritative when present.
+            # A failed status can precede the worker's fallback created receipt,
+            # and a created commit can race the initial read immediately before
+            # process exit. Once the child is dead no further writes are
+            # possible, so only this final durable read can prove rejection.
+            try:
+                snapshot = await job_manager.get_snapshot(request.job_id)
+            except ValueError:
+                pass
+            else:
+                cleanup_worker_artifacts(request_path)
+                return snapshot
             status = read_status(status_path)
             error = (
                 str(status.get("error"))
@@ -239,6 +264,11 @@ async def launch_detached_job(
                 else "detached worker exited before persisting job acceptance"
             )
             job_manager.abandon_reserved_job_id(request.job_id)
+            for artifact in (request_path, status_path):
+                try:
+                    artifact.unlink()
+                except OSError:
+                    pass
             raise RuntimeError(error)
 
         if asyncio.get_running_loop().time() >= deadline:

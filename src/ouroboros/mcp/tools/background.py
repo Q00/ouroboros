@@ -71,8 +71,10 @@ class BackgroundJobAcceptanceState:
     job_manager: JobManager | None = None
     job_id: str | None = None
 
-    def begin_detached_acceptance(self) -> None:
+    def begin_detached_acceptance(self, job_manager: JobManager, job_id: str) -> None:
         self.phase = "detached_pending"
+        self.job_manager = job_manager
+        self.job_id = job_id
 
     def begin_local_acceptance(self, job_manager: JobManager, job_id: str) -> None:
         self.phase = "local_pending"
@@ -82,10 +84,19 @@ class BackgroundJobAcceptanceState:
     def mark_accepted(self) -> None:
         self.phase = "accepted"
 
-    def cancellation_may_have_accepted(self) -> bool:
-        """Return true only after a transport may own the requested job."""
-        if self.phase in {"detached_pending", "accepted"}:
+    def may_have_accepted(self, _exc: BaseException) -> bool:
+        """Classify ownership from the transport phase, not exception type alone."""
+        if self.phase == "accepted":
             return True
+        if self.phase == "detached_pending":
+            if self.job_manager is None or self.job_id is None:
+                return True
+            has_unresolved_acceptance = getattr(
+                type(self.job_manager), "has_unresolved_job_acceptance", None
+            )
+            return not callable(has_unresolved_acceptance) or bool(
+                has_unresolved_acceptance(self.job_manager, self.job_id)
+            )
         if self.phase != "local_pending" or self.job_manager is None or self.job_id is None:
             return False
         has_accepted_job = getattr(type(self.job_manager), "has_accepted_job", None)
@@ -188,24 +199,37 @@ async def start_background_tool_job(
                 f"Durable background job {job_type!r} is missing its detached invocation"
             )
         try:
+            request = DetachedJobRequest(
+                job_id=job_id,
+                tool_name=detached_tool_name,
+                arguments=dict(detached_arguments),
+                database_url=event_store.database_url,
+                cwd=str(Path.cwd()),
+                runtime_backend=runtime_backend,
+                llm_backend=llm_backend,
+                opencode_mode=opencode_mode,
+            )
             if on_detaching is not None:
                 await on_detaching()
-            acceptance_state.begin_detached_acceptance()
+            acceptance_state.begin_detached_acceptance(job_manager, job_id)
             snapshot = await launch_detached_job(
                 job_manager=job_manager,
                 event_store=event_store,
-                request=DetachedJobRequest(
-                    job_id=job_id,
-                    tool_name=detached_tool_name,
-                    arguments=dict(detached_arguments),
-                    database_url=event_store.database_url,
-                    cwd=str(Path.cwd()),
-                    runtime_backend=runtime_backend,
-                    llm_backend=llm_backend,
-                    opencode_mode=opencode_mode,
-                ),
+                request=request,
             )
+            acceptance_state.mark_accepted()
+            settle_external_acceptance = getattr(
+                job_manager, "settle_external_job_acceptance", None
+            )
+            if callable(settle_external_acceptance):
+                settle_external_acceptance(job_id)
         except DetachedJobAcceptanceTimeout as exc:
+            acceptance_state.mark_accepted()
+            settle_external_acceptance = getattr(
+                job_manager, "settle_external_job_acceptance", None
+            )
+            if callable(settle_external_acceptance):
+                settle_external_acceptance(job_id)
             if on_enqueue_failure is not None:
                 try:
                     await on_enqueue_failure(exc)
@@ -223,6 +247,15 @@ async def start_background_tool_job(
                 details=exc.receipt,
             ) from exc
         except BaseException as exc:
+            if acceptance_state.may_have_accepted(exc):
+                acceptance_state.mark_accepted()
+                settle_external_acceptance = getattr(
+                    job_manager, "settle_external_job_acceptance", None
+                )
+                if callable(settle_external_acceptance):
+                    settle_external_acceptance(job_id)
+            else:
+                job_manager.abandon_reserved_job_id(job_id)
             if on_enqueue_failure is not None:
                 try:
                     await on_enqueue_failure(exc)
@@ -233,7 +266,6 @@ async def start_background_tool_job(
                         exc_info=True,
                     )
             raise
-        acceptance_state.mark_accepted()
         if on_started is not None:
             await on_started(snapshot)
         return snapshot
@@ -268,8 +300,10 @@ async def start_background_tool_job(
         # the caller release any compose-around bookkeeping before we re-raise.
         # Once ``start_job`` registers ownership it has wrapped this coroutine
         # in a live Task; closing the same coroutine here would strand that job.
-        if inspect.iscoroutine(runner) and not acceptance_state.cancellation_may_have_accepted():
-            runner.close()
+        if not acceptance_state.may_have_accepted(exc):
+            job_manager.abandon_reserved_job_id(job_id)
+            if inspect.iscoroutine(runner):
+                runner.close()
         if on_enqueue_failure is not None:
             try:
                 await on_enqueue_failure(exc)
