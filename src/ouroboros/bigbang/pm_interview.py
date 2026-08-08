@@ -25,7 +25,7 @@ from typing import Any
 import structlog
 
 from ouroboros.bigbang.ambiguity import AmbiguityScorer
-from ouroboros.bigbang.answer_provenance import classify_answer_provenance, extraction_rounds
+from ouroboros.bigbang.answer_provenance import extraction_rounds
 from ouroboros.bigbang.brownfield import (
     load_brownfield_repos_as_dicts as _load_brownfield_dicts,
 )
@@ -970,7 +970,11 @@ class PMInterviewEngine:
             for r in state.rounds
             if r.user_response is not None
             and r.question != INITIAL_CONTEXT_SUMMARY_QUESTION
-            and classify_answer_provenance(r.user_response) == "user"
+            # ``r.provenance``, not the marker: consumers read the settled
+            # field, which is the rule ``answer_provenance`` exists to hold
+            # (#1755). They agree today and diverge on the historical envelopes
+            # ``_settle_provenance`` strips.
+            and r.provenance == "user"
         )
 
         # ── Ambiguity check (only after minimum rounds) ────────────────
@@ -1225,16 +1229,20 @@ class PMInterviewEngine:
         # Question lines are unchanged either way: an observation reaching a
         # later question is where it was collected to arrive.
         if withhold_observations:
-            rendered = [(item.question, item.answer) for item in extraction_rounds(state)]
+            rendered = [(item.question, item.answer, None) for item in extraction_rounds(state)]
         else:
-            rendered = [(item.question, item.user_response) for item in state.rounds]
+            rendered = [(r.question, r.user_response, r.evidence) for r in state.rounds]
 
-        for question, answer in rendered:
+        for question, answer, evidence in rendered:
             if question == INITIAL_CONTEXT_SUMMARY_QUESTION:
                 continue
             parts.append(f"\nQ: {question}")
             if answer:
                 parts.append(f"A: {answer}")
+            # Withheld when extracting, for the reason the answer's provenance is:
+            # what the person weighed is not what they decided.
+            if evidence:
+                parts.append(f"Weighed against: {evidence}")
 
         return "\n".join(parts)
 

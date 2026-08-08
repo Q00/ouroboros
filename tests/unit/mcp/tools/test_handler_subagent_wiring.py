@@ -741,6 +741,81 @@ class TestPMInterviewHandlerSubagentDispatch:
         assert observed not in prompt
         assert "observation withheld" in prompt
 
+    async def test_plugin_path_carries_evidence_to_the_child(self, handler, monkeypatch) -> None:
+        """Regression (#1941): the tool advertises ``evidence`` on every runtime.
+
+        This runtime accepted it and dropped it — the branch never read the
+        parameter — so a lane's finding never reached the child that writes the
+        next question, which is the only reason it is collected. It rides on the
+        round the answer filled, so the transcript carries it forward.
+        """
+        saved: list[InterviewState] = []
+
+        async def _capture_save(state_dir: Path, state: InterviewState) -> Result[Path, str]:
+            saved.append(state)
+            return await _noop_save(state_dir, state)
+
+        import ouroboros.mcp.tools.authoring_handlers as ah
+
+        monkeypatch.setattr(ah, "_plugin_save_state", _capture_save)
+
+        result = await handler.handle(
+            {
+                "session_id": "sess-ev",
+                "answer": "counted by service date",
+                "last_question": "Q?",
+                "evidence": "[from-code] billing-api: period end",
+            }
+        )
+
+        assert result.is_ok
+        assert "billing-api: period end" in result.value.meta["_subagent"]["prompt"]
+        # On the answer's own round, adding none of its own.
+        assert [(r.question, r.user_response, r.evidence) for r in saved[-1].rounds] == [
+            ("Q?", "counted by service date", "[from-code] billing-api: period end")
+        ]
+
+    async def test_plugin_path_carries_evidence_with_no_round_pending(
+        self, handler, monkeypatch
+    ) -> None:
+        """The other plugin entry: the answer opens the round it attaches to.
+
+        Each plugin dispatch is a new child session, so a resumed interview can
+        reach here with nothing persisted to fill. The answer appends a round,
+        and the evidence must find *that* one.
+        """
+        saved: list[InterviewState] = []
+
+        async def _load_empty(state_dir: Path, session_id: str) -> Result[InterviewState, str]:
+            del state_dir
+            return Result.ok(
+                InterviewState(interview_id=session_id, initial_context="test context")
+            )
+
+        async def _capture_save(state_dir: Path, state: InterviewState) -> Result[Path, str]:
+            saved.append(state)
+            return await _noop_save(state_dir, state)
+
+        import ouroboros.mcp.tools.authoring_handlers as ah
+
+        monkeypatch.setattr(ah, "_plugin_load_state", _load_empty)
+        monkeypatch.setattr(ah, "_plugin_save_state", _capture_save)
+
+        result = await handler.handle(
+            {
+                "session_id": "sess-ev-fresh",
+                "answer": "cancellations free the slot",
+                "last_question": "When does the slot reopen?",
+                "evidence": "[from-data] 12,480 cancellations",
+            }
+        )
+
+        assert result.is_ok
+        assert "12,480 cancellations" in result.value.meta["_subagent"]["prompt"]
+        assert [(r.question, r.evidence) for r in saved[-1].rounds] == [
+            ("When does the slot reopen?", "[from-data] 12,480 cancellations")
+        ]
+
     async def test_context_preserves_selected_repos(self, handler) -> None:
         result = await handler.handle(
             {
