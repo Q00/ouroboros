@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import shlex
 import signal
+import subprocess
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
@@ -21,6 +22,7 @@ from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
 from ouroboros.orchestrator.adapter import AgentMessage, ParamSupport, RuntimeHandle
 import ouroboros.orchestrator.codex_cli_runtime as codex_cli_runtime_module
 from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime
+from ouroboros.orchestrator.copilot_cli_runtime import CopilotCliRuntime
 from ouroboros.orchestrator.skill_tool_mapping import SkillToolMapping
 from ouroboros.router import Resolved, ResolveRequest
 from ouroboros.router.dispatch import SkillDispatchRouter as SharedSkillDispatchRouter
@@ -293,6 +295,263 @@ def test_build_command_rejects_cli_content_drift_before_version_probe(
     with pytest.raises(RuntimeError, match="Codex CLI executable changed"):
         runtime._build_command("/tmp/last-message")
     assert not side_effect.exists()
+
+
+def test_version_attestation_distinguishes_timeout_from_execution_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cli_path = tmp_path / "codex"
+    cli_path.write_text("#!/bin/sh\necho codex 1.0\n", encoding="utf-8")
+    cli_path.chmod(0o755)
+    runtime = CodexCliRuntime(cli_path=cli_path, cwd=tmp_path, model="gpt-5")
+
+    def timeout(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        raise subprocess.TimeoutExpired(str(cli_path), timeout=2)
+
+    monkeypatch.setattr(codex_cli_runtime_module.subprocess, "run", timeout)
+    timed_out = runtime._cli_executable_version_attestation()
+    assert timed_out.state is codex_cli_runtime_module._CliExecutableVersionState.TIMED_OUT
+    assert timed_out.identity is None
+
+    def execution_failure(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        raise OSError("deterministic probe failure")
+
+    monkeypatch.setattr(
+        codex_cli_runtime_module.subprocess,
+        "run",
+        execution_failure,
+    )
+    failed = runtime._cli_executable_version_attestation()
+    assert failed.state is codex_cli_runtime_module._CliExecutableVersionState.EXECUTION_FAILED
+    assert failed.identity is None
+
+
+def test_missing_attestations_never_compare_as_positive_identity_evidence() -> None:
+    state = codex_cli_runtime_module._CliExecutableVersionState
+    attestation = codex_cli_runtime_module._CliExecutableVersionAttestation
+
+    assert (
+        CodexCliRuntime._compare_cli_executable_version_attestations(
+            attestation(state.TIMED_OUT),
+            attestation(state.TIMED_OUT),
+        )
+        is state.TIMED_OUT
+    )
+    # Even an internally malformed "verified" value cannot turn None == None
+    # into positive identity evidence.
+    assert (
+        CodexCliRuntime._compare_cli_executable_version_attestations(
+            attestation(state.VERIFIED),
+            attestation(state.VERIFIED),
+        )
+        is state.EXECUTION_FAILED
+    )
+
+
+def test_initialization_timeout_blocks_without_claiming_executable_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cli_path = tmp_path / "codex"
+    cli_path.write_text("#!/bin/sh\necho codex 1.0\n", encoding="utf-8")
+    cli_path.chmod(0o755)
+    calls = 0
+
+    def timeout(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        nonlocal calls
+        calls += 1
+        raise subprocess.TimeoutExpired(str(cli_path), timeout=2)
+
+    monkeypatch.setattr(codex_cli_runtime_module.subprocess, "run", timeout)
+    runtime = CodexCliRuntime(cli_path=cli_path, cwd=tmp_path, model="gpt-5")
+
+    with pytest.raises(RuntimeError, match="timed out during runtime initialization") as excinfo:
+        runtime._build_command(str(tmp_path / "last-message"))
+
+    assert "executable changed" not in str(excinfo.value)
+    # A missing baseline cannot be repaired by comparing it to another missing
+    # probe: command construction fails before performing a second probe.
+    assert calls == 1
+
+
+def test_initialization_execution_failure_has_distinct_fail_closed_error(tmp_path: Path) -> None:
+    cli_path = tmp_path / "codex"
+    cli_path.write_text("#!/bin/sh\nexit 7\n", encoding="utf-8")
+    cli_path.chmod(0o755)
+    runtime = CodexCliRuntime(cli_path=cli_path, cwd=tmp_path, model="gpt-5")
+
+    with pytest.raises(RuntimeError, match="failed during runtime initialization") as excinfo:
+        runtime._build_command(str(tmp_path / "last-message"))
+
+    assert "executable changed" not in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    ("runtime_class", "display_name"),
+    [
+        (CodexCliRuntime, "Codex CLI"),
+        (CopilotCliRuntime, "Copilot CLI"),
+    ],
+)
+def test_check_time_timeout_is_fail_closed_but_retryable_for_codex_family(
+    runtime_class: type[CodexCliRuntime],
+    display_name: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cli_path = tmp_path / "runtime-cli"
+    cli_path.write_text("#!/bin/sh\necho runtime 1.0\n", encoding="utf-8")
+    cli_path.chmod(0o755)
+    runtime = runtime_class(cli_path=cli_path, cwd=tmp_path, model="test-model")
+    successful_run = codex_cli_runtime_module.subprocess.run
+
+    def timeout(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        raise subprocess.TimeoutExpired(str(cli_path), timeout=2)
+
+    monkeypatch.setattr(codex_cli_runtime_module.subprocess, "run", timeout)
+    assert (
+        runtime.execution_identity_contract()["cli_executable_version"]
+        == runtime._cli_executable_version_identity_snapshot
+    )
+    with pytest.raises(RuntimeError, match="timed out while verifying") as excinfo:
+        runtime._build_command(str(tmp_path / "last-message"), prompt="test")
+    assert str(excinfo.value).startswith(display_name)
+    assert "executable changed" not in str(excinfo.value)
+
+    # A transient check-time failure does not poison the initialization
+    # baseline. The same runtime succeeds after the probe becomes available.
+    monkeypatch.setattr(codex_cli_runtime_module.subprocess, "run", successful_run)
+    assert runtime._build_command(str(tmp_path / "last-message"), prompt="test")
+
+
+def test_check_time_execution_failure_is_not_reported_as_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cli_path = tmp_path / "codex"
+    cli_path.write_text("#!/bin/sh\necho codex 1.0\n", encoding="utf-8")
+    cli_path.chmod(0o755)
+    runtime = CodexCliRuntime(cli_path=cli_path, cwd=tmp_path, model="gpt-5")
+
+    def failed_probe(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args, 7, stdout="", stderr="temporary failure")
+
+    monkeypatch.setattr(codex_cli_runtime_module.subprocess, "run", failed_probe)
+    with pytest.raises(RuntimeError, match="failed while verifying") as excinfo:
+        runtime._build_command(str(tmp_path / "last-message"))
+    assert "executable changed" not in str(excinfo.value)
+
+
+def test_repeated_probe_timeouts_never_converge_to_false_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Model an overloaded 16-way probe burst without wall-clock races."""
+    cli_path = tmp_path / "codex"
+    cli_path.write_text("#!/bin/sh\necho codex 1.0\n", encoding="utf-8")
+    cli_path.chmod(0o755)
+    runtime = CodexCliRuntime(cli_path=cli_path, cwd=tmp_path, model="gpt-5")
+
+    def timeout(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        raise subprocess.TimeoutExpired(str(cli_path), timeout=2)
+
+    monkeypatch.setattr(codex_cli_runtime_module.subprocess, "run", timeout)
+    for _ in range(16):
+        with pytest.raises(RuntimeError, match="timed out while verifying") as excinfo:
+            runtime._build_command(str(tmp_path / "last-message"))
+        assert "executable changed" not in str(excinfo.value)
+
+
+def test_successful_version_change_has_distinct_changed_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cli_path = tmp_path / "codex"
+    cli_path.write_text("#!/bin/sh\necho ignored\n", encoding="utf-8")
+    cli_path.chmod(0o755)
+    outputs = iter(("codex 1.0\n", "codex 2.0\n"))
+
+    def version_probe(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args, 0, stdout=next(outputs), stderr="")
+
+    monkeypatch.setattr(codex_cli_runtime_module.subprocess, "run", version_probe)
+    runtime = CodexCliRuntime(cli_path=cli_path, cwd=tmp_path, model="gpt-5")
+
+    with pytest.raises(RuntimeError, match="executable version changed"):
+        runtime._build_command(str(tmp_path / "last-message"))
+
+
+@pytest.mark.parametrize("runtime_class", [CodexCliRuntime, CopilotCliRuntime])
+def test_atomic_executable_replacement_with_identical_evidence_is_changed(
+    runtime_class: type[CodexCliRuntime],
+    tmp_path: Path,
+) -> None:
+    """A same-bytes/same-version replacement still changes execution authority."""
+    script = "#!/bin/sh\necho runtime 1.0\n"
+    cli_path = tmp_path / "runtime-cli"
+    cli_path.write_text(script, encoding="utf-8")
+    cli_path.chmod(0o755)
+    runtime = runtime_class(cli_path=cli_path, cwd=tmp_path, model="test-model")
+    initialized = runtime._cli_executable_version_attestation_snapshot
+    assert initialized is not None
+    assert initialized.filesystem_identity == (cli_path.stat().st_dev, cli_path.stat().st_ino)
+
+    replacement = tmp_path / "replacement-cli"
+    replacement.write_text(script, encoding="utf-8")
+    replacement.chmod(0o755)
+    replacement_identity = (replacement.stat().st_dev, replacement.stat().st_ino)
+    assert replacement_identity != initialized.filesystem_identity
+    os.replace(replacement, cli_path)
+
+    current = runtime._cli_executable_version_attestation()
+    assert current.state is codex_cli_runtime_module._CliExecutableVersionState.VERIFIED
+    assert current.filesystem_identity == replacement_identity
+    assert (
+        runtime._compare_cli_executable_version_attestations(initialized, current)
+        is codex_cli_runtime_module._CliExecutableVersionState.CHANGED
+    )
+    with pytest.raises(RuntimeError, match="executable version changed"):
+        runtime._build_command(str(tmp_path / "last-message"), prompt="test")
+
+
+def test_atomic_symlink_target_replacement_with_identical_evidence_is_changed(
+    tmp_path: Path,
+) -> None:
+    """Target inode drift remains visible through an unchanged launch symlink."""
+    script = "#!/bin/sh\necho codex 1.0\n"
+    target = tmp_path / "codex-target"
+    target.write_text(script, encoding="utf-8")
+    target.chmod(0o755)
+    cli_link = tmp_path / "codex"
+    cli_link.symlink_to(target.name)
+    runtime = CodexCliRuntime(cli_path=cli_link, cwd=tmp_path, model="gpt-5")
+    initialized = runtime._cli_executable_version_attestation_snapshot
+    assert initialized is not None
+    assert initialized.filesystem_identity == (target.stat().st_dev, target.stat().st_ino)
+
+    replacement = tmp_path / "replacement-target"
+    replacement.write_text(script, encoding="utf-8")
+    replacement.chmod(0o755)
+    replacement_identity = (replacement.stat().st_dev, replacement.stat().st_ino)
+    assert replacement_identity != initialized.filesystem_identity
+    os.replace(replacement, target)
+
+    # The launch path and its textual target did not change, but the effective
+    # executable object did.
+    assert cli_link.readlink() == Path(target.name)
+    assert (
+        runtime._cli_executable_content_identity()
+        == runtime._cli_executable_content_identity_snapshot
+    )
+    current = runtime._cli_executable_version_attestation()
+    assert current.filesystem_identity == replacement_identity
+    assert (
+        runtime._compare_cli_executable_version_attestations(initialized, current)
+        is codex_cli_runtime_module._CliExecutableVersionState.CHANGED
+    )
+    with pytest.raises(RuntimeError, match="executable version changed"):
+        runtime._build_command(str(tmp_path / "last-message"))
 
 
 def test_execution_identity_tracks_launch_symlink_target(

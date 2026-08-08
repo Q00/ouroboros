@@ -153,6 +153,14 @@ copilot --no-color --log-level none \
 | `--agent`           | Custom agent profile; takes precedence over `--model`        |
 | `-p`                | One-shot prompt (no interactive REPL)                        |
 
+Before launching that command, the runtime applies the same executable
+version-attestation policy as Codex: initialization-time probe failure blocks
+the runtime because no positive baseline exists; a later timeout or execution
+failure blocks only the current attempt and is not reported as executable
+drift; only two successful, different attestations confirm a version change.
+This ensures that two missing `copilot --version` results never authorize a
+launch under load.
+
 ### MCP registration
 
 `ouroboros setup --runtime copilot` writes

@@ -216,6 +216,25 @@ ouroboros --help
 
 The `CodexCliRuntime` adapter launches `codex` (or `codex-cli`) as its transport layer, but wraps it with session handles, resume support, and deterministic skill/MCP dispatch so the runtime behaves like a persistent Ouroboros session.
 
+### Executable version attestation
+
+The adapter records successful `codex --version` evidence together with the
+selected path, effective target's device/inode pair, content digest, and
+symlink identity when the runtime is created, then verifies that evidence
+before each launch. The policy is fail-closed but does not confuse unavailable
+evidence with confirmed drift:
+
+- A timeout or execution failure during initialization leaves no positive
+  baseline, so execution is blocked and a new runtime session is required.
+- A timeout or execution failure during a later check blocks that attempt but
+  is reported as unavailable attestation evidence; the same runtime may be
+  retried.
+- Executable drift is reported only when two successful attestations differ.
+  Two missing attestations never count as proof that the executable is
+  unchanged.
+
+The Copilot runtime inherits the same attestation and comparison policy.
+
 > For a side-by-side comparison of all runtime backends, see the [runtime capability matrix](../runtime-capability-matrix.md).
 
 ## Codex CLI Strengths

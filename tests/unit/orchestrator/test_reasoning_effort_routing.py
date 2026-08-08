@@ -11,6 +11,9 @@ directly rather than assumed.
 from __future__ import annotations
 
 from dataclasses import replace
+from pathlib import Path
+
+import pytest
 
 from ouroboros.orchestrator.adapter import (
     FULL_CAPABILITIES,
@@ -21,6 +24,15 @@ from ouroboros.orchestrator.codex_cli_runtime import (
     _CODEX_REASONING_EFFORT_LEVELS,
     CodexCliRuntime,
 )
+
+
+@pytest.fixture
+def fake_cli_path(tmp_path: Path) -> str:
+    """Provide stable version evidence without invoking an installed host CLI."""
+    cli = tmp_path / "fake-agent-cli"
+    cli.write_text("#!/bin/sh\necho fake-agent-cli 1.0\n", encoding="utf-8")
+    cli.chmod(0o755)
+    return str(cli)
 
 
 class TestCapabilityDeclarations:
@@ -39,17 +51,17 @@ class TestCapabilityDeclarations:
         inherited = replace(FULL_CAPABILITIES, system_prompt_support=ParamSupport.TRANSLATED)
         assert inherited.reasoning_effort_support is ParamSupport.IGNORED
 
-    def test_codex_runtime_declares_native_effort(self) -> None:
-        runtime = CodexCliRuntime(cli_path="codex", cwd="/tmp")
+    def test_codex_runtime_declares_native_effort(self, fake_cli_path: str) -> None:
+        runtime = CodexCliRuntime(cli_path=fake_cli_path, cwd="/tmp")
         assert runtime.capabilities.reasoning_effort_support is ParamSupport.NATIVE
 
-    def test_copilot_runtime_declares_native_effort(self) -> None:
+    def test_copilot_runtime_declares_native_effort(self, fake_cli_path: str) -> None:
         from ouroboros.orchestrator.copilot_cli_runtime import (
             _COPILOT_REASONING_EFFORT_LEVELS,
             CopilotCliRuntime,
         )
 
-        runtime = CopilotCliRuntime(cli_path="copilot", cwd="/tmp")
+        runtime = CopilotCliRuntime(cli_path=fake_cli_path, cwd="/tmp")
         assert runtime.capabilities.reasoning_effort_support is ParamSupport.NATIVE
         # The enforceable vocabulary must be declared so a level the flag does not
         # accept is downgraded to advised instead of recorded as a false "enforced"
@@ -58,39 +70,43 @@ class TestCapabilityDeclarations:
             runtime.capabilities.enforceable_reasoning_efforts == _COPILOT_REASONING_EFFORT_LEVELS
         )
 
-    def test_gemini_and_goose_declare_advised_effort(self) -> None:
+    def test_gemini_and_goose_declare_advised_effort(self, fake_cli_path: str) -> None:
         from ouroboros.orchestrator.gemini_cli_runtime import GeminiCLIRuntime
         from ouroboros.orchestrator.goose_runtime import GooseCliRuntime
 
-        gemini = GeminiCLIRuntime(cli_path="gemini", cwd="/tmp")
-        goose = GooseCliRuntime(cli_path="goose", cwd="/tmp")
+        gemini = GeminiCLIRuntime(cli_path=fake_cli_path, cwd="/tmp")
+        goose = GooseCliRuntime(cli_path=fake_cli_path, cwd="/tmp")
         assert gemini.capabilities.reasoning_effort_support is ParamSupport.IGNORED
         assert goose.capabilities.reasoning_effort_support is ParamSupport.IGNORED
 
 
 class TestCopilotEffortEnforcement:
-    def _runtime(self):
+    def _runtime(self, fake_cli_path: str):
         from ouroboros.orchestrator.copilot_cli_runtime import CopilotCliRuntime
 
-        return CopilotCliRuntime(cli_path="copilot", cwd="/tmp")
+        return CopilotCliRuntime(cli_path=fake_cli_path, cwd="/tmp")
 
-    def test_known_level_is_enforced_via_flag(self) -> None:
-        command = self._runtime()._build_command("out.txt", prompt="hi", reasoning_effort="high")
+    def test_known_level_is_enforced_via_flag(self, fake_cli_path: str) -> None:
+        command = self._runtime(fake_cli_path)._build_command(
+            "out.txt", prompt="hi", reasoning_effort="high"
+        )
         assert "--reasoning-effort" in command
         idx = command.index("--reasoning-effort")
         assert command[idx + 1] == "high"
 
-    def test_unknown_level_is_not_injected(self) -> None:
-        command = self._runtime()._build_command(
+    def test_unknown_level_is_not_injected(self, fake_cli_path: str) -> None:
+        command = self._runtime(fake_cli_path)._build_command(
             "out.txt", prompt="hi", reasoning_effort="; rm -rf /"
         )
         assert "--reasoning-effort" not in command
 
-    def test_no_effort_emits_no_flag(self) -> None:
-        command = self._runtime()._build_command("out.txt", prompt="hi", reasoning_effort=None)
+    def test_no_effort_emits_no_flag(self, fake_cli_path: str) -> None:
+        command = self._runtime(fake_cli_path)._build_command(
+            "out.txt", prompt="hi", reasoning_effort=None
+        )
         assert "--reasoning-effort" not in command
 
-    def test_subclasses_accept_effort_kwarg_without_error(self) -> None:
+    def test_subclasses_accept_effort_kwarg_without_error(self, fake_cli_path: str) -> None:
         """codex execute_task forwards reasoning_effort to _build_command on every
         CodexCliRuntime subclass — each override must accept it (regression guard).
         """
@@ -98,8 +114,8 @@ class TestCopilotEffortEnforcement:
         from ouroboros.orchestrator.goose_runtime import GooseCliRuntime
 
         for runtime in (
-            GeminiCLIRuntime(cli_path="gemini", cwd="/tmp"),
-            GooseCliRuntime(cli_path="goose", cwd="/tmp"),
+            GeminiCLIRuntime(cli_path=fake_cli_path, cwd="/tmp"),
+            GooseCliRuntime(cli_path=fake_cli_path, cwd="/tmp"),
         ):
             # Must not raise; gemini/goose accept-and-ignore (no per-call flag).
             runtime._build_command("out.txt", prompt="hi", reasoning_effort="high")
@@ -138,11 +154,11 @@ class TestCopilotEffortEnforcement:
 
 
 class TestCodexEffortEnforcement:
-    def _runtime(self) -> CodexCliRuntime:
-        return CodexCliRuntime(cli_path="codex", cwd="/tmp")
+    def _runtime(self, fake_cli_path: str) -> CodexCliRuntime:
+        return CodexCliRuntime(cli_path=fake_cli_path, cwd="/tmp")
 
-    def test_known_level_is_enforced_via_config_override(self) -> None:
-        command = self._runtime()._build_command(
+    def test_known_level_is_enforced_via_config_override(self, fake_cli_path: str) -> None:
+        command = self._runtime(fake_cli_path)._build_command(
             output_last_message_path="/tmp/out.txt",
             reasoning_effort="high",
         )
@@ -151,8 +167,8 @@ class TestCodexEffortEnforcement:
         idx = command.index("-c")
         assert command[idx + 1] == "model_reasoning_effort=high"
 
-    def test_no_effort_emits_no_override(self) -> None:
-        command = self._runtime()._build_command(
+    def test_no_effort_emits_no_override(self, fake_cli_path: str) -> None:
+        command = self._runtime(fake_cli_path)._build_command(
             output_last_message_path="/tmp/out.txt",
             reasoning_effort=None,
         )
@@ -161,9 +177,9 @@ class TestCodexEffortEnforcement:
             isinstance(arg, str) and arg.startswith("model_reasoning_effort=") for arg in command
         )
 
-    def test_unknown_level_is_not_injected(self) -> None:
+    def test_unknown_level_is_not_injected(self, fake_cli_path: str) -> None:
         """An unexpected token must never reach the ``key=value`` override."""
-        command = self._runtime()._build_command(
+        command = self._runtime(fake_cli_path)._build_command(
             output_last_message_path="/tmp/out.txt",
             reasoning_effort="; rm -rf /",
         )
@@ -171,8 +187,8 @@ class TestCodexEffortEnforcement:
             isinstance(arg, str) and arg.startswith("model_reasoning_effort=") for arg in command
         )
 
-    def test_every_advertised_level_is_accepted(self) -> None:
-        runtime = self._runtime()
+    def test_every_advertised_level_is_accepted(self, fake_cli_path: str) -> None:
+        runtime = self._runtime(fake_cli_path)
         for level in _CODEX_REASONING_EFFORT_LEVELS:
             command = runtime._build_command(
                 output_last_message_path="/tmp/out.txt",

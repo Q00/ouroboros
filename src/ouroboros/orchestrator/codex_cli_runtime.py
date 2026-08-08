@@ -8,6 +8,7 @@ from collections.abc import AsyncIterator, Mapping
 import contextlib
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
+from enum import StrEnum
 import hashlib
 import json
 import math
@@ -215,6 +216,30 @@ _ITEM_FAILURE_STATUSES = frozenset(
 _ITEM_SUCCESS_STATUSES = frozenset({"completed", "success", "succeeded"})
 
 
+class _CliExecutableVersionState(StrEnum):
+    """Outcome of probing or comparing one CLI version attestation.
+
+    Probe unavailability is deliberately not represented by ``None``.  A
+    timeout and an execution failure have different operational meaning, and
+    neither is positive evidence that an executable stayed the same.  The
+    ``CHANGED`` state is produced only by comparing two successful probes.
+    """
+
+    VERIFIED = "verified"
+    TIMED_OUT = "timed_out"
+    EXECUTION_FAILED = "execution_failed"
+    CHANGED = "changed"
+
+
+@dataclass(frozen=True, slots=True)
+class _CliExecutableVersionAttestation:
+    """Structured version evidence for the selected CLI executable."""
+
+    state: _CliExecutableVersionState
+    identity: str | None = None
+    filesystem_identity: tuple[int, int] | None = None
+
+
 @dataclass(frozen=True, slots=True)
 class _CodexToolCall:
     """One normalized tool invocation derived from a Codex thread item."""
@@ -318,8 +343,13 @@ class CodexCliRuntime:
         self._cli_executable_content_identity_snapshot = (
             self._cli_executable_content_identity() if snapshots_cli_execution_identity else None
         )
+        self._cli_executable_version_attestation_snapshot = (
+            self._cli_executable_version_attestation() if snapshots_cli_execution_identity else None
+        )
         self._cli_executable_version_identity_snapshot = (
-            self._cli_executable_version_identity() if snapshots_cli_execution_identity else None
+            self._cli_executable_version_attestation_snapshot.identity
+            if self._cli_executable_version_attestation_snapshot is not None
+            else None
         )
         # Freeze the role-default model/profile once per runtime. Without this,
         # every ``codex exec`` call re-reads mutable profile config, so a long
@@ -512,12 +542,24 @@ class CodexCliRuntime:
         deliberately unavailable when the executable cannot provide a stable
         version response or content digest.
         """
+        return self._cli_executable_version_attestation().identity
+
+    def _cli_executable_version_attestation(self) -> _CliExecutableVersionAttestation:
+        """Return explicit success, timeout, or execution-failure evidence.
+
+        The probe remains bounded, but a transient failure is preserved as its
+        own state instead of being collapsed to ``None``.  Callers can therefore
+        fail closed without reporting an unchanged executable as mutated.
+        """
         executable_path = self._cli_executable_identity()
         if executable_path is None:
-            return None
+            return _CliExecutableVersionAttestation(_CliExecutableVersionState.EXECUTION_FAILED)
+        filesystem_identity = self._cli_executable_filesystem_identity()
+        if filesystem_identity is None:
+            return _CliExecutableVersionAttestation(_CliExecutableVersionState.EXECUTION_FAILED)
         content_digest = self._cli_executable_content_identity()
         if content_digest is None:
-            return None
+            return _CliExecutableVersionAttestation(_CliExecutableVersionState.EXECUTION_FAILED)
         symlink_identity = self._cli_executable_symlink_identity()
         try:
             result = subprocess.run(
@@ -527,18 +569,73 @@ class CodexCliRuntime:
                 timeout=2,
                 check=False,
             )
-        except (OSError, subprocess.TimeoutExpired):
-            return None
+        except subprocess.TimeoutExpired:
+            return _CliExecutableVersionAttestation(_CliExecutableVersionState.TIMED_OUT)
+        except (OSError, UnicodeError):
+            return _CliExecutableVersionAttestation(_CliExecutableVersionState.EXECUTION_FAILED)
         version_output = (result.stdout or result.stderr).strip()
         if result.returncode != 0 or not version_output:
-            return None
-        return self._hash_json_payload(
-            {
-                "content_sha256": content_digest,
-                "symlink": symlink_identity,
-                "version_output": version_output,
-            }
+            return _CliExecutableVersionAttestation(_CliExecutableVersionState.EXECUTION_FAILED)
+        # The content read and version subprocess span multiple syscalls. An
+        # atomic replacement during that window would otherwise produce a
+        # mixed attestation. Only publish evidence when the effective target's
+        # device/inode pair is stable across the entire probe.
+        if self._cli_executable_filesystem_identity() != filesystem_identity:
+            return _CliExecutableVersionAttestation(_CliExecutableVersionState.EXECUTION_FAILED)
+        return _CliExecutableVersionAttestation(
+            _CliExecutableVersionState.VERIFIED,
+            self._hash_json_payload(
+                {
+                    "content_sha256": content_digest,
+                    "filesystem": {
+                        "device": filesystem_identity[0],
+                        "inode": filesystem_identity[1],
+                    },
+                    "symlink": symlink_identity,
+                    "version_output": version_output,
+                }
+            ),
+            filesystem_identity,
         )
+
+    def _cli_executable_filesystem_identity(self) -> tuple[int, int] | None:
+        """Return the effective executable target's stable device/inode pair.
+
+        ``Path.stat`` follows a launch-path symlink, so replacing either a
+        direct executable or its symlink target changes this identity even
+        when replacement bytes and ``--version`` output are identical.
+        """
+        executable_path = self._cli_executable_identity()
+        if executable_path is None:
+            return None
+        try:
+            executable_stat = Path(executable_path).stat()
+        except OSError:
+            return None
+        return executable_stat.st_dev, executable_stat.st_ino
+
+    @staticmethod
+    def _compare_cli_executable_version_attestations(
+        initialized: _CliExecutableVersionAttestation,
+        current: _CliExecutableVersionAttestation,
+    ) -> _CliExecutableVersionState:
+        """Compare positive evidence without equating two missing probes."""
+        if initialized.state is not _CliExecutableVersionState.VERIFIED:
+            return initialized.state
+        if current.state is not _CliExecutableVersionState.VERIFIED:
+            return current.state
+        if (
+            initialized.identity is None
+            or current.identity is None
+            or initialized.filesystem_identity is None
+            or current.filesystem_identity is None
+        ):
+            return _CliExecutableVersionState.EXECUTION_FAILED
+        if initialized.filesystem_identity != current.filesystem_identity:
+            return _CliExecutableVersionState.CHANGED
+        if initialized.identity == current.identity:
+            return _CliExecutableVersionState.VERIFIED
+        return _CliExecutableVersionState.CHANGED
 
     def _cli_executable_symlink_identity(self) -> dict[str, str] | None:
         """Return launch-path symlink target identity without dereferencing it away."""
@@ -1114,7 +1211,13 @@ class CodexCliRuntime:
         )
 
     def _assert_cli_executable_identity_unchanged(self) -> None:
-        """Fail closed if the selected CLI executable changed in place."""
+        """Fail closed on drift or unavailable version-attestation evidence.
+
+        Initialization and check-time probe failures both block execution, but
+        use errors distinct from verified drift.  A caller may retry a
+        check-time transient failure on the same runtime; an initialization
+        failure has no trustworthy baseline and requires a new runtime.
+        """
         if self._cli_executable_path_identity is None:
             cli_path = str(self._cli_path)
             cli_candidate = Path(cli_path).expanduser()
@@ -1144,13 +1247,43 @@ class CodexCliRuntime:
                 "Codex CLI executable changed after runtime initialization; "
                 "start a new execution session"
             )
-        if (
-            self._cli_executable_version_identity()
-            == self._cli_executable_version_identity_snapshot
-        ):
+        initialized = self._cli_executable_version_attestation_snapshot
+        if initialized is None:
+            raise RuntimeError(
+                f"{self._display_name} version attestation was not captured during "
+                "runtime initialization; start a new execution session"
+            )
+        if initialized.state is _CliExecutableVersionState.TIMED_OUT:
+            raise RuntimeError(
+                f"{self._display_name} version attestation timed out during runtime "
+                "initialization; execution is blocked without claiming executable drift; "
+                "start a new execution session"
+            )
+        if initialized.state is _CliExecutableVersionState.EXECUTION_FAILED:
+            raise RuntimeError(
+                f"{self._display_name} version attestation failed during runtime "
+                "initialization; execution is blocked without claiming executable drift; "
+                "start a new execution session"
+            )
+
+        current = self._cli_executable_version_attestation()
+        comparison = self._compare_cli_executable_version_attestations(initialized, current)
+        if comparison is _CliExecutableVersionState.VERIFIED:
             return
+        if comparison is _CliExecutableVersionState.TIMED_OUT:
+            raise RuntimeError(
+                f"{self._display_name} version attestation timed out while verifying the "
+                "executable; execution is blocked without claiming executable drift; retry "
+                "the execution or start a new execution session"
+            )
+        if comparison is _CliExecutableVersionState.EXECUTION_FAILED:
+            raise RuntimeError(
+                f"{self._display_name} version attestation failed while verifying the "
+                "executable; execution is blocked without claiming executable drift; retry "
+                "the execution or start a new execution session"
+            )
         raise RuntimeError(
-            "Codex CLI executable changed after runtime initialization; "
+            f"{self._display_name} executable version changed after runtime initialization; "
             "start a new execution session"
         )
 
@@ -1355,7 +1488,7 @@ class CodexCliRuntime:
                 "kind": f"{self._runtime_handle_backend}_v1",
                 "cli_executable_path": self._cli_executable_identity(),
                 "cli_executable_content_sha256": self._cli_executable_content_identity(),
-                "cli_executable_version": self._cli_executable_version_identity(),
+                "cli_executable_version": self._cli_executable_version_identity_snapshot,
                 "fallback_model": None if native_agent else constructor_model,
                 "native_agent": native_agent,
                 "effective_model_observed": constructor_model is not None and native_agent is None,
@@ -1386,7 +1519,7 @@ class CodexCliRuntime:
             # could resume the same native thread under different defaults.
             "cli_executable_path": self._cli_executable_identity(),
             "cli_executable_content_sha256": self._cli_executable_content_identity(),
-            "cli_executable_version": self._cli_executable_version_identity(),
+            "cli_executable_version": self._cli_executable_version_identity_snapshot,
             "runtime_profile": self._runtime_profile.strip()
             if isinstance(self._runtime_profile, str) and self._runtime_profile.strip()
             else None,
