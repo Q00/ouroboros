@@ -52,18 +52,6 @@ def stable_pm_question_identity(question: str) -> str:
     return f"pm-question:{digest}"
 
 
-#: The question text a recorded evidence round carries. It is a constant for the
-#: same reason the initial-context summary question is: consumers that count or
-#: render rounds have to be able to tell a synthetic round from a question the
-#: person was actually asked, and comparing against a fixed string is the way
-#: this codebase already does that.
-#:
-#: The round it labels is always submitted *after* the person's answer, which is
-#: what keeps it from being one: a round submitted first would fill the pending
-#: question and be the answer, and one submitted after has nothing left to
-#: answer (RFC #1937 decision 3).
-PM_EVIDENCE_ROUND_QUESTION = "[evidence considered for the previous question]"
-
 #: Why the code lane carries no policy. A closed set, for the same reason the
 #: data lane's is closed: the reasons this lane can have are known in advance,
 #: so this is a choice rather than a sentence.

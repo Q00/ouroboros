@@ -446,92 +446,21 @@ def test_a_question_with_no_roster_still_gets_its_lanes(registry: FanoutRegistry
 
 
 @pytest.mark.asyncio
-async def test_evidence_never_fills_the_pending_question(tmp_path: Path) -> None:
-    """The ordering is structural, not a convention a host must honour.
+async def test_answer_evidence_answer_keeps_each_answer_on_its_own_question(tmp_path: Path) -> None:
+    """Evidence is a field on the round it informed, never a round of its own.
 
-    A host that submits evidence while a question is open must not have
-    answered it. The server appends instead of filling, so there is no call
-    order that turns a lane finding into somebody's answer.
+    Given its own round it is an answered entry sitting behind an unanswered
+    question, and every consumer reading "the trailing round is the pending one"
+    then files the next decision against a question nobody asked. Three stored
+    sessions carry exactly that damage. As a field the misreading has nothing to
+    read.
     """
-    from ouroboros.bigbang.answer_provenance import extraction_rounds
     from ouroboros.bigbang.interview import InterviewRound, InterviewState
     from ouroboros.core.types import Result as CoreResult
     from ouroboros.mcp.tools.pm_handler import PMInterviewHandler
-    from ouroboros.orchestrator.capabilities.pm_schemas import PM_EVIDENCE_ROUND_QUESTION
 
     handler = PMInterviewHandler(data_dir=tmp_path, agent_runtime_backend="claude")
-    state = InterviewState(interview_id="pm-e", initial_context="ctx")
-    state.rounds.append(
-        InterviewRound(round_number=1, question="What counts as a day?", user_response=None)
-    )
-
-    class _Engine:
-        codebase_context = ""
-        _selected_brownfield_repos: list[dict[str, str]] = []
-        deferred_items: list[str] = []
-        decide_later_items: list[str] = []
-        classifications: list[Any] = []
-
-        async def save_state(self, s: InterviewState) -> Any:
-            return CoreResult.ok(s)
-
-        def get_pending_reframe(self) -> None:
-            return None
-
-    result = await handler._record_evidence_round(
-        _Engine(), state, "pm-e", "[from-code] billing-api: access continues", str(tmp_path)
-    )
-
-    assert result.is_ok
-    assert result.value.meta["evidence_recorded"] is True
-    # The question is still waiting for a decision.
-    assert state.rounds[0].user_response is None
-    # Named apart from ``question`` on purpose: a response carrying that key is a
-    # turn the host shows and fans out around, and this one is an acknowledgement.
-    assert "question" not in result.value.meta
-    assert result.value.meta["pending_question"] == "What counts as a day?"
-    # The evidence is its own round, labelled so consumers can tell it apart.
-    assert state.rounds[1].question == PM_EVIDENCE_ROUND_QUESTION
-    # Visible to question generation, withheld from requirement extraction.
-    withheld = {item.question: item.withheld for item in extraction_rounds(state)}
-    assert withheld["What counts as a day?"] is False
-    assert withheld[PM_EVIDENCE_ROUND_QUESTION] is True
-
-
-def test_completion_counts_decisions_not_rounds() -> None:
-    """Readiness asks how often the person judged, not how many rounds exist.
-
-    Counting evidence rounds would score readiness a turn early for every
-    question that carried any.
-    """
-    from ouroboros.bigbang.answer_provenance import classify_answer_provenance
-
-    assert classify_answer_provenance("[from-code] a fact") == "observation"
-    assert classify_answer_provenance("[from-data] a number") == "observation"
-    assert classify_answer_provenance("counted by service date") == "user"
-
-
-@pytest.mark.asyncio
-async def test_answer_evidence_answer_keeps_each_answer_on_its_own_question(
-    tmp_path: Path,
-) -> None:
-    """Regression (#1941 review): evidence must not steal the next answer.
-
-    Recorded as an ordinary appended round, evidence becomes the trailing round
-    while the next question is still pending. A handler that finds the pending
-    question by being *last* then files the user's next decision under the
-    evidence marker and leaves the real question unanswered for the rest of the
-    session — silently, because both rounds look well-formed.
-    """
-    from ouroboros.bigbang.answer_provenance import extraction_rounds
-    from ouroboros.bigbang.interview import InterviewRound, InterviewState
-    from ouroboros.core.types import Result as CoreResult
-    from ouroboros.mcp.tools.pm_handler import PMInterviewHandler
-    from ouroboros.orchestrator.capabilities.pm_schemas import PM_EVIDENCE_ROUND_QUESTION
-
-    handler = PMInterviewHandler(data_dir=tmp_path, agent_runtime_backend="claude")
-    state = InterviewState(interview_id="pm-seq", initial_context="ctx")
-
+    state = InterviewState(interview_id="pm-field", initial_context="ctx")
     questions = iter(["Q2", "Q3"])
 
     class _Engine:
@@ -578,74 +507,251 @@ async def test_answer_evidence_answer_keeps_each_answer_on_its_own_question(
     state.rounds.append(InterviewRound(round_number=1, question="Q1", user_response=None))
 
     first = await handler._handle_answer(
-        engine, "pm-seq", "decided by service date", str(tmp_path), evidence="[from-code] api: x"
+        engine, "pm-field", "counted by service date", str(tmp_path), evidence="[from-code] api: x"
     )
     assert first.is_ok
 
+    # One question answered, one asked. The evidence added no round.
+    assert [r.question for r in state.rounds] == ["Q1", "Q2"]
+    answered = state.rounds[0]
+    assert answered.user_response == "counted by service date"
+    assert answered.evidence == "[from-code] api: x"
+    assert state.rounds[1].evidence is None
+
+    # And the next decision lands on its own question, not on anything behind it.
     second = await handler._handle_answer(
-        engine, "pm-seq", "cancellations free the slot", str(tmp_path)
+        engine, "pm-field", "cancellations free the slot", str(tmp_path)
     )
     assert second.is_ok
-
-    answered = {
-        r.question: r.user_response
-        for r in state.rounds
-        if r.question != PM_EVIDENCE_ROUND_QUESTION
-    }
-    assert answered["Q1"] == "decided by service date"
-    # The second decision belongs to Q2, not to the evidence marker.
-    assert answered["Q2"] == "cancellations free the slot"
-    # No question is left stranded unanswered behind an evidence round.
+    assert state.rounds[1].user_response == "cancellations free the slot"
     assert [r.question for r in state.rounds if r.user_response is None] == ["Q3"]
-    # And the evidence is still withheld from requirement extraction.
-    withheld = {r.question: r.withheld for r in extraction_rounds(state)}
-    assert withheld[PM_EVIDENCE_ROUND_QUESTION] is True
 
 
-def test_evidence_is_recorded_before_the_next_question_is_generated() -> None:
-    """The ordering is what makes recording it worth doing.
-
-    Evidence submitted on a later call reaches the generator one question too
-    late: the answer call already wrote the next question.
+def test_no_round_is_ever_created_for_evidence() -> None:
+    """The reviewer asked for a reconnect regression over evidence trailing a
+    pending question. That state can no longer be built, which is a stronger
+    answer than handling it: what is pinned here is its absence.
     """
     from ouroboros.bigbang.interview import InterviewRound, InterviewState
-    from ouroboros.mcp.tools.pm_handler import _append_evidence_round
-    from ouroboros.orchestrator.capabilities.pm_schemas import PM_EVIDENCE_ROUND_QUESTION
+    from ouroboros.mcp.tools.pm_handler import _attach_evidence, _pending_round
 
-    state = InterviewState(interview_id="pm-ord", initial_context="ctx")
+    state = InterviewState(interview_id="pm-none", initial_context="ctx")
     state.rounds.append(InterviewRound(round_number=1, question="Q1", user_response="A1"))
-    _append_evidence_round(state, "[from-data] 12,480")
+    state.rounds.append(InterviewRound(round_number=2, question="Q2", user_response=None))
 
-    assert state.rounds[-1].question == PM_EVIDENCE_ROUND_QUESTION
-    assert [r.question for r in state.rounds if r.user_response is None] == []
+    _attach_evidence(state, state.rounds[0], "[from-code] x")
+
+    assert len(state.rounds) == 2
+    pending = _pending_round(state)
+    assert pending is not None and pending.question == "Q2"
 
 
-def test_a_decision_is_never_filed_under_the_evidence_marker() -> None:
-    """The marker cannot be a question on any branch, including the fallback.
+def test_an_observation_in_the_answer_slot_attaches_without_answering() -> None:
+    """The guard path: a finding sent where a decision goes cannot become one."""
+    from ouroboros.bigbang.interview import InterviewRound, InterviewState
+    from ouroboros.mcp.tools.pm_handler import _attach_evidence, _pending_round
 
-    With no round pending, falling back to the trailing round picks the evidence
-    round — and the person's next decision is then recorded against a marker
-    they were never shown. The invariant is that an evidence round is not a
-    question, so no branch may treat it as one.
+    state = InterviewState(interview_id="pm-guard", initial_context="ctx")
+    state.rounds.append(InterviewRound(round_number=1, question="Q1", user_response=None))
+
+    pending = _pending_round(state)
+    _attach_evidence(state, pending, "[from-code] api: x")
+
+    assert state.rounds[0].user_response is None
+    assert state.rounds[0].evidence == "[from-code] api: x"
+
+
+def test_evidence_reaches_question_generation_but_not_requirement_extraction() -> None:
+    """The asymmetry survived the move off rounds; it is now the field's own.
+
+    Writing the next question needs to know what was already weighed. Distilling
+    requirements must not, or the PM's system as it stands gets written down as
+    the PM's decision — which is the promotion #1755 closed.
     """
     from ouroboros.bigbang.interview import InterviewRound, InterviewState
-    from ouroboros.orchestrator.capabilities.pm_schemas import PM_EVIDENCE_ROUND_QUESTION
+    from ouroboros.mcp.tools.pm_handler import _format_pm_transcript
 
-    state = InterviewState(interview_id="pm-fb", initial_context="ctx")
-    state.rounds.append(InterviewRound(round_number=1, question="Q1", user_response="A1"))
+    state = InterviewState(interview_id="pm-wh", initial_context="ctx")
     state.rounds.append(
         InterviewRound(
-            round_number=2, question=PM_EVIDENCE_ROUND_QUESTION, user_response="[from-code] x"
+            round_number=1,
+            question="When does access end?",
+            user_response="at period end",
+            evidence="[from-code] billing-api: period end",
         )
     )
 
-    pending_index = next(
-        (i for i in reversed(range(len(state.rounds))) if state.rounds[i].user_response is None),
+    for_generation = _format_pm_transcript(state, withhold_observations=False)
+    for_extraction = _format_pm_transcript(state, withhold_observations=True)
+
+    assert "billing-api: period end" in for_generation
+    assert "billing-api: period end" not in for_extraction
+    # The decision itself is in both: only what informed it is withheld.
+    assert "at period end" in for_extraction
+
+
+@pytest.mark.asyncio
+async def test_evidence_without_an_answer_attaches_to_the_pending_question(
+    tmp_path: Path,
+) -> None:
+    """A call carrying only evidence must not be accepted and dropped.
+
+    Splitting ``evidence`` out of ``answer`` left one blind spot: with no answer
+    beside it the reconnect branch returns before the attach, so the value
+    vanished while the call still reported ``ok``. That is the same class the
+    plugin path was blocked for — advertised, accepted, discarded.
+    """
+    from ouroboros.bigbang.interview import InterviewRound, InterviewState
+    from ouroboros.core.types import Result as CoreResult
+    from ouroboros.mcp.tools.pm_handler import PMInterviewHandler
+
+    handler = PMInterviewHandler(data_dir=tmp_path, agent_runtime_backend="claude")
+    state = InterviewState(interview_id="pm-late", initial_context="ctx")
+    state.rounds.append(InterviewRound(round_number=1, question="Q1", user_response="A1"))
+    state.rounds.append(InterviewRound(round_number=2, question="Q2", user_response=None))
+
+    class _Engine:
+        codebase_context = ""
+        _selected_brownfield_repos: list[dict[str, str]] = []
+        deferred_items: list[str] = []
+        decide_later_items: list[str] = []
+        classifications: list[Any] = []
+
+        async def load_state(self, _sid: str) -> Any:
+            return CoreResult.ok(state)
+
+        async def save_state(self, s: InterviewState) -> Any:
+            return CoreResult.ok(s)
+
+        def get_pending_reframe(self) -> None:
+            return None
+
+        def get_last_classification(self) -> None:
+            return None
+
+        def restore_meta(self, _m: Any) -> None:
+            return None
+
+    result = await handler._handle_answer(
+        _Engine(),
+        "pm-late",
         None,
+        str(tmp_path),
+        evidence="[from-code] billing-api: period end",
     )
-    assert pending_index is None
-    fallback = next(
-        (r.question for r in reversed(state.rounds) if r.question != PM_EVIDENCE_ROUND_QUESTION),
-        state.rounds[-1].question,
-    )
-    assert fallback == "Q1"
+
+    assert result.is_ok
+    # It landed on the question still waiting — the one it was weighed for.
+    assert state.rounds[1].evidence == "[from-code] billing-api: period end"
+    assert state.rounds[0].evidence is None
+    # No round was added, and that question is still the one being asked.
+    assert len(state.rounds) == 2
+    assert result.value.meta["question"] == "Q2"
+
+
+def test_reconnect_returns_the_unanswered_question_not_a_new_one() -> None:
+    """Pending is found by being unanswered, wherever it sits in the stream."""
+    from ouroboros.bigbang.interview import InterviewRound, InterviewState
+    from ouroboros.mcp.tools.pm_handler import _pending_round
+
+    state = InterviewState(interview_id="pm-rc", initial_context="ctx")
+    state.rounds.append(InterviewRound(round_number=1, question="Q1", user_response=None))
+    state.rounds.append(InterviewRound(round_number=2, question="Q2", user_response="A2"))
+
+    pending = _pending_round(state)
+    assert pending is not None and pending.question == "Q1"
+
+
+def test_readiness_counts_decisions_not_records() -> None:
+    """Readiness asks how often the person judged, not how much was recorded.
+
+    Evidence no longer occupies a round, so it cannot be counted by accident.
+    What remains countable is provenance, and only ``user`` provenance is a
+    judgement.
+    """
+    from ouroboros.bigbang.answer_provenance import classify_answer_provenance
+
+    assert classify_answer_provenance("[from-code] a fact") == "observation"
+    assert classify_answer_provenance("[from-data] a number") == "observation"
+    assert classify_answer_provenance("counted by service date") == "user"
+
+
+def test_no_constant_names_a_synthetic_round_any_more() -> None:
+    """The shape is gone, so the label that made it buildable is gone too.
+
+    Kept "just for readers", a constant naming a synthetic round leaves that
+    round one import away from returning — and the three stored sessions it cost
+    are the argument against keeping it.
+    """
+    import ouroboros.orchestrator.capabilities.pm_schemas as pm_schemas
+
+    assert [name for name in dir(pm_schemas) if "EVIDENCE_ROUND" in name] == []
+
+
+@pytest.mark.asyncio
+async def test_with_nothing_pending_the_answer_lands_on_the_last_real_question(
+    tmp_path: Path,
+) -> None:
+    """The fallback needs no filter now, so this pins that it needs none.
+
+    Every round is a question the person was asked, so the trailing one is the
+    most recent such question by construction. This is the branch that used to
+    hand a decision to the evidence marker.
+    """
+    from ouroboros.bigbang.interview import InterviewRound, InterviewState
+    from ouroboros.core.types import Result as CoreResult
+    from ouroboros.mcp.tools.pm_handler import PMInterviewHandler
+
+    handler = PMInterviewHandler(data_dir=tmp_path, agent_runtime_backend="claude")
+    state = InterviewState(interview_id="pm-fb", initial_context="ctx")
+    # Nothing pending: the person answered, then answers again on a reconnect.
+    state.rounds.append(InterviewRound(round_number=1, question="Q1", user_response="A1"))
+
+    class _Engine:
+        codebase_context = ""
+        _selected_brownfield_repos: list[dict[str, str]] = []
+        deferred_items: list[str] = []
+        decide_later_items: list[str] = []
+        classifications: list[Any] = []
+
+        async def load_state(self, _sid: str) -> Any:
+            return CoreResult.ok(state)
+
+        async def save_state(self, s: InterviewState) -> Any:
+            return CoreResult.ok(s)
+
+        async def record_response(self, s: InterviewState, answer: str, question: str) -> Any:
+            s.record_answer(question, answer)
+            return CoreResult.ok(s)
+
+        async def ask_next_question(self, _s: InterviewState) -> Any:
+            return CoreResult.ok("Q2")
+
+        async def check_completion(self, _s: InterviewState) -> None:
+            return None
+
+        def get_pending_reframe(self) -> None:
+            return None
+
+        def get_last_classification(self) -> None:
+            return None
+
+        def restore_meta(self, _m: Any) -> None:
+            return None
+
+        def compute_deferred_diff(self, _a: int, _b: int) -> dict[str, Any]:
+            return {
+                "new_deferred": [],
+                "new_decide_later": [],
+                "deferred_count": 0,
+                "decide_later_count": 0,
+            }
+
+    result = await handler._handle_answer(_Engine(), "pm-fb", "revised: A1b", str(tmp_path))
+
+    assert result.is_ok
+    # Recorded against Q1 — the question the person was actually shown.
+    assert [(r.question, r.user_response) for r in state.rounds if r.user_response] == [
+        ("Q1", "A1"),
+        ("Q1", "revised: A1b"),
+    ]

@@ -170,6 +170,15 @@ class InterviewRound(BaseModel):
             the caller adopted from elsewhere. Consumers read this field rather
             than re-reading the ``[from-*]`` marker, which is what drifted
             before (#1755).
+        evidence: What the person weighed this answer against, when a caller
+            supplied it. A field on the round it informed rather than a round of
+            its own: given its own round it becomes an answered entry sitting
+            behind an unanswered question, and every consumer that reads "the
+            trailing round is the pending one" then files the next decision
+            against a question nobody asked. That is not hypothetical — three
+            stored sessions carry decisions under such a marker, with the real
+            questions left unanswered forever. Here there is no round to
+            misread, so the reading cannot go wrong.
         timestamp: When this round was created.
     """
 
@@ -177,6 +186,7 @@ class InterviewRound(BaseModel):
     question: str
     user_response: str | None = None
     provenance: AnswerProvenance = "user"
+    evidence: str | None = None
     timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
     @model_validator(mode="after")
@@ -325,6 +335,11 @@ class InterviewState(BaseModel):
                         # #1755 — one that promoted an observation — would be
                         # judged current and reused.
                         "provenance": round_data.provenance,
+                        # ``evidence`` is absent for the mirror-image reason.
+                        # It is what the person weighed, never what requirement
+                        # extraction may read, so two states differing only in
+                        # it distil identically. Fingerprinting it would expire
+                        # a still-correct cache every time a lane reported.
                     }
                     for round_data in self.rounds
                 ],
@@ -1575,6 +1590,11 @@ class InterviewEngine:
                 response = round_data.user_response
                 if len(response) > self._MAX_USER_RESPONSE_CHARS:
                     response = response[: self._MAX_USER_RESPONSE_CHARS] + "..."
+                if round_data.evidence:
+                    # Carried on the answer's own turn. A separate turn would be
+                    # a question nobody asked, which is the shape this field
+                    # exists to remove.
+                    response = f"{response}\n\n[weighed against]\n{round_data.evidence}"
                 messages.append(Message(role=MessageRole.USER, content=response))
 
         return messages
