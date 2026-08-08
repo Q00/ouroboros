@@ -1118,7 +1118,8 @@ _POSTPOSITIVE_BROWSER_DENIAL_RE = re.compile(
     r"offered|provided|present|included)|"
     r"unsupported|disabled|unavailable|dropped|excluded|"
     r"turned\s+off|removed|prohibited|forbidden|banned|blocked|stripped|"
-    r"denied|denylisted|off[\s\-]limits)\b"
+    r"denied|denylisted|off[\s\-]limits|out\s+of\s+scope|"
+    r"not\s+in\s+scope|beyond\s+(?:the\s+)?scope)\b"
 )
 
 
@@ -1281,7 +1282,7 @@ def _ledger_has_browser_context(ledger: SeedDraftLedger) -> bool:
 
 _NON_BROWSER_RUNTIME_RE = re.compile(
     r"\b(?:desktop|native|terminal|shell|mobile|ios|android|electron|"
-    r"batch|cron|headless)\b"
+    r"batch|cron|headless|processes?|local(?:ly)?|python|node|jvm|java)\b"
 )
 
 
@@ -1343,9 +1344,10 @@ _GOAL_COMPONENT_TARGET_RE = re.compile(
     # bare "with" stays outside so a co-produced component is not
     # swallowed.
     r"\b(?:(?:[\w\-'’]+(?:ed|ing)\s+)?(?:for|of|in|inside|within|into|to|"
-    r"by|alongside|beside)|[\w\-'’]+(?:ed|ing)\s+"
-    # "hosted/mounted ON", "running/nested UNDER" (#1813 R71).
-    r"(?:through|with|from|on|onto|under|beneath|atop)"
+    r"by|alongside|beside|as)|[\w\-'’]+(?:ed|ing)\s+"
+    # "hosted/mounted ON", "running/nested UNDER" (#1813 R71);
+    # identity relations "packaged/distributed AS" (#1813 R75).
+    r"(?:through|with|from|on|onto|under|beneath|atop|as)"
     # A bare host preposition reaches the component when its object is a
     # SINGULAR instance — with a determiner ("on a browser extension",
     # #1813 R72) or brand-qualified without one ("on Chrome browser
@@ -1834,7 +1836,24 @@ def _matches_web_app(ledger: SeedDraftLedger) -> bool:
     # catalog is required. Non-web-product goals (extensions, crawlers,
     # test suites, CLIs) still need genuine UI-composition evidence.
     if _goal_artifact_head_is_web_app(_goal_text(ledger)):
-        return True
+        # A bare browser qualifier is the AMBIGUOUS ownership form
+        # (#1813 R75): under a runtime that declares a competing
+        # non-browser environment, "browser compliance dashboard" is a
+        # subject compound, so only explicit web artifact vocabulary
+        # ("web app", "website", "web-based") overrides the runtime.
+        runtime_env = _strip_negated_signals(
+            _POSTPOSITIVE_BROWSER_DENIAL_RE.sub(" ", runtime),
+            _WEB_APP_GOAL_SIGNAL_FRAGMENT,
+        )
+        runtime_bars_browser = bool(
+            _NON_BROWSER_RUNTIME_RE.search(runtime_env)
+        ) and not _SECTION_BROWSER_ENV_RE.search(runtime_env)
+        if (
+            not runtime_bars_browser
+            or _WEB_APP_ARTIFACT_PHRASE_RE.search(_goal_text(ledger))
+            or re.search(r"\bweb[\s\-]based\b|\bin[\s\-]browser\b", _goal_text(ledger))
+        ):
+            return True
     # An explicitly co-produced web app ("a Python library with an admin
     # web app") retains web ownership regardless of incidental output
     # wording (#1813 R30) — the overlap stays an honest ambiguity.

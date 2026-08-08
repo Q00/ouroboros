@@ -4062,6 +4062,45 @@ def test_brand_qualified_determinerless_hosts_reach_the_component(goal: str) -> 
     assert TaskClass.WEB_APP not in result.classes
 
 
+def test_bare_qualifier_defers_to_a_competing_runtime() -> None:
+    """R75 guard: a bare browser qualifier is the ambiguous ownership
+    form — under a competing runtime it reads as a subject compound,
+    whatever the topical noun, while explicit web artifact vocabulary
+    still overrides."""
+    ledger = _bare_ledger("Build a browser compliance dashboard")
+    _seed_section(ledger, "outputs", value="Interactive charts with a filters panel")
+    _seed_section(ledger, "runtime_context", value="Runs as a local Python process")
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
+        "Build a settings page packaged as a Chrome browser extension",
+        "Build a settings page distributed as a Firefox browser add-on",
+    ],
+)
+def test_identity_relations_reach_the_component(goal: str) -> None:
+    """R75 guard: "packaged/distributed as" declares the artifact's
+    identity — the surface belongs to the component it ships as."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value="Settings panel with save button")
+    _seed_section(ledger, "runtime_context", value="Runs in browsers")
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes
+
+
+def test_out_of_scope_is_a_postpositive_denial() -> None:
+    """R75 guard: "browser support is out of scope" removes the browser
+    signal like the other postpositive denials."""
+    ledger = _bare_ledger("Build a dashboard; browser support is out of scope")
+    _seed_section(ledger, "outputs", value="Interactive charts with a filters panel")
+    _seed_section(ledger, "runtime_context", value="Runs as a local Python process")
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes
+
+
 @pytest.mark.parametrize(
     "goal",
     [
