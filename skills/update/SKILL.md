@@ -72,6 +72,9 @@ When the user invokes this skill:
   other recorded profiles.
 - The Claude SDK and MCP 2 profiles are never combined or substituted.
 - Missing or ambiguous installation identity is a non-mutating error.
+- Automatic runtime refresh preserves the configured backend and the existing
+  OpenCode `plugin`/`subprocess` topology instead of inferring a replacement
+  from PATH.
 - `ouroboros update` supports `--check`, `--yes`, `--dry-run`,
   `--prerelease`, and `--runtime`; see `ouroboros update --help`.
 

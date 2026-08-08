@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 import json
 from pathlib import Path
 import re
+from typing import Literal
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -14,20 +16,34 @@ from ouroboros.cli.commands.update import (
     PACKAGE_NAME,
     InstallationIdentity,
     InstallationIdentityError,
+    RuntimeRefreshTopology,
     _compare_versions,
+    _configured_runtime_topology,
     _detect_installation_identity,
     _fallback_version_key,
     _is_prerelease,
     _latest_pypi_version,
     _refresh_claude_plugin,
+    _refresh_runtime_config,
     _resolve_environment_console,
     _resolve_runtime,
     _upgrade_command,
     _upgrade_environment,
     app,
 )
+from ouroboros.core.errors import ConfigError
 
 runner = CliRunner()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_runtime_topology() -> Iterator[None]:
+    """Keep CLI-flow tests independent of the developer's real config file."""
+    with patch(
+        "ouroboros.cli.commands.update._configured_runtime_topology",
+        return_value=RuntimeRefreshTopology(),
+    ):
+        yield
 
 
 def _plain(output: str) -> str:
@@ -487,6 +503,77 @@ class TestResolveRuntime:
         with patch("ouroboros.cli.commands.update.shutil.which", return_value=None):
             assert _resolve_runtime("auto") == "none"
 
+    @pytest.mark.parametrize("configured_backend", ["hermes", "opencode", "codex", "claude"])
+    def test_auto_preserves_configured_backend(self, configured_backend: str) -> None:
+        with patch(
+            "ouroboros.cli.commands.update.shutil.which",
+            return_value="/usr/bin/claude",
+        ) as which:
+            assert (
+                _resolve_runtime("auto", configured_backend=configured_backend)
+                == configured_backend
+            )
+        which.assert_not_called()
+
+
+class TestConfiguredRuntimeTopology:
+    def test_missing_config_keeps_path_fallback_available(self) -> None:
+        with patch(
+            "ouroboros.cli.commands.update.load_config",
+            side_effect=ConfigError("missing config"),
+        ):
+            assert _configured_runtime_topology() == RuntimeRefreshTopology()
+
+    def test_reads_backend_and_opencode_mode_from_valid_config(self) -> None:
+        config = MagicMock()
+        config.orchestrator.runtime_backend = "opencode"
+        config.orchestrator.opencode_mode = "subprocess"
+        with patch("ouroboros.cli.commands.update.load_config", return_value=config):
+            assert _configured_runtime_topology() == RuntimeRefreshTopology(
+                runtime_backend="opencode",
+                opencode_mode="subprocess",
+            )
+
+    def test_legacy_opencode_config_preserves_effective_subprocess_topology(self) -> None:
+        config = MagicMock()
+        config.orchestrator.runtime_backend = "opencode"
+        config.orchestrator.opencode_mode = None
+        with patch("ouroboros.cli.commands.update.load_config", return_value=config):
+            assert _configured_runtime_topology() == RuntimeRefreshTopology(
+                runtime_backend="opencode",
+                opencode_mode="subprocess",
+            )
+
+    @pytest.mark.parametrize(
+        ("opencode_mode", "plugin_dispatch"),
+        [("plugin", True), ("subprocess", False)],
+    )
+    def test_opencode_refresh_forwards_existing_mcp_topology(
+        self,
+        opencode_mode: Literal["plugin", "subprocess"],
+        plugin_dispatch: bool,
+    ) -> None:
+        from ouroboros.mcp.tools.subagent import should_dispatch_via_plugin
+
+        with patch("ouroboros.cli.commands.update._run_step", return_value=True) as run:
+            assert _refresh_runtime_config(
+                "opencode",
+                False,
+                _mock_identity("uv"),
+                opencode_mode=opencode_mode,
+            )
+
+        assert run.call_args.args[0] == [
+            "/managed/uv/venvs/ouroboros-ai/bin/ouroboros",
+            "setup",
+            "--runtime",
+            "opencode",
+            "--opencode-mode",
+            opencode_mode,
+            "--non-interactive",
+        ]
+        assert should_dispatch_via_plugin("opencode", opencode_mode) is plugin_dispatch
+
 
 class TestClaudePluginRefresh:
     def test_existing_plugin_is_explicitly_updated_after_install(self) -> None:
@@ -637,6 +724,77 @@ class TestUpdateFlow:
 
         assert result.exit_code == 0
         assert "Runtime refresh skipped" in result.output
+        run.assert_not_called()
+
+    @pytest.mark.parametrize("configured_backend", ["hermes", "codex", "claude"])
+    def test_auto_update_preserves_configured_backend(
+        self,
+        configured_backend: str,
+    ) -> None:
+        with (
+            patch("ouroboros.cli.commands.update.__version__", "0.1.0"),
+            patch(
+                "ouroboros.cli.commands.update._latest_pypi_version",
+                return_value="99.0.0",
+            ),
+            patch(
+                "ouroboros.cli.commands.update._detect_installation_identity",
+                return_value=_mock_identity("uv"),
+            ),
+            patch(
+                "ouroboros.cli.commands.update._configured_runtime_topology",
+                return_value=RuntimeRefreshTopology(configured_backend),
+            ),
+            patch(
+                "ouroboros.cli.commands.update.shutil.which",
+                return_value="/usr/bin/available",
+            ),
+            patch("ouroboros.cli.commands.update.subprocess.run") as run,
+        ):
+            result = runner.invoke(app, ["--dry-run"])
+
+        assert result.exit_code == 0
+        output = _plain(result.output)
+        assert f"setup --runtime {configured_backend} --non-interactive" in output
+        if configured_backend != "claude":
+            assert "claude plugin" not in output
+        run.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "runtime_args",
+        [[], ["--runtime", "opencode"]],
+        ids=["auto", "explicit"],
+    )
+    def test_opencode_update_preserves_subprocess_topology(
+        self,
+        runtime_args: list[str],
+    ) -> None:
+        with (
+            patch("ouroboros.cli.commands.update.__version__", "0.1.0"),
+            patch(
+                "ouroboros.cli.commands.update._latest_pypi_version",
+                return_value="99.0.0",
+            ),
+            patch(
+                "ouroboros.cli.commands.update._detect_installation_identity",
+                return_value=_mock_identity("uv"),
+            ),
+            patch(
+                "ouroboros.cli.commands.update._configured_runtime_topology",
+                return_value=RuntimeRefreshTopology("opencode", "subprocess"),
+            ),
+            patch(
+                "ouroboros.cli.commands.update.shutil.which",
+                return_value="/usr/bin/claude",
+            ),
+            patch("ouroboros.cli.commands.update.subprocess.run") as run,
+        ):
+            result = runner.invoke(app, ["--dry-run", *runtime_args])
+
+        assert result.exit_code == 0
+        output = _plain(result.output)
+        assert "setup --runtime opencode --opencode-mode subprocess --non-interactive" in output
+        assert "claude plugin" not in output
         run.assert_not_called()
 
     def test_explicit_claude_runtime_without_claude_cli_is_a_notice_not_a_failure(

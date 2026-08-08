@@ -35,6 +35,8 @@ from ouroboros.cli.formatters.panels import (
     print_success,
     print_warning,
 )
+from ouroboros.config.loader import load_config
+from ouroboros.core.errors import ConfigError
 
 app = typer.Typer(
     name="update",
@@ -157,6 +159,14 @@ class InstallationIdentity:
     console_path: Path
     manager_binary: str
     manager_home: Path
+
+
+@dataclass(frozen=True)
+class RuntimeRefreshTopology:
+    """Configured runtime identity that an unattended update must preserve."""
+
+    runtime_backend: str | None = None
+    opencode_mode: Literal["plugin", "subprocess"] | None = None
 
 
 def _normalise_distribution_name(name: str) -> str:
@@ -462,19 +472,50 @@ def _refresh_claude_plugin(dry_run: bool) -> bool | None:
     )
 
 
-def _refresh_runtime_config(runtime: str, dry_run: bool, identity: InstallationIdentity) -> bool:
+def _refresh_runtime_config(
+    runtime: str,
+    dry_run: bool,
+    identity: InstallationIdentity,
+    *,
+    opencode_mode: Literal["plugin", "subprocess"] | None = None,
+) -> bool:
     """Re-run setup through the proven installation's refreshed console script."""
+    command = [str(identity.console_path), "setup", "--runtime", runtime]
+    if runtime in {"opencode", "opencode_cli"} and opencode_mode is not None:
+        command.extend(["--opencode-mode", opencode_mode])
+    command.append("--non-interactive")
     return _run_step(
-        [str(identity.console_path), "setup", "--runtime", runtime, "--non-interactive"],
+        command,
         description=f"Refreshed {runtime} runtime config",
         dry_run=dry_run,
     )
 
 
-def _resolve_runtime(runtime: str) -> str:
-    """Resolve --runtime auto to the best available runtime."""
+def _configured_runtime_topology() -> RuntimeRefreshTopology:
+    """Read the persisted runtime topology without inferring it from PATH."""
+    try:
+        config = load_config()
+    except ConfigError:
+        return RuntimeRefreshTopology()
+    runtime_backend = config.orchestrator.runtime_backend
+    opencode_mode = config.orchestrator.opencode_mode
+    # Legacy OpenCode configs predate the explicit mode field. Their effective
+    # topology is non-plugin/subprocess because the dispatch gate requires an
+    # explicit ``plugin`` value; preserve that behavior during refresh.
+    if runtime_backend == "opencode" and opencode_mode is None:
+        opencode_mode = "subprocess"
+    return RuntimeRefreshTopology(
+        runtime_backend=runtime_backend,
+        opencode_mode=opencode_mode,
+    )
+
+
+def _resolve_runtime(runtime: str, *, configured_backend: str | None = None) -> str:
+    """Resolve --runtime auto while preserving an existing configured backend."""
     if runtime != "auto":
         return runtime
+    if configured_backend is not None:
+        return configured_backend
     if shutil.which("claude") is not None:
         return "claude"
     if shutil.which("codex") is not None:
@@ -536,7 +577,7 @@ def update(
             "--runtime",
             "-r",
             help="Runtime integration to refresh after upgrading "
-            "(auto, claude, codex, ..., or none to skip).",
+            "(auto preserves the configured backend; none skips refresh).",
         ),
     ] = "auto",
 ) -> None:
@@ -622,7 +663,16 @@ def update(
             raise typer.Exit(1)
 
     failed: list[str] = []
-    resolved_runtime = _resolve_runtime(runtime)
+    configured_topology = _configured_runtime_topology()
+    resolved_runtime = _resolve_runtime(
+        runtime,
+        configured_backend=configured_topology.runtime_backend,
+    )
+    opencode_mode = (
+        configured_topology.opencode_mode
+        if resolved_runtime in {"opencode", "opencode_cli"}
+        else None
+    )
     if resolved_runtime == "none":
         print_info("Runtime refresh skipped — package upgrade only.")
     elif resolved_runtime == "claude":
@@ -642,7 +692,12 @@ def update(
     else:
         # Codex and the other setup-supported runtimes: setup re-installs
         # the packaged rules/skills, so no separate plugin step is needed.
-        if not _refresh_runtime_config(resolved_runtime, dry_run, identity):
+        if not _refresh_runtime_config(
+            resolved_runtime,
+            dry_run,
+            identity,
+            opencode_mode=opencode_mode,
+        ):
             failed.append(f"{resolved_runtime} runtime config refresh")
 
     console.print()

@@ -824,7 +824,7 @@ ouroboros update [OPTIONS]
 | `-y, --yes` | flag | off | Skip confirmation prompt (for scripts) |
 | `--dry-run` | flag | off | Show the commands that would run without executing them |
 | `--prerelease / --no-prerelease` | flag | auto | Include pre-releases (default: only when a pre-release is installed) |
-| `-r, --runtime` | text | `auto` | Runtime integration to refresh after upgrading (`auto`, `claude`, `codex`, ..., or `none` to skip) |
+| `-r, --runtime` | text | `auto` | Runtime integration to refresh after upgrading. `auto` preserves the configured backend; `none` skips refresh |
 
 **Examples:**
 
@@ -857,7 +857,7 @@ ouroboros update --runtime none -y
    `plugin update`) when the `claude` CLI is available
 5. Re-runs `ouroboros setup --runtime <rt> --non-interactive` for the selected runtime
 
-With `--runtime auto` (the default), the runtime is picked by probing for the `claude` CLI first, then `codex`; when neither is found the runtime refresh is skipped with a notice — the package upgrade still completes. Runtime setup and the post-update version check always use the console script inside the same proven environment, including `.exe`/`PATHEXT` launcher resolution on native Windows.
+With `--runtime auto` (the default), an existing configured backend is preserved. Only an unconfigured installation probes for the `claude` CLI first and then `codex`; when neither is found the runtime refresh is skipped with a notice and the package upgrade still completes. Existing OpenCode integrations also preserve their mutually exclusive `plugin` or `subprocess` mode. Runtime setup and the post-update version check always use the console script inside the same proven environment, including `.exe`/`PATHEXT` launcher resolution on native Windows.
 
 > **Installation identity:** the updater does not guess from global tool lists,
 > PATH order, directory names, or the selected runtime. If the receipt is
