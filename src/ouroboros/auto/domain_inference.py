@@ -749,11 +749,11 @@ _RELATIONAL_TARGET_RE = re.compile(
     r"served\s+(?:from|on)|published\s+(?:on|to))\s+"
     # Coordinated consumer lists are consumed whole (#1813 R37): the web
     # item may sit anywhere in "mobile apps and web apps".
-    r"(?:(?:an?|the|my|our|your)\s+)?(?:[\w\-'’]+(?:\s+[\w\-'’]+){0,2}?\s*(?:,|\band\b|\bor\b|/)\s*){0,3}?"
+    r"(?:(?:an?|the|my|our|your)\s+)?(?:[\w\-'’]+(?:\s+[\w\-'’]+){0,2}?\s*(?:,|\band\b|\bor\b|\bas\s+well\s+as\b|\balong\s+with\b|\bplus\b|/)\s*){0,3}?"
     r"(?:an?\s+|the\s+)?(?:[\w\-'’]+\s+){0,2}?"
     r"(?:web[\s\-]?app(?:lication)?s?|webapps?|websites?|web\s+uis?|frontends?|"
     r"front[\s\-]ends?|single[\s\-]page\s+app(?:lication)?s?)\b"
-    r"(?:\s*(?:,|\band\b|\bor\b|/)\s*(?:(?:an?|the|my|our|your)\s+)?[\w\-'’]+(?:\s+[\w\-'’]+){0,2}){0,3}"
+    r"(?:\s*(?:,|\band\b|\bor\b|\bas\s+well\s+as\b|\balong\s+with\b|\bplus\b|/)\s*(?:(?:an?|the|my|our|your)\s+)?[\w\-'’]+(?:\s+[\w\-'’]+){0,2}){0,3}"
 )
 
 
@@ -844,7 +844,7 @@ def _goal_has_web_only_conjunct(goal_text: str, other_evidence_re: re.Pattern[st
 
 
 _POSTPOSITIVE_BROWSER_DENIAL_RE = re.compile(
-    rf"\b{_WEB_APP_GOAL_SIGNAL_FRAGMENT}(?:\s+support)?\s+(?:is\s+|are\s+)?"
+    rf"\b{_WEB_APP_GOAL_SIGNAL_FRAGMENT}(?:\s+[\w\-]+){{0,2}}?\s+(?:is\s+|are\s+)?"
     r"(?:not\s+supported|unsupported|disabled|unavailable|dropped|excluded|"
     r"turned\s+off|removed)\b"
 )
@@ -1038,7 +1038,7 @@ _CONSUMED_DEPENDENCY_RE = re.compile(
     r"(?:an?\s+|the\s+)?(?:[\w\-'’]+\s+){0,2}?"
     r"(?:public\s+api|rest\s+apis?|apis?|sdks?|clis?|command[\s\-]line(?:\s+(?!(?:or|and|nor|but)\b)[\w\-'’]+){0,2}|web\s+services?)\b"
     # Later coordinated items are dependencies too (#1813 R37).
-    r"(?:\s*(?:,|\band\b|\bor\b|/)\s*(?:(?:an?|the|my|our|your)\s+)?[\w\-'’]+(?:\s+[\w\-'’]+){0,2}){0,3}"
+    r"(?:\s*(?:,|\band\b|\bor\b|\bas\s+well\s+as\b|\balong\s+with\b|\bplus\b|/)\s*(?:(?:an?|the|my|our|your)\s+)?[\w\-'’]+(?:\s+[\w\-'’]+){0,2}){0,3}"
 )
 _PRENOMINAL_DEPENDENCY_CLIENT_RE = re.compile(
     r"\b(?:public\s+api|rest\s+apis?|apis?|sdks?|clis?|"

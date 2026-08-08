@@ -2650,3 +2650,24 @@ def test_coordinated_dependency_lists_are_fully_consumed() -> None:
     result = derive_domain_from_ledger(ledger)
     assert result.is_single
     assert result.single is TaskClass.WEB_APP
+
+
+def test_postpositive_denial_with_capability_noun() -> None:
+    """R38 probe: the denied capability noun is generic, not just
+    "support"."""
+    ledger = _bare_ledger("Build a native desktop settings tool")
+    _seed_section(ledger, "outputs", value="Settings panel for local files")
+    _seed_section(
+        ledger, "runtime_context", value="Browser integration is disabled; native desktop runtime"
+    )
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes
+
+
+def test_as_well_as_joins_consumer_lists() -> None:
+    """R38 probe: "as well as" coordinates consumer targets too."""
+    ledger = _bare_ledger("Build a desktop tool compatible with mobile apps as well as web apps")
+    _seed_section(ledger, "outputs", value="Settings panel for local files")
+    _seed_section(ledger, "runtime_context", value="Native desktop runtime")
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes
