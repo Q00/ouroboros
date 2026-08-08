@@ -318,22 +318,60 @@ async def rebind_generation(
     generation_number: int,
 ) -> bool:
     """Bind an unfinished outer receipt to the generation its core claim owns."""
-    engine = _engine(event_store)
-    if engine is None:
+    settle = getattr(event_store, "settle_transactional_write", None)
+    declared_settle = getattr(type(event_store), "settle_transactional_write", None)
+    if not callable(declared_settle) or not callable(settle):
         return False
+    return await settle(
+        lambda engine: _rebind_generation(
+            engine,
+            scope=scope,
+            lineage_id=lineage_id,
+            owner_id=owner_id,
+            generation_number=generation_number,
+        ),
+        operation="rebind_lineage_generation",
+    )
+
+
+async def _rebind_generation(
+    engine: AsyncEngine,
+    *,
+    scope: str,
+    lineage_id: str,
+    owner_id: str,
+    generation_number: int,
+) -> bool:
     async with engine.begin() as connection:
-        result = await connection.execute(
-            update(lineage_advancement_claims_table)
-            .where(
-                lineage_advancement_claims_table.c.scope == scope,
-                lineage_advancement_claims_table.c.lineage_id == lineage_id,
-                lineage_advancement_claims_table.c.owner_id == owner_id,
-                lineage_advancement_claims_table.c.completed.is_(False),
-                lineage_advancement_claims_table.c.lease_expires_at_ms > _now_ms(),
-            )
-            .values(generation_number=generation_number)
+        result = await _update_generation(
+            connection,
+            scope=scope,
+            lineage_id=lineage_id,
+            owner_id=owner_id,
+            generation_number=generation_number,
         )
     return bool(result.rowcount)
+
+
+async def _update_generation(
+    connection: AsyncConnection,
+    *,
+    scope: str,
+    lineage_id: str,
+    owner_id: str,
+    generation_number: int,
+) -> Any:
+    return await connection.execute(
+        update(lineage_advancement_claims_table)
+        .where(
+            lineage_advancement_claims_table.c.scope == scope,
+            lineage_advancement_claims_table.c.lineage_id == lineage_id,
+            lineage_advancement_claims_table.c.owner_id == owner_id,
+            lineage_advancement_claims_table.c.completed.is_(False),
+            lineage_advancement_claims_table.c.lease_expires_at_ms > _now_ms(),
+        )
+        .values(generation_number=generation_number)
+    )
 
 
 async def observe(

@@ -8,9 +8,11 @@ import json
 import multiprocessing
 from pathlib import Path
 import time
+from unittest.mock import AsyncMock
 
 import pytest
 
+from ouroboros.core.errors import PersistenceError
 from ouroboros.core.lineage import GenerationPhase
 from ouroboros.core.seed import (
     EvaluationPrinciple,
@@ -979,6 +981,86 @@ async def test_outer_claim_rebinds_before_nested_generation_effects(tmp_path: Pa
         assert receipt.generation_number == 2
     finally:
         await writer.close()
+        await reader.close()
+
+
+@pytest.mark.asyncio
+async def test_generation_rebind_ignores_synthetic_mock_settlement_capability() -> None:
+    """Lightweight mocks retain the no-durable-authority fallback."""
+    event_store = AsyncMock()
+    synthetic_settle = event_store.settle_transactional_write
+
+    assert not await lineage_claims.rebind_generation(
+        event_store,
+        scope="evolve-handler",
+        lineage_id="mock-lineage",
+        owner_id="mock-owner",
+        generation_number=2,
+    )
+    synthetic_settle.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_close_drains_generation_rebind_and_refuses_post_close_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A rebind transaction cannot outlive its EventStore lifecycle."""
+    writer, reader = await _stores(tmp_path / "claim-rebind-close.db")
+    claim = await lineage_claims.try_acquire(
+        writer,
+        scope="evolve-handler",
+        lineage_id="claim-rebind-close",
+        generation_number=1,
+        owner_id="rebind-owner",
+        request_key="rebind-request",
+    )
+    assert claim is not None and claim.acquired
+    entered, release = asyncio.Event(), asyncio.Event()
+    original_update = lineage_claims._update_generation
+
+    async def gated_update(*args, **kwargs):  # type: ignore[no-untyped-def]
+        entered.set()
+        await release.wait()
+        return await original_update(*args, **kwargs)
+
+    monkeypatch.setattr(lineage_claims, "_update_generation", gated_update)
+    rebind_task = asyncio.create_task(
+        lineage_claims.rebind_generation(
+            writer,
+            scope="evolve-handler",
+            lineage_id="claim-rebind-close",
+            owner_id="rebind-owner",
+            generation_number=2,
+        )
+    )
+    await asyncio.wait_for(entered.wait(), timeout=5)
+    close_task = asyncio.create_task(writer.close())
+    await asyncio.sleep(0)
+    assert not close_task.done()
+
+    release.set()
+    assert await asyncio.wait_for(rebind_task, timeout=5)
+    await asyncio.wait_for(close_task, timeout=10)
+
+    with pytest.raises(PersistenceError, match="closing"):
+        await lineage_claims.rebind_generation(
+            writer,
+            scope="evolve-handler",
+            lineage_id="claim-rebind-close",
+            owner_id="rebind-owner",
+            generation_number=3,
+        )
+
+    try:
+        observed = await lineage_claims.observe(
+            reader,
+            scope="evolve-handler",
+            lineage_id="claim-rebind-close",
+        )
+        assert observed is not None
+        assert observed.generation_number == 2
+    finally:
         await reader.close()
 
 
