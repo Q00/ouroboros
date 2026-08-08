@@ -3578,6 +3578,49 @@ def test_component_nouns_rehead_the_browser_qualifier(
     assert TaskClass.WEB_APP not in result.classes
 
 
+def test_component_goals_resist_generic_browser_runtimes() -> None:
+    """R61 guard: component ownership survives generic runtime wording —
+    "Runs in browsers" cannot hand an extension surface to web_app."""
+    ledger = _bare_ledger("Build a browser extension settings page")
+    _seed_section(ledger, "outputs", value="Settings panel with permission toggles")
+    _seed_section(ledger, "runtime_context", value="Runs in browsers")
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes
+
+
+@pytest.mark.parametrize(
+    ("goal", "excluded"),
+    [
+        ("Build a REST API documentation website", TaskClass.WEB_SERVICE),
+        ("Build a CLI documentation website", TaskClass.CLI),
+    ],
+)
+def test_attributive_artifact_mentions_follow_the_final_head(
+    goal: str, excluded: TaskClass
+) -> None:
+    """R61 probe: the final-head rule is shared across classes — a
+    documentation website about an API or CLI is the website."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value="Reference pages with navigation and search panel")
+    _seed_section(ledger, "runtime_context", value="Runs in browsers")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP
+    assert excluded not in result.classes
+
+
+def test_monitoring_subject_dashboards_own_with_runtime_evidence() -> None:
+    """R61 probe: the inspection veto's product-head exception accepts
+    standardized runtime evidence — monitoring is the dashboard's
+    subject, not its artifact type."""
+    ledger = _bare_ledger("Build a webhook monitoring dashboard")
+    _seed_section(ledger, "outputs", value="Interactive charts and a filters panel")
+    _seed_section(ledger, "runtime_context", value="Runs in browsers")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP
+
+
 @pytest.mark.parametrize(
     "goal",
     [

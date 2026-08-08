@@ -488,7 +488,13 @@ def _matches_cli(ledger: SeedDraftLedger) -> bool:
     # Consumed tooling ("using a command-line image converter") is a
     # dependency, not the produced artifact (#1813 R28).
     goal_text = _strip_consumed_dependencies(_goal_text(ledger))
-    goal_signal = _goal_has_unnegated_cli_signal(goal_text)
+    # Attributive CLI mentions follow the final-head rule shared with the
+    # library and web-app vocabulary (#1813 R61): in "a CLI documentation
+    # website" the produced artifact is the website, so the goal-side CLI
+    # token carries no ownership when the first NP heads a UI product.
+    goal_signal = _goal_has_unnegated_cli_signal(goal_text) and not _goal_first_np_has_ui_shape(
+        _goal_text(ledger)
+    )
     # Each of the three signals is independently sufficient once the
     # ledger-evidence gate above is satisfied. The earlier form
     # `runtime_signal or (output_signal and (goal_signal or outputs))`
@@ -542,12 +548,19 @@ def _matches_web_service(ledger: SeedDraftLedger) -> bool:
     service_goal = _strip_negated_signals(goal, _WEB_SERVICE_SIGNAL_FRAGMENT)
     # A production verb governing the API ("serving predictions via a
     # REST API") keeps it produced even through via/through (#1813 W1).
-    if _PRODUCED_SERVICE_RE.search(service_goal):
+    # Goal-side service evidence follows the final-head rule (#1813 R61):
+    # in "a REST API documentation website" the API is the website's
+    # subject, so a UI-headed goal contributes no service ownership —
+    # outputs evidence (produced responses, endpoint lists) still owns.
+    ui_headed_goal = _goal_first_np_has_ui_shape(goal)
+    if not ui_headed_goal and _PRODUCED_SERVICE_RE.search(service_goal):
         return True
     # The sections are joined with a sentence boundary so the destination
     # rule sees the goal's own imperative segment (#1813 R53) — keyword
     # matching never legitimately spans the outputs/goal seam.
-    visible = _strip_consumed_dependencies(outputs + ". " + service_goal)
+    visible = _strip_consumed_dependencies(
+        outputs + ". " + ("" if ui_headed_goal else service_goal)
+    )
     # Response nouns describe service ownership only when a server-like
     # artifact governs a production verb (#1813 R37).  Browser clients also
     # display HTTP responses / JSON bodies, so those detached payload nouns
@@ -1332,6 +1345,27 @@ _NOMINAL_GERUND_WORDS = frozenset(
         "polling",
     ]
 )
+# A component noun anywhere in the first NP owns the artifact (#1813
+# R61): "browser extension settings page" is an extension surface, and
+# no runtime wording — specialized or generic — can hand it back to
+# web_app.
+_COMPONENT_NOUN_WORDS = frozenset(
+    [
+        "extension",
+        "extensions",
+        "plugin",
+        "plugins",
+        "addon",
+        "addons",
+        "add-on",
+        "add-ons",
+        "devtool",
+        "devtools",
+        "driver",
+        "drivers",
+        "automation",
+    ]
+)
 # The gate WALK accepts more nominal gerunds than the ownership REs
 # (#1813 R56): "browser monitoring dashboard" is Q00's own product
 # example, and the walk only filters — it cannot grant — so activity
@@ -1369,6 +1403,8 @@ def _goal_first_np_has_ui_shape(goal_text: str) -> bool:
     first_segment = re.split(r"[.;:!?,]", goal_text)[0]
     for token in re.findall(r"[\w'’\-]+", first_segment):
         lowered = token.lower()
+        if lowered in _COMPONENT_NOUN_WORDS:
+            return False
         if lowered in _NP_CHAIN_STOP_WORDS:
             break
         if lowered in _NP_DETERMINER_WORDS:
@@ -1472,8 +1508,16 @@ def _matches_web_app(ledger: SeedDraftLedger) -> bool:
     # A goal declaring an inspection/automation artifact marks output
     # widgets as its targets (#1813 R30) — clause-level ownership, not
     # another noun list.
+    # The product-head exception accepts standardized runtime evidence
+    # (#1813 R61): "webhook monitoring dashboard" with a browser
+    # execution environment is a dashboard whose subject is monitoring,
+    # not a monitoring tool.
     if _INSPECTION_TOOL_GOAL_RE.search(_goal_text(ledger)) and not (
         _goal_has_browser_ui_product_head(_goal_text(ledger))
+        or (
+            _goal_first_np_has_ui_shape(_goal_text(ledger))
+            and _SECTION_BROWSER_ENV_RE.search(_section_browser_context_text(ledger))
+        )
     ):
         return False
     # Positive UI-product ownership precedes output composition (#1813
