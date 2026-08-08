@@ -417,6 +417,10 @@ from ouroboros.orchestrator.verifier import (
     VerifierVerdict,
     verifier_operational_failure_verdict,
 )
+from ouroboros.orchestrator.workspace_evidence_paths import (
+    is_untracked_top_level_evidence_path,
+    load_tracked_workspace_paths,
+)
 
 _PARALLEL_PAUSE_REPLAY_PAGE_SIZE = 64
 _has_usage_limit_pause = adaptive_concurrency.has_usage_limit_pause
@@ -5146,18 +5150,24 @@ class ParallelACExecutor:
                     for declared in declared_paths
                 )
 
+            tracked_paths = load_tracked_workspace_paths(root)
+
             digest = hashlib.sha256()
             paths = sorted(root.rglob("*"), key=lambda path: path.as_posix())
             for path in paths:
                 relative = path.relative_to(root)
                 declared_contract_path = is_declared_contract_path(relative)
                 if (
-                    any(
+                    is_untracked_top_level_evidence_path(
+                        relative,
+                        tracked_paths=tracked_paths,
+                        is_directory=path.is_dir() and not path.is_symlink(),
+                    )
+                    or any(
                         part in _WORKSPACE_FINGERPRINT_IGNORED_DIRECTORIES
                         for part in relative.parts
                     )
-                    and not declared_contract_path
-                ):
+                ) and not declared_contract_path:
                     continue
                 try:
                     stat = path.lstat()

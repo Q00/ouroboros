@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator, Iterator, Mapping
+from contextvars import ContextVar
 from copy import deepcopy
 from dataclasses import replace
 import hashlib
@@ -35,6 +36,7 @@ from ouroboros.events.session_signal import (
     create_session_signal_queued_event,
     create_session_signal_requested_event,
 )
+from ouroboros.orchestrator import provider_admission
 from ouroboros.orchestrator.ac_runtime_handle_manager import ACRuntimeHandleManager
 from ouroboros.orchestrator.adapter import (
     AgentMessage,
@@ -214,6 +216,7 @@ def _live_executor(
     process_local_resume_nonce: str,
     max_concurrent: int = 3,
     session_signal_hub: Any | None = None,
+    executor_type: type[ParallelACExecutor] = ParallelACExecutor,
 ) -> ParallelACExecutor:
     """Build the production provider boundary against a real event store."""
 
@@ -225,7 +228,7 @@ def _live_executor(
     )
     assert router is not None
     adapter.working_directory = working_directory
-    return ParallelACExecutor(
+    return executor_type(
         adapter=adapter,
         event_store=event_store,
         console=MagicMock(),
@@ -2651,6 +2654,7 @@ async def test_signal_blocked_before_provider_entry_preserves_primary_across_pau
 @pytest.mark.asyncio
 async def test_live_pre_entry_sibling_remains_pending_across_route_pause(
     tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A sibling held behind the semaphore has no provider effect to hand off."""
 
@@ -2658,11 +2662,39 @@ async def test_live_pre_entry_sibling_remains_pending_across_route_pause(
     await store.initialize()
     adapter = _Adapter()
     calls: list[str] = []
+    first_provider_entered = asyncio.Event()
+    sibling_waiting_for_admission = asyncio.Event()
+    sibling_execution = ContextVar("sibling_execution", default=False)
+    original_provider_admission_wait = provider_admission.wait
+
+    async def observe_sibling_admission_wait() -> None:
+        if sibling_execution.get():
+            sibling_waiting_for_admission.set()
+        await original_provider_admission_wait()
+
+    monkeypatch.setattr(provider_admission, "wait", observe_sibling_admission_wait)
+
+    class _SynchronizedExecutor(ParallelACExecutor):
+        async def _execute_single_ac(self, *args: Any, **kwargs: Any) -> ACExecutionResult:
+            is_sibling = kwargs["ac_index"] == 1
+            if is_sibling:
+                await first_provider_entered.wait()
+            sibling_token = sibling_execution.set(is_sibling)
+            try:
+                return await super()._execute_single_ac(*args, **kwargs)
+            finally:
+                sibling_execution.reset(sibling_token)
 
     async def execute_task(*_args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
         ac_name = "first" if "## Your Task (AC 1)\nship first" in kwargs["prompt"] else "second"
-        calls.append(ac_name)
+        if ac_name == "first":
+            first_provider_entered.set()
         runtime_handle = kwargs.get("resume_handle")
+        calls.append(ac_name)
+        if ac_name == "first" and (
+            runtime_handle is None or runtime_handle.resume_session_id is None
+        ):
+            await sibling_waiting_for_admission.wait()
         if ac_name == "first" and (
             runtime_handle is None or runtime_handle.resume_session_id is None
         ):
@@ -2706,6 +2738,7 @@ async def test_live_pre_entry_sibling_remains_pending_across_route_pause(
             working_directory=str(tmp_path),
             process_local_resume_nonce=nonce,
             max_concurrent=1,
+            executor_type=_SynchronizedExecutor,
         )
         await first_executor._run_batch_with_bounded_route_escalation(**run_kwargs)
 
@@ -2715,14 +2748,18 @@ async def test_live_pre_entry_sibling_remains_pending_across_route_pause(
             limit=3,
         )
         assert handoffs == []
+        assert first_provider_entered.is_set()
         assert calls == ["first"]
 
+        first_provider_entered = asyncio.Event()
+        sibling_waiting_for_admission = asyncio.Event()
         resumed_executor = _live_executor(
             adapter=adapter,
             event_store=store,
             working_directory=str(tmp_path),
             process_local_resume_nonce=nonce,
             max_concurrent=1,
+            executor_type=_SynchronizedExecutor,
         )
         resumed = await resumed_executor._run_batch_with_bounded_route_escalation(**run_kwargs)
 

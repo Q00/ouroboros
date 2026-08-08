@@ -145,6 +145,15 @@ class TestGetStatusStyle:
         assert _get_status_style("unknown") == ""
         assert _get_status_style("custom") == ""
 
+    def test_cancelled_and_markup_like_values_render_as_plain_text(self) -> None:
+        table = create_status_table([{"name": "exec_[danger]", "status": "cancelled[/]"}])
+        output = StringIO()
+
+        Console(file=output, color_system=None).print(table)
+
+        assert "exec_[danger]" in output.getvalue()
+        assert "cancelled[/]" in output.getvalue()
+
 
 class TestPrintTable:
     """Tests for print_table function."""
