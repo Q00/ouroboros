@@ -8,6 +8,7 @@ from contextlib import suppress
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 import inspect
+from pathlib import Path
 import re
 import threading
 import time
@@ -55,6 +56,7 @@ from ouroboros.auto.recovery_plan import (
 from ouroboros.auto.reference_candidate_bridge import (
     apply_requirement_distillation_to_ledger,
 )
+from ouroboros.auto.seed_preflight import run_seed_preflight
 from ouroboros.auto.seed_repairer import SeedRepairer
 from ouroboros.auto.seed_reviewer import SeedReview, SeedReviewer
 from ouroboros.auto.state import (
@@ -113,11 +115,21 @@ _RECOVERY_BLOCKED_CHOICES: str = (
 
 
 class SeedQaRepairMappingError(RuntimeError):
-    def __init__(self, feedback: tuple[str, ...]) -> None:
+    def __init__(
+        self,
+        feedback: tuple[str, ...],
+        *,
+        code: str = "seed_qa_feedback_unmapped",
+        message: str | None = None,
+    ) -> None:
         self.feedback: tuple[str, ...] = feedback
+        self.code: str = code
         super().__init__(
-            "Seed QA feedback could not be mapped to a bounded repair; "
-            "manual Seed revision is required"
+            message
+            or (
+                "Seed QA feedback could not be mapped to a bounded repair; "
+                "manual Seed revision is required"
+            )
         )
 
 
@@ -526,6 +538,27 @@ class AutoPipeline:
                 ),
                 event_store=getattr(self.interview_driver, "event_store", None),
             )
+            if result.status in {"blocked", "failed"}:
+                # Silent-block fix: a blocked pipeline still terminates its
+                # background *job* as COMPLETED ("Job complete"), so without a
+                # dedicated attention event nothing wakes a
+                # ``wait_for="attention_or_ac_change"`` observer and the block
+                # goes unannounced. Emit one typed event per outermost
+                # terminal so every block class — not just the Seed gates —
+                # reaches the attention relay.
+                await self._emit_runtime_event(
+                    "auto.session.blocked",
+                    state.auto_session_id,
+                    {
+                        "schema_version": 1,
+                        "auto_session_id": state.auto_session_id,
+                        "status": result.status,
+                        "stop_reason_code": state.last_error_code,
+                        "tool_name": state.last_tool_name,
+                        "blocker": (result.blocker or "")[:320],
+                        "resume_capability": result.resume_capability.value,
+                    },
+                )
         return result
 
     async def _run_pipeline(self, state: AutoPipelineState) -> AutoPipelineResult:
@@ -1311,6 +1344,12 @@ class AutoPipeline:
                 state.mark_blocked(blocker, tool_name="grade_gate")
                 self._save(state)
                 return self._result(state, ledger, review=review, blocker=blocker)
+
+            preflight_blocked = await self._run_seed_preflight_gate(
+                state, ledger, seed, review=review
+            )
+            if preflight_blocked is not None:
+                return preflight_blocked
 
             seed_qa, seed, review = await self._run_seed_qa_gate(state, ledger, seed, review=review)
             if seed_qa is not None:
@@ -2788,6 +2827,53 @@ class AutoPipeline:
         self._save(state)
         return msg
 
+    async def _run_seed_preflight_gate(
+        self,
+        state: AutoPipelineState,
+        ledger: SeedDraftLedger,
+        seed: Seed,
+        *,
+        review: SeedReview | None,
+    ) -> AutoPipelineResult | None:
+        """Deterministically verify the Seed's executability claims before QA/RUN.
+
+        The LLM Seed QA judge cannot notice that a claimed verify script does
+        not exist or that an environment variable has no binding. This gate
+        checks those claims against the filesystem and blocks with the open
+        questions a human must answer — a fabricated verification harness must
+        not reach RUN, and the repair is missing facts, not another rewrite.
+        """
+        workspace_root: Path | None = None
+        if state.cwd:
+            candidate = Path(state.cwd).expanduser()
+            if candidate.is_dir():
+                workspace_root = candidate
+        report = run_seed_preflight(seed, workspace_root=workspace_root)
+        if report.passed:
+            return None
+        questions = list(report.open_questions)[:8]
+        await self._emit_runtime_event(
+            "auto.seed_preflight.blocked",
+            state.auto_session_id,
+            {
+                "schema_version": 1,
+                "auto_session_id": state.auto_session_id,
+                "seed_id": seed.metadata.seed_id,
+                "codes": [finding.code for finding in report.blocking_findings][:8],
+                "open_questions": questions,
+            },
+        )
+        blocker = (
+            f"Seed preflight found {len(report.blocking_findings)} unexecutable contract "
+            "claim(s); answer these open questions, revise the Seed, and resume: "
+            + " | ".join(questions)
+        )
+        state.mark_blocked(
+            blocker, tool_name="seed_preflight", error_code="seed_preflight_unexecutable"
+        )
+        self._save(state)
+        return self._result(state, ledger, review=review, blocker=blocker)
+
     async def _run_seed_qa_gate(
         self,
         state: AutoPipelineState,
@@ -2896,13 +2982,13 @@ class AutoPipeline:
                             "score": float(qa_result.score),
                             "differences": state.last_qa_differences[:5],
                             "suggestions": state.last_qa_suggestions[:5],
-                            "reason": "seed_qa_feedback_unmapped",
+                            "reason": exc.code,
                         },
                     )
                     state.mark_blocked(
                         str(exc),
                         tool_name="seed_qa",
-                        error_code="seed_qa_feedback_unmapped",
+                        error_code=exc.code,
                     )
                     self._save(state)
                     return (
@@ -4770,7 +4856,14 @@ def _recoverable_phase_for_tool(tool_name: str | None) -> AutoPhase | None:
         return AutoPhase.INTERVIEW
     if tool_name == "seed_generator":
         return AutoPhase.SEED_GENERATION
-    if tool_name in {"seed_saver", "grade_gate", "seed_loader", "seed_repairer", "seed_qa"}:
+    if tool_name in {
+        "seed_saver",
+        "grade_gate",
+        "seed_loader",
+        "seed_repairer",
+        "seed_qa",
+        "seed_preflight",
+    }:
         # ``seed_repairer`` joins this set so a repair-phase timeout (the
         # outer ``asyncio.wait_for`` around ``repairer.converge`` inside
         # AutoPipeline.run) is recoverable on ``--resume``: the only sensible
@@ -4918,15 +5011,12 @@ def _seed_with_seed_qa_lateral_feedback(
         for constraint in seed.constraints
         if not _is_seed_qa_diagnostic_constraint(constraint)
     )
+    del qa_result
     metadata_updates: dict[str, Any] = {
         "seed_id": f"seed_{uuid4().hex[:12]}",
         "created_at": datetime.now(UTC),
         "parent_seed_id": seed.metadata.seed_id,
     }
-    if _requests_seed_qa_ambiguity_repair(qa_result):
-        metadata_updates["ambiguity_score"] = min(
-            seed.metadata.ambiguity_score, _SEED_QA_AMBIGUITY_REPAIR_SCORE
-        )
     return seed.model_copy(
         update={
             "constraints": tuple(dict.fromkeys((*existing_constraints, *normalized_feedback))),
@@ -4949,10 +5039,6 @@ def _seed_with_seed_qa_feedback(seed: Seed, qa_result: EvaluateResult, *, attemp
         "created_at": datetime.now(UTC),
         "parent_seed_id": seed.metadata.seed_id,
     }
-    if _requests_seed_qa_ambiguity_repair(qa_result):
-        metadata_updates["ambiguity_score"] = min(
-            seed.metadata.ambiguity_score, _SEED_QA_AMBIGUITY_REPAIR_SCORE
-        )
     return seed.model_copy(
         update={
             "constraints": tuple(dict.fromkeys((*existing_constraints, *normalized_feedback))),
@@ -4973,7 +5059,6 @@ def _is_seed_qa_diagnostic_constraint(constraint: str) -> bool:
     )
 
 
-_SEED_QA_AMBIGUITY_REPAIR_SCORE = 0.19
 _SEED_QA_DIAGNOSTIC_PREFIX_RE = re.compile(
     r"\[seed qa(?: lateral)? repair attempt [^\]]+\]\s*",
     re.IGNORECASE,
@@ -5097,9 +5182,22 @@ def _normalized_seed_qa_feedback(qa_result: EvaluateResult) -> tuple[str, ...]:
     lowered = "\n".join(feedback).casefold()
     if re.search(r"\bexit[_\s-]*conditions?\b", lowered):
         raise SeedQaRepairMappingError(feedback)
-    repairs: list[str] = []
     if _requests_seed_qa_ambiguity_repair(qa_result):
-        repairs.append("Seed metadata must satisfy the readiness gate: ambiguity_score <= 0.20.")
+        # A constraint patch cannot lower interview-derived ambiguity; the
+        # only honest resolution is more facts. Historically this path forced
+        # ``metadata.ambiguity_score`` down to pass the gate numerically —
+        # that gamed the score without reducing ambiguity, so it now blocks
+        # with the real feedback instead.
+        raise SeedQaRepairMappingError(
+            feedback,
+            code="seed_qa_ambiguity_unrepairable",
+            message=(
+                "Seed QA requires ambiguity_score <= 0.20, which a constraint patch "
+                "cannot deliver; resume the interview to resolve the ambiguity or "
+                "revise the Seed manually"
+            ),
+        )
+    repairs: list[str] = []
     if "non_goals" in lowered or "non-goals" in lowered or "runtime_context" in lowered:
         repairs.append(
             "Preserve ledger non-goals and runtime context in executable Seed surfaces; "
@@ -5150,11 +5248,31 @@ def _requests_seed_qa_ambiguity_repair(qa_result: EvaluateResult) -> bool:
     return False
 
 
+# Feedback items that indicate injected/verbatim prompt content rather than
+# reviewer substance: raw-prompt echoes, instruction-override phrasing, and
+# exfiltration surfaces (email addresses, URLs). Durable state must never
+# carry these — they would flow into status surfaces and lateral prompts.
+_SEED_QA_SENSITIVE_RE = re.compile(
+    r"(?i)\braw prompt\b|\bignore (?:all )?previous\b|[\w.+-]+@[\w-]+\.[\w.-]+|\w+://\S+"
+)
+
+
 def _safe_seed_qa_evidence(feedback: tuple[str, ...]) -> list[str]:
-    count = len(feedback[:5])
-    if count == 0:
-        return []
-    return [f"{count} Seed QA feedback item(s) withheld from durable state"]
+    """Sanitize QA feedback for durable state without discarding its substance.
+
+    Earlier revisions replaced the feedback with a "N item(s) withheld" counter,
+    which left BLOCKED sessions with no way to learn what QA actually objected
+    to. Persisting the *sanitized* items — transcript/diagnostic prose stripped,
+    injection-indicative items dropped entirely, length-bounded — keeps durable
+    state clean while keeping the evidence real.
+    """
+    items: list[str] = []
+    for raw in feedback[:5]:
+        cleaned = _clean_seed_qa_repair_text(raw, limit=240)
+        if not cleaned or _SEED_QA_SENSITIVE_RE.search(cleaned):
+            continue
+        items.append(cleaned)
+    return items
 
 
 def _safe_seed_qa_verdict(verdict: str) -> str:

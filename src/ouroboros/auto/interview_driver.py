@@ -471,6 +471,13 @@ class AutoInterviewDriver:
         while self._pending_emit_tasks:
             pending = list(self._pending_emit_tasks)
             await asyncio.gather(*pending, return_exceptions=True)
+            # A task can be done while its ``call_soon``-scheduled ``discard``
+            # callback has not run yet — notably during event-loop shutdown,
+            # when scheduled callbacks are no longer serviced and awaiting the
+            # already-done gather future returns without yielding. Without
+            # this explicit removal the while-loop busy-spins forever on a
+            # set that can no longer shrink (uninterruptible 100%-CPU hang).
+            self._pending_emit_tasks.difference_update(task for task in pending if task.done())
 
     def _emit(self, state: AutoPipelineState) -> None:
         """Emit a progress snapshot for the current state via the callback.

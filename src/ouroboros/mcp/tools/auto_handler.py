@@ -546,6 +546,15 @@ class AutoHandler:
             )
             lateral_thinker = HandlerLateralThinker(lateral_handler)
 
+        # Runtime EventStore shared by the driver's ``auto.*`` observability
+        # events and the watchdog below. Without this handle every
+        # ``_emit_runtime_event`` call in the pipeline (``auto.seed_qa.blocked``,
+        # ``auto.seed_preflight.blocked``, ``auto.session.blocked``) silently
+        # no-ops, so the attention relay never sees a blocked auto session —
+        # the "silent block" failure mode.
+        runtime_event_store = self.event_store or EventStore()
+        await runtime_event_store.initialize()
+
         driver = AutoInterviewDriver(
             HandlerInterviewBackend(interview_handler, cwd=state.cwd),
             store=store,
@@ -556,6 +565,7 @@ class AutoHandler:
             # AI answer refiner: concrete goal-specific answers so interview
             # ambiguity converges. Best-effort; None falls back to deterministic.
             answer_refiner=build_answer_refiner(),
+            event_store=runtime_event_store,
         )
         # Complete-product Ralph follows the execute-stage runtime because it
         # continues product mutation/evaluation after the initial run handoff.
@@ -623,8 +633,7 @@ class AutoHandler:
                 opencode_mode=demote_plugin_opencode_mode(runtime_plan.evaluate.opencode_mode),
             )
             evaluator = HandlerEvaluator(evaluation_handler)
-        watchdog_event_store = self.event_store or EventStore()
-        await watchdog_event_store.initialize()
+        watchdog_event_store = runtime_event_store
         watchdog = Watchdog(
             controls=load_runtime_controls(None),
             event_appender=watchdog_event_store,

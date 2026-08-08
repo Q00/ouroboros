@@ -618,6 +618,13 @@ async def _run_auto(
     # goal-specific ones so interview ambiguity actually converges. Best-effort —
     # any construction failure leaves the deterministic answerer untouched.
     answer_refiner = build_answer_refiner()
+    # Runtime EventStore shared by the driver's ``auto.*`` observability events
+    # and the watchdog below. Without this handle every pipeline
+    # ``_emit_runtime_event`` call (``auto.seed_qa.blocked``,
+    # ``auto.seed_preflight.blocked``, ``auto.session.blocked``) silently
+    # no-ops, so status/TUI surfaces never learn a session blocked.
+    runtime_event_store = EventStore()
+    await runtime_event_store.initialize()
     driver = AutoInterviewDriver(
         HandlerInterviewBackend(interview, cwd=state.cwd),
         store=store,
@@ -625,6 +632,7 @@ async def _run_auto(
         timeout_seconds=state.phase_timeout_seconds(AutoPhase.INTERVIEW),
         lateral_thinker=lateral_thinker,
         answer_refiner=answer_refiner,
+        event_store=runtime_event_store,
     )
     ralph_handler = (
         # Q00/ouroboros#782 review-7/8/10: pass the un-demoted
@@ -657,8 +665,11 @@ async def _run_auto(
     # state forever. Sharing the handler reuses the same ``JobManager``
     # (and underlying ``EventStore``) so the poller sees the persisted job.
     ralph_resumer = HandlerRalphPoller(ralph_handler) if ralph_handler is not None else None
-    watchdog_event_store = EventStore()
-    await watchdog_event_store.initialize()
+    # Share the driver's runtime EventStore so the watchdog and the
+    # ``auto.*`` observability events (``auto.session.blocked`` et al.) land
+    # in the same store the attention relay reads — a fresh EventStore here
+    # would silently fork the blocked-event stream.
+    watchdog_event_store = runtime_event_store
     # Auto does not have an execution id until interview/Seed handoff finishes.
     # Publish the picker now; it polls until the eventual run appears, and the
     # selected row supplies the pinned ?run=<execution_id> detail URL.

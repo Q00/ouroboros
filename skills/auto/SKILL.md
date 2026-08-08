@@ -96,8 +96,16 @@ ask or send either argument; Auto restores the persisted contract.
 2. Runs bounded Socratic interview rounds with source-tagged auto answers.
 3. Generates a Seed.
 4. Reviews and repairs until A-grade or blocked.
-5. Starts execution only after A-grade.
-6. When `complete_product=true`, chains RUN → RALPH_HANDOFF after a successful run handoff and waits for a terminal Ralph status so a single invocation iterates Ralph until QA passes, convergence, or a budget bound trips. A QA-pass on the executed product completes the auto session; recognized failure modes (`iteration_timeout`, `wall_clock_exhausted`, `oscillation_detected`, `grade_regressing`, `max_generations reached`) block the auto session with the matching `stop_reason` in `last_error` so operators can resume after the cause is addressed.
+5. Runs a deterministic Seed preflight (do the claimed scripts/paths exist,
+   are verify-command env vars bound?) and then the pre-run Seed QA gate.
+   A preflight or unrepairable QA block surfaces **open questions** in the
+   blocker and the `auto.seed_preflight.blocked` / `auto.seed_qa.blocked`
+   events: relay them to the user, collect answers (check the interview
+   ledger first — only ask the user what the ledger does not already
+   answer), revise the saved Seed accordingly, then `--resume`. Never
+   invent the missing facts.
+6. Starts execution only after A-grade.
+7. When `complete_product=true`, chains RUN → RALPH_HANDOFF after a successful run handoff and waits for a terminal Ralph status so a single invocation iterates Ralph until QA passes, convergence, or a budget bound trips. A QA-pass on the executed product completes the auto session; recognized failure modes (`iteration_timeout`, `wall_clock_exhausted`, `oscillation_detected`, `grade_regressing`, `max_generations reached`) block the auto session with the matching `stop_reason` in `last_error` so operators can resume after the cause is addressed.
 
 ## Background monitoring UX
 
@@ -242,6 +250,9 @@ For `attention_required`, treat `recommended_host_actions` as authoritative:
 | Ralph | `oscillation_detected` | blocker text + (future) `result.stop_reason_code` | Ralph oscillated between two grade states without making progress. |
 | Ralph | `grade_regressing` | blocker text + (future) `result.stop_reason_code` | A subsequent Ralph generation produced a strictly worse grade than its predecessor. |
 | Ralph | `max_generations reached` | blocker text + (future) `result.stop_reason_code` | Ralph hit its configured generation cap before reaching A grade. |
+| Seed gate | `seed_preflight_unexecutable` | `last_error_code`, `result.stop_reason_code` | Deterministic Seed preflight found fabricated or unbound contract claims (missing claimed script, unresolvable brownfield path, unbound `$VAR` in a verify command). The blocker and the `auto.seed_preflight.blocked` event carry the open questions; answer them, revise the Seed, and `--resume` (re-enters REVIEW). |
+| Seed gate | `seed_qa_feedback_unmapped` | `last_error_code`, `result.stop_reason_code` | Pre-run Seed QA failed with feedback the bounded repair mapper cannot translate into a safe constraint patch; manual Seed revision is required. Evidence is persisted sanitized (not withheld) on `last_qa_differences` / `last_qa_suggestions`. |
+| Seed gate | `seed_qa_ambiguity_unrepairable` | `last_error_code`, `result.stop_reason_code` | Seed QA demanded `ambiguity_score <= 0.20`. A constraint patch cannot lower interview-derived ambiguity (and the engine no longer rewrites the score to pass the gate), so the session blocks: resolve the ambiguity via the interview or manual Seed revision, then `--resume`. |
 
 Blockers without a canonical code keep using the free-form ``last_error`` text. Ralph-layer codes are surfaced via blocker text today; their result-envelope promotion is tracked as a follow-up.
 

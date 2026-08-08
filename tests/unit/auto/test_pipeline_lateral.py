@@ -97,7 +97,6 @@ def test_seed_qa_feedback_does_not_pollute_constraints_with_diagnostics() -> Non
         score=0.52,
         verdict="revise",
         differences=(
-            "metadata.ambiguity_score is 0.206, exceeding the required readiness gate of <= 0.20.",
             "The constraints section is polluted with pasted lateral repair and QA diagnostic text.",
         ),
         suggestions=(
@@ -112,7 +111,8 @@ def test_seed_qa_feedback_does_not_pollute_constraints_with_diagnostics() -> Non
     assert "QA differences:" not in constraints
     assert "[seed qa lateral repair attempt" not in constraints
     assert "omit QA or lateral diagnostic prose" in constraints
-    assert repaired.metadata.ambiguity_score == 0.19
+    # Repair never rewrites interview-derived ambiguity to game the gate.
+    assert repaired.metadata.ambiguity_score == 0.206
     assert repaired.metadata.parent_seed_id == "seed_dirty"
 
 
@@ -224,7 +224,14 @@ def test_seed_qa_lateral_feedback_does_not_trip_intent_guard_pollution() -> None
         "metadata.ambiguity_score remains above 0.20 and exceeds the readiness gate",
     ),
 )
-def test_seed_qa_lateral_feedback_applies_typed_ambiguity_repair(difference: str) -> None:
+def test_seed_qa_ambiguity_feedback_is_unrepairable_and_blocks(difference: str) -> None:
+    """A constraint patch cannot lower interview-derived ambiguity.
+
+    The old behavior forced ``metadata.ambiguity_score`` down to 0.19 so the
+    re-judge would pass numerically — score gaming. The typed ambiguity
+    request must now raise so the pipeline blocks with the real feedback and
+    routes the gap back to the interview/operator.
+    """
     seed = _build_seed().model_copy(
         update={"metadata": SeedMetadata(seed_id="seed_ambiguous", ambiguity_score=0.206)}
     )
@@ -241,14 +248,17 @@ def test_seed_qa_lateral_feedback_applies_typed_ambiguity_repair(difference: str
         text="Treat every CSV cell as a string.",
     )
 
-    repaired = _seed_with_seed_qa_lateral_feedback(
+    with pytest.raises(SeedQaRepairMappingError) as exc_info:
+        _seed_with_seed_qa_feedback(seed, qa_result, attempt=1)
+    assert exc_info.value.code == "seed_qa_ambiguity_unrepairable"
+
+    lateral = _seed_with_seed_qa_lateral_feedback(
         seed,
         lateral_result,
         qa_result=qa_result,
         attempt=1,
     )
-
-    assert repaired.metadata.ambiguity_score == 0.19
+    assert lateral.metadata.ambiguity_score == 0.206
 
 
 @pytest.mark.parametrize(
