@@ -1555,6 +1555,7 @@ def create_ouroboros_server(
     event_store: Any | None = None,
     brownfield_store: Any | None = None,
     state_dir: Any | None = None,
+    project_dir: Any | None = None,
     runtime_backend: str | None = None,
     llm_backend: str | None = None,
     opencode_mode: str | None = None,
@@ -1584,9 +1585,9 @@ def create_ouroboros_server(
         event_store: Optional EventStore instance. If not provided, creates default.
         brownfield_store: Optional BrownfieldStore instance for shared brownfield
             MCP access. If not provided, handlers create their own store.
-        state_dir: Optional pathlib.Path for interview state directory.
-                   If not provided, uses ``get_config_dir() / "data"``
-                   (typically ``~/.ouroboros/data``).
+        state_dir: Optional pathlib.Path for interview state directory. Defaults to
+            ``get_config_dir() / "data"`` (typically ``~/.ouroboros/data``).
+        project_dir: Effective project workspace; defaults to the safe launcher CWD.
         runtime_backend: Optional orchestrator runtime backend override.
         llm_backend: Optional LLM-only backend override.
         opencode_mode: Optional OpenCode integration mode (``"plugin"`` or
@@ -1663,7 +1664,7 @@ def create_ouroboros_server(
         StartEvolveStepHandler,
         StartExecuteSeedHandler,
         StartRalphHandler,
-        SubmitFanoutResultsHandler,
+        create_fanout_handler,
     )
     from ouroboros.mcp.tools.fanout import FanoutRegistry
     from ouroboros.mcp.tools.pm_handler import PMInterviewHandler
@@ -1748,8 +1749,7 @@ def create_ouroboros_server(
     # Resolve a safe working directory once so all consumers agree.
     # When the MCP server is spawned with cwd=/, Path.cwd() is unusable as a
     # project root, so _safe_cwd() falls back to $HOME.
-    effective_cwd = _safe_cwd()
-
+    effective_cwd = Path(project_dir).expanduser().resolve() if project_dir else _safe_cwd()
     # Materialize the default runtime once so composition validates backend wiring.
     default_execute_runtime = runtime_adapter
     runtime_adapter_backend = (
@@ -2495,7 +2495,7 @@ def create_ouroboros_server(
             opencode_mode=opencode_mode,
             fanout_registry=fanout_registry,
         ),
-        SubmitFanoutResultsHandler(fanout_registry=fanout_registry),
+        create_fanout_handler(fanout_registry, effective_cwd, event_store),
         evolve_step,
         StartEvolveStepHandler(
             evolve_handler=evolve_step,

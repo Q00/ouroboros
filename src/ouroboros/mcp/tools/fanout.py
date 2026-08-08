@@ -154,6 +154,16 @@ class FanoutRecord:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class PreparedFanoutSynthesis:
+    """Validated terminal inputs whose synthesis may run behind a boundary."""
+
+    record: FanoutRecord
+    fanout_id: str
+    provided: dict[str, Any]
+    completion_report: dict[str, Any]
+
+
 class FanoutRegistry:
     """File-backed store for pending fan-out expected-key state.
 
@@ -694,15 +704,15 @@ def _branch_distance(branch_errors: list[Any]) -> tuple[int, int]:
     return len(branch_errors), refusals
 
 
-def submit_fanout_results(
+def prepare_fanout_results(
     registry: FanoutRegistry,
     *,
     session_id: str,
     correlation_key: str,
     results: list[Mapping[str, Any]],
     fanout_id: str,
-) -> dict[str, Any]:
-    """Validate + route a batch of correlated fan-out results back to synthesis.
+) -> dict[str, Any] | PreparedFanoutSynthesis:
+    """Validate a batch and return either a reply or terminal synthesis inputs.
 
     Contract:
 
@@ -903,6 +913,32 @@ def submit_fanout_results(
         "contract_violations": contract_violations,
     }
 
+    if record.kind not in {
+        FANOUT_KIND_LATERAL_PERSONA_PANEL,
+        FANOUT_KIND_CODE_INVESTIGATION,
+        FANOUT_KIND_QUESTION_ADVISORY,
+    }:
+        return {
+            "status": "unknown_kind",
+            "fanout_id": fanout_id,
+            "kind": record.kind,
+            "error": f"No synthesizer is registered for fan-out kind={record.kind!r}.",
+        }
+    return PreparedFanoutSynthesis(
+        record=record,
+        fanout_id=fanout_id,
+        provided=provided,
+        completion_report=completion_report,
+    )
+
+
+def synthesize_fanout_results(prepared: PreparedFanoutSynthesis) -> dict[str, Any]:
+    """Run terminal synthesis for an already validated fan-out submission."""
+
+    record = prepared.record
+    fanout_id = prepared.fanout_id
+    provided = prepared.provided
+    completion_report = prepared.completion_report
     if record.kind == FANOUT_KIND_LATERAL_PERSONA_PANEL:
         from ouroboros.mcp.tools.subagent import (
             continue_interview_after_lateral_persona_synthesis,
@@ -962,12 +998,29 @@ def submit_fanout_results(
             **completion_report,
         }
 
-    return {
-        "status": "unknown_kind",
-        "fanout_id": fanout_id,
-        "kind": record.kind,
-        "error": f"No synthesizer is registered for fan-out kind={record.kind!r}.",
-    }
+    raise RuntimeError(f"prepared fan-out kind has no synthesizer: {record.kind!r}")
+
+
+def submit_fanout_results(
+    registry: FanoutRegistry,
+    *,
+    session_id: str,
+    correlation_key: str,
+    results: list[Mapping[str, Any]],
+    fanout_id: str,
+) -> dict[str, Any]:
+    """Validate and synchronously synthesize a complete fan-out submission."""
+
+    prepared = prepare_fanout_results(
+        registry,
+        session_id=session_id,
+        correlation_key=correlation_key,
+        results=results,
+        fanout_id=fanout_id,
+    )
+    if isinstance(prepared, dict):
+        return prepared
+    return synthesize_fanout_results(prepared)
 
 
 def _contract_violations(
@@ -1121,10 +1174,13 @@ __all__ = [
     "FANOUT_KIND_QUESTION_ADVISORY",
     "FanoutRecord",
     "FanoutRegistry",
+    "PreparedFanoutSynthesis",
+    "prepare_fanout_results",
     "register_code_investigation_fanout",
     "register_lateral_persona_fanout",
     "register_question_advisory_fanout",
     "stamp_lateral_persona_fanout",
     "stamp_question_advisory_fanout",
     "submit_fanout_results",
+    "synthesize_fanout_results",
 ]

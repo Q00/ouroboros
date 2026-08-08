@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 from contextvars import ContextVar
 import inspect
+from pathlib import Path
 from typing import Any
 
 _COMPOSING_RUNTIME_TOOLS: ContextVar[bool] = ContextVar(
@@ -111,6 +112,7 @@ def configured_runtime_tools(
     include_auto: bool,
     mcp_bridge: Any | None,
     runtime_adapter: Any | None = None,
+    project_dir: str | Path | None = None,
 ) -> ConfiguredRuntimeTools | None:
     """Return the production handler graph, or ``None`` for lightweight fallback.
 
@@ -131,6 +133,9 @@ def configured_runtime_tools(
     if not executing_builtin_runtime or _COMPOSING_RUNTIME_TOOLS.get():
         return None
 
+    if project_dir is None and runtime_adapter is not None:
+        project_dir = runtime_adapter.working_directory
+
     from ouroboros.mcp.server.adapter import create_ouroboros_server
     from ouroboros.mcp.tools.evaluation_handlers import ChecklistVerifyHandler
 
@@ -143,6 +148,7 @@ def configured_runtime_tools(
                 opencode_mode=opencode_mode,
                 mcp_bridge=mcp_bridge,
                 runtime_adapter=runtime_adapter,
+                project_dir=project_dir,
                 # Embedded interceptors own their event loop. Preserve this
                 # factory's historical in-process JobManager behavior.
                 durable_jobs=False,

@@ -237,6 +237,7 @@ class CodexCommandDispatcher:
                 version="1.0.0",
                 runtime_backend=self._runtime_backend,
                 llm_backend=self._llm_backend,
+                project_dir=self._cwd,
             )
         return self._server
 

@@ -656,11 +656,19 @@ async def test_the_public_submit_tool_refuses_a_self_contradicting_answer(tmp_pa
 async def test_the_public_submit_tool_also_refuses_a_malformed_declaration(tmp_path: Any) -> None:
     """Through the tool that accepts the unconstrained result objects."""
     from ouroboros.mcp.tools.evaluation_handlers import SubmitFanoutResultsHandler
+    from ouroboros.orchestrator.disposable_memory import DisposableMemory
+    from ouroboros.persistence.artifact_store import ContentAddressedArtifactStore
 
     registry = FanoutRegistry(tmp_path)
     fanout_id, lane_ids, identity = _registered_advisory(registry)
     required = [entry["key"] for entry in _required_results(lane_ids, identity)]
-    submit = SubmitFanoutResultsHandler(fanout_registry=registry)
+    disposable = DisposableMemory(
+        artifact_store=ContentAddressedArtifactStore.for_project(tmp_path)
+    )
+    submit = SubmitFanoutResultsHandler(
+        fanout_registry=registry,
+        disposable_memory=disposable,
+    )
 
     malformed = await submit.handle(
         {
@@ -707,7 +715,8 @@ async def test_the_public_submit_tool_also_refuses_a_malformed_declaration(tmp_p
     )
 
     assert honest.is_ok, honest
-    meta = honest.unwrap().meta
+    envelope = honest.unwrap().meta
+    meta = disposable.fetch(envelope["contract_id"]).body
     assert meta["status"] == "complete"
     assert sorted(meta["undispatched_keys"]) == sorted(required)
 
