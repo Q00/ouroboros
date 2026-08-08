@@ -17,14 +17,17 @@ class CliExecutableVersionState(StrEnum):
     """Outcome of probing or comparing one CLI version attestation.
 
     Probe unavailability is deliberately not represented by ``None``. A
-    timeout and an execution failure have different operational meaning, and
-    neither is positive evidence that an executable stayed the same. The
-    ``CHANGED`` state is produced only by comparing two successful probes.
+    timeout, execution failure, and indeterminate authority evidence have
+    different operational meaning, and none is positive evidence that an
+    executable stayed the same. ``CHANGED`` is reserved for evidence tied to
+    the executable or its semantic symlink chain, not broad parent-directory
+    generation churn that could have come from an unrelated sibling.
     """
 
     VERIFIED = "verified"
     TIMED_OUT = "timed_out"
     EXECUTION_FAILED = "execution_failed"
+    INDETERMINATE = "indeterminate"
     CHANGED = "changed"
 
 
@@ -41,6 +44,33 @@ class CliExecutableVersionAttestation:
 type IdentityReader = Callable[[], object]
 type FilesystemIdentityReader = Callable[[], tuple[int, int] | None]
 type HashPayload = Callable[[object], str]
+
+
+def _only_parent_generations_changed(
+    before: object,
+    after: object,
+) -> bool:
+    """Return whether resolution evidence differs only in parent generations.
+
+    A containing directory's generation changes for both authority-entry ABA
+    and unrelated sibling churn. It is therefore useful fail-closed evidence,
+    but cannot truthfully prove that the executable itself changed.
+    """
+    if not isinstance(before, tuple) or not isinstance(after, tuple) or before == after:
+        return False
+    if len(before) != len(after):
+        return False
+    for before_entry, after_entry in zip(before, after, strict=True):
+        if (
+            not isinstance(before_entry, tuple)
+            or not isinstance(after_entry, tuple)
+            or len(before_entry) != 4
+            or len(after_entry) != 4
+            or (before_entry[0], before_entry[1], before_entry[3])
+            != (after_entry[0], after_entry[1], after_entry[3])
+        ):
+            return False
+    return True
 
 
 def read_cli_executable_filesystem_identity(
@@ -243,14 +273,21 @@ def probe_cli_executable_version_attestation(
     after_content = content_identity()
     after_resolution_chain = resolution_chain_identity()
     after_filesystem = filesystem_identity()
-    if (
+    authority_changed = (
         after_filesystem != before_filesystem
-        or after_resolution_chain != before_resolution_chain
         or after_content != before_content
         or after_symlink != before_symlink
-    ):
+    )
+    resolution_changed = after_resolution_chain != before_resolution_chain
+    if authority_changed or resolution_changed:
+        state = CliExecutableVersionState.CHANGED
+        if not authority_changed and _only_parent_generations_changed(
+            before_resolution_chain,
+            after_resolution_chain,
+        ):
+            state = CliExecutableVersionState.INDETERMINATE
         return CliExecutableVersionAttestation(
-            CliExecutableVersionState.CHANGED,
+            state,
             filesystem_identity=before_filesystem,
             nonexecuting_identity=nonexecuting_identity,
         )
@@ -328,6 +365,12 @@ def require_unchanged_cli_version_attestation(
             "initialization; execution is blocked without claiming executable drift; "
             "start a new execution session"
         )
+    if initialized.state is CliExecutableVersionState.INDETERMINATE:
+        raise RuntimeError(
+            f"{display_name} executable authority was indeterminate during runtime "
+            "initialization; execution is blocked without claiming executable drift; "
+            "start a new execution session"
+        )
     if initialized.state is CliExecutableVersionState.CHANGED:
         raise RuntimeError(
             f"{display_name} executable changed during runtime initialization; "
@@ -348,6 +391,12 @@ def require_unchanged_cli_version_attestation(
             f"{display_name} version attestation failed while verifying the "
             "executable; execution is blocked without claiming executable drift; retry "
             "the execution or start a new execution session"
+        )
+    if comparison is CliExecutableVersionState.INDETERMINATE:
+        raise RuntimeError(
+            f"{display_name} executable authority became indeterminate while verifying "
+            "the executable; execution is blocked without claiming executable drift; "
+            "retry the execution or start a new execution session"
         )
     raise RuntimeError(
         f"{display_name} executable version changed after runtime initialization; "

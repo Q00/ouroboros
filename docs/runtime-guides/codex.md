@@ -236,12 +236,17 @@ evidence with confirmed drift:
 - Every started probe is post-sampled even when it times out or fails. If that
   evidence proves probe-window mutation, mutation takes precedence over the
   transient probe outcome.
+- A containing-directory generation change alone is broader than executable
+  identity: it can come from an unrelated sibling or an entry swap-and-restore.
+  The attempt therefore fails closed as retryable, indeterminate authority
+  without claiming confirmed executable drift.
 - Version drift is reported only when two successful version attestations
   differ. Path, content, symlink, device/inode, or probe-window generation
   drift can fail closed before a second successful version probe. Two missing
   attestations never count as proof that the executable is unchanged.
 
-The Copilot runtime inherits the same attestation and comparison policy.
+The Copilot, Gemini, Goose, and Grok runtimes inherit the same attestation and
+comparison policy.
 
 > For a side-by-side comparison of all runtime backends, see the [runtime capability matrix](../runtime-capability-matrix.md).
 

@@ -345,6 +345,13 @@ def test_missing_attestations_never_compare_as_positive_identity_evidence() -> N
         )
         is state.TIMED_OUT
     )
+    assert (
+        CodexCliRuntime._compare_cli_executable_version_attestations(
+            attestation(state.VERIFIED, "baseline", (1, 1), "baseline"),
+            attestation(state.INDETERMINATE),
+        )
+        is state.INDETERMINATE
+    )
     # Even an internally malformed "verified" value cannot turn None == None
     # into positive identity evidence.
     assert (
@@ -693,14 +700,27 @@ def test_sibling_churn_during_probe_fails_closed_but_is_retryable(
     runtime = CodexCliRuntime(cli_path=cli_path, cwd=tmp_path, model="gpt-5")
     successful_run = codex_cli_runtime_module.subprocess.run
 
+    sibling_number = 0
+
     def churn_sibling(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
-        (tmp_path / "unrelated-sibling").write_text("unrelated", encoding="utf-8")
+        nonlocal sibling_number
+        sibling_number += 1
+        (tmp_path / f"unrelated-sibling-{sibling_number}").write_text(
+            "unrelated",
+            encoding="utf-8",
+        )
         return subprocess.CompletedProcess(args, 0, stdout="codex 1.0\n", stderr="")
 
     monkeypatch.setattr(codex_cli_runtime_module.subprocess, "run", churn_sibling)
-    with pytest.raises(RuntimeError, match="executable version changed") as excinfo:
+    current = runtime._cli_executable_version_attestation(
+        runtime._cli_executable_version_attestation_snapshot
+    )
+    assert current.state is codex_cli_runtime_module._CliExecutableVersionState.INDETERMINATE
+
+    with pytest.raises(RuntimeError, match="authority became indeterminate") as excinfo:
         runtime._build_command(str(tmp_path / "last-message"))
-    assert "executable changed" not in str(excinfo.value)
+    assert "without claiming executable drift" in str(excinfo.value)
+    assert "retry the execution" in str(excinfo.value)
 
     monkeypatch.setattr(codex_cli_runtime_module.subprocess, "run", successful_run)
     assert runtime._build_command(str(tmp_path / "last-message"))

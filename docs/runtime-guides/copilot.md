@@ -163,6 +163,10 @@ The runtime rejects non-executing path/content/device/inode/symlink evidence
 that differs from initialization before running `copilot --version`, and it
 post-samples every started probe so mutation takes precedence over a concurrent
 timeout or execution failure.
+If only a containing-directory generation changed, the evidence cannot
+distinguish unrelated sibling churn from an executable-entry swap-and-restore.
+That attempt fails closed as retryable, indeterminate authority without
+claiming confirmed executable drift.
 Path, content, symlink, device/inode, or probe-window generation drift can fail
 closed before a second successful version probe. This ensures that two missing
 `copilot --version` results never authorize a launch under load.
