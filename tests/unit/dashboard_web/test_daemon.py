@@ -12,13 +12,38 @@ import time
 import pytest
 
 from ouroboros.dashboard_web import daemon
-from ouroboros.persistence.picker_indexes import PICKER_INDEX_DDL
+from ouroboros.persistence.picker_indexes import (
+    PICKER_CONTRACT_DDL_BY_NAME,
+    PICKER_META_TABLE,
+    PICKER_PROJECTION_SCOPE_SQL,
+    PICKER_PROJECTION_VERSION,
+    PICKER_START_TABLE,
+)
 
 
 def _create_events_table(conn: sqlite3.Connection) -> None:
-    conn.execute("CREATE TABLE events (aggregate_id TEXT, event_type TEXT, payload TEXT)")
-    for statement in PICKER_INDEX_DDL:
+    conn.execute(
+        "CREATE TABLE events (aggregate_id TEXT, event_type TEXT, payload TEXT, "
+        "picker_projection_version INTEGER)"
+    )
+    for statement in PICKER_CONTRACT_DDL_BY_NAME.values():
         conn.execute(statement)
+    conn.execute(
+        f"INSERT INTO {PICKER_META_TABLE} "
+        "(contract_version, backfilled_through_rowid) VALUES (?, 0)",
+        (PICKER_PROJECTION_VERSION,),
+    )
+
+
+def _backfill_picker_starts(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        f"INSERT INTO {PICKER_START_TABLE} (event_rowid) "
+        "SELECT rowid FROM events WHERE event_type = 'orchestrator.session.started'"
+    )
+    conn.execute(
+        f"UPDATE events SET picker_projection_version = ? WHERE {PICKER_PROJECTION_SCOPE_SQL}",
+        (PICKER_PROJECTION_VERSION,),
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -130,6 +155,7 @@ class TestDbIdentity:
                     json.dumps({"execution_id": execution_id}),
                 ),
             )
+            _backfill_picker_starts(conn)
             conn.commit()
         finally:
             conn.close()
@@ -282,10 +308,6 @@ class TestPendingRun:
         conn = sqlite3.connect(legacy_db)
         try:
             conn.execute("CREATE TABLE events (aggregate_id TEXT, event_type TEXT, payload TEXT)")
-            for statement in PICKER_INDEX_DDL:
-                conn.execute(
-                    statement.replace("'workflow.progress.updated'", "'workflow.progress. updated'")
-                )
             conn.commit()
         finally:
             conn.close()
@@ -326,6 +348,7 @@ class TestPendingRun:
                     ("foreign", "orchestrator.progress.updated", "{not-json"),
                 ],
             )
+            _backfill_picker_starts(conn)
             conn.commit()
         finally:
             conn.close()
@@ -375,6 +398,7 @@ class TestPendingRun:
                     for index in range(10)
                 ],
             )
+            _backfill_picker_starts(conn)
             conn.commit()
         finally:
             conn.close()

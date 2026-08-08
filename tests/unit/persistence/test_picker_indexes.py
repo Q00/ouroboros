@@ -1,4 +1,4 @@
-"""Dashboard picker index lifecycle and exact contract tests."""
+"""Dashboard picker projection lifecycle, repair, and budget tests."""
 
 from __future__ import annotations
 
@@ -11,20 +11,24 @@ from statistics import median
 import time
 
 import pytest
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import IntegrityError, OperationalError
 
+from ouroboros.dashboard_web.reader import (
+    PickerIndexContractError,
+    list_recent_executions,
+)
 from ouroboros.events.base import BaseEvent
 from ouroboros.persistence.event_store import EventStore
 from ouroboros.persistence.picker_indexes import (
-    AGGREGATE_EVENT_INDEX,
     DIRECT_EVENT_INDEX,
-    PICKER_INDEX_DDL_BY_NAME,
-    PICKER_INDEX_NAMES,
-    PICKER_PROGRESS_SCOPE_SQL,
-    START_EVENT_INDEX,
-    VALID_JSON_SQL,
-    matching_picker_indexes,
-    normalize_index_ddl,
+    OBSOLETE_PICKER_INDEX_NAMES,
+    PICKER_CONTRACT_NAMES,
+    PICKER_GAP_INDEX,
+    PICKER_META_TABLE,
+    PICKER_PROGRESS_TABLE,
+    PICKER_PROJECTION_SCOPE_SQL,
+    PICKER_START_TABLE,
+    matching_picker_contract,
 )
 
 
@@ -37,211 +41,748 @@ def _create_legacy_events_table(path: Path) -> None:
         conn.close()
 
 
-def _picker_index_sql(conn: sqlite3.Connection) -> dict[str, str]:
-    placeholders = ",".join("?" for _ in PICKER_INDEX_NAMES)
-    return dict(
-        conn.execute(
-            f"SELECT name, sql FROM sqlite_master WHERE type = 'index' "
-            f"AND name IN ({placeholders})",
-            PICKER_INDEX_NAMES,
-        )
-    )
-
-
-async def test_writable_initialize_installs_picker_indexes_on_existing_store(tmp_path) -> None:
-    db = tmp_path / "legacy.db"
-    _create_legacy_events_table(db)
-
-    store = EventStore(f"sqlite+aiosqlite:///{db}")
+async def _initialize(path: Path) -> None:
+    store = EventStore(f"sqlite+aiosqlite:///{path}")
     await store.initialize()
     await store.close()
 
+
+def _insert_raw_start_without_projection_version(
+    conn: sqlite3.Connection, *, suffix: str
+) -> BaseEvent:
+    event = BaseEvent(
+        type="orchestrator.session.started",
+        aggregate_type="session",
+        aggregate_id=f"orch-{suffix}",
+        data={"execution_id": f"exec-{suffix}"},
+    )
+    values = event.to_db_dict()
+    values["payload"] = json.dumps(values["payload"])
+    values["timestamp"] = values["timestamp"].isoformat()
+    conn.execute(
+        "INSERT INTO events (id, aggregate_type, aggregate_id, event_type, payload, "
+        "timestamp, consensus_id) VALUES (:id, :aggregate_type, :aggregate_id, "
+        ":event_type, :payload, :timestamp, :consensus_id)",
+        values,
+    )
+    return event
+
+
+async def test_writable_initialize_backfills_exact_projection_on_existing_store(tmp_path) -> None:
+    db = tmp_path / "legacy.db"
+    _create_legacy_events_table(db)
     conn = sqlite3.connect(db)
     try:
-        assert matching_picker_indexes(conn) == frozenset(PICKER_INDEX_NAMES)
+        conn.executemany(
+            "INSERT INTO events (aggregate_id, event_type, payload) VALUES (?, ?, ?)",
+            [
+                ("orch", "orchestrator.session.started", json.dumps({"execution_id": "exec"})),
+                (
+                    "exec",
+                    "workflow.progress.updated",
+                    json.dumps(
+                        {
+                            "progress": {"runtime_status": "running"},
+                            "acceptance_criteria": [],
+                        }
+                    ),
+                ),
+                ("exec", "workflow.progress.updated", json.dumps({"runtime_status": "done"})),
+                ("exec", "workflow.progress.updated", "{malformed"),
+            ],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    await _initialize(db)
+
+    conn = sqlite3.connect(db)
+    try:
+        assert matching_picker_contract(conn) == frozenset(PICKER_CONTRACT_NAMES)
+        assert conn.execute(f"SELECT event_rowid FROM {PICKER_START_TABLE}").fetchall() == [(1,)]
+        assert conn.execute(
+            f"SELECT latest_valid_rowid, latest_running_rowid, latest_snapshot_rowid "
+            f"FROM {PICKER_PROGRESS_TABLE}"
+        ).fetchall() == [(3, 2, 2)]
+        assert conn.execute(f"SELECT * FROM {PICKER_META_TABLE}").fetchall() == [(1, 4)]
+        names = {row[0] for row in conn.execute("SELECT name FROM sqlite_master")}
+        assert {DIRECT_EVENT_INDEX} <= names
+        assert not (set(OBSOLETE_PICKER_INDEX_NAMES) & names)
+        table_sql = dict(
+            conn.execute(
+                "SELECT name, sql FROM sqlite_master WHERE type = 'table' AND name IN (?, ?)",
+                (PICKER_START_TABLE, PICKER_PROGRESS_TABLE),
+            )
+        )
+        assert "WITHOUT ROWID" not in table_sql[PICKER_START_TABLE]
+        assert table_sql[PICKER_PROGRESS_TABLE].endswith("WITHOUT ROWID")
     finally:
         conn.close()
 
 
-async def test_read_only_initialize_does_not_install_picker_indexes(tmp_path) -> None:
-    db = tmp_path / "read-only.db"
-    _create_legacy_events_table(db)
+async def test_application_heads_advance_independently(tmp_path) -> None:
+    db = tmp_path / "application.db"
+    store = EventStore(f"sqlite+aiosqlite:///{db}")
+    await store.initialize()
+    events = [
+        BaseEvent(
+            type="orchestrator.session.started",
+            aggregate_type="session",
+            aggregate_id="orch",
+            data={"execution_id": "exec"},
+        ),
+        BaseEvent(
+            type="workflow.progress.updated",
+            aggregate_type="workflow",
+            aggregate_id="exec",
+            data={"acceptance_criteria": [], "runtime_status": "idle"},
+        ),
+        BaseEvent(
+            type="workflow.progress.updated",
+            aggregate_type="workflow",
+            aggregate_id="exec",
+            data={"progress": {"runtime_status": "running"}},
+        ),
+        BaseEvent(
+            type="workflow.progress.updated",
+            aggregate_type="workflow",
+            aggregate_id="exec",
+            data={"runtime_status": "done"},
+        ),
+    ]
+    for event in events:
+        await store.append(event)
+    await store.close()
+    conn = sqlite3.connect(db)
+    try:
+        assert conn.execute(f"SELECT * FROM {PICKER_START_TABLE}").fetchall() == [(1,)]
+        assert conn.execute(
+            f"SELECT latest_valid_rowid, latest_running_rowid, latest_snapshot_rowid "
+            f"FROM {PICKER_PROGRESS_TABLE}"
+        ).fetchall() == [(4, 3, 2)]
+    finally:
+        conn.close()
 
-    store = EventStore(f"sqlite+aiosqlite:///{db}", read_only=True)
-    await store.initialize(create_schema=False)
+
+async def test_sparse_relevant_batch_projects_only_requested_event_ids(tmp_path) -> None:
+    db = tmp_path / "sparse-batch.db"
+    store = EventStore(f"sqlite+aiosqlite:///{db}")
+    await store.initialize()
+    events = [
+        BaseEvent(
+            type="telemetry.unrelated",
+            aggregate_type="telemetry",
+            aggregate_id=f"noise-{index}",
+            data={},
+        )
+        for index in range(100)
+    ]
+    progress = BaseEvent(
+        type="workflow.progress.updated",
+        aggregate_type="workflow",
+        aggregate_id="exec-sparse",
+        data={
+            "last_update": {"runtime_status": "running"},
+            "acceptance_criteria": [],
+        },
+    )
+    events.insert(50, progress)
+    await store.append_batch(events)
     await store.close()
 
     conn = sqlite3.connect(db)
     try:
-        assert _picker_index_sql(conn) == {}
+        progress_rowid = conn.execute(
+            "SELECT rowid FROM events WHERE id = ?", (progress.id,)
+        ).fetchone()[0]
+        assert conn.execute(f"SELECT COUNT(*) FROM {PICKER_START_TABLE}").fetchone() == (0,)
+        assert conn.execute(
+            f"SELECT aggregate_id, event_type, latest_valid_rowid, "
+            f"latest_running_rowid, latest_snapshot_rowid FROM {PICKER_PROGRESS_TABLE}"
+        ).fetchall() == [
+            (
+                "exec-sparse",
+                "workflow.progress.updated",
+                progress_rowid,
+                progress_rowid,
+                progress_rowid,
+            ),
+        ]
     finally:
         conn.close()
 
 
-async def test_writable_initialize_repairs_wrong_same_name_indexes(tmp_path) -> None:
-    db = tmp_path / "wrong-indexes.db"
+async def test_read_only_initialize_does_not_install_projection(tmp_path) -> None:
+    db = tmp_path / "read-only.db"
+    _create_legacy_events_table(db)
+    store = EventStore(f"sqlite+aiosqlite:///{db}", read_only=True)
+    await store.initialize(create_schema=False)
+    await store.close()
+    conn = sqlite3.connect(db)
+    try:
+        names = {row[0] for row in conn.execute("SELECT name FROM sqlite_master")}
+        assert not (set(PICKER_CONTRACT_NAMES) & names)
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("bad_marker", [-1, 1.5, "text", sqlite3.Binary(b"blob")])
+async def test_writable_initialize_repairs_malformed_completion_marker(
+    tmp_path, bad_marker
+) -> None:
+    db = tmp_path / "marker.db"
+    await _initialize(db)
+    conn = sqlite3.connect(db)
+    try:
+        conn.execute("PRAGMA ignore_check_constraints = ON")
+        conn.execute(f"UPDATE {PICKER_META_TABLE} SET backfilled_through_rowid = ?", (bad_marker,))
+        conn.commit()
+        assert matching_picker_contract(conn) != frozenset(PICKER_CONTRACT_NAMES)
+    finally:
+        conn.close()
+
+    await _initialize(db)
+    conn = sqlite3.connect(db)
+    try:
+        assert matching_picker_contract(conn) == frozenset(PICKER_CONTRACT_NAMES)
+        assert conn.execute(f"SELECT * FROM {PICKER_META_TABLE}").fetchall() == [(1, 0)]
+    finally:
+        conn.close()
+
+
+async def test_nonpositive_legacy_rowids_backfill_with_nonnegative_marker(tmp_path) -> None:
+    db = tmp_path / "nonpositive.db"
     _create_legacy_events_table(db)
     conn = sqlite3.connect(db)
     try:
-        for name in PICKER_INDEX_NAMES:
-            conn.execute(
-                f"CREATE INDEX \"{name}\" ON events (aggregate_id) WHERE event_type = 'other'"
+        conn.executemany(
+            "INSERT INTO events (rowid, aggregate_id, event_type, payload) VALUES (?, ?, ?, ?)",
+            [
+                (
+                    -(2**63),
+                    "orch-min",
+                    "orchestrator.session.started",
+                    json.dumps({"execution_id": "exec-min"}),
+                ),
+                (
+                    0,
+                    "orch-zero",
+                    "orchestrator.session.started",
+                    json.dumps({"execution_id": "exec-zero"}),
+                ),
+            ],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    await _initialize(db)
+    conn = sqlite3.connect(db)
+    try:
+        assert conn.execute(
+            f"SELECT * FROM {PICKER_START_TABLE} ORDER BY event_rowid"
+        ).fetchall() == [(-(2**63),), (0,)]
+        assert conn.execute(f"SELECT * FROM {PICKER_META_TABLE}").fetchall() == [(1, 0)]
+    finally:
+        conn.close()
+
+
+async def test_raw_old_writer_gap_fails_closed_then_writable_repair_recovers(
+    tmp_path,
+) -> None:
+    db = tmp_path / "raw-old-writer-gap.db"
+    await _initialize(db)
+    conn = sqlite3.connect(db)
+    try:
+        event = _insert_raw_start_without_projection_version(conn, suffix="old-writer")
+        conn.commit()
+        assert conn.execute(
+            "SELECT picker_projection_version FROM events WHERE id = ?", (event.id,)
+        ).fetchone() == (None,)
+        plan = " ".join(
+            str(column)
+            for row in conn.execute(
+                "EXPLAIN QUERY PLAN SELECT 1 FROM events "
+                f"INDEXED BY {PICKER_GAP_INDEX} "
+                f"WHERE {PICKER_PROJECTION_SCOPE_SQL} "
+                "AND picker_projection_version IS NOT 1 LIMIT 1"
             )
+            for column in row
+        ).upper()
+        assert "SEARCH EVENTS" in plan
+        assert "TEMP B-TREE" not in plan
+    finally:
+        conn.close()
+
+    with pytest.raises(PickerIndexContractError, match="contains unprojected relevant events"):
+        list_recent_executions(db)
+
+    await _initialize(db)
+    conn = sqlite3.connect(db)
+    try:
+        assert conn.execute(
+            "SELECT picker_projection_version FROM events WHERE id = ?", (event.id,)
+        ).fetchone() == (1,)
+    finally:
+        conn.close()
+    assert [run["execution_id"] for run in list_recent_executions(db)] == ["exec-old-writer"]
+
+
+@pytest.mark.parametrize(
+    "bad_version",
+    [
+        pytest.param(0, id="zero"),
+        pytest.param(2, id="future-integer"),
+        pytest.param(1.5, id="real"),
+        pytest.param("bad", id="text"),
+        pytest.param(sqlite3.Binary(b"1"), id="blob"),
+    ],
+)
+async def test_reader_fails_closed_for_every_malformed_projection_version(
+    tmp_path, bad_version
+) -> None:
+    db = tmp_path / "malformed-projection-version.db"
+    store = EventStore(f"sqlite+aiosqlite:///{db}")
+    await store.initialize()
+    event = BaseEvent(
+        type="orchestrator.session.started",
+        aggregate_type="session",
+        aggregate_id="orch-version",
+        data={"execution_id": "exec-version"},
+    )
+    await store.append(event)
+    await store.close()
+
+    conn = sqlite3.connect(db)
+    try:
+        conn.execute(
+            "UPDATE events SET picker_projection_version = ? WHERE id = ?",
+            (bad_version, event.id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    with pytest.raises(PickerIndexContractError, match="contains unprojected relevant events"):
+        list_recent_executions(db)
+
+
+def test_reader_fails_closed_for_legacy_events_table_without_version_column(tmp_path) -> None:
+    db = tmp_path / "legacy-without-version-column.db"
+    _create_legacy_events_table(db)
+    conn = sqlite3.connect(db)
+    try:
+        conn.execute(
+            "INSERT INTO events (aggregate_id, event_type, payload) VALUES (?, ?, ?)",
+            (
+                "orch-legacy",
+                "orchestrator.session.started",
+                json.dumps({"execution_id": "exec-legacy"}),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    with pytest.raises(PickerIndexContractError):
+        list_recent_executions(db)
+
+
+@pytest.mark.parametrize(
+    "column_ddl",
+    [
+        pytest.param("INTEGER DEFAULT 1", id="default-one"),
+        pytest.param("TEXT", id="wrong-affinity"),
+        pytest.param("INTEGER NOT NULL DEFAULT 1", id="not-null"),
+    ],
+)
+async def test_wrong_same_name_projection_column_stays_unavailable_and_fails_closed(
+    tmp_path, column_ddl: str
+) -> None:
+    db = tmp_path / "wrong-projection-column.db"
+    conn = sqlite3.connect(db)
+    try:
+        conn.execute(
+            "CREATE TABLE events ("
+            "id VARCHAR(36) PRIMARY KEY, aggregate_type VARCHAR(100) NOT NULL, "
+            "aggregate_id VARCHAR(36) NOT NULL, event_type VARCHAR(200) NOT NULL, "
+            "payload JSON NOT NULL, timestamp DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, "
+            "consensus_id VARCHAR(36), "
+            f"picker_projection_version {column_ddl})"
+        )
         conn.commit()
     finally:
         conn.close()
 
     store = EventStore(f"sqlite+aiosqlite:///{db}")
     await store.initialize()
+    assert store._picker_projection_ready is False
+    event = BaseEvent(
+        type="orchestrator.session.started",
+        aggregate_type="session",
+        aggregate_id="orch-wrong-column",
+        data={"execution_id": "exec-wrong-column"},
+    )
+    await store.append(event)
+    replayed, _ = await store.get_events_after("session", "orch-wrong-column", 0)
     await store.close()
+    assert [item.id for item in replayed] == [event.id]
 
     conn = sqlite3.connect(db)
     try:
-        assert matching_picker_indexes(conn) == frozenset(PICKER_INDEX_NAMES)
-        actual = _picker_index_sql(conn)
-        for name, expected in PICKER_INDEX_DDL_BY_NAME.items():
-            assert normalize_index_ddl(actual[name]) == normalize_index_ddl(expected)
+        assert matching_picker_contract(conn) != frozenset(PICKER_CONTRACT_NAMES)
     finally:
         conn.close()
+    with pytest.raises(PickerIndexContractError):
+        list_recent_executions(db)
 
 
-def test_contract_checker_rejects_column_order_drift_with_same_predicate(tmp_path) -> None:
-    db = tmp_path / "column-drift.db"
+async def test_writable_initialize_backfills_100k_legacy_progress_rows(tmp_path) -> None:
+    db = tmp_path / "legacy-100k.db"
     _create_legacy_events_table(db)
     conn = sqlite3.connect(db)
     try:
-        for statement in PICKER_INDEX_DDL_BY_NAME.values():
-            conn.execute(statement)
-        conn.execute(f'DROP INDEX "{AGGREGATE_EVENT_INDEX}"')
         conn.execute(
-            f'CREATE INDEX "{AGGREGATE_EVENT_INDEX}" '
-            "ON events (event_type, aggregate_id) "
-            f"WHERE {PICKER_PROGRESS_SCOPE_SQL} AND {VALID_JSON_SQL}"
+            "INSERT INTO events (aggregate_id, event_type, payload) VALUES (?, ?, ?)",
+            (
+                "orch",
+                "orchestrator.session.started",
+                json.dumps({"execution_id": "exec"}),
+            ),
         )
-
-        matching = matching_picker_indexes(conn)
-
-        assert AGGREGATE_EVENT_INDEX not in matching
-        assert matching == frozenset(PICKER_INDEX_NAMES) - {AGGREGATE_EVENT_INDEX}
+        completed = json.dumps({"runtime_status": "completed"})
+        conn.executemany(
+            "INSERT INTO events (aggregate_id, event_type, payload) VALUES (?, ?, ?)",
+            (("exec", "workflow.progress.updated", completed) for _ in range(99_999)),
+        )
+        conn.execute(
+            "INSERT INTO events (aggregate_id, event_type, payload) VALUES (?, ?, ?)",
+            (
+                "exec",
+                "workflow.progress.updated",
+                json.dumps(
+                    {
+                        "progress": {"runtime_status": "running"},
+                        "acceptance_criteria": [],
+                    }
+                ),
+            ),
+        )
+        conn.commit()
     finally:
         conn.close()
 
-
-def test_contract_checker_rejects_direct_index_column_order_drift(tmp_path) -> None:
-    db = tmp_path / "direct-column-drift.db"
-    _create_legacy_events_table(db)
-    conn = sqlite3.connect(db)
-    try:
-        for statement in PICKER_INDEX_DDL_BY_NAME.values():
-            conn.execute(statement)
-        expected = PICKER_INDEX_DDL_BY_NAME[DIRECT_EVENT_INDEX]
-        conn.execute(f'DROP INDEX "{DIRECT_EVENT_INDEX}"')
-        conn.execute(expected.replace("(event_type, aggregate_id)", "(aggregate_id, event_type)"))
-
-        matching = matching_picker_indexes(conn)
-
-        assert DIRECT_EVENT_INDEX not in matching
-        assert matching == frozenset(PICKER_INDEX_NAMES) - {DIRECT_EVENT_INDEX}
-    finally:
-        conn.close()
-
-
-@pytest.mark.parametrize(
-    "replacements",
-    [
-        {
-            "orchestrator.progress.updated": "ORCHESTRATOR.PROGRESS.UPDATED",
-            "workflow.progress.updated": "WORKFLOW.PROGRESS.UPDATED",
-            "running": "RUNNING",
-        },
-        {"'workflow.progress.updated'": "'workflow.progress. updated'"},
-    ],
-)
-async def test_contract_rejects_and_repairs_changed_string_literals(tmp_path, replacements) -> None:
-    db = tmp_path / "literal-drift.db"
-    _create_legacy_events_table(db)
-    conn = sqlite3.connect(db)
-    try:
-        for statement in PICKER_INDEX_DDL_BY_NAME.values():
-            changed = statement
-            for canonical, case_changed in replacements.items():
-                changed = changed.replace(canonical, case_changed)
-            conn.execute(changed)
-
-        assert matching_picker_indexes(conn) == frozenset({DIRECT_EVENT_INDEX, START_EVENT_INDEX})
-    finally:
-        conn.close()
-
-    store = EventStore(f"sqlite+aiosqlite:///{db}")
-    await store.initialize()
-    await store.close()
+    await _initialize(db)
 
     conn = sqlite3.connect(db)
     try:
-        assert matching_picker_indexes(conn) == frozenset(PICKER_INDEX_NAMES)
+        assert conn.execute(f"SELECT * FROM {PICKER_START_TABLE}").fetchall() == [(1,)]
+        assert conn.execute(
+            f"SELECT latest_valid_rowid, latest_running_rowid, latest_snapshot_rowid "
+            f"FROM {PICKER_PROGRESS_TABLE}"
+        ).fetchall() == [(100_001, 100_001, 100_001)]
+        assert conn.execute(f"SELECT * FROM {PICKER_META_TABLE}").fetchall() == [(1, 100_001)]
     finally:
         conn.close()
 
 
 @pytest.mark.parametrize("sqlite_error", ["database or disk is full", "database is locked"])
-async def test_picker_index_failure_does_not_block_writer(
+async def test_projection_failure_does_not_block_writer(
     tmp_path, monkeypatch, caplog, sqlite_error
 ) -> None:
     from ouroboros.persistence import event_store as event_store_module
     from ouroboros.persistence import picker_index_provisioning as provisioning_module
 
     def fail_provision(_connection) -> None:
-        raise OperationalError(
-            "CREATE INDEX",
-            {},
-            sqlite3.OperationalError(sqlite_error),
-        )
+        raise OperationalError("CREATE TABLE", {}, sqlite3.OperationalError(sqlite_error))
 
     monkeypatch.setattr(provisioning_module, "provision_picker_indexes", fail_provision)
     caplog.set_level(logging.WARNING, logger=event_store_module.__name__)
     db = tmp_path / "full.db"
     store = EventStore(f"sqlite+aiosqlite:///{db}")
-
     await store.initialize()
     event = BaseEvent(
-        type="ontology.concept.added",
-        aggregate_type="ontology",
-        aggregate_id="ont-123",
-        data={"name": "still writable"},
+        type="orchestrator.session.started",
+        aggregate_type="session",
+        aggregate_id="orch-123",
+        data={"execution_id": "exec-123"},
     )
     await store.append(event)
-    replayed, _last_row = await store.get_events_after("ontology", "ont-123", 0)
+    replayed, _ = await store.get_events_after("session", "orch-123", 0)
+    await store.close()
+    assert [item.id for item in replayed] == [event.id]
+    assert "projection provisioning deferred" in caplog.text.lower()
+
+
+async def test_relevant_append_survives_deferred_repair_of_malformed_meta(
+    tmp_path, monkeypatch
+) -> None:
+    from ouroboros.persistence import picker_index_provisioning as provisioning_module
+
+    db = tmp_path / "malformed-meta.db"
+    await _initialize(db)
+    conn = sqlite3.connect(db)
+    try:
+        conn.execute(f'DROP TABLE "{PICKER_META_TABLE}"')
+        conn.execute(f'CREATE TABLE "{PICKER_META_TABLE}" (contract_version INTEGER)')
+        conn.commit()
+    finally:
+        conn.close()
+
+    def fail_provision(_connection) -> None:
+        raise OperationalError(
+            "projection rebuild",
+            {},
+            sqlite3.OperationalError("database is locked"),
+        )
+
+    monkeypatch.setattr(provisioning_module, "provision_picker_indexes", fail_provision)
+    store = EventStore(f"sqlite+aiosqlite:///{db}")
+    await store.initialize()
+    event = BaseEvent(
+        type="orchestrator.session.started",
+        aggregate_type="session",
+        aggregate_id="orch-123",
+        data={"execution_id": "exec-123"},
+    )
+    await store.append(event)
+    replayed, _ = await store.get_events_after("session", "orch-123", 0)
     await store.close()
 
     assert [item.id for item in replayed] == [event.id]
-    assert "picker index provisioning deferred" in caplog.text.lower()
+    conn = sqlite3.connect(db)
+    try:
+        assert matching_picker_contract(conn) != frozenset(PICKER_CONTRACT_NAMES)
+    finally:
+        conn.close()
+
+
+async def test_projection_write_failure_rolls_back_single_and_batch_events(tmp_path) -> None:
+    from ouroboros.core.errors import PersistenceError
+
+    db = tmp_path / "projection-write-rollback.db"
+    store = EventStore(f"sqlite+aiosqlite:///{db}")
+    await store.initialize()
+    conn = sqlite3.connect(db)
+    try:
+        conn.execute(f'DROP TABLE "{PICKER_PROGRESS_TABLE}"')
+        conn.commit()
+    finally:
+        conn.close()
+
+    single = BaseEvent(
+        type="workflow.progress.updated",
+        aggregate_type="workflow",
+        aggregate_id="exec-single",
+        data={"acceptance_criteria": []},
+    )
+    batch = [
+        BaseEvent(
+            type="workflow.progress.updated",
+            aggregate_type="workflow",
+            aggregate_id="exec-batch",
+            data={"runtime_status": status},
+        )
+        for status in ("running", "completed")
+    ]
+    mixed_batch = [
+        BaseEvent(
+            type="telemetry.unrelated",
+            aggregate_type="telemetry",
+            aggregate_id="noise-mixed",
+            data={},
+        ),
+        BaseEvent(
+            type="workflow.progress.updated",
+            aggregate_type="workflow",
+            aggregate_id="exec-mixed",
+            data={"runtime_status": "running"},
+        ),
+    ]
+    with pytest.raises(PersistenceError):
+        await store.append(single)
+    with pytest.raises(PersistenceError):
+        await store.append_batch(batch)
+    with pytest.raises(PersistenceError):
+        await store.append_batch(mixed_batch)
+    await store.close()
+
+    conn = sqlite3.connect(db)
+    try:
+        event_ids = [
+            single.id,
+            *(event.id for event in batch),
+            *(event.id for event in mixed_batch),
+        ]
+        placeholders = ",".join("?" for _ in event_ids)
+        assert conn.execute(
+            f"SELECT COUNT(*) FROM events WHERE id IN ({placeholders})", event_ids
+        ).fetchone() == (0,)
+    finally:
+        conn.close()
+
+
+async def test_projection_integrity_failure_is_also_best_effort(tmp_path, monkeypatch) -> None:
+    from ouroboros.persistence import picker_index_provisioning as provisioning_module
+
+    def fail_provision(_connection) -> None:
+        raise IntegrityError("backfill", {}, sqlite3.IntegrityError("constraint failed"))
+
+    monkeypatch.setattr(provisioning_module, "provision_picker_indexes", fail_provision)
+    db = tmp_path / "integrity.db"
+    store = EventStore(f"sqlite+aiosqlite:///{db}")
+    await store.initialize()
+    await store.append(
+        BaseEvent(type="test.added", aggregate_type="test", aggregate_id="a", data={})
+    )
+    await store.close()
 
 
 async def test_concurrent_writable_initializers_are_benign(tmp_path) -> None:
     db = tmp_path / "concurrent.db"
     first = EventStore(f"sqlite+aiosqlite:///{db}")
     second = EventStore(f"sqlite+aiosqlite:///{db}")
-
     await asyncio.gather(first.initialize(), second.initialize())
     event = BaseEvent(
-        type="ontology.concept.added",
-        aggregate_type="ontology",
-        aggregate_id="ont-concurrent",
-        data={"name": "ready"},
+        type="orchestrator.session.started",
+        aggregate_type="session",
+        aggregate_id="orch-concurrent",
+        data={"execution_id": "exec-concurrent"},
     )
     await first.append(event)
-    replayed, _last_row = await second.get_events_after("ontology", "ont-concurrent", 0)
+    replayed, _ = await second.get_events_after("session", "orch-concurrent", 0)
     await asyncio.gather(first.close(), second.close())
 
     assert [item.id for item in replayed] == [event.id]
     conn = sqlite3.connect(db)
     try:
-        assert matching_picker_indexes(conn) == frozenset(PICKER_INDEX_NAMES)
+        assert matching_picker_contract(conn) == frozenset(PICKER_CONTRACT_NAMES)
+        assert conn.execute(f"SELECT COUNT(*) FROM {PICKER_META_TABLE}").fetchone() == (1,)
+        assert conn.execute(f"SELECT COUNT(*) FROM {PICKER_START_TABLE}").fetchone() == (1,)
     finally:
         conn.close()
 
 
-def _measure_bulk_append(path: Path, event_type: str, *, indexed: bool) -> tuple[float, int]:
+async def test_writable_initialize_repairs_wrong_same_name_direct_index(tmp_path) -> None:
+    db = tmp_path / "wrong-direct.db"
+    await _initialize(db)
+    conn = sqlite3.connect(db)
+    try:
+        conn.execute(f'DROP INDEX "{DIRECT_EVENT_INDEX}"')
+        conn.execute(f'CREATE INDEX "{DIRECT_EVENT_INDEX}" ON events (aggregate_id)')
+        conn.commit()
+        assert matching_picker_contract(conn) != frozenset(PICKER_CONTRACT_NAMES)
+    finally:
+        conn.close()
+    await _initialize(db)
+    conn = sqlite3.connect(db)
+    try:
+        assert matching_picker_contract(conn) == frozenset(PICKER_CONTRACT_NAMES)
+    finally:
+        conn.close()
+
+
+async def test_writable_initialize_repairs_wrong_projection_objects_and_backfills(
+    tmp_path,
+) -> None:
+    db = tmp_path / "wrong-projection-objects.db"
+    await _initialize(db)
+    started = BaseEvent(
+        type="orchestrator.session.started",
+        aggregate_type="session",
+        aggregate_id="orch",
+        data={"execution_id": "exec"},
+    )
+    progress = BaseEvent(
+        type="workflow.progress.updated",
+        aggregate_type="workflow",
+        aggregate_id="exec",
+        data={"progress": {"runtime_status": "running"}, "acceptance_criteria": []},
+    )
+    conn = sqlite3.connect(db)
+    try:
+        conn.execute(f'DROP TABLE "{PICKER_START_TABLE}"')
+        conn.execute(f'DROP TABLE "{PICKER_PROGRESS_TABLE}"')
+        conn.execute(f'DROP TABLE "{PICKER_META_TABLE}"')
+        conn.execute(
+            f'CREATE VIEW "{PICKER_START_TABLE}" AS SELECT rowid AS event_rowid FROM events WHERE 0'
+        )
+        conn.execute(f'CREATE TABLE "{PICKER_PROGRESS_TABLE}" (aggregate_id TEXT)')
+        conn.execute(f'CREATE TABLE "{PICKER_META_TABLE}" (contract_version TEXT)')
+        for event in (started, progress):
+            values = event.to_db_dict()
+            values["payload"] = json.dumps(values["payload"])
+            conn.execute(
+                "INSERT INTO events (id, aggregate_type, aggregate_id, event_type, payload, "
+                "timestamp, consensus_id) VALUES (:id, :aggregate_type, :aggregate_id, "
+                ":event_type, :payload, :timestamp, :consensus_id)",
+                values,
+            )
+        conn.commit()
+        assert matching_picker_contract(conn) != frozenset(PICKER_CONTRACT_NAMES)
+    finally:
+        conn.close()
+
+    await _initialize(db)
+
+    conn = sqlite3.connect(db)
+    try:
+        assert matching_picker_contract(conn) == frozenset(PICKER_CONTRACT_NAMES)
+        assert conn.execute(f"SELECT * FROM {PICKER_START_TABLE}").fetchall() == [(1,)]
+        assert conn.execute(
+            f"SELECT latest_valid_rowid, latest_running_rowid, latest_snapshot_rowid "
+            f"FROM {PICKER_PROGRESS_TABLE}"
+        ).fetchall() == [(2, 2, 2)]
+    finally:
+        conn.close()
+
+
+async def test_failed_rebuild_rolls_back_all_projection_ddl(tmp_path, monkeypatch) -> None:
+    from ouroboros.persistence import picker_index_provisioning as provisioning
+
+    db = tmp_path / "rollback.db"
+    await _initialize(db)
+    conn = sqlite3.connect(db)
+    try:
+        conn.execute(f'DROP INDEX "{DIRECT_EVENT_INDEX}"')
+        conn.execute(f'CREATE INDEX "{DIRECT_EVENT_INDEX}" ON events (aggregate_id)')
+        conn.commit()
+    finally:
+        conn.close()
+
+    def fail_mid_rebuild(connection) -> None:
+        connection.exec_driver_sql(f'DROP TABLE "{PICKER_START_TABLE}"')
+        raise OperationalError(
+            "projection rebuild",
+            {},
+            sqlite3.OperationalError("injected rebuild failure"),
+        )
+
+    monkeypatch.setattr(provisioning, "_rebuild_projection", fail_mid_rebuild)
+    await _initialize(db)
+    conn = sqlite3.connect(db)
+    try:
+        names = {row[0] for row in conn.execute("SELECT name FROM sqlite_master")}
+        assert PICKER_START_TABLE in names
+        assert PICKER_META_TABLE in names
+        # The pre-existing drift remains; none of the failed rebuild's partial
+        # DDL became visible.
+        assert matching_picker_contract(conn) != frozenset(PICKER_CONTRACT_NAMES)
+    finally:
+        conn.close()
+
+
+def test_all_event_inserts_are_owned_by_projection_wrapper() -> None:
+    repo_root = Path(__file__).parents[3]
+    insert_sites: list[str] = []
+    for path in (repo_root / "src" / "ouroboros").rglob("*.py"):
+        count = path.read_text().count("events_table.insert")
+        if count:
+            insert_sites.append(str(path.relative_to(repo_root)))
+    assert insert_sites == ["src/ouroboros/persistence/picker_projection_updates.py"]
+
+
+def _measure_bulk_append(path: Path, event_type: str, *, projected: bool) -> tuple[float, int]:
     conn = sqlite3.connect(path)
     try:
         conn.execute(
@@ -249,37 +790,85 @@ def _measure_bulk_append(path: Path, event_type: str, *, indexed: bool) -> tuple
             "aggregate_id TEXT, event_type TEXT, payload TEXT, timestamp TEXT, "
             "consensus_id TEXT)"
         )
-        conn.execute("CREATE INDEX ix_events_aggregate_type ON events (aggregate_type)")
         conn.execute("CREATE INDEX ix_events_aggregate_id ON events (aggregate_id)")
+        conn.execute("CREATE INDEX ix_events_aggregate_type ON events (aggregate_type)")
         conn.execute(
             "CREATE INDEX ix_events_aggregate_type_id ON events (aggregate_type, aggregate_id)"
         )
         conn.execute("CREATE INDEX ix_events_event_type ON events (event_type)")
         conn.execute("CREATE INDEX ix_events_timestamp ON events (timestamp)")
-        if indexed:
-            for statement in PICKER_INDEX_DDL_BY_NAME.values():
-                conn.execute(statement)
-        payload = json.dumps(
-            {
-                "progress": {"runtime_status": "completed"},
-                "acceptance_criteria": [{"node_id": "n", "status": "completed"}],
-            }
-        )
+        if projected:
+            from sqlalchemy import create_engine
+
+            from ouroboros.persistence.picker_index_provisioning import provision_picker_indexes
+
+            conn.commit()
+            conn.close()
+            engine = create_engine(f"sqlite:///{path}")
+            with engine.begin() as connection:
+                provision_picker_indexes(connection)
+            engine.dispose()
+            conn = sqlite3.connect(path)
+        payload = {
+            "progress": {"runtime_status": "completed"},
+            "acceptance_criteria": [{"node_id": "n", "status": "completed"}],
+        }
+        conn.close()
+        event_chunks = [
+            [
+                BaseEvent(
+                    id=f"{offset + index:036d}",
+                    type=event_type,
+                    aggregate_type="test",
+                    aggregate_id="aggregate",
+                    data=payload,
+                )
+                for index in range(5_000)
+            ]
+            for offset in range(0, 100_000, 5_000)
+        ]
+
+        async def append_all() -> None:
+            from sqlalchemy.ext.asyncio import create_async_engine
+
+            from ouroboros.persistence.picker_projection_updates import (
+                insert_events_with_picker_projection,
+            )
+            from ouroboros.persistence.schema import events_table
+
+            engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
+            try:
+                async with engine.begin() as connection:
+                    for events in event_chunks:
+                        if projected:
+                            await insert_events_with_picker_projection(
+                                connection,
+                                events,
+                                projection_ready=True,
+                            )
+                        else:
+                            await connection.execute(
+                                events_table.insert(),
+                                [event.to_db_dict() for event in events],
+                            )
+            finally:
+                await engine.dispose()
+
         started = time.process_time()
-        conn.executemany(
-            "INSERT INTO events "
-            "(id, aggregate_type, aggregate_id, event_type, payload, timestamp) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (
-                (str(index), "test", "aggregate", event_type, payload, str(index))
-                for index in range(100_000)
-            ),
-        )
-        conn.commit()
+        asyncio.run(append_all())
         elapsed = time.process_time() - started
-        page_count = int(conn.execute("PRAGMA page_count").fetchone()[0])
-        page_size = int(conn.execute("PRAGMA page_size").fetchone()[0])
-        return elapsed, page_count * page_size
+        conn = sqlite3.connect(path)
+        if projected:
+            start_count = conn.execute(f"SELECT COUNT(*) FROM {PICKER_START_TABLE}").fetchone()[0]
+            progress_count = conn.execute(
+                f"SELECT COUNT(*) FROM {PICKER_PROGRESS_TABLE}"
+            ).fetchone()[0]
+            assert start_count == (100_000 if event_type == "orchestrator.session.started" else 0)
+            assert progress_count == (1 if event_type == "workflow.progress.updated" else 0)
+        size = int(conn.execute("PRAGMA page_count").fetchone()[0]) * int(
+            conn.execute("PRAGMA page_size").fetchone()[0]
+        )
+        return elapsed, size
     finally:
         conn.close()
 
@@ -293,28 +882,25 @@ def _measure_bulk_append(path: Path, event_type: str, *, indexed: bool) -> tuple
         ("workflow.progress.updated", 2.1, 1.35),
     ],
 )
-def test_picker_index_write_and_disk_budgets(
+def test_picker_projection_write_and_disk_budgets(
     tmp_path, event_type: str, max_time_ratio: float, max_size_ratio: float
 ) -> None:
     time_ratios: list[float] = []
     size_ratios: list[float] = []
     for trial in range(3):
-        baseline_path = tmp_path / f"baseline-{event_type}-{trial}.db"
-        indexed_path = tmp_path / f"indexed-{event_type}-{trial}.db"
+        baseline = tmp_path / f"baseline-{trial}.db"
+        projected = tmp_path / f"projected-{trial}.db"
         try:
             baseline_time, baseline_size = _measure_bulk_append(
-                baseline_path, event_type, indexed=False
+                baseline, event_type, projected=False
             )
-            indexed_time, indexed_size = _measure_bulk_append(
-                indexed_path, event_type, indexed=True
+            projected_time, projected_size = _measure_bulk_append(
+                projected, event_type, projected=True
             )
-            time_ratios.append(indexed_time / baseline_time)
-            size_ratios.append(indexed_size / baseline_size)
+            time_ratios.append(projected_time / baseline_time)
+            size_ratios.append(projected_size / baseline_size)
         finally:
-            baseline_path.unlink(missing_ok=True)
-            indexed_path.unlink(missing_ok=True)
-
-    # Process CPU isolates index-maintenance cost from fsync and scheduler wait.
-    # Keep the same budget and require the median of three 100k-append trials.
+            baseline.unlink(missing_ok=True)
+            projected.unlink(missing_ok=True)
     assert median(time_ratios) < max_time_ratio
     assert max(size_ratios) < max_size_ratio

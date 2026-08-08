@@ -232,7 +232,7 @@ def create_event_store_schema(connection: Connection) -> None:
     metadata.create_all(connection)
 
 
-async def initialize_event_store_schema(engine: AsyncEngine, logger: logging.Logger) -> None:
+async def initialize_event_store_schema(engine: AsyncEngine, logger: logging.Logger) -> bool:
     """Commit required tables, then provision optional picker indexes."""
     async with engine.connect() as connection:
         await connection.exec_driver_sql("BEGIN IMMEDIATE")
@@ -243,4 +243,4 @@ async def initialize_event_store_schema(engine: AsyncEngine, logger: logging.Log
             raise
         else:
             await connection.commit()
-    await provision_picker_indexes_best_effort(engine, logger)
+    return await provision_picker_indexes_best_effort(engine, logger)

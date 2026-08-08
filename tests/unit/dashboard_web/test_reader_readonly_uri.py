@@ -9,6 +9,7 @@ from statistics import median
 import time
 
 import pytest
+from sqlalchemy import create_engine
 
 from ouroboros.dashboard_web import reader as reader_module
 from ouroboros.dashboard_web.reader import (
@@ -19,13 +20,21 @@ from ouroboros.dashboard_web.reader import (
     list_recent_executions,
 )
 from ouroboros.orchestrator.events import create_workflow_progress_event
+from ouroboros.persistence.picker_index_provisioning import provision_picker_indexes
 from ouroboros.persistence.picker_indexes import (
-    AGGREGATE_EVENT_INDEX,
     DIRECT_EVENT_INDEX,
-    PICKER_INDEX_DDL,
-    RUNNING_PROGRESS_INDEX,
-    START_EVENT_INDEX,
-    WORKFLOW_SNAPSHOT_INDEX,
+    PICKER_CONTRACT_DDL_BY_NAME,
+    PICKER_GAP_INDEX,
+    PICKER_META_TABLE,
+    PICKER_PROGRESS_SCOPE_SQL,
+    PICKER_PROGRESS_TABLE,
+    PICKER_PROJECTION_SCOPE_SQL,
+    PICKER_PROJECTION_VERSION,
+    PICKER_START_SCOPE_SQL,
+    PICKER_START_TABLE,
+    RUNNING_PROGRESS_SQL,
+    VALID_JSON_SQL,
+    WORKFLOW_SNAPSHOT_SQL,
 )
 
 
@@ -45,7 +54,6 @@ def _make_events_db(path, rows: list[tuple[str, str, dict]]) -> None:
         conn.execute("CREATE TABLE events (aggregate_id TEXT, event_type TEXT, payload TEXT)")
         conn.execute("CREATE INDEX ix_events_aggregate_id ON events (aggregate_id)")
         conn.execute("CREATE INDEX ix_events_event_type ON events (event_type)")
-        _install_picker_indexes(conn)
         conn.executemany(
             "INSERT INTO events (aggregate_id, event_type, payload) VALUES (?, ?, ?)",
             [
@@ -57,10 +65,62 @@ def _make_events_db(path, rows: list[tuple[str, str, dict]]) -> None:
     finally:
         conn.close()
 
+    # Production installs and backfills the projection only from a writable
+    # connection.  These reader fixtures deliberately insert legacy history
+    # first, then use that same provisioning path instead of relying on the
+    # triggers that the application-owned projection replaced.
+    engine = create_engine(f"sqlite:///{path}")
+    try:
+        with engine.begin() as connection:
+            provision_picker_indexes(connection)
+    finally:
+        engine.dispose()
 
-def _install_picker_indexes(conn: sqlite3.Connection) -> None:
-    for statement in PICKER_INDEX_DDL:
+
+def _install_picker_contract(conn: sqlite3.Connection) -> None:
+    columns = {row[1] for row in conn.execute('PRAGMA table_info("events")')}
+    if "picker_projection_version" not in columns:
+        conn.execute("ALTER TABLE events ADD COLUMN picker_projection_version INTEGER")
+    for statement in PICKER_CONTRACT_DDL_BY_NAME.values():
         conn.execute(statement)
+    conn.execute(
+        f"INSERT INTO {PICKER_META_TABLE} "
+        "(contract_version, backfilled_through_rowid) VALUES (?, 0)",
+        (PICKER_PROJECTION_VERSION,),
+    )
+
+
+def _refresh_picker_contract(conn: sqlite3.Connection) -> None:
+    """Backfill fixtures using the production projection's stored-row rules."""
+    conn.execute(f"DELETE FROM {PICKER_START_TABLE}")
+    conn.execute(f"DELETE FROM {PICKER_PROGRESS_TABLE}")
+    conn.execute(f"DELETE FROM {PICKER_META_TABLE}")
+    conn.execute(
+        f"INSERT INTO {PICKER_START_TABLE} (event_rowid) "
+        f"SELECT rowid FROM events WHERE {PICKER_START_SCOPE_SQL}"
+    )
+    conn.execute(
+        f"INSERT INTO {PICKER_PROGRESS_TABLE} ("
+        "aggregate_id, event_type, latest_valid_rowid, latest_running_rowid, "
+        "latest_snapshot_rowid) SELECT aggregate_id, event_type, MAX(rowid), "
+        f"MAX(CASE WHEN {RUNNING_PROGRESS_SQL} THEN rowid END), "
+        "MAX(CASE WHEN event_type = 'workflow.progress.updated' "
+        f"AND {WORKFLOW_SNAPSHOT_SQL} THEN rowid END) FROM events "
+        f"WHERE {PICKER_PROGRESS_SCOPE_SQL} AND {VALID_JSON_SQL} "
+        "GROUP BY aggregate_id, event_type"
+    )
+    backfilled_through = conn.execute(
+        "SELECT CASE WHEN MAX(rowid) > 0 THEN MAX(rowid) ELSE 0 END FROM events"
+    ).fetchone()[0]
+    conn.execute(
+        f"INSERT INTO {PICKER_META_TABLE} "
+        "(contract_version, backfilled_through_rowid) VALUES (?, ?)",
+        (PICKER_PROJECTION_VERSION, int(backfilled_through)),
+    )
+    conn.execute(
+        f"UPDATE events SET picker_projection_version = ? WHERE {PICKER_PROJECTION_SCOPE_SQL}",
+        (PICKER_PROJECTION_VERSION,),
+    )
 
 
 def test_readonly_connect_handles_question_mark_in_path(tmp_path) -> None:
@@ -107,10 +167,7 @@ def test_picker_fails_before_history_reads_without_exact_index_contract(
     try:
         conn.execute("CREATE TABLE events (aggregate_id TEXT, event_type TEXT, payload TEXT)")
         if wrong_same_name:
-            for name in (AGGREGATE_EVENT_INDEX, RUNNING_PROGRESS_INDEX, WORKFLOW_SNAPSHOT_INDEX):
-                conn.execute(
-                    f"CREATE INDEX \"{name}\" ON events (aggregate_id) WHERE event_type = 'other'"
-                )
+            conn.execute(f"CREATE TABLE {PICKER_START_TABLE} (aggregate_id TEXT)")
         conn.execute(
             "INSERT INTO events (aggregate_id, event_type, payload) VALUES (?, ?, ?)",
             (
@@ -154,10 +211,16 @@ def test_picker_fails_before_history_read_for_literal_drift_indexes(tmp_path, mo
     conn = sqlite3.connect(db)
     try:
         conn.execute("CREATE TABLE events (aggregate_id TEXT, event_type TEXT, payload TEXT)")
-        for statement in PICKER_INDEX_DDL:
+        conn.execute("ALTER TABLE events ADD COLUMN picker_projection_version INTEGER")
+        for statement in PICKER_CONTRACT_DDL_BY_NAME.values():
             conn.execute(
                 statement.replace("'workflow.progress.updated'", "'workflow.progress. updated'")
             )
+        conn.execute(
+            f"INSERT INTO {PICKER_META_TABLE} "
+            "(contract_version, backfilled_through_rowid) VALUES (?, 0)",
+            (PICKER_PROJECTION_VERSION,),
+        )
         conn.execute(
             "INSERT INTO events (aggregate_id, event_type, payload) VALUES (?, ?, ?)",
             (
@@ -194,6 +257,231 @@ def test_picker_fails_before_history_read_for_literal_drift_indexes(tmp_path, mo
 
     assert not any("FROM events" in statement for statement in statements)
     assert vm_steps < 500
+
+
+def test_picker_pins_snapshot_before_gap_probe_and_history_reads(tmp_path, monkeypatch) -> None:
+    db = tmp_path / "gap-snapshot-race.db"
+    _make_events_db(
+        db,
+        [
+            (
+                "orch-before",
+                "orchestrator.session.started",
+                {"execution_id": "exec-before"},
+            )
+        ],
+    )
+    writer = sqlite3.connect(db)
+    try:
+        writer.execute("PRAGMA journal_mode=WAL")
+        writer.commit()
+    finally:
+        writer.close()
+
+    original_connect = reader_module._connect_readonly
+    observed = {"in_transaction": False, "injected": False}
+
+    class InjectingConnection:
+        def __init__(self, connection: sqlite3.Connection) -> None:
+            self._connection = connection
+
+        def execute(self, statement, parameters=()):
+            cursor = self._connection.execute(statement, parameters)
+            if f"INDEXED BY {PICKER_GAP_INDEX}" in statement and not observed["injected"]:
+                observed["in_transaction"] = self._connection.in_transaction
+                concurrent_writer = sqlite3.connect(db)
+                try:
+                    concurrent_writer.execute(
+                        "INSERT INTO events (aggregate_id, event_type, payload) VALUES (?, ?, ?)",
+                        (
+                            "orch-after-gap",
+                            "orchestrator.session.started",
+                            json.dumps({"execution_id": "exec-after-gap"}),
+                        ),
+                    )
+                    concurrent_writer.commit()
+                finally:
+                    concurrent_writer.close()
+                observed["injected"] = True
+            return cursor
+
+        def __getattr__(self, name):
+            return getattr(self._connection, name)
+
+    def injecting_connect(db_path):
+        return InjectingConnection(original_connect(db_path))
+
+    monkeypatch.setattr(reader_module, "_connect_readonly", injecting_connect)
+
+    runs = list_recent_executions(db)
+
+    assert observed == {"in_transaction": True, "injected": True}
+    assert [run["execution_id"] for run in runs] == ["exec-before"]
+    monkeypatch.setattr(reader_module, "_connect_readonly", original_connect)
+    with pytest.raises(PickerIndexContractError, match="contains unprojected relevant events"):
+        list_recent_executions(db)
+
+
+def test_picker_fails_closed_for_dangling_start_projection(tmp_path) -> None:
+    db = tmp_path / "dangling-start.db"
+    _make_events_db(
+        db,
+        [("orch_target", "orchestrator.session.started", {"execution_id": "exec_target"})],
+    )
+    conn = sqlite3.connect(db)
+    try:
+        conn.execute(
+            f"INSERT INTO {PICKER_START_TABLE} (event_rowid) VALUES (?)",
+            (999_999,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    with pytest.raises(PickerIndexContractError, match="start pointer mismatch"):
+        list_recent_executions(db)
+
+
+def test_picker_fails_closed_for_wrong_type_start_projection(tmp_path) -> None:
+    db = tmp_path / "wrong-type-start.db"
+    _make_events_db(
+        db,
+        [("orch_target", "orchestrator.session.started", {"execution_id": "exec_target"})],
+    )
+    conn = sqlite3.connect(db)
+    try:
+        cursor = conn.execute(
+            "INSERT INTO events (aggregate_id, event_type, payload) VALUES (?, ?, ?)",
+            ("unrelated", "telemetry.unrelated", "{}"),
+        )
+        conn.execute(
+            f"INSERT INTO {PICKER_START_TABLE} (event_rowid) VALUES (?)",
+            (int(cursor.lastrowid),),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    with pytest.raises(PickerIndexContractError, match="start pointer mismatch"):
+        list_recent_executions(db)
+
+
+def test_picker_fails_closed_for_mismatched_progress_projection(tmp_path) -> None:
+    db = tmp_path / "mismatched-progress.db"
+    _make_events_db(
+        db,
+        [
+            ("orch_target", "orchestrator.session.started", {"execution_id": "exec_target"}),
+            (
+                "exec_target",
+                "workflow.progress.updated",
+                {"execution_id": "exec_target", "acceptance_criteria": []},
+            ),
+        ],
+    )
+    conn = sqlite3.connect(db)
+    try:
+        conn.execute(
+            f"UPDATE {PICKER_PROGRESS_TABLE} SET latest_valid_rowid = 1, "
+            "latest_running_rowid = NULL, latest_snapshot_rowid = NULL "
+            "WHERE aggregate_id = ? AND event_type = ?",
+            ("exec_target", "workflow.progress.updated"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    with pytest.raises(PickerIndexContractError, match="pointer mismatch"):
+        list_recent_executions(db)
+
+
+@pytest.mark.parametrize(
+    ("column", "missing_rowid", "kind"),
+    [
+        ("latest_valid_rowid", 999_997, "valid"),
+        ("latest_running_rowid", -1, "running"),
+        ("latest_snapshot_rowid", -2, "snapshot"),
+    ],
+)
+def test_picker_fails_closed_for_dangling_progress_projection(
+    tmp_path,
+    column: str,
+    missing_rowid: int,
+    kind: str,
+) -> None:
+    db = tmp_path / f"dangling-progress-{kind}.db"
+    _make_events_db(
+        db,
+        [
+            ("orch_target", "orchestrator.session.started", {"execution_id": "exec_target"}),
+            (
+                "exec_target",
+                "workflow.progress.updated",
+                {"execution_id": "exec_target", "acceptance_criteria": []},
+            ),
+        ],
+    )
+    conn = sqlite3.connect(db)
+    try:
+        conn.execute(
+            f"UPDATE {PICKER_PROGRESS_TABLE} SET {column} = ? "
+            "WHERE aggregate_id = ? AND event_type = ?",
+            (missing_rowid, "exec_target", "workflow.progress.updated"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    with pytest.raises(PickerIndexContractError, match=rf"/{kind}/{missing_rowid}$"):
+        list_recent_executions(db)
+
+
+@pytest.mark.parametrize(
+    "column,kind", [("latest_running_rowid", "running"), ("latest_snapshot_rowid", "snapshot")]
+)
+def test_picker_fails_closed_for_wrong_predicate_progress_projection(
+    tmp_path,
+    column: str,
+    kind: str,
+) -> None:
+    db = tmp_path / f"wrong-predicate-progress-{kind}.db"
+    _make_events_db(
+        db,
+        [
+            ("orch_target", "orchestrator.session.started", {"execution_id": "exec_target"}),
+            (
+                "exec_target",
+                "workflow.progress.updated",
+                {"execution_id": "exec_target", "acceptance_criteria": []},
+            ),
+        ],
+    )
+    conn = sqlite3.connect(db)
+    try:
+        cursor = conn.execute(
+            "INSERT INTO events (aggregate_id, event_type, payload) VALUES (?, ?, ?)",
+            (
+                "exec_target",
+                "workflow.progress.updated",
+                json.dumps({"execution_id": "exec_target", "runtime_status": "completed"}),
+            ),
+        )
+        corrupt_rowid = int(cursor.lastrowid)
+        conn.execute(
+            "UPDATE events SET picker_projection_version = ? WHERE rowid = ?",
+            (PICKER_PROJECTION_VERSION, corrupt_rowid),
+        )
+        conn.execute(
+            f"UPDATE {PICKER_PROGRESS_TABLE} SET latest_valid_rowid = ?, {column} = ? "
+            "WHERE aggregate_id = ? AND event_type = ?",
+            (corrupt_rowid, corrupt_rowid, "exec_target", "workflow.progress.updated"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    with pytest.raises(PickerIndexContractError, match=rf"/{kind}/{corrupt_rowid}$"):
+        list_recent_executions(db)
 
 
 def test_list_recent_executions_preserves_goal_and_reports_concurrent_runs(tmp_path) -> None:
@@ -837,7 +1125,7 @@ def test_malformed_unrelated_json_is_ignored_by_picker_and_tail(tmp_path) -> Non
     conn = sqlite3.connect(db)
     try:
         conn.execute("CREATE TABLE events (aggregate_id TEXT, event_type TEXT, payload TEXT)")
-        _install_picker_indexes(conn)
+        _install_picker_contract(conn)
         conn.executemany(
             "INSERT INTO events (aggregate_id, event_type, payload) VALUES (?, ?, ?)",
             [
@@ -851,6 +1139,7 @@ def test_malformed_unrelated_json_is_ignored_by_picker_and_tail(tmp_path) -> Non
                 ("orch_good", "orchestrator.progress.updated", "{local-not-json"),
             ],
         )
+        _refresh_picker_contract(conn)
         conn.commit()
     finally:
         conn.close()
@@ -868,7 +1157,7 @@ def test_picker_limit_applies_after_malformed_start_rows_are_skipped(tmp_path) -
     conn = sqlite3.connect(db)
     try:
         conn.execute("CREATE TABLE events (aggregate_id TEXT, event_type TEXT, payload TEXT)")
-        _install_picker_indexes(conn)
+        _install_picker_contract(conn)
         conn.execute(
             "INSERT INTO events (aggregate_id, event_type, payload) VALUES (?, ?, ?)",
             (
@@ -884,6 +1173,7 @@ def test_picker_limit_applies_after_malformed_start_rows_are_skipped(tmp_path) -
                 for index in range(20)
             ],
         )
+        _refresh_picker_contract(conn)
         conn.commit()
     finally:
         conn.close()
@@ -912,6 +1202,39 @@ def test_picker_limit_counts_distinct_valid_execution_ids(tmp_path) -> None:
     assert [run["execution_id"] for run in runs] == ["exec_new", "exec_old"]
 
 
+def test_picker_paginates_zero_and_minimum_int64_start_rowids(tmp_path) -> None:
+    db = tmp_path / "nonpositive-start-rowids.db"
+    conn = sqlite3.connect(db)
+    try:
+        conn.execute("CREATE TABLE events (aggregate_id TEXT, event_type TEXT, payload TEXT)")
+        conn.executemany(
+            "INSERT INTO events (rowid, aggregate_id, event_type, payload) VALUES (?, ?, ?, ?)",
+            [
+                (
+                    -(2**63),
+                    "orch-min",
+                    "orchestrator.session.started",
+                    json.dumps({"execution_id": "exec-min"}),
+                ),
+                (
+                    0,
+                    "orch-zero",
+                    "orchestrator.session.started",
+                    json.dumps({"execution_id": "exec-zero"}),
+                ),
+            ],
+        )
+        _install_picker_contract(conn)
+        _refresh_picker_contract(conn)
+        conn.commit()
+    finally:
+        conn.close()
+
+    runs = list_recent_executions(db, limit=10)
+
+    assert [run["execution_id"] for run in runs] == ["exec-zero", "exec-min"]
+
+
 def test_picker_progress_queries_are_aggregate_bounded_at_scale(
     tmp_path,
     monkeypatch,
@@ -922,7 +1245,7 @@ def test_picker_progress_queries_are_aggregate_bounded_at_scale(
         conn.execute("CREATE TABLE events (aggregate_id TEXT, event_type TEXT, payload TEXT)")
         conn.execute("CREATE INDEX ix_events_aggregate_id ON events (aggregate_id)")
         conn.execute("CREATE INDEX ix_events_event_type ON events (event_type)")
-        _install_picker_indexes(conn)
+        _install_picker_contract(conn)
         foreign_payload = json.dumps(
             {"execution_id": "exec_foreign", "progress": {"runtime_status": "running"}}
         )
@@ -944,6 +1267,7 @@ def test_picker_progress_queries_are_aggregate_bounded_at_scale(
                 for index in range(10)
             ],
         )
+        _refresh_picker_contract(conn)
         conn.commit()
         conn.execute("ANALYZE")
         plan = conn.execute(
@@ -1001,12 +1325,13 @@ def test_picker_progress_queries_are_aggregate_bounded_at_scale(
     assert [event["event_type"] for event in tail_events] == ["orchestrator.session.started"]
     assert picker_elapsed < 0.5
     assert tail_elapsed < 0.5
-    assert len(progress_queries) == 20
+    assert len(progress_queries) == 10
     assert all("aggregate_id =" in statement for statement in progress_queries)
     assert any("ix_events_aggregate_id" in str(row[3]) for row in plan)
     assert all("TEMP B-TREE" not in str(row[3]) for row in plan)
     assert any("ix_events_aggregate_id" in str(row[3]) for row in direct_tail_plan)
     assert any("ix_events_event_type" in str(row[3]) for row in linked_tail_plan)
+    assert all("SCAN events" not in str(row[3]) for row in direct_tail_plan + linked_tail_plan)
     assert all("TEMP B-TREE" not in str(row[3]) for row in direct_tail_plan + linked_tail_plan)
 
 
@@ -1020,7 +1345,7 @@ def test_workflow_progress_queries_are_aggregate_bounded_at_scale(
         conn.execute("CREATE TABLE events (aggregate_id TEXT, event_type TEXT, payload TEXT)")
         conn.execute("CREATE INDEX ix_events_aggregate_id ON events (aggregate_id)")
         conn.execute("CREATE INDEX ix_events_event_type ON events (event_type)")
-        _install_picker_indexes(conn)
+        _install_picker_contract(conn)
         foreign_payload = json.dumps(
             {
                 "execution_id": "exec_foreign",
@@ -1054,6 +1379,7 @@ def test_workflow_progress_queries_are_aggregate_bounded_at_scale(
                 ),
             ],
         )
+        _refresh_picker_contract(conn)
         conn.commit()
         conn.execute("ANALYZE")
     finally:
@@ -1104,17 +1430,23 @@ def test_workflow_progress_queries_are_aggregate_bounded_at_scale(
     ]
     assert picker_elapsed < 0.5
     assert tail_elapsed < 0.5
-    assert len(picker_workflow_queries) == 6
+    assert len(picker_workflow_queries) == 4
     assert len(tail_workflow_queries) == 2
-    assert all("aggregate_id =" in statement for statement in workflow_queries)
+    assert all(
+        "aggregate_id =" in statement or "FROM events WHERE rowid =" in statement
+        for statement in workflow_queries
+    )
     assert all("json_extract" not in statement for statement in tail_workflow_queries)
     assert all(
         any(
-            "ix_events_aggregate_id" in str(row[3]) or "ix_events_picker_" in str(row[3])
+            "ix_events_aggregate_id" in str(row[3])
+            or "ix_events_picker_" in str(row[3])
+            or "PRIMARY KEY" in str(row[3])
             for row in plan
         )
         for plan in workflow_plans
     )
+    assert all("SCAN events" not in str(row[3]) for plan in workflow_plans for row in plan)
     assert all("TEMP B-TREE" not in str(row[3]) for plan in workflow_plans for row in plan)
 
 
@@ -1125,7 +1457,7 @@ def test_picker_bounds_selected_workflow_progress_history(tmp_path, monkeypatch)
         conn.execute("CREATE TABLE events (aggregate_id TEXT, event_type TEXT, payload TEXT)")
         conn.execute("CREATE INDEX ix_events_aggregate_id ON events (aggregate_id)")
         conn.execute("CREATE INDEX ix_events_event_type ON events (event_type)")
-        _install_picker_indexes(conn)
+        _install_picker_contract(conn)
         conn.execute(
             "INSERT INTO events (aggregate_id, event_type, payload) VALUES (?, ?, ?)",
             (
@@ -1154,6 +1486,7 @@ def test_picker_bounds_selected_workflow_progress_history(tmp_path, monkeypatch)
             "INSERT INTO events (aggregate_id, event_type, payload) VALUES (?, ?, ?)",
             ("exec_target", "workflow.progress.updated", latest),
         )
+        _refresh_picker_contract(conn)
         conn.commit()
         conn.execute("ANALYZE")
     finally:
@@ -1218,10 +1551,11 @@ def test_picker_bounds_selected_workflow_progress_history(tmp_path, monkeypatch)
     monkeypatch.setattr(reader_module, "_connect_readonly", traced_connect)
     instrumented_runs = list_recent_executions(db, limit=1)
 
-    workflow_queries = [
-        statement
-        for statement in statements
-        if "event_type = 'workflow.progress.updated'" in statement
+    head_queries = [
+        statement for statement in statements if f"FROM {PICKER_PROGRESS_TABLE}" in statement
+    ]
+    pointer_queries = [
+        statement for statement in statements if "FROM events WHERE rowid =" in statement
     ]
     direct_queries = [
         statement
@@ -1234,12 +1568,15 @@ def test_picker_bounds_selected_workflow_progress_history(tmp_path, monkeypatch)
         if f"INDEXED BY {DIRECT_EVENT_INDEX}" in statement and "aggregate_id NOT IN" in statement
     ]
     start_queries = [
-        statement for statement in statements if f"INDEXED BY {START_EVENT_INDEX}" in statement
+        statement
+        for statement in statements
+        if f"FROM {PICKER_START_TABLE} AS projected" in statement
     ]
     conn = sqlite3.connect(db)
     try:
         plans = [
-            conn.execute("EXPLAIN QUERY PLAN " + query).fetchall() for query in workflow_queries
+            conn.execute("EXPLAIN QUERY PLAN " + query).fetchall()
+            for query in (*head_queries, *pointer_queries)
         ]
         plans.extend(
             conn.execute("EXPLAIN QUERY PLAN " + query).fetchall() for query in direct_queries
@@ -1288,17 +1625,17 @@ def test_picker_bounds_selected_workflow_progress_history(tmp_path, monkeypatch)
     assert len(unbounded_rows) == 100_000
     assert unbounded_progress_callbacks >= 100
     assert max(decode_samples) <= 4
-    assert len(workflow_queries) == 6
+    assert len(head_queries) == 3
+    assert len(pointer_queries) == 2
     assert len(direct_queries) == 18
     assert len(linked_queries) == 5
     assert len(start_queries) == 1
+    assert all("SCAN events" not in str(row[3]) for plan in (*plans, *start_plans) for row in plan)
     assert all("TEMP B-TREE" not in str(row[3]) for plan in (*plans, *start_plans) for row in plan)
-    used_indexes = {str(row[3]) for plan in (*plans, *start_plans) for row in plan}
-    assert any(AGGREGATE_EVENT_INDEX in value for value in used_indexes)
-    assert any(DIRECT_EVENT_INDEX in value for value in used_indexes)
-    assert any(START_EVENT_INDEX in value for value in used_indexes)
-    assert any(RUNNING_PROGRESS_INDEX in value for value in used_indexes)
-    assert any(WORKFLOW_SNAPSHOT_INDEX in value for value in used_indexes)
+    used_access_paths = {str(row[3]) for plan in (*plans, *start_plans) for row in plan}
+    assert any(DIRECT_EVENT_INDEX in value for value in used_access_paths)
+    assert any("USING PRIMARY KEY" in value for value in used_access_paths)
+    assert any("USING INTEGER PRIMARY KEY" in value for value in used_access_paths)
 
 
 def test_picker_bounds_large_start_history(tmp_path, monkeypatch) -> None:
@@ -1307,7 +1644,7 @@ def test_picker_bounds_large_start_history(tmp_path, monkeypatch) -> None:
     try:
         conn.execute("CREATE TABLE events (aggregate_id TEXT, event_type TEXT, payload TEXT)")
         conn.execute("CREATE INDEX ix_events_event_type ON events (event_type)")
-        _install_picker_indexes(conn)
+        _install_picker_contract(conn)
         conn.executemany(
             "INSERT INTO events (aggregate_id, event_type, payload) VALUES (?, ?, ?)",
             (
@@ -1327,6 +1664,7 @@ def test_picker_bounds_large_start_history(tmp_path, monkeypatch) -> None:
                 json.dumps({"execution_id": "exec_target", "runtime_backend": "codex"}),
             ),
         )
+        _refresh_picker_contract(conn)
         conn.commit()
         conn.execute("ANALYZE")
     finally:
@@ -1350,7 +1688,7 @@ def test_picker_bounds_large_start_history(tmp_path, monkeypatch) -> None:
         def count_step():
             nonlocal start_vm_steps
             statement_vm_steps[current_statement] = statement_vm_steps.get(current_statement, 0) + 1
-            if f"INDEXED BY {START_EVENT_INDEX}" in current_statement:
+            if f"FROM {PICKER_START_TABLE} AS projected" in current_statement:
                 start_vm_steps += 1
             return 0
 
@@ -1361,7 +1699,9 @@ def test_picker_bounds_large_start_history(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(reader_module, "_connect_readonly", traced_connect)
     runs = list_recent_executions(db, limit=1)
     start_queries = [
-        statement for statement in statements if f"INDEXED BY {START_EVENT_INDEX}" in statement
+        statement
+        for statement in statements
+        if f"FROM {PICKER_START_TABLE} AS projected" in statement
     ]
     conn = sqlite3.connect(db)
     try:
@@ -1378,8 +1718,9 @@ def test_picker_bounds_large_start_history(tmp_path, monkeypatch) -> None:
     ]
     assert start_vm_steps < 500, (top_vm_statements, start_plans)
     assert len(start_queries) == 1
+    assert all("SCAN events" not in str(row[3]) for plan in start_plans for row in plan)
     assert all("TEMP B-TREE" not in str(row[3]) for plan in start_plans for row in plan)
-    assert any(START_EVENT_INDEX in str(row[3]) for plan in start_plans for row in plan)
+    assert any("USING INTEGER PRIMARY KEY" in str(row[3]) for plan in start_plans for row in plan)
 
 
 @pytest.mark.parametrize(
@@ -1398,7 +1739,7 @@ def test_picker_bounds_producer_split_progress_with_absent_family_lookup(
         conn.execute("CREATE TABLE events (aggregate_id TEXT, event_type TEXT, payload TEXT)")
         conn.execute("CREATE INDEX ix_events_aggregate_id ON events (aggregate_id)")
         conn.execute("CREATE INDEX ix_events_event_type ON events (event_type)")
-        _install_picker_indexes(conn)
+        _install_picker_contract(conn)
         conn.executemany(
             "INSERT INTO events (aggregate_id, event_type, payload) VALUES (?, ?, ?)",
             [
@@ -1439,6 +1780,7 @@ def test_picker_bounds_producer_split_progress_with_absent_family_lookup(
             "INSERT INTO events (aggregate_id, event_type, payload) VALUES (?, ?, ?)",
             (("orch_target", "orchestrator.progress.updated", completed) for _ in range(99_999)),
         )
+        _refresh_picker_contract(conn)
         conn.commit()
         conn.execute("ANALYZE")
     finally:
@@ -1485,7 +1827,7 @@ def test_picker_keeps_latest_usable_workflow_snapshot_before_poison_rows(tmp_pat
         conn.execute("CREATE TABLE events (aggregate_id TEXT, event_type TEXT, payload TEXT)")
         conn.execute("CREATE INDEX ix_events_aggregate_id ON events (aggregate_id)")
         conn.execute("CREATE INDEX ix_events_event_type ON events (event_type)")
-        _install_picker_indexes(conn)
+        _install_picker_contract(conn)
         conn.executemany(
             "INSERT INTO events (aggregate_id, event_type, payload) VALUES (?, ?, ?)",
             [
@@ -1517,6 +1859,7 @@ def test_picker_keeps_latest_usable_workflow_snapshot_before_poison_rows(tmp_pat
                 ("exec_target", "workflow.progress.updated", "{malformed"),
             ],
         )
+        _refresh_picker_contract(conn)
         conn.commit()
     finally:
         conn.close()
@@ -1534,7 +1877,7 @@ def test_picker_status_only_turn_cannot_erase_running_after_settled_snapshot(tmp
         conn.execute("CREATE TABLE events (aggregate_id TEXT, event_type TEXT, payload TEXT)")
         conn.execute("CREATE INDEX ix_events_aggregate_id ON events (aggregate_id)")
         conn.execute("CREATE INDEX ix_events_event_type ON events (event_type)")
-        _install_picker_indexes(conn)
+        _install_picker_contract(conn)
         conn.executemany(
             "INSERT INTO events (aggregate_id, event_type, payload) VALUES (?, ?, ?)",
             [
@@ -1575,6 +1918,7 @@ def test_picker_status_only_turn_cannot_erase_running_after_settled_snapshot(tmp
                 ),
             ],
         )
+        _refresh_picker_contract(conn)
         conn.commit()
     finally:
         conn.close()
@@ -1605,7 +1949,7 @@ def test_picker_running_whitespace_matches_python_reducer_and_partial_index(
         conn.execute("CREATE TABLE events (aggregate_id TEXT, event_type TEXT, payload TEXT)")
         conn.execute("CREATE INDEX ix_events_aggregate_id ON events (aggregate_id)")
         conn.execute("CREATE INDEX ix_events_event_type ON events (event_type)")
-        _install_picker_indexes(conn)
+        _install_picker_contract(conn)
         conn.executemany(
             "INSERT INTO events (aggregate_id, event_type, payload) VALUES (?, ?, ?)",
             [
@@ -1638,6 +1982,7 @@ def test_picker_running_whitespace_matches_python_reducer_and_partial_index(
                 ),
             ],
         )
+        _refresh_picker_contract(conn)
         conn.commit()
     finally:
         conn.close()
@@ -1654,7 +1999,7 @@ def test_picker_unicode_whitespace_is_not_a_running_acknowledgement(tmp_path) ->
         conn.execute("CREATE TABLE events (aggregate_id TEXT, event_type TEXT, payload TEXT)")
         conn.execute("CREATE INDEX ix_events_aggregate_id ON events (aggregate_id)")
         conn.execute("CREATE INDEX ix_events_event_type ON events (event_type)")
-        _install_picker_indexes(conn)
+        _install_picker_contract(conn)
         conn.executemany(
             "INSERT INTO events (aggregate_id, event_type, payload) VALUES (?, ?, ?)",
             [
@@ -1686,6 +2031,7 @@ def test_picker_unicode_whitespace_is_not_a_running_acknowledgement(tmp_path) ->
                 ),
             ],
         )
+        _refresh_picker_contract(conn)
         conn.commit()
     finally:
         conn.close()

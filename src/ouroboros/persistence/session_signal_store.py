@@ -16,6 +16,7 @@ from ouroboros.events.session_signal import (
     create_session_signal_delivery_uncertain_event,
     create_session_signal_rejected_event,
 )
+from ouroboros.persistence.picker_projection_updates import insert_event_with_picker_projection
 from ouroboros.persistence.schema import events_table, session_signal_target_guards_table
 
 _ACTIVE_EVENTS = frozenset(
@@ -33,6 +34,10 @@ _TERMINAL_EVENTS = frozenset(
 def _engine(event_store: object) -> AsyncEngine | None:
     engine = getattr(event_store, "_engine", None)
     return engine if isinstance(engine, AsyncEngine) else None
+
+
+def _projection_ready(event_store: object) -> bool:
+    return getattr(event_store, "_picker_projection_ready", False) is True
 
 
 def _identity(event: BaseEvent) -> tuple[str, str, str] | None:
@@ -69,7 +74,9 @@ async def append_runtime_lifecycle(event_store: object, event: BaseEvent) -> boo
     ):
         return False
     await settle(
-        lambda engine: _append_runtime_lifecycle(engine, event, identity),
+        lambda engine: _append_runtime_lifecycle(
+            engine, event, identity, projection_ready=_projection_ready(event_store)
+        ),
         operation="append_runtime_lifecycle",
     )
     return True
@@ -108,6 +115,8 @@ async def _append_runtime_lifecycle(
     engine: AsyncEngine,
     event: BaseEvent,
     identity: tuple[str, str, str],
+    *,
+    projection_ready: bool,
 ) -> None:
     execution_id, scope_id, attempt_id = identity
     conn = await _begin(engine)
@@ -139,10 +148,10 @@ async def _append_runtime_lifecycle(
             where=update_where,
         )
         await conn.execute(upsert)
-        await conn.execute(events_table.insert().values(**event.to_db_dict()))
+        await insert_event_with_picker_projection(conn, event, projection_ready)
         if event.type in _TERMINAL_EVENTS:
             for terminal_event in await _pending_terminal_events(conn, identity, event):
-                await conn.execute(events_table.insert().values(**terminal_event.to_db_dict()))
+                await insert_event_with_picker_projection(conn, terminal_event, projection_ready)
         await conn.commit()
     except BaseException:
         if conn.in_transaction():
@@ -221,7 +230,13 @@ async def admit_if_target_active(
         return None
     return await settle(
         lambda engine: _admit_if_target_active(
-            engine, identity, accepted, queued, rejected, locally_owned=locally_owned
+            engine,
+            identity,
+            accepted,
+            queued,
+            rejected,
+            locally_owned=locally_owned,
+            projection_ready=_projection_ready(event_store),
         ),
         operation="admit_session_signal_if_target_active",
     )
@@ -235,6 +250,7 @@ async def _admit_if_target_active(
     rejected: BaseEvent,
     *,
     locally_owned: bool,
+    projection_ready: bool,
 ) -> bool:
     conn = await _begin(engine)
     try:
@@ -248,7 +264,7 @@ async def _admit_if_target_active(
         admitted = active is True or (active is None and locally_owned)
         events = (accepted, queued) if admitted else (rejected,)
         for event in events:
-            await conn.execute(events_table.insert().values(**event.to_db_dict()))
+            await insert_event_with_picker_projection(conn, event, projection_ready)
         await conn.commit()
         return admitted
     except BaseException:

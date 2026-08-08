@@ -21,26 +21,24 @@ from urllib.parse import quote
 from ouroboros.config.models import resolve_event_store_path
 from ouroboros.dashboard.board import reduce_board
 from ouroboros.persistence.picker_indexes import (
-    AGGREGATE_EVENT_INDEX,
     DIRECT_EVENT_INDEX,
+    PICKER_CONTRACT_NAMES,
     PICKER_DIRECT_EVENT_TYPES,
     PICKER_DIRECT_INDEX_SCOPE_SQL,
     PICKER_DIRECT_SCOPE_SQL,
-    PICKER_INDEX_NAMES,
+    PICKER_GAP_INDEX,
     PICKER_PROGRESS_EVENT_TYPES,
-    PICKER_PROGRESS_SCOPE_SQL,
-    PICKER_START_SCOPE_SQL,
-    RUNNING_PROGRESS_INDEX,
+    PICKER_PROGRESS_TABLE,
+    PICKER_PROJECTION_SCOPE_SQL,
+    PICKER_START_TABLE,
     RUNNING_PROGRESS_SQL,
     RUNTIME_STATUS_ASCII_WHITESPACE,
     SAFE_EXECUTION_ID_SQL,
     SAFE_SESSION_ID_SQL,
-    START_EVENT_INDEX,
     VALID_JSON_SQL,
     WORKFLOW_PROGRESS_SCOPE_SQL,
-    WORKFLOW_SNAPSHOT_INDEX,
     WORKFLOW_SNAPSHOT_SQL,
-    matching_picker_indexes,
+    matching_picker_contract,
 )
 
 # Events relevant to the execution Kanban. Filtering at the SQL layer keeps the
@@ -136,10 +134,12 @@ def _connect_readonly(db_path: str | Path) -> sqlite3.Connection:
 class PickerIndexContractError(RuntimeError):
     """Raised when bounded picker reads cannot be guaranteed read-only."""
 
-    def __init__(self, missing: frozenset[str]) -> None:
+    def __init__(self, missing: frozenset[str], *, detail: str | None = None) -> None:
         self.missing = missing
-        joined = ", ".join(sorted(missing))
-        super().__init__(f"dashboard picker index contract unavailable: {joined}")
+        if detail is None:
+            joined = ", ".join(sorted(missing))
+            detail = f"contract unavailable: {joined}"
+        super().__init__(f"dashboard picker projection {detail}")
 
 
 _EXPLICIT_TERMINAL_PRECEDENCE = {
@@ -438,7 +438,7 @@ def _fetch_latest_progress_rows(
     aggregate_ids: list[str],
     event_types: tuple[str, ...] = _PICKER_PROGRESS_EVENT_TYPES,
 ) -> list[sqlite3.Row]:
-    """Fetch only picker-relevant checkpoints from high-volume progress logs.
+    """Fetch only picker-relevant checkpoints from explicit progress heads.
 
     The latest valid progress row preserves truthful ``last_row`` ordering even
     when its per-turn status is ignored.  The latest durable running row is also
@@ -450,39 +450,46 @@ def _fetch_latest_progress_rows(
     rows_by_rowid: dict[int, sqlite3.Row] = {}
     for aggregate_id in aggregate_ids:
         for event_type in event_types:
-            latest = conn.execute(
-                "SELECT rowid, aggregate_id, event_type, payload FROM events "
-                f"INDEXED BY {AGGREGATE_EVENT_INDEX} "
-                "WHERE aggregate_id = ? AND event_type = ? "
-                f"AND {PICKER_PROGRESS_SCOPE_SQL} AND {VALID_JSON_SQL} "
-                "ORDER BY aggregate_id DESC, event_type DESC, rowid DESC LIMIT 1",
+            head = conn.execute(
+                "SELECT latest_valid_rowid, latest_running_rowid, latest_snapshot_rowid "
+                f"FROM {PICKER_PROGRESS_TABLE} "
+                "WHERE aggregate_id = ? AND event_type = ?",
                 [aggregate_id, event_type],
             ).fetchone()
-            if latest is not None:
-                rows_by_rowid[int(latest["rowid"])] = latest
-            latest_running = conn.execute(
-                "SELECT rowid, aggregate_id, event_type, payload FROM events "
-                f"INDEXED BY {RUNNING_PROGRESS_INDEX} "
-                "WHERE aggregate_id = ? AND event_type = ? "
-                f"AND {PICKER_PROGRESS_SCOPE_SQL} AND {VALID_JSON_SQL} "
-                f"AND {RUNNING_PROGRESS_SQL} "
-                "ORDER BY aggregate_id DESC, event_type DESC, rowid DESC LIMIT 1",
-                [aggregate_id, event_type],
-            ).fetchone()
-            if latest_running is not None:
-                rows_by_rowid[int(latest_running["rowid"])] = latest_running
-            if event_type == "workflow.progress.updated":
-                latest_snapshot = conn.execute(
-                    "SELECT rowid, aggregate_id, event_type, payload FROM events "
-                    f"INDEXED BY {WORKFLOW_SNAPSHOT_INDEX} "
-                    "WHERE aggregate_id = ? AND event_type = ? "
-                    f"AND {WORKFLOW_PROGRESS_SCOPE_SQL} AND {VALID_JSON_SQL} "
-                    f"AND {WORKFLOW_SNAPSHOT_SQL} "
-                    "ORDER BY aggregate_id DESC, rowid DESC LIMIT 1",
-                    [aggregate_id, event_type],
+            if head is None:
+                continue
+            pointers = (
+                ("valid", head["latest_valid_rowid"]),
+                ("running", head["latest_running_rowid"]),
+                ("snapshot", head["latest_snapshot_rowid"]),
+            )
+            for kind, raw_rowid in pointers:
+                if raw_rowid is None:
+                    continue
+                row = conn.execute(
+                    "SELECT rowid, aggregate_id, event_type, payload, "
+                    f"{VALID_JSON_SQL} AS is_valid, "
+                    f"{RUNNING_PROGRESS_SQL} AS is_running, "
+                    f"({WORKFLOW_PROGRESS_SCOPE_SQL} AND {WORKFLOW_SNAPSHOT_SQL}) "
+                    "AS is_snapshot FROM events WHERE rowid = ?",
+                    [raw_rowid],
                 ).fetchone()
-                if latest_snapshot is not None:
-                    rows_by_rowid[int(latest_snapshot["rowid"])] = latest_snapshot
+                valid_pointer = (
+                    row is not None
+                    and row["aggregate_id"] == aggregate_id
+                    and row["event_type"] == event_type
+                    and bool(row["is_valid"])
+                    and (kind != "running" or bool(row["is_running"]))
+                    and (kind != "snapshot" or bool(row["is_snapshot"]))
+                )
+                if not valid_pointer:
+                    raise PickerIndexContractError(
+                        frozenset(),
+                        detail=(
+                            f"pointer mismatch: {aggregate_id}/{event_type}/{kind}/{raw_rowid}"
+                        ),
+                    )
+                rows_by_rowid[int(row["rowid"])] = row
     return list(rows_by_rowid.values())
 
 
@@ -499,21 +506,40 @@ def list_recent_executions(db_path: str | Path, *, limit: int = 10) -> list[dict
     if not path.exists():
         return []
     start_page_sql = (
-        "SELECT rowid, aggregate_id, event_type, payload "
-        f"FROM events INDEXED BY {START_EVENT_INDEX} "
-        f"WHERE {PICKER_START_SCOPE_SQL} "
-        "AND rowid <= ? ORDER BY event_type DESC, rowid DESC LIMIT ?"
+        "SELECT projected.event_rowid AS projected_rowid, events.rowid, "
+        "events.aggregate_id, events.event_type, events.payload "
+        f"FROM {PICKER_START_TABLE} AS projected "
+        "LEFT JOIN events ON events.rowid = projected.event_rowid "
+        "WHERE projected.event_rowid <= ? "
+        "ORDER BY projected.event_rowid DESC LIMIT ?"
     )
     conn = _connect_readonly(path)
     try:
+        # Pin one SQLite snapshot across contract validation, the rolling-writer
+        # gap fence, and every projected/history read. Without an explicit read
+        # transaction, a legacy writer can commit after the gap probe and make
+        # later queries observe a different snapshot, bypassing fail-closed.
+        conn.execute("BEGIN")
         # The checkpoint queries force these indexes because ANALYZE may prefer
         # the broader legacy aggregate index and restore an O(history) scan.
         # Validate full sqlite_master SQL plus index_xinfo first: a missing or
         # stale same-name definition must fail before any EventStore read.
-        matching_indexes = matching_picker_indexes(conn)
-        missing_indexes = frozenset(PICKER_INDEX_NAMES) - matching_indexes
-        if missing_indexes:
-            raise PickerIndexContractError(missing_indexes)
+        matching_contract = matching_picker_contract(conn)
+        missing_contract = frozenset(PICKER_CONTRACT_NAMES) - matching_contract
+        if missing_contract:
+            raise PickerIndexContractError(missing_contract)
+        if (
+            conn.execute(
+                "SELECT 1 FROM events "
+                f"INDEXED BY {PICKER_GAP_INDEX} "
+                f"WHERE {PICKER_PROJECTION_SCOPE_SQL} "
+                "AND picker_projection_version IS NOT 1 LIMIT 1"
+            ).fetchone()
+            is not None
+        ):
+            raise PickerIndexContractError(
+                frozenset(), detail="contains unprojected relevant events"
+            )
         run_specs: list[tuple[sqlite3.Row, dict[str, Any], str, str]] = []
         seen_execution_ids: set[str] = set()
         target_count = max(1, limit)
@@ -526,6 +552,21 @@ def list_recent_executions(db_path: str | Path, *, limit: int = 10) -> list[dict
             ).fetchall()
             if not start_page:
                 break
+            invalid_start = next(
+                (
+                    start
+                    for start in start_page
+                    if start["rowid"] is None
+                    or start["event_type"] != "orchestrator.session.started"
+                    or int(start["rowid"]) != int(start["projected_rowid"])
+                ),
+                None,
+            )
+            if invalid_start is not None:
+                raise PickerIndexContractError(
+                    frozenset(),
+                    detail=f"start pointer mismatch: {invalid_start['projected_rowid']}",
+                )
             oldest_rowid = min(int(start["rowid"]) for start in start_page)
             exhausted_rowid_range = oldest_rowid == -(2**63)
             if not exhausted_rowid_range:

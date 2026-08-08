@@ -57,7 +57,8 @@ from sqlalchemy.pool import NullPool
 import structlog
 
 from ouroboros.persistence.event_store import _run_to_settlement
-from ouroboros.persistence.schema import events_table, lineage_step_claims_table, metadata
+from ouroboros.persistence.picker_projection_updates import insert_event_with_picker_projection
+from ouroboros.persistence.schema import lineage_step_claims_table, metadata
 
 log = structlog.get_logger(__name__)
 
@@ -326,7 +327,7 @@ class DurableStepClaims:
                 if held != claim_token:
                     await conn.rollback()
                     return False
-                await conn.execute(events_table.insert().values(**event.to_db_dict()))
+                await insert_event_with_picker_projection(conn, event, False)
                 if lease.lost.is_set():
                     # The self-fence fired after admission: authority is no
                     # longer provable, so the admitted write must not commit.

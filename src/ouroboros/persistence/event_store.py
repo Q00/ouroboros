@@ -29,6 +29,12 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from ouroboros.core.errors import PersistenceError
 from ouroboros.events.base import BaseEvent
 from ouroboros.persistence.backend_contract import require_sqlite_event_store_url
+from ouroboros.persistence.picker_projection_updates import (
+    insert_event_with_picker_projection as _insert_event,
+)
+from ouroboros.persistence.picker_projection_updates import (
+    insert_events_with_picker_projection as _insert_events,
+)
 from ouroboros.persistence.schema import (
     ac_acceptance_guards_table,
     events_table,
@@ -614,6 +620,7 @@ class EventStore:
             database_url = sqlite_database_url(db_path)
 
         self._read_only = read_only
+        self._picker_projection_ready = False
         self._settling_writes = set()
         self._closing = False
         self._lifecycle_lock = asyncio.Lock()
@@ -830,7 +837,9 @@ class EventStore:
                     configure_writable_sqlite_connection(dbapi_conn)
 
         if create_schema:
-            await initialize_event_store_schema(self._engine, logger)
+            self._picker_projection_ready = await initialize_event_store_schema(
+                self._engine, logger
+            )
 
     async def append(
         self,
@@ -964,7 +973,7 @@ class EventStore:
                                     "session_start_conflict": True,
                                 },
                             ) from exc
-                        await conn.execute(events_table.insert().values(**event.to_db_dict()))
+                        await _insert_event(conn, event, self._picker_projection_ready)
                         if sqlite:
                             await conn.commit()
                         elif transaction is not None:
@@ -1171,7 +1180,7 @@ class EventStore:
                         for acceptance_event in acceptance_events:
                             await self._append_ac_acceptance_in_transaction(conn, acceptance_event)
 
-                        await conn.execute(events_table.insert().values(**event.to_db_dict()))
+                        await _insert_event(conn, event, self._picker_projection_ready)
                         if sqlite:
                             await conn.commit()
                         elif transaction is not None:
@@ -1263,7 +1272,7 @@ class EventStore:
                 },
             )
 
-        await conn.execute(events_table.insert().values(**event.to_db_dict()))
+        await _insert_event(conn, event, self._picker_projection_ready)
         return True
 
     async def append_session_pause_if_active(self, event: BaseEvent) -> bool:
@@ -1337,7 +1346,7 @@ class EventStore:
                                 await transaction.rollback()
                             return False
 
-                        await conn.execute(events_table.insert().values(**event.to_db_dict()))
+                        await _insert_event(conn, event, self._picker_projection_ready)
                         if sqlite:
                             await conn.commit()
                         elif transaction is not None:
@@ -1495,7 +1504,7 @@ class EventStore:
             # generation mid-append could then lose its own decision events,
             # violating the durable-replay contract (#1794).
             async with engine.begin() as conn:
-                await conn.execute(events_table.insert().values(**event.to_db_dict()))
+                await _insert_event(conn, event, self._picker_projection_ready)
                 rowid = await conn.scalar(
                     select(text("rowid"))
                     .select_from(events_table)
@@ -1643,10 +1652,7 @@ class EventStore:
             # batch transaction must complete or roll back even if the caller
             # is cancelled mid-append (#1794).
             async with engine.begin() as conn:
-                await conn.execute(
-                    events_table.insert(),
-                    [event.to_db_dict() for event in events],
-                )
+                await _insert_events(conn, events, self._picker_projection_ready)
 
         for attempt in range(3):
             try:
@@ -1953,7 +1959,8 @@ class EventStore:
         # payload string.
         indexed_query = (
             text(
-                "SELECT * FROM events INDEXED BY ix_events_event_type "
+                "SELECT id, aggregate_type, aggregate_id, event_type, payload, "
+                "timestamp, consensus_id FROM events INDEXED BY ix_events_event_type "
                 "WHERE event_type LIKE :pattern "
                 "ORDER BY timestamp ASC"
             )
