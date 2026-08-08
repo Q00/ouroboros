@@ -29,6 +29,7 @@ import urllib.request
 import typer
 
 from ouroboros import __version__
+from ouroboros.backends import get_backend_capability, resolve_runtime_backend_name
 from ouroboros.cli.formatters import console
 from ouroboros.cli.formatters.panels import (
     print_info,
@@ -62,14 +63,6 @@ _RUNTIME_CLI_IDENTITIES: dict[str, tuple[str, str, str]] = {
     "grok": ("OUROBOROS_GROK_CLI_PATH", "grok_cli_path", "grok"),
     "zcode": ("OUROBOROS_ZCODE_CLI_PATH", "zcode_cli_path", "zcode"),
 }
-
-_RUNTIME_ALIASES = {
-    "claude_code": "claude",
-    "codex_cli": "codex",
-    "opencode_cli": "opencode",
-    "hermes_cli": "hermes",
-}
-
 
 # ── Version helpers ──────────────────────────────────────────────
 
@@ -141,21 +134,15 @@ def _latest_pypi_version(include_prereleases: bool, timeout: float = 10.0) -> st
             data = json.loads(response.read())
     except (OSError, ValueError):
         return None
-    stable = data.get("info", {}).get("version")
-    if not include_prereleases:
-        return stable
-    # Pre-release installs may sit ahead of info.version — scan all releases.
-    # A release only counts with at least one non-yanked file: pip/uv skip
-    # fully-yanked releases, so reporting one as "latest" would prompt an
-    # update that installs something else.
+    # Build both channels from installable release files. `info.version` is
+    # merely PyPI metadata and can itself name a fully-yanked release.
     candidates = [
         version
         for version, files in data.get("releases", {}).items()
         if isinstance(files, list)
         and any(isinstance(file, dict) and not file.get("yanked", False) for file in files)
+        and (include_prereleases or not _is_prerelease(version))
     ]
-    if stable:
-        candidates.append(stable)
     if not candidates:
         return None
     latest = candidates[0]
@@ -525,7 +512,23 @@ def _refresh_runtime_config(
 
 
 def _canonical_runtime_backend(runtime: str) -> str:
-    return _RUNTIME_ALIASES.get(runtime.strip().lower(), runtime.strip().lower())
+    normalized = runtime.strip().lower()
+    try:
+        backend = resolve_runtime_backend_name(normalized)
+    except ValueError:
+        return normalized
+    if backend in _RUNTIME_CLI_IDENTITIES:
+        return backend
+
+    # Worker runtimes such as codex_mcp/claude_mcp share their operator-facing
+    # CLI integration with the canonical Codex/Claude setup backend. Derive
+    # that relationship from capability metadata instead of another alias map.
+    capability = get_backend_capability(backend)
+    if capability is not None:
+        for integration, (_, config_field, command_name) in _RUNTIME_CLI_IDENTITIES.items():
+            if capability.cli_config_key == config_field and capability.cli_name == command_name:
+                return integration
+    return backend
 
 
 def _validate_runtime_option(runtime: str) -> str:
@@ -590,7 +593,7 @@ def _configured_runtime_topology(requested_runtime: str = "auto") -> RuntimeRefr
     except ConfigError:
         # A genuinely unconfigured installation may still use PATH discovery.
         # An existing malformed/invalid config is different: treating it as
-        # absent could refresh a different runtime after the package mutation.
+        # absent could authorize a different runtime before package mutation.
         # Check both sides of the load to fail closed across create/delete races.
         if not config_existed and not config_path.exists():
             config = None
@@ -752,6 +755,15 @@ def update(
     if check:
         raise typer.Exit()
 
+    configured_topology = RuntimeRefreshTopology()
+    if runtime != "none":
+        try:
+            configured_topology = _configured_runtime_topology(runtime)
+        except ConfigError as exc:
+            print_warning(f"Cannot update safely: runtime configuration is invalid: {exc}")
+            console.print("[dim]No changes were made.[/dim]\n")
+            raise typer.Exit(1) from exc
+
     try:
         identity = _detect_installation_identity()
     except InstallationIdentityError as exc:
@@ -800,42 +812,19 @@ def update(
             raise typer.Exit(1)
 
     failed: list[str] = []
-    topology_error: ConfigError | None = None
-    configured_topology = RuntimeRefreshTopology()
-    if runtime != "none":
-        try:
-            configured_topology = _configured_runtime_topology(runtime)
-        except ConfigError as exc:
-            topology_error = exc
+    resolved_runtime = _resolve_runtime(
+        runtime,
+        configured_backend=configured_topology.runtime_backend,
+    )
+    opencode_mode: Literal["plugin", "subprocess"] | None = (
+        configured_topology.opencode_mode
+        if resolved_runtime in {"opencode", "opencode_cli"}
+        else None
+    )
 
-    resolved_runtime = "none"
-    opencode_mode: Literal["plugin", "subprocess"] | None = None
-    if topology_error is not None:
-        print_warning(
-            (
-                "Runtime refresh would be skipped because the existing configuration "
-                "could not be read safely: "
-                if dry_run
-                else "Package updated, but the existing runtime configuration could not be "
-                "read safely: "
-            )
-            + str(topology_error)
-        )
-        failed.append("runtime config refresh (existing config is invalid)")
-    else:
-        resolved_runtime = _resolve_runtime(
-            runtime,
-            configured_backend=configured_topology.runtime_backend,
-        )
-        opencode_mode = (
-            configured_topology.opencode_mode
-            if resolved_runtime in {"opencode", "opencode_cli"}
-            else None
-        )
-
-    if topology_error is None and resolved_runtime == "none":
+    if resolved_runtime == "none":
         print_info("Runtime refresh skipped — package upgrade only.")
-    elif topology_error is None and resolved_runtime == "claude":
+    elif resolved_runtime == "claude":
         plugin_refreshed = _refresh_claude_plugin(
             dry_run,
             configured_topology.runtime_executable,
@@ -858,7 +847,7 @@ def update(
                 runtime_executable_env_key=(configured_topology.runtime_executable_env_key),
             ):
                 failed.append("claude runtime config refresh")
-    elif topology_error is None:
+    else:
         # Codex and the other setup-supported runtimes: setup re-installs
         # the packaged rules/skills, so no separate plugin step is needed.
         if not _refresh_runtime_config(
