@@ -3234,3 +3234,58 @@ def test_auxiliary_obligation_qualifiers_own_the_artifact(goal: str) -> None:
     result = derive_domain_from_ledger(ledger)
     assert result.is_single
     assert result.single is TaskClass.WEB_APP
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
+        "I want to build an admin portal that runs in browsers",
+        "Build a secure internal role management admin portal that runs in browsers",
+        "Build an admin portal that is mandated to run in browsers",
+    ],
+)
+def test_wrappers_long_modifiers_and_mandates_own_the_artifact(goal: str) -> None:
+    """R52 probe: intent wrappers, long modifier chains, and obligation
+    synonyms do not change what is produced."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value="Role management and account administration")
+    _seed_section(ledger, "runtime_context", value="Browser")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP
+
+
+@pytest.mark.parametrize(
+    ("goal", "outputs", "runtime", "expected"),
+    [
+        (
+            "Migrate from a legacy script to a CLI",
+            "Converted workflows with progress logs",
+            "Runs on developer machines",
+            TaskClass.CLI,
+        ),
+        (
+            "Convert the old tool to a CLI",
+            "Converted workflows with progress logs",
+            "Runs on developer machines",
+            TaskClass.CLI,
+        ),
+        (
+            "Migrate the old endpoint to a REST API",
+            "JSON responses with status codes",
+            "Containerized HTTP service",
+            TaskClass.WEB_SERVICE,
+        ),
+    ],
+)
+def test_migration_destinations_are_produced_artifacts(
+    goal: str, outputs: str, runtime: str, expected: TaskClass
+) -> None:
+    """R52 probe: after a migration/conversion verb, "to <artifact>"
+    names the produced destination, not a consumed dependency."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value=outputs)
+    _seed_section(ledger, "runtime_context", value=runtime)
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is expected

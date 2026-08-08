@@ -777,7 +777,8 @@ _POSTNOMINAL_PREDICATE_TOKEN = (
     r"(?:[\w\-]+ly|also|only|still|already|now|and|or|"
     r"is|are|was|were|be|being|been|will|would|can|could|may|might|must|"
     r"should|shall|has|have|had|ought|expected|required|requires?|needs?|"
-    r"needed|supposed|planned|guaranteed|"
+    r"needed|supposed|planned|guaranteed|mandated|obliged|obligated|"
+    r"compelled|forced|slated|scheduled|destined|"
     r"runs?|running|operates?|operating|works?|working|loads?|loading|"
     r"opens?|opening|renders?|rendered|rendering|serves?|served|serving|"
     r"delivers?|delivered|displayed|shown|hosted|lives?|living|"
@@ -797,12 +798,19 @@ _POSTNOMINAL_BROWSER_QUALIFIER_RE = re.compile(
     # before the head, where nominal gerunds are ordinary product
     # vocabulary ("billing dashboard", "landing page") but relational and
     # subject-matter stems keep their verbal reading.
-    r"^(?:(?!(?:that|which|who|to|for|of|from|with|without|via|through|by|on|in|at|"
+    # Routine intent wrappers precede the imperative ("I want to build",
+    # "we need to create") without changing what is produced (#1813 R52).
+    r"^(?:(?:i|we|you|please|kindly|really|just|ideally|ultimately|"
+    r"eventually|currently|first|next|now|then|also|help|me|us|let[’']?s|"
+    r"want|wants|wanted|need|needs|needed|would|like|love|hope|hoping|"
+    r"plan|planning|aim|aiming|intend|intending|going|trying|try|wish|"
+    r"wishes|to)\s+){0,6}?"
+    r"(?:(?!(?:that|which|who|to|for|of|from|with|without|via|through|by|on|in|at|"
     r"and|or|nor|but|about|regarding|concerning)\b)(?![\w'’\-]+ing\b)[\w'’\-]+\s+){0,2}?"
     r"(?:(?:an?|the|one|this|our|my|your)\s+)?"
     r"(?:(?!(?:an?|the|one|this|that|which|who|to|for|of|from|with|without|via|"
     r"through|by|on|in|at|and|or|nor|but|about|regarding|concerning)\b)"
-    r"(?![\w'’\-]+ing\b)[\w'’\-]+\s+){0,3}?"
+    r"(?![\w'’\-]+ing\b)[\w'’\-]+\s+){0,6}?"
     # The attributive slot admits only nominal gerunds — established
     # compound-noun product vocabulary (#1813 R51). An unknown participle
     # is verbal by default ("a report evaluating dashboards"), so
@@ -1241,9 +1249,29 @@ _PRENOMINAL_DEPENDENCY_CLIENT_RE = re.compile(
 )
 
 
+# Migration/conversion destinations are produced, not consumed (#1813
+# R52): in "convert the old tool to a CLI" the CLI is the RESULT of the
+# work, so the "to" phrase keeps its artifact. The check runs per match
+# against the immediately preceding words, so ordinary dependency "to"
+# targets keep stripping.
+_DESTINATION_VERB_TAIL_RE = re.compile(
+    r"\b(?:migrat\w*|convert\w*|port(?:s|ed|ing)?|rewrit\w*|rewrot\w*|"
+    r"transform\w*|turn(?:s|ed|ing)?|transition\w*|upgrad\w*|mov\w*|"
+    r"moderniz\w*|switch\w*|evolv\w*|consolidat\w*|graduat\w*)"
+    r"(?:\s+[\w\-'’]+){0,4}\s*$"
+)
+
+
 def _strip_consumed_dependencies(text: str) -> str:
     """Remove relational and prenominal dependency/client declarations."""
-    text = _CONSUMED_DEPENDENCY_RE.sub(" ", text)
+
+    def _spare_destinations(match: re.Match[str]) -> str:
+        is_to_relation = re.match(r"to\s", match.group(0)) is not None
+        if is_to_relation and _DESTINATION_VERB_TAIL_RE.search(text[: match.start()]):
+            return match.group(0)
+        return " "
+
+    text = _CONSUMED_DEPENDENCY_RE.sub(_spare_destinations, text)
     return _PRENOMINAL_DEPENDENCY_CLIENT_RE.sub(" ", text)
 
 
