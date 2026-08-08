@@ -75,6 +75,7 @@ from ouroboros.orchestrator.leaf_dispatcher import (
     _close_pending_targets,
     _correlated_tool_result_name,
     _pending_bash_filesystem_targets,
+    _stat_fingerprint,
 )
 from ouroboros.orchestrator.level_context import ACContextSummary, LevelContext
 from ouroboros.orchestrator.parallel_executor import (
@@ -1024,6 +1025,79 @@ def test_files_touched_rejects_parent_symlink_swap_restored_before_completion(tm
         "link/claimed.py",
         (call, result),
         task_cwd=str(tmp_path),
+    )
+
+
+def test_capture_rejects_intermediate_workspace_ancestor_swap(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pre-linked external inode cannot survive a task_cwd ancestor swap."""
+    ancestor = tmp_path / "trusted-ancestor"
+    workspace = ancestor / "workspace"
+    workspace.mkdir(parents=True)
+    artifact = workspace / "claimed.py"
+    artifact.write_text("before\n", encoding="utf-8")
+    displaced_ancestor = tmp_path / "displaced-ancestor"
+    outside_ancestor = tmp_path / "outside-ancestor"
+    outside_workspace = outside_ancestor / workspace.name
+    outside_workspace.mkdir(parents=True)
+    outside_artifact = outside_workspace / artifact.name
+    os.link(artifact, outside_artifact)
+    original_open = os.open
+    swapped = False
+    fingerprint_before_swap = None
+
+    def adversarial_open(path, flags, mode=0o777, *, dir_fd=None):
+        nonlocal fingerprint_before_swap, swapped
+        fd = original_open(path, flags, mode, dir_fd=dir_fd)
+        if not swapped and dir_fd is not None and os.fspath(path) == ancestor.name:
+            fingerprint_before_swap = _stat_fingerprint(artifact.lstat())
+            ancestor.rename(displaced_ancestor)
+            ancestor.symlink_to(outside_ancestor, target_is_directory=True)
+            swapped = True
+        return fd
+
+    monkeypatch.setattr(os, "open", adversarial_open)
+    monkeypatch.setattr(os, "supports_dir_fd", {*os.supports_dir_fd, adversarial_open})
+    call = AgentMessage(
+        type="tool",
+        content="Bash: touch claimed.py",
+        tool_name="Bash",
+        data={
+            "tool_input": {"command": "touch claimed.py"},
+            "tool_call_id": "ancestor-swap",
+        },
+    )
+    completion = AgentMessage(
+        type="tool_result",
+        content="command completed with exit code 0",
+        data={
+            "subtype": "tool_result",
+            "exit_code": 0,
+            "tool_call_id": "ancestor-swap",
+        },
+    )
+
+    with _BashFilesystemLeaseTracker(task_cwd=str(workspace)) as tracker:
+        tracker.observe(call)
+        pending = tracker._pending_by_id["ancestor-swap"][0]
+        assert fingerprint_before_swap == pending.pre_fingerprint
+        completed = subprocess.run(  # noqa: S602
+            "touch claimed.py",
+            cwd=workspace,
+            shell=True,
+            check=False,
+        )
+        observed_completion = tracker.observe(completion)
+
+    assert swapped is True
+    assert completed.returncode == 0
+    assert _stat_fingerprint(outside_artifact.lstat()) != fingerprint_before_swap
+    assert "filesystem_effects" not in observed_completion.data
+    assert not _runtime_messages_support_file_claim(
+        "claimed.py",
+        (call, observed_completion),
+        task_cwd=str(workspace),
     )
 
 

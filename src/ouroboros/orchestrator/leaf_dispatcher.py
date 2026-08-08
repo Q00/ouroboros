@@ -28,6 +28,11 @@ from typing import TYPE_CHECKING, Any
 
 import anyio
 
+from ouroboros.core.filesystem_capability import (
+    NoFollowDirectoryChain,
+    nofollow_directory_capabilities_available,
+    open_nofollow_directory_chain,
+)
 from ouroboros.orchestrator.adapter import AgentMessage, RuntimeHandle
 from ouroboros.orchestrator.evidence.claims import (
     _runtime_message_command_values,
@@ -78,11 +83,18 @@ class LeafDispatchState:
 class _PendingBashTarget:
     """Execution-span lease on one lexical shell receiver parent."""
 
-    parent_fd: int | None
+    directory_chain: NoFollowDirectoryChain | None
     leaf_name: str
     reported_path: str
     workspace_relative_path: str
     pre_fingerprint: tuple[int, int, int, int, int, int] | None
+
+    @property
+    def parent_fd(self) -> int | None:
+        """Return the final held parent fd while this lease owns its chain."""
+        if self.directory_chain is None:
+            return None
+        return self.directory_chain.leaf_fd
 
 
 _MAX_BASH_FILESYSTEM_EFFECTS = 128
@@ -124,15 +136,9 @@ def _lease_bash_target(
     effective_cwd: str,
 ) -> _PendingBashTarget | None:
     """Open a no-follow dirfd chain that survives path-component replacement."""
-    parent_fd: int | None = None
+    directory_chain: NoFollowDirectoryChain | None = None
     try:
-        if (
-            not hasattr(os, "O_DIRECTORY")
-            or not hasattr(os, "O_NOFOLLOW")
-            or os.open not in os.supports_dir_fd
-            or os.stat not in os.supports_dir_fd
-            or os.stat not in os.supports_follow_symlinks
-        ):
+        if not nofollow_directory_capabilities_available():
             return None
         workspace = Path(os.path.abspath(task_cwd))
         candidate = Path(target)
@@ -144,37 +150,31 @@ def _lease_bash_target(
         relative = absolute.relative_to(workspace)
         if not relative.parts or relative.name in {"", ".", ".."}:
             return None
-        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
-        parent_fd = os.open(workspace, flags)
-        for part in relative.parts[:-1]:
-            if part in {"", ".", ".."}:
-                return None
-            next_fd = os.open(part, flags, dir_fd=parent_fd)
-            os.close(parent_fd)
-            parent_fd = next_fd
+        directory_chain = open_nofollow_directory_chain(
+            workspace,
+            relative_components=relative.parts[:-1],
+        )
+        parent_fd = directory_chain.leaf_fd
         try:
             pre = os.stat(relative.name, dir_fd=parent_fd, follow_symlinks=False)
         except FileNotFoundError:
             pre_fingerprint = None
         else:
             pre_fingerprint = _stat_fingerprint(pre)
-        leased_fd = parent_fd
-        parent_fd = None
-        return _PendingBashTarget(
-            parent_fd=leased_fd,
+        pending = _PendingBashTarget(
+            directory_chain=directory_chain,
             leaf_name=relative.name,
             reported_path=target,
             workspace_relative_path=relative.as_posix(),
             pre_fingerprint=pre_fingerprint,
         )
+        directory_chain = None
+        return pending
     except (OSError, RuntimeError, ValueError):
         return None
     finally:
-        if parent_fd is not None:
-            try:
-                os.close(parent_fd)
-            except OSError:
-                pass
+        if directory_chain is not None:
+            directory_chain.close()
 
 
 def _stat_fingerprint(value: os.stat_result) -> tuple[int, int, int, int, int, int]:
@@ -197,7 +197,8 @@ def _attach_bash_filesystem_effects(
     effects: list[dict[str, object]] = []
     for target in targets:
         parent_fd = target.parent_fd
-        if parent_fd is None:
+        directory_chain = target.directory_chain
+        if parent_fd is None or directory_chain is None:
             continue
         try:
             try:
@@ -220,6 +221,8 @@ def _attach_bash_filesystem_effects(
                     or post_fingerprint == target.pre_fingerprint
                 ):
                     continue
+            if not directory_chain.postvalidate():
+                continue
             effects.append(
                 {
                     "capture": "ouroboros.leaf-dispatch.v1",
@@ -302,14 +305,11 @@ def _runtime_message_has_malformed_tool_call_aliases(message: AgentMessage) -> b
 
 
 def _close_pending_target(target: _PendingBashTarget) -> None:
-    fd = target.parent_fd
-    if fd is None:
+    directory_chain = target.directory_chain
+    if directory_chain is None:
         return
-    target.parent_fd = None
-    try:
-        os.close(fd)
-    except OSError:
-        pass
+    target.directory_chain = None
+    directory_chain.close()
 
 
 def _close_pending_targets(targets: tuple[_PendingBashTarget, ...]) -> None:

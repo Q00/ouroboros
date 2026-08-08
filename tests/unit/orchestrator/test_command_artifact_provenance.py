@@ -370,6 +370,116 @@ async def test_production_capture_persists_through_journal_to_verifier(tmp_path:
 
 
 @pytest.mark.asyncio
+async def test_production_route_rejects_intermediate_task_cwd_ancestor_swap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The real dispatch-to-journal route rejects a pre-linked ancestor escape."""
+    ancestor = tmp_path / "trusted-ancestor"
+    workspace = ancestor / "workspace"
+    workspace.mkdir(parents=True)
+    artifact = workspace / "claimed.txt"
+    artifact.write_text("before", encoding="utf-8")
+    displaced_ancestor = tmp_path / "displaced-ancestor"
+    outside_ancestor = tmp_path / "outside-ancestor"
+    outside_workspace = outside_ancestor / workspace.name
+    outside_workspace.mkdir(parents=True)
+    outside_artifact = outside_workspace / artifact.name
+    os.link(artifact, outside_artifact)
+    expected_before_swap = _effect(artifact, relative_path=artifact.name)
+    assert expected_before_swap == _effect(outside_artifact, relative_path=artifact.name)
+    original_open = os.open
+    swapped = False
+
+    def adversarial_open(path, flags, mode=0o777, *, dir_fd=None):
+        nonlocal swapped
+        fd = original_open(path, flags, mode, dir_fd=dir_fd)
+        if not swapped and dir_fd is not None and os.fspath(path) == ancestor.name:
+            assert expected_before_swap == _effect(artifact, relative_path=artifact.name)
+            ancestor.rename(displaced_ancestor)
+            ancestor.symlink_to(outside_ancestor, target_is_directory=True)
+            swapped = True
+        return fd
+
+    monkeypatch.setattr(os, "open", adversarial_open)
+    monkeypatch.setattr(os, "supports_dir_fd", {*os.supports_dir_fd, adversarial_open})
+
+    class StubRuntime:
+        runtime_backend = "opencode"
+        permission_mode = "acceptEdits"
+        working_directory = str(workspace)
+
+        async def execute_task(self, **_kwargs: Any):
+            yield AgentMessage(
+                type="assistant",
+                content="write artifact",
+                tool_name="Bash",
+                data={
+                    "tool_call_id": "production-ancestor-swap",
+                    "tool_input": {"command": "printf accepted > claimed.txt"},
+                },
+            )
+            subprocess.run(
+                ["/bin/sh", "-c", "printf accepted > claimed.txt"],
+                cwd=workspace,
+                check=True,
+            )
+            yield AgentMessage(
+                type="assistant",
+                content="created claimed.txt",
+                tool_name="Bash",
+                data={
+                    "subtype": "tool_result",
+                    "tool_call_id": "production-ancestor-swap",
+                    "tool_result": {"is_error": False, "meta": {"exit_status": 0}},
+                },
+            )
+            yield AgentMessage(
+                type="result", content="[TASK_COMPLETE]", data={"subtype": "success"}
+            )
+
+    store = _EventStore([])
+    executor = ParallelACExecutor(
+        adapter=StubRuntime(),
+        event_store=store,
+        console=MagicMock(),
+        enable_decomposition=False,
+        task_cwd=str(workspace),
+        run_verify_commands=False,
+    )
+    result = await executor._execute_atomic_ac(
+        ac_index=0,
+        ac_content="Create claimed.txt",
+        session_id="sess_1",
+        execution_id="exec_1",
+        tools=["Bash"],
+        system_prompt="test",
+        seed_goal="test provenance",
+        depth=0,
+        start_time=datetime.now(UTC),
+        retry_attempt=1,
+        node_identity=ExecutionNodeIdentity.root(execution_context_id="exec_1", ac_index=0),
+    )
+    tool_start = next(event for event in store.events if event.type == "execution.tool.started")
+    tool_completion = next(
+        event for event in store.events if event.type == "execution.tool.completed"
+    )
+    manifest, fact = await _artifact_fact(
+        store.events,
+        task_cwd=workspace,
+        ac_id=str(tool_start.data["ac_id"]),
+        session_attempt_id=str(tool_start.data["session_attempt_id"]),
+    )
+
+    assert result.success is False
+    assert swapped is True
+    assert _effect(outside_artifact, relative_path=artifact.name) != expected_before_swap
+    assert "filesystem_effects" not in tool_completion.data
+    assert all("command_artifacts" not in entry.payload for entry in manifest.entries)
+    assert fact.evidence_handle == "missing:files_touched:0"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("field", "failure"),
     (
@@ -933,7 +1043,7 @@ async def test_symlink_escape_is_rejected_at_verifier_boundary(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
-async def test_parent_swap_after_workspace_open_is_rejected(
+async def test_parent_swap_after_workspace_component_open_is_rejected(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     receiver_parent = tmp_path / "sub"
@@ -952,7 +1062,7 @@ async def test_parent_swap_after_workspace_open_is_rejected(
     def adversarial_open(path, flags, mode=0o777, *, dir_fd=None):
         nonlocal swapped
         fd = original_open(path, flags, mode, dir_fd=dir_fd)
-        if not swapped and dir_fd is None and os.fspath(path) == str(tmp_path):
+        if not swapped and dir_fd is not None and os.fspath(path) == tmp_path.name:
             receiver_parent.rename(displaced_parent)
             receiver_parent.symlink_to(outside_parent, target_is_directory=True)
             swapped = True
@@ -1026,6 +1136,57 @@ async def test_parent_swap_after_child_dirfd_open_is_rejected(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("swap_on_open", (1, 2), ids=("lease", "rewalk"))
+async def test_intermediate_workspace_ancestor_swap_is_rejected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    swap_on_open: int,
+) -> None:
+    ancestor = tmp_path / "trusted-ancestor"
+    workspace = ancestor / "workspace"
+    workspace.mkdir(parents=True)
+    artifact = workspace / "claimed.txt"
+    artifact.write_text("captured", encoding="utf-8")
+    displaced_ancestor = tmp_path / "original-ancestor"
+    outside_ancestor = tmp_path / "outside-ancestor"
+    outside_workspace = outside_ancestor / workspace.name
+    outside_workspace.mkdir(parents=True)
+    os.link(artifact, outside_workspace / artifact.name)
+    observed = _effect(artifact, relative_path=artifact.name)
+    assert observed == _effect(artifact, relative_path=artifact.name)
+    original_open = deliver_gate_module.os.open
+    swapped = False
+    matching_open_count = 0
+
+    def adversarial_open(path, flags, mode=0o777, *, dir_fd=None):
+        nonlocal matching_open_count, swapped
+        fd = original_open(path, flags, mode, dir_fd=dir_fd)
+        if dir_fd is not None and os.fspath(path) == ancestor.name:
+            matching_open_count += 1
+            if not swapped and matching_open_count == swap_on_open:
+                assert observed == _effect(artifact, relative_path=artifact.name)
+                ancestor.rename(displaced_ancestor)
+                ancestor.symlink_to(outside_ancestor, target_is_directory=True)
+                swapped = True
+        return fd
+
+    monkeypatch.setattr(deliver_gate_module.os, "open", adversarial_open)
+    monkeypatch.setattr(
+        deliver_gate_module.os,
+        "supports_dir_fd",
+        {*deliver_gate_module.os.supports_dir_fd, adversarial_open},
+    )
+
+    _manifest, fact = await _artifact_fact(
+        _command_events(call_id=f"intermediate-ancestor-swap-{swap_on_open}", effects=[observed]),
+        task_cwd=workspace,
+    )
+
+    assert swapped is True
+    assert fact.evidence_handle == "missing:files_touched:0"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("swap_on_open", (1, 2), ids=("lease", "rewalk"))
 async def test_workspace_swap_after_root_dirfd_open_is_rejected(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1048,9 +1209,10 @@ async def test_workspace_swap_after_root_dirfd_open_is_rejected(
     def adversarial_open(path, flags, mode=0o777, *, dir_fd=None):
         nonlocal matching_open_count, swapped
         fd = original_open(path, flags, mode, dir_fd=dir_fd)
-        if dir_fd is None and os.fspath(path) == str(workspace):
+        if dir_fd is not None and os.fspath(path) == workspace.name:
             matching_open_count += 1
             if not swapped and matching_open_count == swap_on_open:
+                assert observed == _effect(artifact, relative_path=artifact.name)
                 workspace.rename(displaced_workspace)
                 workspace.symlink_to(outside_workspace, target_is_directory=True)
                 swapped = True
@@ -1071,6 +1233,28 @@ async def test_workspace_swap_after_root_dirfd_open_is_rejected(
     )
 
     assert swapped is True
+    assert fact.evidence_handle == "missing:files_touched:0"
+
+
+@pytest.mark.asyncio
+async def test_static_intermediate_task_cwd_symlink_is_rejected(tmp_path: Path) -> None:
+    outside_ancestor = tmp_path / "outside-ancestor"
+    outside_workspace = outside_ancestor / "workspace"
+    outside_workspace.mkdir(parents=True)
+    artifact = outside_workspace / "claimed.txt"
+    artifact.write_text("outside", encoding="utf-8")
+    ancestor = tmp_path / "linked-ancestor"
+    ancestor.symlink_to(outside_ancestor, target_is_directory=True)
+    linked_workspace = ancestor / outside_workspace.name
+
+    _manifest, fact = await _artifact_fact(
+        _command_events(
+            call_id="static-intermediate-symlink",
+            effects=[_effect(artifact, relative_path=artifact.name)],
+        ),
+        task_cwd=linked_workspace,
+    )
+
     assert fact.evidence_handle == "missing:files_touched:0"
 
 
