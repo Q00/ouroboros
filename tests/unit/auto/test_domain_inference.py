@@ -3190,3 +3190,47 @@ def test_attributive_gerunds_stay_product_vocabulary() -> None:
     result = derive_domain_from_ledger(ledger)
     assert result.is_single
     assert result.single is TaskClass.WEB_APP
+
+
+@pytest.mark.parametrize(
+    ("goal", "outputs", "runtime"),
+    [
+        (
+            "Create a report evaluating dashboards used in browsers",
+            "Risk scores and recommendations",
+            "Local batch job",
+        ),
+        (
+            "Build documentation summarizing admin portals available in browsers",
+            "Reference guide and examples",
+            "Local documentation build",
+        ),
+    ],
+)
+def test_unknown_participles_read_as_verbal_subjects(goal: str, outputs: str, runtime: str) -> None:
+    """R51 guard: the attributive slot is a nominal-gerund allowlist — an
+    unknown participle is verbal by default, so evaluation and summary
+    subjects block without enumeration."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value=outputs)
+    _seed_section(ledger, "runtime_context", value=runtime)
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
+        "Build an admin portal that has to run in browsers",
+        "Build an admin portal that ought to run in browsers",
+    ],
+)
+def test_auxiliary_obligation_qualifiers_own_the_artifact(goal: str) -> None:
+    """R51 probe: "has to" and "ought to" compose like the other
+    obligation auxiliaries."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value="Role management and account administration")
+    _seed_section(ledger, "runtime_context", value="Browser")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP

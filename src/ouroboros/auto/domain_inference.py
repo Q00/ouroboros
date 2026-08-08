@@ -776,8 +776,8 @@ _BROWSER_QUALIFIED_UI_HEAD_RE = re.compile(
 _POSTNOMINAL_PREDICATE_TOKEN = (
     r"(?:[\w\-]+ly|also|only|still|already|now|and|or|"
     r"is|are|was|were|be|being|been|will|would|can|could|may|might|must|"
-    r"should|shall|expected|required|requires?|needs?|needed|supposed|"
-    r"planned|guaranteed|"
+    r"should|shall|has|have|had|ought|expected|required|requires?|needs?|"
+    r"needed|supposed|planned|guaranteed|"
     r"runs?|running|operates?|operating|works?|working|loads?|loading|"
     r"opens?|opening|renders?|rendered|rendering|serves?|served|serving|"
     r"delivers?|delivered|displayed|shown|hosted|lives?|living|"
@@ -803,15 +803,13 @@ _POSTNOMINAL_BROWSER_QUALIFIER_RE = re.compile(
     r"(?:(?!(?:an?|the|one|this|that|which|who|to|for|of|from|with|without|via|"
     r"through|by|on|in|at|and|or|nor|but|about|regarding|concerning)\b)"
     r"(?![\w'’\-]+ing\b)[\w'’\-]+\s+){0,3}?"
-    r"(?:(?!(?:targeting|supporting|serving|powering|backing|integrating|"
-    r"syncing|connecting|linking|talking|communicating|marketing|selling|"
-    r"advertising|promoting|pitching|installing|bundling|packaging|"
-    r"shipping|plugging|mounting|embedding|nesting|containing|hosting|"
-    r"deploying|publishing|running|living|mimicking|emulating|imitating|"
-    r"resembling|mirroring|looking|feeling|behaving|acting|working|using|"
-    r"consuming|calling|invoking|wrapping|introducing|presenting|"
-    r"showcasing|demonstrating|describing|covering|explaining|"
-    r"documenting)\b)[\w'’\-]+ing\s+)?"
+    # The attributive slot admits only nominal gerunds — established
+    # compound-noun product vocabulary (#1813 R51). An unknown participle
+    # is verbal by default ("a report evaluating dashboards"), so
+    # subject and relationship verbs block without enumeration.
+    r"(?:(?:billing|landing|onboarding|shopping|reporting|logging|"
+    r"messaging|streaming|banking|invoicing|pricing|staging|voting|"
+    r"polling)\s+)?"
     rf"{_UI_PRODUCT_HEAD_FRAGMENT}"
     # A comma may introduce a dependent qualifier ("an admin portal,
     # accessible in the browser") — a coordinator after it is real
