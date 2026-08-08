@@ -97,12 +97,6 @@ from memory, so it is the last one to skip evidence on.
 Apply this to **every** MCP response that carries a question, including the one
 Step 2 returned and any question re-shown on resume.
 
-**Except one:** a response with `meta.evidence_recorded=true` acknowledges a
-recorded observation, not a question turn. Do not show it, do not ask
-anything, and do not fan out — its `meta.pending_question` is the question
-already on screen, repeated so you can see nothing was consumed. Continue from
-where you were.
-
 **A. Show alerts** (if present in `meta`):
 - `meta.deferred_this_round` → print `[DEV → deferred] "question"`
 - `meta.decide_later_this_round` → print `[DEV → decide-later] "question"`
@@ -155,7 +149,7 @@ having two lanes instead of six:
 
 Write the line in the language the user is speaking.
 
-**Do not go to step B until the lanes have returned.** Step B is where you ask
+**Do not go to step A3 or B until the lanes have returned.** Step B is where you ask
 the user, and asking before the evidence arrives is the exact failure this
 mechanism exists to prevent: the PM decides without the two things they could
 not have looked up themselves.
@@ -171,8 +165,11 @@ you could not spawn at all is submitted as
 fabricated finding is worse than a missing one.
 
 There are two lanes and both are required: `code_context` and `data_context`.
-Neither can become the answer — there is no prefix to forward and nothing to
-confirm. Do not skip asking the user because a lane answered clearly.
+A `code_context` lane that carries a policy returns `answer_prefix:
+"[from-code]"` and a `user_confirmation_prompt` — that is a step, described in
+A3 below, not the answer. `data_context` has no prefix at all: measurements are
+shown beside the question and the answer is the user's own words. Never skip
+asking the user because a lane answered clearly.
 
 **Synthesize into the evidence block.** This is what
 `synthesis_contract.output_shape = "evidence_beside_question"` means, and it is a
@@ -218,12 +215,57 @@ Rules for building it:
   `roster_repository_not_readable` / `store_described_but_not_callable` → yours
   to handle (nothing registered, a path did not open, a store did not answer);
   do not relay any of them as "your system has no such policy/data".
-- **Drop evidence the user has already answered past.** If they answered while
-  the lanes were still running, do not re-open a settled decision with it.
+- **Drop a finding the user has already answered past.** If they answered while
+  the lanes were still running, do not re-open a settled decision with it. There
+  is nowhere to put it: a finding takes the round it was fetched for, and that
+  round is spent.
 - **Evidence from outside the roster is a suggestion, not evidence.** It is
   rejected at submission, so relaying it as a finding would show the user
   something the record does not contain. Offer to register the repository
   instead, so the next question can be answered against it.
+
+**A3. Record a confirmed finding — its own turn, before you prompt for an answer.**
+
+Only when `code_context` came back `policy_found: true`. It carries
+`answer_prefix: "[from-code]"` and a `user_confirmation_prompt`, and there is no
+prefix that skips this step: `[from-code][auto-confirmed]` is not a value the
+contract can hold, so a lane cannot declare itself pre-confirmed.
+
+1. Show the evidence block (A2) and ask the lane's `user_confirmation_prompt`
+   through `AskUserQuestion`. Ask it as it is: the user is confirming that this
+   is what the code does, not deciding what it should do.
+2. If they say it is wrong, or they would rather just answer, **send nothing**
+   and go to B. A question answered with no finding recorded is an accurate
+   account of how that decision was made, not a degraded one.
+3. If they confirm, send it as the answer with its prefix, composed from
+   `evidence[]` so every claim keeps the repository it was checked against:
+
+```
+Tool: ouroboros_pm_interview
+Arguments:
+  session_id: <meta.session_id>
+  answer: |
+    [from-code] billing-api src/billing/lapse.py: access continues to period end.
+    [from-code] storefront src/checkout.ts: access is revoked immediately.
+```
+
+4. The server records it as an **adopted fact**: the round is marked
+   `observation`, requirement extraction reads a withheld-note in its place, and
+   it does not count toward the decisions that complete the interview. The
+   response carries the **next** question, generated with the finding in view —
+   that is the question the user answers in their own words, from step 3-A.
+
+**Why it takes the round rather than riding beside the answer.** It was built
+the other way first, with a second parameter for findings. Two entrances meant
+two sets of rules for one payload, and they stopped agreeing: the same class of
+silent loss reappeared at a new address for six review rounds. One entrance is
+what closed it, and it is what `ouroboros_interview` always did.
+
+**What this does not license.** The finding is never sent unconfirmed to save a
+turn. What holds if you do is downstream and weaker than the user's eyes: the
+`[from-code]` prefix keeps it out of requirement extraction and out of the
+completion count, so an unconfirmed forward costs the user a question turn and
+puts nothing false in the PRD. That is a floor, not a permission.
 
 **B. Show content + get user input** (once A2's lanes have returned):
 
@@ -288,11 +330,10 @@ Omit any section you have nothing for. An empty `Constraints (user-stated)` is
 better absent than filled with something plausible, and `Reasoning` drawn from
 nothing they said is the failure this labelling exists to make visible.
 
-**No codebase-context section.** The regular interview adds one, because there
-the main session inspects code itself. Here it does not: the lanes did, and
-their findings ride the same call in the `evidence` field, where they are
-recorded as an adopted fact. Putting a lane's finding in this payload instead
-would record it as part of the user's decision.
+**No codebase-context section, and no lane findings.** The regular interview
+adds one, because there the main session inspects code itself. Here it does not.
+A lane's finding is recorded by step A3, on its own turn, as an adopted fact.
+Putting it in this payload would record it as part of the user's decision.
 
 **Then confirm — this is the gate, and it is what licenses the structuring
 above.** One `AskUserQuestion` before sending:
@@ -318,30 +359,19 @@ Append `[refined]` only after this confirmation: an unconfirmed structure carrie
 your reading of the answer under the user's name, and the PRD cannot tell the
 difference later.
 
-**Send the answer and what it was weighed against in one call.** `evidence`
-carries the lanes' findings, prefixed `[from-code]` / `[from-data]`:
+**Send it as the answer, on the one parameter every answer uses.**
 
 ```
 Tool: ouroboros_pm_interview
 Arguments:
   session_id: <meta.session_id>
   <meta.response_param>: <the refined answer, or "[decide_later]" / "[deferred]">
-  evidence: |
-    [from-code] billing-api src/billing/lapse.py: access continues to period end.
-    [from-code] storefront src/checkout.ts: access is revoked immediately.
-    [from-data] active subscriptions by plan, last 90 days: standard 12,480 / premium 3,120.
 ```
 
-**One call, not two.** Evidence recorded after the answer call has missed the
-question it exists to inform: that call already wrote the next one. Sending it
-later is not a slower version of this — it is a different thing, recorded
-against a decision it was not weighed for.
-
-**What to put there.** The lanes' findings as they reported them: no conclusion
-of your own, and nothing from a no-op lane — there was nothing weighed. If both
-lanes were no-ops, omit `evidence` entirely. The server records it as an adopted
-fact, so requirement extraction withholds it and it never becomes a PRD
-requirement, and it answers no question.
+There is no second parameter carrying findings. The tool has exactly the fields
+the regular interview has, and a finding travels the same way any adopted fact
+travels there — see **A3. Record a confirmed finding** above, which is a separate
+turn taken *before* the user answers, not something appended to this call.
 
 **D. Check completion:**
 

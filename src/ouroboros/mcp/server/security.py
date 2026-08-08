@@ -453,13 +453,12 @@ class InputValidator:
         "prompt",
         "goal",
         "initial_context",
+        # Lane findings quote source, and source contains ``;``. They arrive
+        # here — a confirmed ``[from-code]`` finding is sent as the answer, on
+        # the one entrance every answer uses. A second field for the same
+        # payload was tried and removed; the exemption did not have to move with
+        # it, because it never left ``answer``.
         "answer",
-        # Lane findings quote source, and source contains ``;``. This carries
-        # what ``answer`` used to carry before the two were split, so leaving it
-        # off the list made moving the field a rejection: the only way through
-        # would have been to reword the finding, which is what this PR removed
-        # for ``results[].content`` for exactly the same reason.
-        "evidence",
         "current_approach",
         "problem_context",
         "acceptance_criterion",

@@ -741,13 +741,19 @@ class TestPMInterviewHandlerSubagentDispatch:
         assert observed not in prompt
         assert "observation withheld" in prompt
 
-    async def test_plugin_path_carries_evidence_to_the_child(self, handler, monkeypatch) -> None:
-        """Regression (#1941): the tool advertises ``evidence`` on every runtime.
+    async def test_plugin_path_records_a_confirmed_finding_like_any_answer(
+        self, handler, monkeypatch
+    ) -> None:
+        """Regression (#1941): one entrance, so the two runtimes cannot drift.
 
-        This runtime accepted it and dropped it — the branch never read the
-        parameter — so a lane's finding never reached the child that writes the
-        next question, which is the only reason it is collected. It rides on the
-        round the answer filled, so the transcript carries it forward.
+        This runtime used to be handed a second field it never read, and a
+        lane's finding silently failed to reach the child that writes the next
+        question. There is no second field now: a confirmed finding arrives as
+        the answer, ``record_answer`` settles it as an observation, and the
+        transcript carries it forward with no branch of its own here.
+
+        Revert the parameter and this still passes — which is why the *absence*
+        is pinned separately, in ``test_pm_question_advisory.py``.
         """
         saved: list[InterviewState] = []
 
@@ -762,27 +768,24 @@ class TestPMInterviewHandlerSubagentDispatch:
         result = await handler.handle(
             {
                 "session_id": "sess-ev",
-                "answer": "counted by service date",
+                "answer": "[from-code] billing-api: period end",
                 "last_question": "Q?",
-                "evidence": "[from-code] billing-api: period end",
             }
         )
 
         assert result.is_ok
         assert "billing-api: period end" in result.value.meta["_subagent"]["prompt"]
-        # On the answer's own round, adding none of its own.
-        assert [(r.question, r.user_response, r.evidence) for r in saved[-1].rounds] == [
-            ("Q?", "counted by service date", "[from-code] billing-api: period end")
+        assert [(r.question, r.user_response, r.provenance) for r in saved[-1].rounds] == [
+            ("Q?", "[from-code] billing-api: period end", "observation")
         ]
 
-    async def test_plugin_path_carries_evidence_with_no_round_pending(
+    async def test_plugin_path_opens_the_round_a_finding_lands_on(
         self, handler, monkeypatch
     ) -> None:
-        """The other plugin entry: the answer opens the round it attaches to.
+        """The other plugin entry: nothing persisted, so the answer opens it.
 
         Each plugin dispatch is a new child session, so a resumed interview can
-        reach here with nothing persisted to fill. The answer appends a round,
-        and the evidence must find *that* one.
+        reach here with no round to fill. One round appears, not two.
         """
         saved: list[InterviewState] = []
 
@@ -804,43 +807,16 @@ class TestPMInterviewHandlerSubagentDispatch:
         result = await handler.handle(
             {
                 "session_id": "sess-ev-fresh",
-                "answer": "cancellations free the slot",
+                "answer": "[from-data] 12,480 cancellations",
                 "last_question": "When does the slot reopen?",
-                "evidence": "[from-data] 12,480 cancellations",
             }
         )
 
         assert result.is_ok
         assert "12,480 cancellations" in result.value.meta["_subagent"]["prompt"]
-        assert [(r.question, r.evidence) for r in saved[-1].rounds] == [
-            ("When does the slot reopen?", "[from-data] 12,480 cancellations")
+        assert [(r.question, r.provenance) for r in saved[-1].rounds] == [
+            ("When does the slot reopen?", "observation")
         ]
-
-    async def test_plugin_path_refuses_evidence_without_an_answer(
-        self, handler, monkeypatch
-    ) -> None:
-        """One rule covers both runtimes because it runs before they diverge.
-
-        The refusal lives in argument validation, ahead of the plugin/in-process
-        split, so there is no per-runtime branch to forget. Nothing is persisted
-        and no child is dispatched.
-        """
-        saved: list[InterviewState] = []
-
-        async def _capture_save(state_dir: Path, state: InterviewState) -> Result[Path, str]:
-            saved.append(state)
-            return await _noop_save(state_dir, state)
-
-        import ouroboros.mcp.tools.authoring_handlers as ah
-
-        monkeypatch.setattr(ah, "_plugin_save_state", _capture_save)
-
-        result = await handler.handle(
-            {"session_id": "sess-ev", "evidence": "[from-code] billing-api: period end"}
-        )
-
-        assert result.is_err
-        assert saved == []
 
     async def test_context_preserves_selected_repos(self, handler) -> None:
         result = await handler.handle(

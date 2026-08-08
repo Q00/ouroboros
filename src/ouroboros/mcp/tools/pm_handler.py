@@ -28,7 +28,7 @@ from typing import Any
 import structlog
 
 from ouroboros.backends import backend_supports_tool_envelope
-from ouroboros.bigbang.answer_provenance import classify_answer_provenance, extraction_rounds
+from ouroboros.bigbang.answer_provenance import extraction_rounds
 from ouroboros.bigbang.interview import (
     InterviewRound,
     InterviewState,
@@ -126,23 +126,12 @@ def _pending_round(state: InterviewState) -> InterviewRound | None:
     be answered without being a question, and every consumer that assumed the
     trailing round was the pending one then filed the next decision against
     whatever sat behind it.
+
+    ``None`` is now load-bearing rather than a fallback: it means there is no
+    question for an incoming answer to belong to, and the caller is asked to
+    name one instead of the trailing round being borrowed.
     """
     return next((r for r in reversed(state.rounds) if r.user_response is None), None)
-
-
-def _attach_evidence(state: InterviewState, target: InterviewRound | None, evidence: str) -> None:
-    """Record what a decision was weighed against, on the decision's own round.
-
-    Not a round of its own. Given one it is an answered entry sitting behind an
-    unanswered question, and three stored sessions show what follows: decisions
-    filed under a marker nobody was asked, and their real questions unanswered
-    forever. As a field there is no round to misread.
-    """
-    if target is None:
-        return
-    existing = target.evidence
-    target.evidence = f"{existing}\n{evidence}" if existing else evidence
-    state.mark_updated()
 
 
 def _meta_path(session_id: str, data_dir: Path | None = None) -> Path:
@@ -278,21 +267,18 @@ def _format_pm_transcript(state: InterviewState, *, withhold_observations: bool 
         return ""
     if withhold_observations:
         rendered = [
-            (item.round_number, item.question, item.answer, None)
-            for item in extraction_rounds(state)
+            (item.round_number, item.question, item.answer) for item in extraction_rounds(state)
         ]
     else:
-        rendered = [(r.round_number, r.question, r.user_response, r.evidence) for r in state.rounds]
+        rendered = [(r.round_number, r.question, r.user_response) for r in state.rounds]
     lines: list[str] = []
     if state.initial_context:
         lines.append(f"**Product Idea:** {state.initial_context}")
         lines.append("")
-    for round_number, question, answer, evidence in rendered:
+    for round_number, question, answer in rendered:
         lines.append(f"**Q{round_number}:** {question}")
         if answer:
             lines.append(f"**A{round_number}:** {answer}")
-        if evidence:
-            lines.append(f"**Weighed against:** {evidence}")
         lines.append("")
     return "\n".join(lines).rstrip()
 
@@ -478,28 +464,17 @@ class PMInterviewHandler:
                     items={"type": "string"},
                 ),
                 MCPToolParameter(
-                    name="evidence",
-                    type=ToolInputType.STRING,
-                    description=(
-                        "What the answer was weighed against — the advisory lanes' "
-                        "findings, prefixed [from-code] / [from-data]. Sent on the "
-                        "same call as the answer so it is recorded before the next "
-                        "question is generated, which is what lets it inform that "
-                        "question. It is an adopted fact, not a decision: requirement "
-                        "extraction withholds it, and it answers nothing."
-                    ),
-                    required=False,
-                ),
-                MCPToolParameter(
                     name="last_question",
                     type=ToolInputType.STRING,
                     description=(
-                        "The question text from the previous child session's response. "
-                        "In plugin mode each dispatch creates a new child session whose "
-                        "questions are not automatically persisted server-side. Pass the "
-                        "child's last question here when submitting an answer so the "
-                        "PM interview transcript preserves the real question text instead "
-                        "of a placeholder."
+                        "The question this answer is answering, when the server is "
+                        "not already holding it unanswered. In plugin mode each "
+                        "dispatch creates a new child session whose questions are "
+                        "not persisted server-side, so pass the child's last "
+                        "question here. On any runtime, an answer sent when no "
+                        "question is pending is refused without it — there is no "
+                        "question to file it under, and the round behind it is one "
+                        "somebody already answered."
                     ),
                     required=False,
                 ),
@@ -551,7 +526,6 @@ class PMInterviewHandler:
         cwd_arg = arguments.get("cwd")
         selected_repos: list[str] | None = arguments.get("selected_repos")
         last_question = arguments.get("last_question")
-        evidence = arguments.get("evidence")
 
         # Auto-detect action from parameter presence (AC 13)
         action = _detect_action(arguments)
@@ -568,34 +542,6 @@ class PMInterviewHandler:
             return Result.err(
                 MCPToolError(
                     "Must provide initial_context to start, or session_id to resume/generate",
-                    tool_name="ouroboros_pm_interview",
-                )
-            )
-
-        # Evidence with no answer beside it is an invalid combination, not a
-        # partial one. There is no round it belongs to: the decision it was
-        # weighed for is already recorded, and the only round still open is the
-        # *next* question, so accepting it would file a finding against a
-        # decision it was never weighed for. Storing it is misfiling and
-        # dropping it is the silent loss the plugin path was blocked for, so
-        # neither is available — the call is refused instead, before the plugin
-        # and in-process paths diverge, which is why one rule covers both.
-        #
-        # This does not gate the person. RFC #1937 makes waiting for the lanes
-        # their choice, and refusing a malformed host call does not hold anyone:
-        # an answer alone is always accepted, and a record carrying no evidence
-        # is an accurate account of a decision made without it rather than a
-        # degraded one. `skills/pm/SKILL.md` already tells hosts to drop
-        # evidence the user answered past rather than re-open a settled
-        # decision with it; this is that instruction made true here.
-        if evidence and not answer:
-            return Result.err(
-                MCPToolError(
-                    "evidence must be sent on the same call as the answer it was "
-                    "weighed for. It cannot be recorded on its own: the decision it "
-                    "informed is already written, and the only open question is the "
-                    "next one. If the user answered before the lanes returned, "
-                    "discard the evidence rather than re-opening a settled decision.",
                     tool_name="ouroboros_pm_interview",
                 )
             )
@@ -794,21 +740,13 @@ class PMInterviewHandler:
                         question_text = (
                             last_question if last_question else "(continued from subagent)"
                         )
+                    # One call for every answer, whatever its provenance. A
+                    # confirmed lane finding arrives here as an ordinary
+                    # ``[from-code]`` answer and ``record_answer`` settles it as
+                    # an observation, so this branch needs no case of its own —
+                    # which is what makes the two runtimes agree by default
+                    # instead of by a second rule someone has to keep in step.
                     state.record_answer(question_text, answer)
-                    if evidence:
-                        # The tool advertises this field on every runtime, so
-                        # this one may not accept it and drop it. It lands on
-                        # the round the answer just filled, and the transcript
-                        # built below carries it to the child that writes the
-                        # next question.
-                        _attach_evidence(
-                            state,
-                            next(
-                                (r for r in reversed(state.rounds) if r.user_response is not None),
-                                None,
-                            ),
-                            evidence,
-                        )
                     state.mark_updated()
                     save_result = await _plugin_save_state(state_dir, state)
                     if save_result.is_err:
@@ -887,7 +825,9 @@ class PMInterviewHandler:
 
             # ── Resume with answer ─────────────────────────────────
             if action == "resume" and session_id:
-                return await self._handle_answer(engine, session_id, answer, cwd, evidence=evidence)
+                return await self._handle_answer(
+                    engine, session_id, answer, cwd, last_question=last_question
+                )
 
             return Result.err(
                 MCPToolError(
@@ -1315,67 +1255,13 @@ class PMInterviewHandler:
     # Answer (resume + record)
     # ──────────────────────────────────────────────────────────────
 
-    async def _record_evidence_round(
-        self,
-        engine: PMInterviewEngine,
-        state: InterviewState,
-        session_id: str,
-        answer: str,
-        cwd: str,
-    ) -> Result[MCPToolResult, MCPServerError]:
-        """Record an adopted fact that arrived in the answer slot, answering nothing.
-
-        A guard, not a documented step: the protocol carries evidence in its own
-        field on the same call as the answer. What reaches here is a caller
-        sending a finding where a decision goes, and the point is that it cannot
-        become one — it attaches to the question still waiting, as what the
-        person is weighing, and that question stays open.
-        """
-        pending = _pending_round(state)
-        _attach_evidence(state, pending, answer)
-        save_result = await engine.save_state(state)
-        if isinstance(save_result, Result) and save_result.is_err:
-            return Result.err(
-                MCPToolError(
-                    f"Failed to persist evidence: {save_result.error}",
-                    tool_name="ouroboros_pm_interview",
-                )
-            )
-        _save_pm_meta(session_id, engine, cwd=cwd, data_dir=self.data_dir)
-
-        log.info(
-            "pm_handler.evidence_recorded",
-            session_id=session_id,
-            has_pending_question=pending is not None,
-        )
-        return Result.ok(
-            MCPToolResult(
-                content=(
-                    MCPContentItem(
-                        type=ContentType.TEXT,
-                        text=(
-                            "Evidence recorded. It informs the next question and is "
-                            "withheld from requirement extraction."
-                        ),
-                    ),
-                ),
-                is_error=False,
-                meta={
-                    "session_id": session_id,
-                    "evidence_recorded": True,
-                    "is_complete": False,
-                    "pending_question": pending.question if pending else None,
-                },
-            )
-        )
-
     async def _handle_answer(
         self,
         engine: PMInterviewEngine,
         session_id: str,
         answer: str | None,
         cwd: str,
-        evidence: str | None = None,
+        last_question: str | None = None,
     ) -> Result[MCPToolResult, MCPServerError]:
         """Resume session, record an answer, check completion, then ask next question.
 
@@ -1472,31 +1358,46 @@ class PMInterviewHandler:
                 )
             )
         if answer and state.rounds:
-            # An adopted fact never fills a question. It attaches to the
-            # question still waiting, as what the person is weighing, and that
-            # question stays open — so a lane's finding cannot arrive as
-            # somebody's answer no matter what order a host calls in, which is
-            # what RFC #1937 decision 3 claims, made true here rather than left
-            # to the caller to honour.
-            if classify_answer_provenance(answer) == "observation":
-                return await self._record_evidence_round(engine, state, session_id, answer, cwd)
-
             # Pending means unanswered, not last. Those two agree now that
             # nothing but a question occupies a round, and the search is written
             # this way rather than as ``rounds[-1]`` so that it keeps agreeing:
             # the assumption cost three stored sessions their real questions
             # when it last stopped holding.
+            #
+            # What follows is ``ouroboros_interview``'s guard, copied rather
+            # than adapted (``authoring_handlers._handle_interview_answer``).
+            # An answer needs a question to be filed under, and when none is
+            # pending the trailing round is one somebody already answered —
+            # binding a second answer to it overwrites a decision that was
+            # made. The caller has the question on screen, so it is asked for.
+            #
+            # Deliberately provenance-blind. The previous shape branched here
+            # on ``classify_answer_provenance`` and routed observations to a
+            # side path that reported success while persisting nothing when no
+            # round was pending. A second door for one class of answer is what
+            # produced that; the rule is the same for every answer now, and an
+            # adopted fact is protected downstream by its provenance rather
+            # than by a branch here.
             pending = _pending_round(state)
             if pending is not None:
-                last_question = pending.question
+                # The stored question of an unanswered round is what we asked,
+                # and it is preferred over the echo: what the host has on screen
+                # carries the advisory dispatch directive appended to it, so an
+                # echo would write our own instructions into the transcript.
+                question_for_answer = pending.question
                 state.rounds.remove(pending)
+            elif last_question:
+                question_for_answer = last_question
             else:
-                # No question is pending. The trailing round is the most recent
-                # one the person was actually asked, and no filter is needed to
-                # say so: every round is a question now that evidence is a field
-                # on one. The filter this replaced existed only because it
-                # wasn't.
-                last_question = state.rounds[-1].question
+                return Result.err(
+                    MCPToolError(
+                        "Cannot record answer - the previous round is already "
+                        "answered and no follow-up question was provided. Pass "
+                        "the question this answer belongs to as 'last_question' "
+                        "alongside 'answer'.",
+                        tool_name="ouroboros_pm_interview",
+                    )
+                )
 
             # ── User chose to skip (decide later / defer to dev) ───
             # The main session detects classification via response_meta
@@ -1510,7 +1411,7 @@ class PMInterviewHandler:
             stripped = answer.strip()
             last_classification = _last_classification(engine)
             if stripped == "[decide_later]" and last_classification == "decide_later":
-                skip_result = await engine.skip_as_decide_later(state, last_question)
+                skip_result = await engine.skip_as_decide_later(state, question_for_answer)
                 if skip_result.is_err:
                     return Result.err(
                         MCPToolError(
@@ -1521,7 +1422,7 @@ class PMInterviewHandler:
                 state = skip_result.value
                 state.clear_stored_ambiguity()
             elif stripped == "[deferred]" and last_classification == "deferred":
-                skip_result = await engine.skip_as_deferred(state, last_question)
+                skip_result = await engine.skip_as_deferred(state, question_for_answer)
                 if skip_result.is_err:
                     return Result.err(
                         MCPToolError(
@@ -1532,7 +1433,7 @@ class PMInterviewHandler:
                 state = skip_result.value
                 state.clear_stored_ambiguity()
             else:
-                record_result = await engine.record_response(state, answer, last_question)
+                record_result = await engine.record_response(state, answer, question_for_answer)
                 if record_result.is_err:
                     return Result.err(
                         MCPToolError(
@@ -1542,23 +1443,6 @@ class PMInterviewHandler:
                     )
                 state = record_result.value
                 state.clear_stored_ambiguity()
-
-        # ── What the decision was weighed against ─────────────────
-        # Recorded in the same call as the answer, and before the next question
-        # is generated. Two things fall out of that placement and neither is a
-        # rule anyone has to follow: the evidence cannot fill the question,
-        # because the answer above already did; and it reaches the generator in
-        # time to inform the question that follows, which is the entire reason
-        # it is recorded at all. Submitting it on a later call could do neither
-        # -- the next question was already written by then.
-        if evidence:
-            # The round the answer just landed on: the most recent one carrying
-            # a response. Evidence belongs to the decision it informed.
-            _attach_evidence(
-                state,
-                next((r for r in reversed(state.rounds) if r.user_response is not None), None),
-                evidence,
-            )
 
         # ── Completion check (AC 12) ─────────────────────────────
         # Completion is determined by engine ambiguity scoring.
