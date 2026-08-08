@@ -3696,6 +3696,44 @@ def test_brand_qualified_components_own_their_surfaces(goal: str) -> None:
 
 
 @pytest.mark.parametrize(
+    ("goal", "outputs"),
+    [
+        ("Create browser-based kanban board", "Users can drag and drop cards between columns"),
+        ("Build online spreadsheet that runs in browsers", "Editable table with formula bar"),
+    ],
+)
+def test_articleless_imperative_goals_reach_their_product_np(goal: str, outputs: str) -> None:
+    """R64 probe: content after the imperative marks the product NP —
+    routine articleless goals own like their articled equivalents."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value=outputs)
+    _seed_section(ledger, "runtime_context", value="Browser")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP
+
+
+@pytest.mark.parametrize(
+    ("goal", "outputs"),
+    [
+        ("Build a Firefox sidebar for tab management", "Interactive tab list with pinned groups"),
+        (
+            "Build a Chrome popup for bookmark management",
+            "Interactive bookmark list with folders panel",
+        ),
+    ],
+)
+def test_native_component_surfaces_stay_outside_web_app(goal: str, outputs: str) -> None:
+    """R64 guard: qualified sidebar/popup heads are native browser
+    component surfaces, analogous to extension and plugin pages."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value=outputs)
+    _seed_section(ledger, "runtime_context", value="Runs in browsers")
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes
+
+
+@pytest.mark.parametrize(
     "goal",
     [
         "The product is an admin portal that runs in browsers",

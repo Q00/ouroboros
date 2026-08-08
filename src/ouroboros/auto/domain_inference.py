@@ -1364,6 +1364,18 @@ _COMPONENT_NOUN_WORDS = frozenset(
         "driver",
         "drivers",
         "automation",
+        # Native browser component surfaces (#1813 R64): a qualified
+        # sidebar/popup is a component like a qualified extension.
+        "sidebar",
+        "sidebars",
+        "popup",
+        "popups",
+        "pop-up",
+        "pop-ups",
+        "toolbar",
+        "toolbars",
+        "overlay",
+        "overlays",
     ]
 )
 # The gate WALK accepts more nominal gerunds than the ownership REs
@@ -1515,7 +1527,11 @@ def _goal_first_np_head(goal_text: str) -> str | None:
             break
         np_tokens.append(lowered)
         content_since_determiner += 1
-    if not np_tokens or not seen_determiner:
+    # A bare-verb walk ("Migrate from ...") never reached a product NP;
+    # articleless imperatives ("Create browser-based kanban board") did
+    # (#1813 R63/R64) — content after the verb marks the phrase, not the
+    # determiner alone.
+    if not np_tokens or (not seen_determiner and len(np_tokens) < 2):
         return None
     return np_tokens[-1]
 
