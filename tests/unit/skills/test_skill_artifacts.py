@@ -198,6 +198,20 @@ def test_codex_plugin_manifest_starts_a_codex_composed_mcp_server() -> None:
     assert (repo_root / ".claude-plugin" / "skills" / "config" / "SKILL.md").is_file()
 
 
+def test_fanout_synthesis_fetch_contract_is_shipped_to_every_host() -> None:
+    """Every MCP-only host must be able to consume a completed fan-out."""
+    repo_root = Path(__file__).resolve().parents[3]
+
+    for skill_root in (repo_root / "skills", repo_root / ".claude-plugin" / "skills"):
+        skill_path = skill_root / "interview" / "SKILL.md"
+        content = skill_path.read_text(encoding="utf-8")
+        assert "A complete set returns a bounded artifact envelope" in content, skill_path
+        assert "`ouroboros_fetch_artifact` with its `contract_id`" in content, skill_path
+        assert "correlated synthesis in the fetched `body`" in content, skill_path
+        assert "Continue the interview from the fetched synthesis" in content, skill_path
+        assert "Continue the interview from the returned synthesis" not in content, skill_path
+
+
 def test_shipped_skill_metadata_never_claims_claude_reserved_command_names() -> None:
     """Primary names and aliases must leave Claude's built-in commands reachable."""
     repo_root = Path(__file__).resolve().parents[3]
