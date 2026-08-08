@@ -772,6 +772,7 @@ class EvolveStepHandler(BridgeAwareMixin):
                     lineage_id,
                     persisted=None,
                     fallback_source_cwd=effective_source_project_dir or os.getcwd(),
+                    allow_untracked_evidence=True,
                 )
             except WorktreeError as e:
                 return Result.err(
