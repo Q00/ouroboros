@@ -963,6 +963,7 @@ def test_shared_blob_recovers_partial_terminal_epoch_publication(
         *,
         stable: bool,
         authority_check: Any,
+        replace_existing: bool = False,
     ) -> None:
         nonlocal epoch_writes
         if path.suffix == ".epoch":
@@ -974,6 +975,7 @@ def test_shared_blob_recovers_partial_terminal_epoch_publication(
             payload,
             stable=stable,
             authority_check=authority_check,
+            replace_existing=replace_existing,
         )
 
     monkeypatch.setattr(store, "_write_record_locked", fail_second_epoch)
@@ -1122,6 +1124,7 @@ def test_lifecycle_head_recovers_terminal_record_write_failure(
         *,
         stable: bool,
         authority_check: Any,
+        replace_existing: bool = False,
     ) -> None:
         if path.suffix == ".tombstoned":
             raise OSError("simulated terminal record failure")
@@ -1130,6 +1133,7 @@ def test_lifecycle_head_recovers_terminal_record_write_failure(
             payload,
             stable=stable,
             authority_check=authority_check,
+            replace_existing=replace_existing,
         )
 
     monkeypatch.setattr(store, "_write_record_locked", fail_terminal_record)
@@ -1162,6 +1166,29 @@ def test_committed_contract_requires_non_optional_lifecycle_head(tmp_path: Path)
     assert _blob_path(store, envelope.artifact_ref).exists()
 
 
+def test_committed_contract_requires_expected_lifecycle_head(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    envelope = _put(store, "CONTRACT1", {"expected_head": "required"})
+    store._anchor_path("CONTRACT1").with_suffix(".lifecycle.head").unlink()
+
+    with pytest.raises(ArtifactManifestError, match="lifecycle authority is missing"):
+        store.fetch("CONTRACT1")
+    assert _blob_path(store, envelope.artifact_ref).exists()
+
+
+def test_lifecycle_head_substitution_fails_closed(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    first = _put(store, "CONTRACT1", {"head": "first"})
+    _put(store, "CONTRACT2", {"head": "second"})
+    first_head = store._anchor_path("CONTRACT1").with_suffix(".lifecycle.head")
+    second_head = store._anchor_path("CONTRACT2").with_suffix(".lifecycle.head")
+    first_head.write_bytes(second_head.read_bytes())
+
+    with pytest.raises(ArtifactManifestError, match="lifecycle authority is invalid"):
+        store.fetch("CONTRACT1")
+    assert _blob_path(store, first.artifact_ref).exists()
+
+
 def test_lifecycle_retention_authority_repairs_schema_valid_manifest_rollback(
     tmp_path: Path,
 ) -> None:
@@ -1190,6 +1217,171 @@ def test_lifecycle_retention_authority_repairs_schema_valid_manifest_rollback(
     assert repaired["active"] is True
     assert repaired["retain_until"] == (NOW + timedelta(days=365)).isoformat()
     assert repaired["updated_at"] == NOW.isoformat()
+
+
+def test_expected_head_rejects_retention_epoch_tail_erasure(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    envelope = _put(
+        store,
+        "CONTRACT1",
+        {"retention": "tail must not disappear"},
+        retain_until=NOW - timedelta(days=1),
+    )
+    manifest_path = store.root / "contracts" / "CONTRACT1" / "events.json"
+    expired_manifest = manifest_path.read_bytes()
+    store.set_contract_retention(
+        "CONTRACT1",
+        active=True,
+        retain_until=NOW + timedelta(days=365),
+        now=NOW + timedelta(hours=1),
+    )
+    blob_path = _blob_path(store, envelope.artifact_ref)
+    _age(blob_path, days=100)
+    _lifecycle_epochs(store, "CONTRACT1")[-1].unlink()
+    manifest_path.write_bytes(expired_manifest)
+
+    with pytest.raises(ArtifactManifestError, match="lifecycle authority"):
+        store.prune(ttl=timedelta(days=90), apply=True, now=NOW)
+    assert blob_path.exists()
+
+
+def test_expected_head_rejects_terminal_epoch_tail_erasure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _store(tmp_path)
+    envelope = _put(
+        store,
+        "CONTRACT1",
+        {"terminal": "tail must remain monotonic"},
+        retain_until=NOW - timedelta(days=1),
+    )
+    manifest_path = store.root / "contracts" / "CONTRACT1" / "events.json"
+    referenced_manifest = manifest_path.read_bytes()
+    blob_path = _blob_path(store, envelope.artifact_ref)
+    _age(blob_path, days=100)
+    monkeypatch.setattr(
+        store,
+        "_unlink_blob_candidate_locked",
+        lambda _candidate: (_ for _ in ()).throw(OSError("keep body")),
+    )
+    with pytest.raises(OSError, match="keep body"):
+        store.prune(ttl=timedelta(days=90), apply=True, now=NOW)
+    monkeypatch.undo()
+
+    _lifecycle_epochs(store, "CONTRACT1")[-1].unlink()
+    store._anchor_path("CONTRACT1").with_suffix(".tombstoned").unlink()
+    manifest_path.write_bytes(referenced_manifest)
+
+    with pytest.raises(ArtifactManifestError, match="lifecycle authority"):
+        store.replay("CONTRACT1")
+    assert blob_path.exists()
+
+
+def test_retention_epoch_before_head_crash_recovers_forward(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _store(tmp_path)
+    envelope = _put(
+        store,
+        "CONTRACT1",
+        {"retention": "head crash"},
+        retain_until=NOW - timedelta(days=1),
+    )
+    manifest_path = store.root / "contracts" / "CONTRACT1" / "events.json"
+    expired_manifest = manifest_path.read_bytes()
+    head_path = store._anchor_path("CONTRACT1").with_suffix(".lifecycle.head")
+    original_write = store._write_record_locked
+
+    def fail_head_update(
+        path: Path,
+        payload: bytes,
+        *,
+        stable: bool,
+        authority_check: Any,
+        replace_existing: bool = False,
+    ) -> None:
+        if path == head_path and replace_existing:
+            raise OSError("simulated lifecycle head failure")
+        original_write(
+            path,
+            payload,
+            stable=stable,
+            authority_check=authority_check,
+            replace_existing=replace_existing,
+        )
+
+    monkeypatch.setattr(store, "_write_record_locked", fail_head_update)
+    with pytest.raises(OSError, match="lifecycle head failure"):
+        store.set_contract_retention(
+            "CONTRACT1",
+            active=True,
+            retain_until=NOW + timedelta(days=365),
+            now=NOW + timedelta(hours=1),
+        )
+    assert len(_lifecycle_epochs(store, "CONTRACT1")) == 1
+    assert json.loads(head_path.read_text(encoding="utf-8"))["sequence"] == 0
+    assert manifest_path.read_bytes() == expired_manifest
+    monkeypatch.undo()
+
+    assert store.fetch("CONTRACT1").envelope == envelope
+    assert json.loads(head_path.read_text(encoding="utf-8"))["sequence"] == 1
+    repaired = _manifest(store, "CONTRACT1")
+    assert repaired["active"] is True
+    assert repaired["retain_until"] == (NOW + timedelta(days=365)).isoformat()
+
+
+def test_terminal_epoch_before_head_crash_recovers_forward(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _store(tmp_path)
+    envelope = _put(
+        store,
+        "CONTRACT1",
+        {"terminal": "head crash"},
+        retain_until=NOW - timedelta(days=1),
+    )
+    blob_path = _blob_path(store, envelope.artifact_ref)
+    _age(blob_path, days=100)
+    head_path = store._anchor_path("CONTRACT1").with_suffix(".lifecycle.head")
+    terminal_path = store._anchor_path("CONTRACT1").with_suffix(".tombstoned")
+    original_write = store._write_record_locked
+
+    def fail_head_update(
+        path: Path,
+        payload: bytes,
+        *,
+        stable: bool,
+        authority_check: Any,
+        replace_existing: bool = False,
+    ) -> None:
+        if path == head_path and replace_existing:
+            raise OSError("simulated lifecycle head failure")
+        original_write(
+            path,
+            payload,
+            stable=stable,
+            authority_check=authority_check,
+            replace_existing=replace_existing,
+        )
+
+    monkeypatch.setattr(store, "_write_record_locked", fail_head_update)
+    with pytest.raises(OSError, match="lifecycle head failure"):
+        store.prune(ttl=timedelta(days=90), apply=True, now=NOW)
+    assert len(_lifecycle_epochs(store, "CONTRACT1")) == 1
+    assert json.loads(head_path.read_text(encoding="utf-8"))["sequence"] == 0
+    assert not terminal_path.exists()
+    assert blob_path.exists()
+    monkeypatch.undo()
+
+    with pytest.raises(ArtifactTombstonedError, match="force-rerun"):
+        store.envelope_if_exists("CONTRACT1")
+    assert json.loads(head_path.read_text(encoding="utf-8"))["sequence"] == 1
+    assert terminal_path.is_file()
+    assert _manifest(store, "CONTRACT1")["events"][-1]["type"] == "artifact.tombstoned"
+    assert blob_path.exists()
 
 
 def test_retention_epoch_recovers_manifest_write_failure(

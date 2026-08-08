@@ -39,6 +39,8 @@ from ouroboros.persistence.artifact_binding import (
     completion_payload,
     encode_record,
     lifecycle_genesis_record,
+    lifecycle_head_path,
+    lifecycle_head_record,
     lifecycle_path,
     read_lifecycle_state,
     reconcile_contract_authority,
@@ -337,6 +339,12 @@ class ContentAddressedArtifactStore:
                 authority_check=lock_authority.validate,
             )
             self._write_record_locked(
+                lifecycle_head_path(self._anchor_path(contract_id)),
+                encode_record(lifecycle_head_record(record)),
+                stable=True,
+                authority_check=lock_authority.validate,
+            )
+            self._write_record_locked(
                 self._binding_path(contract_id),
                 encode_record(record),
                 stable=False,
@@ -374,6 +382,7 @@ class ContentAddressedArtifactStore:
             and not self._binding_path(contract_id).exists()
             and not self._anchor_path(contract_id).exists()
             and not lifecycle_path(self._anchor_path(contract_id)).exists()
+            and not lifecycle_head_path(self._anchor_path(contract_id)).exists()
             and not tombstone_path(self._anchor_path(contract_id)).exists()
         ):
             return None
@@ -409,6 +418,7 @@ class ContentAddressedArtifactStore:
             and not self._binding_path(contract_id).exists()
             and not self._anchor_path(contract_id).exists()
             and not lifecycle_path(self._anchor_path(contract_id)).exists()
+            and not lifecycle_head_path(self._anchor_path(contract_id)).exists()
             and not tombstone_path(self._anchor_path(contract_id)).exists()
         ):
             return None
@@ -496,7 +506,12 @@ class ContentAddressedArtifactStore:
                     operation="write",
                     details={"contract_id": contract_id},
                 )
-            state = read_lifecycle_state(self, anchor, read_bounded=_read_bounded_bytes)
+            state = read_lifecycle_state(
+                self,
+                anchor,
+                read_bounded=_read_bounded_bytes,
+                authority_check=lock_authority.validate,
+            )
             append_lifecycle_epoch(
                 self,
                 anchor,
@@ -569,6 +584,7 @@ class ContentAddressedArtifactStore:
                         self,
                         anchor,
                         read_bounded=_read_bounded_bytes,
+                        authority_check=lock_authority.validate,
                     )
                     append_lifecycle_epoch(
                         self,
@@ -797,6 +813,7 @@ class ContentAddressedArtifactStore:
         *,
         stable: bool,
         authority_check: Callable[[], None],
+        replace_existing: bool = False,
     ) -> None:
         root = self.root.parent if stable else self._bindings_root
         _atomic_write_bytes(
@@ -805,7 +822,7 @@ class ContentAddressedArtifactStore:
             root=root,
             anchor=self._lock_directory_anchor if stable else self._directory_anchor,
             label="artifact authority" if stable else "artifact binding",
-            matching_existing=payload,
+            matching_existing=None if replace_existing else payload,
             authority_check=authority_check,
         )
 

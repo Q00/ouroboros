@@ -1,12 +1,12 @@
 """Contract bindings anchored outside the replaceable artifact generation.
 
 Per-contract manifests, binding files, and ``.tombstoned`` files are
-recoverable projections.  Initial publication and lifecycle epochs are the
-trusted monotonic authority in the stable parent: retention and terminal
-transitions are immutable, content-addressed, and sequence/hash chained.  This
-matches Disposable Memory's cooperative local trust model; coherent rollback
-of the trusted authority itself requires an external counter or journal and is
-not a security guarantee made by this filesystem store.
+recoverable projections.  Initial publication, immutable lifecycle epochs, and
+an independently committed expected head are the trusted monotonic authority
+in the stable parent.  This matches Disposable Memory's cooperative local
+trust model; coherent rollback of the trusted head and its matching authority
+tail requires an external counter or journal and is not a security guarantee
+made by this filesystem store.
 """
 
 from __future__ import annotations
@@ -64,6 +64,15 @@ EPOCH_FIELDS: Final[frozenset[str]] = frozenset(
         "terminal",
     }
 )
+HEAD_FIELDS: Final[frozenset[str]] = frozenset(
+    {
+        "schema_version",
+        "contract_id",
+        "authority_sha256",
+        "sequence",
+        "head_sha256",
+    }
+)
 _EPOCH_NAME_PATTERN: Final[re.Pattern[str]] = re.compile(
     r"(?P<sequence>[0-9]{20})\.(?P<digest>[0-9a-f]{64})\.epoch"
 )
@@ -90,6 +99,7 @@ class AuthorityStore(Protocol):
         *,
         stable: bool,
         authority_check: Callable[[], None],
+        replace_existing: bool = False,
     ) -> None: ...
 
     def _write_manifest_locked(
@@ -155,6 +165,11 @@ def tombstone_path(anchor: Path) -> Path:
 def lifecycle_path(anchor: Path) -> Path:
     """Return the immutable lifecycle genesis for one contract."""
     return anchor.with_suffix(".lifecycle")
+
+
+def lifecycle_head_path(anchor: Path) -> Path:
+    """Return the mutable expected head for one immutable lifecycle chain."""
+    return anchor.with_suffix(".lifecycle.head")
 
 
 def lifecycle_epoch_prefix(anchor: Path) -> str:
@@ -253,6 +268,30 @@ def lifecycle_epoch_record(
     }
 
 
+def lifecycle_head_record(
+    authority: dict[str, Any],
+    state: LifecycleState | None = None,
+) -> dict[str, Any]:
+    """Bind the expected lifecycle sequence and digest to initial authority."""
+    if state is None:
+        genesis = lifecycle_genesis_record(authority)
+        state = LifecycleState(
+            active=genesis["active"],
+            retain_until=genesis["retain_until"],
+            updated_at=genesis["timestamp"],
+            terminal=None,
+            sequence=0,
+            head_sha256=hashlib.sha256(encode_record(genesis)).hexdigest(),
+        )
+    return {
+        "schema_version": LIFECYCLE_VERSION,
+        "contract_id": authority["contract_id"],
+        "authority_sha256": hashlib.sha256(encode_record(authority)).hexdigest(),
+        "sequence": state.sequence,
+        "head_sha256": state.head_sha256,
+    }
+
+
 def validate_authority(raw: Any, *, contract_id: str) -> dict[str, Any]:
     """Validate the exact independently anchored record schema."""
     if not isinstance(raw, dict) or frozenset(raw) != BINDING_FIELDS:
@@ -342,11 +381,57 @@ def _validate_lifecycle_record(
     return raw
 
 
+def _validate_lifecycle_head(
+    raw: Any,
+    authority: dict[str, Any],
+) -> dict[str, Any]:
+    """Validate the independently committed expected lifecycle head."""
+    if not isinstance(raw, dict) or frozenset(raw) != HEAD_FIELDS:
+        raise ValueError("lifecycle head fields do not match the exact schema")
+    expected = {
+        "schema_version": LIFECYCLE_VERSION,
+        "contract_id": authority["contract_id"],
+        "authority_sha256": hashlib.sha256(encode_record(authority)).hexdigest(),
+    }
+    if any(raw.get(field) != value for field, value in expected.items()):
+        raise ValueError("lifecycle head does not match initial authority")
+    sequence = raw.get("sequence")
+    if (
+        isinstance(sequence, bool)
+        or not isinstance(sequence, int)
+        or not 0 <= sequence <= LIFECYCLE_MAX_EPOCHS
+    ):
+        raise ValueError("lifecycle head sequence is invalid")
+    head_sha256 = raw.get("head_sha256")
+    if not isinstance(head_sha256, str) or re.fullmatch(r"[0-9a-f]{64}", head_sha256) is None:
+        raise ValueError("lifecycle head digest is invalid")
+    return raw
+
+
+def _write_lifecycle_head(
+    store: AuthorityStore,
+    authority: dict[str, Any],
+    state: LifecycleState,
+    *,
+    authority_check: Callable[[], None],
+    replace_existing: bool,
+) -> None:
+    """Atomically publish the expected head after its immutable record exists."""
+    store._write_record_locked(
+        lifecycle_head_path(store._anchor_path(authority["contract_id"])),
+        encode_record(lifecycle_head_record(authority, state)),
+        stable=True,
+        authority_check=authority_check,
+        replace_existing=replace_existing,
+    )
+
+
 def read_lifecycle_state(
     store: AuthorityStore,
     authority: dict[str, Any],
     *,
     read_bounded: BoundedReader,
+    authority_check: Callable[[], None],
 ) -> LifecycleState:
     """Read and verify the complete append-only lifecycle epoch chain."""
     anchor = store._anchor_path(authority["contract_id"])
@@ -374,6 +459,21 @@ def read_lifecycle_state(
         terminal=None,
         sequence=0,
         head_sha256=head_sha256,
+    )
+    expected_head = _validate_lifecycle_head(
+        json.loads(
+            read_bounded(
+                lifecycle_head_path(anchor),
+                max_bytes=BINDING_MAX_BYTES,
+                root=store.root.parent,
+                anchor=store._lock_directory_anchor,
+                label="artifact lifecycle head",
+            )
+        ),
+        authority,
+    )
+    committed_head_matches = (
+        expected_head["sequence"] == 0 and expected_head["head_sha256"] == state.head_sha256
     )
     epoch_prefix = lifecycle_epoch_prefix(anchor)
     prefix = f"{epoch_prefix}."
@@ -423,6 +523,20 @@ def read_lifecycle_state(
             sequence=sequence,
             head_sha256=digest,
         )
+        if sequence == expected_head["sequence"]:
+            committed_head_matches = digest == expected_head["head_sha256"]
+    if state.sequence < expected_head["sequence"]:
+        raise ValueError("lifecycle epoch chain is shorter than its committed head")
+    if not committed_head_matches:
+        raise ValueError("lifecycle epoch chain does not match its committed head")
+    if state.sequence > expected_head["sequence"]:
+        _write_lifecycle_head(
+            store,
+            authority,
+            state,
+            authority_check=authority_check,
+            replace_existing=True,
+        )
     return state
 
 
@@ -462,7 +576,7 @@ def append_lifecycle_epoch(
         stable=True,
         authority_check=authority_check,
     )
-    return LifecycleState(
+    next_state = LifecycleState(
         active=epoch["active"],
         retain_until=epoch["retain_until"],
         updated_at=epoch["timestamp"],
@@ -470,6 +584,14 @@ def append_lifecycle_epoch(
         sequence=epoch["sequence"],
         head_sha256=digest,
     )
+    _write_lifecycle_head(
+        store,
+        authority,
+        next_state,
+        authority_check=authority_check,
+        replace_existing=True,
+    )
+    return next_state
 
 
 def tombstone_event(record: dict[str, Any]) -> dict[str, Any]:
@@ -558,6 +680,7 @@ def reconcile_contract_authority(
     """Reconcile replaceable metadata with monotonic stable authorities."""
     anchor_path = store._anchor_path(contract_id)
     lifecycle = lifecycle_path(anchor_path)
+    head = lifecycle_head_path(anchor_path)
     terminal_path = tombstone_path(anchor_path)
     anchor = store._read_authority_locked(contract_id)
     binding = store._binding_path(contract_id)
@@ -568,6 +691,7 @@ def reconcile_contract_authority(
             manifest["events"]
             or binding.exists()
             or lifecycle.exists()
+            or head.exists()
             or epochs_exist
             or terminal_path.exists()
         ):
@@ -583,6 +707,7 @@ def reconcile_contract_authority(
             store,
             anchor,
             read_bounded=read_bounded,
+            authority_check=authority_check,
         )
     except FileNotFoundError:
         if marker.exists():
@@ -592,13 +717,7 @@ def reconcile_contract_authority(
                 details={"contract_id": contract_id, "path": str(lifecycle)},
             ) from None
         genesis = lifecycle_genesis_record(anchor)
-        store._write_record_locked(
-            lifecycle,
-            encode_record(genesis),
-            stable=True,
-            authority_check=authority_check,
-        )
-        state = LifecycleState(
+        initial_state = LifecycleState(
             active=genesis["active"],
             retain_until=genesis["retain_until"],
             updated_at=genesis["timestamp"],
@@ -606,6 +725,34 @@ def reconcile_contract_authority(
             sequence=0,
             head_sha256=hashlib.sha256(encode_record(genesis)).hexdigest(),
         )
+        if not lifecycle.exists():
+            store._write_record_locked(
+                lifecycle,
+                encode_record(genesis),
+                stable=True,
+                authority_check=authority_check,
+            )
+        if not head.exists():
+            _write_lifecycle_head(
+                store,
+                anchor,
+                initial_state,
+                authority_check=authority_check,
+                replace_existing=False,
+            )
+        try:
+            state = read_lifecycle_state(
+                store,
+                anchor,
+                read_bounded=read_bounded,
+                authority_check=authority_check,
+            )
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+            raise ArtifactManifestError(
+                "Artifact lifecycle authority is invalid",
+                operation="read",
+                details={"contract_id": contract_id, "path": str(lifecycle)},
+            ) from exc
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
         raise ArtifactManifestError(
             "Artifact lifecycle authority is invalid",
@@ -763,6 +910,8 @@ __all__ = [
     "lifecycle_epoch_path",
     "lifecycle_epoch_prefix",
     "lifecycle_genesis_record",
+    "lifecycle_head_path",
+    "lifecycle_head_record",
     "lifecycle_path",
     "manifest_from_authority",
     "read_lifecycle_state",

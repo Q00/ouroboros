@@ -25,10 +25,13 @@ The accepted C2-C5 contract is implemented by these production surfaces:
   Python values that cannot round-trip as JSON, and refuses contract reuse for
   different content. Per-contract manifests, binding files, and
   `.tombstoned` files are recoverable projections. Initial contract records
-  and immutable lifecycle genesis/epoch records live in the stable parent;
-  retention and terminal transitions are content-addressed and hash chained,
-  so projection rollback, substitution, or a crash between authority and
-  projection publication is repaired or rejected before replay or GC.
+  and immutable lifecycle genesis/epoch records live in the stable parent.
+  A separately committed expected sequence/head digest makes missing tails
+  fail closed; retention and terminal transitions are content-addressed and
+  hash chained, so projection rollback, substitution, or a crash between
+  authority and projection publication is repaired or rejected before replay
+  or GC. An epoch is published before its expected head, allowing a uniquely
+  validated successor left by a crash to advance the head during recovery.
 - `orchestrator/disposable_memory.py` runs child work through `AgentProcess`,
   serializes each contract's effects with a cross-process lock, persists the
   body before completion, and returns only the bounded envelope. Ordinary retry
@@ -61,10 +64,11 @@ Malformed manifests abort GC fail-closed.
 
 The authority boundary follows the RFC's cooperative local trust model.
 Manifest and cache corruption is untrusted and must fail closed or recover from
-the stable authority. An actor able to coherently delete or replace the stable
-authority itself—and every matching projection—or restore the whole project to
-an older filesystem snapshot is outside this local store's security contract;
-detecting that requires an external rollback-resistant counter or journal.
+the stable authority. An actor able to coherently roll back the stable expected
+head together with its matching lifecycle tail and every projection, delete or
+replace the stable authority itself, or restore the whole project to an older
+filesystem snapshot is outside this local store's security contract; detecting
+that requires an external rollback-resistant counter or journal.
 
 ## Scope
 
