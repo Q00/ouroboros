@@ -11,20 +11,43 @@ from __future__ import annotations
 
 import sqlite3
 
-PICKER_DIRECT_EVENT_TYPES: tuple[str, ...] = (
-    "orchestrator.session.completed",
-    "orchestrator.session.failed",
-    "orchestrator.session.paused",
-    "orchestrator.session.cancelled",
+PICKER_PROGRESS_EVENT_TYPES: tuple[str, ...] = (
+    "orchestrator.progress.updated",
+    "workflow.progress.updated",
+)
+PICKER_PROJECTION_EVENT_TYPES: tuple[str, ...] = (
+    "orchestrator.session.started",
+    *PICKER_PROGRESS_EVENT_TYPES,
+)
+# One canonical family contract for EventTail and the recent-run picker.  The
+# high-volume projection families are separated below; every remaining family
+# is served through the bounded canonical-link index path.
+PICKER_RELEVANT_EVENT_TYPES: tuple[str, ...] = (
     "execution.node.created",
     "execution.node.updated",
     "execution.subtask.updated",
     "execution.session.started",
     "execution.ac.completed",
-)
-PICKER_PROGRESS_EVENT_TYPES: tuple[str, ...] = (
+    "execution.tool.started",
+    "execution.coordinator.tool.started",
+    "orchestrator.tool.called",
     "orchestrator.progress.updated",
     "workflow.progress.updated",
+    "execution.session.completed",
+    "orchestrator.session.completed",
+    "orchestrator.session.failed",
+    "orchestrator.session.paused",
+    "orchestrator.session.cancelled",
+    "orchestrator.session.started",
+    "execution.ac.model_routed",
+    "execution.ac.token_attribution.reported",
+    "execution.frugality_proof.evaluated",
+    "execution.frugality_retrospective.reported",
+)
+PICKER_DIRECT_EVENT_TYPES: tuple[str, ...] = tuple(
+    event_type
+    for event_type in PICKER_RELEVANT_EVENT_TYPES
+    if event_type not in PICKER_PROJECTION_EVENT_TYPES
 )
 RUNTIME_STATUS_ASCII_WHITESPACE = " \t\n\r\v\f"
 RUNTIME_STATUS_ASCII_WHITESPACE_SQL = "char(9, 10, 11, 12, 13, 32)"
@@ -63,16 +86,33 @@ def _workflow_snapshot_sql(payload_sql: str) -> str:
 
 
 PICKER_PROGRESS_SCOPE_SQL = _event_type_scope(PICKER_PROGRESS_EVENT_TYPES)
-PICKER_PROJECTION_EVENT_TYPES = (
-    "orchestrator.session.started",
-    *PICKER_PROGRESS_EVENT_TYPES,
-)
 PICKER_PROJECTION_SCOPE_SQL = _event_type_scope(PICKER_PROJECTION_EVENT_TYPES)
 PICKER_DIRECT_SCOPE_SQL = _event_type_scope(PICKER_DIRECT_EVENT_TYPES)
 PICKER_START_SCOPE_SQL = "event_type = 'orchestrator.session.started'"
+# Prefix ranges keep unrelated-write predicate cost low. Any canonical direct
+# family outside those ranges is derived into an exact clause automatically, so
+# adding a reader family cannot silently leave it outside the partial index.
+_PICKER_DIRECT_INDEX_PREFIXES: tuple[str, ...] = (
+    "execution.",
+    "orchestrator.session.",
+)
+_PICKER_DIRECT_INDEX_EXACT_EVENT_TYPES: tuple[str, ...] = tuple(
+    event_type
+    for event_type in PICKER_DIRECT_EVENT_TYPES
+    if not event_type.startswith(_PICKER_DIRECT_INDEX_PREFIXES)
+)
+_PICKER_DIRECT_INDEX_EXACT_SCOPE_SQL = " OR ".join(
+    f"event_type = '{event_type}'" for event_type in _PICKER_DIRECT_INDEX_EXACT_EVENT_TYPES
+)
 PICKER_DIRECT_INDEX_SCOPE_SQL = (
     "((event_type >= 'execution.' AND event_type < 'execution/') "
-    "OR (event_type >= 'orchestrator.session.' AND event_type < 'orchestrator.session/')) "
+    "OR (event_type >= 'orchestrator.session.' AND event_type < 'orchestrator.session/')"
+    + (
+        f" OR {_PICKER_DIRECT_INDEX_EXACT_SCOPE_SQL}"
+        if _PICKER_DIRECT_INDEX_EXACT_SCOPE_SQL
+        else ""
+    )
+    + ") "
     "AND event_type != 'orchestrator.session.started'"
 )
 WORKFLOW_PROGRESS_SCOPE_SQL = "event_type = 'workflow.progress.updated'"
@@ -80,16 +120,27 @@ WORKFLOW_PROGRESS_SCOPE_SQL = "event_type = 'workflow.progress.updated'"
 SAFE_EXECUTION_ID_SQL = _safe_json_extract("payload", "$.execution_id")
 SAFE_SESSION_ID_SQL = _safe_json_extract("payload", "$.session_id")
 VALID_JSON_SQL = "json_valid(payload) = 1"
+PICKER_CANONICAL_LINK_ID_SQL = (
+    "CASE "
+    f"WHEN typeof({SAFE_EXECUTION_ID_SQL}) = 'text' "
+    f"AND trim({SAFE_EXECUTION_ID_SQL}, {RUNTIME_STATUS_ASCII_WHITESPACE_SQL}) != '' "
+    f"THEN {SAFE_EXECUTION_ID_SQL} "
+    f"WHEN typeof({SAFE_SESSION_ID_SQL}) = 'text' "
+    f"AND trim({SAFE_SESSION_ID_SQL}, {RUNTIME_STATUS_ASCII_WHITESPACE_SQL}) != '' "
+    f"THEN {SAFE_SESSION_ID_SQL} "
+    "ELSE aggregate_id END"
+)
 WORKFLOW_SNAPSHOT_SQL = _workflow_snapshot_sql("payload")
 RUNNING_PROGRESS_SQL = _running_progress_sql("payload")
 
-DIRECT_EVENT_INDEX = "ix_events_picker_direct_aggregate_event_v1"
+DIRECT_EVENT_INDEX = "ix_events_picker_canonical_link_event_v1"
 PICKER_GAP_INDEX = "ix_events_picker_projection_gap_v1"
 START_EVENT_INDEX = "ix_events_picker_session_start_v1"
 AGGREGATE_EVENT_INDEX = "ix_events_picker_aggregate_event_valid_v1"
 RUNNING_PROGRESS_INDEX = "ix_events_picker_running_progress_v1"
 WORKFLOW_SNAPSHOT_INDEX = "ix_events_picker_workflow_snapshot_v1"
 OBSOLETE_PICKER_INDEX_NAMES: tuple[str, ...] = (
+    "ix_events_picker_direct_aggregate_event_v1",
     START_EVENT_INDEX,
     AGGREGATE_EVENT_INDEX,
     RUNNING_PROGRESS_INDEX,
@@ -103,7 +154,7 @@ PICKER_PROJECTION_VERSION = 1
 
 DIRECT_EVENT_INDEX_DDL = (
     f"CREATE INDEX IF NOT EXISTS {DIRECT_EVENT_INDEX} "
-    "ON events (event_type, aggregate_id) "
+    f"ON events ({PICKER_CANONICAL_LINK_ID_SQL}, event_type) "
     f"WHERE {PICKER_DIRECT_INDEX_SCOPE_SQL}"
 )
 PICKER_GAP_INDEX_DDL = (
@@ -140,8 +191,14 @@ PICKER_CONTRACT_DDL_BY_NAME: dict[str, str] = {
     PICKER_META_TABLE: PICKER_META_TABLE_DDL,
 }
 PICKER_CONTRACT_NAMES: tuple[str, ...] = tuple(PICKER_CONTRACT_DDL_BY_NAME)
-PICKER_INDEX_NAMES: tuple[str, ...] = (DIRECT_EVENT_INDEX, PICKER_GAP_INDEX)
-PICKER_INDEX_DDL: tuple[str, ...] = (DIRECT_EVENT_INDEX_DDL, PICKER_GAP_INDEX_DDL)
+PICKER_INDEX_NAMES: tuple[str, ...] = (
+    DIRECT_EVENT_INDEX,
+    PICKER_GAP_INDEX,
+)
+PICKER_INDEX_DDL: tuple[str, ...] = (
+    DIRECT_EVENT_INDEX_DDL,
+    PICKER_GAP_INDEX_DDL,
+)
 PICKER_INDEX_DDL_BY_NAME = {
     DIRECT_EVENT_INDEX: DIRECT_EVENT_INDEX_DDL,
     PICKER_GAP_INDEX: PICKER_GAP_INDEX_DDL,
@@ -226,7 +283,7 @@ def matching_picker_contract(conn: sqlite3.Connection) -> frozenset[str]:
                 if int(row[5]) == 1
             )
             expected_keys = {
-                DIRECT_EVENT_INDEX: ("event_type", "aggregate_id"),
+                DIRECT_EVENT_INDEX: (None, "event_type"),
                 PICKER_GAP_INDEX: ("event_type",),
             }
             if key_columns != expected_keys[name]:
@@ -267,6 +324,7 @@ __all__ = [
     "PICKER_DIRECT_EVENT_TYPES",
     "PICKER_DIRECT_INDEX_SCOPE_SQL",
     "PICKER_DIRECT_SCOPE_SQL",
+    "PICKER_CANONICAL_LINK_ID_SQL",
     "PICKER_INDEX_DDL",
     "PICKER_INDEX_DDL_BY_NAME",
     "PICKER_INDEX_NAMES",
@@ -278,6 +336,7 @@ __all__ = [
     "PICKER_PROJECTION_EVENT_TYPES",
     "PICKER_PROJECTION_SCOPE_SQL",
     "PICKER_PROGRESS_SCOPE_SQL",
+    "PICKER_RELEVANT_EVENT_TYPES",
     "PICKER_PROGRESS_TABLE",
     "PICKER_PROGRESS_TABLE_DDL",
     "PICKER_PROJECTION_VERSION",

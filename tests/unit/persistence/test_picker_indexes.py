@@ -682,6 +682,56 @@ async def test_writable_initialize_repairs_wrong_same_name_direct_index(tmp_path
         conn.close()
 
 
+async def test_writable_initialize_migrates_pr_local_aggregate_index_to_canonical_link(
+    tmp_path,
+) -> None:
+    db = tmp_path / "old-pr-local-direct-index.db"
+    store = EventStore(f"sqlite+aiosqlite:///{db}")
+    await store.initialize()
+    event = BaseEvent(
+        type="orchestrator.session.started",
+        aggregate_type="session",
+        aggregate_id="orch-migrate",
+        data={"execution_id": "exec-migrate"},
+    )
+    await store.append(event)
+    await store.close()
+
+    old_index = "ix_events_picker_direct_aggregate_event_v1"
+    conn = sqlite3.connect(db)
+    try:
+        conn.execute(f'DROP INDEX "{DIRECT_EVENT_INDEX}"')
+        conn.execute(
+            f"CREATE INDEX {old_index} ON events (event_type, aggregate_id) "
+            "WHERE ((event_type >= 'execution.' AND event_type < 'execution/') "
+            "OR (event_type >= 'orchestrator.session.' "
+            "AND event_type < 'orchestrator.session/')) "
+            "AND event_type != 'orchestrator.session.started'"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    with pytest.raises(PickerIndexContractError):
+        list_recent_executions(db)
+
+    await _initialize(db)
+    conn = sqlite3.connect(db)
+    try:
+        names = {row[0] for row in conn.execute("SELECT name FROM sqlite_master")}
+        assert old_index not in names
+        assert matching_picker_contract(conn) == frozenset(PICKER_CONTRACT_NAMES)
+        key_columns = tuple(
+            row[2]
+            for row in conn.execute(f'PRAGMA index_xinfo("{DIRECT_EVENT_INDEX}")')
+            if int(row[5]) == 1
+        )
+        assert key_columns == (None, "event_type")
+    finally:
+        conn.close()
+    assert [run["execution_id"] for run in list_recent_executions(db)] == ["exec-migrate"]
+
+
 async def test_writable_initialize_repairs_wrong_projection_objects_and_backfills(
     tmp_path,
 ) -> None:
@@ -813,6 +863,15 @@ def _measure_bulk_append(path: Path, event_type: str, *, projected: bool) -> tup
             "progress": {"runtime_status": "completed"},
             "acceptance_criteria": [{"node_id": "n", "status": "completed"}],
         }
+        if event_type == "execution.ac.token_attribution.reported":
+            payload = {
+                "execution_id": "execution",
+                "session_id": "native-session",
+                "node_id": "n",
+                "token_spend": 1234,
+            }
+        elif event_type == "orchestrator.tool.called":
+            payload = {"tool_name": "Read"}
         conn.close()
         event_chunks = [
             [
@@ -879,6 +938,8 @@ def _measure_bulk_append(path: Path, event_type: str, *, projected: bool) -> tup
         ("telemetry.unrelated", 1.25, 1.02),
         ("orchestrator.session.started", 1.75, 1.25),
         ("execution.node.updated", 1.75, 1.25),
+        ("execution.ac.token_attribution.reported", 1.75, 1.25),
+        ("orchestrator.tool.called", 1.75, 1.25),
         ("workflow.progress.updated", 2.1, 1.35),
     ],
 )

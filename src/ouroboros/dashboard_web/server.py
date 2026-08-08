@@ -32,6 +32,7 @@ from ouroboros.dashboard_web.reader import (
 _POLL_INTERVAL_SEC = 0.7
 # Heartbeat comment cadence so idle connections stay open through proxies/tunnels.
 _HEARTBEAT_SEC = 15.0
+_PICKER_CONTRACT_ERROR = "picker_index_contract_unavailable"
 
 
 class _DashboardServer(ThreadingHTTPServer):
@@ -87,7 +88,7 @@ class _Handler(BaseHTTPRequestHandler):
                 runs = list_recent_executions(self.server.db_path)
             except PickerIndexContractError:
                 self._send_json(
-                    {"runs": [], "error": "picker_index_contract_unavailable"},
+                    {"runs": [], "error": _PICKER_CONTRACT_ERROR},
                     status=503,
                 )
                 return
@@ -109,7 +110,11 @@ class _Handler(BaseHTTPRequestHandler):
             self.send_error(400, "missing ?run=<execution_id>")
             return
         tail = EventTail(self.server.db_path, run_id)
-        events = tail.fetch_new(limit=100000)
+        try:
+            events = tail.fetch_new(limit=100000)
+        except PickerIndexContractError:
+            self._send_json({"error": _PICKER_CONTRACT_ERROR}, status=503)
+            return
         board = reduce_board(events, execution_id=run_id)
         self._send_bytes(
             static_html(board, run_id=run_id).encode("utf-8"), "text/html; charset=utf-8"
@@ -133,6 +138,15 @@ class _Handler(BaseHTTPRequestHandler):
         if not run_id:
             self.send_error(400, "missing ?run=<execution_id>")
             return
+        tail = EventTail(self.server.db_path, run_id)
+        try:
+            first_batch = tail.fetch_new()
+        except PickerIndexContractError:
+            # The HTTP status cannot change after SSE headers are committed, so
+            # validate and fetch once before announcing a successful stream.
+            self._send_json({"error": _PICKER_CONTRACT_ERROR}, status=503)
+            return
+
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
@@ -141,13 +155,16 @@ class _Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
         self.server.stream_opened()
-        tail = EventTail(self.server.db_path, run_id)
         accumulated: list[dict[str, Any]] = []
         last_emit = 0.0
         last_payload: str | None = None
         try:
             while True:
-                new = tail.fetch_new()
+                if first_batch is not None:
+                    new = first_batch
+                    first_batch = None
+                else:
+                    new = tail.fetch_new()
                 now = time.monotonic()
                 if new:
                     accumulated.extend(new)
@@ -164,6 +181,12 @@ class _Handler(BaseHTTPRequestHandler):
                     last_emit = now
                     self.server.touch()
                 time.sleep(_POLL_INTERVAL_SEC)
+        except PickerIndexContractError:
+            # A contract can drift after the preflight in a long-lived stream.
+            # Close cleanly; EventSource reconnects and receives a deliberate
+            # pre-header 503 from the next request.
+            self.close_connection = True
+            return
         except (BrokenPipeError, ConnectionResetError):
             return  # client navigated away
         except OSError:

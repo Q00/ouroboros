@@ -93,7 +93,7 @@ def picker_contract_is_complete(connection: Connection) -> bool:
     ) != ("INTEGER", 0, None, 0, 0):
         return False
     expected_index_keys = {
-        DIRECT_EVENT_INDEX: ("event_type", "aggregate_id"),
+        DIRECT_EVENT_INDEX: (None, "event_type"),
         PICKER_GAP_INDEX: ("event_type",),
     }
     for name, expected_keys in expected_index_keys.items():

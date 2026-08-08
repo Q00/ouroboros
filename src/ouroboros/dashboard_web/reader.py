@@ -22,6 +22,7 @@ from ouroboros.config.models import resolve_event_store_path
 from ouroboros.dashboard.board import reduce_board
 from ouroboros.persistence.picker_indexes import (
     DIRECT_EVENT_INDEX,
+    PICKER_CANONICAL_LINK_ID_SQL,
     PICKER_CONTRACT_NAMES,
     PICKER_DIRECT_EVENT_TYPES,
     PICKER_DIRECT_INDEX_SCOPE_SQL,
@@ -29,76 +30,25 @@ from ouroboros.persistence.picker_indexes import (
     PICKER_GAP_INDEX,
     PICKER_PROGRESS_EVENT_TYPES,
     PICKER_PROGRESS_TABLE,
+    PICKER_PROJECTION_EVENT_TYPES,
     PICKER_PROJECTION_SCOPE_SQL,
+    PICKER_RELEVANT_EVENT_TYPES,
     PICKER_START_TABLE,
     RUNNING_PROGRESS_SQL,
     RUNTIME_STATUS_ASCII_WHITESPACE,
     SAFE_EXECUTION_ID_SQL,
-    SAFE_SESSION_ID_SQL,
     VALID_JSON_SQL,
     WORKFLOW_PROGRESS_SCOPE_SQL,
     WORKFLOW_SNAPSHOT_SQL,
     matching_picker_contract,
 )
 
-# Events relevant to the execution Kanban. Filtering at the SQL layer keeps the
-# tail cheap even on a mult-hundred-MB DB shared by many runs.
-_RELEVANT_EVENT_TYPES: tuple[str, ...] = (
-    "execution.node.created",
-    "execution.node.updated",
-    "execution.subtask.updated",
-    "execution.session.started",
-    "execution.ac.completed",
-    "execution.tool.started",
-    "execution.coordinator.tool.started",
-    "orchestrator.tool.called",
-    "orchestrator.progress.updated",
-    "workflow.progress.updated",
-    "execution.session.completed",
-    "orchestrator.session.completed",
-    "orchestrator.session.failed",
-    "orchestrator.session.paused",
-    "orchestrator.session.cancelled",
-    # Carries the run-level runtime_backend (provider) — lets the board tag the
-    # provider on SIMPLE runs that emit no per-worker execution.session.started.
-    "orchestrator.session.started",
-    # Frugality telemetry: per-AC model tier/model routing, per-AC runtime token
-    # spend, and the run-end frugality proof — already emitted, previously filtered
-    # out of the Kanban tail.
-    "execution.ac.model_routed",
-    "execution.ac.token_attribution.reported",
-    "execution.frugality_proof.evaluated",
-    "execution.frugality_retrospective.reported",
-)
+# EventTail and the bounded recent-run picker share one persistence-owned family
+# contract so the summary reducer cannot silently lose newly supported events.
+_RELEVANT_EVENT_TYPES = PICKER_RELEVANT_EVENT_TYPES
 
-# Session lifecycle/progress rows are canonically stored under one of the run's
-# selected orchestrator/execution aggregates.  Do not include them in the
-# JSON-linked fallback query: progress is the highest-volume event family and
-# scanning every run's progress history to find a different execution made the
-# picker O(global history * visible runs).
-_SESSION_SCOPED_EVENT_TYPES = frozenset(
-    {
-        "orchestrator.session.started",
-        "orchestrator.session.completed",
-        "orchestrator.session.failed",
-        "orchestrator.session.paused",
-        "orchestrator.session.cancelled",
-        "orchestrator.progress.updated",
-        "workflow.progress.updated",
-    }
-)
-_PAYLOAD_LINKED_EVENT_TYPES: tuple[str, ...] = tuple(
-    event_type
-    for event_type in _RELEVANT_EVENT_TYPES
-    if event_type not in _SESSION_SCOPED_EVENT_TYPES
-)
 _PICKER_EVENT_TYPES = PICKER_DIRECT_EVENT_TYPES
 _PICKER_PROGRESS_EVENT_TYPES = PICKER_PROGRESS_EVENT_TYPES
-_PICKER_PAYLOAD_LINKED_EVENT_TYPES: tuple[str, ...] = tuple(
-    event_type
-    for event_type in _PICKER_EVENT_TYPES
-    if event_type not in _SESSION_SCOPED_EVENT_TYPES
-)
 _AC_STATE_EVENT_TYPES = frozenset(
     {
         "execution.node.created",
@@ -274,13 +224,10 @@ class EventTail:
     """Cursor-based read-only tail of one run's events.
 
     A single run carries TWO ids — an ``execution_id`` (``exec_…``) and an
-    orchestrator ``session_id`` (``orch_…``) — and its events are split across
-    them (per-worker node events under the execution_id; the AC snapshot in
-    ``workflow.progress.updated`` under the session_id). So we first resolve the
-    run's full id CLUSTER from ``orchestrator.session.started`` (which carries
-    both), then match any event filed under either id via ``aggregate_id`` /
-    ``payload.execution_id`` / ``payload.session_id``. Pass either id as
-    ``run_id`` — the cluster is recovered the same way.
+    orchestrator ``session_id`` (``orch_…``). Start/progress rows stay aggregate
+    scoped; lower-volume rows use the exact canonical picker identity (nonblank
+    text execution_id, else nonblank text session_id, else aggregate_id). Pass
+    either run id — the start event resolves the same selected-id cluster first.
     """
 
     def __init__(self, db_path: str | Path, run_id: str) -> None:
@@ -322,46 +269,49 @@ class EventTail:
             return []
         conn = _connect_readonly(self._db_path)
         try:
+            matching_contract = matching_picker_contract(conn)
+            missing_contract = frozenset(PICKER_CONTRACT_NAMES) - matching_contract
+            if missing_contract:
+                raise PickerIndexContractError(missing_contract)
             ids = self._resolve_ids(conn)
-            id_ph = ",".join("?" for _ in ids)
-            type_ph = ",".join("?" for _ in _RELEVANT_EVENT_TYPES)
-            direct_sql = (
+            projection_type_ph = ",".join("?" for _ in PICKER_PROJECTION_EVENT_TYPES)
+            projection_sql = (
                 "SELECT rowid, event_type, payload "
                 "FROM events "
                 "WHERE rowid > ? "
-                f"AND event_type IN ({type_ph}) "
+                f"AND event_type IN ({projection_type_ph}) "
                 "AND aggregate_id = ? "
                 "ORDER BY rowid "
                 "LIMIT ?"
             )
-            direct_rows: list[sqlite3.Row] = []
+            rows_by_rowid: dict[int, sqlite3.Row] = {}
             for aggregate_id in ids:
-                direct_rows.extend(
-                    conn.execute(
-                        direct_sql,
-                        [self._cursor, *_RELEVANT_EVENT_TYPES, aggregate_id, limit],
-                    ).fetchall()
-                )
-            linked_sql = (
+                rows = conn.execute(
+                    projection_sql,
+                    [self._cursor, *PICKER_PROJECTION_EVENT_TYPES, aggregate_id, limit],
+                ).fetchall()
+                for row in rows:
+                    rows_by_rowid[int(row["rowid"])] = row
+            canonical_sql = (
                 "SELECT rowid, event_type, payload "
-                "FROM events "
+                f"FROM events INDEXED BY {DIRECT_EVENT_INDEX} "
                 "WHERE rowid > ? "
                 "AND event_type = ? "
-                f"AND aggregate_id NOT IN ({id_ph}) "
-                f"AND ({SAFE_EXECUTION_ID_SQL} IN ({id_ph}) "
-                f"     OR {SAFE_SESSION_ID_SQL} IN ({id_ph})) "
+                f"AND {PICKER_DIRECT_INDEX_SCOPE_SQL} "
+                f"AND {PICKER_DIRECT_SCOPE_SQL} "
+                f"AND {PICKER_CANONICAL_LINK_ID_SQL} = ? "
                 "ORDER BY rowid "
                 "LIMIT ?"
             )
-            linked_rows: list[sqlite3.Row] = []
-            for event_type in _PAYLOAD_LINKED_EVENT_TYPES:
-                linked_rows.extend(
-                    conn.execute(
-                        linked_sql,
-                        [self._cursor, event_type, *ids, *ids, *ids, limit],
+            for selected_id in ids:
+                for event_type in PICKER_DIRECT_EVENT_TYPES:
+                    rows = conn.execute(
+                        canonical_sql,
+                        [self._cursor, event_type, selected_id, limit],
                     ).fetchall()
-                )
-            rows = sorted((*direct_rows, *linked_rows), key=lambda row: int(row["rowid"]))[:limit]
+                    for row in rows:
+                        rows_by_rowid[int(row["rowid"])] = row
+            rows = sorted(rows_by_rowid.values(), key=lambda row: int(row["rowid"]))[:limit]
         finally:
             conn.close()
 
@@ -389,47 +339,22 @@ def _fetch_direct_rows(
     ids: list[str],
     event_types: tuple[str, ...],
 ) -> list[sqlite3.Row]:
-    """Fetch non-progress rows through the aggregate/event picker index."""
-    if not ids or not event_types:
-        return []
-    rows: list[sqlite3.Row] = []
-    for aggregate_id in ids:
-        for event_type in event_types:
-            sql = (
-                "SELECT rowid, aggregate_id, event_type, payload FROM events "
-                f"INDEXED BY {DIRECT_EVENT_INDEX} "
-                "WHERE aggregate_id = ? AND event_type = ? "
-                f"AND {PICKER_DIRECT_INDEX_SCOPE_SQL} "
-                f"AND {PICKER_DIRECT_SCOPE_SQL}"
-            )
-            rows.extend(conn.execute(sql, [aggregate_id, event_type]).fetchall())
-    return rows
-
-
-def _fetch_payload_linked_rows(
-    conn: sqlite3.Connection,
-    ids: list[str],
-    event_types: tuple[str, ...],
-) -> list[sqlite3.Row]:
-    """Seek payload-linked families, excluding already fetched aggregates."""
+    """Fetch non-progress rows through the canonical run-link index."""
     if not ids or not event_types:
         return []
     id_ph = ",".join("?" for _ in ids)
     rows: list[sqlite3.Row] = []
+    sql = (
+        "SELECT rowid, aggregate_id, event_type, payload, "
+        f"{PICKER_CANONICAL_LINK_ID_SQL} AS link_id FROM events "
+        f"INDEXED BY {DIRECT_EVENT_INDEX} "
+        f"WHERE {PICKER_CANONICAL_LINK_ID_SQL} IN ({id_ph}) "
+        "AND event_type = ? "
+        f"AND {PICKER_DIRECT_INDEX_SCOPE_SQL} "
+        f"AND {PICKER_DIRECT_SCOPE_SQL}"
+    )
     for event_type in event_types:
-        rows.extend(
-            conn.execute(
-                "SELECT rowid, aggregate_id, event_type, payload FROM events "
-                f"INDEXED BY {DIRECT_EVENT_INDEX} "
-                "WHERE event_type = ? "
-                f"AND {PICKER_DIRECT_INDEX_SCOPE_SQL} "
-                f"AND {PICKER_DIRECT_SCOPE_SQL} "
-                f"AND aggregate_id NOT IN ({id_ph}) "
-                f"AND ({SAFE_EXECUTION_ID_SQL} IN ({id_ph}) "
-                f"     OR {SAFE_SESSION_ID_SQL} IN ({id_ph}))",
-                [event_type, *ids, *ids, *ids],
-            ).fetchall()
-        )
+        rows.extend(conn.execute(sql, [*ids, event_type]).fetchall())
     return rows
 
 
@@ -468,6 +393,7 @@ def _fetch_latest_progress_rows(
                     continue
                 row = conn.execute(
                     "SELECT rowid, aggregate_id, event_type, payload, "
+                    f"{PICKER_CANONICAL_LINK_ID_SQL} AS link_id, "
                     f"{VALID_JSON_SQL} AS is_valid, "
                     f"{RUNNING_PROGRESS_SQL} AS is_running, "
                     f"({WORKFLOW_PROGRESS_SCOPE_SQL} AND {WORKFLOW_SNAPSHOT_SQL}) "
@@ -603,15 +529,6 @@ def list_recent_executions(db_path: str | Path, *, limit: int = 10) -> list[dict
             all_ids,
             _PICKER_EVENT_TYPES,
         )
-        event_rows.extend(spec[0] for spec in run_specs)
-        if all_ids:
-            event_rows.extend(
-                _fetch_payload_linked_rows(
-                    conn,
-                    all_ids,
-                    _PICKER_PAYLOAD_LINKED_EVENT_TYPES,
-                )
-            )
         event_rows.extend(
             _fetch_latest_progress_rows(
                 conn,
@@ -629,26 +546,52 @@ def list_recent_executions(db_path: str | Path, *, limit: int = 10) -> list[dict
         event_rows.sort(key=lambda row: int(row["rowid"]))
 
         events_by_execution: dict[str, list[dict[str, Any]]] = {
-            execution_id: [] for _start, _payload, execution_id, _session_id in run_specs
+            execution_id: [
+                {
+                    "rowid": start["rowid"],
+                    "event_type": start["event_type"],
+                    "payload": start_payload,
+                }
+            ]
+            for start, start_payload, execution_id, _session_id in run_specs
         }
         executions_by_id: dict[str, set[str]] = {}
         for _start, _payload, execution_id, session_id in run_specs:
             executions_by_id.setdefault(execution_id, set()).add(execution_id)
             if session_id:
                 executions_by_id.setdefault(session_id, set()).add(execution_id)
+        ambiguous_ids = sorted(
+            selected_id
+            for selected_id, execution_ids in executions_by_id.items()
+            if len(execution_ids) != 1
+        )
+        if ambiguous_ids:
+            raise PickerIndexContractError(
+                frozenset(), detail=f"ambiguous selected run ids: {ambiguous_ids}"
+            )
         for row in event_rows:
             payload = _decode_payload(row["payload"])
             if not isinstance(payload, dict):
                 continue
-            linked_ids = {row["aggregate_id"]}
+            link_id = row["link_id"]
+            matched_executions = (
+                executions_by_id.get(link_id, set()) if isinstance(link_id, str) else set()
+            )
+            if len(matched_executions) != 1:
+                raise PickerIndexContractError(
+                    frozenset(), detail=f"canonical link mismatch: {row['rowid']}/{link_id}"
+                )
             for key in ("execution_id", "session_id"):
                 value = payload.get(key)
-                if isinstance(value, str) and value:
-                    linked_ids.add(value)
-            matched_executions: set[str] = set()
-            for linked_id in linked_ids:
-                if isinstance(linked_id, str):
-                    matched_executions.update(executions_by_id.get(linked_id, ()))
+                if not isinstance(value, str) or not value or value not in executions_by_id:
+                    continue
+                if executions_by_id[value] != matched_executions:
+                    raise PickerIndexContractError(
+                        frozenset(),
+                        detail=(
+                            f"conflicting selected payload ids: {row['rowid']}/{link_id}/{value}"
+                        ),
+                    )
             event = {
                 "rowid": row["rowid"],
                 "event_type": row["event_type"],
