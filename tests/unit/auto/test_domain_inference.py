@@ -4154,6 +4154,35 @@ def test_component_identity_resolves_across_the_whole_goal(goal: str) -> None:
 @pytest.mark.parametrize(
     "goal",
     [
+        "Build a web app; browsers are unsupported",
+        "Build a web app; browser execution is disabled",
+        "Build a website; browser use is forbidden",
+    ],
+)
+def test_postpositive_goal_denials_precede_every_grant(goal: str) -> None:
+    """R77 guard: an explicit postpositive exclusion bars the class even
+    when the goal also names a web artifact."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value="Interactive charts with a filters panel")
+    _seed_section(ledger, "runtime_context", value="Native desktop runtime")
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes
+
+
+def test_component_runtime_is_authoritative_over_the_grant() -> None:
+    """R77 guard: a standardized extension/plugin runtime owns the
+    surface before any goal-side grant — no per-surface vocabulary
+    (browser action, page, panel) is needed."""
+    ledger = _bare_ledger("Build a Chrome browser action settings page")
+    _seed_section(ledger, "outputs", value="Settings panel with save button")
+    _seed_section(ledger, "runtime_context", value="Browser extension runtime")
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
         "The product is an admin portal that runs in browsers",
         "The deliverable is an admin portal available in browsers",
     ],
