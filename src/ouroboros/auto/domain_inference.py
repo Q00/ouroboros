@@ -787,7 +787,7 @@ def _goal_artifact_head_is_web_app(goal_text: str) -> bool:
     # relations ("SDK targeting web apps", "package used by web apps")
     # name the consumer (#1813 R29).
     core = _INFINITIVE_TARGET_RE.sub(" ", core)
-    core = _RELATIONAL_TARGET_RE.sub(" ", core)
+    core = _strip_consumer_relations(core)
     web_matches = list(_WEB_APP_ARTIFACT_PHRASE_RE.finditer(core))
     if not web_matches:
         return False
@@ -812,7 +812,7 @@ def _goal_has_web_co_product_conjunct(goal_text: str) -> bool:
     # stripped before splitting so the comma pieces of a coordinated
     # denial ("not a browser, web app, or frontend") cannot masquerade
     # as co-product conjuncts.
-    goal_text = _RELATIONAL_TARGET_RE.sub(" ", goal_text)
+    goal_text = _strip_consumer_relations(goal_text)
     goal_text = _strip_negated_signals(goal_text, _WEB_APP_GOAL_SIGNAL_FRAGMENT)
     # Infinitive/PP action targets ("and upload the docs to our website",
     # "to scaffold and deploy a web app") are not product declarations
@@ -855,10 +855,23 @@ _POSTPOSITIVE_BROWSER_DENIAL_RE = re.compile(
     r"(?:is\s+|are\s+|was\s+|were\s+|has\s+been\s+|have\s+been\s+|"
     r"had\s+been\s+|will\s+be\s+)?"
     r"(?:\w+ly\s+)?"
-    r"(?:not\s+supported|unsupported|disabled|unavailable|dropped|excluded|"
+    r"(?:not\s+(?:supported|available|allowed|permitted|enabled|possible|"
+    r"offered|provided|present|included)|"
+    r"unsupported|disabled|unavailable|dropped|excluded|"
     r"turned\s+off|removed|prohibited|forbidden|banned|blocked|stripped|"
     r"denied|denylisted|off[\s\-]limits)\b"
 )
+
+
+# A for-phrase whose object carries a human relative clause ("for
+# developers who build web apps") is audience end to end (#1813 R41) —
+# structural, not another token window.
+_AUDIENCE_CLAUSE_RE = re.compile(r"\bfor\s+[^,.;]*?\b(?:who|whose|whom)\b[^,.;]*")
+
+
+def _strip_consumer_relations(text: str) -> str:
+    """Remove relational consumer targets and human-audience clauses."""
+    return _RELATIONAL_TARGET_RE.sub(" ", _AUDIENCE_CLAUSE_RE.sub(" ", text))
 
 
 def _ledger_has_browser_context(ledger: SeedDraftLedger) -> bool:
@@ -873,12 +886,12 @@ def _ledger_has_browser_context(ledger: SeedDraftLedger) -> bool:
     # Relationship-aware like every other ownership surface (#1813 R36):
     # interop/compatibility targets in outputs are consumers of the
     # artifact, not evidence that it IS a browser product.
-    context_text = _RELATIONAL_TARGET_RE.sub(" ", outputs + " " + runtime)
+    context_text = _strip_consumer_relations(outputs + " " + runtime)
     # Postpositive denials ("the browser is not supported", "browser
     # support disabled") negate from behind (#1813 R37).
     context_text = _POSTPOSITIVE_BROWSER_DENIAL_RE.sub(" ", context_text)
     context_text = _strip_negated_signals(context_text, _WEB_APP_GOAL_SIGNAL_FRAGMENT)
-    goal_for_context = _RELATIONAL_TARGET_RE.sub(" ", _goal_text(ledger))
+    goal_for_context = _strip_consumer_relations(_goal_text(ledger))
     return bool(_WEB_APP_GOAL_SIGNAL_RE.search(context_text)) or (
         _goal_has_unnegated_web_app_signal(goal_for_context)
     )

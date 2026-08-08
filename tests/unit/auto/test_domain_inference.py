@@ -2758,3 +2758,23 @@ def test_plain_audience_targets_are_consumer_relations(goal: str) -> None:
     _seed_section(ledger, "runtime_context", value="Native desktop runtime")
     result = derive_domain_from_ledger(ledger)
     assert TaskClass.WEB_APP not in result.classes
+
+
+def test_relative_clause_audiences_are_not_ownership() -> None:
+    """R41 probe: "for developers who build web apps" describes the
+    users' work — a human relative clause marks the whole for-phrase as
+    audience."""
+    ledger = _bare_ledger("Build a native desktop settings tool for developers who build web apps")
+    _seed_section(ledger, "outputs", value="Settings panel for local files")
+    _seed_section(ledger, "runtime_context", value="Native desktop runtime")
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes
+
+
+def test_compositional_not_available_denial() -> None:
+    """R41 probe: "not available" composes like "unavailable"."""
+    ledger = _bare_ledger("Build a native desktop settings tool; browser support is not available")
+    _seed_section(ledger, "outputs", value="Settings panel for local files")
+    _seed_section(ledger, "runtime_context", value="Native desktop runtime")
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes
