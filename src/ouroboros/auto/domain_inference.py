@@ -1376,6 +1376,69 @@ _COMPONENT_NOUN_WORDS = frozenset(
         "toolbars",
         "overlay",
         "overlays",
+        "menu",
+        "menus",
+    ]
+)
+# A lone leading token is a product NP only when it is a noun (#1813
+# R65): "Spreadsheet in the browser" declares a product, "Migrate from
+# ..." is a bare imperative. The action verbs form the closed set.
+_BARE_ACTION_VERB_WORDS = frozenset(
+    [
+        "build",
+        "create",
+        "make",
+        "develop",
+        "implement",
+        "design",
+        "write",
+        "produce",
+        "deliver",
+        "ship",
+        "craft",
+        "construct",
+        "add",
+        "expose",
+        "provide",
+        "offer",
+        "publish",
+        "host",
+        "migrate",
+        "convert",
+        "port",
+        "adapt",
+        "promote",
+        "move",
+        "upgrade",
+        "switch",
+        "transition",
+        "modernize",
+        "rewrite",
+        "transform",
+        "refactor",
+        "consolidate",
+        "turn",
+        "submit",
+        "send",
+        "upload",
+        "forward",
+        "deploy",
+        "fix",
+        "update",
+        "improve",
+        "optimize",
+        "test",
+        "audit",
+        "scan",
+        "check",
+        "analyze",
+        "review",
+        "inspect",
+        "monitor",
+        "run",
+        "generate",
+        "launch",
+        "start",
     ]
 )
 # The gate WALK accepts more nominal gerunds than the ownership REs
@@ -1528,10 +1591,17 @@ def _goal_first_np_head(goal_text: str) -> str | None:
         np_tokens.append(lowered)
         content_since_determiner += 1
     # A bare-verb walk ("Migrate from ...") never reached a product NP;
-    # articleless imperatives ("Create browser-based kanban board") did
-    # (#1813 R63/R64) — content after the verb marks the phrase, not the
-    # determiner alone.
-    if not np_tokens or (not seen_determiner and len(np_tokens) < 2):
+    # articleless imperatives ("Create browser-based kanban board") and
+    # one-word product declarations ("Spreadsheet in the browser") did
+    # (#1813 R63-R65) — only a lone ACTION VERB fails to mark a phrase.
+    if not np_tokens:
+        return None
+    if not seen_determiner and len(np_tokens) < 2 and np_tokens[0] in _BARE_ACTION_VERB_WORDS:
+        return None
+    # A component noun in HEAD position is component-owned regardless of
+    # qualifier order (#1813 R65): "a sidebar for Firefox" is the same
+    # surface as "a Firefox sidebar".
+    if np_tokens[-1] in _COMPONENT_NOUN_WORDS:
         return None
     return np_tokens[-1]
 

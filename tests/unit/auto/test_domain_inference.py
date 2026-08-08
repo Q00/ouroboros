@@ -3734,6 +3734,36 @@ def test_native_component_surfaces_stay_outside_web_app(goal: str, outputs: str)
 
 
 @pytest.mark.parametrize(
+    ("goal", "outputs"),
+    [
+        ("Build a sidebar for Firefox", "Interactive tab list with pinned groups"),
+        ("Build a popup for Chrome", "Interactive bookmark list with folders panel"),
+        ("Build a context menu for Chrome", "Interactive action list with shortcuts"),
+    ],
+)
+def test_component_heads_own_regardless_of_qualifier_order(goal: str, outputs: str) -> None:
+    """R65 guard: a component noun in head position is component-owned —
+    "a sidebar for Firefox" is the same surface as "a Firefox
+    sidebar"."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value=outputs)
+    _seed_section(ledger, "runtime_context", value="Runs in browsers")
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes
+
+
+def test_one_word_product_declarations_reach_their_np() -> None:
+    """R65 probe: a lone leading noun is a product NP — only a bare
+    action verb fails to mark one."""
+    ledger = _bare_ledger("Spreadsheet in the browser")
+    _seed_section(ledger, "outputs", value="Editable cells with formula bar")
+    _seed_section(ledger, "runtime_context", value="Runs in browsers")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP
+
+
+@pytest.mark.parametrize(
     "goal",
     [
         "The product is an admin portal that runs in browsers",
