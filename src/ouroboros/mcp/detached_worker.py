@@ -18,9 +18,11 @@ from typing import Any
 from ouroboros.mcp.detached_jobs import (
     DetachedJobRequest,
     cleanup_worker_artifacts,
+    encode_tool_error_rejection,
     status_path_for,
     write_private_json,
 )
+from ouroboros.mcp.errors import MCPToolError
 from ouroboros.mcp.job_manager import JobLinks, JobManager
 from ouroboros.mcp.server.adapter import create_ouroboros_server
 from ouroboros.mcp.tools.background import start_background_tool_job
@@ -202,8 +204,37 @@ async def run_worker(request_path: Path) -> int:
                 raise ValueError(f"Unknown detached Start tool: {request.tool_name}")
             result = await handler.handle(dict(request.arguments))
             if result.is_err:
-                error = result.error.message
-                await _compensate_unaccepted_start_failure(manager, request, error)
+                error = result.error
+                try:
+                    await manager.get_snapshot(request.job_id)
+                except ValueError:
+                    if isinstance(error, MCPToolError):
+                        manager.abandon_reserved_job_id(request.job_id)
+                        try:
+                            rejection = encode_tool_error_rejection(error)
+                        except ValueError as exc:
+                            try:
+                                _status(
+                                    request_path,
+                                    "failed",
+                                    error=f"Invalid detached tool rejection: {exc}",
+                                )
+                            except Exception:
+                                pass
+                            return 1
+                        _status(
+                            request_path,
+                            "rejected",
+                            job_id=request.job_id,
+                            request_tool_name=request.tool_name,
+                            rejection=rejection,
+                        )
+                        return 1
+                await _compensate_unaccepted_start_failure(
+                    manager,
+                    request,
+                    error.message,
+                )
             else:
                 returned_job_id = result.value.meta.get("job_id")
                 if returned_job_id != request.job_id:

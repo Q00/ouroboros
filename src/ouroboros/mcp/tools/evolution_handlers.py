@@ -7,6 +7,7 @@ Contains handlers for evolutionary loop operations:
 - StartEvolveStepHandler: Start an evolve_step asynchronously (background job)
 """
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 import os
 from pathlib import Path
@@ -45,8 +46,15 @@ from ouroboros.evolution.frugality import (
 )
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.job_manager import JobLinks, JobManager
-from ouroboros.mcp.tools.background import start_background_tool_job
+from ouroboros.mcp.tools.background import (
+    BackgroundJobAcceptanceState,
+    start_background_tool_job,
+)
 from ouroboros.mcp.tools.bridge_mixin import BridgeAwareMixin
+from ouroboros.mcp.tools.evolve_start_claim import (
+    PreparedEvolveClaim,
+    evolve_lineage_busy_error,
+)
 from ouroboros.mcp.tools.job_observer import build_job_observer_contract
 from ouroboros.mcp.tools.subagent import (
     DELEGATED_TO_PLUGIN,
@@ -501,6 +509,8 @@ class EvolveStepHandler(BridgeAwareMixin):
     async def handle(
         self,
         arguments: dict[str, Any],
+        *,
+        on_generation_claimed: Callable[[int], Awaitable[None]] | None = None,
     ) -> Result[MCPToolResult, MCPServerError]:
         """Coalesce the complete public request before workspace acquisition."""
         lineage_id = arguments.get("lineage_id")
@@ -638,12 +648,30 @@ class EvolveStepHandler(BridgeAwareMixin):
                 encode_evolve_handler_result,
             )
 
-            async def run_bounded_handler() -> Result[MCPToolResult, MCPServerError]:
+            async def run_bounded_handler(
+                claimed_callback: Callable[[int], Awaitable[None]] | None,
+            ) -> Result[MCPToolResult, MCPServerError]:
+                if recovered_evolve_result is not None and claimed_callback is not None:
+                    assert recovered_generation is not None
+                    await claimed_callback(recovered_generation)
+                    claimed_callback = None
                 raw_result = await self._handle_once(
                     dict(arguments),
                     recovered_evolve_result=recovered_evolve_result,
+                    on_generation_claimed=claimed_callback,
                 )
                 return decode_evolve_handler_result(encode_evolve_handler_result(raw_result))
+
+            async def run_bound_handler_claim(
+                _projected_generation: int,
+                rebind_generation: Callable[[int], Awaitable[None]],
+            ) -> Result[MCPToolResult, MCPServerError]:
+                async def publish_authoritative_generation(generation_number: int) -> None:
+                    await rebind_generation(generation_number)
+                    if on_generation_claimed is not None:
+                        await on_generation_claimed(generation_number)
+
+                return await run_bounded_handler(publish_authoritative_generation)
 
             while True:
                 generation_number = recovered_generation
@@ -658,15 +686,18 @@ class EvolveStepHandler(BridgeAwareMixin):
                         event_store,
                         str(lineage_id),
                         request_key,
-                        run_bounded_handler,
+                        lambda: run_bounded_handler(on_generation_claimed),
                         generation_number=generation_number,
                         encode=encode_evolve_handler_result,
                         decode=decode_evolve_handler_result,
                         scope="evolve-handler",
+                        operation_with_claim=run_bound_handler_claim,
                     )
                 except loop_support.LineageWinnerAdvanced:
                     continue
 
+        if on_generation_claimed is not None:
+            return await run_public_request()
         return await loop_support.run_lineage_single_flight(
             event_store,
             str(lineage_id),
@@ -680,6 +711,7 @@ class EvolveStepHandler(BridgeAwareMixin):
         arguments: dict[str, Any],
         *,
         recovered_evolve_result: Any | None = None,
+        on_generation_claimed: Callable[[int], Awaitable[None]] | None = None,
     ) -> Result[MCPToolResult, MCPServerError]:
         """Run one complete evolve handler request under public ownership."""
         lineage_id = arguments.get("lineage_id")
@@ -821,6 +853,7 @@ class EvolveStepHandler(BridgeAwareMixin):
                     lineage_id,
                     initial_seed,
                     **evolve_kwargs,
+                    on_generation_claimed=on_generation_claimed,
                 )
             if result.is_ok:
                 step = result.value
@@ -1630,42 +1663,100 @@ class StartEvolveStepHandler:
 
         # Fall-through: real background job path. The shared pipeline owns the
         # ``should_cancel()`` pre-work guard, so the runner only does the work.
+        await self._event_store.initialize()
+        if isinstance(self._event_store, EventStore):
+            from ouroboros.persistence import lineage_claims
+
+            existing_claim = await lineage_claims.observe(
+                self._event_store,
+                scope="evolve-handler",
+                lineage_id=str(lineage_id),
+            )
+            if (
+                existing_claim is not None
+                and not existing_claim.completed
+                and existing_claim.lease_expires_at_ms > int(time.time() * 1000)
+            ):
+                return Result.err(evolve_lineage_busy_error(str(lineage_id)))
+        supports_claimed_handoff = (
+            isinstance(self._event_store, EventStore)
+            and getattr(self._evolve_handler, "evolutionary_loop", None) is not None
+        )
+        prepared_claim = PreparedEvolveClaim(
+            self._evolve_handler,
+            arguments,
+            str(lineage_id),
+        )
+
+        execution_id = None
+        if not supports_claimed_handoff:
+            replay_lineage = getattr(self._event_store, "replay_lineage", None)
+            generation_number = (
+                await loop_support.planned_evolve_generation(
+                    self._event_store,
+                    str(lineage_id),
+                    execute=bool(arguments.get("execute", True)),
+                )
+                if callable(replay_lineage)
+                else 1
+            )
+            execution_id = loop_support.generation_execution_id(
+                str(lineage_id),
+                generation_number,
+            )
+
         async def _runner(_handle) -> MCPToolResult:
             result = await self._evolve_handler.handle(arguments)
             if result.is_err:
                 raise RuntimeError(str(result.error))
             return result.value
 
-        snapshot = await start_background_tool_job(
-            job_manager=self._job_manager,
-            event_store=self._event_store,
-            job_type="evolve_step",
-            intent="evolve_step",
-            process_scope=f"evolve_step:{lineage_id}",
-            initial_message=f"Queued evolve_step for {lineage_id}",
-            links=JobLinks(lineage_id=lineage_id),
-            work_fn=_runner,
-            cancelled_text="evolve_step cancelled before restart work began.",
-            detached_tool_name="ouroboros_start_evolve_step",
-            detached_arguments=arguments,
-            runtime_backend=self.agent_runtime_backend,
-            opencode_mode=self.opencode_mode,
-        )
+        background_acceptance = BackgroundJobAcceptanceState()
+
+        async def _abort_unaccepted_claim(error: BaseException) -> None:
+            if not background_acceptance.may_have_accepted(error):
+                await prepared_claim.abort_on_failure(error)
+
+        try:
+            snapshot = await start_background_tool_job(
+                job_manager=self._job_manager,
+                event_store=self._event_store,
+                job_type="evolve_step",
+                intent="evolve_step",
+                process_scope=f"evolve_step:{lineage_id}",
+                initial_message=f"Queued evolve_step for {lineage_id}",
+                links=JobLinks(lineage_id=lineage_id, execution_id=execution_id),
+                work_fn=_runner,
+                cancelled_text="evolve_step cancelled before restart work began.",
+                detached_tool_name="ouroboros_start_evolve_step",
+                detached_arguments=arguments,
+                runtime_backend=self.agent_runtime_backend,
+                opencode_mode=self.opencode_mode,
+                prepare_inline=prepared_claim.prepare if supports_claimed_handoff else None,
+                on_cancel_before_work=prepared_claim.abort if supports_claimed_handoff else None,
+                on_enqueue_failure=(_abort_unaccepted_claim if supports_claimed_handoff else None),
+                acceptance_state=background_acceptance,
+            )
+        except MCPToolError as exc:
+            return Result.err(exc)
 
         text = (
             f"Started background evolve_step.\n\n"
             f"Job ID: {snapshot.job_id}\n"
-            f"Lineage ID: {lineage_id}\n\n"
+            f"Lineage ID: {lineage_id}\n"
+            f"Execution ID: {snapshot.links.execution_id}\n\n"
             "Use ouroboros_job_status, ouroboros_job_wait, or ouroboros_job_result to monitor it."
         )
         meta = {
             "job_id": snapshot.job_id,
             "lineage_id": lineage_id,
+            "execution_id": snapshot.links.execution_id,
             "status": snapshot.status.value,
             "cursor": snapshot.cursor,
             "job_observer": build_job_observer_contract(
                 job_id=snapshot.job_id,
                 cursor=snapshot.cursor,
+                execution_id=snapshot.links.execution_id,
             ),
         }
         return Result.ok(

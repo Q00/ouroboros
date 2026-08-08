@@ -1585,9 +1585,8 @@ def create_ouroboros_server(
         event_store: Optional EventStore instance. If not provided, creates default.
         brownfield_store: Optional BrownfieldStore instance for shared brownfield
             MCP access. If not provided, handlers create their own store.
-        state_dir: Optional pathlib.Path for interview state directory.
-                   If not provided, uses ``get_config_dir() / "data"``
-                   (typically ``~/.ouroboros/data``).
+        state_dir: Optional pathlib.Path for interview state directory. Defaults to
+            ``get_config_dir() / "data"`` (typically ``~/.ouroboros/data``).
         project_dir: Effective project workspace; defaults to the safe launcher CWD.
         runtime_backend: Optional orchestrator runtime backend override.
         llm_backend: Optional LLM-only backend override.
@@ -1945,6 +1944,7 @@ def create_ouroboros_server(
             mcp_tool_prefix=_evo_mcp_prefix,
             debug=False,
             enable_decomposition=True,
+            session_signal_hub=session_signal_hub,
         )
         return await evolution_runner.execute_seed(
             seed=seed,
@@ -2284,7 +2284,7 @@ def create_ouroboros_server(
         SessionSignalMailbox(
             event_store=event_store,
             target_resolver=session_signal_target_resolver,
-            delivery_queue=session_signal_hub,
+            delivery_queue=None,  # Detached worker imports at its safe boundary.
         )
     )
     evolve_step = EvolveStepHandler(

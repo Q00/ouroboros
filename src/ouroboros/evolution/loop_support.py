@@ -34,6 +34,7 @@ from ouroboros.persistence.event_store import EventStore
 
 logger = logging.getLogger(__name__)
 _PHASE_ORDER = ("wondering", "reflecting", "seeding", "executing", "evaluating")
+type GenerationClaimCallback = Callable[[int], Awaitable[None]]
 
 
 class LineageWinnerAdvanced(RuntimeError):
@@ -671,6 +672,11 @@ async def run_durable_lineage_single_flight[T](
     encode: Callable[[T], dict[str, Any]],
     decode: Callable[[Mapping[str, Any]], T | Awaitable[T]],
     scope: str = "evolve-core",
+    on_claimed: Callable[[int], Awaitable[None]] | None = None,
+    operation_for_generation: Callable[[int], Awaitable[T]] | None = None,
+    operation_with_claim: (
+        Callable[[int, Callable[[int], Awaitable[None]]], Awaitable[T]] | None
+    ) = None,
 ) -> T:
     """Coordinate one lineage writer across EventStore instances and processes."""
     from ouroboros.persistence import lineage_claims
@@ -696,6 +702,8 @@ async def run_durable_lineage_single_flight[T](
                 and claim.request_key == request_key
                 and claim.result_payload is not None
             ):
+                if on_claimed is not None:
+                    await on_claimed(claim.generation_number)
                 decoded = decode(claim.result_payload)
                 return await decoded if inspect.isawaitable(decoded) else decoded
             if claim.generation_number == generation_number:
@@ -703,6 +711,7 @@ async def run_durable_lineage_single_flight[T](
             await asyncio.sleep(0.01)
             continue
         if claim.acquired:
+            claimed_generation = claim.generation_number
             heartbeat = asyncio.create_task(
                 _renew_claim_until_cancelled(
                     event_store,
@@ -712,7 +721,28 @@ async def run_durable_lineage_single_flight[T](
                 )
             )
             try:
-                result = await operation()
+                if on_claimed is not None:
+                    await on_claimed(claimed_generation)
+
+                async def rebind_generation(authoritative_generation: int) -> None:
+                    rebound = await lineage_claims.rebind_generation(
+                        event_store,
+                        scope=scope,
+                        lineage_id=lineage_id,
+                        owner_id=owner_id,
+                        generation_number=authoritative_generation,
+                    )
+                    if not rebound:
+                        raise RuntimeError(
+                            "Lost durable lineage advancement claim before generation binding"
+                        )
+
+                if operation_with_claim is not None:
+                    result = await operation_with_claim(claimed_generation, rebind_generation)
+                elif operation_for_generation is not None:
+                    result = await operation_for_generation(claimed_generation)
+                else:
+                    result = await operation()
                 if heartbeat.done():
                     heartbeat_error = None if heartbeat.cancelled() else heartbeat.exception()
                     if heartbeat_error is not None:
@@ -791,6 +821,8 @@ async def run_durable_lineage_single_flight[T](
                     )
                 if winner.completed:
                     if winner.request_key == request_key and winner.result_payload is not None:
+                        if on_claimed is not None:
+                            await on_claimed(winner.generation_number)
                         decoded = decode(winner.result_payload)
                         return await decoded if inspect.isawaitable(decoded) else decoded
                     raise LineageWinnerAdvanced
