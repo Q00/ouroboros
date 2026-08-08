@@ -3867,6 +3867,37 @@ def test_participial_content_clauses_are_not_browser_context(goal: str) -> None:
     assert TaskClass.WEB_APP not in result.classes
 
 
+def test_browser_usage_compounds_are_subject_matter() -> None:
+    """R69 guard: a browser word re-headed by a measurement noun
+    ("browser usage metrics") is what the artifact reports on, and the
+    "for browser use" idiom stays a terminal environment form."""
+    ledger = _bare_ledger("Build a desktop dashboard with browser usage metrics")
+    _seed_section(ledger, "outputs", value="Interactive charts with a filters panel")
+    _seed_section(ledger, "runtime_context", value="Desktop application")
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
+        "Build a settings page attached to a browser extension",
+        "Build a settings page used by a browser extension",
+        "Build a settings page belonging to a browser extension",
+        "Build a settings page alongside a browser extension",
+    ],
+)
+def test_relational_component_targets_own_their_surfaces(goal: str) -> None:
+    """R69 guard: any relational introduction reaches the component —
+    attached/belonging to, used by, alongside — not only the plain
+    prepositions."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value="Interactive charts with a filters panel")
+    _seed_section(ledger, "runtime_context", value="Runs in browsers")
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes
+
+
 @pytest.mark.parametrize(
     "goal",
     [

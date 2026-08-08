@@ -919,12 +919,15 @@ _POSTNOMINAL_BROWSER_QUALIFIER_RE = re.compile(
     r"(?:(?:an?|the|any|all|every|most)\s+)?"
     r"(?:(?:web|modern|current|standard|major|mobile|desktop|mainstream|"
     r"common|popular|supported|default|local|system)\s+){0,2}?"
-    r"browsers?\b"
+    # The R45 "for browser use" idiom is a TERMINAL form (#1813 R69):
+    # "use" is consumed only as the phrase's own end, so "browser usage
+    # metrics" stays subject matter.
+    r"browsers?\b(?:\s+use\b)?"
     # The environment phrase must END at the browser token (#1813 R46): a
     # trailing noun re-heads it into an artifact ("the browser extension",
-    # "the browser automation suite"). Function words and the R45
-    # "browser use" idiom keep the environment reading.
-    r"(?!\s+(?!(?:and|or|nor|but|use|usage|without|with|for|on|in|at|by|"
+    # "the browser automation suite"); function words keep the
+    # environment reading.
+    r"(?!\s+(?!(?:and|or|nor|but|without|with|for|on|in|at|by|"
     r"from|via|through|to|so|that|which|because|since|while|when|where|"
     r"using|during|after|before|only|instead|rather|too|as|alongside)\b)[\w'’\-]+)"
 )
@@ -1197,6 +1200,16 @@ def _ledger_has_browser_context(ledger: SeedDraftLedger) -> bool:
         " ",
         goal_for_context,
     )
+    # A browser word re-headed by a data/measurement noun is subject
+    # matter (#1813 R69): "browser usage metrics", "browser adoption
+    # trends" describe what the artifact reports on.
+    goal_for_context = re.sub(
+        r"\b(?:browsers?|web)\s+(?:usage|adoption|traffic|statistics|stats|"
+        r"metrics|performance|behaviors?|behaviours?|trends?|share|history|"
+        r"activity|analytics)\b",
+        " ",
+        goal_for_context,
+    )
     # A participle taking an object names the artifact's data ("tracking
     # browser usage", "showing web app uptime"); one followed by a
     # preposition declares its environment ("running in browsers") and
@@ -1265,7 +1278,9 @@ _INSPECTION_TOOL_GOAL_RE = re.compile(
 # trailing rejection keeps audiences ("for extension developers")
 # outside the veto.
 _GOAL_COMPONENT_TARGET_RE = re.compile(
-    r"\b(?:for|of|in|inside|within|into)\s+"
+    # Any relational introduction reaches the component (#1813 R69):
+    # prepositions, "attached/belonging TO", "used BY", "alongside".
+    r"\b(?:for|of|in|inside|within|into|to|by|alongside|beside)\s+"
     r"(?:(?:an?|the|our|my|your|their|its)\s+)?(?:[\w\-'’]+\s+){0,3}?"
     r"(?:extensions?|plugins?|add[\s\-]?ons?|addons?|sidebars?|popups?|"
     r"toolbars?|overlays?|devtools?)\b"
