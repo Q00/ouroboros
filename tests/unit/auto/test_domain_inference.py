@@ -3623,6 +3623,39 @@ def test_monitoring_subject_dashboards_own_with_runtime_evidence() -> None:
 
 @pytest.mark.parametrize(
     "goal",
+    ["Build a recruiting dashboard", "Build a fundraising portal"],
+)
+def test_phrase_initial_participles_are_attributive(goal: str) -> None:
+    """R62 probe: an unknown participle in phrase-initial position is a
+    nominal modifier — position decides, not a vocabulary list."""
+    ledger = _bare_ledger(goal)
+    _seed_section(
+        ledger, "outputs", value="Interactive account table, settings panel, and navigation bar"
+    )
+    _seed_section(ledger, "runtime_context", value="Runs in browsers")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP
+
+
+@pytest.mark.parametrize(
+    "goal",
+    ["Build a plugin management dashboard", "Build an automation reporting dashboard"],
+)
+def test_component_subjects_do_not_veto_ui_products(goal: str) -> None:
+    """R62 probe: a component word owns only in a browser-component
+    compound — a dashboard that manages or reports on components is
+    still the dashboard."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value="Interactive panel with navigation")
+    _seed_section(ledger, "runtime_context", value="Runs in browsers")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP
+
+
+@pytest.mark.parametrize(
+    "goal",
     [
         "The product is an admin portal that runs in browsers",
         "The deliverable is an admin portal available in browsers",

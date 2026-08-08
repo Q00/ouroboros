@@ -1400,10 +1400,19 @@ def _goal_first_np_has_ui_shape(goal_text: str) -> bool:
     them — the same final-head semantics as the direct grant."""
     np_tokens: list[str] = []
     seen_determiner = False
+    content_since_determiner = 0
+    previous_lowered = ""
     first_segment = re.split(r"[.;:!?,]", goal_text)[0]
     for token in re.findall(r"[\w'’\-]+", first_segment):
         lowered = token.lower()
-        if lowered in _COMPONENT_NOUN_WORDS:
+        # Component ownership is scoped to browser-component compounds
+        # (#1813 R62): "browser extension settings page" belongs to the
+        # extension, while "plugin management dashboard" merely manages
+        # plugins — the component word must directly follow the
+        # browser/web token to own.
+        if lowered in _COMPONENT_NOUN_WORDS and (
+            previous_lowered == "web" or previous_lowered.startswith("browser")
+        ):
             return False
         if lowered in _NP_CHAIN_STOP_WORDS:
             break
@@ -1411,10 +1420,23 @@ def _goal_first_np_has_ui_shape(goal_text: str) -> bool:
             if seen_determiner:
                 break
             seen_determiner = True
+            content_since_determiner = 0
+            previous_lowered = lowered
             continue
-        if lowered.endswith("ing") and lowered not in _NP_WALK_GERUND_WORDS:
+        # An unknown participle is attributive in phrase-initial position
+        # ("a recruiting dashboard") and verbal once content precedes it
+        # ("a report evaluating dashboards") — position decides, not a
+        # vocabulary list (#1813 R62); the known nominal gerunds stay
+        # recognized in any slot.
+        if (
+            lowered.endswith("ing")
+            and lowered not in _NP_WALK_GERUND_WORDS
+            and content_since_determiner > 0
+        ):
             break
         np_tokens.append(lowered)
+        content_since_determiner += 1
+        previous_lowered = lowered
     if not np_tokens:
         return False
     return bool(_UI_HEAD_NOUN_RE.match(np_tokens[-1]))
