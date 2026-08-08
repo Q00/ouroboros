@@ -559,17 +559,36 @@ async def test_relevant_append_survives_deferred_repair_of_malformed_meta(
 
 async def test_projection_write_failure_rolls_back_single_and_batch_events(tmp_path) -> None:
     from ouroboros.core.errors import PersistenceError
+    from ouroboros.persistence.picker_projection_updates import (
+        insert_events_with_picker_projection,
+    )
 
     db = tmp_path / "projection-write-rollback.db"
     store = EventStore(f"sqlite+aiosqlite:///{db}")
     await store.initialize()
     conn = sqlite3.connect(db)
     try:
+        conn.execute(f'DROP TABLE "{PICKER_START_TABLE}"')
         conn.execute(f'DROP TABLE "{PICKER_PROGRESS_TABLE}"')
         conn.commit()
     finally:
         conn.close()
 
+    start_single = BaseEvent(
+        type="orchestrator.session.started",
+        aggregate_type="session",
+        aggregate_id="orch-start-single",
+        data={"execution_id": "exec-start-single"},
+    )
+    start_batch = [
+        BaseEvent(
+            type="orchestrator.session.started",
+            aggregate_type="session",
+            aggregate_id=f"orch-start-batch-{index}",
+            data={"execution_id": f"exec-start-batch-{index}"},
+        )
+        for index in range(2)
+    ]
     single = BaseEvent(
         type="workflow.progress.updated",
         aggregate_type="workflow",
@@ -600,6 +619,16 @@ async def test_projection_write_failure_rolls_back_single_and_batch_events(tmp_p
         ),
     ]
     with pytest.raises(PersistenceError):
+        await store.append(start_single)
+    assert store._engine is not None
+    with pytest.raises(OperationalError):
+        async with store._engine.begin() as connection:
+            await insert_events_with_picker_projection(
+                connection,
+                start_batch,
+                projection_ready=True,
+            )
+    with pytest.raises(PersistenceError):
         await store.append(single)
     with pytest.raises(PersistenceError):
         await store.append_batch(batch)
@@ -610,6 +639,8 @@ async def test_projection_write_failure_rolls_back_single_and_batch_events(tmp_p
     conn = sqlite3.connect(db)
     try:
         event_ids = [
+            start_single.id,
+            *(event.id for event in start_batch),
             single.id,
             *(event.id for event in batch),
             *(event.id for event in mixed_batch),

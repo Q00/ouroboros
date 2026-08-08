@@ -49,14 +49,30 @@ _PROGRESS_UPSERT_SQL = (
 )
 
 
+async def _write_start_rows(conn: Any, rowids: Sequence[int]) -> None:
+    if not rowids:
+        return
+    if len(rowids) == 1:
+        await conn.exec_driver_sql(
+            f"INSERT INTO {PICKER_START_TABLE} (event_rowid) VALUES (?)",
+            (rowids[0],),
+        )
+        return
+    await conn.exec_driver_sql(
+        f"INSERT INTO {PICKER_START_TABLE} (event_rowid) "
+        "SELECT CAST(value AS INTEGER) FROM json_each(?)",
+        (json.dumps(rowids),),
+    )
+
+
 async def _write_projection_rows(conn: Any, rows: Sequence[Any]) -> None:
-    starts: list[tuple[int]] = []
+    starts: list[int] = []
     heads: dict[tuple[str, str], list[int | None]] = {}
     for row in rows:
         rowid = int(row[0])
         event_type = str(row[2])
         if event_type == _START_EVENT_TYPE:
-            starts.append((rowid,))
+            starts.append(rowid)
             continue
         if not bool(row[3]):
             continue
@@ -67,11 +83,7 @@ async def _write_projection_rows(conn: Any, rows: Sequence[Any]) -> None:
             head[1] = rowid if head[1] is None else max(int(head[1]), rowid)
         if bool(row[5]):
             head[2] = rowid if head[2] is None else max(int(head[2]), rowid)
-    if starts:
-        await conn.exec_driver_sql(
-            f"INSERT INTO {PICKER_START_TABLE} (event_rowid) VALUES (?)",
-            starts,
-        )
+    await _write_start_rows(conn, starts)
     if heads:
         parameters = [
             (aggregate_id, event_type, values[0], values[1], values[2])
@@ -136,6 +148,9 @@ async def insert_event_with_picker_projection(
         return
     statement = _fenced_event_writes.insert().values(**_projected_values(event))
     rowid = int((await conn.execute(statement.returning(literal_column("rowid")))).scalar_one())
+    if event.type == _START_EVENT_TYPE:
+        await _write_start_rows(conn, (rowid,))
+        return
     await _project_inserted_range(conn, rowid, rowid)
 
 
@@ -173,6 +188,9 @@ async def insert_events_with_picker_projection(
     rowids = [int(rowid) for rowid in raw_rowids]
     if max(rowids) - min(rowids) + 1 != len(rowids):
         raise RuntimeError("Event batch INSERT rowids were not one contiguous SQLite range.")
+    if all(event.type == _START_EVENT_TYPE for event in events):
+        await _write_start_rows(conn, rowids)
+        return
     await _project_inserted_range(conn, min(rowids), max(rowids))
 
 
