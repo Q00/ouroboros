@@ -45,7 +45,10 @@ from ouroboros.evolution.step_receipt import (
 from ouroboros.evolution.wonder import GroundedQuestion, WonderOutput
 from ouroboros.persistence import lineage_claims
 from ouroboros.persistence.event_store import EventStore
-from ouroboros.persistence.schema import lineage_advancement_waiters_table
+from ouroboros.persistence.schema import (
+    lineage_advancement_claims_table,
+    lineage_advancement_waiters_table,
+)
 
 
 def _seed() -> Seed:
@@ -1116,11 +1119,26 @@ async def test_claim_acquisition_refuses_close_admission_without_hanging(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_generation_rebind_ignores_synthetic_mock_settlement_capability() -> None:
+async def test_claim_operations_ignore_synthetic_mock_settlement_capability() -> None:
     """Lightweight mocks retain the no-durable-authority fallback."""
     event_store = AsyncMock()
     synthetic_settle = event_store.settle_transactional_write
 
+    with pytest.raises(PersistenceError, match="initialized"):
+        await lineage_claims.try_acquire(
+            event_store,
+            scope="evolve-handler",
+            lineage_id="mock-lineage",
+            generation_number=1,
+            owner_id="mock-owner",
+            request_key="mock-request",
+        )
+    assert not await lineage_claims.renew(
+        event_store,
+        scope="evolve-handler",
+        lineage_id="mock-lineage",
+        owner_id="mock-owner",
+    )
     assert not await lineage_claims.rebind_generation(
         event_store,
         scope="evolve-handler",
@@ -1128,7 +1146,171 @@ async def test_generation_rebind_ignores_synthetic_mock_settlement_capability() 
         owner_id="mock-owner",
         generation_number=2,
     )
+    assert (
+        await lineage_claims.observe(
+            event_store,
+            scope="evolve-handler",
+            lineage_id="mock-lineage",
+        )
+        is None
+    )
+    assert not await lineage_claims.complete(
+        event_store,
+        scope="evolve-handler",
+        lineage_id="mock-lineage",
+        owner_id="mock-owner",
+        result_payload={"ok": True},
+    )
+    await lineage_claims.release(
+        event_store,
+        scope="evolve-handler",
+        lineage_id="mock-lineage",
+        owner_id="mock-owner",
+    )
+    assert not await lineage_claims.recover_expired(
+        event_store,
+        scope="evolve-handler",
+        lineage_id="mock-lineage",
+    )
+    assert not await lineage_claims.renew_waiter(
+        event_store,
+        scope="evolve-handler",
+        lineage_id="mock-lineage",
+        owner_id="mock-owner",
+        waiter_id="mock-waiter",
+    )
+    await lineage_claims.acknowledge_waiter(
+        event_store,
+        scope="evolve-handler",
+        lineage_id="mock-lineage",
+        owner_id="mock-owner",
+        waiter_id="mock-waiter",
+    )
     synthetic_settle.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_closed_store_refuses_every_claim_operation_without_durable_change(
+    tmp_path: Path,
+) -> None:
+    """Closed production stores cannot silently bypass their lifecycle fence."""
+    database_url = f"sqlite+aiosqlite:///{tmp_path / 'closed-claim-operations.db'}"
+    store = EventStore(database_url)
+    await store.initialize()
+    owner = await lineage_claims.try_acquire(
+        store,
+        scope="evolve-handler",
+        lineage_id="closed-claim-operations",
+        generation_number=1,
+        owner_id="closed-owner",
+        request_key="closed-request",
+    )
+    waiter = await lineage_claims.try_acquire(
+        store,
+        scope="evolve-handler",
+        lineage_id="closed-claim-operations",
+        generation_number=1,
+        owner_id="closed-waiter",
+        request_key="closed-request",
+    )
+    assert owner is not None and owner.acquired
+    assert waiter is not None and waiter.waiter_registered
+    engine = store._engine
+    assert engine is not None
+    async with engine.connect() as connection:
+        claims_before = [
+            dict(row)
+            for row in (await connection.execute(select(lineage_advancement_claims_table)))
+            .mappings()
+            .all()
+        ]
+        waiters_before = [
+            dict(row)
+            for row in (await connection.execute(select(lineage_advancement_waiters_table)))
+            .mappings()
+            .all()
+        ]
+    await store.close()
+
+    operations: tuple[Callable[[], Awaitable[object]], ...] = (
+        lambda: lineage_claims.try_acquire(
+            store,
+            scope="evolve-handler",
+            lineage_id="post-close-new-lineage",
+            generation_number=1,
+            owner_id="post-close-new-owner",
+            request_key="post-close-new-request",
+        ),
+        lambda: lineage_claims.renew(
+            store,
+            scope="evolve-handler",
+            lineage_id="closed-claim-operations",
+            owner_id="closed-owner",
+        ),
+        lambda: lineage_claims.observe(
+            store,
+            scope="evolve-handler",
+            lineage_id="closed-claim-operations",
+        ),
+        lambda: lineage_claims.complete(
+            store,
+            scope="evolve-handler",
+            lineage_id="closed-claim-operations",
+            owner_id="closed-owner",
+            result_payload={"ok": True},
+        ),
+        lambda: lineage_claims.release(
+            store,
+            scope="evolve-handler",
+            lineage_id="closed-claim-operations",
+            owner_id="closed-owner",
+        ),
+        lambda: lineage_claims.recover_expired(
+            store,
+            scope="evolve-handler",
+            lineage_id="closed-claim-operations",
+        ),
+        lambda: lineage_claims.renew_waiter(
+            store,
+            scope="evolve-handler",
+            lineage_id="closed-claim-operations",
+            owner_id="closed-owner",
+            waiter_id="closed-waiter",
+        ),
+        lambda: lineage_claims.acknowledge_waiter(
+            store,
+            scope="evolve-handler",
+            lineage_id="closed-claim-operations",
+            owner_id="closed-owner",
+            waiter_id="closed-waiter",
+        ),
+    )
+    for operation in operations:
+        with pytest.raises(PersistenceError, match="closing"):
+            await operation()
+
+    reopened = EventStore(database_url)
+    await reopened.initialize()
+    try:
+        reopened_engine = reopened._engine
+        assert reopened_engine is not None
+        async with reopened_engine.connect() as connection:
+            claims_after = [
+                dict(row)
+                for row in (await connection.execute(select(lineage_advancement_claims_table)))
+                .mappings()
+                .all()
+            ]
+            waiters_after = [
+                dict(row)
+                for row in (await connection.execute(select(lineage_advancement_waiters_table)))
+                .mappings()
+                .all()
+            ]
+        assert claims_after == claims_before
+        assert waiters_after == waiters_before
+    finally:
+        await reopened.close()
 
 
 @pytest.mark.asyncio

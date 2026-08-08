@@ -54,6 +54,18 @@ def _engine(event_store: EventStore) -> AsyncEngine | None:
     return engine if isinstance(engine, AsyncEngine) else None
 
 
+def _has_declared_settlement(event_store: object) -> bool:
+    """Return whether the store type declares the transactional lifecycle fence."""
+    settle = getattr(event_store, "settle_transactional_write", None)
+    declared_settle = getattr(type(event_store), "settle_transactional_write", None)
+    return callable(declared_settle) and callable(settle)
+
+
+def _can_settle_claim_transaction(event_store: EventStore) -> bool:
+    """Keep lightweight fallbacks while routing real stores through their fence."""
+    return _has_declared_settlement(event_store) or _engine(event_store) is not None
+
+
 async def _settle_claim_transaction[T](
     event_store: EventStore,
     transaction: Callable[[AsyncEngine], Coroutine[Any, Any, T]],
@@ -62,8 +74,7 @@ async def _settle_claim_transaction[T](
 ) -> T:
     """Run one claim transaction inside the EventStore lifecycle fence."""
     settle = getattr(event_store, "settle_transactional_write", None)
-    declared_settle = getattr(type(event_store), "settle_transactional_write", None)
-    if callable(declared_settle) and callable(settle):
+    if _has_declared_settlement(event_store) and callable(settle):
         return await settle(transaction, operation=operation)
     engine = _engine(event_store)
     if engine is None:
@@ -154,8 +165,7 @@ async def try_acquire(
     request_key: str,
 ) -> ClaimObservation | None:
     """Acquire a lineage claim or register as a waiter on its active owner."""
-    engine = _engine(event_store)
-    if engine is None:
+    if not _can_settle_claim_transaction(event_store):
         raise PersistenceError(
             "EventStore must be initialized before lineage claim acquisition",
             operation="claim_lineage_advancement",
@@ -470,8 +480,7 @@ async def renew(
     owner_id: str,
 ) -> bool:
     """Renew an active claim lease owned by this caller."""
-    engine = _engine(event_store)
-    if engine is None:
+    if not _can_settle_claim_transaction(event_store):
         return False
     return await _settle_claim_transaction(
         event_store,
@@ -515,11 +524,10 @@ async def rebind_generation(
     generation_number: int,
 ) -> bool:
     """Bind an unfinished outer receipt to the generation its core claim owns."""
-    settle = getattr(event_store, "settle_transactional_write", None)
-    declared_settle = getattr(type(event_store), "settle_transactional_write", None)
-    if not callable(declared_settle) or not callable(settle):
+    if not _has_declared_settlement(event_store):
         return False
-    return await settle(
+    return await _settle_claim_transaction(
+        event_store,
         lambda engine: _rebind_generation(
             engine,
             scope=scope,
@@ -578,8 +586,7 @@ async def observe(
     lineage_id: str,
 ) -> ClaimObservation | None:
     """Read the current owner and optional completed result."""
-    engine = _engine(event_store)
-    if engine is None:
+    if not _can_settle_claim_transaction(event_store):
         return None
     return await _settle_claim_transaction(
         event_store,
@@ -634,8 +641,7 @@ async def complete(
     result_payload: dict[str, Any],
 ) -> bool:
     """Publish a result only when registered waiters need to replay it."""
-    engine = _engine(event_store)
-    if engine is None:
+    if not _can_settle_claim_transaction(event_store):
         return False
     return await _settle_claim_transaction(
         event_store,
@@ -712,8 +718,7 @@ async def release(
     owner_id: str,
 ) -> None:
     """Release an unfinished owner claim after failure or cancellation."""
-    engine = _engine(event_store)
-    if engine is None:
+    if not _can_settle_claim_transaction(event_store):
         return
     await _settle_claim_transaction(
         event_store,
@@ -760,8 +765,7 @@ async def recover_expired(
     lineage_id: str,
 ) -> bool:
     """Explicitly clear an expired unfinished claim after operator confirmation."""
-    engine = _engine(event_store)
-    if engine is None:
+    if not _can_settle_claim_transaction(event_store):
         return False
     return await _settle_claim_transaction(
         event_store,
@@ -807,8 +811,7 @@ async def renew_waiter(
     waiter_id: str,
 ) -> bool:
     """Renew one live waiter's independent receipt-registration lease."""
-    engine = _engine(event_store)
-    if engine is None:
+    if not _can_settle_claim_transaction(event_store):
         return False
     return await _settle_claim_transaction(
         event_store,
@@ -855,8 +858,7 @@ async def acknowledge_waiter(
     waiter_id: str,
 ) -> None:
     """Atomically consume one exact waiter registration without a lost update."""
-    engine = _engine(event_store)
-    if engine is None:
+    if not _can_settle_claim_transaction(event_store):
         return
     await _settle_claim_transaction(
         event_store,
