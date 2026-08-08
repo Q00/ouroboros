@@ -34,8 +34,7 @@ replayable execution contract on your choice of runtime backend.
 - [CLI Reference](./cli-reference.md) - Command-line interface flags and options
 - [Configuration Reference](./config-reference.md) - All `config.yaml` options and environment variables
 - [Agent OS Profile Taxonomy](./agentos/profile-taxonomy.md) - Locked 4-slot vocabulary (`runtime_backend`, `stage_runtime`, `llm_profile`, `provider_profile`) for the historically-overloaded "profile" concepts; tiebreaker for #573
-- [AgentOS Release Readiness](./agentos/release-readiness.md) - #961-aligned release gate, verification pack, and open issue triage
-- [AgentOS Issue Sequencing Graph](./agentos/issue-sequencing-graph.md) - Non-normative, dated #961/#1256 snapshot of track sequencing, merged-PR evidence, and recommended work order
+- [AgentOS Sequencing SSOT](https://github.com/Q00/ouroboros/issues/961) - Living authority for AgentOS ownership, approval gates, and bounded-slice sequencing
 
 ### API Reference
 
@@ -66,6 +65,16 @@ replayable execution contract on your choice of runtime backend.
 - [Key Patterns](./contributing/key-patterns.md) - Result type, immutability, event sourcing, protocols
 - [Findings Registry](./contributing/findings-registry.md) - Documentation audit findings registry
 - [Issue Quality Policy](./contributing/issue-quality-policy.md) - Quality bar for actionable issues and PRD-lite feature requests
+
+### Historical Planning Snapshots
+
+These documents preserve point-in-time evidence and work orders. They are
+immutable, non-normative history; use [#961](https://github.com/Q00/ouroboros/issues/961)
+for current AgentOS sequencing.
+
+- [AgentOS Release Readiness (2026-05-29)](./history/agentos/release-readiness.md) - Historical release triage and verification snapshot
+- [AgentOS Issue Sequencing Graph (2026-05-29)](./history/agentos/issue-sequencing-graph.md) - Historical issue-state and work-order snapshot
+- [Master Roadmap 2026-07](./history/master-roadmap-2026-07.md) - Superseded PR-A through PR-K execution plan with final dispositions
 
 
 ## Key Concepts
