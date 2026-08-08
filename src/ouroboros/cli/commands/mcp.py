@@ -18,6 +18,7 @@ import time
 from typing import Annotated, Any
 
 from rich.console import Console
+from rich.text import Text
 import structlog
 import typer
 
@@ -27,6 +28,11 @@ from ouroboros.orchestrator.heartbeat import (
     current_process_identity,
     is_process_identity_alive,
     process_start_time,
+)
+from ouroboros.package_profiles import (
+    UNSUPPORTED_CLAUDE_SDK_MCP_MESSAGE,
+    has_unsupported_claude_sdk_mcp_mix,
+    public_runtime_backend,
 )
 
 # Per-instance PID registry for stale-instance accounting. Many servers run
@@ -64,6 +70,7 @@ class AgentRuntimeBackend(str, Enum):  # noqa: UP042
     """Supported orchestrator runtime backends for MCP commands."""
 
     CLAUDE = "claude"
+    CLAUDE_CLI = "claude-cli"
     CODEX = "codex"
     OPENCODE = "opencode"
     HERMES = "hermes"
@@ -930,7 +937,7 @@ def serve(
         typer.Option(
             "--runtime",
             help=(
-                "Agent runtime backend for orchestrator-driven tools (claude, codex, "
+                "Agent runtime backend for orchestrator-driven tools (claude, claude-cli, codex, "
                 "opencode, hermes, gemini, copilot, goose, kiro, pi, gjc, "
                 "antigravity, grok, or zcode)."
             ),
@@ -978,6 +985,13 @@ def serve(
         ouroboros mcp serve --runtime codex --llm-backend codex
 
     """
+    # A resolver normally prevents a mixed interpreter. Also reject an
+    # explicit SDK runtime request: this command is the MCP 2 server boundary,
+    # so Claude execution here must use the out-of-process CLI worker.
+    if has_unsupported_claude_sdk_mcp_mix() or (runtime is not None and runtime.value == "claude"):
+        _stderr_console.print(Text(UNSUPPORTED_CLAUDE_SDK_MCP_MESSAGE, style="red"))
+        raise typer.Exit(1)
+
     # Guard: prevent recursive MCP server spawning.
     # When ouroboros spawns a runtime (Codex/Claude/OpenCode), the child process
     # inherits this env var. If that runtime's MCP config tries to spawn another
@@ -996,7 +1010,7 @@ def serve(
                 port,
                 transport,
                 db_path,
-                runtime.value if runtime else None,
+                public_runtime_backend(runtime.value if runtime else None),
                 llm_backend.value if llm_backend else None,
             )
         )
@@ -1009,7 +1023,8 @@ def serve(
             "  uvx --from 'ouroboros-ai\\[mcp]' ouroboros mcp serve\n"
             "or:\n"
             "  pipx run --spec 'ouroboros-ai\\[mcp]' ouroboros mcp serve\n"
-            "Do not combine it with the MCP 1.x-based Claude SDK extra.[/blue]"
+            "Do not combine it with the MCP 1.x-based \\[claude] or "
+            "\\[claude-sdk] extras; use \\[claude-cli] for the CLI path.[/blue]"
         )
         raise typer.Exit(1) from e
     except OSError as e:
@@ -1038,7 +1053,7 @@ def info(
         typer.Option(
             "--runtime",
             help=(
-                "Agent runtime backend for orchestrator-driven tools (claude, codex, "
+                "Agent runtime backend for orchestrator-driven tools (claude, claude-cli, codex, "
                 "opencode, hermes, gemini, copilot, goose, kiro, pi, gjc, "
                 "antigravity, grok, or zcode)."
             ),
@@ -1064,7 +1079,7 @@ def info(
     # Create server with all tools pre-registered
     server = create_ouroboros_server(
         name="ouroboros-mcp",
-        runtime_backend=runtime.value if runtime else None,
+        runtime_backend=public_runtime_backend(runtime.value if runtime else None),
         llm_backend=llm_backend.value if llm_backend else None,
     )
 

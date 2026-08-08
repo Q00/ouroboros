@@ -285,7 +285,8 @@ ouroboros setup --non-interactive
 - Detects configured paths and PATH entries for the shipped runtimes, including `zcode` and the macOS ZCode app-bundle script
 - Prompts you to select a runtime if multiple are found (or auto-selects if only one)
 - Writes `orchestrator.runtime_backend` to `~/.ouroboros/config.yaml`
-- For standalone Claude SDK setup: configures runtime/LLM settings and leaves `~/.claude/mcp.json` untouched because that profile requires MCP 1.x
+- For Claude CLI setup: configures the dependency-free `claude_mcp` runtime and leaves `~/.claude/mcp.json` ownership to the host/plugin
+- For explicit `--runtime claude-sdk`: preserves the SDK runtime, rejects an MCP 2 environment, and leaves `~/.claude/mcp.json` untouched
 - For Codex CLI: sets `orchestrator.codex_cli_path` and `llm.backend: codex` in `~/.ouroboros/config.yaml`
 - For Codex CLI: installs managed Ouroboros rules into `~/.codex/rules/`
 - For Codex CLI: installs managed Ouroboros skills into `~/.codex/skills/`
@@ -1090,17 +1091,18 @@ On startup, `mcp serve` automatically cancels any sessions left in `RUNNING` or 
 
 **MCP host integration:**
 
-`ouroboros setup --runtime claude` configures the standalone Claude SDK profile
-and deliberately leaves `~/.claude/mcp.json` untouched. Its MCP 1.x dependency
-cannot share the Ouroboros MCP 2 process. Supported CLI-backed host setup writes
-an isolated launcher equivalent to:
+`ouroboros setup --runtime claude` configures the default Agent SDK profile
+(`runtime_backend: claude`) on MCP 1.x. `claude-sdk` is an explicit alias;
+`ouroboros setup --runtime claude-cli` selects the dependency-free worker used
+inside an MCP 2 server environment. Setup leaves `~/.claude/mcp.json` untouched;
+the marketplace plugin launches an isolated server equivalent to:
 
 ```json
 {
   "mcpServers": {
     "ouroboros": {
       "command": "uvx",
-      "args": ["--from", "ouroboros-ai[mcp]", "ouroboros", "mcp", "serve"]
+      "args": ["--from", "ouroboros-ai[mcp]", "ouroboros", "mcp", "serve", "--runtime", "claude-cli", "--llm-backend", "claude_code"]
     }
   }
 }
@@ -1123,7 +1125,7 @@ If `uvx` is unavailable, use the package-isolated pipx runner:
 
 ```yaml
 orchestrator:
-  runtime_backend: claude   # or "codex", "opencode", "hermes", "gemini", "copilot", "goose", "kiro", "pi", or "gjc"
+  runtime_backend: claude   # SDK default; isolated MCP 2 launchers use "claude_mcp"
 ```
 
 Override per-session with the `OUROBOROS_AGENT_RUNTIME` environment variable if needed.
@@ -1180,7 +1182,7 @@ The table below covers the most commonly used variables. For the full list — i
 | `ANTHROPIC_API_KEY` | — | Anthropic API key for Claude models |
 | `OPENAI_API_KEY` | — | OpenAI API key for LiteLLM / Codex CLI |
 | `OPENROUTER_API_KEY` | — | OpenRouter API key for consensus and LiteLLM |
-| `OUROBOROS_AGENT_RUNTIME` | `orchestrator.runtime_backend` | Override the runtime backend (`claude`, `codex`, `opencode`, `hermes`, `gemini`, `goose`, `kiro`, `copilot`, `pi`, `gjc`, `antigravity`, `grok`, `zcode`) |
+| `OUROBOROS_AGENT_RUNTIME` | `orchestrator.runtime_backend` | Override the runtime backend (`claude_mcp` for Claude CLI, `claude` for the isolated SDK runtime, or another supported runtime) |
 | `OUROBOROS_RUNTIME` | `orchestrator.runtime_backend` (fallback) | Shortcut env var honored by both `orchestrator.runtime_backend` and `llm.backend` resolution when their dedicated env vars are unset |
 | `OUROBOROS_KIRO_CLI_PATH` | `orchestrator.kiro_cli_path` | Explicit path to `kiro-cli` binary when it is not on `PATH` |
 | `OUROBOROS_AGENT_PERMISSION_MODE` | `orchestrator.permission_mode` | Stored runtime preference; runner-driven seed execution forces the native `bypassPermissions` equivalent for fresh and resumed dispatches wherever the backend exposes an approval surface. OpenCode maps it to `--dangerously-skip-permissions`; Pi and GJC have no separate approval flag and already run headlessly without an approval dialogue |

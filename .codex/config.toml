@@ -6,4 +6,8 @@ args = [
     "ouroboros",
     "mcp",
     "serve",
+    "--runtime",
+    "codex",
+    "--llm-backend",
+    "codex",
 ]

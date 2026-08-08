@@ -183,7 +183,7 @@ def test_codex_plugin_manifest_starts_a_codex_composed_mcp_server() -> None:
         "command": "uvx",
         "args": [
             "--from",
-            "ouroboros-ai[mcp,claude]",
+            "ouroboros-ai[mcp]",
             "ouroboros",
             "mcp",
             "serve",

@@ -48,6 +48,7 @@ from ouroboros.events.hitl import (
     create_hitl_requested_event,
 )
 from ouroboros.observability import LoggingConfig, configure_logging
+from ouroboros.package_profiles import public_runtime_backend
 from ouroboros.providers import create_llm_adapter, resolve_llm_backend
 from ouroboros.providers.base import LLMAdapter
 
@@ -66,6 +67,7 @@ class AgentRuntimeBackend(str, Enum):  # noqa: UP042
     """Supported orchestrator runtime backends for workflow handoff."""
 
     CLAUDE = "claude"
+    CLAUDE_CLI = "claude-cli"
     CODEX = "codex"
     OPENCODE = "opencode"
     HERMES = "hermes"
@@ -1032,7 +1034,7 @@ def start(
                 state_dir,
                 orchestrator,
                 debug,
-                runtime.value if runtime else None,
+                public_runtime_backend(runtime.value if runtime else None),
                 llm_backend.value if llm_backend else None,
             )
         )

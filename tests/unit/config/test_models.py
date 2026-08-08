@@ -727,7 +727,7 @@ class TestOrchestratorConfig:
     """Test OrchestratorConfig runtime settings."""
 
     def test_orchestrator_config_defaults(self) -> None:
-        """Defaults to the Claude runtime."""
+        """Defaults to the isolated Claude SDK runtime."""
         config = OrchestratorConfig()
         assert config.runtime_backend == "claude"
         assert config.permission_mode == "acceptEdits"

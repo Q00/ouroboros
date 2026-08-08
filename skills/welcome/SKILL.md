@@ -793,14 +793,15 @@ Give brief personalized response (1-2 sentences) based on choice.
 
 ### Step 3: Advanced Runtime Check
 
-Standalone Claude SDK setup intentionally does not register MCP 2. Do not
-inspect or mutate `~/.claude/mcp.json` as an onboarding health check.
+Ordinary Claude setup uses the dependency-free CLI profile and intentionally
+leaves host-owned `~/.claude/mcp.json` untouched. Do not inspect or mutate that
+file as an onboarding health check.
 
 If the active runtime does not expose Ouroboros MCP tools, **AskUserQuestion**:
 ```json
 {
   "questions": [{
-    "question": "Advanced MCP workflows require a supported CLI-backed runtime. What would you like to do?",
+    "question": "Advanced MCP workflows require a host-managed MCP 2 launcher. What would you like to do?",
     "header": "Runtime",
     "options": [
       { "label": "Continue native (Recommended)", "description": "Use Claude-native interview, seed, evaluate, and unstuck workflows" },
@@ -811,9 +812,9 @@ If the active runtime does not expose Ouroboros MCP tools, **AskUserQuestion**:
 }
 ```
 - **Continue native**: Continue to Step 4
-- **Show MCP setup**: Explain `ouroboros setup --runtime <runtime>` for a
-  supported CLI-backed runtime. Do not register MCP in the standalone Claude
-  SDK profile. Then continue to Step 4.
+- **Show MCP setup**: Explain that the Claude marketplace plugin or another
+  supported host setup owns the isolated `[mcp]` launcher. Never combine
+  `[claude-sdk]` with `[mcp]`. Then continue to Step 4.
 
 ---
 

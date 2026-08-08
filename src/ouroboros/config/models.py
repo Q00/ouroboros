@@ -647,6 +647,7 @@ class OrchestratorConfig(BaseModel, frozen=True):
 
     runtime_backend: Literal[
         "claude",
+        "claude_mcp",
         "codex",
         "opencode",
         "hermes",
