@@ -82,7 +82,7 @@ _CLI_GOAL_PHRASE_RE = re.compile(r"\bcommand[\s\-]line\b")
 # "command-line" phrase. See PR #1264 review rounds 2-7.
 _NEGATION_CUE_FRAGMENT = (
     r"(?:not|no|never|"
-    r"without|excluding|sans|"
+    r"without|excluding|excludes?|omit(?:s|ted)?|sans|"
     r"isn[’']?t|aren[’']?t|wasn[’']?t|weren[’']?t|"
     r"won[’']?t|wouldn[’']?t|shouldn[’']?t|"
     r"can[’']?t|cannot|"
@@ -1119,6 +1119,7 @@ _POSTPOSITIVE_BROWSER_DENIAL_RE = re.compile(
     r"unsupported|disabled|unavailable|dropped|excluded|"
     r"turned\s+off|removed|prohibited|forbidden|banned|blocked|stripped|"
     r"denied|denylisted|off[\s\-]limits|out\s+of\s+scope|"
+    r"outside\s+(?:the\s+)?scope|"
     r"not\s+in\s+scope|beyond\s+(?:the\s+)?scope)\b"
 )
 
@@ -1143,7 +1144,8 @@ _AUDIENCE_CLAUSE_RE = re.compile(
 # "browser-like", "web-app-style": a similarity suffix marks the web token
 # as a comparison reference, not the produced artifact (#1813 R44).
 _WEB_SIMILARITY_MODIFIER_RE = re.compile(
-    rf"\b{_WEB_APP_GOAL_SIGNAL_FRAGMENT}[\s\-]+(?:like|style|styled|esque|inspired|themed)\b"
+    rf"\b{_WEB_APP_GOAL_SIGNAL_FRAGMENT}[\s\-]+"
+    r"(?:like|style|styled|esque|inspired|themed|free)\b"
 )
 # A browser/web token followed by a component-artifact noun is re-headed
 # by that component (#1813 R60): a "browser extension settings page" is
@@ -1251,6 +1253,17 @@ def _ledger_has_browser_context(ledger: SeedDraftLedger) -> bool:
         " ",
         goal_for_context,
     )
+    # Structurally, a bare browser token re-headed by a PLAIN noun is a
+    # topic compound (#1813 R76) — no vocabulary required. UI heads
+    # ("browser dashboard"), activity gerunds ("browser monitoring
+    # dashboard"), deliberate hyphen compounds ("browser vector-scene
+    # editor"), and the terminal "browser use" idiom keep their reading.
+    goal_for_context = re.sub(
+        rf"\bbrowsers?\s+(?!{_UI_PRODUCT_HEAD_FRAGMENT}\b)(?!use\b)"
+        r"(?![\w'’]*ing\b)[\w'’]+(?![\w'’\-])",
+        " ",
+        goal_for_context,
+    )
     # A participle taking an object names the artifact's data ("tracking
     # browser usage", "showing web app uptime"); one followed by a
     # preposition declares its environment ("running in browsers") and
@@ -1278,6 +1291,27 @@ def _ledger_has_browser_context(ledger: SeedDraftLedger) -> bool:
     ):
         return False
     return _goal_has_unnegated_web_app_signal(goal_for_context)
+
+
+# Ownership confidence tiers for the qualified-head grant (#1813 R76).
+_EXPLICIT_WEB_VOCAB_RE = re.compile(
+    r"\b(?:web[\s\-]?app(?:lication)?s?|webapps?|websites?|web\s+uis?|"
+    r"frontends?|front[\s\-]ends?|single[\s\-]page\s+app(?:lication)?s?)\b"
+    r"|\bweb[\s\-]based\b|\bin[\s\-]browser\b"
+)
+_BARE_ADJACENT_QUALIFIER_RE = re.compile(
+    r"\b(?:browsers?|web)[\s\-]+"
+    r"(?:apps?|applications?|webapps?|uis?|interfaces?|pages?|"
+    r"frontends?|sites?|websites?|dashboards?|consoles?|portals?|"
+    r"players?|editors?|viewers?|clients?|panels?|forms?)\b"
+)
+# Interaction-class heads act on their modifier ("vector-scene editor")
+# and keep bare-qualifier ownership; display-class heads (dashboard,
+# console, portal) naturally take topics and need section confirmation.
+_INTERACTION_HEAD_TAIL_RE = re.compile(
+    r"\b(?:apps?|applications?|webapps?|pages?|panels?|forms?|"
+    r"players?|editors?|viewers?|clients?)[\s.!?]*$"
+)
 
 
 _NON_BROWSER_RUNTIME_RE = re.compile(
@@ -1348,6 +1382,9 @@ _GOAL_COMPONENT_TARGET_RE = re.compile(
     # "hosted/mounted ON", "running/nested UNDER" (#1813 R71);
     # identity relations "packaged/distributed AS" (#1813 R75).
     r"(?:through|with|from|on|onto|under|beneath|atop|as)"
+    # Copular identity anywhere in the goal (#1813 R76): "it is a Chrome
+    # browser extension", "that is ...", "it ships as ...".
+    r"|(?:is|are|was|were|becomes?)|[\w\-'’]+s\s+as"
     # A bare host preposition reaches the component when its object is a
     # SINGULAR instance — with a determiner ("on a browser extension",
     # #1813 R72) or brand-qualified without one ("on Chrome browser
@@ -1356,7 +1393,8 @@ _GOAL_COMPONENT_TARGET_RE = re.compile(
     r"|(?:on|onto|under|beneath|atop)(?=\s+(?:(?:an?|the|our|my|your|their|its)\s+)?"
     r"(?:[\w\-'’]+\s+){0,3}?"
     r"(?:extension|plugin|add[\s\-]?on|addon|sidebar|popup|toolbar|overlay|devtool)\b(?!s)))\s+"
-    r"(?:(?:an?|the|our|my|your|their|its)\s+)?(?:[\w\-'’]+\s+){0,3}?"
+    r"(?:(?:an?|the|our|my|your|their|its)\s+)?"
+    r"(?:(?!(?:not|no|never)\b)[\w\-'’]+\s+){0,3}?"
     r"(?:extensions?|plugins?|add[\s\-]?ons?|addons?|sidebars?|popups?|"
     r"toolbars?|overlays?|devtools?)\b"
     r"(?!\s+(?!(?:and|or|nor|but|without|with|for|on|in|at|by|from|via|"
@@ -1836,11 +1874,18 @@ def _matches_web_app(ledger: SeedDraftLedger) -> bool:
     # catalog is required. Non-web-product goals (extensions, crawlers,
     # test suites, CLIs) still need genuine UI-composition evidence.
     if _goal_artifact_head_is_web_app(_goal_text(ledger)):
-        # A bare browser qualifier is the AMBIGUOUS ownership form
-        # (#1813 R75): under a runtime that declares a competing
-        # non-browser environment, "browser compliance dashboard" is a
-        # subject compound, so only explicit web artifact vocabulary
-        # ("web app", "website", "web-based") overrides the runtime.
+        # Qualified-head ownership is tiered by confidence (#1813
+        # R75/R76). Explicit web artifact vocabulary owns outright. A
+        # bare browser qualifier is the AMBIGUOUS form: it defers to a
+        # competing runtime, owns when directly adjacent to its head or
+        # when the standardized sections confirm a browser environment,
+        # and with an intervening modifier it owns only an
+        # interaction-class head ("vector-scene editor" acts on scenes;
+        # a display-class "certificate dashboard" naturally takes
+        # topics, so it needs section confirmation).
+        goal_text_raw = _goal_text(ledger)
+        if _EXPLICIT_WEB_VOCAB_RE.search(goal_text_raw):
+            return True
         runtime_env = _strip_negated_signals(
             _POSTPOSITIVE_BROWSER_DENIAL_RE.sub(" ", runtime),
             _WEB_APP_GOAL_SIGNAL_FRAGMENT,
@@ -1848,12 +1893,13 @@ def _matches_web_app(ledger: SeedDraftLedger) -> bool:
         runtime_bars_browser = bool(
             _NON_BROWSER_RUNTIME_RE.search(runtime_env)
         ) and not _SECTION_BROWSER_ENV_RE.search(runtime_env)
-        if (
-            not runtime_bars_browser
-            or _WEB_APP_ARTIFACT_PHRASE_RE.search(_goal_text(ledger))
-            or re.search(r"\bweb[\s\-]based\b|\bin[\s\-]browser\b", _goal_text(ledger))
-        ):
-            return True
+        if not runtime_bars_browser:
+            if (
+                _BARE_ADJACENT_QUALIFIER_RE.search(goal_text_raw)
+                or _SECTION_BROWSER_ENV_RE.search(_section_browser_context_text(ledger))
+                or _INTERACTION_HEAD_TAIL_RE.search(re.split(r"[.;:!?,]", goal_text_raw)[0])
+            ):
+                return True
     # An explicitly co-produced web app ("a Python library with an admin
     # web app") retains web ownership regardless of incidental output
     # wording (#1813 R30) — the overlap stays an honest ambiguity.
@@ -1906,7 +1952,7 @@ def _matches_web_app(ledger: SeedDraftLedger) -> bool:
     # (#1813 R66), whatever the runtime wording — the postfix mirror of
     # the first-NP component rule, guarding the composition and semantic
     # fallbacks after the affirmative grants have had their say.
-    if _GOAL_COMPONENT_TARGET_RE.search(re.split(r"[.;:!?]", _goal_text(ledger))[0]):
+    if _GOAL_COMPONENT_TARGET_RE.search(_goal_text(ledger)):
         return False
     # The product-head exception accepts standardized runtime evidence
     # (#1813 R61): "webhook monitoring dashboard" with a browser

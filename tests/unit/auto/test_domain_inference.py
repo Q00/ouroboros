@@ -4103,6 +4103,56 @@ def test_out_of_scope_is_a_postpositive_denial() -> None:
 
 @pytest.mark.parametrize(
     "goal",
+    ["Build a browser certificate dashboard", "Build a browser policy dashboard"],
+)
+def test_plain_noun_browser_compounds_need_section_confirmation(goal: str) -> None:
+    """R76 guard: a bare browser token re-headed by a plain noun is a
+    topic compound structurally — no vocabulary list — while gerund and
+    hyphen compounds ("monitoring", "vector-scene") keep ownership."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value="Interactive charts with a filters panel")
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
+        "Build a local dashboard; browser UI is outside scope",
+        "Build a dashboard; browser support is outside the scope",
+        "Build a dashboard; exclude the browser UI",
+        "Build a browser-free dashboard",
+    ],
+)
+def test_productive_exclusion_forms_deny_the_browser(goal: str) -> None:
+    """R76 guard: outside-scope, imperative exclude, and the -free
+    suffix all remove the browser signal."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value="Interactive charts with a filters panel")
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
+        "Build a settings page. It is a Chrome browser extension.",
+        "Build a settings page; it ships as a Chrome browser extension.",
+        "Build a settings page that is a Chrome browser extension",
+    ],
+)
+def test_component_identity_resolves_across_the_whole_goal(goal: str) -> None:
+    """R76 guard: copular and later-clause identity declarations reach
+    the component before the web-app grant."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value="Settings panel with save button")
+    _seed_section(ledger, "runtime_context", value="Runs in browsers")
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes
+
+
+@pytest.mark.parametrize(
+    "goal",
     [
         "The product is an admin portal that runs in browsers",
         "The deliverable is an admin portal available in browsers",
