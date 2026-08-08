@@ -130,6 +130,11 @@ def test_denylist_covers_known_execution_routing_keys() -> None:
         "OUROBOROS_PLUGIN_LOCKFILE",
         "OUROBOROS_PLUGIN_TRUST_ROOT",
         "OUROBOROS_ALLOW_LOCAL_TRANSPORT",
+        # Operator-owned telemetry preference and destination must never be
+        # supplied by a cloned repository.
+        "OUROBOROS_TELEMETRY",
+        "OUROBOROS_POSTHOG_API_KEY",
+        "OUROBOROS_POSTHOG_HOST",
         # Runtime/backend selectors + permission/capability overrides.
         "OUROBOROS_AGENT_RUNTIME",
         "OUROBOROS_LLM_BACKEND",

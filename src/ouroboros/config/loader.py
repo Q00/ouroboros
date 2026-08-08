@@ -1438,6 +1438,43 @@ def get_opencode_mode() -> str | None:
         return None
 
 
+def get_telemetry_enabled() -> bool:
+    """Whether anonymous usage telemetry may send events.
+
+    Every control that can disable telemetry is resolved first; any one of
+    them wins unconditionally (TELEMETRY.md: "Any one of these disables
+    telemetry completely"):
+
+        1. DO_NOT_TRACK environment variable (any truthy value disables)
+        2. OUROBOROS_TELEMETRY=0/false/off/no
+        3. config.yaml telemetry.enabled: false
+        4. invalid or unreadable configuration (fails closed)
+
+    Only when no disabling source is present does telemetry run (default:
+    on, with first-run notice and TELEMETRY.md contract). An explicit
+    ``OUROBOROS_TELEMETRY=1`` is therefore never an override: it cannot
+    re-enable collection against a persisted opt-out or malformed
+    configuration. A privacy preference can be present in a file whose
+    unrelated field no longer validates; it is never safe to turn collection
+    back on merely because the full application config could not be
+    constructed.
+    """
+    if os.environ.get("DO_NOT_TRACK", "").strip().lower() in ("1", "true", "on", "yes"):
+        return False
+    if _env_flag("OUROBOROS_TELEMETRY") is False:
+        return False
+    config_path = get_config_dir() / "config.yaml"
+    # ``Path.exists()`` is false for a dangling symlink. Treat that as invalid
+    # persisted configuration rather than the genuinely-absent default-on
+    # case; ``load_config`` below will reject the unreadable target.
+    if not config_path.exists() and not config_path.is_symlink():
+        return True
+    try:
+        return load_config(config_path).telemetry.enabled
+    except (ConfigError, OSError):
+        return False
+
+
 def get_gemini_cli_path() -> str | None:
     """Get Gemini CLI path from environment variable or config file.
 

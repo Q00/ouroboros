@@ -25,6 +25,12 @@ os.environ["_TYPER_FORCE_DISABLE_TERMINAL"] = "1"
 # exercise the wiring opt back in explicitly via monkeypatch + a mocked resolver.
 os.environ["OUROBOROS_DASHBOARD"] = "0"
 
+# Anonymous usage telemetry ships with an embedded PostHog key, so without this
+# kill switch any test that reaches a CLI callback or MCP call_tool would send
+# real events. Tests that exercise telemetry itself delete this var and inject
+# a fake key + transport (see tests/unit/test_telemetry.py).
+os.environ["OUROBOROS_TELEMETRY"] = "0"
+
 
 # ── Hermetic home isolation (before collection) ──────────────────────────────
 # Ouroboros resolves its state root two ways: ``Path.home()`` AND

@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Any
 from pydantic import Field
 import structlog
 
+from ouroboros import telemetry as usage_telemetry
 from ouroboros.config._model_defaults import DEFAULT_SONNET_MODEL
 from ouroboros.config.loader import get_execution_model
 from ouroboros.core.seed import ac_text, ac_texts
@@ -42,6 +43,7 @@ from ouroboros.mcp.server.project_dir import (  # noqa: F401
 )
 from ouroboros.mcp.server.protocol import PromptHandler, ResourceHandler, ToolHandler
 from ouroboros.mcp.server.security import AuthConfig, AuthMethod, RateLimitConfig, SecurityLayer
+from ouroboros.mcp.telemetry_boundary import observe_adapter_tool_call
 from ouroboros.mcp.types import (
     MCPCapabilities,
     MCPPromptDefinition,
@@ -98,31 +100,9 @@ if _SDKMCPServer is not None:
             context: Any = None,
         ) -> Any:
             del context
-            from jsonschema import Draft202012Validator
+            from ouroboros.mcp.telemetry_boundary import call_sdk_tool
 
-            from ouroboros.mcp.sdk_mapping import tool_result_to_sdk
-
-            definition = next(
-                (item for item in await self._ouroboros_adapter.list_tools() if item.name == name),
-                None,
-            )
-            if definition is None:
-                raise RuntimeError(f"Tool not found: {name}")
-
-            # Accept the one historical wrapper shape at the application edge,
-            # but validate the normalized payload against the canonical schema.
-            if set(arguments) == {"kwargs"} and isinstance(arguments.get("kwargs"), dict):
-                arguments = arguments["kwargs"]
-            _validate_parameter_constraints(definition.parameters, arguments)
-            Draft202012Validator(definition.to_input_schema()).validate(arguments)
-
-            result = await self._ouroboros_adapter.call_tool(name, arguments)
-            if result.is_err:
-                raise RuntimeError(str(result.error))
-            value = result.value
-            if definition.output_schema is not None:
-                Draft202012Validator(definition.output_schema).validate(value.structured_content)
-            return tool_result_to_sdk(value)
+            return await call_sdk_tool(self._ouroboros_adapter, name, arguments)
 
         async def list_resources(self) -> list[Any]:
             from ouroboros.mcp.sdk_mapping import resource_to_sdk
@@ -946,6 +926,18 @@ class MCPServerAdapter:
         name: str,
         arguments: dict[str, Any],
         credentials: dict[str, str] | None = None,
+        *,
+        _capture_telemetry: bool = True,
+    ) -> Result[MCPToolResult, MCPServerError]:
+        """Call a registered tool through the complete request observer."""
+        operation = lambda: self._call_tool_impl(name, arguments, credentials)  # noqa: E731
+        return await observe_adapter_tool_call(name, operation, enabled=_capture_telemetry)
+
+    async def _call_tool_impl(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        credentials: dict[str, str] | None = None,
     ) -> Result[MCPToolResult, MCPServerError]:
         """Call a registered tool.
 
@@ -1738,6 +1730,15 @@ def create_ouroboros_server(
     interview_llm_backend = role_llm_backend("interview")
     evaluate_llm_backend = role_llm_backend("semantic_evaluation")
     reflect_llm_backend = role_llm_backend("reflect")
+
+    # Stamp resolved backends onto anonymous usage telemetry so every
+    # command_run event carries provider context (see TELEMETRY.md).
+    usage_telemetry.set_context(
+        runtime_backend=resolved_runtime_backend,
+        execute_runtime_backend=execute_runtime_backend,
+        interview_llm_backend=interview_llm_backend,
+        evaluate_llm_backend=evaluate_llm_backend,
+    )
 
     # Resolve opencode_mode from config file if caller did not pass one.
     # Controls _subagent envelope dispatch gate in every handler.

@@ -18,6 +18,7 @@ import structlog
 
 from ouroboros.core.errors import PersistenceError
 from ouroboros.events.base import BaseEvent
+from ouroboros.mcp.telemetry_boundary import JobTelemetryBoundary
 from ouroboros.orchestrator.agent_process import AgentProcessHandle
 from ouroboros.orchestrator.events import create_execution_terminal_event
 from ouroboros.orchestrator.evidence.common import validate_attempt_judgment_payload
@@ -416,16 +417,12 @@ class JobManager:
         self._cleanup_running = False
         self._last_cleanup_monotonic = time.monotonic()
         self._live_snapshots: dict[str, JobSnapshot] = {}
+        self._telemetry = JobTelemetryBoundary()
 
     def get_cached_snapshot(self, job_id: str) -> JobSnapshot | None:
-        """Return a snapshot that is safe to use without durable reconciliation.
+        """Return cache only when durable reconciliation is unnecessary.
 
-        The in-process cache is updated from persisted job events, but a
-        non-terminal entry can outlive the task that owned the job.  Once that
-        happens, :meth:`get_snapshot` must inspect linked execution evidence
-        and owner liveness before callers report the job as still running.
-        Terminal snapshots are monotonic, while a non-terminal snapshot is a
-        valid fast path only while this manager still owns a live job task.
+        Non-terminal cache is valid only while this manager owns a live task.
         """
         snapshot = self._live_snapshots.get(job_id)
         if snapshot is None or snapshot.is_terminal:
@@ -1934,6 +1931,7 @@ class JobManager:
             raise ValueError(f"Job not found: {job_id}")
 
         created = events[0]
+        self._telemetry.remember(job_id, created.data)
         created_links = created.data.get("links", {})
         status = JobStatus(created.data.get("status", JobStatus.QUEUED.value))
         message = created.data.get("message", "")
@@ -2874,6 +2872,7 @@ class JobManager:
             self._started_job_ids.discard(job_id)
             self._reserved_job_ids.discard(job_id)
             self._forced_inline_allocations.discard(job_id)
+            self._telemetry.forget(job_id)
         return len(expired)
 
     async def _append_event(
@@ -2884,7 +2883,7 @@ class JobManager:
         *,
         event_id: str | None = None,
     ) -> None:
-        """Persist one job event."""
+        """Persist one job event and observe its durable terminal boundary."""
         await self._ensure_initialized()
         cursor = await self._event_store.append_with_rowid(
             BaseEvent(
@@ -2896,3 +2895,4 @@ class JobManager:
             )
         )
         self._merge_live_snapshot(job_id, data, cursor=cursor)
+        self._telemetry.observe(event_type, job_id, data)

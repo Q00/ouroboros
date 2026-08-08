@@ -19,7 +19,7 @@ from typing import Annotated
 import click
 import typer
 
-from ouroboros import __version__
+from ouroboros import __version__, telemetry
 from ouroboros.cli.commands import (
     artifacts,
     auto,
@@ -151,7 +151,8 @@ def version_callback(value: bool) -> None:
 
 @app.callback()
 def main(
-    version: Annotated[
+    ctx: typer.Context,
+    version: Annotated[  # noqa: ARG001 — consumed by the eager version_callback
         bool | None,
         typer.Option(
             "--version",
@@ -176,7 +177,8 @@ def main(
 
     Use [bold cyan]ouroboros COMMAND --help[/] for command-specific help.
     """
-    pass
+    telemetry.show_first_run_notice()
+    telemetry.capture_cli_command(ctx.invoked_subcommand)
 
 
 __all__ = ["app", "main"]

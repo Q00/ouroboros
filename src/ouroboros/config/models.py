@@ -742,6 +742,18 @@ class OrchestratorConfig(BaseModel, frozen=True):
         return str(Path(v).expanduser())
 
 
+class TelemetryConfig(BaseModel, frozen=True):
+    """Anonymous usage telemetry configuration.
+
+    Attributes:
+        enabled: Whether anonymous usage events may be sent. Environment
+            overrides (DO_NOT_TRACK, OUROBOROS_TELEMETRY) always win over
+            this flag — see config.loader.get_telemetry_enabled().
+    """
+
+    enabled: bool = True
+
+
 class OuroborosConfig(BaseModel, frozen=True):
     """Top-level Ouroboros configuration.
 
@@ -778,6 +790,7 @@ class OuroborosConfig(BaseModel, frozen=True):
     runtime_controls: RuntimeControlsConfig = Field(default_factory=RuntimeControlsConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     orchestrator: OrchestratorConfig = Field(default_factory=OrchestratorConfig)
+    telemetry: TelemetryConfig = Field(default_factory=TelemetryConfig)
 
 
 def get_default_config() -> OuroborosConfig:

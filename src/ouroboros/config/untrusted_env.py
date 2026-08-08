@@ -142,6 +142,14 @@ UNTRUSTED_ENV_DENYLIST = frozenset(
         # MCP transport targets unless this is "1"; an untrusted .env must not
         # be able to re-enable connections to internal addresses.
         "OUROBOROS_ALLOW_LOCAL_TRANSPORT",
+        # Telemetry is an operator-owned privacy boundary. A project `.env`
+        # must not be able to re-enable collection, replace the public ingest
+        # key, or redirect the stable anonymous identifier to an arbitrary
+        # endpoint. These remain available from the real process environment
+        # and the trusted ~/.ouroboros/.env file.
+        "OUROBOROS_TELEMETRY",
+        "OUROBOROS_POSTHOG_API_KEY",
+        "OUROBOROS_POSTHOG_HOST",
         # Runtime/backend selectors — choose which adapter is spawned.
         "OUROBOROS_AGENT_RUNTIME",
         "OUROBOROS_RUNTIME",

@@ -90,6 +90,217 @@ _prompt() {
   printf '%b' "${BOLD}$1${RESET}"
 }
 
+# --- Anonymous install telemetry (PostHog) ---------------------------------
+# Same privacy contract as the CLI (see TELEMETRY.md): random UUID, no PII,
+# no code/paths. Disable with DO_NOT_TRACK=1, OUROBOROS_TELEMETRY=0, or
+# telemetry.enabled: false in ~/.ouroboros/config.yaml.
+# The API key is a public write-only PostHog project key.
+
+# TELEMETRY.md declares ~/.ouroboros/.env a trusted persistent control
+# source; the application loader applies it at import. This standalone
+# installer must honor the same telemetry keys before any notice or capture,
+# so a persisted opt-out or destination override there holds during install.
+# Only the four allowlisted telemetry keys are read, and an already-set real
+# process environment value is never overridden (mirrors config/loader.py).
+_telemetry_load_user_env() {
+  local f="$HOME/.ouroboros/.env" line key value
+  { [ -f "$f" ] && [ -r "$f" ]; } || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line#"${line%%[![:space:]]*}"}"
+    case "$line" in ''|'#'*) continue ;; esac
+    case "$line" in 'export '*) line="${line#export }" ;; esac
+    case "$line" in *=*) ;; *) continue ;; esac
+    key="${line%%=*}"
+    key="${key%"${key##*[![:space:]]}"}"
+    case "$key" in
+      DO_NOT_TRACK|OUROBOROS_TELEMETRY|OUROBOROS_POSTHOG_API_KEY|OUROBOROS_POSTHOG_HOST) ;;
+      *) continue ;;
+    esac
+    value="${line#*=}"
+    value="${value#"${value%%[![:space:]]*}"}"
+    case "$value" in
+      \"*\") value="${value%\"}"; value="${value#\"}" ;;
+      \'*\') value="${value%\'}"; value="${value#\'}" ;;
+      *)
+        # Unquoted values follow dotenv grammar: an inline ` # comment` is
+        # not part of the value. Dropping it here matters for opt-outs --
+        # `OUROBOROS_TELEMETRY=0 # off` must parse as "0", not fail the
+        # flag match and silently keep collection on.
+        value="${value%%[[:space:]]#*}"
+        value="${value%"${value##*[![:space:]]}"}"
+        ;;
+    esac
+    [ -n "$value" ] || continue
+    eval "[ -z \"\${$key+x}\" ]" || continue
+    export "$key=$value"
+  done < "$f"
+}
+_telemetry_load_user_env
+
+PH_API_KEY="${OUROBOROS_POSTHOG_API_KEY:-phc_mSoetD4ExLDDCi3vNua635NhwRTgHfRaCG9WYNKmrvv5}"
+PH_HOST="${OUROBOROS_POSTHOG_HOST:-https://us.i.posthog.com}"
+
+_telemetry_config_allows() {
+  local f="$HOME/.ouroboros/config.yaml" script_dir source_root=""
+  local python_candidate ouroboros_cmd shebang status
+  # `-e` is false for a dangling symlink. That is invalid persisted state,
+  # not a genuinely absent config, so keep it on the fail-closed path.
+  [ -e "$f" ] || [ -L "$f" ] || return 0
+  [ -r "$f" ] || return 1
+
+  # Match the application resolver: parse the complete YAML document and
+  # validate every known field before trusting telemetry.enabled. A partial
+  # text parser can accept telemetry.enabled=true while overlooking malformed
+  # YAML or an invalid unrelated field. Existing configuration therefore
+  # requires a Python environment with Ouroboros' real schema available;
+  # otherwise collection fails closed. A genuinely absent config retains the
+  # documented default-on behavior after the notice below.
+  script_dir=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" 2>/dev/null && pwd) || true
+  if [ -n "$script_dir" ] && [ -f "$script_dir/../src/ouroboros/config/models.py" ]; then
+    source_root=$(CDPATH='' cd -- "$script_dir/../src" 2>/dev/null && pwd) || true
+  fi
+
+  _telemetry_validate_config_with_python() {
+    local interpreter="$1"
+    "$interpreter" -I - "$f" "$source_root" <<'PY'
+import sys
+
+config_path, source_root = sys.argv[1:]
+if source_root:
+    sys.path.insert(0, source_root)
+
+try:
+    import yaml
+    from ouroboros.config.models import OuroborosConfig
+except Exception:
+    raise SystemExit(2)
+
+try:
+    with open(config_path, encoding="utf-8") as config_file:
+        raw = yaml.safe_load(config_file)
+    config = OuroborosConfig.model_validate({} if raw is None else raw)
+except Exception:
+    raise SystemExit(1)
+
+raise SystemExit(0 if config.telemetry.enabled is True else 1)
+PY
+  }
+
+  for python_candidate in python3 python; do
+    python_candidate=$(command -v "$python_candidate" 2>/dev/null || true)
+    [ -n "$python_candidate" ] || continue
+    if _telemetry_validate_config_with_python "$python_candidate"; then
+      unset -f _telemetry_validate_config_with_python
+      return 0
+    else
+      status=$?
+      if [ "$status" -ne 2 ]; then
+        unset -f _telemetry_validate_config_with_python
+        return 1
+      fi
+    fi
+  done
+
+  # uv/pipx entry points carry their environment's Python interpreter in the
+  # shebang. It may have the schema when the system Python does not.
+  ouroboros_cmd=$(command -v ouroboros 2>/dev/null || true)
+  if [ -n "$ouroboros_cmd" ] && [ -r "$ouroboros_cmd" ]; then
+    shebang=$(head -n 1 "$ouroboros_cmd" 2>/dev/null || true)
+    case "$shebang" in
+      '#!'/*)
+        python_candidate=${shebang#'#!'}
+        case "$python_candidate" in
+          *' '*) ;;
+          *)
+            if [ -x "$python_candidate" ]; then
+              if _telemetry_validate_config_with_python "$python_candidate"; then
+                unset -f _telemetry_validate_config_with_python
+                return 0
+              fi
+            fi
+            ;;
+        esac
+        ;;
+    esac
+  fi
+
+  unset -f _telemetry_validate_config_with_python
+  return 1
+}
+
+_telemetry_enabled() {
+  [ -n "$PH_API_KEY" ] || return 1
+  case "${DO_NOT_TRACK:-}" in 1|true|TRUE|True|on|yes) return 1 ;; esac
+  case "${OUROBOROS_TELEMETRY:-}" in 0|false|FALSE|False|off|no) return 1 ;; esac
+  # OUROBOROS_TELEMETRY=1 is never an override: persisted opt-out and
+  # malformed configuration stay authoritative (TELEMETRY.md: any one
+  # disabling control wins), matching the application resolver.
+  _telemetry_config_allows || return 1
+  command -v curl &>/dev/null || return 1
+  return 0
+}
+
+_telemetry_distinct_id() {
+  local f="$HOME/.ouroboros/telemetry.json" id=""
+  if [ -f "$f" ]; then
+    id=$(sed -n 's/.*"distinct_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$f" | head -1)
+  fi
+  if [ -z "$id" ]; then
+    if command -v uuidgen &>/dev/null; then
+      id=$(uuidgen | tr '[:upper:]' '[:lower:]')
+    elif command -v python3 &>/dev/null; then
+      id=$(python3 -c "import uuid; print(uuid.uuid4())" 2>/dev/null || true)
+    fi
+    [ -n "$id" ] || return 1
+    mkdir -p "$HOME/.ouroboros" 2>/dev/null || return 1
+    printf '{"distinct_id": "%s", "created_at": "%s", "notice_shown": false}\n' \
+      "$id" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$f" 2>/dev/null || true
+  fi
+  printf '%s' "$id"
+}
+
+_telemetry_notice() {
+  _telemetry_enabled || return 0
+  local f="$HOME/.ouroboros/telemetry.json" tmp id
+  if [ -f "$f" ] && grep -q '"notice_shown"[[:space:]]*:[[:space:]]*true' "$f"; then
+    return 0
+  fi
+
+  _blank
+  _say "${BOLD}Anonymous usage stats help improve Ouroboros.${RESET}"
+  _info "Collects commands, versions, and success rates — never code, prompts, or paths."
+  _info "Opt out: export OUROBOROS_TELEMETRY=0  |  details: https://github.com/Q00/ouroboros/blob/main/TELEMETRY.md"
+
+  # Persist the one-time notice before the first collection attempt. Failure
+  # is harmless: this run was disclosed and a later run will disclose again.
+  id=$(_telemetry_distinct_id) || return 0
+  [ -n "$id" ] || return 0
+  tmp="${f}.notice.$$"
+  if sed 's/"notice_shown"[[:space:]]*:[[:space:]]*false/"notice_shown": true/' "$f" > "$tmp" 2>/dev/null; then
+    mv "$tmp" "$f" 2>/dev/null || true
+  fi
+  rm -f "$tmp" 2>/dev/null || true
+}
+
+# _telemetry_ping <event> [key=value ...] — fire-and-forget, never fails.
+_telemetry_ping() {
+  _telemetry_enabled || return 0
+  local event="$1" id props kv k v
+  shift
+  id=$(_telemetry_distinct_id) || return 0
+  props='"source":"install_sh","os":"'"$(uname -s | tr '[:upper:]' '[:lower:]')"'","arch":"'"$(uname -m)"'"'
+  for kv in "$@"; do
+    k="${kv%%=*}"
+    v="${kv#*=}"
+    props="$props,\"$k\":\"$v\""
+  done
+  curl -fsS -m 4 -X POST "$PH_HOST/capture/" -H 'Content-Type: application/json' \
+    -d '{"api_key":"'"$PH_API_KEY"'","event":"'"$event"'","distinct_id":"'"$id"'","properties":{'"$props"'}}' \
+    >/dev/null 2>&1 &
+  return 0
+}
+# ---------------------------------------------------------------------------
+
 # Parse simple flags: --reconfigure, --runtime <name>
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -134,6 +345,9 @@ if [ "$IS_LOCAL" = false ] && command -v curl &>/dev/null; then
 fi
 
 _banner
+
+_telemetry_notice
+_telemetry_ping install_started "is_local=$IS_LOCAL" "pre=${PRE_FLAG:-no}" "version=${LATEST:-unknown}"
 
 # 1. Detect installer: uv > pipx > pip (determines Python requirement)
 HAS_UV=false
@@ -639,6 +853,9 @@ if command -v claude &>/dev/null; then
   fi
 fi
 
+_telemetry_ping install_completed "method=${INSTALL_METHOD:-unknown}" "runtime=${RUNTIME:-none}" \
+  "detected_runtimes=${RUNTIME_COUNT:-0}" "version=${LATEST:-unknown}"
+
 _blank
 _say "${GREEN}${BOLD}Done! Ouroboros is ready.${RESET}"
 _blank
@@ -697,3 +914,7 @@ if [ -t 0 ] && [ -z "${OUROBOROS_INSTALL_SKIP_CONFIG_GUI:-}" ]; then
       ;;
   esac
 fi
+
+_blank
+_say "${BOLD}Like Ouroboros?${RESET}"
+_info "Give the repo a star on GitHub: https://github.com/Q00/ouroboros"
