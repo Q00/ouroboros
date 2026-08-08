@@ -183,11 +183,11 @@ def test_explicit_claude_isolates_mcp_from_claude_extra(tmp_path: Path) -> None:
     calls = (tmp_path / "calls.log").read_text(encoding="utf-8")
     assert "Runtime: claude (from --runtime / OUROBOROS_INSTALL_RUNTIME)" in result.stdout
     assert (
-        "uv tool install --upgrade --python >=3.12 . --with click>=8.1.0,<9.0.0 --with claude-agent-sdk==0.2.123 --with anthropic==0.117.0 --with textual==8.2.8 --with textual-serve==1.1.3"
+        "uv tool install --upgrade --python >=3.12 . --with click>=8.1.0,<9.0.0 --with claude-agent-sdk==0.2.128 --with anthropic==0.120.0 --with mcp==1.28.1 --with textual==8.2.8 --with textual-serve==1.1.3"
         in calls
     )
     _assert_calls_include_pyproject_pins(calls, "claude")
-    assert "--with mcp==" not in calls
+    assert "--with mcp==2.0.0" not in calls
     assert "ouroboros setup --runtime claude --non-interactive" in calls
     assert "MCP registration skipped for the standalone Claude SDK profile" in result.stdout
     assert not (tmp_path / "home" / ".claude" / "mcp.json").exists()
@@ -617,7 +617,7 @@ def test_pypi_lookup_failure_stays_stable_only_for_remote_install(tmp_path: Path
 # explicit (rather than parsed from pyproject) so a wrong rename or removal
 # fails loudly here instead of silently desyncing.
 _EXTRA_TO_PACKAGES: dict[str, tuple[str, ...]] = {
-    "claude": ("claude-agent-sdk", "anthropic"),
+    "claude": ("claude-agent-sdk", "anthropic", "mcp"),
     "copilot": (),  # pyproject declares copilot extras as []; nothing to install
     "litellm": ("litellm",),
     "dashboard": (),  # compatibility alias; no runtime payload
@@ -699,4 +699,5 @@ def test_install_all_extras_match_pyproject_pins(tmp_path: Path) -> None:
     calls = (tmp_path / "calls.log").read_text(encoding="utf-8")
 
     _assert_calls_include_pyproject_pins(calls, *(set(_EXTRA_TO_PACKAGES) - {"mcp"}))
-    assert "--with mcp==" not in calls
+    assert "--with mcp==1.28.1" in calls
+    assert "--with mcp==2.0.0" not in calls
