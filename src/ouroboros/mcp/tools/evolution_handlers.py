@@ -46,7 +46,10 @@ from ouroboros.evolution.frugality import (
 )
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.job_manager import JobLinks, JobManager
-from ouroboros.mcp.tools.background import start_background_tool_job
+from ouroboros.mcp.tools.background import (
+    BackgroundJobAcceptanceState,
+    start_background_tool_job,
+)
 from ouroboros.mcp.tools.bridge_mixin import BridgeAwareMixin
 from ouroboros.mcp.tools.evolve_start_claim import (
     PreparedEvolveClaim,
@@ -1708,6 +1711,12 @@ class StartEvolveStepHandler:
                 raise RuntimeError(str(result.error))
             return result.value
 
+        background_acceptance = BackgroundJobAcceptanceState()
+
+        async def _abort_unaccepted_claim(error: BaseException) -> None:
+            if not background_acceptance.cancellation_may_have_accepted():
+                await prepared_claim.abort_on_failure(error)
+
         try:
             snapshot = await start_background_tool_job(
                 job_manager=self._job_manager,
@@ -1725,9 +1734,8 @@ class StartEvolveStepHandler:
                 opencode_mode=self.opencode_mode,
                 prepare_inline=prepared_claim.prepare if supports_claimed_handoff else None,
                 on_cancel_before_work=prepared_claim.abort if supports_claimed_handoff else None,
-                on_enqueue_failure=(
-                    prepared_claim.abort_on_failure if supports_claimed_handoff else None
-                ),
+                on_enqueue_failure=(_abort_unaccepted_claim if supports_claimed_handoff else None),
+                acceptance_state=background_acceptance,
             )
         except MCPToolError as exc:
             return Result.err(exc)

@@ -63,6 +63,7 @@ from ouroboros.mcp.job_manager import JobManager, JobStatus
 from ouroboros.mcp.server.adapter import _extract_feedback_metadata_from_artifact
 from ouroboros.mcp.tools.evolution_handlers import EvolveStepHandler, StartEvolveStepHandler
 from ouroboros.mcp.tools.synapse_handler import SynapseTargetsHandler
+from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
 from ouroboros.orchestrator.synapse import EventStoreSessionSignalTargetResolver
 from ouroboros.persistence import lineage_claims
 from ouroboros.persistence.event_store import EventStore
@@ -567,6 +568,159 @@ async def test_start_evolve_contention_race_returns_bounded_structured_conflict(
             lineage_id=lineage_id,
             owner_id="race-winner",
         )
+        await manager.drain(grace_seconds=0.1)
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_start_evolve_preacceptance_cancellation_aborts_prepared_claim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Caller cancellation before enqueue ownership releases the held claim."""
+    store = await create_event_store()
+    lineage_id = "lin_start_cancel_before_acceptance"
+    manager = JobManager(store)
+    claim_prepared = asyncio.Event()
+    claim_cancelled = asyncio.Event()
+    enqueue_started = asyncio.Event()
+
+    class ControlledEvolveHandler:
+        evolutionary_loop = object()
+
+        async def handle(self, _arguments, *, on_generation_claimed=None):  # type: ignore[no-untyped-def]
+            assert on_generation_claimed is not None
+            try:
+                claim_prepared.set()
+                await on_generation_claimed(7)
+                raise AssertionError("unaccepted prepared claim must not run")
+            except asyncio.CancelledError:
+                claim_cancelled.set()
+                raise
+
+    async def block_before_acceptance(**_kwargs):  # type: ignore[no-untyped-def]
+        enqueue_started.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    monkeypatch.setattr(manager, "start_job", block_before_acceptance)
+    start = StartEvolveStepHandler(
+        evolve_handler=ControlledEvolveHandler(),  # type: ignore[arg-type]
+        event_store=store,
+        job_manager=manager,
+        agent_runtime_backend="codex",
+    )
+    pending = asyncio.create_task(start.handle({"lineage_id": lineage_id, "execute": False}))
+    try:
+        await asyncio.wait_for(claim_prepared.wait(), timeout=1.0)
+        await asyncio.wait_for(enqueue_started.wait(), timeout=1.0)
+        pending.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+
+        await asyncio.wait_for(claim_cancelled.wait(), timeout=1.0)
+        assert manager._started_job_ids == set()
+        assert manager._tasks == {}
+        assert manager._runner_tasks == {}
+        assert await store.query_events(event_type="mcp.job.created") == []
+    finally:
+        if not pending.done():
+            pending.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await pending
+        await manager.drain(grace_seconds=0.1)
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_start_evolve_postacceptance_cancellation_preserves_claim_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Once accepted, caller cancellation cannot abort the runner-owned claim."""
+    store = await create_event_store()
+    lineage_id = "lin_start_cancel_after_acceptance"
+    expected_execution_id = f"evolve:{lineage_id}:generation:7"
+    manager = JobManager(store)
+    accepted = asyncio.Event()
+    work_started = asyncio.Event()
+    release_work = asyncio.Event()
+    claim_cancelled = asyncio.Event()
+    original_start_job = manager.start_job
+
+    class ControlledEvolveHandler:
+        evolutionary_loop = object()
+
+        async def handle(self, _arguments, *, on_generation_claimed=None):  # type: ignore[no-untyped-def]
+            assert on_generation_claimed is not None
+            try:
+                await on_generation_claimed(7)
+                work_started.set()
+                await release_work.wait()
+                return Result.ok(
+                    MCPToolResult(
+                        content=(
+                            MCPContentItem(
+                                type=ContentType.TEXT,
+                                text="generation completed",
+                            ),
+                        ),
+                        is_error=False,
+                        meta={"generation_number": 7},
+                    )
+                )
+            except asyncio.CancelledError:
+                claim_cancelled.set()
+                raise
+
+    async def block_after_acceptance(**kwargs):  # type: ignore[no-untyped-def]
+        await original_start_job(**kwargs)
+        accepted.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    monkeypatch.setattr(manager, "start_job", block_after_acceptance)
+    start = StartEvolveStepHandler(
+        evolve_handler=ControlledEvolveHandler(),  # type: ignore[arg-type]
+        event_store=store,
+        job_manager=manager,
+        agent_runtime_backend="codex",
+    )
+    pending = asyncio.create_task(start.handle({"lineage_id": lineage_id, "execute": False}))
+    try:
+        await asyncio.wait_for(accepted.wait(), timeout=1.0)
+        await asyncio.wait_for(work_started.wait(), timeout=1.0)
+        job_id = next(iter(manager._started_job_ids))
+        job_task = manager._tasks[job_id]
+        runner_task = manager._runner_tasks[job_id]
+
+        pending.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+
+        await asyncio.sleep(0)
+        assert not claim_cancelled.is_set()
+        assert not runner_task.cancelled()
+        assert not runner_task.done()
+        assert not job_task.cancelled()
+        snapshot = await manager.get_snapshot(job_id)
+        assert snapshot.links.execution_id == expected_execution_id
+
+        job_events, _ = await store.get_events_after("job", job_id, last_row_id=0)
+        created = next(event for event in job_events if event.type == "mcp.job.created")
+        assert created.data["links"]["execution_id"] == expected_execution_id
+
+        release_work.set()
+        await asyncio.wait_for(asyncio.shield(job_task), timeout=1.0)
+        completed = await manager.get_snapshot(job_id)
+        assert completed.status == JobStatus.COMPLETED
+        assert completed.links.execution_id == expected_execution_id
+        assert not claim_cancelled.is_set()
+    finally:
+        release_work.set()
+        if not pending.done():
+            pending.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await pending
         await manager.drain(grace_seconds=0.1)
         await store.close()
 
