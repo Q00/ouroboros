@@ -25,7 +25,17 @@ class _FakeSeed:
 
 
 @pytest.mark.asyncio
-async def test_auto_run_starter_keeps_one_authoritative_evaluation_path(tmp_path) -> None:
+async def test_auto_run_starter_delegates_successor_policy_to_operator_config(tmp_path) -> None:
+    """Default-mode Auto completes at run handoff without its own evaluation
+    pass, so run->evaluate->evolve convergence must be delegated to the
+    server-side successor chain (#1916) instead of being force-disabled.
+    ``auto_evaluate``/``auto_evolve`` must be OMITTED entirely so
+    ``snapshot_run_successor_policy`` falls back to the operator's
+    ``execution.auto_evaluate`` / ``auto_evolve`` config (default: ON).
+    Contrast with ``HandlerSynchronousRunStarter``, which still opts out
+    below because the complete-product pipeline owns EVALUATE/RALPH_HANDOFF
+    itself.
+    """
     handler = AsyncMock()
     handler.handle = AsyncMock(
         return_value=Result.ok(MCPToolResult(meta={"job_id": "job_run", "session_id": "orch_run"}))
@@ -35,8 +45,8 @@ async def test_auto_run_starter_keeps_one_authoritative_evaluation_path(tmp_path
     await starter(_FakeSeed())  # type: ignore[arg-type]
 
     arguments = handler.handle.await_args.args[0]
-    assert arguments["auto_evaluate"] is False
-    assert arguments["auto_evolve"] is False
+    assert "auto_evaluate" not in arguments
+    assert "auto_evolve" not in arguments
 
 
 @pytest.mark.asyncio
@@ -75,7 +85,15 @@ async def test_auto_interview_backend_ignores_seed_ready_client_gate_metadata(tm
 
 @pytest.mark.asyncio
 async def test_synchronous_run_starter_skips_execute_seed_qa(tmp_path) -> None:
-    """Auto complete-product uses exact execution evidence, not execute_seed QA teardown."""
+    """Auto complete-product uses exact execution evidence, not execute_seed QA teardown.
+
+    This starter's ``auto_evaluate``/``auto_evolve`` opt-out is
+    complete-product-only: the complete-product pipeline runs EVALUATE and
+    RALPH_HANDOFF itself, so a second evaluation owner via the server-side
+    successor chain would compete with it. Default-mode ``HandlerRunStarter``
+    does not have its own evaluation pass, so it omits these keys instead of
+    forcing them off (see test_auto_run_starter_delegates_successor_policy_to_operator_config).
+    """
     handler = AsyncMock()
     handler.handle = AsyncMock(
         return_value=Result.ok(

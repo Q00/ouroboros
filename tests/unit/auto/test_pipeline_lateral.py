@@ -25,6 +25,7 @@ from ouroboros.auto.lateral_routing import (
     classify_qa_failure_to_pattern,
     select_persona_for_qa_failure,
 )
+import ouroboros.auto.pipeline as pipeline_module
 from ouroboros.auto.pipeline import (
     AutoPipeline,
     SeedQaRepairMappingError,
@@ -1013,7 +1014,12 @@ async def test_pipeline_lateral_skipped_when_complete_product_false(tmp_path) ->
 
 
 @pytest.mark.asyncio
-async def test_pipeline_lateral_timeout_blocks_with_recoverable_tool_name(tmp_path) -> None:
+async def test_pipeline_lateral_timeout_blocks_with_recoverable_tool_name(
+    tmp_path, monkeypatch
+) -> None:
+    # Vision #1157: a persistent timeout now exhausts the bounded in-process
+    # transient retry before blocking. Zero the backoff so the test stays fast.
+    monkeypatch.setattr(pipeline_module, "_TRANSIENT_RETRY_BACKOFF_SECONDS", (0.0,))
     state = _state_at_run_phase(tmp_path)
     state.timeout_seconds_by_phase[AutoPhase.UNSTUCK_LATERAL.value] = 1
     state.last_recovery_plan = _stale_recovery_plan()
@@ -1040,11 +1046,13 @@ async def test_pipeline_lateral_timeout_blocks_with_recoverable_tool_name(tmp_pa
     assert result.status == "blocked"
     assert state.last_tool_name == "lateral_thinker"
     assert "timed out" in (state.last_error or "")
+    assert state.last_error_code == "lateral_transient_exhausted"
     assert state.last_recovery_plan is None
 
 
 @pytest.mark.asyncio
-async def test_pipeline_lateral_handler_error_blocks(tmp_path) -> None:
+async def test_pipeline_lateral_handler_error_blocks(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(pipeline_module, "_TRANSIENT_RETRY_BACKOFF_SECONDS", (0.0,))
     state = _state_at_run_phase(tmp_path)
     state.last_recovery_plan = _stale_recovery_plan()
 
@@ -1074,6 +1082,7 @@ async def test_pipeline_lateral_handler_error_blocks(tmp_path) -> None:
     assert result.status == "blocked"
     assert state.last_tool_name == "lateral_thinker"
     assert "lateral_think tool unreachable" in (state.last_error or "")
+    assert state.last_error_code == "lateral_transient_exhausted"
     assert state.last_recovery_plan is None
 
 

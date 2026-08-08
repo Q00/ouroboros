@@ -113,6 +113,14 @@ _RECOVERY_BLOCKED_CHOICES: str = (
     "be edited mid-session); (2) abandon this session"
 )
 
+# Bounded in-process retry for transient tool failures (timeout, raised
+# exception, transient ``.error`` result). Vision #1157: a one-shot
+# infrastructure hiccup must not terminate an auto session as BLOCKED when
+# the same call is idempotently re-enterable (the --resume path already
+# re-enters these phases). Retries never consume repair/evaluate budgets.
+_TRANSIENT_TOOL_ATTEMPTS: int = 3
+_TRANSIENT_RETRY_BACKOFF_SECONDS: tuple[float, ...] = (1.0, 5.0)
+
 
 class SeedQaRepairMappingError(RuntimeError):
     def __init__(
@@ -2890,48 +2898,64 @@ class AutoPipeline:
         current_review = review
         max_attempts = max(1, int(state.max_repair_rounds or 1))
         for attempt in range(1, max_attempts + 1):
-            timeout = self._deadline_capped_timeout(
-                state, state.phase_timeout_seconds(AutoPhase.EVALUATE)
-            )
-            try:
-                qa_result = await asyncio.wait_for(
-                    self.seed_qa_evaluator(current_seed, ledger), timeout=timeout
+            qa_result = None
+            transient_failure: str | None = None
+            for transient_attempt in range(_TRANSIENT_TOOL_ATTEMPTS):
+                if transient_attempt:
+                    backoff = _TRANSIENT_RETRY_BACKOFF_SECONDS[
+                        min(transient_attempt - 1, len(_TRANSIENT_RETRY_BACKOFF_SECONDS) - 1)
+                    ]
+                    await asyncio.sleep(backoff)
+                timeout = self._deadline_capped_timeout(
+                    state, state.phase_timeout_seconds(AutoPhase.EVALUATE)
                 )
-            except TimeoutError:
-                if self._enforce_deadline(state):
-                    return (
-                        self._result(
-                            state, ledger, review=current_review, blocker=state.last_error
-                        ),
-                        current_seed,
-                        current_review,
+                try:
+                    candidate = await asyncio.wait_for(
+                        self.seed_qa_evaluator(current_seed, ledger), timeout=timeout
                     )
-                state.mark_blocked(
-                    f"Seed QA timed out after {timeout:.0f}s",
-                    tool_name="seed_qa",
-                )
-                self._save(state)
-                return (
-                    self._result(state, ledger, review=current_review, blocker=state.last_error),
-                    current_seed,
-                    current_review,
-                )
-            except Exception as exc:
-                state.mark_blocked(
-                    f"Seed QA raised {type(exc).__name__}",
-                    tool_name="seed_qa",
-                )
-                self._save(state)
-                return (
-                    self._result(state, ledger, review=current_review, blocker=state.last_error),
-                    current_seed,
-                    current_review,
-                )
+                except TimeoutError:
+                    if self._enforce_deadline(state):
+                        return (
+                            self._result(
+                                state, ledger, review=current_review, blocker=state.last_error
+                            ),
+                            current_seed,
+                            current_review,
+                        )
+                    transient_failure = f"Seed QA timed out after {timeout:.0f}s"
+                    continue
+                except Exception as exc:
+                    transient_failure = f"Seed QA raised {type(exc).__name__}"
+                    continue
 
-            if qa_result.error:
+                if candidate.error:
+                    transient_failure = "Seed QA reported a transient evaluator error"
+                    continue
+
+                qa_result = candidate
+                transient_failure = None
+                break
+
+            if qa_result is None:
+                await self._emit_runtime_event(
+                    "auto.seed_qa.blocked",
+                    state.auto_session_id,
+                    {
+                        "schema_version": 1,
+                        "auto_session_id": state.auto_session_id,
+                        "seed_id": current_seed.metadata.seed_id,
+                        "attempts": _TRANSIENT_TOOL_ATTEMPTS,
+                        "verdict": state.last_qa_verdict or "fail",
+                        "score": float(state.last_qa_score or 0.0),
+                        "differences": list(state.last_qa_differences[:5]),
+                        "suggestions": list(state.last_qa_suggestions[:5]),
+                        "reason": "seed_qa_transient_exhausted",
+                    },
+                )
                 state.mark_blocked(
-                    "Seed QA reported a transient evaluator error",
+                    transient_failure or "Seed QA failed after transient retries",
                     tool_name="seed_qa",
+                    error_code="seed_qa_transient_exhausted",
                 )
                 self._save(state)
                 return (
@@ -3352,42 +3376,50 @@ class AutoPipeline:
         # ``"evaluator timed out"`` instead of the canonical
         # ``pipeline_timeout`` blocker every other long-running phase
         # produces.
-        capped_timeout = self._deadline_capped_timeout(state, phase_timeout)
-        try:
-            eval_result = await asyncio.wait_for(
-                self.evaluator(seed, artifact), timeout=capped_timeout
-            )
-        except TimeoutError:
-            # If the deadline expired during the call, surface the canonical
-            # pipeline-timeout blocker so resume / status surfaces see the
-            # same shape as every other deadline trip in the pipeline.
-            if self._enforce_deadline(state):
-                return self._result(
-                    state,
-                    ledger,
-                    review=review,
-                    blocker=state.last_error,
-                    run_subagent=run_subagent,
+        eval_result = None
+        transient_failure: str | None = None
+        for transient_attempt in range(_TRANSIENT_TOOL_ATTEMPTS):
+            if transient_attempt:
+                backoff = _TRANSIENT_RETRY_BACKOFF_SECONDS[
+                    min(transient_attempt - 1, len(_TRANSIENT_RETRY_BACKOFF_SECONDS) - 1)
+                ]
+                await asyncio.sleep(backoff)
+            capped_timeout = self._deadline_capped_timeout(state, phase_timeout)
+            try:
+                candidate = await asyncio.wait_for(
+                    self.evaluator(seed, artifact), timeout=capped_timeout
                 )
-            state.mark_blocked(
-                f"evaluator timed out after {capped_timeout:.0f}s",
-                tool_name="evaluator",
-            )
-            self._save(state)
-            return self._result(
-                state, ledger, review=review, blocker=state.last_error, run_subagent=run_subagent
-            )
-        except Exception as exc:
-            state.mark_blocked(f"evaluator raised: {exc}", tool_name="evaluator")
-            self._save(state)
-            return self._result(
-                state, ledger, review=review, blocker=state.last_error, run_subagent=run_subagent
-            )
+            except TimeoutError:
+                # If the deadline expired during the call, surface the canonical
+                # pipeline-timeout blocker so resume / status surfaces see the
+                # same shape as every other deadline trip in the pipeline.
+                if self._enforce_deadline(state):
+                    return self._result(
+                        state,
+                        ledger,
+                        review=review,
+                        blocker=state.last_error,
+                        run_subagent=run_subagent,
+                    )
+                transient_failure = f"evaluator timed out after {capped_timeout:.0f}s"
+                continue
+            except Exception as exc:
+                transient_failure = f"evaluator raised: {exc}"
+                continue
 
-        if eval_result.error:
+            if candidate.error:
+                transient_failure = f"evaluator reported transient error: {candidate.error}"
+                continue
+
+            eval_result = candidate
+            transient_failure = None
+            break
+
+        if eval_result is None:
             state.mark_blocked(
-                f"evaluator reported transient error: {eval_result.error}",
+                transient_failure or "evaluator failed after transient retries",
                 tool_name="evaluator",
+                error_code="evaluator_transient_exhausted",
             )
             self._save(state)
             return self._result(
@@ -3769,45 +3801,53 @@ class AutoPipeline:
 
         run_artifact = state.evaluate_artifact or ""
         phase_timeout = state.phase_timeout_seconds(AutoPhase.UNSTUCK_LATERAL)
-        capped_timeout = self._deadline_capped_timeout(state, phase_timeout)
-        try:
-            lateral_result = await asyncio.wait_for(
-                self.lateral_thinker(
-                    persona=persona,
-                    qa_differences=qa_differences,
-                    qa_suggestions=qa_suggestions,
-                    run_artifact=run_artifact,
-                ),
-                timeout=capped_timeout,
-            )
-        except TimeoutError:
-            if self._enforce_deadline(state):
-                return self._result(
-                    state,
-                    ledger,
-                    review=review,
-                    blocker=state.last_error,
-                    run_subagent=run_subagent,
+        lateral_result = None
+        transient_failure: str | None = None
+        for transient_attempt in range(_TRANSIENT_TOOL_ATTEMPTS):
+            if transient_attempt:
+                backoff = _TRANSIENT_RETRY_BACKOFF_SECONDS[
+                    min(transient_attempt - 1, len(_TRANSIENT_RETRY_BACKOFF_SECONDS) - 1)
+                ]
+                await asyncio.sleep(backoff)
+            capped_timeout = self._deadline_capped_timeout(state, phase_timeout)
+            try:
+                candidate = await asyncio.wait_for(
+                    self.lateral_thinker(
+                        persona=persona,
+                        qa_differences=qa_differences,
+                        qa_suggestions=qa_suggestions,
+                        run_artifact=run_artifact,
+                    ),
+                    timeout=capped_timeout,
                 )
-            state.mark_blocked(
-                f"lateral_thinker timed out after {capped_timeout:.0f}s",
-                tool_name="lateral_thinker",
-            )
-            self._save(state)
-            return self._result(
-                state, ledger, review=review, blocker=state.last_error, run_subagent=run_subagent
-            )
-        except Exception as exc:
-            state.mark_blocked(f"lateral_thinker raised: {exc}", tool_name="lateral_thinker")
-            self._save(state)
-            return self._result(
-                state, ledger, review=review, blocker=state.last_error, run_subagent=run_subagent
-            )
+            except TimeoutError:
+                if self._enforce_deadline(state):
+                    return self._result(
+                        state,
+                        ledger,
+                        review=review,
+                        blocker=state.last_error,
+                        run_subagent=run_subagent,
+                    )
+                transient_failure = f"lateral_thinker timed out after {capped_timeout:.0f}s"
+                continue
+            except Exception as exc:
+                transient_failure = f"lateral_thinker raised: {exc}"
+                continue
 
-        if lateral_result.error:
+            if candidate.error:
+                transient_failure = f"lateral_thinker reported transient error: {candidate.error}"
+                continue
+
+            lateral_result = candidate
+            transient_failure = None
+            break
+
+        if lateral_result is None:
             state.mark_blocked(
-                f"lateral_thinker reported transient error: {lateral_result.error}",
+                transient_failure or "lateral_thinker failed after transient retries",
                 tool_name="lateral_thinker",
+                error_code="lateral_transient_exhausted",
             )
             self._save(state)
             return self._result(
@@ -4863,12 +4903,15 @@ def _recoverable_phase_for_tool(tool_name: str | None) -> AutoPhase | None:
         "seed_repairer",
         "seed_qa",
         "seed_preflight",
+        "seed_reviewer",
     }:
         # ``seed_repairer`` joins this set so a repair-phase timeout (the
         # outer ``asyncio.wait_for`` around ``repairer.converge`` inside
         # AutoPipeline.run) is recoverable on ``--resume``: the only sensible
         # restart is the REVIEW phase, which re-invokes the bounded repairer.
         # Without this entry a transient timeout becomes a permanent dead end.
+        # ``seed_reviewer`` gets the same treatment: the pre-run review
+        # timeout blocks with that tool name and is an equally pure transient.
         return AutoPhase.REVIEW
     if tool_name == "run_starter":
         return AutoPhase.RUN

@@ -11,6 +11,7 @@ from pathlib import Path
 import time
 from typing import Annotated
 
+from rich.console import Console
 from rich.markup import escape as _rich_escape
 import typer
 
@@ -361,7 +362,15 @@ def auto_command(
         print_error(f"Auto pipeline failed: {exc}")
         raise typer.Exit(1) from exc
 
-    _print_result(result, show_ledger=show_ledger)
+    blocked_state: AutoPipelineState | None = None
+    if result.status == "blocked":
+        try:
+            blocked_state = AutoStore().load(result.auto_session_id)
+        except Exception:
+            # Best-effort reload for the blocked panel's ``stage`` field —
+            # the panel degrades to result-only fields when this fails.
+            blocked_state = None
+    _print_result(result, show_ledger=show_ledger, state=blocked_state)
     if no_wait and _is_run_handoff_only_completion(result) and result.job_id:
         print_warning(
             "Detached with --no-wait: the execute job runs in this CLI process only. "
@@ -1393,7 +1402,68 @@ def _print_detached_guidance(result: AutoPipelineResult) -> None:
         console.print(f'Retrieve job (MCP): ouroboros_job_result(job_id="{result.ralph_job_id}")')
 
 
-def _print_result(result: AutoPipelineResult, *, show_ledger: bool) -> None:
+def _render_blocked_panel(
+    console: Console,
+    state: AutoPipelineState | None,
+    result: AutoPipelineResult,
+) -> None:
+    """Print a compact, actionable summary for a ``blocked`` terminal result.
+
+    Answers WHY the session stopped, WHAT (if anything) the user must
+    resolve, and HOW to resume — up front, before the full field-by-field
+    dump ``_print_result`` renders below it. ``state`` is the freshly
+    reloaded persisted session (``None`` when the reload failed); the panel
+    degrades to ``result``-only fields when it is unavailable.
+    """
+    stage = (state.last_tool_name if state is not None else None) or "unknown"
+    reason_code = result.stop_reason_code or "-"
+    blocker_text = " ".join((result.blocker or "").split())[:400]
+
+    open_items: list[str] = []
+    if reason_code == "seed_preflight_unexecutable" and result.blocker:
+        _, _, tail = result.blocker.rpartition("resume: ")
+        if tail:
+            open_items = [item.strip() for item in tail.split(" | ") if item.strip()]
+    elif (result.last_qa_differences or result.last_qa_suggestions) and (
+        state is None or state.last_tool_name == "seed_qa"
+    ):
+        open_items = [*result.last_qa_differences, *result.last_qa_suggestions][:5]
+
+    # Derive the resume row from the single source of truth for resume
+    # syntax (resume_render.py) rather than re-deriving the CLI command
+    # here — this also closes the NONE-without-goal gap, where that helper
+    # returns no lines at all (no other surface fills that gap either).
+    resume_lines = render_resume_lines(
+        result.resume_capability, result.auto_session_id, goal=None, use_markup=False
+    )
+    resume_note: str | None = None
+    if not resume_lines:
+        resume_line = "not resumable — start a new session"
+    else:
+        _, _, resume_line = resume_lines[0].partition(": ")
+        if len(resume_lines) > 1:
+            resume_note = resume_lines[1].strip()
+
+    console.print("── auto blocked ────────────────────────────────")
+    console.print(f" stage      : {stage}")
+    console.print(f" reason code: {reason_code}")
+    console.print(f" blocker    : {blocker_text}")
+    if open_items:
+        console.print(" open items :")
+        for item in open_items:
+            console.print(f"   - {item}")
+    console.print(f" resume     : {resume_line}")
+    if resume_note:
+        console.print(f"              {resume_note}")
+    console.print("────────────────────────────────────────────────")
+
+
+def _print_result(
+    result: AutoPipelineResult,
+    *,
+    show_ledger: bool,
+    state: AutoPipelineState | None = None,
+) -> None:
     handoff_only = _is_run_handoff_only_completion(result)
     completed_ralph_product = _is_completed_ralph_product(result)
     external_ralph_plugin = _is_external_ralph_plugin_completion(result)
@@ -1412,6 +1482,8 @@ def _print_result(result: AutoPipelineResult, *, show_ledger: bool) -> None:
     console.print(f"Status: [bold]{displayed_status}[/]")
     if result.artifact_state:
         console.print(f"Artifact state: [bold]{result.artifact_state}[/]")
+    if result.status == "blocked":
+        _render_blocked_panel(console, state, result)
     if handoff_only:
         console.print(
             "Product status: [yellow]not verified complete; execution is still external/pending[/]"

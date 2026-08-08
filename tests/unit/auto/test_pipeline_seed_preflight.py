@@ -226,3 +226,9 @@ async def test_pipeline_clean_seed_passes_preflight_and_runs(tmp_path) -> None:
 
 def test_seed_preflight_block_resumes_into_review() -> None:
     assert _recoverable_phase_for_tool("seed_preflight") is AutoPhase.REVIEW
+
+
+def test_seed_reviewer_timeout_block_resumes_into_review() -> None:
+    # Pre-run review timeout blocks with tool_name="seed_reviewer" — a pure
+    # transient that must not be a permanent dead end on --resume.
+    assert _recoverable_phase_for_tool("seed_reviewer") is AutoPhase.REVIEW
