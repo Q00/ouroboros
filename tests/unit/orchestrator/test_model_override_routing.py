@@ -11,6 +11,9 @@ enforce it, so the distinction is tested directly rather than assumed.
 from __future__ import annotations
 
 from dataclasses import replace
+from pathlib import Path
+
+import pytest
 
 from ouroboros.orchestrator.adapter import (
     FULL_CAPABILITIES,
@@ -21,6 +24,15 @@ from ouroboros.orchestrator.adapter import (
 from ouroboros.orchestrator.claude_worker_runtime import build_claude_worker_runtime
 from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime
 from ouroboros.orchestrator.codex_mcp_runtime import build_codex_mcp_worker_runtime
+
+
+@pytest.fixture
+def fake_cli_path(tmp_path: Path) -> str:
+    """Provide stable version evidence without invoking an installed host CLI."""
+    cli = tmp_path / "fake-agent-cli"
+    cli.write_text("#!/bin/sh\necho fake-agent-cli 1.0\n", encoding="utf-8")
+    cli.chmod(0o755)
+    return str(cli)
 
 
 class TestCapabilityDeclarations:
@@ -42,8 +54,8 @@ class TestCapabilityDeclarations:
         adapter = ClaudeAgentAdapter(api_key="test", cwd="/tmp")
         assert adapter.capabilities.model_override_support is ParamSupport.NATIVE
 
-    def test_codex_runtime_declares_native_model_override(self) -> None:
-        runtime = CodexCliRuntime(cli_path="codex", cwd="/tmp")
+    def test_codex_runtime_declares_native_model_override(self, fake_cli_path: str) -> None:
+        runtime = CodexCliRuntime(cli_path=fake_cli_path, cwd="/tmp")
         assert runtime.capabilities.model_override_support is ParamSupport.NATIVE
 
     def test_claude_worker_declares_native_model_override(self) -> None:
@@ -56,14 +68,14 @@ class TestCapabilityDeclarations:
         rt = build_codex_mcp_worker_runtime(cwd="/tmp")
         assert rt.capabilities.model_override_support is ParamSupport.IGNORED
 
-    def test_advised_codex_subclasses_ignore_model_override(self) -> None:
+    def test_advised_codex_subclasses_ignore_model_override(self, fake_cli_path: str) -> None:
         """Gemini/Goose share the codex base but do not opt in, so they stay
         IGNORED (the orchestrator therefore never routes them a model)."""
         from ouroboros.orchestrator.gemini_cli_runtime import GeminiCLIRuntime
         from ouroboros.orchestrator.goose_runtime import GooseCliRuntime
 
-        gemini = GeminiCLIRuntime(cli_path="gemini", cwd="/tmp")
-        goose = GooseCliRuntime(cli_path="goose", cwd="/tmp")
+        gemini = GeminiCLIRuntime(cli_path=fake_cli_path, cwd="/tmp")
+        goose = GooseCliRuntime(cli_path=fake_cli_path, cwd="/tmp")
         assert gemini.capabilities.model_override_support is ParamSupport.IGNORED
         assert goose.capabilities.model_override_support is ParamSupport.IGNORED
 
@@ -77,42 +89,36 @@ class TestCapabilityDeclarations:
 
 
 class TestCodexModelOverrideEnforcement:
-    def _runtime(self, *, model: str | None = None) -> CodexCliRuntime:
-        runtime = CodexCliRuntime(cli_path="codex", cwd="/tmp", model=model)
-        # These tests exercise command construction, not live executable drift.
-        # Keep the initialization snapshot stable so an App/CLI updater cannot
-        # make this unit suite depend on a second external ``codex --version``.
-        version_snapshot = runtime._cli_executable_version_identity_snapshot  # noqa: SLF001
-        runtime._cli_executable_version_identity = lambda: version_snapshot  # type: ignore[method-assign]  # noqa: SLF001
-        return runtime
+    def _runtime(self, fake_cli_path: str, *, model: str | None = None) -> CodexCliRuntime:
+        return CodexCliRuntime(cli_path=fake_cli_path, cwd="/tmp", model=model)
 
-    def test_per_call_model_is_enforced_via_flag(self) -> None:
-        command = self._runtime()._build_command(
+    def test_per_call_model_is_enforced_via_flag(self, fake_cli_path: str) -> None:
+        command = self._runtime(fake_cli_path)._build_command(
             output_last_message_path="/tmp/out.txt",
             model="claude-haiku-4-5",
         )
         assert "--model" in command
         assert command[command.index("--model") + 1] == "claude-haiku-4-5"
 
-    def test_per_call_model_wins_over_constructor_pin(self) -> None:
-        command = self._runtime(model="o3")._build_command(
+    def test_per_call_model_wins_over_constructor_pin(self, fake_cli_path: str) -> None:
+        command = self._runtime(fake_cli_path, model="o3")._build_command(
             output_last_message_path="/tmp/out.txt",
             model="gpt-5.5",
         )
         assert command[command.index("--model") + 1] == "gpt-5.5"
         assert "o3" not in command
 
-    def test_no_per_call_model_falls_back_to_constructor(self) -> None:
-        command = self._runtime(model="o3")._build_command(
+    def test_no_per_call_model_falls_back_to_constructor(self, fake_cli_path: str) -> None:
+        command = self._runtime(fake_cli_path, model="o3")._build_command(
             output_last_message_path="/tmp/out.txt",
         )
         assert command[command.index("--model") + 1] == "o3"
 
-    def test_default_sentinel_per_call_model_is_a_noop(self) -> None:
+    def test_default_sentinel_per_call_model_is_a_noop(self, fake_cli_path: str) -> None:
         """``_normalize_model`` collapses the ``default`` sentinel to None, so a
         ``model="default"`` override is byte-identical to passing no override —
         both fall through to the unchanged constructor/runtime-profile fallback."""
-        runtime = self._runtime()
+        runtime = self._runtime(fake_cli_path)
         with_sentinel = runtime._build_command(
             output_last_message_path="/tmp/out.txt", model="default"
         )
