@@ -37,7 +37,7 @@
   <a href="#从-wonder-到本体论">理念</a>
 </p>
 
-**把一个模糊的想法，跨 Claude Code、Codex CLI、OpenCode、Hermes 变成一份经过验证、可运行的代码库。**
+**把一个模糊的想法，跨 Claude Code、Codex CLI、OpenCode、Hermes、Gemini、Kiro、Copilot、Pi 和 Zcode，变成一份经过验证、可运行的代码库。**
 
 Ouroboros 是面向 AI 编码的 Agent OS：一层本地优先的运行时，把非确定性的 agent 工作转换成一份可重放、可观测、受策略约束的执行契约。它用一套结构化的、规约优先的工作流取代东拼西凑的 prompt：访谈、定型、执行、评估、演化。
 
@@ -69,7 +69,52 @@ curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.
 > ooo interview "I want to build a task management CLI"
 ```
 
-> 支持 Claude Code、Codex CLI、OpenCode、Hermes。安装脚本会为 Claude Code 配置独立的 `[claude]` 运行环境，并为 Codex CLI 和 Hermes CLI 注册隔离的 MCP 2 server。OpenCode 用户在安装后运行 `ouroboros setup --runtime opencode` 即可。
+> 支持 Claude Code、Codex CLI、GitHub Copilot CLI、OpenCode、Hermes、Gemini、Kiro CLI、Pi CLI 和 Zcode。安装程序会自动检测可用的运行时，并在宿主支持的情况下注册 MCP server。如需显式选择运行时，安装后执行 `ouroboros setup --runtime <opencode|kiro|copilot|gemini|pi|zcode>`。Copilot CLI 运行时会通过 GitHub Copilot models API 实时获取模型列表，并在配置过程中让你选择默认模型。
+
+<details>
+<summary><strong>Codex 插件快速开始</strong></summary>
+
+```bash
+codex plugin marketplace add Q00/ouroboros
+codex plugin add ouroboros@ouroboros
+```
+
+打开一个新的 Codex 会话，输入 `ooo`。首次使用时，Ouroboros 会在改动任何内容之前，先询问是否准备运行环境。准备就绪后，它会沿用 Codex 当前的默认模型；只有在需要为某个流水线阶段固定特定模型时，才选择**直接配置模型**。
+
+</details>
+
+<details>
+<summary><strong>Kiro CLI 快速开始</strong></summary>
+
+```bash
+pipx install 'ouroboros-ai[mcp]'       # 或者：uv tool install 'ouroboros-ai[mcp]'
+ouroboros setup            # 检测 Kiro CLI 并注册 MCP server
+```
+
+在 `.env` 中设置运行时：
+```
+OUROBOROS_RUNTIME=kiro
+```
+
+之后就可以在 Kiro CLI 会话中使用 `ooo` 命令。
+
+</details>
+
+<details>
+<summary><strong>GitHub Copilot CLI 快速开始</strong></summary>
+
+```bash
+gh auth login                                # 一次性 GitHub 认证（用于实时获取模型列表）
+pipx install 'ouroboros-ai[mcp]'             # 或者：uv tool install 'ouroboros-ai[mcp]'
+ouroboros setup --runtime copilot            # 实时获取模型列表并选择默认模型，
+                                             # 在 ~/.copilot/mcp-config.json 中注册 MCP server
+```
+
+重新启动 Copilot CLI 会话后，即可在会话中使用 `ooo` 命令。配置中其他地方使用的连字符格式 Anthropic 模型 ID（如 `claude-opus-4-6`）会在运行时自动映射为 Copilot 的点号格式（`claude-opus-4.6`），因此切换后端时现有配置仍然可用。
+
+完整说明见 [GitHub Copilot CLI 运行时指南](./docs/runtime-guides/copilot.md)。
+
+</details>
 
 <details>
 <summary><strong>其他安装方式</strong></summary>
@@ -97,7 +142,7 @@ ouroboros setup                         # 配置运行时
 
 历史兼容：在 extras 迁移期间，`ouroboros-ai[dashboard]` 仍然作为兼容别名保留。
 
-各运行时指南：[Claude Code](./docs/runtime-guides/claude-code.md) · [Codex CLI](./docs/runtime-guides/codex.md) · [Hermes](./docs/runtime-guides/hermes.md) · [OpenCode](./docs/runtime-guides/opencode.md)
+各运行时指南：[Claude Code](./docs/runtime-guides/claude-code.md) · [Codex CLI](./docs/runtime-guides/codex.md) · [Hermes](./docs/runtime-guides/hermes.md) · [OpenCode](./docs/runtime-guides/opencode.md) · [Kiro CLI](./docs/runtime-guides/kiro.md) · [Gemini CLI](./docs/runtime-guides/gemini.md) · [GitHub Copilot CLI](./docs/runtime-guides/copilot.md) · [Zcode](./docs/runtime-guides/zcode.md) · [Pi JSON mode](https://pi.dev/docs/latest/json)
 
 </details>
 
