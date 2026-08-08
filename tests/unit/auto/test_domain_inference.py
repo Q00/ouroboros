@@ -3142,3 +3142,51 @@ def test_modal_and_passive_infinitive_qualifiers_own_the_artifact(goal: str) -> 
     result = derive_domain_from_ledger(ledger)
     assert result.is_single
     assert result.single is TaskClass.WEB_APP
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
+        "Build documentation introducing an admin portal that runs in browsers",
+        "Build documentation presenting a billing dashboard for browsers",
+    ],
+)
+def test_embedded_noun_phrases_block_postnominal_ownership(goal: str) -> None:
+    """R50 guard: a determiner deeper in the chain opens an embedded noun
+    phrase — the UI noun is a relationship target no matter which verb
+    introduced it."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value="Reference guide and examples")
+    _seed_section(ledger, "runtime_context", value="Local documentation build")
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
+        "Build an admin portal expected to run in browsers",
+        "Build an admin portal required to run in browsers",
+        "Build an admin portal that needs to run in browsers",
+    ],
+)
+def test_obligation_qualifiers_own_the_artifact(goal: str) -> None:
+    """R50 probe: obligation and expectation constructions are the same
+    environment declaration as the plain runtime forms."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value="Role management and account administration")
+    _seed_section(ledger, "runtime_context", value="Browser")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP
+
+
+def test_attributive_gerunds_stay_product_vocabulary() -> None:
+    """R50 guard: nominal gerund modifiers ("landing page") keep the
+    grant while the participle bar stops verbal chain tokens."""
+    ledger = _bare_ledger("Build a landing page for the browser")
+    _seed_section(ledger, "outputs", value="Signup conversion copy and forms")
+    _seed_section(ledger, "runtime_context", value="Browser")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP

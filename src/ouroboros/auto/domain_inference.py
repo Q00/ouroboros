@@ -776,7 +776,8 @@ _BROWSER_QUALIFIED_UI_HEAD_RE = re.compile(
 _POSTNOMINAL_PREDICATE_TOKEN = (
     r"(?:[\w\-]+ly|also|only|still|already|now|and|or|"
     r"is|are|was|were|be|being|been|will|would|can|could|may|might|must|"
-    r"should|shall|"
+    r"should|shall|expected|required|requires?|needs?|needed|supposed|"
+    r"planned|guaranteed|"
     r"runs?|running|operates?|operating|works?|working|loads?|loading|"
     r"opens?|opening|renders?|rendered|rendering|serves?|served|serving|"
     r"delivers?|delivered|displayed|shown|hosted|lives?|living|"
@@ -786,12 +787,31 @@ _POSTNOMINAL_PREDICATE_TOKEN = (
     r"offered|provided)"
 )
 _POSTNOMINAL_BROWSER_QUALIFIER_RE = re.compile(
-    # Subject relationships block the chain like structural prepositions
-    # (#1813 R49): in "documentation about an admin portal" the portal is
-    # what the documentation is ABOUT, not the produced artifact.
+    # The produced head is the goal's FIRST noun phrase (#1813 R50): at
+    # most two lead tokens (imperative verbs), neither a participle, then
+    # ONE optional determiner, then modifiers. A determiner deeper in the
+    # chain opens an embedded noun phrase ("documentation introducing AN
+    # admin portal"), so a UI noun there is a relationship target no
+    # matter which verb introduced it — no verb enumeration involved.
+    # Participles are barred from every chain slot except attributively
+    # before the head, where nominal gerunds are ordinary product
+    # vocabulary ("billing dashboard", "landing page") but relational and
+    # subject-matter stems keep their verbal reading.
     r"^(?:(?!(?:that|which|who|to|for|of|from|with|without|via|through|by|on|in|at|"
-    r"and|or|nor|but|about|regarding|concerning|covering|describing|"
-    r"explaining|documenting)\b)[\w'’\-]+\s+){0,5}?"
+    r"and|or|nor|but|about|regarding|concerning)\b)(?![\w'’\-]+ing\b)[\w'’\-]+\s+){0,2}?"
+    r"(?:(?:an?|the|one|this|our|my|your)\s+)?"
+    r"(?:(?!(?:an?|the|one|this|that|which|who|to|for|of|from|with|without|via|"
+    r"through|by|on|in|at|and|or|nor|but|about|regarding|concerning)\b)"
+    r"(?![\w'’\-]+ing\b)[\w'’\-]+\s+){0,3}?"
+    r"(?:(?!(?:targeting|supporting|serving|powering|backing|integrating|"
+    r"syncing|connecting|linking|talking|communicating|marketing|selling|"
+    r"advertising|promoting|pitching|installing|bundling|packaging|"
+    r"shipping|plugging|mounting|embedding|nesting|containing|hosting|"
+    r"deploying|publishing|running|living|mimicking|emulating|imitating|"
+    r"resembling|mirroring|looking|feeling|behaving|acting|working|using|"
+    r"consuming|calling|invoking|wrapping|introducing|presenting|"
+    r"showcasing|demonstrating|describing|covering|explaining|"
+    r"documenting)\b)[\w'’\-]+ing\s+)?"
     rf"{_UI_PRODUCT_HEAD_FRAGMENT}"
     # A comma may introduce a dependent qualifier ("an admin portal,
     # accessible in the browser") — a coordinator after it is real
