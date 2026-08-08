@@ -36,6 +36,7 @@ export function num(v: string | undefined, d: number): number {
   return Number.isFinite(n) && n >= 0 ? n : d
 }
 export const CHILD_TIMEOUT_MS = num(process.env.OUROBOROS_CHILD_TIMEOUT_MS, 20 * 60 * 1000)
+const AUTHORITY_TIMEOUT_MS = 5_000
 const PATCH_RETRIES = 3
 const RESOLVE_RETRIES = 5
 const BACKOFF_MS = 100
@@ -477,6 +478,18 @@ function authorityError(reason: string): Error {
   return new Error(`authority snapshot unavailable: ${reason}`)
 }
 
+async function authorityDeadline<T>(lookup: Promise<T>, timeoutMs: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => reject(authorityError("lookup timed out")), timeoutMs)
+  })
+  try {
+    return await Promise.race([lookup, timeout])
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
+  }
+}
+
 function record(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v)
 }
@@ -524,14 +537,16 @@ async function authoritySnapshot(
   cli: Cli,
   parentID: string,
   targetAgents: ReadonlyArray<string>,
+  timeoutMs = AUTHORITY_TIMEOUT_MS,
 ): Promise<ReadonlyMap<string, PermissionRuleset>> {
   if (typeof cli?.session?.get !== "function" || typeof cli?.app?.agents !== "function")
     throw authorityError("client API missing")
 
-  const [parentResult, agentsResult] = await Promise.all([
-    cli.session.get({ path: { id: parentID } }).catch(() => null),
-    cli.app.agents().catch(() => null),
+  const lookup = Promise.all([
+    Promise.resolve().then(() => cli.session.get!({ path: { id: parentID } })).catch(() => null),
+    Promise.resolve().then(() => cli.app!.agents!()).catch(() => null),
   ])
+  const [parentResult, agentsResult] = await authorityDeadline(lookup, timeoutMs)
   if (!parentResult || parentResult.error || !record(parentResult.data))
     throw authorityError("parent lookup failed")
   if (parentResult.data.id !== parentID)

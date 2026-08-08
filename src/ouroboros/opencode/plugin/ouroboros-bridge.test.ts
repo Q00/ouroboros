@@ -1095,6 +1095,32 @@ describe("OpenCode authority snapshot", () => {
   })
 
   test.each([
+    ["parent lookup", true, false],
+    ["agent catalog lookup", false, true],
+    ["both authority lookups", true, true],
+  ])("fails closed when %s stalls", async (_label, stallParent, stallAgents) => {
+    const never = new Promise<never>(() => {})
+    const cli = {
+      session: {
+        get: stallParent
+          ? () => never
+          : async () => ({ data: { id: "parent", permission: [] } }),
+      },
+      app: {
+        agents: stallAgents
+          ? () => never
+          : async () => ({ data: [{ name: "general", permission: [] }] }),
+      },
+    }
+    const started = Date.now()
+
+    await expect(_authoritySnapshot(cli as never, "parent", ["general"], 20)).rejects.toThrow(
+      "authority snapshot unavailable: lookup timed out",
+    )
+    expect(Date.now() - started).toBeLessThan(500)
+  })
+
+  test.each([
     [{ permission: 7, pattern: "*", action: "deny" }, "permission"],
     [{ permission: "bash", pattern: null, action: "deny" }, "pattern"],
     [{ permission: "bash", pattern: "TOP-SECRET-PATTERN", action: "later" }, "action"],
