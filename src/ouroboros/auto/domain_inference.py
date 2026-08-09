@@ -1377,7 +1377,11 @@ _GOAL_COMPONENT_TARGET_RE = re.compile(
     # participial relations ("exposed THROUGH", "associated WITH") —
     # bare "with" stays outside so a co-produced component is not
     # swallowed.
-    r"\b(?:(?:[\w\-'’]+(?:ed|ing)\s+)?(?:for|of|in|inside|within|into|to|"
+    r"\b(?:(?:[\w\-'’]+(?:ed|ing)\s+)?(?:for|of|in|inside|within|into|"
+    # Bare "to" carries identity only toward a determined NP ("attached
+    # to a browser extension"); an infinitive purpose ("to manage
+    # browser extensions") names managed content (#1813 R81).
+    r"to(?=\s+(?:an?|the|our|my|your|their|its)\b)|"
     r"by|alongside|beside|as)|[\w\-'’]+(?:ed|ing)\s+"
     # "hosted/mounted ON", "running/nested UNDER" (#1813 R71);
     # identity relations "packaged/distributed AS" (#1813 R75).
@@ -1394,7 +1398,14 @@ _GOAL_COMPONENT_TARGET_RE = re.compile(
     r"(?:[\w\-'’]+\s+){0,3}?"
     r"(?:extension|plugin|add[\s\-]?on|addon|sidebar|popup|toolbar|overlay|devtool)\b(?!s)))\s+"
     r"(?:(?:an?|the|our|my|your|their|its)\s+)?"
-    r"(?:(?!(?:not|no|never)\b)[\w\-'’]+\s+){0,3}?"
+    # Manipulation verbs mark the component as managed content, not the
+    # artifact's identity (#1813 R81).
+    r"(?:(?!(?:not|no|never|manage|manages|managing|install|installs|"
+    r"installing|list|lists|listing|organize|organizes|organizing|"
+    r"track|tracks|tracking|catalog|catalogs|cataloging|browse|browses|"
+    r"browsing|review|reviews|reviewing|audit|audits|auditing|update|"
+    r"updates|updating|remove|removes|removing|uninstall\w*)\b)"
+    r"[\w\-'’]+\s+){0,3}?"
     r"(?:extensions?|plugins?|add[\s\-]?ons?|addons?|sidebars?|popups?|"
     r"toolbars?|overlays?|devtools?)\b"
     r"(?!\s+(?!(?:and|or|nor|but|without|with|for|on|in|at|by|from|via|"
@@ -1894,7 +1905,14 @@ def _matches_web_app(ledger: SeedDraftLedger) -> bool:
         not any(start <= m.start() < end for start, end in content_regions)
         and not re.match(
             r"\s+(?:from|in|within|inside|for|on|by|under|across|during|"
-            r"except|only|outside)\b",
+            r"except|only|outside)\b"
+            # A condition/time qualifier is not a scope OBJECT (#1813
+            # R81): "in production" and "for now" exclude globally.
+            r"(?!\s+(?:(?:the|this|that)\s+)?(?:production|staging|"
+            r"development|deployment|ci|now|meantime|moment|present|"
+            r"future|foreseeable\s+future|near\s+term|time\s+being|"
+            r"releases?|versions?|phases?|milestones?|sprints?|"
+            r"iterations?)\b)",
             goal_text_value[m.end() :],
         )
         for m in _POSTPOSITIVE_BROWSER_DENIAL_RE.finditer(goal_text_value)

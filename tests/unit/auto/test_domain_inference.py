@@ -4285,6 +4285,42 @@ def test_component_identity_precedes_the_explicit_grant() -> None:
 @pytest.mark.parametrize(
     "goal",
     [
+        "Build a web app to manage browser extensions",
+        "Build a web app for managing browser extensions",
+    ],
+)
+def test_managed_components_are_content_not_identity(goal: str) -> None:
+    """R81 guard: an infinitive purpose or manipulation verb marks the
+    component as the web app's managed content — the produced artifact
+    keeps its class."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value="Extension catalog with install buttons")
+    _seed_section(ledger, "runtime_context", value="Browser")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
+        "Build a web app; browsers are unsupported in production",
+        "Build a web app; browser support is unavailable for now",
+    ],
+)
+def test_condition_qualified_exclusions_still_deny(goal: str) -> None:
+    """R81 guard: a condition/time qualifier ("in production", "for
+    now") is not a scope object — the exclusion stays ledger-wide."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value="Interactive charts with a filters panel")
+    _seed_section(ledger, "runtime_context", value="Native desktop runtime")
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
         "The product is an admin portal that runs in browsers",
         "The deliverable is an admin portal available in browsers",
     ],
