@@ -1,12 +1,38 @@
 [project]
 name = "ouroboros-ai"
 dynamic = ["version"]
-description = "Specification-first workflow engine for AI coding agents. Works with Claude Code and Codex CLI."
+description = "Specification-first workflow engine for AI coding agents -- works across Claude Code, Codex CLI, OpenCode, Hermes, Gemini, Kiro, Copilot, Pi, Zcode, Goose, GJC, Antigravity, and Grok."
 readme = "README.md"
 authors = [
     { name = "Q00", email = "jqyu.lee@gmail.com" }
 ]
 requires-python = ">=3.12"
+keywords = [
+    "agent-os",
+    "ai-agent",
+    "ai-coding-agent",
+    "claude-code",
+    "cli",
+    "developer-tools",
+    "llm-orchestration",
+    "mcp",
+    "prompt-engineering",
+    "socratic-method",
+    "spec-driven-development",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Software Development :: Build Tools",
+    "Topic :: Software Development :: Code Generators",
+]
 dependencies = [
     "aiosqlite>=0.20.0,<1.0.0",
     "anyio>=4.0.0,<5.0.0",
@@ -28,6 +54,12 @@ dependencies = [
     "structlog>=24.0.0,<27.0.0",
     "typer>=0.12.0,<0.28.0",
 ]
+
+[project.urls]
+Homepage = "https://ouroboros.page/"
+Repository = "https://github.com/Q00/ouroboros"
+"Bug Tracker" = "https://github.com/Q00/ouroboros/issues"
+Sponsor = "https://github.com/sponsors/Q00"
 
 [project.optional-dependencies]
 # Exact-pinned (not ranges) on purpose: a future compromised "latest" must not
