@@ -527,8 +527,7 @@ def _require_mcp_dependency() -> None:
             raise ImportError
     except ImportError as exc:
         raise ImportError(
-            "MCP SDK v2 server API unavailable. "
-            "Install with: pip install 'ouroboros-ai[mcp]'"
+            "MCP SDK v2 server API unavailable. Install with: pip install 'ouroboros-ai[mcp]'"
         ) from exc
 
 

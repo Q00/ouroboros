@@ -111,8 +111,7 @@ def test_serve_reports_missing_mcp_dependency(monkeypatch):
         "ouroboros.cli.commands.mcp._run_mcp_server",
         new=AsyncMock(
             side_effect=ImportError(
-                "MCP SDK v2 server API unavailable. "
-                "Install with: pip install 'ouroboros-ai[mcp]'"
+                "MCP SDK v2 server API unavailable. Install with: pip install 'ouroboros-ai[mcp]'"
             )
         ),
     ):
@@ -125,8 +124,7 @@ def test_serve_reports_missing_mcp_dependency(monkeypatch):
     assert "pip install" in result.output
     assert "ouroboros-ai[mcp]" in result.output
     assert (
-        "uvx --python '>=3.12' --from 'ouroboros-ai[mcp]' "
-        "ouroboros mcp serve --runtime claude-cli"
+        "uvx --python '>=3.12' --from 'ouroboros-ai[mcp]' ouroboros mcp serve --runtime claude-cli"
     ) in normalized_output
 
 
