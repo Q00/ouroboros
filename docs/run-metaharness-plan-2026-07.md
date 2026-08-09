@@ -3,7 +3,8 @@
 > Status: PROPOSED PLAN (2026-07-02). Baseline: `main` @ `7bc011dc`.
 > Origin: 6-agent fan-out audit (run failure modes, injection points, brownfield gap,
 > dashboard overlap, meta-harness brainstorm, external harness-landscape research).
-> Companion to `docs/master-roadmap-2026-07.md` — this plan BUILDS ON PR-E/F/G/H
+> Companion to the [historical master roadmap](./history/master-roadmap-2026-07.md)
+> snapshot — this plan BUILDS ON PR-E/F/G/H
 > (AC success contract) and PR-D (run→eval chain); it does not replace them.
 
 ---
