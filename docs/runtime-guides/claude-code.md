@@ -25,8 +25,13 @@ Ouroboros can use **Claude Code** as a runtime backend, leveraging your **Claude
   ([`.claude-plugin/.mcp.json`](../../.claude-plugin/.mcp.json)), so a host with
   only Claude Code cannot start it. Install uv with `pipx install uv`,
   `pip install --user uv`, or `brew install uv`.
-- Python >= 3.12 **for the standalone CLI only**. The plugin manifest launches
-  `uvx --python '>=3.12'`, so uv fetches the interpreter itself.
+- **`python3` on `PATH`** for the marketplace plugin as well. The bundled skills
+  shell out to it directly (`skills/setup/SKILL.md:98`,
+  `skills/welcome/SKILL.md:68`). `uvx --python '>=3.12'` supplies an interpreter
+  to the isolated MCP process only and does not create a global `python3`, so a
+  host with uv but no system Python fails during the first setup/welcome flow.
+  Tracked in #2001.
+- Python >= 3.12 specifically, **for the standalone CLI**.
 - Ouroboros installed, for the standalone CLI (see [Getting Started](../getting-started.md) for install options)
 
 > Install `ouroboros-ai[claude]` for the default in-process SDK runtime on MCP

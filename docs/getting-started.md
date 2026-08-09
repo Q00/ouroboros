@@ -11,11 +11,17 @@ Transform a vague idea into a verified, working codebase -- with any AI coding a
 
 ### Recommended: Claude Code (`ooo`)
 
-No Python install required. You do need `uvx` on the host — the plugin's MCP
-server is launched with it ([`.claude-plugin/.mcp.json`](../.claude-plugin/.mcp.json)),
-so `ooo setup` cannot start without it. Install uv with `pipx install uv`,
-`pip install --user uv`, or `brew install uv`; uv fetches the Python interpreter
-itself, which is why you do not install Python.
+You do not install Ouroboros with pip on this path, but the host needs two
+things: **`uvx`**, because the plugin's MCP server is launched with it
+([`.claude-plugin/.mcp.json`](../.claude-plugin/.mcp.json)), and **`python3`**,
+because the bundled skills shell out to it directly — `skills/setup/SKILL.md:98`
+when recording the first-run preference and `skills/welcome/SKILL.md:68` during
+readiness detection. Install uv with `pipx install uv`, `pip install --user uv`,
+or `brew install uv`.
+
+`uvx --python '>=3.12'` supplies an interpreter to the isolated MCP process; it
+does not create a global `python3`, so a host with uv but no system Python fails
+during the first setup/welcome flow. Tracked in #2001.
 
 Then run the install commands in your terminal, and run setup and auto inside
 Claude Code to go from idea to execution:

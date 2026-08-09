@@ -20,9 +20,12 @@ Ouroboros는 **Claude Code**를 런타임 백엔드로 쓸 수 있습니다. **C
 
 ## 시작하기 (권장 경로)
 
-대부분의 사람은 이 길로 오면 됩니다. **Python도 pip도 API 키 설정도 필요 없습니다** — 런타임은 Claude Code가 맡습니다.
+대부분의 사람은 이 길로 오면 됩니다. **Ouroboros를 pip로 설치할 필요도, API 키를 설정할 필요도 없습니다** — 런타임은 Claude Code가 맡습니다.
 
-시작하기 전에 호스트에 **`uvx`가 있어야 합니다.** 플러그인의 MCP 매니페스트가 `uvx`로 서버를 띄우기 때문에([`.claude-plugin/.mcp.json`](../../.claude-plugin/.mcp.json)), 이게 없으면 아래 `ooo setup`이 뜨지 않습니다. 없으면 다음 중 하나로 uv를 설치하세요:
+시작하기 전에 호스트에 두 가지가 있어야 합니다:
+
+- **`uvx`** — 플러그인의 MCP 매니페스트가 이걸로 서버를 띄웁니다([`.claude-plugin/.mcp.json`](../../.claude-plugin/.mcp.json)).
+- **`python3`** — 번들 스킬들이 셸에서 직접 호출합니다. setup 스킬이 첫 실행 설정을 기록할 때([`skills/setup/SKILL.md:98`](../../.claude-plugin/skills/setup/SKILL.md)), welcome 스킬이 준비 상태를 판별할 때([`skills/welcome/SKILL.md:68`](../../.claude-plugin/skills/welcome/SKILL.md)) 모두 `python3`을 씁니다.
 
 ```bash
 pipx install uv
@@ -30,7 +33,7 @@ pip install --user uv
 brew install uv          # macOS / Linuxbrew
 ```
 
-`uvx`가 `--python '>=3.12'`로 띄우므로 **Python은 uv가 알아서 가져옵니다.** 위의 "Python 필요 없음"은 그래서 성립합니다.
+> **`uvx`가 Python 요구를 대신하지 않습니다.** `uvx --python '>=3.12'`는 **격리된 MCP 프로세스에** 인터프리터를 붙여 줄 뿐, 전역 `python3` 명령을 만들어 주지 않습니다. 위 스킬 스니펫들은 셸에서 `python3`을 직접 찾으므로, `uvx`만 있고 시스템 Python이 없는 호스트는 **첫 setup/welcome 흐름에서 실패합니다.** 스킬 쪽 인터프리터 탐색을 고치는 건 [#2001](https://github.com/Q00/ouroboros/issues/2001)에서 추적합니다.
 
 **터미널:**
 
