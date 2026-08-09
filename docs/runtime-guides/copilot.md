@@ -1,5 +1,7 @@
 # GitHub Copilot CLI Runtime
 
+> 한국어: [copilot.ko.md](./copilot.ko.md)
+
 Run Ouroboros workflows on top of the locally installed
 [GitHub Copilot CLI](https://docs.github.com/copilot/concepts/agents/about-copilot-cli).
 
@@ -97,12 +99,27 @@ a new default after GitHub ships new models.
 
 ### Hyphen versus dotted model IDs
 
-Ouroboros' historical defaults use the hyphenated Anthropic SDK form
-(`claude-opus-4-6`, `claude-sonnet-4-5`). Copilot CLI expects the dotted
-form (`claude-opus-4.6`, `claude-sonnet-4.5`). The Copilot adapter
-auto-maps the well-known Anthropic IDs at runtime, so existing config files
-keep working when you switch the runtime to Copilot. You do not need to
-rewrite any per-role model overrides.
+Ouroboros' defaults use the hyphenated Anthropic SDK form
+(`claude-opus-4-8`, `claude-sonnet-4-5`). Copilot CLI expects the dotted form
+(`claude-opus-4.6`, `claude-sonnet-4.5`). The adapter maps *some* of these, and
+the boundary is narrower than it looks — check your explicit overrides before
+switching.
+
+`map_to_copilot_model()` ([`copilot/model_discovery.py:247`](../../src/ouroboros/copilot/model_discovery.py))
+resolves in order: a verbatim match against the discovered catalog; a static
+name map that currently covers `claude-opus-4-6`, `claude-sonnet-4-5`, and their
+`openrouter/anthropic/` forms; then a hyphen-to-dot fallback. Two consequences:
+
+- Any ID already containing a `.` short-circuits at the top and passes through
+  unchanged (`:276`).
+- The fallback calls `replace("-", ".")`, which rewrites *every* hyphen, so
+  `claude-opus-4-8` becomes `claude.opus.4.8` — not a Copilot ID — and also
+  passes through unchanged.
+
+So the current `DEFAULT_OPUS_MODEL` (`claude-opus-4-8`) has **no** Copilot
+mapping, unlike the previous default. Tracked in
+[#1995](https://github.com/Q00/ouroboros/issues/1995). Leave role models unset so
+setup writes a discovered ID, or set a dotted Copilot ID explicitly.
 
 If you set a model that Copilot does not recognise, the subprocess will
 fail with `Model "<id>" from --model flag is not available.` Pass a model
@@ -117,10 +134,15 @@ orchestrator:
   copilot_cli_path: C:\Users\you\AppData\Local\Programs\copilot\copilot.exe   # optional
 llm:
   backend: copilot
-  default_model: claude-opus-4.6                # written by setup
+  qa_model: claude-opus-4.6                     # written by setup
 clarification:
   default_model: claude-opus-4.6                # written by setup
 ```
+
+> `llm` has no `default_model` field (`config/models.py`, `LLMConfig`). Setup
+> writes the model it discovered into the fields that do exist — for example
+> `clarification.default_model`, `llm.qa_model`, and the evaluation/resilience
+> model fields.
 
 The same `copilot` value is accepted by every CLI surface that takes a
 backend name:
@@ -229,7 +251,10 @@ updates setup-managed entries to the current isolated launcher.
 Old Ouroboros build that did not yet auto-map hyphen IDs to the dotted
 Copilot form. Upgrade to a release that includes the model-discovery
 module, or override your default to the dotted form
-(`OUROBOROS_DEFAULT_MODEL=claude-opus-4.6`).
+by rerunning `ouroboros setup --runtime copilot` and picking a
+dotted ID from the live catalog. There is no `OUROBOROS_DEFAULT_MODEL`
+environment variable; per-role overrides use their own variables, such as
+`OUROBOROS_CLARIFICATION_MODEL`.
 
 **`copilot CLI not found.`**
 Install Copilot CLI per the GitHub docs, then either let setup auto-detect
