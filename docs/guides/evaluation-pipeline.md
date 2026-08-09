@@ -36,7 +36,7 @@ Artifact ready
         ▼                                 ▼
 ┌───────────────────────┐          ┌───────────────┐
 │  Stage 3: Consensus   │          │   APPROVED    │
-│  ($$$, 2/3 majority)  │          └───────────────┘
+│  ($$$, ratio ≥ 0.66)  │          └───────────────┘
 └───────────┬───────────┘
             │
    ┌────────┴────────┐
@@ -101,7 +101,7 @@ It returns `False` for the failures it handles: no manifests, a provider error s
 
 > **If Stage 1 always passes, this is usually why.** With no `.ouroboros/mechanical.toml` and no explicitly configured `MechanicalConfig` commands, all five checks are skipped and treated as passed, which makes Stage 1 a no-op gate.
 >
-> Reaching that state through `ouroboros run` or the MCP evaluation path takes a failure, not just a missing file. Both author the file before reading it, by different routes: `run` calls `build_verification_artifacts()`, which invokes `_auto_detect_mechanical_toml()` (`cli/commands/run.py:785`, `evaluation/verification_artifacts.py:413`), while the MCP evaluation handler checks `has_mechanical_toml()` and calls `ensure_mechanical_toml()` followed by `build_mechanical_config()` directly (`mcp/tools/evaluation_handlers.py:724`). The auto-detection behavior is the same; the call path is not. Stage 1 ends up empty when that best-effort detection fails — no LLM adapter, a provider error, an unwritable `.ouroboros/` — or when a caller drives the lower-level pipeline directly and skips detection. If you see the no-op symptom, look for a failed detection before running `ouroboros detect` by hand.
+> Reaching that state through `ouroboros run` or the MCP evaluation path takes a failure, not just a missing file. Both author the file before reading it, by different routes: `run` calls `build_verification_artifacts()`, which invokes `_auto_detect_mechanical_toml()` (`cli/commands/run.py:785`, `evaluation/verification_artifacts.py:437`), while the MCP evaluation handler checks `has_mechanical_toml()` and calls `ensure_mechanical_toml()` followed by `build_mechanical_config()` directly (`mcp/tools/evaluation_handlers.py:724`). The auto-detection behavior is the same; the call path is not. Stage 1 ends up empty when that best-effort detection fails — no LLM adapter, a provider error, an unwritable `.ouroboros/` — or when a caller drives the lower-level pipeline directly and skips detection. If you see the no-op symptom, look for a failed detection before running `ouroboros detect` by hand.
 
 > **Deprecated:** `detect_language()` no longer detects anything. It is a compatibility shim that reads `.ouroboros/mechanical.toml` and emits a `DeprecationWarning`; call `ensure_mechanical_toml()` plus `build_mechanical_config()` instead.
 
@@ -289,11 +289,11 @@ Raising these thresholds reduces Stage 3 cost but may allow low-confidence outpu
 
 ## Stage 3: Consensus (Multi-Model or Single-Model Fallback)
 
-Stage 3 is the consensus stage; its simple evaluator has two execution paths. The multi-model path launches the configured roster's vote calls concurrently and requires a **2/3 majority**, but every call still goes through the evaluator's one LLM adapter. Separate calls or model labels are not, by themselves, evidence of separate models, vendors, or backends. The fallback path queries the adapter's session model three times with different perspective prompts.
+Stage 3 is the consensus stage; its simple evaluator has two execution paths. The multi-model path may first filter the configured roster for reviewer independence, then launches the retained vote calls concurrently through the evaluator's one LLM adapter. It compares the approval ratio among the successfully collected votes with `majority_threshold` (default `0.66`) and errors when fewer than two votes succeed. Separate calls or model labels are not, by themselves, evidence of separate models, vendors, or backends. The fallback path queries the adapter's session model three times with different perspective prompts.
 
 ### Simple Consensus (Default)
 
-On the multi-model path, the configured roster slots are queried in parallel through the same adapter. **How the default roster is resolved depends on the configured consensus-role backend**, and that setting need not match an adapter supplied independently by a direct API caller.
+On the multi-model path, the configured roster is the starting point; reviewer-independence filtering may remove entries before the retained slots are queried in parallel through the same adapter. **How the default roster is resolved depends on the configured consensus-role backend**, and that setting need not match an adapter supplied independently by a direct API caller.
 
 **Roster-resolution priority.** `get_consensus_models()` first returns a non-empty `OUROBOROS_CONSENSUS_MODELS` list verbatim. Otherwise it reads `config.consensus.models`: a recognized shipped roster is normalized for the configured backend, while a genuinely custom roster is preserved. If config loading fails or has no roster, the shipped fallback is also normalized for the backend. Outside the sentinel set below, that backend-aware config/default resolution retains these shipped OpenRouter identifiers:
 
@@ -317,19 +317,21 @@ OpenCode is easy to miss here: it is not a separate member of the union, it ride
 
 > **Auditing note.** Three votes labeled `default` are not three independent reviewers. If your consensus evidence shows that, the roster resolved to the sentinel and the votes came from one model.
 
-**Changing the roster does not change the adapter.** `ConsensusEvaluator` holds a single `self._llm` and sends every vote through it (`evaluation/consensus.py:281`, and the `tracked_complete(self._llm, ...)` calls at `:476`, `:563`, `:886`, `:1030`). The roster only decides the model **string** handed to that one adapter.
+**Reviewer-independence filtering happens before model-profile resolution.** The multi-model path starts with the configured roster and, when `EvaluationContext.executor_backend` is present, passes those requested labels plus `available_runtime_backends()` to `resolve_reviewer_independence()`. Fewer than two distinct configured backend vendors makes filtering a no-op and reports `unavailable`. Otherwise, labels known to share the executor's vendor are removed only if at least two labels would remain. Unknown-vendor labels are retained, and if filtering would leave fewer than two voters the original roster is kept. The `evaluation.stage3.started` event and the concurrent vote-task list both use this post-filter roster.
 
-**Actual per-vote resolution chain.** Each roster entry becomes `CompletionConfig(model=entry, role="consensus_vote")`. The already-selected adapter then resolves `llm_role_profiles.consensus_vote` and the referenced `llm_profiles` entry for its own backend before dispatching the resulting effective model through that same adapter and transport. With `ConsensusConfig(models=None)`, `models_are_explicit` remains false even when the resolved roster came from `OUROBOROS_CONSENSUS_MODELS` or `config.consensus.models`; a `consensus_vote` profile model can therefore replace every roster entry, collapsing differently named slots onto one effective model. A direct caller that passes `ConsensusConfig(models=(...))` marks non-empty, non-`default` entries as request pins, but still sends all votes through the same adapter.
+**Changing or filtering the roster does not change the adapter.** `ConsensusEvaluator` holds one `self._llm`; every retained vote goes through it.
+
+**Actual per-vote resolution chain.** After the reviewer filter, each retained entry becomes `CompletionConfig(model=entry, role="consensus_vote")`. The already-selected adapter then resolves `llm_role_profiles.consensus_vote` and the referenced `llm_profiles` entry for its own backend before dispatching the resulting effective model through that same adapter and transport. With `ConsensusConfig(models=None)`, `models_are_explicit` remains false even when the resolved roster came from `OUROBOROS_CONSENSUS_MODELS` or `config.consensus.models`; a `consensus_vote` profile model can therefore replace every retained entry, collapsing differently named slots onto one effective model. A direct caller that passes `ConsensusConfig(models=(...))` marks non-empty, non-`default` entries as request pins, but still sends all votes through the same adapter.
 
 Setting `OUROBOROS_CONSENSUS_MODELS` or `consensus.models` alone therefore does not replace the adapter or prove cross-vendor routing. An adapter that is already OpenRouter-capable may interpret provider-qualified strings and route the calls to those providers through that same adapter. A local CLI adapter instead receives the profile-resolved model as its own argument; an `openrouter/...` string does not switch the call to OpenRouter, so it may fail as unsupported or remain on that adapter under a different label.
 
-Cross-vendor independence requires the active LLM backend to be one that can actually reach those providers. Pick the roster to match the backend you are on, not the other way round, and verify effective dispatch plus transport/provider response evidence. Consensus parsing records the original roster string in `Vote.model` and Stage 3 events rather than the provider-returned model, so requested/recorded labels and `reviewer_independence` are classifications, not routing attestation.
+Cross-vendor independence requires the active LLM backend to be one that can actually reach those providers. Pick the roster to match the backend you are on, not the other way round, and verify effective dispatch plus transport/provider response evidence. Reviewer-independence classification is based on the pre-profile requested labels, while consensus parsing records each post-filter requested label in `Vote.model` rather than the provider-returned model. The labels, Stage 3 events, and `reviewer_independence` status are therefore classifications, not routing attestation.
 
 Each successful vote call returns `{ approved, confidence, reasoning }`.
 
-**Approval rule:** `approving_votes / total_votes >= 0.66` (i.e., at least 2 of 3). The ratio is computed over the votes actually **collected**, not over the number of configured models — see [Parallel Consensus Failure Tolerance](#parallel-consensus-failure-tolerance).
+**Approval rule:** `approving_votes / successfully_collected_votes >= majority_threshold` (default `0.66`). The denominator is the successful responses from the post-filter roster, not the configured or pre-filter roster size. “Two of three” is only the common three-success example, not an invariant — see [Parallel Consensus Failure Tolerance](#parallel-consensus-failure-tolerance).
 
-> **Single-model fallback.** When the configured roster contains an `openrouter/*` entry but `OPENROUTER_API_KEY` is missing or still a `YOUR_…` placeholder, `ConsensusEvaluator` silently switches to a single-model mode: the session model is queried three times with the advocate, devil's advocate, and judge system prompts, and those three perspectives vote. The 2-of-3 rule and the `<2` votes error are unchanged, but the reviewers are the same vendor by construction, so reviewer independence is reported as unavailable. Stage 3 events carry `session/<perspective>` model names and a `single-model-perspectives:` trigger reason — check for those if Stage 3 looks cheaper than expected. A roster with no `openrouter/*` entry skips the credential check and uses the multi-model code path, still through the same adapter.
+> **Single-model fallback.** When the configured roster contains an `openrouter/*` entry but `OPENROUTER_API_KEY` is missing or still a `YOUR_…` placeholder, `ConsensusEvaluator` silently switches to a single-model mode: the session model is queried three times with the advocate, devil's advocate, and judge system prompts, and those perspectives vote. The same `majority_threshold` comparison is applied over the successfully collected perspective votes, and fewer than two successes is an error. The reviewers are the same vendor by construction, so reviewer independence is reported as unavailable. Stage 3 events carry `session/<perspective>` model names and a `single-model-perspectives:` trigger reason — check for those if Stage 3 looks cheaper than expected. A roster with no `openrouter/*` entry skips the credential check and uses the multi-model code path, still through the same adapter.
 
 ### Deliberative Consensus
 
@@ -343,9 +345,9 @@ An alternative two-round mode:
 
 | Failure mode | Symptom | Cause / Action |
 |---|---|---|
-| **Fewer than 2 votes collected** | `ValidationError: Not enough votes collected: N/3` | Multiple vote calls returned errors. Check that the active adapter can route the configured roster. At least 2 of 3 calls must succeed. |
+| **Fewer than 2 votes collected** | `ValidationError: Not enough votes collected: N/3` | Fewer than two post-filter vote calls succeeded. The `/3` text is hardcoded and may not equal the post-filter roster size; inspect `evaluation.stage3.started` for the labels actually queried. |
 | **Votes disagree** | `majority_ratio` around 0.33–0.50 | The collected calls disagreed. Inspect `disagreements` in the event payload; model labels alone do not establish independent reviewers. |
-| **Majority ratio below threshold** | `Stage 3 failed: Consensus not reached (XX%)` | Less than 2/3 approval. The `disagreements` tuple in `ConsensusResult` contains dissenters' reasoning. |
+| **Majority ratio below threshold** | `Stage 3 failed: Consensus not reached (XX%)` | The approval ratio among successfully collected post-filter votes is below `majority_threshold` (default `0.66`). The `disagreements` tuple in `ConsensusResult` contains dissenters' reasoning. |
 | **Individual vote-call error** | Logged but tolerated | One call fails; the remaining votes are used. If only 1 remains, a `ValidationError` is raised. |
 | **Deliberative: Advocate fails** | `ValidationError: Advocate failed: ...` | Advocate model API error. The error is not tolerated in deliberative mode — the entire Stage 3 fails. |
 | **Deliberative: Devil's Advocate LLM error** | Devil votes `approved=False` with low confidence | The `DevilAdvocateStrategy` handles LLM errors internally and returns `AnalysisResult.invalid` (soft failure) rather than propagating the error. A Devil LLM failure does **not** abort Stage 3; it results in the Devil casting a failing vote, which may cause the Judge to reject. |
@@ -368,7 +370,7 @@ consensus:
     - "openrouter/google/gemini-2.5-pro"
   temperature: 0.3
   max_tokens: 1024
-  majority_threshold: 0.66     # 2/3 majority
+  majority_threshold: 0.66     # Approval ratio threshold over collected votes
   diversity_required: true     # Currently inert — see note below
 ```
 
@@ -509,7 +511,7 @@ Stage 1 parses coverage from `pytest-cov` output by looking for the pattern `TOT
 
 ### Parallel Consensus Failure Tolerance
 
-In **simple consensus**, individual model failures are tolerated as long as at least 2 models respond successfully. The `majority_ratio` is calculated over only the collected votes (`approving / len(votes)`), not over the configured number of models. This means:
+In **simple consensus**, the reviewer-independence filter runs first, and individual model failures are then tolerated as long as at least two retained models respond successfully. The `majority_ratio` is calculated over only those successful post-filter votes (`approving / len(votes)`), not over the configured or pre-filter number of models. This means:
 - 2 models respond, 1 approves → `majority_ratio = 0.5` → **rejected** (below 0.66)
 - 2 models respond, both approve → `majority_ratio = 1.0` → **approved**
 
@@ -570,7 +572,7 @@ config = PipelineConfig(
         # ),
         temperature=0.3,
         max_tokens=1024,
-        majority_threshold=0.66,     # 2/3 majority required
+        majority_threshold=0.66,     # Compared with collected-vote approval ratio
         diversity_required=True,     # Currently inert
     ),
 

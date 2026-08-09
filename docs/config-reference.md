@@ -467,8 +467,8 @@ Controls Phase 5 — multi-model consensus voting and deliberation.
 
 ```yaml
 consensus:
-  min_models: 3             # Currently inert — runtime requires 2 collected votes
-  threshold: 0.67           # Currently inert — runtime default is 0.66
+  min_models: 3             # Inert — runtime requires 2 successful post-filter votes
+  threshold: 0.67           # Inert — runtime ratio threshold defaults to 0.66
   diversity_required: true  # Currently inert — see the field table below
   models:
     - openrouter/openai/gpt-4o
@@ -481,15 +481,15 @@ consensus:
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `min_models` | `int >= 2` | `3` | **Currently inert.** Simple consensus requires at least two successfully collected votes; this top-level field is not wired to that rule. |
-| `threshold` | `float [0.0, 1.0]` | `0.67` | **Currently inert.** Runtime simple consensus uses direct-Python `ConsensusConfig.majority_threshold` (default `0.66`); this top-level field is not copied into it. |
+| `min_models` | `int >= 2` | `3` | **Currently inert.** After reviewer-independence filtering, simple consensus separately requires at least two successfully collected votes; this top-level field is not wired to that rule. |
+| `threshold` | `float [0.0, 1.0]` | `0.67` | **Currently inert.** Runtime simple consensus compares approvals divided by successful post-filter votes with direct-Python `ConsensusConfig.majority_threshold` (default `0.66`); this top-level field is not copied into it. |
 | `diversity_required` | `bool` | `true` | **Currently inert.** The field exists on `ConsensusConfig` and in the schema, but nothing reads it. Provider diversity depends on actual adapter routing; neither this flag nor differently named roster entries attest it. See [Evaluation Pipeline Guide](./guides/evaluation-pipeline.md#stage-3-consensus-multi-model-or-single-model-fallback). |
 | `models` | `list[string]` | (see above) | Model roster for Stage 3 simple voting. With `llm.backend: litellm`, use `provider/model` or `openrouter/provider/model`. With `llm.backend: codex`, use Codex/OpenAI model IDs such as `gpt-5.4`. Overridable via `OUROBOROS_CONSENSUS_MODELS` (comma-separated). |
 | `advocate_model` | `string` | `"openrouter/anthropic/claude-opus-4.8"` | Model that argues in favor of the proposed solution in deliberative consensus. With `llm.backend: codex`, this can be a Codex/OpenAI model ID such as `gpt-5.4`. Overridable via `OUROBOROS_CONSENSUS_ADVOCATE_MODEL`. |
 | `devil_model` | `string` | `"openrouter/openai/gpt-4o"` | Model that argues against (devil's advocate) in deliberative consensus. With `llm.backend: codex`, this can be a Codex/OpenAI model ID such as `gpt-5.4`. Overridable via `OUROBOROS_CONSENSUS_DEVIL_MODEL`. |
 | `judge_model` | `string` | `"openrouter/google/gemini-2.5-pro"` | Model that renders a final verdict after deliberation. With `llm.backend: codex`, this can be a Codex/OpenAI model ID such as `gpt-5.4`. Overridable via `OUROBOROS_CONSENSUS_JUDGE_MODEL`. |
 
-> **Configuration boundary:** `consensus.min_models` and `consensus.threshold` are schema-validated placeholders. Runtime simple consensus hardcodes a minimum of two collected votes and reads the separate direct-Python `ConsensusConfig.majority_threshold`. Changing these YAML keys does not change either rule.
+> **Configuration boundary:** `consensus.min_models` and `consensus.threshold` are schema-validated placeholders. Runtime simple consensus hardcodes a minimum of two successful post-filter votes and reads the separate direct-Python `ConsensusConfig.majority_threshold`. Changing these YAML keys does not change either rule.
 >
 > **Backend note:** With `llm.backend: litellm`, consensus models typically go through OpenRouter/LiteLLM and require the corresponding provider credentials (commonly `OPENROUTER_API_KEY`). With `llm.backend: codex`, the configured model strings are sent through Codex CLI instead.
 
@@ -961,8 +961,8 @@ evaluation:
   assertion_extraction_model: claude-sonnet-4-6
 
 consensus:
-  min_models: 3               # Currently inert
-  threshold: 0.67             # Currently inert; runtime default is 0.66
+  min_models: 3               # Inert; runtime needs 2 successful post-filter votes
+  threshold: 0.67             # Inert; runtime ratio threshold defaults to 0.66
   diversity_required: true    # Currently inert
   models:
     - openrouter/openai/gpt-4o
