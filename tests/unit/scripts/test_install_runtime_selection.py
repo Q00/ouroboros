@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 import re
@@ -631,6 +632,152 @@ def test_installer_repairs_corrupt_telemetry_json_and_persists_events(tmp_path: 
     assert f'"distinct_id":"{repaired_id}"' in captures
 
 
+_UUID_RE = re.compile(
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+)
+
+
+def _extract_distinct_id(text: str) -> str:
+    match = re.search(r'"distinct_id"\s*:\s*"([^"]*)"', text)
+    assert match is not None, f"no distinct_id field found: {text!r}"
+    return match.group(1)
+
+
+def test_installer_replaces_non_uuid_distinct_id_with_fresh_uuid(tmp_path: Path) -> None:
+    """A non-UUID value (valid JSON, but not an identity we ever minted) must
+    never be emitted under or persisted verbatim -- it's corrupt state, not
+    a salvageable identity, so a fresh canonical UUID replaces it.
+    """
+    state_dir = tmp_path / "home" / ".ouroboros"
+    state_dir.mkdir(parents=True)
+    state = state_dir / "telemetry.json"
+    state.write_text(
+        '{"distinct_id": "person@example.com", "created_at": "2020-01-01T00:00:00Z", '
+        '"notice_shown": false}\n',
+        encoding="utf-8",
+    )
+
+    result = _run_installer(
+        tmp_path,
+        env={"OUROBOROS_TELEMETRY": ""},
+        fake_commands=_telemetry_fake_commands(tmp_path),
+    )
+
+    assert result.returncode == 0, result.stderr
+    repaired_id = _extract_distinct_id(state.read_text(encoding="utf-8"))
+    assert _UUID_RE.fullmatch(repaired_id)
+    assert repaired_id != "person@example.com"
+
+    captures = _wait_for_telemetry(tmp_path)
+    assert '"event":"install_completed"' in captures
+    assert f'"distinct_id":"{repaired_id}"' in captures
+
+
+def test_installer_salvages_uuid_from_malformed_json_and_lowercases_it(tmp_path: Path) -> None:
+    """Malformed JSON around an otherwise-valid UUID must be SALVAGED, not
+    discarded for a fresh mint -- the same identity keeps being used across
+    the repair instead of fragmenting into a new one.
+    """
+    state_dir = tmp_path / "home" / ".ouroboros"
+    state_dir.mkdir(parents=True)
+    state = state_dir / "telemetry.json"
+    state.write_text(
+        '{"distinct_id": "3F2504E0-4F89-11D3-9A0C-0305E82C3301", garbage', encoding="utf-8"
+    )
+
+    result = _run_installer(
+        tmp_path,
+        env={"OUROBOROS_TELEMETRY": ""},
+        fake_commands=_telemetry_fake_commands(tmp_path),
+    )
+
+    assert result.returncode == 0, result.stderr
+    repaired_text = state.read_text(encoding="utf-8")
+    assert _extract_distinct_id(repaired_text) == "3f2504e0-4f89-11d3-9a0c-0305e82c3301"
+    json.loads(repaired_text)  # the surrounding JSON must be repaired too, not just the field
+
+    captures = _wait_for_telemetry(tmp_path)
+    assert '"event":"install_completed"' in captures
+    assert '"distinct_id":"3f2504e0-4f89-11d3-9a0c-0305e82c3301"' in captures
+
+
+def test_installer_canonicalizes_uppercase_uuid_in_valid_json(tmp_path: Path) -> None:
+    """A well-formed file with an uppercase UUID must be lowercased and
+    persisted -- same identity, canonical case, so the Python loader
+    (which now applies the same canonicalization) converges on it too.
+    """
+    state_dir = tmp_path / "home" / ".ouroboros"
+    state_dir.mkdir(parents=True)
+    state = state_dir / "telemetry.json"
+    state.write_text(
+        '{"distinct_id": "3F2504E0-4F89-11D3-9A0C-0305E82C3301", '
+        '"created_at": "2020-01-01T00:00:00Z", "notice_shown": false}\n',
+        encoding="utf-8",
+    )
+
+    result = _run_installer(
+        tmp_path,
+        env={"OUROBOROS_TELEMETRY": ""},
+        fake_commands=_telemetry_fake_commands(tmp_path),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert (
+        _extract_distinct_id(state.read_text(encoding="utf-8"))
+        == "3f2504e0-4f89-11d3-9a0c-0305e82c3301"
+    )
+
+    captures = _wait_for_telemetry(tmp_path)
+    assert '"distinct_id":"3f2504e0-4f89-11d3-9a0c-0305e82c3301"' in captures
+
+
+_TELEMETRY_SHAPE_RE = re.compile(
+    r'^\{"distinct_id": "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", '
+    r'"created_at": "\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", "notice_shown": (?:true|false)\}\n$'
+)
+_TELEMETRY_SKELETON_RE = re.compile(r'"distinct_id": "[^"]*"|"created_at": "[^"]*"')
+
+
+def test_installer_repaired_telemetry_json_matches_fresh_install_shape(tmp_path: Path) -> None:
+    """The repair path (`mv`) must write the exact same single-line shape as
+    the create path (`ln`, on a fresh install) -- no format drift between
+    the two code paths that can produce this file, so Python's json.loads
+    and canonical-UUID check accept either one verbatim.
+    """
+    fresh_home = tmp_path / "fresh"
+    fresh_home.mkdir()
+    fresh_result = _run_installer(
+        fresh_home,
+        env={"OUROBOROS_TELEMETRY": ""},
+        fake_commands=_telemetry_fake_commands(fresh_home),
+    )
+    assert fresh_result.returncode == 0, fresh_result.stderr
+    fresh_text = (fresh_home / "home" / ".ouroboros" / "telemetry.json").read_text(encoding="utf-8")
+    assert _TELEMETRY_SHAPE_RE.match(fresh_text), fresh_text
+    json.loads(fresh_text)
+
+    repaired_home = tmp_path / "repaired"
+    state_dir = repaired_home / "home" / ".ouroboros"
+    state_dir.mkdir(parents=True)
+    corrupt_state = state_dir / "telemetry.json"
+    corrupt_state.write_text("not-json{{{\n", encoding="utf-8")
+    repaired_result = _run_installer(
+        repaired_home,
+        env={"OUROBOROS_TELEMETRY": ""},
+        fake_commands=_telemetry_fake_commands(repaired_home),
+    )
+    assert repaired_result.returncode == 0, repaired_result.stderr
+    repaired_text = corrupt_state.read_text(encoding="utf-8")
+    assert _TELEMETRY_SHAPE_RE.match(repaired_text), repaired_text
+    json.loads(repaired_text)
+
+    # Strip the id/timestamp so the static skeleton -- key names, order,
+    # spacing, quoting, trailing newline -- can be compared verbatim.
+    assert _TELEMETRY_SKELETON_RE.sub("<X>", fresh_text) == _TELEMETRY_SKELETON_RE.sub(
+        "<X>", repaired_text
+    )
+
+
 def _extract_distinct_id_function() -> str:
     """Pull `_telemetry_distinct_id` verbatim out of install.sh.
 
@@ -643,22 +790,19 @@ def _extract_distinct_id_function() -> str:
     return match.group(0)
 
 
-def test_concurrent_corrupt_telemetry_json_repair_converges_on_one_id(tmp_path: Path) -> None:
-    """N processes racing a corrupt telemetry.json must all adopt the SAME id.
-
-    Regression for a last-writer-wins race: an unconditional `mv` in the
-    repair path let every process that saw the corrupt file mint and persist
-    its own uuid, so different processes emitted events under different
-    distinct_ids while only the last writer's id survived on disk. The
-    repair-lock protocol (mkdir "$f.repair.lock") must make every racer
-    converge on exactly one id — whoever's file is actually on disk after
-    all of them finish.
+def _race_distinct_id_drivers(
+    tmp_path: Path, telemetry_json_content: str, *, n_procs: int = 6
+) -> tuple[list[str], Path, Path]:
+    """Launch N processes that all call `_telemetry_distinct_id` against the
+    same pre-seeded telemetry.json at once, released from a shared barrier
+    to maximize the actual race window. Returns (outputs, state file path,
+    state dir path) for the caller to assert convergence on.
     """
     home = tmp_path / "home"
     state_dir = home / ".ouroboros"
     state_dir.mkdir(parents=True)
     state = state_dir / "telemetry.json"
-    state.write_text("not-json{{{\n", encoding="utf-8")
+    state.write_text(telemetry_json_content, encoding="utf-8")
 
     barrier = tmp_path / "go"
     driver = tmp_path / "driver.sh"
@@ -675,7 +819,6 @@ _telemetry_distinct_id
     )
     driver.chmod(0o755)
 
-    n_procs = 6
     driver_env = os.environ.copy()
     driver_env["HOME"] = str(home)
     procs = [
@@ -697,6 +840,21 @@ _telemetry_distinct_id
         out, err = proc.communicate(timeout=10)
         assert proc.returncode == 0, err
         outputs.append(out.strip())
+    return outputs, state, state_dir
+
+
+def test_concurrent_corrupt_telemetry_json_repair_converges_on_one_id(tmp_path: Path) -> None:
+    """N processes racing a corrupt telemetry.json must all adopt the SAME id.
+
+    Regression for a last-writer-wins race: an unconditional `mv` in the
+    repair path let every process that saw the corrupt file mint and persist
+    its own uuid, so different processes emitted events under different
+    distinct_ids while only the last writer's id survived on disk. The
+    repair-lock protocol (mkdir "$f.repair.lock") must make every racer
+    converge on exactly one id — whoever's file is actually on disk after
+    all of them finish.
+    """
+    outputs, state, state_dir = _race_distinct_id_drivers(tmp_path, "not-json{{{\n")
 
     assert all(outputs), f"a driver returned an empty distinct_id: {outputs}"
     assert len(set(outputs)) == 1, f"driver processes disagreed on distinct_id: {outputs}"
@@ -707,6 +865,40 @@ _telemetry_distinct_id
     assert match.group(1) == outputs[0], (
         "the id every process adopted does not match what's actually persisted"
     )
+
+    leftovers = [p.name for p in state_dir.iterdir() if p.name != "telemetry.json"]
+    assert not leftovers, f"repair left stray tmp/lock artifacts behind: {leftovers}"
+
+
+def test_concurrent_salvage_of_malformed_json_converges_on_the_salvaged_id(
+    tmp_path: Path,
+) -> None:
+    """N processes racing a malformed-but-UUID-bearing telemetry.json must all
+    salvage and converge on the SAME canonicalized id -- specifically the one
+    already in the file, never a freshly minted substitute.
+
+    Regression for a bug found while implementing UUID canonicalization: the
+    winner-side re-validation under the repair lock initially used a lenient
+    check that treated ANY pattern-shaped id in the file as "already
+    repaired", even while the file was still malformed (pre-`mv`). That made
+    every racer skip its own `mv`, permanently leaving the malformed JSON on
+    disk while each process still returned a clean canonical id in memory --
+    so a later reader (this file, or the Python loader) would never actually
+    see a repaired, parseable state.
+    """
+    outputs, state, state_dir = _race_distinct_id_drivers(
+        tmp_path, '{"distinct_id": "3F2504E0-4F89-11D3-9A0C-0305E82C3301", garbage'
+    )
+
+    assert all(outputs), f"a driver returned an empty distinct_id: {outputs}"
+    assert len(set(outputs)) == 1, f"driver processes disagreed on distinct_id: {outputs}"
+    assert outputs[0] == "3f2504e0-4f89-11d3-9a0c-0305e82c3301", (
+        f"processes converged on {outputs[0]!r} instead of the salvaged id"
+    )
+
+    repaired = state.read_text(encoding="utf-8")
+    json.loads(repaired)  # the surrounding JSON must actually be repaired, not just the field
+    assert _extract_distinct_id(repaired) == outputs[0]
 
     leftovers = [p.name for p in state_dir.iterdir() if p.name != "telemetry.json"]
     assert not leftovers, f"repair left stray tmp/lock artifacts behind: {leftovers}"

@@ -25,6 +25,7 @@ from pathlib import Path
 import platform
 import queue
 import random
+import re
 import ssl
 import threading
 import time
@@ -244,15 +245,67 @@ def _state_path() -> Path:
     return Path.home() / ".ouroboros" / "telemetry.json"
 
 
+# Canonical hyphenated UUID: 8-4-4-4-12 hex, case-insensitive on read,
+# lowercase on write. Deliberately nothing else -- no braces, no
+# `urn:uuid:` prefix, no unhyphenated 32-hex -- so this pattern and the
+# installer's shell regex (scripts/install.sh) accept exactly the same
+# strings without either side needing to know the other's language.
+_UUID_PATTERN = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
+# Salvage pattern for malformed JSON: a UUID-shaped distinct_id value can
+# still be regex-extracted from otherwise-broken text (see
+# _build_repair_candidate). Same character classes as _UUID_PATTERN.
+_DISTINCT_ID_FIELD_PATTERN = re.compile(
+    r'"distinct_id"\s*:\s*"'
+    r"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"
+    r'"'
+)
+_NOTICE_SHOWN_TRUE_PATTERN = re.compile(r'"notice_shown"\s*:\s*true\b')
+
+
+def _canonical_distinct_id(value: Any) -> str | None:
+    """Validate `value` as a canonical-hyphenated UUID; return it lowercased.
+
+    None means `value` fails the identity contract: not a string, wrong
+    shape, or a plausible-looking but non-UUID value (an email address, a
+    hostname, anything). A non-UUID identity was previously accepted as
+    long as it was a non-empty string and forwarded to the transport
+    unsanitized -- this is the fix.
+    """
+    if not isinstance(value, str):
+        return None
+    if _UUID_PATTERN.fullmatch(value):
+        return value.lower()
+    return None
+
+
+def _validate_state(raw: Any) -> dict[str, Any] | None:
+    """Validate a parsed JSON value as telemetry state; canonicalize the id.
+
+    Returns `raw` with `distinct_id` replaced by its canonical lowercase
+    form when the shape and the id are both valid, or None otherwise.
+    Centralizing this means every read path (a fresh parse in _load_state,
+    _read_valid_state's re-read-and-adopt loops, the repair-lock
+    re-validation in _repair_state) agrees on exactly what "valid" means.
+    """
+    if not isinstance(raw, dict):
+        return None
+    canonical = _canonical_distinct_id(raw.get("distinct_id"))
+    if canonical is None:
+        return None
+    if canonical == raw.get("distinct_id"):
+        return raw
+    return {**raw, "distinct_id": canonical}
+
+
 def _read_valid_state(path: Path) -> dict[str, Any] | None:
-    """Read and validate telemetry.json, or None if absent/unparseable/empty."""
+    """Read and validate telemetry.json, or None if absent/unparseable/invalid."""
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return None
-    if isinstance(raw, dict) and isinstance(raw.get("distinct_id"), str) and raw["distinct_id"]:
-        return raw
-    return None
+    return _validate_state(raw)
 
 
 def _atomic_write(path: Path, state: dict[str, Any]) -> None:
@@ -274,6 +327,50 @@ def _atomic_write(path: Path, state: dict[str, Any]) -> None:
         raise
 
 
+def _fresh_candidate(*, notice_shown: bool = False) -> dict[str, Any]:
+    return {
+        "distinct_id": str(uuid.uuid4()),
+        "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "notice_shown": notice_shown,
+    }
+
+
+def _build_repair_candidate(raw_text: str) -> dict[str, Any]:
+    """Build the repair candidate for an existing-but-invalid state file.
+
+    Valid JSON with a non-UUID distinct_id (e.g. an email) has nothing to
+    salvage -- the value we have IS the identity-contract violation, so
+    mint fresh. Genuinely malformed (unparseable) JSON might still contain a
+    UUID-shaped distinct_id in the raw bytes; salvaging that instead of
+    minting a new one is what keeps a Python-side repair convergent with an
+    installer-side (shell) repair of the same malformed file, rather than
+    each process fragmenting identity by minting its own. notice_shown is
+    preserved (best-effort textual match) if the raw text plainly contains
+    `"notice_shown": true` -- a repeated first-run notice is benign, but
+    losing a value we could plainly see would not be.
+    """
+    try:
+        json.loads(raw_text)
+        malformed = False
+    except Exception:
+        malformed = True
+
+    if not malformed:
+        return _fresh_candidate()
+
+    match = _DISTINCT_ID_FIELD_PATTERN.search(raw_text)
+    canonical = _canonical_distinct_id(match.group(1)) if match else None
+    if canonical is None:
+        return _fresh_candidate()
+
+    notice_shown = bool(_NOTICE_SHOWN_TRUE_PATTERN.search(raw_text))
+    return {
+        "distinct_id": canonical,
+        "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "notice_shown": notice_shown,
+    }
+
+
 def _load_state() -> dict[str, Any]:
     global _state_cache
     with _lock:
@@ -281,9 +378,10 @@ def _load_state() -> dict[str, Any]:
             return _state_cache
         path = _state_path()
         # Distinguish ABSENT (nothing to fix; race is over who creates it
-        # first) from INVALID (a file exists but is corrupt/unparseable; a
-        # create-if-not-exists primitive cannot fix that -- see
-        # _repair_state).
+        # first) from INVALID (a file exists but is corrupt/unparseable, or
+        # parses fine but fails the identity contract -- e.g. a non-UUID
+        # distinct_id; a create-if-not-exists primitive cannot fix either --
+        # see _repair_state / _build_repair_candidate).
         file_absent = False
         raw_text: str | None
         try:
@@ -298,21 +396,25 @@ def _load_state() -> dict[str, Any]:
         if raw_text is not None:
             try:
                 raw = json.loads(raw_text)
-                if (
-                    isinstance(raw, dict)
-                    and isinstance(raw.get("distinct_id"), str)
-                    and raw["distinct_id"]
-                ):
-                    state = raw
             except Exception:
-                state = {}
+                raw = None
+            if raw is not None:
+                validated = _validate_state(raw)
+                if validated is not None:
+                    state = validated
+                    if isinstance(raw, dict) and raw.get("distinct_id") != validated["distinct_id"]:
+                        # Valid but non-canonical case (e.g. uppercase) --
+                        # persist the canonical form so every future reader,
+                        # this process included, converges on the exact same
+                        # bytes instead of re-canonicalizing on every load.
+                        _write_state(validated)
 
         if not state.get("distinct_id"):
-            candidate = {
-                "distinct_id": str(uuid.uuid4()),
-                "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                "notice_shown": False,
-            }
+            candidate = (
+                _fresh_candidate()
+                if file_absent or raw_text is None
+                else _build_repair_candidate(raw_text)
+            )
             state = (
                 _publish_new_state(path, candidate)
                 if file_absent

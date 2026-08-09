@@ -290,31 +290,98 @@ _telemetry_enabled() {
 
 _telemetry_distinct_id() {
   local f="$HOME/.ouroboros/telemetry.json" id="" winner_id="" tmp file_existed=false lockdir wait_i
+  local salvage_id=""
+  local uuid_re='^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+
+  # Two extraction helpers, deliberately different strictness, both nested
+  # (and `unset -f` below) so extracting just this outer function's source
+  # -- e.g. for an isolated concurrency-test driver -- carries them along
+  # automatically instead of leaving a dangling reference:
+  #
+  #   _telemetry_extract_uuid  -- LENIENT. Prints the id, canonicalized to
+  #   lowercase, whenever the sed-extracted value merely matches the
+  #   hyphenated UUID shape -- uppercase or a file with broken JSON around
+  #   it are still accepted. Used only to find a SALVAGE candidate: a real
+  #   identity worth keeping instead of discarding for a fresh mint.
+  #
+  #   _telemetry_canonical_id  -- STRICT. Prints the id only if it is
+  #   ALREADY fully valid: pattern-valid, lowercase, and (when python3 is on
+  #   PATH) sitting inside well-formed JSON. This is the "has a real repair
+  #   already landed on disk" check. It must be strict: sed's regex
+  #   extraction can't tell a still-broken file with a lowercase id in it
+  #   apart from a freshly repaired one, so the lenient helper would report
+  #   the pre-repair state as already valid and every racer would skip its
+  #   own `mv`, permanently leaving the malformed JSON on disk even though
+  #   every process returned a clean canonical id in memory. Without
+  #   python3 we cannot check JSON well-formedness in pure shell, so that
+  #   part of the check is skipped -- best-effort, matching the rest of
+  #   this file.
+  _telemetry_extract_uuid() {
+    local r
+    r=$(sed -n 's/.*"distinct_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$1" 2>/dev/null | head -1)
+    if [[ "$r" =~ $uuid_re ]]; then
+      printf '%s' "$r" | tr '[:upper:]' '[:lower:]'
+    fi
+  }
+  _telemetry_canonical_id() {
+    local r py
+    r=$(sed -n 's/.*"distinct_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$1" 2>/dev/null | head -1)
+    [[ "$r" =~ $uuid_re ]] || return 0
+    [ "$r" = "$(printf '%s' "$r" | tr '[:upper:]' '[:lower:]')" ] || return 0
+    py=$(command -v python3 2>/dev/null || true)
+    if [ -n "$py" ]; then
+      "$py" -c '
+import json, sys
+json.load(open(sys.argv[1], encoding="utf-8"))
+' "$1" >/dev/null 2>&1 || return 0
+    fi
+    printf '%s' "$r"
+  }
+
   if [ -f "$f" ]; then
     file_existed=true
-    id=$(sed -n 's/.*"distinct_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$f" | head -1)
+    id=$(_telemetry_canonical_id "$f")
+    if [ -z "$id" ]; then
+      # Not already fully valid. Keep any pattern-valid id as a SALVAGE
+      # candidate (a real identity worth repairing-in-place) rather than
+      # discarding it for a fresh mint; an id that isn't even UUID-shaped
+      # (e.g. a stray email address, or no `distinct_id` field at all)
+      # leaves `salvage_id` empty and is treated as fully corrupt below.
+      salvage_id=$(_telemetry_extract_uuid "$f")
+    fi
   fi
+
   if [ -z "$id" ]; then
-    if command -v uuidgen &>/dev/null; then
+    if [ -n "$salvage_id" ]; then
+      id="$salvage_id"
+    elif command -v uuidgen &>/dev/null; then
       id=$(uuidgen | tr '[:upper:]' '[:lower:]')
     elif command -v python3 &>/dev/null; then
       id=$(python3 -c "import uuid; print(uuid.uuid4())" 2>/dev/null || true)
     fi
-    [ -n "$id" ] || return 1
-    mkdir -p "$HOME/.ouroboros" 2>/dev/null || return 1
-    # Publish the freshly generated identity via a same-directory temp file,
-    # then re-read whatever actually landed on disk instead of trusting our
-    # own candidate:
+    if [ -z "$id" ]; then
+      unset -f _telemetry_extract_uuid _telemetry_canonical_id
+      return 1
+    fi
+    if ! mkdir -p "$HOME/.ouroboros" 2>/dev/null; then
+      unset -f _telemetry_extract_uuid _telemetry_canonical_id
+      return 1
+    fi
+    # Publish the (fresh or salvaged) identity via a same-directory temp
+    # file, then re-read whatever actually landed on disk instead of
+    # trusting our own candidate:
     #   - `$f` absent: publish with `ln` (hard link) — atomic
     #     create-if-not-exists, it fails if a concurrently-starting process
     #     (e.g. `ouroboros setup` in step 4, or another MCP session) already
     #     won, so nothing here is ever clobbered.
-    #   - `$f` present but invalid (unparseable / no distinct_id): `ln`/`mv`
-    #     alone are not enough here — every racing process would each `mv`
-    #     its own uuid over the others', with the last writer silently
-    #     winning and everyone else adopting a distinct_id different from
-    #     what they just emitted events under. Exactly one process must own
-    #     the repair. `$f.repair.lock` is the SAME lock name telemetry.py's
+    #   - `$f` present but invalid (unparseable, no distinct_id, a non-UUID
+    #     value, mismatched case, or malformed JSON around an otherwise
+    #     salvageable id): `ln`/an unconditional `mv` are not enough here —
+    #     every racing process would each mint or salvage independently and
+    #     the last `mv` would silently win, so processes that already
+    #     emitted events under their own reading would disagree with what
+    #     ends up persisted. Exactly one process must own the repair.
+    #     `$f.repair.lock` is the SAME lock name telemetry.py's
     #     `_repair_state` uses (it creates the path with `O_CREAT|O_EXCL` as
     #     a file; here `mkdir` is the atomic create-if-not-exists primitive).
     #     Both primitives only check whether *something* already exists at
@@ -322,9 +389,10 @@ _telemetry_distinct_id() {
     #     `O_EXCL` file open correctly exclude each other at the same path
     #     (verified on macOS: whichever side creates the path first, the
     #     other's create call fails with EEXIST).
-    # Either way, every process then adopts whichever distinct_id survives
-    # in `$f` (mirrors telemetry.py's `_publish_new_state` / `_repair_state`,
-    # which now make the same absent-vs-invalid, lock-vs-create distinction).
+    # Either way, every process then adopts whichever valid, canonical
+    # distinct_id survives in `$f` (mirrors telemetry.py's
+    # `_publish_new_state` / `_repair_state`, which apply the same
+    # UUID-validate-canonicalize-and-salvage rules).
     tmp="$f.$$.tmp"
     printf '{"distinct_id": "%s", "created_at": "%s", "notice_shown": false}\n' \
       "$id" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$tmp" 2>/dev/null || true
@@ -332,8 +400,9 @@ _telemetry_distinct_id() {
       lockdir="$f.repair.lock"
       if mkdir "$lockdir" 2>/dev/null; then
         # WINNER: re-validate under the lock -- another process may have
-        # repaired the file between our first read and acquiring it.
-        winner_id=$(sed -n 's/.*"distinct_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$f" 2>/dev/null | head -1)
+        # repaired the file (to a valid id) between our first read and
+        # acquiring it.
+        winner_id=$(_telemetry_canonical_id "$f")
         [ -n "$winner_id" ] || mv "$tmp" "$f" 2>/dev/null || true
         rmdir "$lockdir" 2>/dev/null || true
       else
@@ -343,7 +412,7 @@ _telemetry_distinct_id() {
         wait_i=0
         while [ "$wait_i" -lt 10 ]; do
           sleep 0.05
-          winner_id=$(sed -n 's/.*"distinct_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$f" 2>/dev/null | head -1)
+          winner_id=$(_telemetry_canonical_id "$f")
           [ -n "$winner_id" ] && break
           wait_i=$((wait_i + 1))
         done
@@ -359,11 +428,10 @@ _telemetry_distinct_id() {
       ln "$tmp" "$f" 2>/dev/null || true
     fi
     rm -f "$tmp" 2>/dev/null || true
-    if [ -f "$f" ]; then
-      winner_id=$(sed -n 's/.*"distinct_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$f" | head -1)
-    fi
+    winner_id=$(_telemetry_canonical_id "$f")
     [ -n "$winner_id" ] && id="$winner_id"
   fi
+  unset -f _telemetry_extract_uuid _telemetry_canonical_id
   printf '%s' "$id"
 }
 

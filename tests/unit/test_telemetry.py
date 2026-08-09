@@ -6,12 +6,14 @@ import json
 import os
 from pathlib import Path
 import random
+import re
 import socket
 import subprocess
 import sys
 import threading
 import time
 from typing import Any
+import uuid
 
 import pytest
 
@@ -226,6 +228,124 @@ class TestDistinctId:
         path.parent.mkdir(parents=True)
         path.write_text("not json", encoding="utf-8")
         assert telemetry.distinct_id()
+
+
+# Independent transcription of the installer's shell UUID regex (agreed
+# cross-runtime semantics), NOT telemetry._UUID_PATTERN -- reusing the
+# production pattern object would make the cross-runtime tests circular.
+_SHELL_UUID_PATTERN = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
+
+
+class TestDistinctIdValidation:
+    """Regression: distinct_id must be a validated, canonicalized UUID.
+
+    _load_state() previously accepted any non-empty string as a valid
+    identity and forwarded it to the transport unsanitized -- a probe with
+    {"distinct_id": "person@example.com"} sent that email unchanged. Every
+    read path now validates against the canonical hyphenated UUID shape
+    (see telemetry._UUID_PATTERN) and canonicalizes case, with a malformed-
+    JSON salvage path that keeps a Python-side repair convergent with the
+    installer's shell-side repair of the same file.
+    """
+
+    def test_valid_json_non_uuid_distinct_id_never_transmitted(
+        self, tmp_path: Path, sent: list[dict[str, Any]]
+    ) -> None:
+        state_dir = tmp_path / ".ouroboros"
+        state_dir.mkdir(parents=True)
+        state_path = state_dir / "telemetry.json"
+        state_path.write_text(
+            json.dumps({"distinct_id": "person@example.com", "notice_shown": True}),
+            encoding="utf-8",
+        )
+
+        telemetry.capture("mcp_serve_started", {"transport": "stdio", "tool_count": 1})
+        telemetry.flush(timeout=2.0)
+
+        assert len(sent) == 1
+        transmitted = sent[0]["distinct_id"]
+        assert transmitted != "person@example.com"
+        assert telemetry._UUID_PATTERN.fullmatch(transmitted)
+
+        repaired = json.loads(state_path.read_text(encoding="utf-8"))
+        assert repaired["distinct_id"] == transmitted
+
+    def test_malformed_json_with_salvageable_uuid_is_recovered(self, tmp_path: Path) -> None:
+        state_dir = tmp_path / ".ouroboros"
+        state_dir.mkdir(parents=True)
+        state_path = state_dir / "telemetry.json"
+        state_path.write_text(
+            '{"distinct_id": "3F2504E0-4F89-11D3-9A0C-0305E82C3301", garbage',
+            encoding="utf-8",
+        )
+
+        result = telemetry.distinct_id()
+
+        assert result == "3f2504e0-4f89-11d3-9a0c-0305e82c3301"
+        repaired = json.loads(state_path.read_text(encoding="utf-8"))
+        assert repaired["distinct_id"] == "3f2504e0-4f89-11d3-9a0c-0305e82c3301"
+
+    def test_malformed_json_with_no_salvageable_uuid_mints_fresh(self, tmp_path: Path) -> None:
+        state_dir = tmp_path / ".ouroboros"
+        state_dir.mkdir(parents=True)
+        state_path = state_dir / "telemetry.json"
+        state_path.write_text('{"distinct_id": "not-a-uuid-at-all", garbage', encoding="utf-8")
+
+        result = telemetry.distinct_id()
+
+        assert telemetry._UUID_PATTERN.fullmatch(result)
+        repaired = json.loads(state_path.read_text(encoding="utf-8"))
+        assert repaired["distinct_id"] == result
+
+    def test_valid_json_uppercase_uuid_canonicalized_and_persisted(self, tmp_path: Path) -> None:
+        state_dir = tmp_path / ".ouroboros"
+        state_dir.mkdir(parents=True)
+        state_path = state_dir / "telemetry.json"
+        upper = "3F2504E0-4F89-11D3-9A0C-0305E82C3301"
+        state_path.write_text(
+            json.dumps({"distinct_id": upper, "created_at": "x", "notice_shown": False}),
+            encoding="utf-8",
+        )
+
+        result = telemetry.distinct_id()
+
+        assert result == upper.lower()
+        persisted = json.loads(state_path.read_text(encoding="utf-8"))
+        assert persisted["distinct_id"] == upper.lower()
+
+    def test_installer_shaped_state_is_adopted_unchanged(self, tmp_path: Path) -> None:
+        """Exact single-line shape scripts/install.sh's _telemetry_distinct_id
+        writes via `printf '{"distinct_id": "%s", "created_at": "%s",
+        "notice_shown": false}\\n'` -- Python must adopt it as-is."""
+        state_dir = tmp_path / ".ouroboros"
+        state_dir.mkdir(parents=True)
+        state_path = state_dir / "telemetry.json"
+        installer_id = str(uuid.uuid4())
+        state_path.write_text(
+            f'{{"distinct_id": "{installer_id}", "created_at": "2026-01-01T00:00:00Z", '
+            '"notice_shown": false}\n',
+            encoding="utf-8",
+        )
+
+        result = telemetry.distinct_id()
+
+        assert result == installer_id
+
+    def test_python_repaired_state_matches_installer_regex(self, tmp_path: Path) -> None:
+        state_dir = tmp_path / ".ouroboros"
+        state_dir.mkdir(parents=True)
+        state_path = state_dir / "telemetry.json"
+        state_path.write_text("not json at all {{{", encoding="utf-8")
+
+        result = telemetry.distinct_id()
+
+        assert _SHELL_UUID_PATTERN.fullmatch(result), (
+            f"Python-repaired id {result!r} would not be accepted by the installer's shell regex"
+        )
+        persisted = json.loads(state_path.read_text(encoding="utf-8"))
+        assert _SHELL_UUID_PATTERN.fullmatch(persisted["distinct_id"])
 
 
 class TestCapture:
