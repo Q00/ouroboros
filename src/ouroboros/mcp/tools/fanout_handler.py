@@ -77,14 +77,9 @@ class SubmitFanoutResultsHandler:
                 "one {key, content} per child output — `key` is the value of the "
                 "correlation field for that child. A child you could not spawn "
                 "at all is exactly {key, undispatched: true}; never invent output. "
-                "A submission that is not yet complete answers with a `status` "
-                "and the fields it implies: `partial` lists the required lanes "
-                "still missing (retry with EVERY lane), `invalid_result_entry` "
-                "lists the malformed ones. A complete submission answers with a "
-                "bounded disposable artifact envelope instead — it carries a "
-                "`contract_id`, which no other reply has, and every required "
-                "lane passed its contract. Fetch the correlated outputs with "
-                "the MCP tool `ouroboros_fetch_artifact` when you need them."
+                "Missing required keys return `status=partial`; retry with EVERY lane. "
+                "A complete submission returns a bounded disposable artifact envelope; "
+                "fetch its body with the MCP tool `ouroboros_fetch_artifact`."
             ),
             parameters=(
                 MCPToolParameter(
@@ -208,15 +203,6 @@ class SubmitFanoutResultsHandler:
                 f"fan-out result publication failed: {exc}",
                 tool_name="ouroboros_submit_fanout_results",
             )
-        # The envelope and nothing else, deliberately. Every other branch answers
-        # with a ``status`` and the fields that status implies, so it is tempting
-        # to add one here too and give the caller a single discriminator. That key
-        # would not be this tool's to add: the envelope is the disposable-memory
-        # contract (``extra="forbid"``), the same model ``artifact_validation``
-        # re-parses out of the manifest event, and this reply *being* that model
-        # is what keeps the two one thing. A completed submission is told apart by
-        # what only it carries -- a ``contract_id`` -- and that is what the skills
-        # read.
         return envelope.model_dump(mode="json")
 
 
