@@ -166,14 +166,17 @@ you could not spawn at all is submitted as
 `content` beside it. Never invent output for a lane you did not run; a
 fabricated finding is worse than a missing one.
 
-**Reading the reply.** A `contract_id` means every required lane passed its
-contract — synthesize from the outputs you hold. A reply without one names its
-reason instead: `missing_required_keys`, `contract_violations`.
-**A rejected lane's finding is not evidence:** leave it out of the block.
+**Reading the reply.** With a `contract_id`, synthesize from the outputs you
+hold. Without one, read `missing_required_keys` and `contract_violations`, then
+resubmit once carrying every lane. Still without one — go to B with what
+survived, or with none, saying in one line that the investigation did not come
+back. The interview does not wait on this.
 
-Resubmit once with every lane you hold. Still no `contract_id` — go to B with
-what survived, or with none, saying in one line that the investigation did not
-come back. The interview does not wait on this.
+**Two lanes never reach the block, whatever the reply says.** Leave out a lane
+named in `contract_violations`, and leave out a lane you submitted as
+`undispatched` — a lane that did not run has an empty place, not a clear one,
+and a reply can be accepted while one of them never ran. Where the block would
+have carried that lane, write that it did not run.
 
 There are two lanes and both are required: `code_context` and `data_context`.
 A `code_context` lane that carries a policy returns `answer_prefix:
