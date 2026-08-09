@@ -8,7 +8,9 @@ point at later if the guard is removed.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
+import re
 from typing import Any
 
 import pytest
@@ -268,6 +270,103 @@ def test_the_emitted_prompt_names_the_fields_a_carried_finding_requires(
     prompt = _code_lane_prompt(roster)
     for field in ("answer_prefix", "requires_user_confirmation", "user_confirmation_prompt"):
         assert field in prompt
+
+
+def _prompt_json_block(prompt: str, heading: str) -> Any:
+    """Return the parsed JSON fenced under one ``##`` heading of the prompt."""
+    match = re.search(rf"^{re.escape(heading)}.*?\n```json\n(.*?)\n```", prompt, re.S | re.M)
+    assert match is not None, f"no {heading!r} block in the emitted prompt"
+    return json.loads(match.group(1))
+
+
+def test_the_child_is_given_the_contract_it_is_judged_by(
+    roster: list[dict[str, str]],
+) -> None:
+    """Named fields are not the contract, and the prompt said they were.
+
+    The Output section tells the child its contract is "rendered in full above".
+    Nothing rendered it: the brief named three forwarding fields in prose and
+    carried none of the closed part, so the ordinary empty-roster answer required
+    inventing ``no_repository_in_roster`` -- a literal the prompt never showed --
+    and a reasonable answer in any other wording was rejected. The lane is
+    required, so that was not a degraded consultation but no consultation.
+
+    Pinned as equality rather than as a list of substrings. A substring list is
+    the thing that goes stale when the contract grows a field, and it would have
+    passed against the broken prompt for every field the prose happened to name.
+    """
+    contract = pm_code_context_answer_contract()
+    rendered = _prompt_json_block(_code_lane_prompt(roster), "## Answer Contract")
+    assert rendered == contract
+
+    # The enum the reviewer's probe had to guess is reachable by value now, not
+    # by the child knowing the codebase.
+    prompt = _code_lane_prompt(roster)
+    schema = contract["response_model_schema"]
+    reasons = _state(schema, "NothingExamined")["properties"]["nothing_examined_reason"]["enum"]
+    assert reasons
+    for reason in reasons:
+        assert reason in prompt
+
+
+def test_the_whole_roster_reaches_the_child_at_the_declared_ceiling() -> None:
+    """A roster cut mid-array is cited as a complete one.
+
+    ``examined`` accepts up to 64 entries, and the roster used to be rendered
+    through the generic 2,400-character advisory bound -- crossed by 15
+    ordinarily-named repositories. ``_bounded_json`` answers that by cutting,
+    which does not produce a rejected answer: the child reports honestly on
+    everything it was shown and says it examined the roster, while the
+    repositories past the cut were never in front of it.
+
+    So the ceiling this checks is the contract's own, and the assertion is on
+    every identifier rather than on a count.
+    """
+    roster = pm_repository_roster(
+        [
+            {
+                "name": f"payments-ledger-service-{index:02d}",
+                "path": f"/Users/dev/workspace/acme-platform/payments-ledger-service-{index:02d}",
+            }
+            for index in range(64)
+        ]
+    )
+    assert len(roster) == 64
+
+    prompt = _code_lane_prompt(roster)
+    rendered = _prompt_json_block(prompt, "## Repository Roster")
+    assert rendered == roster
+    assert "... [truncated]" not in prompt
+
+
+def test_a_roster_too_large_to_render_whole_leaves_the_question_unassisted() -> None:
+    """Refusing the consultation beats giving it a scope it cannot see.
+
+    Sixty-four repositories is legal by count and can still be too large by
+    bytes, and there is no honest half of a roster: the two outcomes are the
+    whole list or no lanes. The user still gets their question -- the refusal
+    lands in ``attach_question_advisory``'s existing build guard, which attaches
+    nothing rather than failing the turn.
+    """
+    roster = pm_repository_roster(
+        [
+            {
+                "name": f"service-{index:02d}",
+                "path": "/Users/dev/" + "deeply-nested-monorepo-segment/" * 14 + f"svc-{index:02d}",
+            }
+            for index in range(64)
+        ]
+    )
+    meta: dict[str, Any] = {}
+    attach_question_advisory(
+        meta,
+        tool_name="ouroboros_pm_interview",
+        session_id="pm-oversized",
+        question=QUESTION,
+        repository_roster=roster,
+    )
+    assert "question_advisory_subagents" not in meta
+    assert "question_advisory_recommended" not in meta
 
 
 # ── Decision 2: one door in, and no prefix that skips the person ─────────

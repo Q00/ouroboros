@@ -25,12 +25,14 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 import hashlib
+import json
 from typing import Any
 
 import structlog
 
 from ouroboros.backends.capabilities import build_runtime_subagent_orchestration_contract
 from ouroboros.mcp.tools.advisory_prompts import (
+    _INTERVIEW_DATA_CONTRACT_MAX_JSON_CHARS,
     _advisory_output_section,
     _bounded_json,
     _data_context_lane_brief,
@@ -75,8 +77,53 @@ def _tool_advisory_catalog(tool_name: str) -> Mapping[str, Any]:
     return catalog if isinstance(catalog, Mapping) else {}
 
 
-def _pm_code_context_lane_brief(roster: Any, child_answer_rule: str) -> str:
-    """Render the PM code lane's standing rules plus the roster it may cite.
+#: The roster is rendered whole or not at all, so this is the size past which
+#: the lane is refused rather than trimmed. It is set from the boundary the
+#: contract already declares: ``examined`` accepts at most
+#: ``_PM_EXAMINED_MAX_REPOSITORIES`` (64) entries, and 64 entries carrying
+#: deeply-nested monorepo paths render to ~19k characters, so a roster at the
+#: declared ceiling never reaches this bound.
+#:
+#: It exists because the generic advisory bound (2,400) does not: a roster of 15
+#: ordinarily-named repositories crossed it, and ``_bounded_json`` answers that
+#: by cutting mid-array. The child then read a shorter roster than re-entry
+#: enforces and had no way to know it -- so "I examined the roster and found no
+#: policy" was contract-valid, honestly written, and false about the
+#: repositories it was never shown.
+_PM_ROSTER_MAX_JSON_CHARS = 24_000
+
+
+def _pm_roster_json(roster: Any) -> str:
+    """Render the whole roster, or refuse the lane.
+
+    Deliberately not ``_bounded_json``. Truncation is survivable for a thing the
+    child reads *around* -- a synthesis contract, a code-fact request -- and not
+    for the list its answer is bounded by, because a partial roster does not
+    produce a rejected answer. It produces an accepted one that is wrong: the
+    child reports honestly on everything it was given, and neither it nor the
+    parent can see what was cut.
+
+    So a roster that does not fit raises, and ``attach_question_advisory``
+    already turns that into "no lanes attached" rather than a failed turn -- the
+    user still gets their question, without a consultation, which is the honest
+    outcome when the consultation cannot be given its scope.
+    """
+    rendered = json.dumps(roster, ensure_ascii=False, sort_keys=True, indent=2)
+    if len(rendered) > _PM_ROSTER_MAX_JSON_CHARS:
+        raise ValueError(
+            f"repository roster renders to {len(rendered)} chars, over the "
+            f"{_PM_ROSTER_MAX_JSON_CHARS} the code lane may carry; a partial "
+            "roster would be cited as a complete one"
+        )
+    return rendered
+
+
+def _pm_code_context_lane_brief(
+    roster: Any,
+    child_answer_rule: str,
+    answer_contract: Any,
+) -> str:
+    """Render the PM code lane's standing rules, its answer contract, and the roster.
 
     The roster is printed rather than described because the boundary is decided
     by value: an ``examined`` entry whose ``repo_id`` is not in this list is
@@ -93,8 +140,26 @@ def _pm_code_context_lane_brief(roster: Any, child_answer_rule: str) -> str:
     child both that its finding is confirmed and recorded, and that there is
     nothing to confirm. A rule with two spellings is a rule that stops agreeing
     with itself, so this brief renders the declared one.
+
+    ``answer_contract`` is rendered for the same reason the roster is, and it was
+    missing for longer. The prose above names the fields a finding needs; it does
+    not carry the closed part -- the three ``nothing_examined_reason`` literals,
+    ``additionalProperties``, the array and length bounds. The Output section
+    then told the child its contract was "rendered in full above" while nothing
+    had rendered it, so the ordinary empty-roster answer required guessing an
+    unshown literal, and a reasonable one was rejected. This lane is required, so
+    a rejected answer is not a worse answer -- it is no consultation at all.
     """
-    roster_json = _bounded_json(roster, _INTERVIEW_ADVISORY_MAX_JSON_CHARS)
+    roster_json = _pm_roster_json(roster)
+    contract_json = _bounded_json(answer_contract, _INTERVIEW_DATA_CONTRACT_MAX_JSON_CHARS)
+    contract_id = ""
+    if isinstance(answer_contract, Mapping):
+        contract_id = str(answer_contract.get("contract_id") or "")
+    # Named from the contract's own id rather than spelled here, so the heading
+    # cannot outlive a rename the way a hand-written one would.
+    contract_heading = (
+        f"## Answer Contract ({contract_id})" if contract_id else "## Answer Contract"
+    )
     return f"""Read these repositories and report what they implement today for this
 question.
 
@@ -132,6 +197,11 @@ returned is not one at all.
 ## Repository Roster
 ```json
 {roster_json}
+```
+
+{contract_heading}
+```json
+{contract_json}
 ```"""
 
 
@@ -164,7 +234,11 @@ def _lane_instructions(
                 "Find the policy the roster repositories implement today for this "
                 "question, and report it descriptively. If they do not implement "
                 "one, say which repositories you read and give the reason.",
-                _pm_code_context_lane_brief(roster, str(catalog.get("child_answer_rule") or "")),
+                _pm_code_context_lane_brief(
+                    roster,
+                    str(catalog.get("child_answer_rule") or ""),
+                    raw_lane.get("answer_contract"),
+                ),
             )
         return (
             "Inspect the local repository for facts that directly answer or "
