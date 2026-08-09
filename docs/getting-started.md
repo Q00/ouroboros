@@ -13,10 +13,10 @@ Transform a vague idea into a verified, working codebase -- with any AI coding a
 
 You do not install Ouroboros with pip on this path, but the host needs two
 things: **`uvx`**, because the plugin's MCP server is launched with it
-([`.claude-plugin/.mcp.json`](../.claude-plugin/.mcp.json)), and **`python3`**,
-because the bundled skills shell out to it directly — `skills/setup/SKILL.md:98`
-when recording the first-run preference and `skills/welcome/SKILL.md:68` during
-readiness detection. Install uv with `pipx install uv`, `pip install --user uv`,
+([`.claude-plugin/.mcp.json`](../.claude-plugin/.mcp.json)), and **`python3` (3.12 recommended, 3.11 minimum)**, because the plugin's skills
+shell out to it directly (`.claude-plugin/skills/setup/SKILL.md:98`) and import
+`datetime.UTC` (`.claude-plugin/skills/welcome/SKILL.md:168`), which does not
+exist before Python 3.11. Install uv with `pipx install uv`, `pip install --user uv`,
 or `brew install uv`.
 
 `uvx --python '>=3.12'` supplies an interpreter to the isolated MCP process; it

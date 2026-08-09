@@ -25,7 +25,7 @@ Ouroboros는 **Claude Code**를 런타임 백엔드로 쓸 수 있습니다. **C
 시작하기 전에 호스트에 두 가지가 있어야 합니다:
 
 - **`uvx`** — 플러그인의 MCP 매니페스트가 이걸로 서버를 띄웁니다([`.claude-plugin/.mcp.json`](../../.claude-plugin/.mcp.json)).
-- **`python3`** — 번들 스킬들이 셸에서 직접 호출합니다. setup 스킬이 첫 실행 설정을 기록할 때([`skills/setup/SKILL.md:98`](../../.claude-plugin/skills/setup/SKILL.md)), welcome 스킬이 준비 상태를 판별할 때([`skills/welcome/SKILL.md:68`](../../.claude-plugin/skills/welcome/SKILL.md)) 모두 `python3`을 씁니다.
+- **`python3` (3.12 이상 권장, 최소 3.11)** — 마켓플레이스 플러그인이 싣는 스킬들이 셸에서 직접 호출합니다([`.claude-plugin/skills/setup/SKILL.md:98`](../../.claude-plugin/skills/setup/SKILL.md), [`.claude-plugin/skills/welcome/SKILL.md`](../../.claude-plugin/skills/welcome/SKILL.md)). 이 welcome 스킬은 `from datetime import UTC`를 쓰는데(`:168`, `:468`, `:495`), **`datetime.UTC`는 Python 3.11부터 존재합니다.** 3.10 호스트는 사전 조건을 만족한 채로 MCP 프로세스는 뜨지만 `ooo` welcome 흐름에서 `ImportError`로 실패합니다.
 
 ```bash
 pipx install uv
@@ -61,7 +61,7 @@ ooo
 
 - Claude Code CLI 설치 및 인증 완료 (Pro 또는 Max Plan)
 - **`uvx`** (uv에 포함) — 위에서 설명한 대로 플러그인 MCP 매니페스트가 이걸로 서버를 띄웁니다
-- **`python3`** — 번들 스킬이 셸에서 직접 호출합니다. `uvx`가 이걸 대신하지 않습니다 ([#2001](https://github.com/Q00/ouroboros/issues/2001))
+- **`python3` (3.12 이상 권장, 최소 3.11)** — 플러그인이 싣는 스킬이 셸에서 직접 호출하고, `datetime.UTC` 때문에 3.11 미만은 실패합니다. `uvx`가 이걸 대신하지 않습니다 ([#2001](https://github.com/Q00/ouroboros/issues/2001))
 
 아래 독립 CLI 경로의 `Python >= 3.12` 요구사항은 **이 경로에는 해당하지 않습니다.**
 
