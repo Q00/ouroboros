@@ -290,11 +290,6 @@ def _new_claim_path(target: Path, generation: str, label: str) -> Path:
     return target.parent / f".claude-runtime-activation.{generation}.{label}.claim"
 
 
-def _link_if_absent(source: Path, destination: Path) -> None:
-    """Publish ``source`` only while ``destination`` is atomically absent."""
-    os.link(source, destination, follow_symlinks=False)
-
-
 def _rename_if_absent(source: Path, destination: Path) -> None:
     """Atomically move ``source`` without ever replacing ``destination``."""
     if os.name == "nt":  # pragma: no cover - exercised on Windows
@@ -344,24 +339,23 @@ def _rename_if_absent(source: Path, destination: Path) -> None:
 
 
 def _restore_claim_if_absent(claim: Path, target: Path) -> bool:
-    """Restore a claimed inode without overwriting a newer target generation."""
+    """Atomically move a claimed inode back without overwriting a newer target."""
     claimed = _snapshot_target(claim)
     if claimed.kind != "file":
         raise _ConcurrentActivationError(f"Recovery claim is not a regular file: {claim}")
     try:
-        _link_if_absent(claim, target)
+        _rename_if_absent(claim, target)
     except FileExistsError:
         return False
     _claim_restoration_checkpoint("linked", target)
     if not fsync_parent_directory(target):
         raise OSError(f"Could not confirm claimed generation restoration: {target}")
     _claim_restoration_checkpoint("durable", target)
-    _remove_owned_artifact(claim, _owned_guard(claimed))
     return True
 
 
 def _claim_restoration_checkpoint(_phase: str, _target: Path) -> None:
-    """Test seam around restored-live durability and claim retirement."""
+    """Test seam around atomic claim restoration and its directory durability."""
 
 
 def _artifact_cleanup_checkpoint(_path: Path) -> None:
@@ -374,16 +368,19 @@ def _remove_owned_artifact(
     *,
     durable: bool = True,
 ) -> None:
-    """Quarantine then remove only the exact owned generation at ``path``.
+    """Retire only the exact owned generation at ``path``.
 
-    The operator-visible path is never unlinked after a separate check.  A
-    last-moment replacement is atomically moved to quarantine, identified as
-    foreign, and restored without changing its inode, contents, or mode.
+    Portable filesystems do not expose unlink-if-inode.  Consequently even an
+    unpredictable quarantine name has a snapshot-to-unlink race against a
+    same-UID directory observer.  We therefore never path-unlink here: the
+    owned inode is moved to an unpredictable retired tombstone.  A last-moment
+    foreign replacement is moved, identified, and restored without changing
+    its inode, contents, or mode.
     """
     current = _snapshot_target(path)
     if current.kind == "missing":
         return
-    quarantine = path.parent / f".{path.name}.{uuid4().hex}.cleanup"
+    quarantine = path.parent / f".{path.name}.{uuid4().hex}.retired"
     _artifact_cleanup_checkpoint(path)
     _rename_if_absent(path, quarantine)
     quarantined = _snapshot_target(quarantine)
@@ -393,9 +390,9 @@ def _remove_owned_artifact(
                 f"Changed cleanup target and its replacement were both preserved: {path}"
             )
         raise _ConcurrentActivationError(f"Refusing to remove a changed artifact: {path}")
-    # The quarantine name is unpredictable and was populated by the atomic
-    # no-replace move above; the disclosed/original path is never path-unlinked.
-    quarantine.unlink()
+    # Do not unlink the retired name.  There is no portable conditional unlink,
+    # and retaining a small setup-owned tombstone is safer than deleting a
+    # foreign inode inserted after the guard snapshot.
     if durable and not fsync_parent_directory(path):
         raise OSError(f"Could not confirm owned artifact cleanup: {path}")
 
@@ -452,7 +449,7 @@ def _promote_prepared_under_lock(
 
     try:
         _promotion_checkpoint("publish", target)
-        _link_if_absent(prepared.path, target)
+        _rename_if_absent(prepared.path, target)
     except BaseException:
         if expected.kind == "file" and _snapshot_target(claim).kind == "file":
             _restore_claim_if_absent(claim, target)
@@ -460,17 +457,6 @@ def _promote_prepared_under_lock(
     published = _snapshot_target(target)
     if not _matches_guard(published, _owned_guard(prepared.snapshot), strict=False):
         raise _ConcurrentActivationError(f"Prepared generation was not published: {target}")
-    try:
-        _remove_owned_artifact(
-            prepared.path,
-            _owned_guard(prepared.snapshot),
-            durable=False,
-        )
-    except BaseException as exc:
-        raise _DurabilityError(target, published) from exc
-    published = _snapshot_target(target)
-    if not _same_owned_generation(published, prepared.snapshot):
-        raise _ConcurrentActivationError(f"Published generation changed: {target}")
     if not fsync_parent_directory(target):
         raise _DurabilityError(target, published)
     return published
@@ -572,21 +558,10 @@ def _write_journal(
     try:
         _require_snapshot(path, expected)
         _journal_publication_checkpoint(path)
-        _link_if_absent(staging, path)
+        _rename_if_absent(staging, path)
         published = _snapshot_target(path)
         if not _matches_guard(published, _owned_guard(prepared.snapshot), strict=False):
             raise _ConcurrentActivationError("Activation journal generation changed during write")
-        try:
-            _remove_owned_artifact(
-                staging,
-                _owned_guard(prepared.snapshot),
-                durable=False,
-            )
-        except BaseException as exc:
-            raise _DurabilityError(path, published) from exc
-        published = _snapshot_target(path)
-        if not _same_owned_generation(published, prepared.snapshot):
-            raise _ConcurrentActivationError("Activation journal generation changed after publish")
         if not fsync_parent_directory(path):
             raise _DurabilityError(path, published)
         return published

@@ -4621,7 +4621,7 @@ raise SystemExit(0 if activate_claude_runtime("/second/claude") else 2)
     def test_setup_claude_recovery_is_idempotent_across_claim_restoration_crash(
         self, tmp_path: Path, restoration_phase: str
     ) -> None:
-        """A second crash before claim retirement remains recoverable on the third run."""
+        """A crash around atomic claim restoration remains recoverable on the third run."""
         config_dir = tmp_path / ".ouroboros"
         config_dir.mkdir()
         config_path = config_dir / "config.yaml"
@@ -4674,7 +4674,7 @@ activation.activate_claude_runtime("/second/claude")
 
         assert second.returncode == 92
         assert config_path.read_bytes() == original
-        assert tuple(config_dir.glob("*.config-original.claim"))
+        assert not tuple(config_dir.glob("*.config-original.claim"))
 
         final_script = """
 from ouroboros.cli.runtime_activation import activate_claude_runtime
@@ -5336,10 +5336,10 @@ raise SystemExit(0 if activate_claude_runtime("/second/claude") else 2)
             assert setup_cmd._setup_claude("/second/claude") is True
 
     @pytest.mark.parametrize("published_target", ["config", "credentials"])
-    def test_setup_claude_rolls_back_when_published_stage_cleanup_fails(
+    def test_setup_claude_publication_consumes_stage_without_cleanup_race(
         self, tmp_path: Path, published_target: str
     ) -> None:
-        """A post-link staging failure still carries the exact live generation."""
+        """No-replace rename publishes a stage without a later unlink boundary."""
         config_dir = tmp_path / ".ouroboros"
         config_dir.mkdir()
         config_path = config_dir / "config.yaml"
@@ -5350,7 +5350,7 @@ raise SystemExit(0 if activate_claude_runtime("/second/claude") else 2)
             self._write_credentials(config_dir)
         injected = False
 
-        def _fail_published_stage_cleanup(path: Path) -> None:
+        def _observe_published_stage_cleanup(path: Path) -> None:
             nonlocal injected
             if injected or not path.name.endswith(f".{published_target}.stage"):
                 return
@@ -5358,25 +5358,97 @@ raise SystemExit(0 if activate_claude_runtime("/second/claude") else 2)
             if not target.exists():
                 return
             injected = True
-            raise OSError("post-link staging cleanup failed")
 
         with (
             patch("pathlib.Path.home", return_value=tmp_path),
             patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
             patch(
                 "ouroboros.cli.runtime_activation._artifact_cleanup_checkpoint",
-                side_effect=_fail_published_stage_cleanup,
+                side_effect=_observe_published_stage_cleanup,
             ),
             patch("ouroboros.cli.commands.setup.print_success") as mock_success,
         ):
-            assert setup_cmd._setup_claude("/usr/local/bin/claude") is False
+            assert setup_cmd._setup_claude("/usr/local/bin/claude") is True
 
-        assert injected
-        assert config_path.read_bytes() == original
-        if published_target == "credentials":
-            assert not credentials_path.exists()
+        assert not injected
+        assert (
+            yaml.safe_load(config_path.read_text(encoding="utf-8"))["orchestrator"][
+                "runtime_backend"
+            ]
+            == "claude"
+        )
+        assert credentials_path.is_file()
         assert not (config_dir / runtime_activation._JOURNAL_NAME).exists()
-        mock_success.assert_not_called()
+        assert not tuple(config_dir.glob(f"*.{published_target}.stage"))
+        mock_success.assert_called_once()
+
+    def test_remove_owned_artifact_never_unlinks_replaced_retired_generation(
+        self, tmp_path: Path
+    ) -> None:
+        """A same-UID observer may replace a tombstone after its guard snapshot."""
+        owned = tmp_path / ".owned.stage"
+        owned.write_bytes(b"setup-owned\n")
+        expected = runtime_activation._snapshot_target(owned)
+        operator_source = tmp_path / ".operator-retired"
+        operator_source.write_bytes(b"operator-generation\n")
+        operator_source.chmod(0o640)
+        operator_identity = (operator_source.stat().st_dev, operator_source.stat().st_ino)
+        injected_path: list[Path] = []
+        original_matches = runtime_activation._matches_guard
+
+        def _replace_after_match(
+            snapshot: runtime_activation._FileSnapshot,
+            guard: object,
+            *,
+            strict: bool,
+        ) -> bool:
+            matched = original_matches(snapshot, guard, strict=strict)
+            if matched and not injected_path:
+                retired = next(tmp_path.glob(".*.retired"))
+                os.replace(operator_source, retired)
+                injected_path.append(retired)
+            return matched
+
+        with patch(
+            "ouroboros.cli.runtime_activation._matches_guard",
+            side_effect=_replace_after_match,
+        ):
+            runtime_activation._remove_owned_artifact(
+                owned,
+                runtime_activation._owned_guard(expected),
+                durable=False,
+            )
+
+        assert not owned.exists()
+        assert injected_path
+        preserved = injected_path[0]
+        assert preserved.read_bytes() == b"operator-generation\n"
+        assert stat.S_IMODE(preserved.stat().st_mode) == 0o640
+        assert (preserved.stat().st_dev, preserved.stat().st_ino) == operator_identity
+
+    def test_setup_claude_repeated_activation_keeps_live_targets_single_linked(
+        self, tmp_path: Path
+    ) -> None:
+        """Retired tombstones never keep a hard link to the live generation."""
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        config_path.write_text(
+            "orchestrator:\n  runtime_backend: codex\nllm:\n  backend: codex\n",
+            encoding="utf-8",
+        )
+        credentials_path = self._write_credentials(config_dir)
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+        ):
+            assert setup_cmd._setup_claude("/first/claude") is True
+            assert setup_cmd._setup_claude("/second/claude") is True
+
+        assert config_path.stat().st_nlink == 1
+        assert credentials_path.stat().st_nlink == 1
+        assert tuple(config_dir.glob("*.retired"))
 
     @pytest.mark.parametrize("prepared_target", ["config", "credentials"])
     def test_setup_claude_preserves_operator_stage_when_prepare_sync_fails(
@@ -5583,7 +5655,7 @@ raise SystemExit(0 if activate_claude_runtime("/second/claude") else 2)
         assert config_path.read_bytes() == original
         assert not tuple(config_dir.glob(".*.tmp"))
 
-    def test_setup_claude_removes_fresh_topology_when_config_replace_fails(
+    def test_setup_claude_retires_fresh_topology_when_config_replace_fails(
         self, tmp_path: Path
     ) -> None:
         config_dir = tmp_path / ".ouroboros"
@@ -5602,7 +5674,14 @@ raise SystemExit(0 if activate_claude_runtime("/second/claude") else 2)
         ):
             assert setup_cmd._setup_claude("/usr/local/bin/claude") is False
 
-        assert not config_dir.exists()
+        assert not config_path.exists()
+        assert not (config_dir / "credentials.yaml").exists()
+        assert not (config_dir / runtime_activation._JOURNAL_NAME).exists()
+        assert not tuple(config_dir.glob("*.stage"))
+        assert not tuple(config_dir.glob("*.claim"))
+        retired = tuple(config_dir.glob("*.retired"))
+        assert retired
+        assert all(path.is_file() for path in retired)
 
     def test_setup_claude_rolls_back_config_but_preserves_concurrent_credentials_edit(
         self, tmp_path: Path
