@@ -118,7 +118,8 @@ LateralPersonaMetadata = _lateral_personas.LateralPersonaMetadata
 LateralPersonaPanelMetadata = _lateral_personas.LateralPersonaPanelMetadata
 _lateral_persona_panel_metadata = _lateral_personas._lateral_persona_panel_metadata
 _lateral_persona_panel_request_schema = _lateral_personas._lateral_persona_panel_request_schema
-_pm_interview_subagent_metadata = _lateral_personas._pm_interview_subagent_metadata
+_pm_schemas = importlib.import_module(f"{__name__}.pm_schemas")
+_pm_orchestration_metadata = _pm_schemas._pm_orchestration_metadata
 
 
 @dataclass(frozen=True, slots=True)
@@ -1329,7 +1330,7 @@ def _orchestration_metadata_for_ouroboros_tool(name: str) -> Mapping[str, Any]:
     if ralph_family_metadata:
         metadata["ralph_family"] = ralph_family_metadata
     if name == "ouroboros_pm_interview":
-        return {**metadata, "pm_interview_subagent": _pm_interview_subagent_metadata()}
+        return {**metadata, **_pm_orchestration_metadata()}
     if name not in {"ouroboros_interview", "ouroboros_lateral_think"}:
         return metadata
     lateral_panel = _lateral_persona_panel_metadata().to_dict()
@@ -1360,7 +1361,7 @@ def _orchestration_metadata_for_ouroboros_tool(name: str) -> Mapping[str, Any]:
                 "decision or low-confidence confirmation to the user."
             ),
         },
-        "question_advisory_fanout": _interview_question_advisory_fanout_metadata(),
+        "question_advisory_fanout": _interview_schemas._interview_question_advisory_fanout_metadata(),
         "lateral_panel": lateral_panel,
     }
 

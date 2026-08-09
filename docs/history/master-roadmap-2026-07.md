@@ -1,3 +1,30 @@
+> [!WARNING]
+> **Immutable historical snapshot — non-normative and superseded.**
+>
+> - Snapshot date: 2026-07-02
+> - Source commit: [`715a0c63556d330c529085dfb83d066890703a72`](https://github.com/Q00/ouroboros/commit/715a0c63556d330c529085dfb83d066890703a72)
+> - Repository baseline captured by the plan: `aa4aa20b` (v0.44.0)
+> - Current sequencing SSOT: [GitHub issue #961](https://github.com/Q00/ouroboros/issues/961)
+>
+> The original work orders below are retained verbatim for traceability. They
+> must not be executed or treated as current repository guidance.
+
+## Final work-order dispositions
+
+| Work order | Final disposition | Evidence |
+| --- | --- | --- |
+| PR-A | Landed | [#1540](https://github.com/Q00/ouroboros/pull/1540) deleted the confirmed dead code. |
+| PR-B | Superseded / partially landed | [#1571](https://github.com/Q00/ouroboros/pull/1571) landed the valid JSONL and child-environment deduplication; the prompt-composition target was rejected because the implementations were not behaviorally identical. |
+| PR-C | Landed | [#1543](https://github.com/Q00/ouroboros/pull/1543) emitted provider-neutral sequential subagent contracts. |
+| PR-D | Landed | [#1547](https://github.com/Q00/ouroboros/pull/1547) added bounded automatic evaluation chaining after successful runs. |
+| PR-E | Landed | [#1549](https://github.com/Q00/ouroboros/pull/1549) extracted the evidence helper library. |
+| PR-F | Landed | [#1551](https://github.com/Q00/ouroboros/pull/1551) added structured acceptance criteria. |
+| PR-G | Landed | [#1548](https://github.com/Q00/ouroboros/pull/1548) made the executor consume AC success contracts through verify-by-default gates and retries. |
+| PR-H | Landed | [#1572](https://github.com/Q00/ouroboros/pull/1572) made evaluation judge declared AC contracts and enforce the reward-hacking veto. |
+| PR-I | Landed | [#1574](https://github.com/Q00/ouroboros/pull/1574) split the interview authoring handler by action. |
+| PR-J | Landed | [#1578](https://github.com/Q00/ouroboros/pull/1578) added the generic fan-out core and correlated result re-entry. |
+| PR-K | Landed | [#1580](https://github.com/Q00/ouroboros/pull/1580) added the bounded interview fan-out injection points. |
+
 # Master Roadmap 2026-07 — Dead Code → Provider Parity → Verifiable Loop → Interview Fan-out
 
 > Status: APPROVED PLAN (2026-07-02). Baseline: `main` @ `aa4aa20b` (v0.44.0).

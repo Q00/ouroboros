@@ -1,5 +1,7 @@
 # Hidden-Checklist Convergence Requirements
 
+> 中文说明：[README.zh-CN.md](./README.zh-CN.md)
+
 > Generated: 2026-08-07
 > Status: Implemented
 
@@ -12,8 +14,10 @@ the preceding verdict remains authoritative if successor chaining fails.
 
 ## Clarified Specification
 
-- Hide every harness-owned `verify_command` and `output_assertion` from initial
-  and retry worker prompts without a configuration escape hatch.
+- Hide every harness-owned `verify_command` and `output_assertion` from every
+  Ouroboros-transported worker prompt, context, event, artifact, and retry
+  surface without a configuration escape hatch. This contract does not claim
+  to sandbox independently accessible raw Seed files.
 - Build retry guidance from missing artifacts, sanitized verification output,
   and read-only worker tool/file evidence.
 - Formally evaluate completed runs even when AC execution failed, provided an
@@ -39,3 +43,5 @@ the preceding verdict remains authoritative if successor chaining fails.
   detached evaluation request and cannot flip when configuration changes.
 - Approved/unjudged/opted-out evaluations do not enqueue Ralph.
 - Static checks and the bounded target test suites pass.
+- Builtin runtimes retain and can deterministically close the configured
+  composition owner; backend handle aliases do not cause nested runtime creation.

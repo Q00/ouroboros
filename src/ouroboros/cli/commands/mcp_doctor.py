@@ -22,9 +22,14 @@ import sys
 from typing import Annotated, Literal
 
 from rich.console import Console
+from rich.markup import escape
 import typer
 
 from ouroboros.config.models import resolve_event_store_path
+from ouroboros.package_profiles import (
+    UNSUPPORTED_CLAUDE_SDK_MCP_MESSAGE,
+    has_unsupported_claude_sdk_mcp_mix,
+)
 
 # ---------------------------------------------------------------------------
 # Data model
@@ -116,7 +121,7 @@ def check_mcp_import() -> CheckResult:
             message="mcp package not importable",
             remediation=(
                 "Run the server in its isolated profile: "
-                "uvx --from 'ouroboros-ai[mcp]' ouroboros mcp serve"
+                "uvx --python '>=3.12' --from 'ouroboros-ai[mcp]' ouroboros mcp serve"
             ),
         )
 
@@ -140,8 +145,8 @@ def check_mcp_import() -> CheckResult:
             message=f"mcp {version} is not the required MCP 2 runtime",
             remediation=(
                 "Do not add MCP 2 to the Claude SDK environment. Launch the "
-                "separate server process with: uvx --from 'ouroboros-ai[mcp]' "
-                "ouroboros mcp serve"
+                "separate server process with: uvx --python '>=3.12' --from "
+                "'ouroboros-ai[mcp]' ouroboros mcp serve"
             ),
         )
     return CheckResult(
@@ -151,8 +156,7 @@ def check_mcp_import() -> CheckResult:
     )
 
 
-_CLAUDE_RUNTIME_BACKENDS = frozenset({"claude", "claude_code"})
-_CLAUDE_LLM_BACKENDS = frozenset({"claude", "claude_code"})
+_CLAUDE_SDK_RUNTIME_BACKENDS = frozenset({"claude", "claude_code"})
 _GOOSE_RUNTIME_BACKENDS = frozenset({"goose", "goose_cli"})
 
 
@@ -177,16 +181,20 @@ def _get_llm_backend() -> str:
 
 
 def check_claude_agent_sdk_import() -> CheckResult:
-    """Check that the ``claude`` extra (claude-agent-sdk) is installed.
-
-    The check is backend-aware: when the configured runtime is *not*
-    Claude-based (e.g. ``codex`` or ``opencode``), a missing
-    ``claude-agent-sdk`` is downgraded to **warn** instead of **fail**
-    because the package is not required for that backend.
-    """
+    """Diagnose the default Claude SDK/MCP 1 profile."""
     runtime = _get_runtime_backend()
-    llm_backend = _get_llm_backend()
-    needs_claude = runtime in _CLAUDE_RUNTIME_BACKENDS or llm_backend in _CLAUDE_LLM_BACKENDS
+    needs_sdk = runtime in _CLAUDE_SDK_RUNTIME_BACKENDS
+
+    if has_unsupported_claude_sdk_mcp_mix():
+        return CheckResult(
+            name="claude_agent_sdk_import",
+            status="fail",
+            message=UNSUPPORTED_CLAUDE_SDK_MCP_MESSAGE,
+            remediation=(
+                "Recreate this environment with 'ouroboros-ai[claude]' for the SDK/MCP 1 "
+                "runtime, or use 'ouroboros-ai[mcp,claude-cli]' for the MCP 2 CLI worker."
+            ),
+        )
 
     try:
         import claude_agent_sdk  # noqa: F401
@@ -198,31 +206,25 @@ def check_claude_agent_sdk_import() -> CheckResult:
         return CheckResult(
             name="claude_agent_sdk_import",
             status="pass",
-            message=f"claude-agent-sdk {version} (standalone Claude profile)",
+            message=f"claude-agent-sdk {version} (isolated [claude]/[claude-sdk] profile)",
         )
     except ImportError:
-        if needs_claude:
+        if needs_sdk:
             return CheckResult(
                 name="claude_agent_sdk_import",
                 status="fail",
-                message=(
-                    "Claude SDK backend is configured but unavailable in the isolated MCP 2 process"
-                ),
+                message="Claude SDK runtime is configured but [claude] is not installed",
                 remediation=(
-                    "Do not combine the incompatible [mcp] and [claude] profiles. "
-                    "For MCP execution, configure a supported CLI-backed runtime and "
-                    "LLM backend. For standalone Claude workflows, use a separate "
-                    "'ouroboros-ai[claude]' environment."
+                    "Install 'ouroboros-ai[claude]' alone for SDK/MCP 1, or use "
+                    "`ouroboros setup --runtime claude-cli` from an MCP 2 environment. "
+                    "Never combine [claude] or [claude-sdk] with [mcp]."
                 ),
             )
         return CheckResult(
             name="claude_agent_sdk_import",
-            status="warn",
-            message=f"claude-agent-sdk not installed (not required for {runtime} runtime)",
-            remediation=(
-                "Standalone Claude SDK workflows require a separate "
-                "'ouroboros-ai[claude]' environment; never combine it with [mcp]."
-            ),
+            status="pass",
+            message=f"claude-agent-sdk not installed (expected for {runtime} CLI/MCP profile)",
+            remediation="Use 'ouroboros-ai[claude]' only in a separate MCP 1 SDK environment.",
         )
 
 
@@ -566,9 +568,11 @@ def register_doctor_command(app: typer.Typer) -> None:
             console.print()
             for result in results:
                 symbol = _SYMBOLS[result.status]
-                console.print(f"  {symbol}  [bold]{result.name}[/bold]: {result.message}")
+                console.print(
+                    f"  {symbol}  [bold]{escape(result.name)}[/bold]: {escape(result.message)}"
+                )
                 if result.remediation:
-                    console.print(f"      [dim]hint: {result.remediation}[/dim]")
+                    console.print(f"      [dim]hint: {escape(result.remediation)}[/dim]")
             console.print()
 
         has_failure = any(r.status == "fail" for r in results)
@@ -579,7 +583,7 @@ def register_doctor_command(app: typer.Typer) -> None:
 __all__ = [
     "CheckResult",
     "Status",
-    "_CLAUDE_RUNTIME_BACKENDS",
+    "_CLAUDE_SDK_RUNTIME_BACKENDS",
     "check_python_version",
     "check_platform",
     "check_ouroboros_version",

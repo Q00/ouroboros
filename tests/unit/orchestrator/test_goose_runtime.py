@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from unittest.mock import patch
 
@@ -10,6 +11,10 @@ import pytest
 
 from ouroboros.orchestrator.adapter import ParamSupport, RuntimeHandle
 from ouroboros.orchestrator.goose_runtime import GooseCliRuntime
+
+
+def _test_cli_path() -> str:
+    return str(Path(os.environ["OUROBOROS_TEST_CLI_DIR"]) / "goose")
 
 
 class _FakeStream:
@@ -59,14 +64,14 @@ class _FakeProcess:
 
 
 def test_goose_default_permission_mode_preserves_approval_gate() -> None:
-    runtime = GooseCliRuntime(cli_path="/tmp/goose", cwd="/tmp/project")
+    runtime = GooseCliRuntime(cli_path=_test_cli_path(), cwd="/tmp/project")
 
     assert runtime.permission_mode == "approve"
     assert runtime._build_child_env()["GOOSE_MODE"] == "approve"
 
 
 def test_goose_capabilities_report_prompt_only_tool_restrictions_as_translated() -> None:
-    runtime = GooseCliRuntime(cli_path="/tmp/goose", cwd="/tmp/project")
+    runtime = GooseCliRuntime(cli_path=_test_cli_path(), cwd="/tmp/project")
 
     assert runtime.capabilities.system_prompt_support is ParamSupport.TRANSLATED
     assert runtime.capabilities.tool_restriction_support is ParamSupport.TRANSLATED
@@ -75,7 +80,7 @@ def test_goose_capabilities_report_prompt_only_tool_restrictions_as_translated()
 
 @pytest.mark.parametrize("mode", ["default", "acceptEdits", "accept_edits", "acceptedits"])
 def test_goose_safe_permission_aliases_preserve_approval_gate(mode: str) -> None:
-    runtime = GooseCliRuntime(cli_path="/tmp/goose", cwd="/tmp/project", permission_mode=mode)
+    runtime = GooseCliRuntime(cli_path=_test_cli_path(), cwd="/tmp/project", permission_mode=mode)
 
     assert runtime.permission_mode == "approve"
     assert runtime._build_child_env()["GOOSE_MODE"] == "approve"
@@ -83,18 +88,18 @@ def test_goose_safe_permission_aliases_preserve_approval_gate(mode: str) -> None
 
 @pytest.mark.parametrize("mode", ["auto", "bypassPermissions", "bypass_permissions"])
 def test_goose_explicit_bypass_permission_aliases_map_to_auto(mode: str) -> None:
-    runtime = GooseCliRuntime(cli_path="/tmp/goose", cwd="/tmp/project", permission_mode=mode)
+    runtime = GooseCliRuntime(cli_path=_test_cli_path(), cwd="/tmp/project", permission_mode=mode)
 
     assert runtime.permission_mode == "auto"
     assert runtime._build_child_env()["GOOSE_MODE"] == "auto"
 
 
 def test_goose_command_uses_run_stream_json_and_stdin() -> None:
-    runtime = GooseCliRuntime(cli_path="/tmp/goose", cwd="/tmp/project", permission_mode="auto")
+    runtime = GooseCliRuntime(cli_path=_test_cli_path(), cwd="/tmp/project", permission_mode="auto")
 
     command = runtime._build_command("/tmp/out.txt", resume_session_id="session-1")
 
-    assert command[:4] == ["/tmp/goose", "run", "--output-format", "stream-json"]
+    assert command[:4] == [_test_cli_path(), "run", "--output-format", "stream-json"]
     assert "--resume" in command
     assert "--no-profile" not in command
     assert "--quiet" not in command
@@ -103,7 +108,7 @@ def test_goose_command_uses_run_stream_json_and_stdin() -> None:
 
 
 def test_goose_runtime_makes_streamed_generated_handle_resumable() -> None:
-    runtime = GooseCliRuntime(cli_path="/tmp/goose", cwd="/tmp/project", permission_mode="auto")
+    runtime = GooseCliRuntime(cli_path=_test_cli_path(), cwd="/tmp/project", permission_mode="auto")
     initial_handle = runtime._build_runtime_handle(None)
 
     assert initial_handle is not None
@@ -122,7 +127,7 @@ def test_goose_runtime_makes_streamed_generated_handle_resumable() -> None:
 
 
 def test_goose_runtime_derives_stable_name_for_executor_seeded_handle() -> None:
-    runtime = GooseCliRuntime(cli_path="/tmp/goose", cwd="/tmp/project", permission_mode="auto")
+    runtime = GooseCliRuntime(cli_path=_test_cli_path(), cwd="/tmp/project", permission_mode="auto")
     seeded = RuntimeHandle(
         backend="goose",
         metadata={"session_attempt_id": "exec_1_ac_1_attempt_1"},
@@ -162,7 +167,7 @@ async def test_goose_runtime_collects_stream_json_messages() -> None:
     async def fake_exec(*args: object, **kwargs: object) -> _FakeProcess:
         return fake_process
 
-    runtime = GooseCliRuntime(cli_path="/tmp/goose", cwd="/tmp/project", permission_mode="auto")
+    runtime = GooseCliRuntime(cli_path=_test_cli_path(), cwd="/tmp/project", permission_mode="auto")
 
     with (
         patch(
@@ -173,7 +178,12 @@ async def test_goose_runtime_collects_stream_json_messages() -> None:
     ):
         messages = [m async for m in runtime.execute_task("do it", tools=["Bash"])]
 
-    assert mock_exec.call_args.args[:4] == ("/tmp/goose", "run", "--output-format", "stream-json")
+    assert mock_exec.call_args.args[:4] == (
+        _test_cli_path(),
+        "run",
+        "--output-format",
+        "stream-json",
+    )
     assert b"do it" in fake_process.stdin.written
     assert any(m.type == "system" and m.resume_handle for m in messages)
     assert any(m.content == "Working" for m in messages)
@@ -193,7 +203,7 @@ async def test_goose_runtime_preserves_generated_session_name_without_name_echo(
     async def fake_exec(*args: object, **kwargs: object) -> _FakeProcess:
         return fake_process
 
-    runtime = GooseCliRuntime(cli_path="/tmp/goose", cwd="/tmp/project", permission_mode="auto")
+    runtime = GooseCliRuntime(cli_path=_test_cli_path(), cwd="/tmp/project", permission_mode="auto")
 
     with (
         patch(
@@ -239,7 +249,7 @@ async def test_goose_runtime_honors_explicit_resume_session_id() -> None:
     async def fake_exec(*args: object, **kwargs: object) -> _FakeProcess:
         return fake_process
 
-    runtime = GooseCliRuntime(cli_path="/tmp/goose", cwd="/tmp/project", permission_mode="auto")
+    runtime = GooseCliRuntime(cli_path=_test_cli_path(), cwd="/tmp/project", permission_mode="auto")
 
     with (
         patch(
@@ -265,7 +275,7 @@ async def test_goose_runtime_completion_event_does_not_mask_nonzero_exit() -> No
     async def fake_exec(*args: object, **kwargs: object) -> _FakeProcess:
         return fake_process
 
-    runtime = GooseCliRuntime(cli_path="/tmp/goose", cwd="/tmp/project", permission_mode="auto")
+    runtime = GooseCliRuntime(cli_path=_test_cli_path(), cwd="/tmp/project", permission_mode="auto")
 
     with (
         patch(
@@ -294,7 +304,7 @@ async def test_goose_runtime_accumulates_stream_chunks_for_final_fallback() -> N
     async def fake_exec(*args: object, **kwargs: object) -> _FakeProcess:
         return fake_process
 
-    runtime = GooseCliRuntime(cli_path="/tmp/goose", cwd="/tmp/project", permission_mode="auto")
+    runtime = GooseCliRuntime(cli_path=_test_cli_path(), cwd="/tmp/project", permission_mode="auto")
 
     with (
         patch(
@@ -322,7 +332,7 @@ async def test_goose_runtime_keeps_tool_output_out_of_final_fallback() -> None:
     async def fake_exec(*args: object, **kwargs: object) -> _FakeProcess:
         return fake_process
 
-    runtime = GooseCliRuntime(cli_path="/tmp/goose", cwd="/tmp/project", permission_mode="auto")
+    runtime = GooseCliRuntime(cli_path=_test_cli_path(), cwd="/tmp/project", permission_mode="auto")
 
     with (
         patch(
@@ -352,7 +362,7 @@ async def test_goose_runtime_preserves_nested_completion_payload() -> None:
     async def fake_exec(*args: object, **kwargs: object) -> _FakeProcess:
         return fake_process
 
-    runtime = GooseCliRuntime(cli_path="/tmp/goose", cwd="/tmp/project", permission_mode="auto")
+    runtime = GooseCliRuntime(cli_path=_test_cli_path(), cwd="/tmp/project", permission_mode="auto")
 
     with (
         patch(
@@ -368,7 +378,7 @@ async def test_goose_runtime_preserves_nested_completion_payload() -> None:
 
 
 def test_goose_runtime_classifies_tool_failed_as_error_result() -> None:
-    runtime = GooseCliRuntime(cli_path="/tmp/goose", cwd="/tmp/project", permission_mode="auto")
+    runtime = GooseCliRuntime(cli_path=_test_cli_path(), cwd="/tmp/project", permission_mode="auto")
 
     messages = runtime._convert_event({"type": "tool.failed", "error": "permission denied"}, None)
 
@@ -383,7 +393,9 @@ def test_goose_child_env_sets_nested_guard(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setenv("OUROBOROS_LLM_BACKEND", "goose")
     monkeypatch.setenv("OUROBOROS_RUNTIME", "goose")
     monkeypatch.setenv("GOOSE_PROVIDER", "anthropic")
-    runtime = GooseCliRuntime(cli_path="/tmp/goose", cwd="/tmp/project", permission_mode="approve")
+    runtime = GooseCliRuntime(
+        cli_path=_test_cli_path(), cwd="/tmp/project", permission_mode="approve"
+    )
 
     env = runtime._build_child_env()
 
@@ -401,7 +413,7 @@ def test_goose_child_env_does_not_map_ouroboros_llm_backend_to_provider(
 ) -> None:
     monkeypatch.delenv("GOOSE_PROVIDER", raising=False)
     runtime = GooseCliRuntime(
-        cli_path="/tmp/goose",
+        cli_path=_test_cli_path(),
         cwd="/tmp/project",
         permission_mode="auto",
         llm_backend="claude_code",
@@ -411,7 +423,7 @@ def test_goose_child_env_does_not_map_ouroboros_llm_backend_to_provider(
 
 
 def test_goose_session_id_extraction_ignores_generic_tool_and_message_ids() -> None:
-    runtime = GooseCliRuntime(cli_path="/tmp/goose", cwd="/tmp/project", permission_mode="auto")
+    runtime = GooseCliRuntime(cli_path=_test_cli_path(), cwd="/tmp/project", permission_mode="auto")
 
     assert (
         runtime._extract_event_session_id({"type": "session.started", "session_name": "sess-1"})

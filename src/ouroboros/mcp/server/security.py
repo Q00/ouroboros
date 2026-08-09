@@ -453,7 +453,16 @@ class InputValidator:
         "prompt",
         "goal",
         "initial_context",
+        # Lane findings quote source, and source contains ``;``. They arrive
+        # here — a confirmed ``[from-code]`` finding is sent as the answer, on
+        # the one entrance every answer uses. A second field for the same
+        # payload was tried and removed; the exemption did not have to move with
+        # it, because it never left ``answer``.
         "answer",
+        # The question the answer belongs to, echoed back so the round is filed
+        # under it. A PM question quotes the code it is about, so it carries the
+        # same terms an answer does.
+        "last_question",
         "current_approach",
         "problem_context",
         "acceptance_criterion",
@@ -526,7 +535,50 @@ class InputValidator:
                     pairs.extend(_collect_strings(v, f"{prefix}[{i}]"))
             return pairs
 
+        def _is_freetext(key: str) -> bool:
+            """Whether this value is prose the server stores, never a thing it runs.
+
+            Matched on every segment of the path, not only the first. A freetext
+            field is freetext wherever it sits, and the fan-out submission puts
+            one inside a container: ``results[0].content`` carries a subagent's
+            finding, and judging by the root alone rejected it under the
+            container's name.
+            """
+            return bool(
+                self.FREETEXT_FIELDS.intersection(
+                    segment.split("[")[0] for segment in key.split(".")
+                )
+            )
+
         for key, value in _collect_strings(arguments):
+            # The lexical scan below asks whether a value could be executed or
+            # could steer something that executes. For a freetext field the
+            # answer is no by construction: it is recorded and rendered back to
+            # a person, and no path takes it anywhere else. So the scan does not
+            # apply to it, and this is where that is decided — once, ahead of
+            # every check.
+            #
+            # It used to be decided at the last of the three, which made the
+            # exemption half true. Lane findings describe code, so they say
+            # ``subprocess``, ``open(`` and ``eval(`` the way any faithful
+            # description of code does; those went to ``dangerous_patterns``,
+            # which never consulted the exemption, and were rejected. The way
+            # through was to reword the finding — leaving the record saying
+            # something the lane never said, which is the exact harm the
+            # exemption was added to prevent, reached one check earlier.
+            #
+            # The repair is the boundary, not the wordlist. Adding terms to the
+            # exempt list would not have closed this (``dangerous_patterns``
+            # does not read that list), and removing terms from the patterns
+            # would strip the defence from fields that *are* executable. What is
+            # scoped is the question itself: fields that can reach execution or
+            # control are scanned, and evidence text is not one of them. The PM
+            # citation path, which does steer where a reader looks, is closed by
+            # its own contract instead — a pattern on the schema, checked at
+            # re-entry, where a value that must be structured can be required to
+            # be structured.
+            if _is_freetext(key):
+                continue
             for pattern in dangerous_patterns:
                 if pattern in value:
                     return Result.err(
@@ -543,18 +595,14 @@ class InputValidator:
                             details={"pattern": pattern},
                         )
                     )
-            # Skip shell-metachar check for known freetext fields —
-            # they carry code/prompts, never shell commands.
-            root_field = key.split(".")[0].split("[")[0]
-            if root_field not in self.FREETEXT_FIELDS:
-                for char in shell_metacharacters:
-                    if char in value:
-                        return Result.err(
-                            MCPServerError(
-                                f"Shell metacharacter detected in {key}",
-                                details={"pattern": char},
-                            )
+            for char in shell_metacharacters:
+                if char in value:
+                    return Result.err(
+                        MCPServerError(
+                            f"Shell metacharacter detected in {key}",
+                            details={"pattern": char},
                         )
+                    )
 
         # Run custom validator if registered
         if tool_name in self._validators:

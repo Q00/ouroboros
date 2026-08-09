@@ -44,6 +44,33 @@ Ouroboros는 **명세 우선 AI 개발 시스템**입니다. 이 시스템은 �
 
 ---
 
+## Ouroboros Agent OS 스택
+
+여느 OS와 마찬가지로 Ouroboros도 세 층으로 나뉩니다. 원시 기능을 제공하는 안정적인 **OS 층**, 도메인 워크플로우를 담는 **애플리케이션 층**, 그리고 사람이 실제로 마주 앉는 **셸**입니다. 저장소 셋, 스택 하나입니다.
+
+| 층 | 저장소 | 역할 | 얻는 것 |
+| :--- | :--- | :--- | :--- |
+| **Shell** (터미널 클라이언트) | [`Ouro-labs/ourocode`](https://github.com/Ouro-labs/ourocode) | 한 세션 안에서 Claude / Codex / Gemini CLI를 넘나들며 `ooo` 워크플로우를 실행하는 네이티브 터미널 UI | TUI, wonderTool 결정 선택기, MCP 패널 상태, 명령 탐색 |
+| **Apps** (도메인 워크플로우) | [`Ouro-labs/ouroboros-plugins`](https://github.com/Ouro-labs/ouroboros-plugins) | UserLevel 플러그인 계약 — 코어 원시 기능을 설치 가능한 도메인 프로그램(PR 작업, Jira 동기화, 장애 대응, 릴리스)으로 조립 | 플러그인 매니페스트, 범위 한정 권한, 감사/출처 추적, 참조 플러그인 |
+| **OS** (이 저장소) | [`Q00/ouroboros`](https://github.com/Q00/ouroboros) | Agent OS 코어 — Seed, Ledger, Runtime, MCP, 안전 경계 | `ooo` 명령어, 명세 우선 워크플로우 엔진, 다중 런타임 어댑터 |
+
+**어떻게 연결되나:**
+
+```
+  ourocode  ──►  ooo / ouroboros-plugins  ──►  ouroboros core (Seed · Ledger · MCP · Runtime)
+   shell             user-level apps                        kernel
+```
+
+- **커널**(`ouroboros`)이 계약을 소유합니다. 최종 실행을 어느 LLM이 맡든, 모든 행위는 seed에 묶이고 ledger에 기록되는 재생 가능한 이벤트가 됩니다.
+- **플러그인**(`ouroboros-plugins`)은 그 계약에 대고 필요한 권한 범위를 선언합니다. 그래서 도메인 워크플로우(PR 리뷰, Linear 티켓 분류, 릴리스 실행)가 일회성 프롬프트가 아니라 감사 가능하고 정책에 묶인 상태로 남습니다.
+- **Ourocode**는 터미널 셸입니다. MCP 상태, 인터뷰 질문, wonderTool 결정을 일급 TUI 요소로 드러내므로, 키보드를 떠나거나 여러 CLI를 오가지 않고도 이 OS를 몰 수 있습니다.
+
+지원되는 CLI에 `ouroboros`만 얹어 써도 되고, 도메인 워크플로우가 필요하면 플러그인을 더하고, 통합된 터미널 조종석을 원하면 `ourocode`를 설치하면 됩니다.
+
+> **고지.** Ouroboros 프로젝트와 커뮤니티는 **어떤 암호화폐, 토큰, 밈코인, 트레이딩 커뮤니티와도 무관합니다** — pump.fun을 비롯한 런치패드에 올라온 "ouroboros" 티커도 여기 포함됩니다. 이것은 오픈소스 개발자 도구입니다. 우리는 어떤 코인도 발행하거나, 보증하거나, 보유하지 않습니다. 이 프로젝트와 관련이 있다고 주장하는 토큰은 전부 무단입니다.
+
+---
+
 ## Wonder에서 온톨로지로
 
 > *Wonder → "어떻게 살아야 하는가?" → "'삶'이란 무엇인가?" → 온톨로지*
@@ -105,7 +132,29 @@ curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.
 > ooo interview "I want to build a task management CLI"
 ```
 
-> Claude Code, Codex CLI, GitHub Copilot CLI, OpenCode, Hermes, Gemini, Kiro CLI, Pi CLI를 지원합니다. 설치 프로그램은 Claude Code, Codex CLI, Hermes CLI를 자동으로 감지하고 호스트가 지원하는 경우 MCP 서버를 등록합니다. OpenCode, Kiro, GitHub Copilot CLI, Gemini CLI 또는 Pi CLI는 설치 후 `ouroboros setup --runtime <opencode|kiro|copilot|gemini|pi>`를 실행하세요. Copilot CLI 런타임은 GitHub Copilot models API를 통해 모델 카탈로그를 실시간으로 검색하고 설정 중 기본값을 선택할 수 있습니다.
+에이전트 호스트 없이 터미널에서 바로 쓸 수도 있습니다:
+
+```
+$ ouroboros init start --orchestrator "I want to build a task management CLI tool"
+```
+
+<p align="center">
+  <img src="./docs/images/ooo-interview.gif" width="760" alt="ouroboros init start가 순서, 크래시 내구성, v1 범위, 작업을 무엇으로 지목할지를 캐묻다가 모호도 0.31을 보고하고 계속·강제 생성·취소 중 하나를 묻는 터미널 녹화">
+</p>
+
+<p align="center">
+  <sub>터미널 CLI에서 녹화했습니다. 네 번을 주고받아도 모호도가 0.31이고 임계값은 0.2라, CLI는 경고를 띄우고 인터뷰를 더 할지, Seed를 강제로 만들지, 취소할지 묻습니다. 위의 <code>ooo interview</code>는 에이전트 호스트 안에서 돌고, 모호도 임계값 0.2는 동일하며, Seed 생성 전에 자체 closure·restate 게이트가 추가로 붙습니다.</sub>
+</p>
+
+<p align="center">
+  <img src="./docs/images/ooo-setup-refresh.gif" width="760" alt="ouroboros setup refresh가 Codex 규칙과 스킬, Hermes 스킬, OpenCode 플러그인과 지침 문서, Pi와 GJC 브리지를 설치하고 마지막에 Refreshed runtime artifacts: codex, hermes, opencode, pi, gjc를 출력하는 터미널 녹화">
+</p>
+
+<p align="center">
+  <sub>한 대에서 실행한 <code>ouroboros setup refresh</code>. 그 컴퓨터에 실제로 깔려 있는 호스트에만, 각 호스트가 기대하는 형태로 설치합니다. Codex에는 규칙과 스킬, Hermes에는 스킬, OpenCode에는 플러그인과 <code>AGENTS.md</code>, Pi와 GJC에는 브리지. 내 컴퓨터에서는 13개 중 설치돼 있는 것만 나옵니다.</sub>
+</p>
+
+> Claude Code, Codex CLI, GitHub Copilot CLI, OpenCode, Hermes, Gemini, Kiro CLI, Pi CLI, Zcode, Goose, GJC, Antigravity CLI, Grok Build CLI를 지원합니다. 설치 프로그램은 사용 가능한 런타임을 자동으로 감지하고 호스트가 지원하는 경우 MCP 서버를 등록합니다. 런타임을 명시적으로 선택하려면 설치 후 `ouroboros setup --runtime <opencode|kiro|copilot|gemini|pi|zcode|goose|gjc|antigravity|grok>`를 실행하세요. Copilot CLI 런타임은 GitHub Copilot models API를 통해 모델 카탈로그를 실시간으로 검색하고 설정 중 기본값을 선택할 수 있습니다.
 
 <details>
 <summary><strong>Codex 플러그인 빠른 시작</strong></summary>
@@ -127,12 +176,11 @@ codex plugin add ouroboros@ouroboros
 
 ```bash
 pipx install 'ouroboros-ai[mcp]'       # 또는: uv tool install 'ouroboros-ai[mcp]'
-ouroboros setup            # Kiro CLI 감지 및 MCP 서버 등록
-```
-
-`.env`에 런타임 설정:
-```
-OUROBOROS_RUNTIME=kiro
+ouroboros setup --runtime kiro         # Kiro CLI 감지, MCP 서버 등록과 함께
+                                        # OUROBOROS_RUNTIME=kiro 를
+                                        # ~/.kiro/settings/mcp.json (setup이 관리하는
+                                        # 신뢰된 위치)에 기록합니다 — 프로젝트 .env는
+                                        # 신뢰되지 않는 입력이라 이 키는 거기서 무시됩니다
 ```
 
 이후 Kiro CLI 세션에서 `ooo` 명령어를 사용합니다.
@@ -183,7 +231,7 @@ ouroboros setup                         # 런타임 설정
 
 호환성 참고: extras 전환 기간 동안 `ouroboros-ai[dashboard]`도 no-op alias로 계속 허용됩니다.
 
-런타임별 가이드: [Claude Code](./docs/runtime-guides/claude-code.md) · [Codex CLI](./docs/runtime-guides/codex.md)
+런타임별 가이드: [Claude Code](./docs/runtime-guides/claude-code.md) · [Codex CLI](./docs/runtime-guides/codex.md) · [Hermes](./docs/runtime-guides/hermes.md) · [OpenCode](./docs/runtime-guides/opencode.md) · [Kiro CLI](./docs/runtime-guides/kiro.md) · [Gemini CLI](./docs/runtime-guides/gemini.md) · [GitHub Copilot CLI](./docs/runtime-guides/copilot.md) · [Zcode](./docs/runtime-guides/zcode.md) · [Pi JSON mode](https://pi.dev/docs/latest/json) · [Goose](./docs/runtime-guides/goose.md) · [GJC](./docs/runtime-guides/gjc.md) · [Antigravity CLI](./docs/runtime-guides/antigravity.md) · [Grok Build CLI](./docs/runtime-guides/grok.md)
 
 </details>
 
@@ -428,7 +476,7 @@ uv run ouroboros tui monitor
 | `3` | **Logs** | 레벨별 색상 구분, 필터링 가능한 로그 뷰어 |
 | `4` | **Debug** | 상태 인스펙터, 원시 이벤트, 설정 |
 
-> 자세한 내용은 [TUI 사용 가이드](./docs/guides/tui-usage.md)를 참고하세요.
+> 자세한 내용은 [TUI 사용 가이드](./docs/guides/tui-usage.ko.md)를 참고하세요.
 
 ---
 
@@ -457,14 +505,16 @@ Ouroboros는 MIT 라이선스로 공개 개발되는 오픈소스입니다. 이 
 
 ---
 
-## Star 히스토리
+## 활동
 
-<a href="https://www.star-history.com/?repos=Q00/ouroboros&type=Date#gh-light-mode-only">
-  <img src="https://api.star-history.com/svg?repos=Q00/ouroboros&type=Date&theme=light" alt="Star History Chart" width="100%" />
-</a>
-<a href="https://www.star-history.com/?repos=Q00/ouroboros&type=Date#gh-dark-mode-only">
-  <img src="https://api.star-history.com/svg?repos=Q00/ouroboros&type=Date&theme=dark" alt="Star History Chart" width="100%" />
-</a>
+여기 있는 숫자는 GitHub 데이터를 바탕으로 생성되어 자동으로 갱신되며, 캐시로 인해 업데이트가 지연될 수 있습니다.
+
+<p align="center">
+  <a href="https://github.com/Q00/ouroboros/graphs/contributors"><img src="https://img.shields.io/github/contributors/Q00/ouroboros?color=orange" alt="Contributors"></a>
+  <a href="https://github.com/Q00/ouroboros/commits/main"><img src="https://img.shields.io/github/commit-activity/m/Q00/ouroboros?color=orange" alt="Commit activity"></a>
+  <a href="https://github.com/Q00/ouroboros/pulls?q=is%3Apr+is%3Aclosed"><img src="https://img.shields.io/github/issues-pr-closed/Q00/ouroboros?color=orange" alt="Closed pull requests"></a>
+  <a href="https://github.com/Q00/ouroboros/commits/main"><img src="https://img.shields.io/github/last-commit/Q00/ouroboros?color=orange" alt="Last commit"></a>
+</p>
 
 ---
 

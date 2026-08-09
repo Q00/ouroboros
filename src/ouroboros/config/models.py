@@ -467,6 +467,7 @@ VALID_RUNTIME_BACKENDS = frozenset(
     {
         "claude",
         "claude_code",
+        "claude_mcp",
         "codex",
         "codex_cli",
         "opencode",
@@ -647,6 +648,7 @@ class OrchestratorConfig(BaseModel, frozen=True):
 
     runtime_backend: Literal[
         "claude",
+        "claude_mcp",
         "codex",
         "opencode",
         "hermes",

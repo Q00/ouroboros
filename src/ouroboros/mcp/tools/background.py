@@ -35,6 +35,7 @@ control of the receipt and of any compose-around bookkeeping.
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 import inspect
 import logging
 from pathlib import Path
@@ -60,6 +61,46 @@ if TYPE_CHECKING:
 # work can re-check cancellation mid-flight if it wants) and returns the
 # tool result.
 WorkFn = Callable[["AgentProcessHandle"], Awaitable[MCPToolResult]]
+
+
+@dataclass(slots=True)
+class BackgroundJobAcceptanceState:
+    """Track whether cancellation may race an accepted background owner."""
+
+    phase: str = "pre_acceptance"
+    job_manager: JobManager | None = None
+    job_id: str | None = None
+
+    def begin_detached_acceptance(self, job_manager: JobManager, job_id: str) -> None:
+        self.phase = "detached_pending"
+        self.job_manager = job_manager
+        self.job_id = job_id
+
+    def begin_local_acceptance(self, job_manager: JobManager, job_id: str) -> None:
+        self.phase = "local_pending"
+        self.job_manager = job_manager
+        self.job_id = job_id
+
+    def mark_accepted(self) -> None:
+        self.phase = "accepted"
+
+    def may_have_accepted(self, _exc: BaseException) -> bool:
+        """Classify ownership from the transport phase, not exception type alone."""
+        if self.phase == "accepted":
+            return True
+        if self.phase == "detached_pending":
+            if self.job_manager is None or self.job_id is None:
+                return True
+            has_unresolved_acceptance = getattr(
+                type(self.job_manager), "has_unresolved_job_acceptance", None
+            )
+            return not callable(has_unresolved_acceptance) or bool(
+                has_unresolved_acceptance(self.job_manager, self.job_id)
+            )
+        if self.phase != "local_pending" or self.job_manager is None or self.job_id is None:
+            return False
+        has_accepted_job = getattr(type(self.job_manager), "has_accepted_job", None)
+        return bool(callable(has_accepted_job) and has_accepted_job(self.job_manager, self.job_id))
 
 
 def make_cancelled_result(text: str) -> MCPToolResult:
@@ -97,6 +138,9 @@ async def start_background_tool_job(
     on_detaching: Callable[[], Awaitable[None]] | None = None,
     on_started: Callable[[JobSnapshot], Awaitable[None]] | None = None,
     on_enqueue_failure: Callable[[BaseException], Awaitable[None]] | None = None,
+    prepare_inline: (Callable[[], Awaitable[tuple[JobLinks, WorkFn]]] | None) = None,
+    on_cancel_before_work: Callable[[], Awaitable[None]] | None = None,
+    acceptance_state: BackgroundJobAcceptanceState | None = None,
 ) -> JobSnapshot:
     """Run the shared allocate -> guard -> agent-process -> start_job pipeline.
 
@@ -130,6 +174,15 @@ async def start_background_tool_job(
             raises, *before* the exception is re-raised — used by auto to
             release its start lease.  The helper always closes the pending
             runner coroutine on failure regardless of this hook.
+        prepare_inline: Optional two-phase preparation invoked only in the
+            process that will own the inline runner. It may replace both the
+            durable job links and work function before ``mcp.job.created`` is
+            persisted. Detached accepting processes deliberately skip it.
+        on_cancel_before_work: Optional cleanup for state reserved by
+            ``prepare_inline`` when cancellation wins before the work starts.
+        acceptance_state: Optional caller-owned phase tracker used to classify
+            cancellation as definitive non-acceptance or potentially accepted
+            ownership without exposing transport internals to the caller.
 
     Returns:
         The :class:`JobSnapshot` from a successful enqueue.
@@ -138,6 +191,7 @@ async def start_background_tool_job(
         Re-raises any exception from ``start_job`` after running
         ``on_enqueue_failure`` and closing the runner coroutine.
     """
+    acceptance_state = acceptance_state or BackgroundJobAcceptanceState()
     job_id = await job_manager.allocate_job_id()
     claim_inline = getattr(job_manager, "claim_forced_inline_allocation", None)
     forced_inline = bool(claim_inline(job_id)) if callable(claim_inline) else False
@@ -153,23 +207,37 @@ async def start_background_tool_job(
                 f"Durable background job {job_type!r} is missing its detached invocation"
             )
         try:
+            request = DetachedJobRequest(
+                job_id=job_id,
+                tool_name=detached_tool_name,
+                arguments=dict(detached_arguments),
+                database_url=event_store.database_url,
+                cwd=str(Path.cwd()),
+                runtime_backend=runtime_backend,
+                llm_backend=llm_backend,
+                opencode_mode=opencode_mode,
+            )
             if on_detaching is not None:
                 await on_detaching()
+            acceptance_state.begin_detached_acceptance(job_manager, job_id)
             snapshot = await launch_detached_job(
                 job_manager=job_manager,
                 event_store=event_store,
-                request=DetachedJobRequest(
-                    job_id=job_id,
-                    tool_name=detached_tool_name,
-                    arguments=dict(detached_arguments),
-                    database_url=event_store.database_url,
-                    cwd=str(Path.cwd()),
-                    runtime_backend=runtime_backend,
-                    llm_backend=llm_backend,
-                    opencode_mode=opencode_mode,
-                ),
+                request=request,
             )
+            acceptance_state.mark_accepted()
+            settle_external_acceptance = getattr(
+                job_manager, "settle_external_job_acceptance", None
+            )
+            if callable(settle_external_acceptance):
+                settle_external_acceptance(job_id)
         except DetachedJobAcceptanceTimeout as exc:
+            acceptance_state.mark_accepted()
+            settle_external_acceptance = getattr(
+                job_manager, "settle_external_job_acceptance", None
+            )
+            if callable(settle_external_acceptance):
+                settle_external_acceptance(job_id)
             if on_enqueue_failure is not None:
                 try:
                     await on_enqueue_failure(exc)
@@ -187,6 +255,15 @@ async def start_background_tool_job(
                 details=exc.receipt,
             ) from exc
         except BaseException as exc:
+            if acceptance_state.may_have_accepted(exc):
+                acceptance_state.mark_accepted()
+                settle_external_acceptance = getattr(
+                    job_manager, "settle_external_job_acceptance", None
+                )
+                if callable(settle_external_acceptance):
+                    settle_external_acceptance(job_id)
+            else:
+                job_manager.abandon_reserved_job_id(job_id)
             if on_enqueue_failure is not None:
                 try:
                     await on_enqueue_failure(exc)
@@ -201,12 +278,25 @@ async def start_background_tool_job(
             await on_started(snapshot)
         return snapshot
 
+    inline_links = links
+    inline_work_fn = work_fn
+    if prepare_inline is not None:
+        try:
+            inline_links, inline_work_fn = await prepare_inline()
+        except BaseException as exc:
+            job_manager.abandon_reserved_job_id(job_id)
+            if on_enqueue_failure is not None:
+                await on_enqueue_failure(exc)
+            raise
+
     async def _guarded_runner(handle: AgentProcessHandle) -> MCPToolResult:
         # Uniform pre-work cancel guard: a job cancelled while still queued
         # must return a terminal cancelled result without starting work.
         if handle.should_cancel():
+            if on_cancel_before_work is not None:
+                await on_cancel_before_work()
             return make_cancelled_result(cancelled_text)
-        return await work_fn(handle)
+        return await inline_work_fn(handle)
 
     runner = run_with_agent_process(
         event_store=event_store,
@@ -216,20 +306,25 @@ async def start_background_tool_job(
         cancel_key=f"mcp_job:{job_id}",
     )
 
+    acceptance_state.begin_local_acceptance(job_manager, job_id)
     try:
         snapshot = await job_manager.start_job(
             job_type=job_type,
             initial_message=initial_message,
             runner=runner,
-            links=links,
+            links=inline_links,
             job_id=job_id,
         )
     except BaseException as exc:
         # Mirror the pre-extraction auto handler's failure path: close the
         # un-started runner coroutine so it is not left un-awaited, then let
         # the caller release any compose-around bookkeeping before we re-raise.
-        if inspect.iscoroutine(runner):
-            runner.close()
+        # Once ``start_job`` registers ownership it has wrapped this coroutine
+        # in a live Task; closing the same coroutine here would strand that job.
+        if not acceptance_state.may_have_accepted(exc):
+            job_manager.abandon_reserved_job_id(job_id)
+            if inspect.iscoroutine(runner):
+                runner.close()
         if on_enqueue_failure is not None:
             try:
                 await on_enqueue_failure(exc)
@@ -243,6 +338,7 @@ async def start_background_tool_job(
                 )
         raise
 
+    acceptance_state.mark_accepted()
     if on_started is not None:
         await on_started(snapshot)
 

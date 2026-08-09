@@ -29,7 +29,7 @@ def test_monitor_command_reports_optional_tui_dependency() -> None:
     print_error.assert_called_once()
     error_message = print_error.call_args.args[0]
     assert "ouroboros-ai[tui]" in error_message
-    assert "uvx --from 'ouroboros-ai[tui]' ouroboros tui monitor" in error_message
+    assert "uvx --python '>=3.12' --from 'ouroboros-ai[tui]' ouroboros tui monitor" in error_message
 
 
 def test_tui_open_ghostty_uses_argv_and_working_directory(tmp_path: Path) -> None:
@@ -102,7 +102,10 @@ def test_tui_open_headless_prints_manual_command(tmp_path: Path) -> None:
 
     assert launch.argv is None
     assert "SSH/headless" in launch.message
-    assert "uvx --from 'ouroboros-ai[tui]' ouroboros tui monitor" in launch.manual_command
+    assert (
+        "uvx --python '>=3.12' --from 'ouroboros-ai[tui]' ouroboros tui monitor"
+        in launch.manual_command
+    )
     assert str(db_path) in launch.manual_command
 
 

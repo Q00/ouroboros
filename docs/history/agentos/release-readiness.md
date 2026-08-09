@@ -1,3 +1,16 @@
+> [!WARNING]
+> **Immutable historical snapshot — non-normative.**
+>
+> - Snapshot date: 2026-05-29 09:19 KST
+> - Source commit: [`3dd8917eb32158fb526ce23620e898a2687480c6`](https://github.com/Q00/ouroboros/commit/3dd8917eb32158fb526ce23620e898a2687480c6)
+> - Original publication commit: [`84c90602357d54217767538eae75192deb24f87b`](https://github.com/Q00/ouroboros/commit/84c90602357d54217767538eae75192deb24f87b)
+> - Repository baseline captured by the snapshot: `837e56a88aad9214e41dc4b948f551510a50f755`
+> - Current sequencing SSOT: [GitHub issue #961](https://github.com/Q00/ouroboros/issues/961)
+>
+> The content below is preserved as point-in-time evidence. Do not refresh its
+> issue states, release gates, or recommendations, and do not use it as current
+> release policy.
+
 # AgentOS Release Readiness
 
 This note records a dated, non-normative triage snapshot of the live #961

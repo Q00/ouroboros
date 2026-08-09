@@ -54,6 +54,23 @@ class TestLivePage:
         assert "WAIT_POLL_MS" in INDEX_HTML
         assert "run-goal" in INDEX_HTML
         assert "white-space:pre-wrap" in INDEX_HTML
+        assert "status-paused" in INDEX_HTML
+        assert "run-status.paused" in INDEX_HTML
+
+    def test_index_html_distinguishes_picker_503_and_offers_retry(self) -> None:
+        assert "response.status === 503" in INDEX_HTML
+        assert 'payload.error === "picker_index_contract_unavailable"' in INDEX_HTML
+        assert 'state:"picker-unavailable"' in INDEX_HTML
+        assert "Run picker temporarily unavailable" in INDEX_HTML
+        assert "The dashboard remains read-only" in INDEX_HTML
+        assert "Retry now" in INDEX_HTML
+        assert 'role="alert"' in INDEX_HTML
+        assert 'addEventListener("click", refreshRunList)' in INDEX_HTML
+        assert "Run list request failed" in INDEX_HTML
+        assert "request !== runListRequest" in INDEX_HTML
+        # The unavailable state remains in the interval-gated list loop; it is
+        # neither collapsed into the empty-run state nor allowed to spin hot.
+        assert "await refreshRunList()" in INDEX_HTML
 
 
 class TestStaticSnapshot:

@@ -172,7 +172,7 @@ def test_preserves_opencode_backend_from_existing_config(tmp_path: Path) -> None
     ]
 
 
-def test_explicit_claude_isolates_mcp_from_claude_extra(tmp_path: Path) -> None:
+def test_explicit_claude_uses_isolated_sdk_profile(tmp_path: Path) -> None:
     result = _run_installer(
         tmp_path,
         env={"OUROBOROS_INSTALL_RUNTIME": "claude"},
@@ -182,15 +182,82 @@ def test_explicit_claude_isolates_mcp_from_claude_extra(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     calls = (tmp_path / "calls.log").read_text(encoding="utf-8")
     assert "Runtime: claude (from --runtime / OUROBOROS_INSTALL_RUNTIME)" in result.stdout
-    assert (
-        "uv tool install --upgrade --python >=3.12 . --with click>=8.1.0,<9.0.0 --with claude-agent-sdk==0.2.123 --with anthropic==0.117.0 --with textual==8.2.8 --with textual-serve==1.1.3"
-        in calls
-    )
+    assert "Installing .[claude,tui]" in result.stdout
     _assert_calls_include_pyproject_pins(calls, "claude")
     assert "--with mcp==" not in calls
     assert "ouroboros setup --runtime claude --non-interactive" in calls
-    assert "MCP registration skipped for the standalone Claude SDK profile" in result.stdout
-    assert not (tmp_path / "home" / ".claude" / "mcp.json").exists()
+    assert "Claude SDK is isolated on MCP 1.x" in result.stdout
+
+
+def test_explicit_claude_cli_uses_dependency_free_mcp2_profile(tmp_path: Path) -> None:
+    result = _run_installer(
+        tmp_path,
+        env={"OUROBOROS_INSTALL_RUNTIME": "claude-cli"},
+        fake_commands={"claude": "#!/bin/sh\nexit 0\n"},
+    )
+
+    assert result.returncode == 0, result.stderr
+    calls = (tmp_path / "calls.log").read_text(encoding="utf-8")
+    assert "Installing .[claude-cli,tui]" in result.stdout
+    assert "--with claude-agent-sdk" not in calls
+    assert "--with mcp==" not in calls
+    assert "ouroboros setup --runtime claude-cli --non-interactive" in calls
+
+
+def test_explicit_claude_sdk_uses_isolated_sdk_profile(tmp_path: Path) -> None:
+    result = _run_installer(
+        tmp_path,
+        env={"OUROBOROS_INSTALL_RUNTIME": "claude-sdk"},
+        fake_commands={"claude": "#!/bin/sh\nexit 0\n"},
+    )
+
+    assert result.returncode == 0, result.stderr
+    calls = (tmp_path / "calls.log").read_text(encoding="utf-8")
+    assert "Installing .[claude-sdk,tui]" in result.stdout
+    _assert_calls_include_pyproject_pins(calls, "claude-sdk")
+    assert "--with mcp==" not in calls
+    assert "ouroboros setup --runtime claude-sdk --non-interactive" in calls
+    assert "Claude SDK is isolated on MCP 1.x" in result.stdout
+
+
+def test_legacy_claude_config_preserves_sdk_profile_on_upgrade(tmp_path: Path) -> None:
+    config_dir = tmp_path / "home" / ".ouroboros"
+    config_dir.mkdir(parents=True)
+    (config_dir / "config.yaml").write_text(
+        "orchestrator:\n  runtime_backend: claude\n",
+        encoding="utf-8",
+    )
+
+    result = _run_installer(
+        tmp_path,
+        fake_commands={"claude": "#!/bin/sh\nexit 0\n"},
+    )
+
+    assert result.returncode == 0, result.stderr
+    calls = (tmp_path / "calls.log").read_text(encoding="utf-8")
+    assert "Runtime: claude (preserved from" in result.stdout
+    assert "Installing .[claude,tui]" in result.stdout
+    assert "ouroboros setup --runtime claude --non-interactive" in calls
+
+
+def test_cli_backed_claude_config_preserves_cli_profile_on_upgrade(tmp_path: Path) -> None:
+    config_dir = tmp_path / "home" / ".ouroboros"
+    config_dir.mkdir(parents=True)
+    (config_dir / "config.yaml").write_text(
+        "orchestrator:\n  runtime_backend: claude_mcp\n",
+        encoding="utf-8",
+    )
+
+    result = _run_installer(
+        tmp_path,
+        fake_commands={"claude": "#!/bin/sh\nexit 0\n"},
+    )
+
+    assert result.returncode == 0, result.stderr
+    calls = (tmp_path / "calls.log").read_text(encoding="utf-8")
+    assert "Runtime: claude-cli (preserved from" in result.stdout
+    assert "Installing .[claude-cli,tui]" in result.stdout
+    assert "ouroboros setup --runtime claude-cli --non-interactive" in calls
 
 
 def test_explicit_hermes_mcp_extra_matches_pyproject_pins(tmp_path: Path) -> None:
@@ -351,8 +418,7 @@ def test_all_runtime_uv_install_uses_litellm_python_range(tmp_path: Path) -> Non
     assert ("uv tool install --upgrade --python >=3.12,<3.14 . --with click>=8.1.0,<9.0.0") in calls
     assert "--with litellm==1.91.0" in calls
 
-    assert "MCP registration skipped for the standalone Claude SDK profile" in result.stdout
-    assert not (tmp_path / "home" / ".claude" / "mcp.json").exists()
+    assert "--with claude-agent-sdk==0.2.123" in calls
 
 
 def test_non_litellm_uv_install_retains_python_312_floor(tmp_path: Path) -> None:
@@ -618,12 +684,16 @@ def test_pypi_lookup_failure_stays_stable_only_for_remote_install(tmp_path: Path
 # fails loudly here instead of silently desyncing.
 _EXTRA_TO_PACKAGES: dict[str, tuple[str, ...]] = {
     "claude": ("claude-agent-sdk", "anthropic"),
+    "claude-cli": (),
+    "claude-sdk": ("claude-agent-sdk", "anthropic"),
     "copilot": (),  # pyproject declares copilot extras as []; nothing to install
     "litellm": ("litellm",),
     "dashboard": (),  # compatibility alias; no runtime payload
     "mcp": ("mcp",),
     "tui": ("textual",),
 }
+
+_ALL_AGGREGATED_EXTRAS = {"claude", "copilot", "litellm", "dashboard", "tui"}
 
 
 def _read_pyproject_extras() -> dict[str, list[str]]:
@@ -640,7 +710,7 @@ def _read_pyproject_extras() -> dict[str, list[str]]:
 
 
 def test_install_all_extras_match_pyproject(tmp_path: Path) -> None:
-    """`[all]` mirrors every compatible extra and intentionally omits MCP 2.
+    """`[all]` mirrors co-installable payloads and omits isolated profiles.
 
     Catches the contract drift flagged by ouroboros-agent on PR #654:
     install.sh's hand-maintained --with list silently dropped tui, so
@@ -656,10 +726,7 @@ def test_install_all_extras_match_pyproject(tmp_path: Path) -> None:
         if match:
             declared_in_all.update(name.strip() for name in match.group(1).split(","))
 
-    # The compatibility [all] profile intentionally excludes MCP 2 because
-    # its Claude SDK dependency embeds MCP 1.x. The protocol server is a
-    # separate uvx ouroboros-ai[mcp] process.
-    expected_extras = set(_EXTRA_TO_PACKAGES.keys()) - {"mcp"}
+    expected_extras = _ALL_AGGREGATED_EXTRAS
 
     # Sanity: pyproject's `all` aggregates every extra we know about.
     assert declared_in_all == expected_extras, (
@@ -698,5 +765,6 @@ def test_install_all_extras_match_pyproject_pins(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     calls = (tmp_path / "calls.log").read_text(encoding="utf-8")
 
-    _assert_calls_include_pyproject_pins(calls, *(set(_EXTRA_TO_PACKAGES) - {"mcp"}))
+    _assert_calls_include_pyproject_pins(calls, *_ALL_AGGREGATED_EXTRAS)
     assert "--with mcp==" not in calls
+    assert "--with claude-agent-sdk==0.2.123" in calls

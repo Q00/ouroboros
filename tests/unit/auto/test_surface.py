@@ -31,15 +31,20 @@ from ouroboros.orchestrator.runtime_evidence import RuntimeEvidence
 
 
 def test_cli_auto_runtime_enum_matches_supported_backends() -> None:
-    from ouroboros.cli.commands.auto import AgentRuntimeBackend
+    from ouroboros.backends.capabilities import runtime_backend_choices
+    from ouroboros.cli.commands import auto, init, mcp, run
+    from ouroboros.package_profiles import PublicAgentRuntimeBackend, public_runtime_backend
 
-    assert {item.value for item in AgentRuntimeBackend} == {
+    expected_public_backends = {
         "claude",
+        "claude-sdk",
+        "claude-cli",
         "codex",
         "opencode",
         "hermes",
         "gemini",
         "copilot",
+        "goose",
         "kiro",
         "pi",
         "gjc",
@@ -47,6 +52,18 @@ def test_cli_auto_runtime_enum_matches_supported_backends() -> None:
         "grok",
         "zcode",
     }
+    frontdoor_enums = (
+        auto.AgentRuntimeBackend,
+        run.AgentRuntimeBackend,
+        mcp.AgentRuntimeBackend,
+        init.AgentRuntimeBackend,
+    )
+
+    assert all(runtime_enum is PublicAgentRuntimeBackend for runtime_enum in frontdoor_enums)
+    assert {item.value for item in PublicAgentRuntimeBackend} == expected_public_backends
+    assert {public_runtime_backend(item.value) for item in PublicAgentRuntimeBackend} <= set(
+        runtime_backend_choices()
+    )
 
 
 def test_cli_runtime_enums_accept_gjc_for_frontdoor_commands() -> None:

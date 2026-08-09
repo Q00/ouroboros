@@ -18,15 +18,26 @@ import time
 from typing import Annotated, Any
 
 from rich.console import Console
+from rich.text import Text
 import structlog
 import typer
 
+from ouroboros.backends import resolve_runtime_backend_name
 from ouroboros.cli.commands.mcp_doctor import register_doctor_command
 from ouroboros.cli.formatters.panels import print_info, print_success
+from ouroboros.config import get_agent_runtime_backend
 from ouroboros.orchestrator.heartbeat import (
     current_process_identity,
     is_process_identity_alive,
     process_start_time,
+)
+from ouroboros.package_profiles import (
+    UNSUPPORTED_CLAUDE_SDK_MCP_MESSAGE,
+    has_unsupported_claude_sdk_mcp_mix,
+    public_runtime_backend,
+)
+from ouroboros.package_profiles import (
+    PublicAgentRuntimeBackend as AgentRuntimeBackend,
 )
 
 # Per-instance PID registry for stale-instance accounting. Many servers run
@@ -58,24 +69,6 @@ _IDLE_CHECKPOINT_THRESHOLD_SECONDS = 600.0
 # Separate stderr console for stdio transport (stdout is JSON-RPC channel)
 _stderr_console = Console(stderr=True)
 log = structlog.get_logger(__name__)
-
-
-class AgentRuntimeBackend(str, Enum):  # noqa: UP042
-    """Supported orchestrator runtime backends for MCP commands."""
-
-    CLAUDE = "claude"
-    CODEX = "codex"
-    OPENCODE = "opencode"
-    HERMES = "hermes"
-    GEMINI = "gemini"
-    KIRO = "kiro"
-    COPILOT = "copilot"
-    GOOSE = "goose"
-    PI = "pi"
-    GJC = "gjc"
-    ANTIGRAVITY = "antigravity"
-    GROK = "grok"
-    ZCODE = "zcode"
 
 
 class LLMBackend(str, Enum):  # noqa: UP042
@@ -509,6 +502,35 @@ app = typer.Typer(
 register_doctor_command(app)
 
 
+def _effective_mcp_server_runtime(runtime: AgentRuntimeBackend | None) -> str:
+    """Resolve the runtime the MCP 2 composition root would actually select."""
+    requested = runtime.value if runtime is not None else get_agent_runtime_backend()
+    normalized = public_runtime_backend(requested)
+    if normalized is None:  # Defensive: the configured/default resolver always returns text.
+        normalized = "claude"
+    return resolve_runtime_backend_name(normalized)
+
+
+def _require_mcp_dependency() -> None:
+    """Fail before MCP server composition when the MCP v2 API is unavailable.
+
+    ``create_ouroboros_server()`` can build its internal tool catalogue without
+    importing the MCP SDK v2 server surface. Deferring that import until
+    ``server.serve()`` makes a missing or incompatible dependency appear as a
+    successful stdio startup followed by a disconnected server. Validate the
+    exact API consumed by the adapter at the command boundary instead.
+    """
+    try:
+        from mcp.server import MCPServer as _sdk_mcp_server
+
+        if _sdk_mcp_server is None:  # pragma: no cover - defensive import contract.
+            raise ImportError
+    except ImportError as exc:
+        raise ImportError(
+            "MCP SDK v2 server API unavailable. Install with: pip install 'ouroboros-ai[mcp]'"
+        ) from exc
+
+
 async def _run_mcp_server(
     host: str,
     port: int,
@@ -527,14 +549,7 @@ async def _run_mcp_server(
         runtime_backend: Optional orchestrator runtime backend override.
         llm_backend: Optional LLM-only backend override.
     """
-    # Ensure login-shell environment is available (critical for gateway-spawned processes)
-    _ensure_shell_env()
-
-    from ouroboros.config.models import resolve_event_store_path
-    from ouroboros.mcp.server.adapter import create_ouroboros_server, validate_transport
-    from ouroboros.orchestrator.session import SessionRepository
-    from ouroboros.persistence.brownfield import BrownfieldStore
-    from ouroboros.persistence.event_store import EventStore, sqlite_database_url
+    from ouroboros.mcp.server.adapter import validate_transport
 
     # Validate transport early, before any expensive startup work
     try:
@@ -545,6 +560,17 @@ async def _run_mcp_server(
             f"{transport!r}. Must be 'stdio', 'sse', or 'streamable-http'.[/red]"
         )
         raise typer.Exit(code=1)
+
+    _require_mcp_dependency()
+
+    # Ensure login-shell environment is available (critical for gateway-spawned processes)
+    _ensure_shell_env()
+
+    from ouroboros.config.models import resolve_event_store_path
+    from ouroboros.mcp.server.adapter import create_ouroboros_server
+    from ouroboros.orchestrator.session import SessionRepository
+    from ouroboros.persistence.brownfield import BrownfieldStore
+    from ouroboros.persistence.event_store import EventStore, sqlite_database_url
 
     _console_out = _stderr_console if transport == "stdio" else Console()
 
@@ -930,7 +956,8 @@ def serve(
         typer.Option(
             "--runtime",
             help=(
-                "Agent runtime backend for orchestrator-driven tools (claude, codex, "
+                "Agent runtime backend for orchestrator-driven tools (claude, claude-sdk, "
+                "claude-cli, codex, "
                 "opencode, hermes, gemini, copilot, goose, kiro, pi, gjc, "
                 "antigravity, grok, or zcode)."
             ),
@@ -963,13 +990,13 @@ def serve(
     Examples:
 
         # Start with stdio transport (for Claude Desktop)
-        ouroboros mcp serve
+        ouroboros mcp serve --runtime claude-cli
 
         # Start with SSE transport on custom port
-        ouroboros mcp serve --transport sse --port 9000
+        ouroboros mcp serve --runtime claude-cli --transport sse --port 9000
 
         # Start with streamable HTTP transport for Codex CLI --url clients
-        ouroboros mcp serve --transport streamable-http --port 9000
+        ouroboros mcp serve --runtime claude-cli --transport streamable-http --port 9000
 
         # Start with OpenCode runtime
         ouroboros mcp serve --runtime opencode
@@ -978,6 +1005,15 @@ def serve(
         ouroboros mcp serve --runtime codex --llm-backend codex
 
     """
+    # Resolve the exact backend the composition root would use before touching
+    # nested-process state, shell state, persistence, or runtime adapters. A
+    # missing option inherits config and ultimately defaults to the SDK-backed
+    # ``claude`` runtime, which is not executable inside this MCP 2 process.
+    selected_runtime = _effective_mcp_server_runtime(runtime)
+    if has_unsupported_claude_sdk_mcp_mix() or selected_runtime == "claude":
+        _stderr_console.print(Text(UNSUPPORTED_CLAUDE_SDK_MCP_MESSAGE, style="red"))
+        raise typer.Exit(1)
+
     # Guard: prevent recursive MCP server spawning.
     # When ouroboros spawns a runtime (Codex/Claude/OpenCode), the child process
     # inherits this env var. If that runtime's MCP config tries to spawn another
@@ -996,20 +1032,23 @@ def serve(
                 port,
                 transport,
                 db_path,
-                runtime.value if runtime else None,
+                selected_runtime,
                 llm_backend.value if llm_backend else None,
             )
         )
     except KeyboardInterrupt:
         _stderr_console.print("[blue]MCP Server stopped[/blue]")
     except ImportError as e:
-        _stderr_console.print(f"[red]MCP dependencies not installed: {e}[/red]")
+        _stderr_console.print(Text(f"MCP dependencies not installed: {e}", style="red"))
         _stderr_console.print(
             "[blue]Run MCP 2 in an isolated profile:\n"
-            "  uvx --from 'ouroboros-ai\\[mcp]' ouroboros mcp serve\n"
+            "  uvx --python '>=3.12' --from 'ouroboros-ai\\[mcp]' ouroboros mcp serve "
+            "--runtime claude-cli\n"
             "or:\n"
-            "  pipx run --spec 'ouroboros-ai\\[mcp]' ouroboros mcp serve\n"
-            "Do not combine it with the MCP 1.x-based Claude SDK extra.[/blue]"
+            "  pipx run --spec 'ouroboros-ai\\[mcp]' ouroboros mcp serve "
+            "--runtime claude-cli\n"
+            "Do not combine it with the MCP 1.x-based \\[claude] or "
+            "\\[claude-sdk] extras; use \\[claude-cli] for the CLI path.[/blue]"
         )
         raise typer.Exit(1) from e
     except OSError as e:
@@ -1038,7 +1077,8 @@ def info(
         typer.Option(
             "--runtime",
             help=(
-                "Agent runtime backend for orchestrator-driven tools (claude, codex, "
+                "Agent runtime backend for orchestrator-driven tools (claude, claude-sdk, "
+                "claude-cli, codex, "
                 "opencode, hermes, gemini, copilot, goose, kiro, pi, gjc, "
                 "antigravity, grok, or zcode)."
             ),
@@ -1064,7 +1104,7 @@ def info(
     # Create server with all tools pre-registered
     server = create_ouroboros_server(
         name="ouroboros-mcp",
-        runtime_backend=runtime.value if runtime else None,
+        runtime_backend=public_runtime_backend(runtime.value if runtime else None),
         llm_backend=llm_backend.value if llm_backend else None,
     )
 
