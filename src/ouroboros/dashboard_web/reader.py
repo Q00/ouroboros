@@ -15,7 +15,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import sqlite3
-from typing import Any
+from typing import Any, NamedTuple
 from urllib.parse import quote
 
 from ouroboros.config.models import resolve_event_store_path
@@ -224,6 +224,190 @@ def _summary_status(
     return "running"
 
 
+class _ResolvedRunCluster(NamedTuple):
+    """One validated execution and every session that durably belongs to it."""
+
+    execution_id: str | None
+    session_ids: tuple[str, ...]
+    start_rows: tuple[sqlite3.Row, ...]
+
+    @property
+    def selected_ids(self) -> tuple[str, ...]:
+        values = set(self.session_ids)
+        if self.execution_id:
+            values.add(self.execution_id)
+        return tuple(sorted(values))
+
+    @property
+    def identity(self) -> tuple[str | None, tuple[str, ...]]:
+        return self.execution_id, self.session_ids
+
+
+def _execution_start_rows(conn: sqlite3.Connection, execution_id: str) -> list[sqlite3.Row]:
+    """Load and validate every projected start for one execution identity."""
+    rows = conn.execute(
+        "SELECT projected.event_rowid AS projected_rowid, "
+        "projected.execution_id AS projected_execution_id, "
+        "projected.session_id AS projected_session_id, "
+        "events.rowid, events.aggregate_id, events.event_type, events.payload, "
+        f"{PICKER_START_EXECUTION_ID_SQL} AS eid, "
+        f"{PICKER_START_SESSION_ID_SQL} AS sid "
+        f"FROM {PICKER_START_TABLE} AS projected "
+        f"INDEXED BY {PICKER_START_EXECUTION_INDEX} "
+        "LEFT JOIN events ON events.rowid = projected.event_rowid "
+        "WHERE projected.execution_id = ?",
+        [execution_id],
+    ).fetchall()
+    for row in rows:
+        valid_pointer = (
+            row["projected_rowid"] is not None
+            and row["rowid"] is not None
+            and row["event_type"] == "orchestrator.session.started"
+            and int(row["rowid"]) == int(row["projected_rowid"])
+            and row["projected_execution_id"] == row["eid"]
+            and row["projected_session_id"] == row["sid"]
+        )
+        if not valid_pointer:
+            raise PickerIndexContractError(
+                frozenset(),
+                detail=f"start identity pointer mismatch: {row['projected_rowid']}",
+            )
+    return rows
+
+
+def _session_start_rows(conn: sqlite3.Connection, session_id: str) -> list[sqlite3.Row]:
+    """Load and validate every projected execution mapping for one session."""
+    rows = conn.execute(
+        "SELECT projected.event_rowid AS projected_rowid, "
+        "projected.execution_id AS projected_execution_id, "
+        "projected.session_id AS projected_session_id, "
+        "lookup.event_rowid AS lookup_rowid, "
+        "lookup.execution_id AS lookup_execution_id, "
+        "lookup.session_id AS lookup_session_id, "
+        "events.rowid, events.aggregate_id, events.event_type, events.payload, "
+        f"{PICKER_START_EXECUTION_ID_SQL} AS eid, "
+        f"{PICKER_START_SESSION_ID_SQL} AS sid "
+        f"FROM {PICKER_START_SESSION_TABLE} AS lookup "
+        f"LEFT JOIN {PICKER_START_TABLE} AS projected "
+        "ON projected.event_rowid = lookup.event_rowid "
+        "LEFT JOIN events ON events.rowid = projected.event_rowid "
+        "WHERE lookup.session_id = ?",
+        [session_id],
+    ).fetchall()
+    for row in rows:
+        valid_pointer = (
+            row["projected_rowid"] is not None
+            and row["lookup_rowid"] is not None
+            and row["rowid"] is not None
+            and row["event_type"] == "orchestrator.session.started"
+            and int(row["rowid"]) == int(row["projected_rowid"])
+            and int(row["lookup_rowid"]) == int(row["projected_rowid"])
+            and row["lookup_execution_id"] == (row["projected_execution_id"] or "")
+            and row["lookup_session_id"] == row["projected_session_id"]
+            and row["projected_execution_id"] == row["eid"]
+            and row["projected_session_id"] == row["sid"]
+        )
+        if not valid_pointer:
+            raise PickerIndexContractError(
+                frozenset(),
+                detail=f"start identity pointer mismatch: {row['projected_rowid']}",
+            )
+    return rows
+
+
+def _resolve_run_cluster(conn: sqlite3.Connection, run_id: str) -> _ResolvedRunCluster:
+    """Resolve both identity namespaces to exactly one canonical run cluster.
+
+    A token may legally be looked up as either an execution id or a session id.
+    Querying only the first matching namespace lets one token join unrelated
+    runs, so every candidate is expanded and their canonical identities must
+    agree before any dashboard surface may read events.
+    """
+    execution_cache: dict[str, _ResolvedRunCluster | None] = {}
+    session_cache: dict[str, list[sqlite3.Row]] = {}
+
+    def session_rows(session_id: str) -> list[sqlite3.Row]:
+        if session_id not in session_cache:
+            session_cache[session_id] = _session_start_rows(conn, session_id)
+        return session_cache[session_id]
+
+    def execution_cluster(execution_id: str) -> _ResolvedRunCluster | None:
+        if execution_id in execution_cache:
+            return execution_cache[execution_id]
+        rows = _execution_start_rows(conn, execution_id)
+        if not rows:
+            execution_cache[execution_id] = None
+            return None
+        session_ids = tuple(sorted({row["sid"] for row in rows if row["sid"]}))
+        for session_id in session_ids:
+            mapped_rows = session_rows(session_id)
+            if not mapped_rows:
+                raise PickerIndexContractError(
+                    frozenset(),
+                    detail=f"start identity pointer mismatch: missing for {session_id}",
+                )
+            mapped_execution_ids = {row["lookup_execution_id"] for row in mapped_rows}
+            if mapped_execution_ids != {execution_id}:
+                raise PickerIndexContractError(
+                    frozenset(), detail=f"ambiguous selected run ids: {[session_id]}"
+                )
+        cluster = _ResolvedRunCluster(execution_id, session_ids, tuple(rows))
+        execution_cache[execution_id] = cluster
+        return cluster
+
+    candidates: list[_ResolvedRunCluster] = []
+    by_execution = execution_cluster(run_id)
+    if by_execution is not None:
+        candidates.append(by_execution)
+
+    mapped_rows = session_rows(run_id)
+    mapped_execution_ids = {row["lookup_execution_id"] for row in mapped_rows}
+    if "" in mapped_execution_ids:
+        candidates.append(_ResolvedRunCluster(None, (run_id,), tuple(mapped_rows)))
+    for execution_id in sorted(mapped_execution_ids - {""}):
+        mapped_cluster = execution_cluster(execution_id)
+        if mapped_cluster is None:
+            raise PickerIndexContractError(
+                frozenset(), detail=f"start identity pointer mismatch: missing for {run_id}"
+            )
+        candidates.append(mapped_cluster)
+
+    if not candidates:
+        raise PickerIndexContractError(
+            frozenset(), detail=f"start identity pointer mismatch: missing for {run_id}"
+        )
+    identities = {candidate.identity for candidate in candidates}
+    if len(identities) != 1:
+        raise PickerIndexContractError(
+            frozenset(), detail=f"ambiguous selected run ids: {[run_id]}"
+        )
+    canonical = candidates[0]
+    for selected_id in canonical.selected_ids:
+        namespace_identities: set[tuple[str | None, tuple[str, ...]]] = {canonical.identity}
+        selected_execution = execution_cluster(selected_id)
+        if selected_execution is not None:
+            namespace_identities.add(selected_execution.identity)
+        selected_map_rows = session_rows(selected_id)
+        selected_execution_ids = {
+            row["lookup_execution_id"] for row in selected_map_rows if row["lookup_execution_id"]
+        }
+        if any(not row["lookup_execution_id"] for row in selected_map_rows):
+            namespace_identities.add((None, (selected_id,)))
+        for execution_id in selected_execution_ids:
+            selected_cluster = execution_cluster(execution_id)
+            if selected_cluster is None:
+                raise PickerIndexContractError(
+                    frozenset(),
+                    detail=f"start identity pointer mismatch: missing for {selected_id}",
+                )
+            namespace_identities.add(selected_cluster.identity)
+        if namespace_identities != {canonical.identity}:
+            raise PickerIndexContractError(
+                frozenset(), detail=f"ambiguous selected run ids: {[selected_id]}"
+            )
+    return canonical
+
+
 class EventTail:
     """Cursor-based read-only tail of one run's events.
 
@@ -248,116 +432,7 @@ class EventTail:
 
     def _resolve_ids(self, conn: sqlite3.Connection) -> list[str]:
         """Recover the current bounded execution/session cluster for the run."""
-        ids = {self._run_id}
-        expected_map_keys: set[tuple[str, str]] = set()
-        session_ids: set[str] = set()
-        execution_rows: list[sqlite3.Row] = []
-        map_rows: list[sqlite3.Row] = []
-        queried_sessions: set[str] = set()
-
-        def load_execution(execution_id: str) -> None:
-            rows = conn.execute(
-                "SELECT projected.event_rowid AS projected_rowid, "
-                "projected.execution_id AS projected_execution_id, "
-                "projected.session_id AS projected_session_id, "
-                "events.rowid, events.event_type, "
-                f"{PICKER_START_EXECUTION_ID_SQL} AS eid, "
-                f"{PICKER_START_SESSION_ID_SQL} AS sid "
-                f"FROM {PICKER_START_TABLE} AS projected "
-                f"INDEXED BY {PICKER_START_EXECUTION_INDEX} "
-                "LEFT JOIN events ON events.rowid = projected.event_rowid "
-                "WHERE projected.execution_id = ?",
-                [execution_id],
-            ).fetchall()
-            for row in rows:
-                valid_pointer = (
-                    row["projected_rowid"] is not None
-                    and row["rowid"] is not None
-                    and row["event_type"] == "orchestrator.session.started"
-                    and int(row["rowid"]) == int(row["projected_rowid"])
-                    and row["projected_execution_id"] == row["eid"]
-                    and row["projected_session_id"] == row["sid"]
-                )
-                if not valid_pointer:
-                    raise PickerIndexContractError(
-                        frozenset(),
-                        detail=f"start identity pointer mismatch: {row['projected_rowid']}",
-                    )
-                if row["sid"]:
-                    ids.add(row["sid"])
-                    session_ids.add(row["sid"])
-                    expected_map_keys.add((row["sid"], row["eid"] or ""))
-                if row["eid"]:
-                    ids.add(row["eid"])
-            execution_rows.extend(rows)
-
-        def load_session(session_id: str) -> None:
-            if session_id in queried_sessions:
-                return
-            queried_sessions.add(session_id)
-            map_rows.extend(
-                conn.execute(
-                    "SELECT projected.event_rowid AS projected_rowid, "
-                    "projected.execution_id AS projected_execution_id, "
-                    "projected.session_id AS projected_session_id, "
-                    "lookup.event_rowid AS lookup_rowid, "
-                    "lookup.execution_id AS lookup_execution_id, "
-                    "lookup.session_id AS lookup_session_id, "
-                    "events.rowid, events.event_type, "
-                    f"{PICKER_START_EXECUTION_ID_SQL} AS eid, "
-                    f"{PICKER_START_SESSION_ID_SQL} AS sid "
-                    f"FROM {PICKER_START_SESSION_TABLE} AS lookup "
-                    f"LEFT JOIN {PICKER_START_TABLE} AS projected "
-                    "ON projected.event_rowid = lookup.event_rowid "
-                    "LEFT JOIN events ON events.rowid = projected.event_rowid "
-                    "WHERE lookup.session_id = ?",
-                    [session_id],
-                ).fetchall()
-            )
-
-        load_execution(self._run_id)
-        if not execution_rows:
-            load_session(self._run_id)
-            for row in map_rows:
-                if row["lookup_execution_id"]:
-                    load_execution(row["lookup_execution_id"])
-        for session_id in session_ids:
-            load_session(session_id)
-        if not execution_rows and not map_rows:
-            raise PickerIndexContractError(
-                frozenset(),
-                detail=f"start identity pointer mismatch: missing for {self._run_id}",
-            )
-        actual_map_keys: set[tuple[str, str]] = set()
-        for row in map_rows:
-            valid_pointer = (
-                row["projected_rowid"] is not None
-                and row["lookup_rowid"] is not None
-                and row["rowid"] is not None
-                and row["event_type"] == "orchestrator.session.started"
-                and int(row["rowid"]) == int(row["projected_rowid"])
-                and int(row["lookup_rowid"]) == int(row["projected_rowid"])
-                and row["lookup_execution_id"] == (row["projected_execution_id"] or "")
-                and row["lookup_session_id"] == row["projected_session_id"]
-                and row["projected_execution_id"] == row["eid"]
-                and row["projected_session_id"] == row["sid"]
-            )
-            if not valid_pointer:
-                raise PickerIndexContractError(
-                    frozenset(),
-                    detail=f"start identity pointer mismatch: {row['projected_rowid']}",
-                )
-            actual_map_keys.add((row["lookup_session_id"], row["lookup_execution_id"]))
-            if row["sid"]:
-                ids.add(row["sid"])
-            if row["eid"]:
-                ids.add(row["eid"])
-        if not expected_map_keys.issubset(actual_map_keys):
-            raise PickerIndexContractError(
-                frozenset(),
-                detail=f"start identity pointer mismatch: missing for {self._run_id}",
-            )
-        return sorted(ids)
+        return list(_resolve_run_cluster(conn, self._run_id).selected_ids)
 
     def fetch_new(self, *, limit: int = 5000) -> list[dict[str, Any]]:
         """Return events appended since the last call (advances the cursor)."""
@@ -577,7 +652,7 @@ def list_recent_executions(db_path: str | Path, *, limit: int = 10) -> list[dict
             raise PickerIndexContractError(
                 frozenset(), detail="contains unprojected relevant events"
             )
-        run_specs: list[tuple[sqlite3.Row, dict[str, Any], str, str]] = []
+        run_specs: list[tuple[sqlite3.Row, dict[str, Any], str, str, _ResolvedRunCluster]] = []
         seen_execution_ids: set[str] = set()
         target_count = max(1, limit)
         page_size = max(16, target_count * 2)
@@ -645,7 +720,12 @@ def list_recent_executions(db_path: str | Path, *, limit: int = 10) -> list[dict
                 if execution_id in seen_execution_ids:
                     continue
                 seen_execution_ids.add(execution_id)
-                run_specs.append((start, start_payload, execution_id, session_id))
+                cluster = _resolve_run_cluster(conn, execution_id)
+                if cluster.execution_id != execution_id:
+                    raise PickerIndexContractError(
+                        frozenset(), detail=f"canonical execution mismatch: {execution_id}"
+                    )
+                run_specs.append((start, start_payload, execution_id, session_id, cluster))
                 if len(run_specs) >= target_count:
                     break
             if exhausted_rowid_range:
@@ -654,12 +734,18 @@ def list_recent_executions(db_path: str | Path, *, limit: int = 10) -> list[dict
         all_ids = sorted(
             {
                 value
-                for _start, _payload, execution_id, session_id in run_specs
-                for value in (execution_id, session_id)
+                for _start, _payload, _execution_id, _session_id, cluster in run_specs
+                for value in cluster.selected_ids
                 if value
             }
         )
-        session_ids = sorted({spec[3] for spec in run_specs if spec[3]})
+        session_ids = sorted(
+            {
+                session_id
+                for _start, _payload, _execution_id, _session_id, cluster in run_specs
+                for session_id in cluster.session_ids
+            }
+        )
         event_rows = _fetch_direct_rows(
             conn,
             all_ids,
@@ -681,21 +767,25 @@ def list_recent_executions(db_path: str | Path, *, limit: int = 10) -> list[dict
         )
         event_rows.sort(key=lambda row: int(row["rowid"]))
 
-        events_by_execution: dict[str, list[dict[str, Any]]] = {
-            execution_id: [
-                {
-                    "rowid": start["rowid"],
-                    "event_type": start["event_type"],
-                    "payload": start_payload,
-                }
-            ]
-            for start, start_payload, execution_id, _session_id in run_specs
-        }
+        events_by_execution: dict[str, list[dict[str, Any]]] = {}
+        for _start, _start_payload, execution_id, _session_id, cluster in run_specs:
+            start_events: list[dict[str, Any]] = []
+            for cluster_start in cluster.start_rows:
+                cluster_payload = _decode_payload(cluster_start["payload"])
+                if not isinstance(cluster_payload, dict):
+                    continue
+                start_events.append(
+                    {
+                        "rowid": cluster_start["rowid"],
+                        "event_type": cluster_start["event_type"],
+                        "payload": cluster_payload,
+                    }
+                )
+            events_by_execution[execution_id] = start_events
         executions_by_id: dict[str, set[str]] = {}
-        for _start, _payload, execution_id, session_id in run_specs:
-            executions_by_id.setdefault(execution_id, set()).add(execution_id)
-            if session_id:
-                executions_by_id.setdefault(session_id, set()).add(execution_id)
+        for _start, _payload, execution_id, _session_id, cluster in run_specs:
+            for selected_id in cluster.selected_ids:
+                executions_by_id.setdefault(selected_id, set()).add(execution_id)
         ambiguous_ids = sorted(
             selected_id
             for selected_id, execution_ids in executions_by_id.items()
@@ -735,9 +825,11 @@ def list_recent_executions(db_path: str | Path, *, limit: int = 10) -> list[dict
             }
             for execution_id in matched_executions:
                 events_by_execution[execution_id].append(event)
+        for execution_events in events_by_execution.values():
+            execution_events.sort(key=lambda event: int(event["rowid"]))
 
         summaries: list[dict[str, Any]] = []
-        for start, start_payload, execution_id, session_id in run_specs:
+        for start, start_payload, execution_id, session_id, _cluster in run_specs:
             events = events_by_execution[execution_id]
             board = reduce_board(events, execution_id=execution_id)
             columns = board["columns"]

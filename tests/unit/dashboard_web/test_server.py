@@ -71,6 +71,41 @@ def _make_events_db(path, *, contract: str) -> None:
         conn.close()
 
 
+def _add_cross_namespace_collision(path) -> None:
+    """Make ``exec-http`` name a different run's session in the same contract."""
+    conn = sqlite3.connect(path)
+    try:
+        cursor = conn.execute(
+            "INSERT INTO events "
+            "(aggregate_id, event_type, payload, picker_projection_version) "
+            "VALUES (?, ?, ?, ?)",
+            (
+                "exec-http",
+                "orchestrator.session.started",
+                json.dumps({"execution_id": "exec-other"}),
+                PICKER_PROJECTION_VERSION,
+            ),
+        )
+        event_rowid = int(cursor.lastrowid)
+        conn.execute(
+            f"INSERT INTO {PICKER_START_TABLE} "
+            "(event_rowid, execution_id, session_id) VALUES (?, ?, ?)",
+            (event_rowid, "exec-other", "exec-http"),
+        )
+        conn.execute(
+            f"INSERT INTO {PICKER_START_SESSION_TABLE} "
+            "(session_id, execution_id, event_rowid) VALUES (?, ?, ?)",
+            ("exec-http", "exec-other", event_rowid),
+        )
+        conn.execute(
+            f"UPDATE {PICKER_META_TABLE} SET backfilled_through_rowid = ?",
+            (event_rowid,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 @contextmanager
 def _running_server(db_path) -> Iterator[object]:
     server, thread = serve_background(db_path=str(db_path), host="127.0.0.1", port=0)
@@ -106,6 +141,22 @@ def test_run_endpoints_return_json_503_before_committing_success(
         status, headers, body = _get(host, port, path)
         assert server.open_streams == 0
         assert server.last_activity == initial_activity
+
+    assert status == 503
+    assert headers["Content-Type"] == "application/json"
+    assert json.loads(body) == {"error": "picker_index_contract_unavailable"}
+
+
+@pytest.mark.parametrize("path", ["/snapshot?run=exec-http", "/events?run=exec-http"])
+def test_run_endpoints_reject_cross_namespace_identity_collision(tmp_path, path: str) -> None:
+    db = tmp_path / "identity-collision.db"
+    _make_events_db(db, contract="valid")
+    _add_cross_namespace_collision(db)
+
+    with _running_server(db) as server:
+        host, port = server.server_address
+        status, headers, body = _get(host, port, path)
+        assert server.open_streams == 0
 
     assert status == 503
     assert headers["Content-Type"] == "application/json"

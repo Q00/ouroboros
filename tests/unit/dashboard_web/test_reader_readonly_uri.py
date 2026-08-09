@@ -707,6 +707,38 @@ def test_canonical_link_rejects_conflicting_selected_run_ids(tmp_path) -> None:
         list_recent_executions(db, limit=2)
 
 
+def test_run_identity_fails_closed_for_cross_namespace_collision(tmp_path) -> None:
+    db = tmp_path / "cross-namespace-collision.db"
+    _make_events_db(
+        db,
+        [
+            ("orch-a", "orchestrator.session.started", {"execution_id": "shared"}),
+            ("shared", "orchestrator.session.started", {"execution_id": "exec-b"}),
+        ],
+    )
+
+    for selected_id in ("shared", "exec-b"):
+        with pytest.raises(PickerIndexContractError, match="ambiguous selected run ids"):
+            EventTail(db, selected_id).fetch_new()
+    with pytest.raises(PickerIndexContractError, match="ambiguous selected run ids"):
+        list_recent_executions(db, limit=1)
+
+
+def test_run_identity_allows_one_token_in_both_namespaces_for_same_cluster(tmp_path) -> None:
+    db = tmp_path / "same-cluster-identity.db"
+    _make_events_db(
+        db,
+        [("shared", "orchestrator.session.started", {"execution_id": "shared"})],
+    )
+
+    assert [event["event_type"] for event in EventTail(db, "shared").fetch_new()] == [
+        "orchestrator.session.started"
+    ]
+    assert [
+        (run["execution_id"], run["session_id"]) for run in list_recent_executions(db, limit=1)
+    ] == [("shared", "shared")]
+
+
 def test_canonical_link_does_not_cross_link_foreign_execution_to_selected_session(
     tmp_path,
 ) -> None:
@@ -1496,6 +1528,30 @@ def test_picker_limit_counts_distinct_valid_execution_ids(tmp_path) -> None:
     assert [run["execution_id"] for run in runs] == ["exec_new", "exec_old"]
 
 
+def test_recent_summary_reduces_complete_duplicate_execution_session_cluster(tmp_path) -> None:
+    db = tmp_path / "duplicate-start-lifecycle.db"
+    _make_events_db(
+        db,
+        [
+            ("orch-old", "orchestrator.session.started", {"execution_id": "exec-shared"}),
+            ("orch-old", "orchestrator.session.failed", {"reason": "durable failure"}),
+            ("orch-new", "orchestrator.session.started", {"execution_id": "exec-shared"}),
+        ],
+    )
+
+    runs = list_recent_executions(db, limit=1)
+    detail_events = EventTail(db, "exec-shared").fetch_new()
+
+    assert [(run["execution_id"], run["session_id"], run["status"]) for run in runs] == [
+        ("exec-shared", "orch-new", "failed")
+    ]
+    assert [event["event_type"] for event in detail_events] == [
+        "orchestrator.session.started",
+        "orchestrator.session.failed",
+        "orchestrator.session.started",
+    ]
+
+
 def test_picker_paginates_zero_and_minimum_int64_start_rowids(tmp_path) -> None:
     db = tmp_path / "nonpositive-start-rowids.db"
     conn = sqlite3.connect(db)
@@ -2039,7 +2095,7 @@ def test_picker_bounds_selected_workflow_progress_history(tmp_path, monkeypatch)
     assert len(pointer_queries) == 2
     assert len(direct_queries) == len(PICKER_DIRECT_EVENT_TYPES)
     assert len(linked_queries) == 0
-    assert len(start_queries) == 1
+    assert len(start_queries) == 3
     assert all("SCAN events" not in str(row[3]) for plan in (*plans, *start_plans) for row in plan)
     # This fixture has one projected start. SQLite 3.45 may sort that single row,
     # while the dedicated 100k-start regression below enforces the real no-sort
@@ -2131,7 +2187,7 @@ def test_picker_bounds_large_start_history(tmp_path, monkeypatch) -> None:
         :10
     ]
     assert start_vm_steps < 500, (top_vm_statements, start_plans)
-    assert len(start_queries) == 1
+    assert len(start_queries) == 3
     assert all("SCAN events" not in str(row[3]) for plan in start_plans for row in plan)
     assert all("TEMP B-TREE" not in str(row[3]) for plan in start_plans for row in plan)
     assert any("USING INTEGER PRIMARY KEY" in str(row[3]) for plan in start_plans for row in plan)
@@ -2140,8 +2196,8 @@ def test_picker_bounds_large_start_history(tmp_path, monkeypatch) -> None:
 @pytest.mark.parametrize(
     ("run_id", "expected_index", "expected_queries"),
     [
-        ("exec_target", PICKER_START_EXECUTION_INDEX, 2),
-        ("orch_target", "PRIMARY KEY", 3),
+        ("exec_target", PICKER_START_EXECUTION_INDEX, 4),
+        ("orch_target", "PRIMARY KEY", 4),
     ],
 )
 def test_event_tail_bounds_identity_resolution_across_100k_starts(
