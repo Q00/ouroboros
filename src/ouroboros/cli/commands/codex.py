@@ -37,6 +37,16 @@ _REQUIRED_CODEX_AUTO_TOOLS = frozenset(
 )
 _MCP_PROTOCOL_VERSION = "2024-11-05"
 _MCP_STDERR_TAIL_BYTES = 8192
+_CANONICAL_CODEX_UVX_MCP_ARGS = (
+    "--isolated",
+    "--python",
+    UVX_PYTHON_FLOOR,
+    "--from",
+    "ouroboros-ai[mcp]",
+    "ouroboros",
+    "mcp",
+    "serve",
+)
 
 
 class _StdioMcpFramingMismatch(RuntimeError):
@@ -238,33 +248,102 @@ def _check_mcp_runtime_dependency_surface(
     command_name = Path(command).name
     string_args = [arg for arg in args if isinstance(arg, str)]
 
-    if command_name in {"uvx", "uv"}:
+    if command_name == "uvx":
         joined_args = " ".join(string_args)
         if "ouroboros-ai" in joined_args and "ouroboros-ai[mcp]" not in joined_args:
             failures.append(
                 "Codex MCP command installs `ouroboros-ai` without the `mcp` extra; "
                 "use `ouroboros-ai[mcp]` so stdio initialize/list_tools can start"
             )
-        if (
-            command_name == "uvx"
-            and "ouroboros-ai[mcp]" in string_args
-            and "--isolated" not in string_args
+
+        if tuple(string_args) == _CANONICAL_CODEX_UVX_MCP_ARGS:
+            return
+
+        command_tail = ("ouroboros", "mcp", "serve")
+        try:
+            command_index = next(
+                index
+                for index in range(len(string_args) - len(command_tail) + 1)
+                if tuple(string_args[index : index + len(command_tail)]) == command_tail
+            )
+        except StopIteration:
+            command_index = None
+
+        isolated_indices = [
+            index for index, argument in enumerate(string_args) if argument == "--isolated"
+        ]
+        if len(isolated_indices) != 1 or (
+            command_index is not None and isolated_indices[0] > command_index
         ):
             failures.append(
                 "Codex MCP uvx command may reuse an installed MCP 1.x tool; "
-                "add `--isolated` before `--from ouroboros-ai[mcp]`"
+                "use exactly one `--isolated` before the launched command"
             )
-        if command_name == "uvx" and "ouroboros-ai[mcp]" in string_args:
-            try:
-                python_index = string_args.index("--python")
-                python_selector = string_args[python_index + 1]
-            except (ValueError, IndexError):
-                python_selector = None
-            if python_selector != UVX_PYTHON_FLOOR:
-                failures.append(
-                    "Codex MCP uvx command does not select the supported Python floor; "
-                    "add `--python >=3.12` before `--from ouroboros-ai[mcp]`"
-                )
+
+        python_indices = [
+            index
+            for index, argument in enumerate(string_args)
+            if argument == "--python" or argument.startswith("--python=")
+        ]
+        python_selector = (
+            string_args[python_indices[0] + 1]
+            if len(python_indices) == 1
+            and string_args[python_indices[0]] == "--python"
+            and python_indices[0] + 1 < len(string_args)
+            else None
+        )
+        if (
+            len(python_indices) != 1
+            or python_selector != UVX_PYTHON_FLOOR
+            or (command_index is not None and python_indices[0] > command_index)
+        ):
+            failures.append(
+                "Codex MCP uvx command does not select the supported Python floor; "
+                "use exactly one `--python >=3.12` before the launched command"
+            )
+
+        from_indices = [
+            index
+            for index, argument in enumerate(string_args)
+            if argument == "--from" or argument.startswith("--from=")
+        ]
+        package_spec = (
+            string_args[from_indices[0] + 1]
+            if len(from_indices) == 1
+            and string_args[from_indices[0]] == "--from"
+            and from_indices[0] + 1 < len(string_args)
+            else None
+        )
+        if (
+            len(from_indices) != 1
+            or package_spec != "ouroboros-ai[mcp]"
+            or (command_index is not None and from_indices[0] > command_index)
+        ):
+            failures.append(
+                "Codex MCP uvx command must use exactly one unpinned "
+                "`--from ouroboros-ai[mcp]` before the launched command"
+            )
+
+        if command_index is None or tuple(string_args[command_index:]) != command_tail:
+            failures.append(
+                "Codex MCP uvx command must end with `ouroboros mcp serve`; "
+                "uvx launcher flags belong before that command"
+            )
+
+        failures.append(
+            "Codex MCP uvx command is not canonical; expected: "
+            "`uvx --isolated --python >=3.12 --from ouroboros-ai[mcp] "
+            "ouroboros mcp serve`"
+        )
+        return
+
+    if command_name == "uv":
+        joined_args = " ".join(string_args)
+        if "ouroboros-ai" in joined_args and "ouroboros-ai[mcp]" not in joined_args:
+            failures.append(
+                "Codex MCP command installs `ouroboros-ai` without the `mcp` extra; "
+                "use `ouroboros-ai[mcp]` so stdio initialize/list_tools can start"
+            )
         return
 
     if command_name != "ouroboros":

@@ -615,6 +615,113 @@ class TestCodexDoctor:
 
         assert any("does not select the supported Python floor" in failure for failure in failures)
 
+    @pytest.mark.parametrize(
+        ("args", "expected_failure"),
+        [
+            (
+                [
+                    "--isolated",
+                    "--python",
+                    ">=3.12",
+                    "--from",
+                    "ouroboros-ai[mcp]==0.26.0",
+                    "ouroboros",
+                    "mcp",
+                    "serve",
+                ],
+                "exactly one unpinned",
+            ),
+            (
+                [
+                    "--isolated",
+                    "--python",
+                    ">=3.12",
+                    "--from",
+                    "ouroboros-ai[MCP]",
+                    "ouroboros",
+                    "mcp",
+                    "serve",
+                ],
+                "exactly one unpinned",
+            ),
+            (
+                [
+                    "--isolated",
+                    "--python",
+                    ">=3.12",
+                    "--python",
+                    "3.11",
+                    "--from",
+                    "ouroboros-ai[mcp]",
+                    "ouroboros",
+                    "mcp",
+                    "serve",
+                ],
+                "exactly one `--python >=3.12`",
+            ),
+            (
+                [
+                    "--isolated",
+                    "--python",
+                    ">=3.12",
+                    "--from",
+                    "ouroboros-ai[mcp]",
+                    "ouroboros",
+                    "mcp",
+                    "serve",
+                    "--python=3.11",
+                ],
+                "launcher flags belong before",
+            ),
+            (
+                [
+                    "ouroboros",
+                    "mcp",
+                    "serve",
+                    "--isolated",
+                    "--python",
+                    ">=3.12",
+                    "--from",
+                    "ouroboros-ai[mcp]",
+                ],
+                "launcher flags belong before",
+            ),
+            (
+                [
+                    "--isolated",
+                    "--python",
+                    ">=3.12",
+                    "--from",
+                    "ouroboros-ai[mcp]",
+                    "--isolated",
+                    "ouroboros",
+                    "mcp",
+                    "serve",
+                ],
+                "exactly one `--isolated`",
+            ),
+        ],
+    )
+    def test_check_auto_dispatch_surface_rejects_noncanonical_uvx_semantics(
+        self,
+        tmp_path: Path,
+        args: list[str],
+        expected_failure: str,
+    ) -> None:
+        """Equivalent-looking argv must not weaken the isolated launcher contract."""
+        codex_dir = tmp_path / ".codex"
+        self._write_healthy_codex_surface(codex_dir)
+        rendered_args = ", ".join(repr(argument) for argument in args)
+        (codex_dir / "config.toml").write_text(
+            f'[mcp_servers.ouroboros]\ncommand = "uvx"\nargs = [{rendered_args}]\n',
+            encoding="utf-8",
+        )
+
+        failures = _check_auto_dispatch_surface(codex_dir)
+
+        assert any(expected_failure in failure for failure in failures)
+        assert any("is not canonical" in failure for failure in failures)
+
     def test_check_auto_dispatch_surface_reports_direct_ouroboros_without_mcp_import(
         self,
         tmp_path: Path,
