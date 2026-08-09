@@ -5,7 +5,7 @@ doc_metadata:
 
 # Running Ouroboros with Codex CLI
 
-> 한국어: [codex.ko.md](./codex.ko.md) (설치까지 번역됨, 이후 절은 이 문서를 보세요)
+> 한국어: [codex.ko.md](./codex.ko.md)
 
 > For installation and first-run onboarding, see [Getting Started](../getting-started.md).
 

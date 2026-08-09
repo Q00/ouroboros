@@ -7,7 +7,7 @@ doc_metadata:
 
 > English: [codex.md](./codex.md)
 >
-> **번역 진행 상황**: 명령 표면 · 동작 방식 · 런타임 차이 · CLI 옵션 · Seed 레퍼런스까지 옮겼습니다. 문제 해결 · 비용 · Active Conductor는 아직 영문입니다 — [codex.md](./codex.md)를 보세요. 진행은 [#1988](https://github.com/Q00/ouroboros/issues/1988)에서 추적합니다.
+> 영문 원문 전체를 옮긴 완역본입니다. 원문이 갱신되면 이 문서도 함께 갱신해야 합니다.
 
 > 설치와 첫 실행 흐름 전체는 [Getting Started](../getting-started.md)(영문)를 보세요.
 
@@ -375,12 +375,81 @@ uv run ouroboros run workflow --runtime codex --resume <session_id> ~/.ouroboros
 >
 > 실무적으로: 손으로 쓴 seed에 높은 `ambiguity_score`를 박아도 `ouroboros run workflow`가 막지는 않습니다. 이 값은 **강제 차단 장치가 아니라 출처 기록(provenance)**입니다.
 
+## 문제 해결
+
+### Codex CLI를 못 찾을 때
+
+`codex` 또는 `codex-cli`가 설치돼 있고 `PATH`에서 보이는지 확인하세요:
+
+```bash
+which codex || which codex-cli
+```
+
+설치돼 있지 않다면 npm으로:
+
+```bash
+npm install -g @openai/codex
+```
+
+다른 설치 방법은 [Codex CLI README](https://github.com/openai/codex#readme)를 보세요.
+
+### 인증 오류
+
+Codex CLI는 두 가지 방식으로 인증할 수 있고, 어느 쪽인지는 Codex CLI 설정에 달려 있습니다. `$CODEX_HOME/auth.json`(`CODEX_HOME`이 없으면 `~/.codex/auth.json`)에 저장된 Codex 로그인을 쓰거나, OpenAI API 키를 씁니다.
+
+OAuth 기반 Codex CLI라면:
+
+```bash
+codex login
+```
+
+API 키 기반 Codex CLI라면, 키가 설정돼 있고 선택된 모델에 접근 권한이 있는지 확인하세요:
+
+```bash
+echo $OPENAI_API_KEY  # 값이 있어야 합니다
+```
+
+### 헬스체크의 "Providers: warning"
+
+**오케스트레이터 런타임 백엔드를 쓸 때는 정상입니다.** 이 경고는 LiteLLM 공급자를 가리키는데, 오케스트레이터 모드에서는 쓰지 않습니다.
+
+### "EventStore not initialized"
+
+데이터베이스는 `ouroboros config show`가 보여주는 활성 경로에 자동으로 생성됩니다.
+
+## 비용
+
+Codex CLI를 런타임 백엔드로 쓰면, 결제는 **Codex CLI에 설정된 인증·과금 경로를 따릅니다.** 설정에 따라 Codex OAuth일 수도, OpenAI API 키 직접 사용일 수도 있습니다. 비용을 좌우하는 것:
+
+- Codex가 선택한 모델 (**Codex 기본 모델 사용**을 권장합니다)
+- 작업 복잡도와 토큰 사용량
+- 도구 호출 및 반복 횟수
+
+현재 요율은 [OpenAI 가격 페이지](https://openai.com/pricing)를 확인하세요.
+
+## Active Conductor와 Synapse
+
+Codex CLI는 검증된 Synapse `inform`·`after_turn` 백엔드입니다. Ouroboros가 현재 턴이 끝난 뒤 같은 영속 Codex 스레드를 재개하고, 재개된 공급자 턴이 확인 응답을 낸 뒤에야 `applied`로 보고합니다. **라이브 체크포인트 `redirect`나 하드 `replace`는 광고하지 않습니다.**
+
+구체적으로, Codex 런타임이 선언하는 세션 시그널 능력은 6개 중 3개입니다 ([`orchestrator/codex_cli_runtime.py:453`](../../src/ouroboros/orchestrator/codex_cli_runtime.py)):
+
+| 능력 | Codex | 의미 |
+|---|:---:|---|
+| `inform_delivery` | O | 실행 중인 세션에 정보를 전달할 수 있음 |
+| `background_reply` | O | 백그라운드에서 응답을 받을 수 있음 |
+| `after_turn_delivery` | O | **현재 턴이 끝난 뒤에** 전달됨 |
+| `checkpoint_redirect` | X | 턴 중간에 방향을 틀 수 없음 |
+| `owned_turn_abort` | X | 진행 중인 턴을 중단시킬 수 없음 |
+| `replacement_resume` | X | 세션을 교체해 재개할 수 없음 |
+
+`codex exec resume <thread-id>`는 정확히 하나의 영속 스레드로 다시 들어갑니다. Synapse는 현재 턴이 **완료된 뒤에만** 시그널을 배출하므로, 이 능력 선언은 라이브 인터럽션을 주장하지 않습니다. **긴 턴 도중에 방향을 바꾸고 싶다면 그 턴이 끝날 때까지 기다려야 한다는 뜻입니다.**
+
+> **참고 — 서브에이전트 팬아웃:** Codex는 세션 안에서 스스로 병렬화할 수 있지만, `codex mcp-server`는 `codex`와 `codex-reply`만 노출합니다. Codex의 네이티브 멀티에이전트 팀 도구는 외부 드라이버가 닿을 수 없습니다. 그래서 Ouroboros는 Codex 스레드를 재사용·연장할 수는 있어도 **Codex 자식들을 오케스트레이션하지는 못하고**, 서브에이전트 팬아웃은 인프로세스로 남습니다 (`subagent_orchestration=INTERNAL`, [`codex_cli_runtime.py:448`](../../src/ouroboros/orchestrator/codex_cli_runtime.py)).
+
+이 경로가 **공개적으로 호출 가능해지는 것은 완전한 MCP 호스트 계층에서뿐입니다.** 그 계층이 탐색/전달 도구를 등록하고, run 및 Auto 실행과 하나의 Synapse 허브를 공유합니다. 계약만 있는 스택 계층이나 런타임만 있는 계층은 테스트와 수동 스모크 커버리지를 제공할 뿐, 그 자체로 공개 제어 경로를 노출하지는 않습니다.
+
+`ooo run`/`ooo auto`가 도는 동안 메인 호스트는 **읽기 전용 관찰자 하나를 배타적으로** 유지하면서 런타임/모델 라우팅, 효율·절약 정책, 제한된 Discover 요약, 전체 의존/병렬 수준, 처음 스케줄된 AC들, 경로나 하네스 변경, 주의 사항, 최종 보증을 보고합니다. 사용자는 메인 세션에서 계속 대화할 수 있습니다. 호스트는 영향받는 AC를 **의미로 골라내며, 내부 ID를 묻지 않습니다.** 지침의 정본 언어는 영어지만, 호스트는 이 사실들을 사용자가 지금 쓰고 있는 대화 언어로 자연스럽게 표현합니다.
+
 ---
 
-## 이후 절
-
-아래 내용은 아직 영문입니다. [codex.md](./codex.md)에서 이어 보세요.
-
-- 문제 해결 (Codex CLI를 못 찾을 때, 인증 오류, 헬스체크 경고, EventStore 미초기화)
-- 비용
-- Active Conductor와 Synapse
+이 가이드는 여기서 끝납니다. 영문 원문은 [codex.md](./codex.md)입니다.
