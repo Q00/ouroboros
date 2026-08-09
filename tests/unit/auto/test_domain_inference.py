@@ -4972,6 +4972,24 @@ def test_embedded_web_phrases_are_components_not_co_products(
         assert result.single is expected_only
 
 
+@pytest.mark.parametrize(
+    "goal",
+    [
+        "Build a native mobile app with web-style forms",
+        "Build a native mobile app with a web-inspired dashboard",
+        "Build a native mobile app with no web-style forms",
+    ],
+)
+def test_web_similarity_conjuncts_do_not_own(goal: str) -> None:
+    """R117 guard: bare web similarity modifiers compare rather than
+    produce — a native app with web-style forms stays native."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value="Login form and account page")
+    _seed_section(ledger, "runtime_context", value="Native iOS and Android application")
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes
+
+
 def test_coordinated_web_dashboard_keeps_honest_ambiguity() -> None:
     """R105 guard: a coordinated conjunct uses the same ownership grammar
     as a standalone goal — "a CLI and a local web dashboard" is an

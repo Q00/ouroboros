@@ -270,9 +270,11 @@ _POSTPOSITIVE_BROWSER_DENIAL_RE = re.compile(
     r"altogether|everywhere|here|there)\b)(?![\w'’]+ly\b)[\w'’\-]+)"
 )
 
+# Bare "web" takes the similarity reading too (#1813 R117):
+# "web-style forms" compares, it does not produce.
 _WEB_SIMILARITY_MODIFIER_RE = re.compile(
-    rf"\b{_WEB_APP_GOAL_SIGNAL_FRAGMENT}[\s\-]+"
-    r"(?:like|style|styled|esque|inspired|themed|free)\b"
+    rf"\b(?:{_WEB_APP_GOAL_SIGNAL_FRAGMENT}|web)[\s\-]+"
+    r"(?:like|style|styled|esque|inspired|themed|free|flavou?red)\b"
 )
 # One shared component vocabulary across first-NP, goal-identity, and
 # runtime-identity decisions (#1813 R83).
