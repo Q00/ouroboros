@@ -118,6 +118,11 @@ Auto mode is hang-resistant by design: interview and repair loops are bounded, s
 
 ### Option 1: Claude Code Plugin (Recommended)
 
+Requires `uvx` on the host — the plugin's MCP manifest launches the server with
+it ([`.claude-plugin/.mcp.json`](../.claude-plugin/.mcp.json)). Install uv with
+`pipx install uv`, `pip install --user uv`, or `brew install uv`. You do not need
+to install Python yourself; the manifest uses `uvx --python '>=3.12'`.
+
 ```bash
 # Terminal
 claude plugin marketplace add Q00/ouroboros

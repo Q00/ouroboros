@@ -47,8 +47,17 @@ ooo
 ### 사전 조건 (권장 경로)
 
 - Claude Code CLI 설치 및 인증 완료 (Pro 또는 Max Plan)
+- **`uvx`** (uv에 포함). 플러그인의 MCP 매니페스트가 `uvx`로 서버를 띄웁니다 ([`.claude-plugin/.mcp.json`](../../.claude-plugin/.mcp.json))
 
-그게 전부입니다. **Python 요구사항은 아래 독립 CLI 경로에만 해당합니다.**
+`uvx`가 없으면 다음 중 하나로 uv를 설치하세요:
+
+```bash
+pipx install uv
+pip install --user uv
+brew install uv          # macOS / Linuxbrew
+```
+
+**Python은 미리 깔아둘 필요가 없습니다.** 매니페스트가 `uvx --python '>=3.12'`로 띄우기 때문에, uv가 필요한 인터프리터를 알아서 가져옵니다. 아래 독립 CLI 경로의 `Python >= 3.12` 요구사항은 **이 경로에는 해당하지 않습니다.**
 
 ## 독립 CLI로 쓰기 (선택)
 
@@ -62,7 +71,16 @@ Claude Code 세션 밖, 평소 쓰는 셸에서 `ouroboros` 명령을 직접 치
 
 > 기본값인 in-process SDK 런타임(MCP 1.x)을 쓰려면 `ouroboros-ai[claude]`를 설치하세요. 마켓플레이스 플러그인은 격리된 `ouroboros-ai[mcp]` 환경에서 MCP 2 서버를 띄우고 `[claude-cli]` 워커를 고릅니다. **`[mcp]`를 `[claude]`·`[claude-sdk]`·`[all]`과 한 인터프리터에 같이 넣지 마세요.**
 
-### 동작 방식
+## 설정
+
+Claude Code를 런타임 백엔드로 고르려면 Ouroboros 설정에 다음을 넣습니다:
+
+```yaml
+orchestrator:
+  runtime_backend: claude  # `ouroboros setup --runtime claude`가 써 줍니다
+```
+
+`--orchestrator` CLI 플래그를 쓸 때는 Claude Code가 기본 런타임 백엔드입니다.
 
 ## 동작 방식
 
