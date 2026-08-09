@@ -26,7 +26,7 @@ _TUI_INSTALL_HINT = (
     "Install with:\n"
     "  pip install 'ouroboros-ai\\[tui]'\n\n"
     "Or run directly with uvx:\n"
-    "  uvx --from 'ouroboros-ai\\[tui]' ouroboros config"
+    "  uvx --python '>=3.12' --from 'ouroboros-ai\\[tui]' ouroboros config"
 )
 
 

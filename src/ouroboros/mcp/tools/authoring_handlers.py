@@ -20,7 +20,6 @@ import yaml
 from ouroboros.auto.intent_guard import IntentGuardReport, IntentGuardStatus, guard_interview_turn
 from ouroboros.backends import (
     backend_supports_tool_envelope,
-    build_runtime_subagent_orchestration_contract,
 )
 from ouroboros.bigbang.ambiguity import (
     AMBIGUITY_THRESHOLD,
@@ -64,19 +63,20 @@ from ouroboros.mcp.tools.advisory_dispatch import (
     echo_carries_dispatch,
     strip_bridge_notice,
 )
+from ouroboros.mcp.tools.question_advisory import (
+    attach_question_advisory,
+    build_question_advisory_request,
+)
 from ouroboros.mcp.tools.subagent import (
     DELEGATED_TO_SUBAGENT,
     FanoutRegistry,
     SubagentDispatchMode,
     build_generate_seed_subagent,
-    build_interview_question_advisory_subagents,
     build_interview_subagent,
     dispatch_plugin_terminal,
     lateral_persona_panel_metadata_from_capability_definitions,
     resolve_subagent_dispatch,
     should_dispatch_via_plugin,
-    stamp_fanout_meta,
-    stamp_question_advisory_fanout,
 )
 from ouroboros.mcp.types import (
     ContentType,
@@ -675,31 +675,22 @@ def _build_question_advisory_request(
     code_investigation_request: dict[str, Any] | None = None,
     last_question: str | None = None,
 ) -> dict[str, Any]:
-    """Build parent-runtime request metadata for per-question answer help."""
-    mcp_tool_capability = ouroboros_tool_capability_metadata("ouroboros_interview")
-    advisory = mcp_tool_capability["orchestration"]["question_advisory_fanout"]
-    request: dict[str, Any] = {
-        "contract_id": advisory["contract_id"],
-        "session_id": session_id,
-        "question_identity": stable_code_investigation_question_identity(question),
-        "question": question,
-        "phase": phase,
-        "ambiguity_score": score.overall_score if score is not None else None,
-        "milestone": _milestone_for_score(score),
-        "user_question_first": True,
-        "advisory_goal": "help_human_answer_interview_question",
-        "parallel_preference": advisory["parallel_preference"],
-        "sequential_fallback": dict(advisory["sequential_fallback"]),
-        "allowed_capabilities": ["inspect_code", "web_research", "run_lateral_review", "read_data"],
-        "lanes": list(advisory["lanes"]),
-        "synthesis_contract": dict(advisory["synthesis_contract"]),
-        "mcp_tool_capability": mcp_tool_capability,
-    }
-    if last_question:
-        request["last_question"] = last_question
-    if code_investigation_request is not None:
-        request["code_investigation_request"] = code_investigation_request
-    return request
+    """Build the interview's advisory request. Kept for existing importers.
+
+    The builder moved to ``question_advisory`` and is shared with every tool
+    that declares a catalog; this signature stays so a caller that had the
+    interview's ambiguity score in hand does not have to unpack it here.
+    """
+    return build_question_advisory_request(
+        tool_name="ouroboros_interview",
+        session_id=session_id,
+        question=question,
+        phase=phase,
+        ambiguity_score=score.overall_score if score is not None else None,
+        milestone=_milestone_for_score(score),
+        code_investigation_request=code_investigation_request,
+        last_question=last_question,
+    )
 
 
 def _attach_question_assist_requests(
@@ -715,83 +706,34 @@ def _attach_question_assist_requests(
     opencode_mode: str | None = None,
     fanout_registry: FanoutRegistry | None = None,
 ) -> None:
-    """Attach code-fact and advisory fanout requests for a question turn.
+    """Attach the interview's code-fact request and its advisory fan-out.
 
-    ``dispatch_mode`` carries the runtime's resolved subagent dispatch mode. On
-    a ``HOST_DRIVEN`` runtime (e.g. Codex) there is no passive bridge to consume
-    ``question_advisory_subagents``, so the response is stamped with an explicit
-    ``host_action=spawn_subagents`` cue for the host model to fan the advisory
-    lanes out itself.
-
-    When ``fanout_registry`` is provided the advisory fan-out is registered for
-    result re-entry — keyed by ``context.lane_id`` with the emitted payloads'
-    lane ids as expected keys, matching the stamped
-    ``question_advisory_result_correlation_key`` — and its ``fanout_id`` is
-    stamped as ``question_advisory_fanout_id`` so a later
-    ``ouroboros_submit_fanout_results`` submission can be matched. A registry
-    adds that id; the correlation key is stamped without one, on all three.
+    The fan-out itself lives in ``question_advisory``, which serves every tool
+    that declares a catalog — one implementation, so the interview and the PM
+    interview cannot drift apart in the places where being identical matters.
+    What stays here is the part that is only the interview's: the code-fact
+    investigation request, which exists because in this interview a code fact
+    may become the answer.
     """
     code_request = _build_code_investigation_request(
         session_id=session_id,
         question=question,
         last_question=last_question,
     )
-    meta["code_investigation_request"] = code_request
-    meta["question_advisory_recommended"] = True
-    advisory_request = _build_question_advisory_request(
+    attach_question_advisory(
+        meta,
+        tool_name="ouroboros_interview",
         session_id=session_id,
         question=question,
         phase=phase,
-        score=score,
+        ambiguity_score=score.overall_score if score is not None else None,
+        milestone=_milestone_for_score(score),
         code_investigation_request=code_request,
         last_question=last_question,
-    )
-    meta["question_advisory_request"] = advisory_request
-    meta["question_advisory_contract_id"] = advisory_request["contract_id"]
-    try:
-        advisory_payloads = build_interview_question_advisory_subagents(advisory_request)
-    except ValueError as exc:
-        log.warning(
-            "mcp.tool.interview.question_advisory_build_failed",
-            session_id=session_id,
-            error=str(exc),
-        )
-        return
-    meta["question_advisory_subagents"] = [payload.to_dict() for payload in advisory_payloads]
-    meta["question_advisory_preserve_content"] = True
-    contract_backend = runtime_backend
-    if not contract_backend:
-        contract_backend = (
-            "codex"
-            if dispatch_mode is SubagentDispatchMode.HOST_DRIVEN
-            else "opencode"
-            if dispatch_mode is SubagentDispatchMode.PLUGIN_PASSIVE
-            else "gemini"
-        )
-    contract = build_runtime_subagent_orchestration_contract(
-        contract_backend,
-        directive_metadata=advisory_request,
-        opencode_mode=opencode_mode,
-    )
-    meta["subagent_orchestration_instruction"] = contract.runtime_instruction_handling
-    # Advisory lanes are keyed by lane_id; their persona is absent on some
-    # lanes (code_context, web_context), so correlate by lane_id, not persona.
-    stamp_fanout_meta(
-        meta,
-        prefix="question_advisory",
         dispatch_mode=dispatch_mode,
-        payloads=advisory_payloads,
-        correlation_key="context.lane_id",
-    )
-    # Register from the SAME request this response stamps: correlation key
-    # ``context.lane_id``, expected keys the payload lane ids, so a host
-    # following the stamped key round-trips (#1578). Contracts are not
-    # persisted -- re-entry judges by this build (#1825).
-    stamp_question_advisory_fanout(
-        meta,
-        fanout_registry,
-        session_id=session_id,
-        payloads=advisory_payloads,
+        runtime_backend=runtime_backend,
+        opencode_mode=opencode_mode,
+        fanout_registry=fanout_registry,
     )
 
 

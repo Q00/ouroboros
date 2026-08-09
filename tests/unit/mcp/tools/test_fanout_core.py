@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 import json
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -24,6 +25,7 @@ from ouroboros.mcp.tools.authoring_handlers import (
     _attach_question_assist_requests,
 )
 from ouroboros.mcp.tools.evaluation_handlers import (
+    FetchArtifactHandler,
     LateralThinkHandler,
     SubmitFanoutResultsHandler,
 )
@@ -621,6 +623,128 @@ async def test_advisory_reentry_partial_set_lists_missing_required_lane_ids(
     assert out["received_keys"] == [optional_first]
 
 
+@pytest.mark.asyncio
+async def test_a_completed_submission_is_the_only_reply_carrying_a_contract_id(
+    tmp_path: Any,
+) -> None:
+    """Regression (#1941): what the skills read to tell success apart.
+
+    This tool answers in two shapes. An incomplete submission answers with a
+    ``status`` and the fields it implies; a complete one answers with the
+    disposable-memory envelope, which has no ``status`` of its own -- its
+    ``result.status`` is that subsystem's word for its own run, and the envelope
+    is ``extra="forbid"`` because ``artifact_validation`` re-parses the same
+    model out of the manifest event. So the tool cannot add a discriminator
+    without making the reply stop being that model.
+
+    ``contract_id`` is the discriminator it already has: only the completed
+    reply carries one. The PM and interview skills both read it, and the PM
+    skill previously read a top-level ``status`` instead -- which meant it
+    resubmitted every successful fan-out and then discarded the evidence it had
+    just been told was valid. Asserted across the branches together rather than
+    one by one, because what broke was not a branch but their agreement.
+    """
+    registry = FanoutRegistry(tmp_path)
+    session_id = "sess-discriminator"
+    fanout_id, correlation_key, lane_keys, meta = _emitted_advisory_contract(registry, session_id)
+    outputs = _advisory_lane_outputs(meta, lane_keys)
+    submit, _disposable = _bounded_submit(registry, tmp_path)
+
+    async def reply(results: list[dict[str, Any]]) -> dict[str, Any]:
+        result = await submit.handle(
+            {
+                "session_id": session_id,
+                "fanout_id": fanout_id,
+                "correlation_key": correlation_key,
+                "results": results,
+            }
+        )
+        assert result.is_ok, result
+        return result.unwrap().meta
+
+    optional_first = next(key for key in lane_keys if key not in _required_advisory_lanes())
+    partial = await reply([{"key": optional_first, "content": f"{optional_first}-advice"}])
+    invalid = await reply([{"key": lane_keys[0]}])
+    complete = await reply([{"key": key, "content": outputs[key]} for key in lane_keys])
+
+    # What the skills key on: present on the completed reply, absent everywhere
+    # else. Both directions, so neither drifts without this failing.
+    assert complete["contract_id"].startswith("fanout:")
+    for name, out in (("partial", partial), ("invalid", invalid)):
+        assert "contract_id" not in out, f"{name} reply carries a contract_id: {sorted(out)}"
+
+    # And the incomplete replies keep saying why, which is the other half of
+    # what the skills act on.
+    assert partial["status"] == "partial"
+    assert partial["missing_required_keys"]
+    assert invalid["status"] == "invalid_result_entry"
+    assert "status" not in complete
+
+    # The skills are the consumers, so the same key is asserted against what
+    # they tell a host to do. Both mirrors, because a rule that holds in one of
+    # them is not the rule -- it is a copy of it.
+    #
+    # What is asserted here is an instruction, not a claim about the runtime.
+    # The previous version of this test pinned the sentence "a contract_id means
+    # every required lane passed its contract", which is false -- a required lane
+    # submitted as ``undispatched`` is excused from the completeness test and the
+    # submission still completes. Pinning a claim keeps the claim, true or not;
+    # only the runtime can say what a reply means, and it says it below.
+    repo_root = Path(__file__).resolve().parents[4]
+    for root in (repo_root / "skills", repo_root / ".claude-plugin" / "skills"):
+        skill = (root / "pm" / "SKILL.md").read_text(encoding="utf-8")
+        assert "With a `contract_id`, synthesize" in skill, root
+        assert "leave out a lane you submitted as\n`undispatched`" in skill, root
+
+
+@pytest.mark.asyncio
+async def test_a_completed_reply_does_not_mean_every_required_lane_ran(tmp_path: Any) -> None:
+    """Regression (#1941): what a `contract_id` does not promise.
+
+    A required lane declared ``undispatched`` is excused from the completeness
+    test (``prepare_fanout_results``), so the submission completes and an
+    artifact is published with that lane never having run. That is deliberate --
+    #1754 put it there because pinning the fan-out at ``partial`` for good leaves
+    inventing the missing output as the cheapest way for a host to finish, and in
+    an evidence lane an invented output is fabricated grounds in front of a user.
+
+    It is pinned here because a skill once read the completed reply as proof that
+    every required lane had passed. The reply cannot carry that meaning, and the
+    host is the only party that knows which lanes it excused -- so the skills
+    subtract their own ``undispatched`` set rather than reading a promise off the
+    reply. If this ever stops completing, the instruction those skills carry is
+    stricter than it needs to be and should be revisited with it.
+    """
+    registry = FanoutRegistry(tmp_path)
+    session_id = "sess-undispatched-required"
+    fanout_id, correlation_key, lane_keys, meta = _emitted_advisory_contract(registry, session_id)
+    outputs = _advisory_lane_outputs(meta, lane_keys)
+    excused = _required_advisory_lanes()[0]
+    submit, disposable = _bounded_submit(registry, tmp_path)
+
+    result = await submit.handle(
+        {
+            "session_id": session_id,
+            "fanout_id": fanout_id,
+            "correlation_key": correlation_key,
+            "results": [
+                {"key": key, "content": outputs[key]} for key in lane_keys if key != excused
+            ]
+            + [{"key": excused, "undispatched": True}],
+        }
+    )
+
+    assert result.is_ok, result
+    reply = result.unwrap().meta
+    assert reply["contract_id"].startswith("fanout:")
+
+    # The reply that means "accepted" is the same shape either way; only the
+    # body records which lane was excused, and the host never reads the body.
+    body = disposable.fetch(reply["contract_id"]).body
+    assert body["undispatched_keys"] == [excused]
+    assert excused not in {item["lane_id"] for item in body["result"]["aggregated_outputs"]}
+
+
 # --------------------------------------------------------------------------- #
 # Registry state-dir threading (#1578 follow-up, MEDIUM)
 # --------------------------------------------------------------------------- #
@@ -971,6 +1095,14 @@ async def test_submit_tool_requires_fanout_id() -> None:
     submit = SubmitFanoutResultsHandler()
     result = await submit.handle({"results": []})
     assert result.is_err
+
+
+@pytest.mark.asyncio
+async def test_fetch_tool_without_project_artifact_service_fails_closed() -> None:
+    result = await FetchArtifactHandler().handle({"contract_id": "fanout:missing"})
+
+    assert result.is_err
+    assert "requires a configured project artifact service" in str(result.error)
 
 
 @pytest.mark.asyncio

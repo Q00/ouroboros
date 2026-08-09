@@ -127,7 +127,7 @@ backend name:
 
 - `ouroboros setup --runtime copilot`
 - `ouroboros config backend copilot`
-- `ouroboros mcp serve --llm-backend copilot`
+- `ouroboros mcp serve --runtime copilot --llm-backend copilot`
 - `ouroboros init --llm-backend copilot`
 
 ## Headless contract
@@ -152,6 +152,24 @@ copilot --no-color --log-level none \
 | `--model`           | Per-task model override (auto-mapped from hyphen form)       |
 | `--agent`           | Custom agent profile; takes precedence over `--model`        |
 | `-p`                | One-shot prompt (no interactive REPL)                        |
+
+Before launching that command, the runtime applies the same executable
+version-attestation policy as Codex: initialization-time probe failure blocks
+the runtime because no positive baseline exists; a later timeout or execution
+failure blocks only the current attempt and is not reported as executable
+drift; only a version-output change requires two successful, different
+attestations.
+The runtime rejects non-executing path/content/device/inode/symlink evidence
+that differs from initialization before running `copilot --version`, and it
+post-samples every started probe so mutation takes precedence over a concurrent
+timeout or execution failure.
+If only a containing-directory generation changed, the evidence cannot
+distinguish unrelated sibling churn from an executable-entry swap-and-restore.
+That attempt fails closed as retryable, indeterminate authority without
+claiming confirmed executable drift.
+Path, content, symlink, device/inode, or probe-window generation drift can fail
+closed before a second successful version probe. This ensures that two missing
+`copilot --version` results never authorize a launch under load.
 
 ### MCP registration
 

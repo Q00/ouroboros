@@ -3,6 +3,7 @@
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
+import pytest
 from typer.testing import CliRunner
 
 from ouroboros import __version__
@@ -254,7 +255,10 @@ class TestMCPCommands:
             "ouroboros.cli.commands.mcp._run_mcp_server",
             new=AsyncMock(),
         ) as mock_run_mcp_server:
-            result = runner.invoke(app, ["mcp", "serve", "--llm-backend", "pi"])
+            result = runner.invoke(
+                app,
+                ["mcp", "serve", "--runtime", "pi", "--llm-backend", "pi"],
+            )
 
         assert result.exit_code == 0
         mock_run_mcp_server.assert_awaited_once_with(
@@ -262,7 +266,7 @@ class TestMCPCommands:
             8080,
             "stdio",
             None,
-            None,
+            "pi",
             "pi",
         )
 
@@ -312,6 +316,21 @@ class TestShorthandCommands:
 
         # Should invoke workflow command (orchestrator by default calls _run_orchestrator)
         mock_run_orchestrator.assert_awaited_once()
+
+    @pytest.mark.parametrize("runtime", ["claude", "claude-sdk"])
+    def test_run_public_claude_runtime_selects_sdk(self, tmp_path: Path, runtime: str) -> None:
+        seed_file = tmp_path / "seed.yaml"
+        seed_file.write_text("goal: test\nacceptance_criteria:\n  - criterion: test\n")
+
+        mock_run_orchestrator = AsyncMock()
+        with patch(
+            "ouroboros.cli.commands.run._run_orchestrator",
+            new=mock_run_orchestrator,
+        ):
+            result = runner.invoke(app, ["run", str(seed_file), "--runtime", runtime])
+
+        assert result.exit_code == 0
+        assert mock_run_orchestrator.await_args.kwargs["runtime_backend"] == "claude"
 
     def test_run_shorthand_with_no_orchestrator(self, tmp_path: Path) -> None:
         """Test that 'ouroboros run seed.yaml --no-orchestrator' uses placeholder mode."""

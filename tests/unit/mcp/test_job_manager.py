@@ -2364,7 +2364,7 @@ class TestJobManager:
             )
 
             recovery_lock.release()
-            snapshot = await snapshot_task
+            snapshot = await asyncio.wait_for(snapshot_task, timeout=5.0)
 
             assert snapshot.status is JobStatus.CANCEL_REQUESTED
             events, _ = await store.get_events_after(

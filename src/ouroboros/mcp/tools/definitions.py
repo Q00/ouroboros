@@ -33,6 +33,7 @@ from ouroboros.mcp.tools.authoring_handlers import (
 from ouroboros.mcp.tools.evaluation_handlers import (
     ChecklistVerifyHandler,
     EvaluateHandler,
+    FetchArtifactHandler,
     LateralThinkHandler,
     MeasureDriftHandler,
     StartEvaluateHandler,
@@ -48,7 +49,11 @@ from ouroboros.mcp.tools.execution_handlers import (
     ExecuteSeedHandler,
     StartExecuteSeedHandler,
 )
-from ouroboros.mcp.tools.fanout_handler import create_fanout_handler  # noqa: F401
+from ouroboros.mcp.tools.fanout_handler import (  # noqa: F401
+    create_artifact_fetch_handler,
+    create_fanout_handler,
+    create_fanout_handlers,
+)
 from ouroboros.mcp.tools.job_handlers import (
     CancelExecutionHandler,
     CancelJobHandler,
@@ -432,6 +437,8 @@ OuroborosToolHandlers = tuple[
     | StartEvaluateHandler
     | ChecklistVerifyHandler
     | LateralThinkHandler
+    | SubmitFanoutResultsHandler
+    | FetchArtifactHandler
     | EvolveStepHandler
     | StartEvolveStepHandler
     | RalphHandler
@@ -610,6 +617,7 @@ def get_ouroboros_tools(
             fanout_registry=fanout_registry,
             disposable_memory=fanout_disposable_memory,
         ),
+        FetchArtifactHandler(disposable_memory=fanout_disposable_memory),
         EvolveStepHandler(
             agent_runtime_backend=runtime_backend,
             opencode_mode=opencode_mode,
@@ -646,6 +654,7 @@ def get_ouroboros_tools(
             llm_backend=llm_backend,
             agent_runtime_backend=runtime_backend,
             opencode_mode=opencode_mode,
+            fanout_registry=fanout_registry,
         ),
         QAHandler(
             llm_backend=llm_backend,

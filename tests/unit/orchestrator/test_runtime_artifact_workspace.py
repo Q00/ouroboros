@@ -34,7 +34,9 @@ def test_builtin_handlers_use_runtime_cwd_when_launcher_cwd_differs(
     monkeypatch.chdir(launcher)
 
     runtime = runtime_type(cli_path=cli_name, cwd=project)
-    submit = runtime._get_builtin_mcp_handlers()["ouroboros_submit_fanout_results"]
+    handlers = runtime._get_builtin_mcp_handlers()
+    submit = handlers["ouroboros_submit_fanout_results"]
+    fetch = handlers["ouroboros_fetch_artifact"]
 
     assert submit.disposable_memory is not None
     assert submit.disposable_memory.artifact_store.root == (
@@ -42,4 +44,7 @@ def test_builtin_handlers_use_runtime_cwd_when_launcher_cwd_differs(
     )
     assert submit.disposable_memory.artifact_store.root != (
         launcher.resolve() / ".ouroboros" / "artifacts"
+    )
+    assert fetch.disposable_memory.artifact_store.root == (
+        project.resolve() / ".ouroboros" / "artifacts"
     )

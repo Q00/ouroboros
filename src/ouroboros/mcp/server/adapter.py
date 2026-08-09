@@ -1656,7 +1656,7 @@ def create_ouroboros_server(
         StartEvolveStepHandler,
         StartExecuteSeedHandler,
         StartRalphHandler,
-        create_fanout_handler,
+        create_fanout_handlers,
     )
     from ouroboros.mcp.tools.fanout import FanoutRegistry
     from ouroboros.mcp.tools.pm_handler import PMInterviewHandler
@@ -2470,9 +2470,7 @@ def create_ouroboros_server(
             agent_runtime_backend=interview_runtime_backend,
             opencode_mode=opencode_mode,
         ),
-        MeasureDriftHandler(
-            event_store=event_store,
-        ),
+        MeasureDriftHandler(event_store=event_store),
         InterviewHandler(
             interview_engine=interview_engine,
             event_store=event_store,
@@ -2488,6 +2486,7 @@ def create_ouroboros_server(
             event_store=event_store,
             agent_runtime_backend=interview_runtime_backend,
             opencode_mode=opencode_mode,
+            fanout_registry=fanout_registry,
         ),
         BrownfieldHandler(_store=brownfield_store),
         evaluate_handler,
@@ -2497,7 +2496,7 @@ def create_ouroboros_server(
             opencode_mode=opencode_mode,
             fanout_registry=fanout_registry,
         ),
-        create_fanout_handler(fanout_registry, effective_cwd, event_store),
+        *create_fanout_handlers(fanout_registry, effective_cwd, event_store),
         evolve_step,
         StartEvolveStepHandler(
             evolve_handler=evolve_step,

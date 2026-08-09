@@ -827,7 +827,8 @@ def backend(
         console.quiet = True
         setup_mod.print_error = _tracking_print_error  # type: ignore[assignment]
         if new_backend == "claude":
-            _setup_claude(cli_path)
+            if _setup_claude(cli_path) is False:
+                setup_failed = True
         elif new_backend == "codex":
             if _setup_codex(cli_path) is False:
                 setup_failed = True

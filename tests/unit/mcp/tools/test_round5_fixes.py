@@ -237,8 +237,9 @@ class TestGetOuroborosToolsPluginWiring:
 
         tools = get_ouroboros_tools()
         names = {tool.definition.name for tool in tools}
-        assert len(tools) == 31
+        assert len(tools) == 32
         assert "ouroboros_auto" in names
+        assert "ouroboros_fetch_artifact" in names
         assert "ouroboros_query_projection" in names
         assert "ouroboros_project_status" in names
         assert "ouroboros_start_auto" in names
@@ -610,6 +611,87 @@ class TestPMBrownfieldReposPersistence:
         assert _plugin_repo_paths(meta["brownfield_repos"]) == repos
         assert _plugin_repo_paths(meta["brownfield_repos"], durable=True) == repos
 
+    @staticmethod
+    def _capture_plugin_state(monkeypatch) -> list[InterviewState]:
+        """Record what the plugin path writes, and load a plain greenfield state."""
+        saved: list[InterviewState] = []
+
+        async def _load(state_dir: Path, session_id: str) -> Result[InterviewState, str]:  # noqa: ARG001
+            return Result.ok(
+                InterviewState(interview_id=session_id, initial_context="brownfield app")
+            )
+
+        async def _save(state_dir: Path, state: InterviewState) -> Result[None, str]:  # noqa: ARG001
+            saved.append(state)
+            return Result.ok(None)
+
+        import ouroboros.mcp.tools.authoring_handlers as ah
+
+        monkeypatch.setattr(ah, "_plugin_load_state", _load)
+        monkeypatch.setattr(ah, "_plugin_save_state", _save)
+        return saved
+
+    async def test_a_one_step_start_records_its_repositories_on_the_state(
+        self, handler, monkeypatch, tmp_path
+    ) -> None:
+        """The roster reached ``pm_meta`` and nothing else.
+
+        Anything asking the state which repositories a session covers saw none:
+        the direct CLI's resume refusal, and the seed generator's own check. So
+        a session started here resumed into the entrance this PR closes,
+        restored its repositories on the next line, and generated the rest of
+        its questions with no lanes.
+        """
+        monkeypatch.setattr(
+            "ouroboros.mcp.tools.pm_handler.resolve_initial_context_input",
+            lambda ctx, cwd="": Result.ok(ctx),  # noqa: ARG005
+        )
+        monkeypatch.setattr(
+            "ouroboros.core.security.InputValidator.validate_initial_context",
+            staticmethod(lambda ctx: (True, None)),  # noqa: ARG005
+        )
+        saved = self._capture_plugin_state(monkeypatch)
+
+        # ``cwd`` is a directory that is not a checkout, so ``detect_brownfield``
+        # writes nothing and the selected roster is the only source left.
+        result = await handler.handle(
+            {
+                "initial_context": "brownfield app",
+                "selected_repos": ["/repo/api"],
+                "cwd": str(tmp_path),
+            }
+        )
+
+        assert result.is_ok, result
+        assert saved, "no state was written"
+        assert [entry["path"] for entry in saved[-1].codebase_paths] == ["/repo/api"]
+
+    async def test_selecting_repos_records_them_on_the_state(self, handler, monkeypatch) -> None:
+        """The other entrance to the same roster, held to the same rule."""
+        from ouroboros.mcp.tools.pm_handler import _save_pm_meta
+
+        session_id = "ses_select_records_repos"
+        _save_pm_meta(
+            session_id,
+            engine=None,
+            cwd="/tmp",
+            data_dir=handler.data_dir,
+            extra={"initial_context": "brownfield app", "brownfield_repos": []},
+        )
+        saved = self._capture_plugin_state(monkeypatch)
+
+        result = await handler.handle(
+            {
+                "session_id": session_id,
+                "action": "select_repos",
+                "selected_repos": ["/repo/api"],
+            }
+        )
+
+        assert result.is_ok, result
+        assert saved, "no state was written"
+        assert [entry["path"] for entry in saved[-1].codebase_paths] == ["/repo/api"]
+
     async def test_resume_restores_repos_from_meta(self, handler, monkeypatch) -> None:
         """Resume without selected_repos still gets repos from pm_meta."""
         import json
@@ -633,6 +715,7 @@ class TestPMBrownfieldReposPersistence:
             {
                 "session_id": session_id,
                 "answer": "yes, those repos",
+                "last_question": "Are these the repositories the PRD covers?",
             }
         )
         assert result.is_ok
@@ -876,20 +959,25 @@ class TestPMInterviewLastQuestionRoundtrip:
         assert state.rounds[0].question == "What is the core domain of your product?"
         assert state.rounds[0].user_response == "yes, invoice management"
 
-    async def test_no_last_question_uses_placeholder(self, handler) -> None:
-        """answer without last_question → placeholder (backward compat)."""
+    async def test_an_answer_with_no_question_is_refused_here_too(self, handler) -> None:
+        """No pending round and no ``last_question`` → refused, nothing written.
+
+        This asserted the opposite: that the answer was accepted and filed under
+        ``"(continued from subagent)"``. The placeholder was called backward
+        compatibility, but it wrote a question into the durable transcript that
+        nobody was asked, and later questions and requirement extraction read it
+        back as one. The in-process path refuses this call; the two runtimes
+        differing on what a record may contain is the thing being removed.
+        """
         result = await handler.handle(
             {
                 "session_id": "ses_pm_lq_2",
                 "answer": "B2B SaaS",
             }
         )
-        assert result.is_ok
-        assert len(self.saved_states) == 1
-        state = self.saved_states[0]
-        assert len(state.rounds) == 1
-        assert state.rounds[0].question == "(continued from subagent)"
-        assert state.rounds[0].user_response == "B2B SaaS"
+        assert result.is_err
+        assert "last_question" in str(result.error)
+        assert self.saved_states == []
 
     async def test_last_question_updates_existing_round(self, monkeypatch, handler) -> None:
         """Existing unanswered round + last_question → question text updated."""
@@ -934,6 +1022,7 @@ class TestPMInterviewLastQuestionRoundtrip:
             {
                 "session_id": "ses_pm_lq_hint",
                 "answer": "test",
+                "last_question": "Which billing model does the product use?",
             }
         )
         assert result.is_ok
