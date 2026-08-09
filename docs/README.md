@@ -47,6 +47,7 @@ replayable execution contract on your choice of runtime backend.
 - [Seed Authoring Guide](./guides/seed-authoring.md) - YAML structure, field reference, examples
 - [Evolutionary Loop & Ralph](./guides/evolution-loop.md) - Wonder/Reflect cycle, convergence detection, persistent evolution
 - [Evaluation Pipeline Guide](./guides/evaluation-pipeline.md) - Three-stage evaluation, failure modes, and configuration
+- [Evaluation Pipeline Guide (简体中文)](./guides/evaluation-pipeline.zh-CN.md) - 同一份指南的中文版
 - [Execution vs. Evaluation Contract](./guides/execution-vs-evaluation.md) - Task completion, AC verdict, and drift terminology boundaries
 - [Hidden-Checklist Convergence](./hidden-checklist-convergence/architecture.md) - Run → evaluation → bounded Ralph chaining with hidden harness grading inputs
 - [Hidden-Checklist Convergence (简体中文)](./hidden-checklist-convergence/README.zh-CN.md) - 同一设计的中文说明
