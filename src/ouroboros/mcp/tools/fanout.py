@@ -1098,15 +1098,26 @@ def _aggregate_violations(output: Any) -> list[str]:
 
 
 def _roster_violations(record: FanoutRecord, output: Any) -> list[str]:
-    """Return violations for evidence claiming a repository outside the roster.
+    """Return violations for an ``examined`` entry outside or repeating the roster.
 
     The schema can only check that a ``repo_id`` is *shaped* like one, and shape
     is not membership. This is what makes the roster a boundary rather than a
     suggestion: where a lane may look stays open, what it may hand back as
     evidence is closed, and the decision is made from the value alone.
 
-    ``examined_repository_ids`` is judged the same way, because it is the scope
-    every other statement in that answer is relative to.
+    There is one list to judge rather than two. Scope and claim used to be
+    ``examined_repository_ids`` and ``evidence[]``, checked separately against
+    the roster and never against each other, so an answer could declare one
+    repository examined while citing another's code and pass. They are folded
+    into per-repository entries now, which makes that contradiction unspellable;
+    what is left for this function is membership, and it is the same check it
+    always was.
+
+    Uniqueness is checked here for the reason ``_aggregate_violations`` above
+    gives: Draft 2020-12 has ``uniqueItems`` for whole items and nothing for
+    uniqueness by property, so two entries for one repository -- one carrying a
+    claim, one saying it was read and clean -- would otherwise reintroduce the
+    disagreement the fold removed, one level down.
 
     A record with no persisted roster is not checked -- an interview fan-out, or
     one whose producer bounded nothing. Inventing a boundary at re-entry would
@@ -1117,22 +1128,25 @@ def _roster_violations(record: FanoutRecord, output: Any) -> list[str]:
     roster = record.synthesizer_input.get("roster_repo_ids")
     if not isinstance(roster, (list, tuple)):
         return []
+    examined = output.get("examined")
+    if not isinstance(examined, (list, tuple)):
+        return []
     allowed = {str(item) for item in roster}
     problems: list[str] = []
-    examined = output.get("examined_repository_ids")
-    if isinstance(examined, (list, tuple)):
-        problems += [
-            f"examined_repository_ids: {repo_id!r} is not in this session's roster"
-            for repo_id in examined
-            if str(repo_id) not in allowed
-        ]
-    evidence = output.get("evidence")
-    if isinstance(evidence, (list, tuple)):
-        problems += [
-            f"evidence: {item.get('repo_id')!r} is not in this session's roster"
-            for item in evidence
-            if isinstance(item, Mapping) and str(item.get("repo_id") or "") not in allowed | {""}
-        ]
+    seen: set[str] = set()
+    for entry in examined:
+        if not isinstance(entry, Mapping):
+            continue
+        # An absent or empty identifier is the schema's to reject; saying it
+        # twice would report one defect as two.
+        repo_id = str(entry.get("repo_id") or "")
+        if not repo_id:
+            continue
+        if repo_id not in allowed:
+            problems.append(f"examined: {repo_id!r} is not in this session's roster")
+        elif repo_id in seen:
+            problems.append(f"examined: {repo_id!r} has more than one entry")
+        seen.add(repo_id)
     return problems
 
 

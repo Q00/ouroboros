@@ -79,9 +79,9 @@ def _pm_code_context_lane_brief(roster: Any, child_answer_rule: str) -> str:
     """Render the PM code lane's standing rules plus the roster it may cite.
 
     The roster is printed rather than described because the boundary is decided
-    by value: an evidence item whose ``repo_id`` is not in this list is rejected
-    at re-entry, so a child that cannot see the list cannot satisfy the contract
-    except by luck. Everything else here is a boundary the child cannot be
+    by value: an ``examined`` entry whose ``repo_id`` is not in this list is
+    rejected at re-entry, so a child that cannot see the list cannot satisfy the
+    contract except by luck. Everything else here is a boundary the child cannot be
     trusted to rediscover -- what it may not do with a disagreement (resolve
     it), what it must not claim (that a policy does not exist, as opposed to not
     being found in what it read), and which fields the contract requires of a
@@ -100,33 +100,34 @@ question.
 
 {child_answer_rule}
 
-**Say what you read.** Put every repository you actually opened in
-`examined_repository_ids`. Everything else you report is scoped to that list, and
-without it "no policy found" reads as a claim about the PM's whole system rather
-than about the repositories you got to. If the roster is empty, or a repository
-in it would not open after you tried, those are their own reasons — not
-"no policy found".
+**One entry per repository you opened.** `examined` is a list of entries, and
+each carries the repository's `repo_id` and the `policy_claims` you found in it.
+A repository you read and found nothing in is an entry with an empty
+`policy_claims` — that is how "I looked and it is clean" is said. A repository
+you never opened has no entry at all. Give one repository two entries and the
+answer is rejected. If nothing opened at all, `examined` is empty and
+`nothing_examined_reason` says why: an empty roster and a repository that would
+not open are their own reasons, never "no policy found".
 
 **Disagreement is the finding, not a defect.** If two repositories implement
-different policies, carry both as separate evidence items under their own
-`repo_id`. Do not reconcile them, pick a winner, or describe them as one policy
-with an exception. That contradiction is the most useful thing you can hand a
-PRD author.
+different policies, carry both under their own entries. Do not reconcile them,
+pick a winner, or describe them as one policy with an exception. That
+contradiction is the most useful thing you can hand a PRD author.
 
 **Evidence comes from the roster.** If the answer is one directory over, outside
 this list, that is not evidence and it will be rejected: report it in your
-finding as a repository worth adding, and leave `evidence` to the roster.
+finding as a repository worth adding, and give it no entry.
 
-**Fill what a carried finding requires.** When you carry a policy, set
+**Fill what a carried finding requires.** If any entry carries a claim, set
 `answer_prefix` to `[from-code]`, `requires_user_confirmation` to true, and write
 `user_confirmation_prompt` as the question the user should be asked before your
 finding is recorded on their behalf. There is no prefix that skips that step.
-When you carry none, those three fields do not exist in your answer.
+If no entry carries one, those three fields do not exist in your answer.
 
 **Stop while the answer is still useful.** Read the roster in order and stop
-once you can answer, reporting in `examined_repository_ids` what you actually
-opened. A partial scope named honestly is a complete answer; an exhaustive
-search that has not returned is not one at all.
+once you can answer, giving entries only to what you actually opened. A partial
+scope named honestly is a complete answer; an exhaustive search that has not
+returned is not one at all.
 
 ## Repository Roster
 ```json

@@ -38,10 +38,16 @@ WITHHELD_ANSWER_NOTE` in its place and completion counts only rounds whose
 provenance is ``"user"``. An unconfirmed forward costs a question turn; it
 cannot become a PRD requirement and cannot end the interview.
 
-**The forwarded text is composed from ``evidence[]``, not from a free-text
-field.** There is deliberately no ``answer_text`` here. Every claim the host
-forwards therefore carries the ``repo_id`` it was checked against and a
-repository-relative ``path``, which a prose field would have let it shed.
+**The forwarded text is composed from the ``examined`` entries, not from a
+free-text field.** There is deliberately no ``answer_text`` here. Every claim
+the host forwards therefore carries the repository it was checked against — the
+entry it sits in — and a repository-relative ``path``, which a prose field would
+have let it shed.
+
+That structure is also why the lane's scope cannot contradict its claims. Scope
+and claim were two lists once, and an answer could declare one repository
+examined while citing another's code; folding them into per-repository entries
+made the contradiction unspellable rather than checked (RFC #1937 decision 7).
 
 ``data_context`` is reused verbatim from the interview. It already works this
 way: no confirmation, no grade, closed answer states, and no ``[from-data]``
@@ -75,20 +81,21 @@ def stable_pm_question_identity(question: str) -> str:
     return f"pm-question:{digest}"
 
 
-#: Why the code lane carries no policy. A closed set, for the same reason the
-#: data lane's is closed: the reasons this lane can have are known in advance,
-#: so this is a choice rather than a sentence.
+#: Why the code lane read no repository at all. A closed set, for the same
+#: reason the data lane's is closed: the reasons this lane can have are known in
+#: advance, so this is a choice rather than a sentence.
 #:
-#: Every constant is scoped to the lane itself or to what it examined. A lane
-#: sees what reached it, not what the PM has, so it is not positioned to say a
-#: policy does not exist -- only that it did not find one in the repositories it
-#: read. ``no_policy_found_in_examined_repositories`` carries that scope in its
-#: own name, and ``examined_repository_ids`` says which repositories that was.
-PM_NO_POLICY_REASONS: tuple[str, ...] = (
+#: Every constant is scoped to the lane itself. A lane sees what reached it, not
+#: what the PM has, so it is not positioned to say a policy does not exist.
+#:
+#: There is deliberately no "found nothing in what I read" constant here. That
+#: is not a reason the lane reports, it is the shape of its answer: repositories
+#: it read and found nothing in are entries carrying no claim, and a constant
+#: restating that could disagree with the entries beside it.
+PM_NOTHING_EXAMINED_REASONS: tuple[str, ...] = (
     "not_a_policy_question",
     "no_repository_in_roster",
     "roster_repository_not_readable",
-    "no_policy_found_in_examined_repositories",
 )
 
 #: Roster repository identifiers, constrained like identifiers -- no whitespace,
@@ -98,9 +105,14 @@ PM_NO_POLICY_REASONS: tuple[str, ...] = (
 #: against the roster by value.
 _PM_REPO_ID_PATTERN = r"^[A-Za-z0-9_.:\-]{1,128}$"
 
-#: How many evidence items one code-policy answer may carry. A policy answer
-#: that needs more than this is not one policy claim, it is a file listing.
-_PM_EVIDENCE_MAX_ITEMS = 20
+#: How many policy claims one repository's entry may carry. A repository that
+#: needs more than this is not making one policy claim, it is a file listing.
+_PM_CLAIMS_MAX_PER_REPOSITORY = 20
+
+#: How many repositories one answer may report on. The roster is what the lane
+#: was handed and every entry must be in it, so this is a ceiling on the roster
+#: rather than a judgement about the answer.
+_PM_EXAMINED_MAX_REPOSITORIES = 64
 
 
 def pm_repo_id(*, name: str | None, path: str) -> str:
@@ -156,37 +168,34 @@ _PM_EVIDENCE_PATH_PATTERN = (
 )
 
 
-def _pm_policy_evidence_schema() -> dict[str, Any]:
-    """Return the schema for one piece of code-policy evidence.
+def _pm_policy_claim_schema() -> dict[str, Any]:
+    """Return the schema for one policy claim inside a repository's entry.
 
-    ``repo_id`` is on the evidence item rather than on the request because of
-    what each placement can decide. Scoping the request says where to look; it
-    leaves an evidence item's origin unstated, so a citation cannot be traced
-    back, out-of-roster evidence cannot be rejected from the value alone, and
-    two repositories implementing different policies flatten into one answer
-    text. The disagreement is the most valuable PRD input available, and a
-    contract whose only outlet is prose loses it.
+    The claim carries no ``repo_id``. It used to, because the alternative was
+    scoping the request instead, which leaves a citation's origin unstated: it
+    cannot be traced back, out-of-roster evidence cannot be rejected from the
+    value alone, and two repositories implementing different policies flatten
+    into one answer text.
 
-    With the identifier here, disagreement needs no field of its own: two
-    evidence items carrying different ``policy_claim`` under different
-    ``repo_id`` *is* the disagreement, in a shape the surface can render.
+    Nesting the claim under its repository keeps all of that and removes what
+    the identifier could still get wrong. A claim's repository is now the entry
+    it sits in rather than a value it repeats, so it cannot name a repository
+    the answer did not say it read. Disagreement still needs no field of its
+    own: two entries carrying different ``policy_claim`` *is* the disagreement,
+    in a shape the surface can render.
     """
     return {
         "type": "object",
         "additionalProperties": False,
-        "required": ["repo_id", "path", "policy_claim"],
+        "required": ["path", "policy_claim"],
         "properties": {
-            "repo_id": _pm_repo_id_property(
-                "Roster identifier of the repository this evidence came from. "
-                "An identifier outside the roster is rejected at re-entry."
-            ),
             "path": {
                 "type": "string",
                 "minLength": 1,
                 "maxLength": 512,
                 "pattern": _PM_EVIDENCE_PATH_PATTERN,
                 "description": (
-                    "Path within that repository, relative to its root. Relative "
+                    "Path within this entry's repository, relative to its root. Relative "
                     "because an absolute path names the machine the lane ran on, "
                     "which is not what the PM is being asked to check. Enforced "
                     "here rather than asked for: absolute paths, Windows drive "
@@ -207,6 +216,44 @@ def _pm_policy_evidence_schema() -> dict[str, Any]:
     }
 
 
+def _pm_examined_repository_schema(*, max_claims: int) -> dict[str, Any]:
+    """Return the schema for one repository the lane read.
+
+    One entry is one repository the lane actually opened, and it carries what
+    was found there -- possibly nothing. That is the whole of the lane's scope
+    reporting: a repository with no entry was not read, and an entry with no
+    claims was read and had nothing. Neither needs a field to say so.
+
+    ``max_claims`` is zero for the state that carries no policy at all, which is
+    what makes the three answer states mutually exclusive from the entries
+    alone rather than from a boolean the child sets beside them.
+    """
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["repo_id", "policy_claims"],
+        "properties": {
+            "repo_id": _pm_repo_id_property(
+                "Roster identifier of a repository this lane read. An identifier "
+                "outside the roster, or one repeated in another entry, is "
+                "rejected at re-entry."
+            ),
+            "policy_claims": {
+                "type": "array",
+                "maxItems": max_claims,
+                "items": _pm_policy_claim_schema(),
+                "description": (
+                    "What this repository shows the system does today, one claim "
+                    "per source. Empty means the lane read this repository and "
+                    "found no policy bearing on the question -- which is a "
+                    "different statement from the repository being absent, and "
+                    "the reason both are spellable."
+                ),
+            },
+        },
+    }
+
+
 def _pm_code_context_answer_contract() -> dict[str, Any]:
     """Return the answer contract for PM's ``code_context`` advisory lane.
 
@@ -216,88 +263,141 @@ def _pm_code_context_answer_contract() -> dict[str, Any]:
     tool. A second lane id for the same role would have said the roles differ,
     which is the one thing that is not true here.
 
-    Two closed states and no third, mirroring the data lane. The states are
-    ``policy_found`` true or false, and each names everything the other cannot
-    borrow -- an open shape with optional fields accepted "found a policy, here
-    is why I found nothing", which is two answers in one object and neither
-    checkable.
+    **Scope and claim live in one place.** This lane first carried them in two
+    lists -- ``examined_repository_ids`` for what it read, ``evidence[]`` for
+    what it found -- and review round 8 showed an answer declaring only the API
+    repository examined while citing the web repository's code, accepted as
+    complete. Two lists about the same subject can always drift, and a check
+    comparing them would have closed that one drift while leaving the shape that
+    produced it. They are folded instead: ``examined`` is one list of
+    per-repository entries, each carrying the claims found in that repository,
+    so a claim's repository is the entry it sits in. Citing a repository outside
+    the declared scope is not rejected here, it is unspellable.
 
-    ``answer_prefix`` exists only in the found state, under an enum of one
+    Three closed states, and the discriminator is the entries rather than a flag
+    beside them. ``policy_found`` is gone for the reason the fold happened at
+    all: a boolean restating what the entries already show is one more thing
+    that can disagree with them. So is
+    ``no_policy_found_in_examined_repositories`` -- entries with no claims say
+    exactly that, and say which repositories it was true of.
+
+    - ``NothingExamined`` -- no repository was read, and
+      ``nothing_examined_reason`` says why. This is the only state carrying a
+      reason, because it is the only one where the entries cannot speak.
+    - ``NoPolicyInExaminedRepositories`` -- repositories were read and none
+      implements policy bearing on the question. Every entry carries no claim,
+      which is what keeps "found nothing across two of five" different from
+      "found nothing across all five".
+    - ``PolicyCarried`` -- at least one entry carries a claim, and the three
+      forwarding fields are required. ``contains`` is what makes this state
+      unreachable without a claim, so "confirm my finding" with nothing to
+      confirm has no spelling, and neither has a claim that arrives with no
+      confirmation asked for.
+
+    ``answer_prefix`` exists only in the carried state, under an enum of one
     element, and there is no confidence grade beside it. The enum is the
     enforcement: a child cannot mark this output as skipping confirmation
     because ``[from-code][auto-confirmed]`` is not a value this field can hold,
     and the shape is closed, so it cannot add a field that says so another way.
     A rule forbidding the prefix would read as authoritative while being
     enforced by nothing -- three of #1825's findings were guarantees stated
-    where nothing made them true. The no-policy state has no ``answer_prefix``
-    property at all, for the same reason it carries no evidence: there is
-    nothing to forward.
+    where nothing made them true. The other two states have no ``answer_prefix``
+    property at all, for the same reason they carry no claim: there is nothing
+    to forward.
 
-    ``examined_repository_ids`` is required in both states, empty list included.
-    It is what keeps the lane's reporting about itself: "no policy found" means
+    ``examined`` is required in all three states, empty list included. It is
+    what keeps the lane's reporting about itself: "no policy found" means
     nothing about the PM's repositories until it says which ones were read, and
     a session whose roster failed to load reports an empty list rather than
-    silently reading as "searched everywhere and found nothing".
+    silently reading as "searched everywhere and found nothing". A repository
+    the lane never opened simply has no entry, which is what makes stopping
+    early -- the behaviour the lane brief asks for -- reportable honestly.
     """
     identity_property = {
         "type": "string",
         "pattern": r"^pm-question:[0-9a-f]{16}$",
         "description": "Binds this answer to the PM question that requested it.",
     }
-    examined_property = {
-        "type": "array",
-        "maxItems": 64,
-        "items": _pm_repo_id_property("A roster repository this lane actually read."),
-        "description": (
-            "Roster repositories this lane read. Required even when empty: it is "
-            "the scope every other statement in this answer is relative to."
-        ),
-    }
-    no_policy_state: dict[str, Any] = {
-        "title": "NoPolicyCarried",
+
+    def examined_property(*, max_claims: int) -> dict[str, Any]:
+        """The examined list for a state that read at least one repository.
+
+        ``max_claims`` of zero is the state that carries nothing: every entry is
+        then a repository read with no claim, and no ``contains`` is needed
+        because none could be satisfied. Above zero it is the carried state, and
+        ``contains`` demands that at least one entry actually carry a claim --
+        which is what separates the two states from the entries alone.
+        """
+        prop: dict[str, Any] = {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": _PM_EXAMINED_MAX_REPOSITORIES,
+            "items": _pm_examined_repository_schema(max_claims=max_claims),
+            "description": (
+                "Repositories this lane read, one entry each, carrying what it "
+                "found there. A repository it did not open has no entry; an "
+                "entry with no claims was read and had nothing."
+            ),
+        }
+        if max_claims:
+            prop["contains"] = {
+                "type": "object",
+                "required": ["policy_claims"],
+                "properties": {"policy_claims": {"type": "array", "minItems": 1}},
+            }
+        return prop
+
+    nothing_examined_state: dict[str, Any] = {
+        "title": "NothingExamined",
         "type": "object",
         "additionalProperties": False,
         "required": [
             "question_identity",
             "lane_id",
-            "policy_found",
-            "examined_repository_ids",
-            "no_policy_reason",
+            "examined",
+            "nothing_examined_reason",
         ],
         "properties": {
             "question_identity": identity_property,
             "lane_id": {"const": "code_context"},
-            "policy_found": {
-                "const": False,
+            "examined": {
+                "type": "array",
+                "maxItems": 0,
                 "description": (
-                    "No policy is carried. Either the question is not asking what "
-                    "the system does today, or nothing readable here implements it."
+                    "Empty: this lane opened no repository. What it did not read "
+                    "it does not report on."
                 ),
             },
-            "examined_repository_ids": examined_property,
-            "evidence": {"type": "array", "maxItems": 0},
-            "no_policy_reason": {
+            "nothing_examined_reason": {
                 "type": "string",
-                "enum": list(PM_NO_POLICY_REASONS),
+                "enum": list(PM_NOTHING_EXAMINED_REASONS),
                 "description": (
-                    "Why no policy is carried. Chosen from a closed set. Each one "
-                    "is about this lane or about what it examined, never about "
-                    "what the PM has -- a subagent sees what reached it, not what "
-                    "is registered."
+                    "Why nothing was read. Chosen from a closed set, and each one "
+                    "is about this lane rather than about what the PM has -- a "
+                    "subagent sees what reached it, not what is registered."
                 ),
             },
         },
     }
+    no_policy_state: dict[str, Any] = {
+        "title": "NoPolicyInExaminedRepositories",
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["question_identity", "lane_id", "examined"],
+        "properties": {
+            "question_identity": identity_property,
+            "lane_id": {"const": "code_context"},
+            "examined": examined_property(max_claims=0),
+        },
+    }
     found_state: dict[str, Any] = {
-        "title": "PolicyFound",
+        "title": "PolicyCarried",
         "type": "object",
         "additionalProperties": False,
         "required": [
             "question_identity",
             "lane_id",
-            "policy_found",
-            "examined_repository_ids",
-            "evidence",
+            "examined",
             "answer_prefix",
             "requires_user_confirmation",
             "user_confirmation_prompt",
@@ -305,11 +405,7 @@ def _pm_code_context_answer_contract() -> dict[str, Any]:
         "properties": {
             "question_identity": identity_property,
             "lane_id": {"const": "code_context"},
-            "policy_found": {
-                "const": True,
-                "description": "The examined repositories implement policy bearing on this question.",
-            },
-            "examined_repository_ids": examined_property,
+            "examined": examined_property(max_claims=_PM_CLAIMS_MAX_PER_REPOSITORY),
             "answer_prefix": {
                 "type": "string",
                 "enum": ["[from-code]"],
@@ -341,17 +437,6 @@ def _pm_code_context_answer_contract() -> dict[str, Any]:
                     "is one the host is free to skip silently."
                 ),
             },
-            "evidence": {
-                "type": "array",
-                "minItems": 1,
-                "maxItems": _PM_EVIDENCE_MAX_ITEMS,
-                "items": _pm_policy_evidence_schema(),
-                "description": (
-                    "What the code shows, one claim per source. Items from "
-                    "different repositories that disagree are left as they are: "
-                    "the contradiction is a PRD input, not a defect to reconcile."
-                ),
-            },
         },
     }
     return {
@@ -361,17 +446,19 @@ def _pm_code_context_answer_contract() -> dict[str, Any]:
         # and the instruction the child must follow. A claim *about* the system
         # in a third field reads as authoritative as either and is enforced by
         # nothing (#1825).
-        "response_model_schema": {"oneOf": [no_policy_state, found_state]},
+        "response_model_schema": {"oneOf": [nothing_examined_state, no_policy_state, found_state]},
         "runtime_instruction": (
             "Read the repositories named in the roster you were given, and report "
             "what they implement today for this question. Describe, never "
             "prescribe: what the code does is an input to the PM's decision and "
-            "is not the decision. Name every repository you actually read in "
-            "examined_repository_ids -- everything else you say is scoped to it. "
+            "is not the decision. Give every repository you actually read an entry "
+            "in examined, carrying what you found there; a repository you read and "
+            "found nothing in is an entry with no claims, and one you never opened "
+            "has no entry. "
             "If two repositories implement different policies, carry both; the "
             "disagreement is what the PM most needs to see. Evidence from outside "
             "the roster is not evidence: say so in your finding so the PM can add "
-            "the repository, and do not put it in evidence. When you carry a "
+            "the repository, and do not give it an entry. When you carry a "
             "policy, set answer_prefix to [from-code] and write "
             "user_confirmation_prompt as the question the user should be asked "
             "before your finding is recorded on their behalf -- the finding is "
@@ -393,7 +480,8 @@ def _pm_question_advisory_fanout_metadata() -> dict[str, Any]:
     total answer -- one that exists no matter what the question is -- because a
     required lane with no such answer would block questions it has nothing to
     say about. Both have one: the data lane answers ``data_needed=false`` with a
-    reason, and the code lane answers ``policy_found=false`` with a reason. That
+    reason, and the code lane answers with an empty ``examined`` and a reason it
+    read nothing. That
     is also why requiring them is worth doing: optional would let a question that
     did need evidence lose it silently, which is the defect the lanes exist to
     remove.
@@ -566,7 +654,7 @@ def pm_repository_roster(repos: Any) -> list[dict[str, str]]:
 
 
 __all__ = [
-    "PM_NO_POLICY_REASONS",
+    "PM_NOTHING_EXAMINED_REASONS",
     "_pm_code_context_answer_contract",
     "_pm_question_advisory_fanout_metadata",
     "pm_code_context_answer_contract",

@@ -204,9 +204,12 @@ Rules for building it:
   one line, and never present a disagreement as one policy with an exception —
   flag it, as above. That contradiction is the most useful thing the PM can be
   shown, and it is the first thing a tidy summary destroys.
-- **Always print the examined scope.** `examined_repository_ids` is what every
-  other statement is relative to; "found nothing" across two of five repositories
-  means something different from across all five.
+- **Always print the examined scope.** `examined` has one entry per repository
+  the lane read, and every claim sits inside its own entry; "found nothing"
+  across two of five repositories means something different from across all
+  five. An entry whose `policy_claims` is empty was read and had nothing — say
+  so. A repository with no entry was never opened, and must never be printed as
+  clean.
 - **Carry measurements as reported** — the lane's `metric`, its groups, its
   numbers. Do not re-scale, combine, or round; you did not run the read.
 - **A no-op lane gets at most one line, and often none.** Read the reason as a
@@ -227,10 +230,11 @@ Rules for building it:
 
 **A3. Record a confirmed finding — its own turn, before you prompt for an answer.**
 
-Only when `code_context` came back `policy_found: true`. It carries
-`answer_prefix: "[from-code]"` and a `user_confirmation_prompt`, and there is no
-prefix that skips this step: `[from-code][auto-confirmed]` is not a value the
-contract can hold, so a lane cannot declare itself pre-confirmed.
+Only when some `code_context` entry came back carrying a `policy_claims` item.
+That answer also carries `answer_prefix: "[from-code]"` and a
+`user_confirmation_prompt`, and there is no prefix that skips this step:
+`[from-code][auto-confirmed]` is not a value the contract can hold, so a lane
+cannot declare itself pre-confirmed.
 
 1. Show the evidence block (A2) and ask the lane's `user_confirmation_prompt`
    through `AskUserQuestion`. Ask it as it is: the user is confirming that this
@@ -238,8 +242,8 @@ contract can hold, so a lane cannot declare itself pre-confirmed.
 2. If they say it is wrong, or they would rather just answer, **send nothing**
    and go to B. A question answered with no finding recorded is an accurate
    account of how that decision was made, not a degraded one.
-3. If they confirm, send it as the answer with its prefix, composed from
-   `evidence[]` so every claim keeps the repository it was checked against:
+3. If they confirm, send it as the answer with its prefix, composed from the
+   `examined` entries so every claim keeps the repository it was read in:
 
 ```
 Tool: ouroboros_pm_interview

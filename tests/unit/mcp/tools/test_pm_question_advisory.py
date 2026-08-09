@@ -37,9 +37,9 @@ QUESTION = "What happens today when a subscription lapses mid-period?"
 
 
 def _found_policy(roster: list[dict[str, str]], **overrides: Any) -> dict[str, Any]:
-    """Return a well-formed ``policy_found`` answer for the code lane.
+    """Return a well-formed ``PolicyCarried`` answer for the code lane.
 
-    Built in one place because the found state is the one that carries the
+    Built in one place because the carried state is the one that holds the
     forwarding fields: a test that spells them out by hand records today's
     contract in a dozen places, and the last round's lesson is that a payload
     with more than one spelling is a payload whose rules stop agreeing.
@@ -47,21 +47,25 @@ def _found_policy(roster: list[dict[str, str]], **overrides: Any) -> dict[str, A
     payload: dict[str, Any] = {
         "question_identity": stable_pm_question_identity(QUESTION),
         "lane_id": "code_context",
-        "policy_found": True,
-        "examined_repository_ids": [roster[0]["repo_id"]] if roster else [],
+        "examined": [
+            {
+                "repo_id": roster[0]["repo_id"] if roster else "api-12345678",
+                "policy_claims": [
+                    {"path": "src/billing.py", "policy_claim": "grace period applies"}
+                ],
+            }
+        ],
         "answer_prefix": "[from-code]",
         "requires_user_confirmation": True,
         "user_confirmation_prompt": "Record this finding as what the code does today?",
-        "evidence": [
-            {
-                "repo_id": roster[0]["repo_id"] if roster else "api-12345678",
-                "path": "src/billing.py",
-                "policy_claim": "grace period applies",
-            }
-        ],
     }
     payload.update(overrides)
     return payload
+
+
+def _state(schema: dict[str, Any], title: str) -> dict[str, Any]:
+    """Return one named answer state from the code lane's ``oneOf``."""
+    return next(state for state in schema["oneOf"] if state["title"] == title)
 
 
 def _stub_engine(state: InterviewState, questions: tuple[str, ...] = ()) -> Any:
@@ -303,10 +307,7 @@ def test_the_only_answer_prefix_is_the_one_that_has_to_be_confirmed() -> None:
     earn the exception, and there is no exception to earn.
     """
     schema = pm_code_context_answer_contract()["response_model_schema"]
-    found = next(s for s in schema["oneOf"] if s["properties"]["policy_found"]["const"] is True)
-    no_policy = next(
-        s for s in schema["oneOf"] if s["properties"]["policy_found"]["const"] is False
-    )
+    found = _state(schema, "PolicyCarried")
 
     assert found["properties"]["answer_prefix"]["enum"] == ["[from-code]"]
     assert found["properties"]["requires_user_confirmation"]["const"] is True
@@ -315,9 +316,10 @@ def test_the_only_answer_prefix_is_the_one_that_has_to_be_confirmed() -> None:
         found["required"]
     )
     # Nothing to forward, so no way to say how to forward it.
-    assert "answer_prefix" not in no_policy["properties"]
-    # And no free-text answer field: what the host forwards is composed from
-    # ``evidence[]``, so every claim keeps the repo_id it was checked against.
+    for title in ("NothingExamined", "NoPolicyInExaminedRepositories"):
+        assert "answer_prefix" not in _state(schema, title)["properties"]
+    # And no free-text answer field: what the host forwards is composed from the
+    # ``examined`` entries, so every claim keeps the repository it was read in.
     for state in schema["oneOf"]:
         assert state["additionalProperties"] is False
         assert "answer_text" not in state["properties"]
@@ -367,13 +369,12 @@ def test_a_free_text_reason_is_rejected(
         {
             "question_identity": stable_pm_question_identity(QUESTION),
             "lane_id": "code_context",
-            "policy_found": False,
-            "examined_repository_ids": [roster[0]["repo_id"]],
-            "no_policy_reason": "there is no such policy anywhere in your system",
+            "examined": [],
+            "nothing_examined_reason": "there is no such policy anywhere in your system",
         },
     )
     assert result["status"] == "partial"
-    assert "no_policy_reason: enum" in result["contract_violations"]["code_context"]
+    assert "nothing_examined_reason" in str(result["contract_violations"]["code_context"])
 
 
 def test_scope_is_required_even_when_nothing_was_read(
@@ -387,9 +388,8 @@ def test_scope_is_required_even_when_nothing_was_read(
         {
             "question_identity": stable_pm_question_identity(QUESTION),
             "lane_id": "code_context",
-            "policy_found": False,
-            "examined_repository_ids": [],
-            "no_policy_reason": "no_repository_in_roster",
+            "examined": [],
+            "nothing_examined_reason": "no_repository_in_roster",
         },
     )
     assert result["status"] == "complete"
@@ -398,7 +398,28 @@ def test_scope_is_required_even_when_nothing_was_read(
 def test_an_answer_without_its_scope_is_rejected() -> None:
     schema = pm_code_context_answer_contract()["response_model_schema"]
     for state in schema["oneOf"]:
-        assert "examined_repository_ids" in state["required"]
+        assert "examined" in state["required"]
+
+
+def test_no_reason_restates_what_the_entries_already_say() -> None:
+    """ "Found nothing in what I read" is the shape, not a reason to choose.
+
+    Keeping it as a constant would leave a value that can disagree with the
+    entries beside it — an empty scope claiming it searched, or a populated one
+    claiming the roster was empty. It is derived from the entries instead, so
+    only reasons about *not reading* remain, and they exist in the one state
+    where there are no entries to speak.
+    """
+    from ouroboros.orchestrator.capabilities.pm_schemas import PM_NOTHING_EXAMINED_REASONS
+
+    assert "no_policy_found_in_examined_repositories" not in PM_NOTHING_EXAMINED_REASONS
+    schema = pm_code_context_answer_contract()["response_model_schema"]
+    assert "nothing_examined_reason" in _state(schema, "NothingExamined")["properties"]
+    for title in ("NoPolicyInExaminedRepositories", "PolicyCarried"):
+        assert "nothing_examined_reason" not in _state(schema, title)["properties"]
+    # And no boolean restating whether a claim is carried.
+    for state in schema["oneOf"]:
+        assert "policy_found" not in state["properties"]
 
 
 # ── Decision 4: a total answer, so the lane can be required ──────────────
@@ -408,10 +429,14 @@ def test_both_lanes_are_required_and_both_have_a_no_op_answer() -> None:
     lanes = _pm_question_advisory_fanout_metadata()["lanes"]
     assert all(lane["required"] for lane in lanes)
     code_states = {
-        state["properties"]["policy_found"]["const"]
+        state["title"]
         for state in pm_code_context_answer_contract()["response_model_schema"]["oneOf"]
     }
-    assert code_states == {True, False}
+    assert code_states == {
+        "NothingExamined",
+        "NoPolicyInExaminedRepositories",
+        "PolicyCarried",
+    }
 
 
 # ── Decision 6: the roster is a boundary, decided from the value ─────────
@@ -426,11 +451,10 @@ def test_evidence_from_outside_the_roster_is_rejected(
         meta,
         _found_policy(
             roster,
-            evidence=[
+            examined=[
                 {
                     "repo_id": "elsewhere-deadbeef",
-                    "path": "src/x.py",
-                    "policy_claim": "something",
+                    "policy_claims": [{"path": "src/x.py", "policy_claim": "something"}],
                 }
             ],
         ),
@@ -449,13 +473,192 @@ def test_a_scope_claiming_an_unoffered_repository_is_rejected(
         {
             "question_identity": stable_pm_question_identity(QUESTION),
             "lane_id": "code_context",
-            "policy_found": False,
-            "examined_repository_ids": ["ghost-11111111"],
-            "no_policy_reason": "no_policy_found_in_examined_repositories",
+            "examined": [{"repo_id": "ghost-11111111", "policy_claims": []}],
         },
     )
     assert result["status"] == "partial"
-    assert "examined_repository_ids" in str(result["contract_violations"]["code_context"])
+    assert "examined" in str(result["contract_violations"]["code_context"])
+
+
+def test_one_repository_cannot_hold_two_entries(
+    registry: FanoutRegistry, roster: list[dict[str, str]]
+) -> None:
+    """The fold removed a disagreement; a repeated key would rebuild it.
+
+    Two entries for the same repository — one carrying a claim, one saying it
+    was read and clean — is the round-8 contradiction one level down. Draft
+    2020-12 has ``uniqueItems`` for whole items and nothing for uniqueness by
+    property, so this is decided at re-entry, exactly as the data lane decides a
+    repeated ``group`` key.
+    """
+    meta = _attach(registry, roster)
+    result = _submit(
+        registry,
+        meta,
+        _found_policy(
+            roster,
+            examined=[
+                {
+                    "repo_id": roster[0]["repo_id"],
+                    "policy_claims": [
+                        {"path": "src/billing.py", "policy_claim": "grace period applies"}
+                    ],
+                },
+                {"repo_id": roster[0]["repo_id"], "policy_claims": []},
+            ],
+        ),
+    )
+    assert result["status"] == "partial"
+    assert "more than one entry" in str(result["contract_violations"]["code_context"])
+
+
+def test_a_claim_cannot_name_a_repository_the_answer_did_not_examine(
+    registry: FanoutRegistry, roster: list[dict[str, str]]
+) -> None:
+    """Round 8's probe, in the shape it would have to take now.
+
+    It declared only the API repository examined while citing the web
+    repository's code, and re-entry returned ``complete``. There is no longer a
+    second list to disagree with the first: a claim's repository *is* the entry
+    holding it, so the only way to spell the probe is to smuggle a ``repo_id``
+    into the claim, and the claim shape is closed.
+    """
+    meta = _attach(registry, roster)
+    result = _submit(
+        registry,
+        meta,
+        _found_policy(
+            roster,
+            examined=[
+                {
+                    "repo_id": roster[0]["repo_id"],
+                    "policy_claims": [
+                        {
+                            "repo_id": roster[1]["repo_id"],
+                            "path": "src/checkout.ts",
+                            "policy_claim": "revoked immediately",
+                        }
+                    ],
+                }
+            ],
+        ),
+    )
+    assert result["status"] == "partial"
+    # And the old two-list spelling has no home either.
+    stale = _submit(
+        registry,
+        _attach(registry, roster, session_id="pm-stale"),
+        {
+            "question_identity": stable_pm_question_identity(QUESTION),
+            "lane_id": "code_context",
+            "policy_found": True,
+            "examined_repository_ids": [roster[0]["repo_id"]],
+            "answer_prefix": "[from-code]",
+            "requires_user_confirmation": True,
+            "user_confirmation_prompt": "ok?",
+            "evidence": [
+                {
+                    "repo_id": roster[1]["repo_id"],
+                    "path": "src/checkout.ts",
+                    "policy_claim": "revoked immediately",
+                }
+            ],
+        },
+        session_id="pm-stale",
+    )
+    assert stale["status"] == "partial"
+
+
+def test_a_repository_read_and_clean_is_not_a_repository_unread(
+    registry: FanoutRegistry, roster: list[dict[str, str]]
+) -> None:
+    """Two scans with identical claims still say different things.
+
+    This is the loss that ruled out deleting the scope outright: the lane brief
+    tells the child to stop once it can answer, so a partial scan is the
+    designed default, and "found nothing across two of five" must stay
+    distinguishable from "across all five". Absence from ``examined`` means not
+    read; an entry with no claims means read and clean.
+    """
+    wide = pm_repository_roster(
+        [
+            {"path": "/repo/api", "name": "api"},
+            {"path": "/repo/web", "name": "web"},
+            {"path": "/repo/mobile", "name": "mobile"},
+            {"path": "/repo/admin", "name": "admin"},
+            {"path": "/repo/docs", "name": "docs"},
+        ]
+    )
+    carried = [
+        {"path": "src/billing.py", "policy_claim": "grace period applies"},
+    ]
+
+    def scan(session_id: str, read: list[dict[str, str]]) -> dict[str, Any]:
+        meta = _attach(registry, wide, session_id=session_id)
+        result = _submit(
+            registry,
+            meta,
+            _found_policy(
+                wide,
+                examined=[
+                    {
+                        "repo_id": entry["repo_id"],
+                        "policy_claims": carried if index == 0 else [],
+                    }
+                    for index, entry in enumerate(read)
+                ],
+            ),
+            session_id=session_id,
+        )
+        assert result["status"] == "complete"
+        return next(
+            lane["output"]
+            for lane in result["result"]["aggregated_outputs"]
+            if lane["lane_id"] == "code_context"
+        )
+
+    stopped_early = scan("pm-partial", wide[:2])
+    read_everything = scan("pm-full", wide)
+
+    assert [entry["repo_id"] for entry in stopped_early["examined"]] == [
+        wide[0]["repo_id"],
+        wide[1]["repo_id"],
+    ]
+    assert len(read_everything["examined"]) == 5
+    assert stopped_early != read_everything
+    # The claims are identical; only the scope differs, which is the whole point.
+    assert [claim for entry in stopped_early["examined"] for claim in entry["policy_claims"]] == [
+        claim for entry in read_everything["examined"] for claim in entry["policy_claims"]
+    ]
+
+
+def test_a_cited_repository_need_not_be_the_only_one_examined(
+    registry: FanoutRegistry, roster: list[dict[str, str]]
+) -> None:
+    """Reading more than you cite is normal and stays accepted.
+
+    The reviewer asked for cited repositories to be a subset of the declared
+    scope. Folding makes that hold by construction — but the converse must not
+    become an equality: a repository read and found clean is exactly the
+    honest partial scope the lane brief asks for.
+    """
+    result = _submit(
+        registry,
+        _attach(registry, roster),
+        _found_policy(
+            roster,
+            examined=[
+                {
+                    "repo_id": roster[0]["repo_id"],
+                    "policy_claims": [
+                        {"path": "src/billing.py", "policy_claim": "grace period applies"}
+                    ],
+                },
+                {"repo_id": roster[1]["repo_id"], "policy_claims": []},
+            ],
+        ),
+    )
+    assert result["status"] == "complete"
 
 
 def test_cross_repo_disagreement_survives_as_structure(
@@ -464,8 +667,8 @@ def test_cross_repo_disagreement_survives_as_structure(
     """Two repositories implementing different policies is the PRD input.
 
     It is accepted rather than reconciled, and the two claims stay attached to
-    their own repositories — which is the whole reason ``repo_id`` sits on the
-    evidence item rather than on the request.
+    their own repositories — which is the whole reason a claim lives inside its
+    repository's entry rather than beside a separate scope list.
     """
     meta = _attach(registry, roster)
     result = _submit(
@@ -473,33 +676,40 @@ def test_cross_repo_disagreement_survives_as_structure(
         meta,
         _found_policy(
             roster,
-            examined_repository_ids=[roster[0]["repo_id"], roster[1]["repo_id"]],
-            evidence=[
+            examined=[
                 {
                     "repo_id": roster[0]["repo_id"],
-                    "path": "src/billing.py",
-                    "policy_claim": "access continues until period end",
+                    "policy_claims": [
+                        {
+                            "path": "src/billing.py",
+                            "policy_claim": "access continues until period end",
+                        }
+                    ],
                 },
                 {
                     "repo_id": roster[1]["repo_id"],
-                    "path": "src/checkout.ts",
-                    "policy_claim": "access is revoked immediately",
+                    "policy_claims": [
+                        {
+                            "path": "src/checkout.ts",
+                            "policy_claim": "access is revoked immediately",
+                        }
+                    ],
                 },
             ],
         ),
     )
     assert result["status"] == "complete"
-    evidence = [
-        item
+    examined = next(
+        lane["output"]["examined"]
         for lane in result["result"]["aggregated_outputs"]
         if lane["lane_id"] == "code_context"
-        for item in lane["output"]["evidence"]
-    ]
-    assert [item["repo_id"] for item in evidence] == [
+    )
+    assert [entry["repo_id"] for entry in examined] == [
         roster[0]["repo_id"],
         roster[1]["repo_id"],
     ]
-    assert len({item["policy_claim"] for item in evidence}) == 2
+    claims = [claim["policy_claim"] for entry in examined for claim in entry["policy_claims"]]
+    assert len(set(claims)) == 2
 
 
 def test_repo_id_survives_a_rename_and_separates_a_shared_name() -> None:
@@ -548,9 +758,8 @@ def test_an_answer_for_a_different_question_is_rejected(
         {
             "question_identity": "pm-question:0000000000000000",
             "lane_id": "code_context",
-            "policy_found": False,
-            "examined_repository_ids": [],
-            "no_policy_reason": "no_repository_in_roster",
+            "examined": [],
+            "nothing_examined_reason": "no_repository_in_roster",
         },
     )
     assert result["status"] == "partial"
@@ -856,14 +1065,14 @@ def test_a_citation_path_that_is_not_repository_relative_is_rejected() -> None:
     """
     from jsonschema import Draft202012Validator
 
-    from ouroboros.orchestrator.capabilities.pm_schemas import _pm_policy_evidence_schema
+    from ouroboros.orchestrator.capabilities.pm_schemas import _pm_policy_claim_schema
 
-    schema = _pm_policy_evidence_schema()
+    schema = _pm_policy_claim_schema()
     Draft202012Validator.check_schema(schema)
     validator = Draft202012Validator(schema)
 
     def accepted(path: str) -> bool:
-        item = {"repo_id": "api-12345678", "path": path, "policy_claim": "access ends"}
+        item = {"path": path, "policy_claim": "access ends"}
         return not list(validator.iter_errors(item))
 
     # What a lane is supposed to cite, including dotfiles and a literal '..'
