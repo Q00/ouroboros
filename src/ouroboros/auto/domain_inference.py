@@ -1873,18 +1873,37 @@ def _matches_web_app(ledger: SeedDraftLedger) -> bool:
     # denial the app DISPLAYS ("showing which browsers are unsupported")
     # is content, not scope.
     goal_text_value = _goal_text(ledger)
-    # Subordinate clauses ("where embedded browsers are disabled") scope
-    # a denial to the conjunct they modify (#1813 R79), and an exclusion
-    # with a from/in tail ("excluded from the report") names its own
-    # scope object — neither erases the whole ledger.
-    content_regions = [m.span() for m in _CONTENT_CLAUSE_RE.finditer(goal_text_value)] + [
-        m.span() for m in re.finditer(r"\bwhere\s+[^,.;]*", goal_text_value)
-    ]
+    # Subordinate and participial content clauses scope a denial to what
+    # they modify (#1813 R79/R80): "where embedded browsers are
+    # disabled" belongs to its conjunct, "displaying websites that are
+    # unavailable" is displayed content. A prepositional tail after the
+    # denial names its own scope object ("unsupported for the desktop
+    # client") — closed function words, not an object list.
+    content_regions = (
+        [m.span() for m in _CONTENT_CLAUSE_RE.finditer(goal_text_value)]
+        + [m.span() for m in re.finditer(r"\bwhere\s+[^,.;]*", goal_text_value)]
+        + [
+            m.span()
+            for m in re.finditer(
+                rf"\b(?!{_NOMINAL_GERUND_FRAGMENT}\b)[a-z'’\-]+ing\s+[^,.;]*",
+                goal_text_value,
+            )
+        ]
+    )
     if any(
         not any(start <= m.start() < end for start, end in content_regions)
-        and not re.match(r"\s+(?:from|in|within|inside)\b", goal_text_value[m.end() :])
+        and not re.match(
+            r"\s+(?:from|in|within|inside|for|on|by|under|across|during|"
+            r"except|only|outside)\b",
+            goal_text_value[m.end() :],
+        )
         for m in _POSTPOSITIVE_BROWSER_DENIAL_RE.finditer(goal_text_value)
     ):
+        return False
+    # Goal-side component identity resolves before every affirmative
+    # grant (#1813 R80): "a web app that is a Chrome browser extension"
+    # is an extension, whatever the goal called it first.
+    if _GOAL_COMPONENT_TARGET_RE.search(goal_text_value):
         return False
     # An explicit component runtime is authoritative (#1813 R77) — as an
     # IDENTITY (#1813 R78/R79): negated mentions do not count, and the
@@ -1985,12 +2004,6 @@ def _matches_web_app(ledger: SeedDraftLedger) -> bool:
     # A goal declaring an inspection/automation artifact marks output
     # widgets as its targets (#1813 R30) — clause-level ownership, not
     # another noun list.
-    # A UI surface declared FOR a component belongs to that component
-    # (#1813 R66), whatever the runtime wording — the postfix mirror of
-    # the first-NP component rule, guarding the composition and semantic
-    # fallbacks after the affirmative grants have had their say.
-    if _GOAL_COMPONENT_TARGET_RE.search(_goal_text(ledger)):
-        return False
     # The product-head exception accepts standardized runtime evidence
     # (#1813 R61): "webhook monitoring dashboard" with a browser
     # execution environment is a dashboard whose subject is monitoring,

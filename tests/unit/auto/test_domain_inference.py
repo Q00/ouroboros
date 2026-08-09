@@ -4249,6 +4249,39 @@ def test_conjunct_scoped_denials_do_not_erase_the_web_app(goal: str) -> None:
     assert TaskClass.WEB_APP in result.classes
 
 
+def test_participial_content_denials_stay_content() -> None:
+    """R80 guard: a denial inside displayed content ("displaying
+    websites that are unavailable") never erases the web app."""
+    ledger = _bare_ledger("Build a web app displaying websites that are unavailable")
+    _seed_section(ledger, "outputs", value="Availability table with a filters panel")
+    _seed_section(ledger, "runtime_context", value="Browser")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP
+
+
+def test_prepositional_scope_tails_keep_the_web_app() -> None:
+    """R80 guard: any prepositional tail names the denial's own scope —
+    "unsupported for the desktop client" belongs to the client."""
+    ledger = _bare_ledger(
+        "Build a web app and a desktop client; browsers are unsupported for the desktop client"
+    )
+    _seed_section(ledger, "outputs", value="Login form with a settings panel shown in the browser")
+    _seed_section(ledger, "runtime_context", value="Browser")
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP in result.classes
+
+
+def test_component_identity_precedes_the_explicit_grant() -> None:
+    """R80 guard: "a web app that is a Chrome browser extension" is an
+    extension — identity resolves before every affirmative grant."""
+    ledger = _bare_ledger("Build a web app that is a Chrome browser extension")
+    _seed_section(ledger, "outputs", value="Settings panel with save button")
+    _seed_section(ledger, "runtime_context", value="Runs in browsers")
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes
+
+
 @pytest.mark.parametrize(
     "goal",
     [
