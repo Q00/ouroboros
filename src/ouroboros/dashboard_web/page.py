@@ -17,7 +17,7 @@ _PAGE_TEMPLATE = """<!doctype html>
   :root {
     --bg: #0d1117; --panel: #161b22; --border: #30363d; --text: #e6edf3;
     --muted: #8b949e; --pending: #6e7681; --executing: #d29922;
-    --completed: #2ea043; --failed: #f85149;
+    --completed: #2ea043; --failed: #f85149; --paused: #58a6ff; --cancelled: #a371f7;
   }
   * { box-sizing: border-box; }
   body { margin: 0; background: var(--bg); color: var(--text);
@@ -50,6 +50,8 @@ _PAGE_TEMPLATE = """<!doctype html>
   .run-row.status-running { border-left-color:var(--executing); }
   .run-row.status-completed { border-left-color:var(--completed); }
   .run-row.status-failed { border-left-color:var(--failed); }
+  .run-row.status-paused { border-left-color:var(--paused); }
+  .run-row.status-cancelled { border-left-color:var(--cancelled); }
   .run-goal { font-size:13px; white-space:pre-wrap; overflow-wrap:anywhere; }
   .run-details { display:flex; flex-wrap:wrap; gap:8px 14px; margin-top:7px;
     color:var(--muted); font-size:11px; }
@@ -58,6 +60,8 @@ _PAGE_TEMPLATE = """<!doctype html>
   .run-status.running { color:var(--executing); }
   .run-status.completed { color:var(--completed); }
   .run-status.failed { color:var(--failed); }
+  .run-status.paused { color:var(--paused); }
+  .run-status.cancelled { color:var(--cancelled); }
   .list-empty { color:var(--muted); border:1px dashed var(--border); border-radius:7px;
     padding:28px 16px; text-align:center; font-size:12px; }
   #detail-view[hidden], #run-list[hidden] { display:none; }

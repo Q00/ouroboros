@@ -57,7 +57,8 @@ from sqlalchemy.pool import NullPool
 import structlog
 
 from ouroboros.persistence.event_store import _run_to_settlement
-from ouroboros.persistence.schema import events_table, lineage_step_claims_table, metadata
+from ouroboros.persistence.picker_projection_updates import insert_event_with_picker_projection
+from ouroboros.persistence.schema import lineage_step_claims_table, metadata
 
 log = structlog.get_logger(__name__)
 
@@ -326,7 +327,7 @@ class DurableStepClaims:
                 if held != claim_token:
                     await conn.rollback()
                     return False
-                await conn.execute(events_table.insert().values(**event.to_db_dict()))
+                await insert_event_with_picker_projection(conn, event, False)
                 if lease.lost.is_set():
                     # The self-fence fired after admission: authority is no
                     # longer provable, so the admitted write must not commit.
@@ -432,14 +433,15 @@ _LOCAL_CLAIMS_BY_STORE: weakref.WeakKeyDictionary[Any, LocalStepClaims] = (
 
 
 def _is_shared_database_url(url: str) -> bool:
-    """True when the URL names a database another process could open too."""
+    """True when one URL can host a shared database-backed claim namespace."""
     try:
         parsed = make_url(url)
     except Exception:
         return False
     if parsed.get_backend_name() == "sqlite":
-        # Every pathless or explicit-:memory: SQLite form is in-memory and
-        # therefore private to this process by construction.
+        # Pathless and explicit ``:memory:`` forms cannot be reopened by a
+        # separate claims engine. Canonical named memdb URLs do have a stable
+        # path identity, even though that shared database remains process-local.
         return bool(parsed.database) and parsed.database != ":memory:"
     return True
 
@@ -447,9 +449,9 @@ def _is_shared_database_url(url: str) -> bool:
 def step_claims_for(event_store: Any) -> StepClaims:
     """Resolve the claims backend for a store.
 
-    Only a store with a real database URL can share claims across processes;
-    in-memory URLs are private to one process by construction and unit-test
-    fakes expose no URL at all, so both use a per-store table.
+    Anonymous memory stores and unit-test fakes use per-store local claims.
+    Canonical named memdb URLs have a stable process-local database identity,
+    so same-URL stores share the durable claim backend just like file stores.
     """
     url = getattr(event_store, "database_url", None)
     if not isinstance(url, str) or not _is_shared_database_url(url):

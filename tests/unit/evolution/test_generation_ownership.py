@@ -1376,3 +1376,37 @@ class TestClaimBackendClassification:
             assert executions == [1]
         finally:
             await store.close()
+
+    @pytest.mark.asyncio
+    async def test_ownership_holds_on_a_named_in_memory_store(self) -> None:
+        """A supported named SQLite memory URL must keep transaction ownership."""
+        store = EventStore(
+            "sqlite+aiosqlite:///file:named-evolve?mode=memory&cache=shared&uri=true"
+        )
+        await store.initialize()
+        try:
+            assert isinstance(step_claims_for(store), DurableStepClaims)
+            executions: list[int] = []
+            result = await _build_loop(store, executions).evolve_step(
+                "lineage-named-memory", initial_seed=_make_seed()
+            )
+            assert result.is_ok, str(result.error) if result.is_err else ""
+            assert executions == [1]
+        finally:
+            await store.close()
+
+    @pytest.mark.asyncio
+    async def test_ownership_holds_on_the_standard_shared_memory_uri(self) -> None:
+        """The standard ``file::memory:`` URI keeps durable claim ownership."""
+        store = EventStore("sqlite+aiosqlite:///file::memory:?cache=shared&uri=true")
+        await store.initialize()
+        try:
+            assert isinstance(step_claims_for(store), DurableStepClaims)
+            executions: list[int] = []
+            result = await _build_loop(store, executions).evolve_step(
+                "lineage-standard-shared-memory", initial_seed=_make_seed()
+            )
+            assert result.is_ok, str(result.error) if result.is_err else ""
+            assert executions == [1]
+        finally:
+            await store.close()

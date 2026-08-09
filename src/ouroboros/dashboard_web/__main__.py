@@ -11,7 +11,11 @@ from __future__ import annotations
 import argparse
 
 from ouroboros.dashboard_web.daemon import ensure_dashboard, run_daemon
-from ouroboros.dashboard_web.reader import default_db_path, list_recent_executions
+from ouroboros.dashboard_web.reader import (
+    PickerIndexContractError,
+    default_db_path,
+    list_recent_executions,
+)
 
 
 def main() -> None:
@@ -39,7 +43,11 @@ def main() -> None:
         print(f"Open: {info.run_url(args.run)}")
         return
 
-    recent = list_recent_executions(args.db)
+    try:
+        recent = list_recent_executions(args.db)
+    except PickerIndexContractError as exc:
+        print(f"Dashboard picker unavailable until the EventStore is upgraded: {exc}")
+        return
     if not recent:
         print("No runs found yet — start one with `ooo run` / `ooo auto`.")
         return
