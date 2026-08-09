@@ -29,15 +29,14 @@ ouroboros-tui --help                    # show all options
 | Key | Shortcut | Screen |
 |-----|----------|--------|
 | `1` | | Dashboard — Double Diamond phase bar, AC tree, node detail |
-| `2` | | Execution — Phase outputs, event timeline |
-| `3` | `l` | Logs — Sortable/filterable table |
-| `4` | `d` | Debug — State dump, drift/cost sparklines, events |
-| `5` | `e` | Lineage — Evolutionary generation history |
-| | `s` | Session Selector |
+| `2` | | Execution — Phase outputs, event timeline, optional log panel |
+| `3` | `e` | Lineage — Evolutionary generation history |
+| `4` | `s` | Sessions — Browse and load sessions |
+| | `l` | Toggle the log panel while Execution is active |
 
 ## Keys
 
-`q` quit · `1-5` screens · `Ctrl+P` command palette · `↑↓` navigate · `Enter` select · mouse click
+`q` quit · `1-4` screens · `Ctrl+P` command palette · `↑↓` navigate · `Enter` select · mouse click
 
 `p`/`r` pause/resume are available in demo mode only, where this process owns the simulation
 it is pausing. Demo mode is entered with `--mock`, and also as a fallback when the database
