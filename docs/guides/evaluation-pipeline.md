@@ -300,7 +300,9 @@ openrouter/anthropic/claude-opus-4.8
 openrouter/google/gemini-2.5-pro
 ```
 
-**Sentinel-model backends.** For the backends in `_SENTINEL_DEFAULT_BACKENDS` (`config/loader.py:101` — Codex, Kiro, Copilot, Hermes, Pi, GJC, Antigravity, Grok, Zcode), `get_consensus_models()` maps the shipped roster to the literal string `"default"` for all three slots (`config/loader.py:1947`). OpenCode is not in that set.
+**Sentinel-model backends.** For the backends in `_SENTINEL_DEFAULT_BACKENDS` (`config/loader.py:101`), `get_consensus_models()` maps the shipped roster to the literal string `"default"` for all three slots (`config/loader.py:1947`). That set is Codex, **OpenCode**, Kiro, Copilot, Hermes, Pi, GJC, Antigravity, Grok, and Zcode.
+
+OpenCode is easy to miss here: it is not a separate member of the union, it rides in through `_CODEX_LLM_BACKENDS`, which is `frozenset({"codex", "codex_cli", "opencode", "opencode_cli"})` (`config/loader.py:76`). So `get_consensus_models("opencode")` returns `("default", "default", "default")` exactly as Codex does. The unrelated `_OPENCODE_BACKENDS` constant at `config/loader.py:113` is used for permission-mode resolution, not for model defaults.
 
 `_should_use_multi_model()` treats anything that does not start with `openrouter/` as a genuine multi-model roster (`evaluation/consensus.py:313`), so `"default"` does **not** trigger the single-model perspective fallback below. On these backends Stage 3 casts three votes labeled `default`, all from the one model that backend is configured to use.
 
@@ -535,12 +537,19 @@ config = PipelineConfig(
     ),
 
     # Stage 3: Simple consensus evaluation
+    #
+    # models=None keeps the backend-aware default: OpenRouter-capable backends
+    # get the shipped roster, sentinel backends get ("default",) * 3. Passing an
+    # explicit tuple marks the roster as configured and skips that
+    # normalization, so the OpenRouter ids below are only correct on a backend
+    # that can actually reach OpenRouter. See "Sentinel-model backends" above.
     consensus=ConsensusConfig(
-        models=(
-            "openrouter/openai/gpt-4o",
-            "openrouter/anthropic/claude-opus-4.8",
-            "openrouter/google/gemini-2.5-pro",
-        ),
+        models=None,  # or, on an OpenRouter-capable backend only:
+        # models=(
+        #     "openrouter/openai/gpt-4o",
+        #     "openrouter/anthropic/claude-opus-4.8",
+        #     "openrouter/google/gemini-2.5-pro",
+        # ),
         temperature=0.3,
         max_tokens=1024,
         majority_threshold=0.66,     # 2/3 majority required
