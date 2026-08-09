@@ -339,20 +339,30 @@ def test_the_whole_roster_reaches_the_child_at_the_declared_ceiling() -> None:
     assert "... [truncated]" not in prompt
 
 
-def test_a_roster_too_large_to_render_whole_leaves_the_question_unassisted() -> None:
-    """Refusing the consultation beats giving it a scope it cannot see.
+def test_long_registration_notes_shorten_themselves_and_never_the_roster() -> None:
+    """The free-text field yields; the list does not.
 
-    Sixty-four repositories is legal by count and can still be too large by
-    bytes, and there is no honest half of a roster: the two outcomes are the
-    whole list or no lanes. The user still gets their question -- the refusal
-    lands in ``attach_question_advisory``'s existing build guard, which attaches
-    nothing rather than failing the turn.
+    ``name`` and ``desc`` are typed by a person at ``ooo brownfield``
+    registration and stored in unbounded ``Text`` columns, so they are the roster
+    fields that can grow without limit -- and the ones nothing is keyed on, since
+    the child cites by ``repo_id`` and reads at ``path``. Both are covered here:
+    bounding one free-text field and leaving its twin is the shape of the
+    original mistake.
+
+    A size ceiling on the whole roster stood here first and had the sign
+    backwards: it bounded the list, whose loss is fatal, and left ``desc``
+    unbounded, whose loss is free. Sixty-four repositories carrying long notes
+    then attached *no* lanes at all, and the resulting turn was indistinguishable
+    from an ordinary greenfield question -- the same ungrounded PM decision the
+    truncation bug produced, reached by refusing instead of by cutting. So the
+    assertion is that every repository still arrives, however long the notes.
     """
     roster = pm_repository_roster(
         [
             {
-                "name": f"service-{index:02d}",
-                "path": "/Users/dev/" + "deeply-nested-monorepo-segment/" * 14 + f"svc-{index:02d}",
+                "name": f"payments-ledger-service-{index:02d}-" + "n" * 300,
+                "path": f"/Users/dev/workspace/acme-platform/payments-ledger-service-{index:02d}",
+                "desc": "why this repository was registered, at length. " * 20,
             }
             for index in range(64)
         ]
@@ -361,12 +371,24 @@ def test_a_roster_too_large_to_render_whole_leaves_the_question_unassisted() -> 
     attach_question_advisory(
         meta,
         tool_name="ouroboros_pm_interview",
-        session_id="pm-oversized",
+        session_id="pm-long-notes",
         question=QUESTION,
         repository_roster=roster,
     )
-    assert "question_advisory_subagents" not in meta
-    assert "question_advisory_recommended" not in meta
+    assert len(meta["question_advisory_subagents"]) == 2
+
+    rendered = _prompt_json_block(_code_lane_prompt(roster), "## Repository Roster")
+    # What the answer is keyed on arrives exactly: the identifier it cites by and
+    # the location it reads at.
+    assert [entry["repo_id"] for entry in rendered] == [entry["repo_id"] for entry in roster]
+    assert [entry["path"] for entry in rendered] == [entry["path"] for entry in roster]
+    # The notes are what gave, and they gave visibly rather than silently.
+    for field_name in ("name", "desc"):
+        assert all(
+            len(entry[field_name]) < len(original[field_name])
+            for entry, original in zip(rendered, roster, strict=True)
+        )
+        assert all(entry[field_name].endswith("…") for entry in rendered)
 
 
 # ── Decision 2: one door in, and no prefix that skips the person ─────────

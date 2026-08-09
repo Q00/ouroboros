@@ -77,45 +77,57 @@ def _tool_advisory_catalog(tool_name: str) -> Mapping[str, Any]:
     return catalog if isinstance(catalog, Mapping) else {}
 
 
-#: The roster is rendered whole or not at all, so this is the size past which
-#: the lane is refused rather than trimmed. It is set from the boundary the
-#: contract already declares: ``examined`` accepts at most
-#: ``_PM_EXAMINED_MAX_REPOSITORIES`` (64) entries, and 64 entries carrying
-#: deeply-nested monorepo paths render to ~19k characters, so a roster at the
-#: declared ceiling never reaches this bound.
+#: ``name`` and ``desc`` are the roster fields a person types freely at
+#: ``ooo brownfield`` registration, and they are the two the child does not act
+#: on: it cites by ``repo_id`` and reads at ``path``. So they are the fields that
+#: may be shortened, and shortening them is what keeps the list itself whole.
 #:
-#: It exists because the generic advisory bound (2,400) does not: a roster of 15
-#: ordinarily-named repositories crossed it, and ``_bounded_json`` answers that
-#: by cutting mid-array. The child then read a shorter roster than re-entry
-#: enforces and had no way to know it -- so "I examined the roster and found no
-#: policy" was contract-valid, honestly written, and false about the
-#: repositories it was never shown.
-_PM_ROSTER_MAX_JSON_CHARS = 24_000
+#: Both, not just the longer one. ``desc`` is the field that grows in practice,
+#: but ``name`` is typed in the same box and stored the same way, and bounding
+#: one while leaving the other is how this defect was written the first time.
+#: Shortening ``name`` here reaches only the rendered roster: ``repo_id`` is
+#: already derived and slug-capped by ``pm_repo_id``, so nothing keyed on it
+#: moves.
+_PM_ROSTER_FREETEXT_MAX_CHARS = 200
+_PM_ROSTER_FREETEXT_FIELDS = ("name", "desc")
 
 
 def _pm_roster_json(roster: Any) -> str:
-    """Render the whole roster, or refuse the lane.
+    """Render every roster entry, shortening only the field nothing depends on.
 
-    Deliberately not ``_bounded_json``. Truncation is survivable for a thing the
-    child reads *around* -- a synthesis contract, a code-fact request -- and not
-    for the list its answer is bounded by, because a partial roster does not
-    produce a rejected answer. It produces an accepted one that is wrong: the
-    child reports honestly on everything it was given, and neither it nor the
-    parent can see what was cut.
+    Deliberately not ``_bounded_json``, which cuts the JSON mid-array. Losing
+    entries does not produce a rejected answer, it produces an accepted one that
+    is wrong: the child reports honestly on everything it was given and says it
+    examined the roster, and neither it nor the parent can see what went
+    missing. Losing the tail of a description costs nothing by comparison --
+    nothing is keyed on it.
 
-    So a roster that does not fit raises, and ``attach_question_advisory``
-    already turns that into "no lanes attached" rather than a failed turn -- the
-    user still gets their question, without a consultation, which is the honest
-    outcome when the consultation cannot be given its scope.
+    This replaces a size ceiling that refused the lane outright. That was the
+    same defect wearing the opposite sign: it bounded the list, whose truncation
+    is fatal, and left ``desc`` unbounded, whose truncation is free -- so a
+    registration with long notes silently produced a PM turn with no lanes at
+    all, indistinguishable from an ordinary greenfield question. Bounding the
+    free-text field instead removes the state rather than reporting it: there is
+    no roster a valid session can hold that fails to render.
     """
-    rendered = json.dumps(roster, ensure_ascii=False, sort_keys=True, indent=2)
-    if len(rendered) > _PM_ROSTER_MAX_JSON_CHARS:
-        raise ValueError(
-            f"repository roster renders to {len(rendered)} chars, over the "
-            f"{_PM_ROSTER_MAX_JSON_CHARS} the code lane may carry; a partial "
-            "roster would be cited as a complete one"
-        )
-    return rendered
+    if not isinstance(roster, (list, tuple)):
+        # Rendered as it came rather than as an empty list. A roster of the
+        # wrong shape is a caller bug and shows as one; rendering ``[]`` would
+        # tell the child there are no repositories, which is the silent
+        # falsehood this function exists to prevent.
+        return json.dumps(roster, ensure_ascii=False, sort_keys=True, indent=2)
+    entries: list[Any] = []
+    for entry in roster:
+        if not isinstance(entry, Mapping):
+            entries.append(entry)
+            continue
+        shortened = dict(entry)
+        for field_name in _PM_ROSTER_FREETEXT_FIELDS:
+            value = shortened.get(field_name)
+            if isinstance(value, str) and len(value) > _PM_ROSTER_FREETEXT_MAX_CHARS:
+                shortened[field_name] = value[:_PM_ROSTER_FREETEXT_MAX_CHARS].rstrip() + "…"
+        entries.append(shortened)
+    return json.dumps(entries, ensure_ascii=False, sort_keys=True, indent=2)
 
 
 def _pm_code_context_lane_brief(
