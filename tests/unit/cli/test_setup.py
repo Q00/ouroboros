@@ -4710,6 +4710,169 @@ raise SystemExit(0 if activate_claude_runtime("/second/claude") else 2)
         assert stat.S_IMODE(config_path.stat().st_mode) == 0o640
         mock_success.assert_not_called()
 
+    @pytest.mark.parametrize(
+        "claim_label",
+        [
+            "config-original",
+            "credentials-original",
+            "config-rollback",
+            "credentials-rollback",
+        ],
+    )
+    def test_setup_claude_rejects_preexisting_generation_claims_without_loss(
+        self, tmp_path: Path, claim_label: str
+    ) -> None:
+        """Disclosed claim names are reservations, never overwrite destinations."""
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        config_path.write_text(
+            "orchestrator:\n  runtime_backend: codex\nllm:\n  backend: codex\n",
+            encoding="utf-8",
+        )
+        credentials_path = self._write_credentials(config_dir)
+        config_before = config_path.read_bytes()
+        credentials_before = credentials_path.read_bytes()
+        generation = "1" * 32
+        claim_path = config_dir / (f".claude-runtime-activation.{generation}.{claim_label}.claim")
+        malicious = f"operator-owned-{claim_label}\n".encode()
+        claim_path.write_bytes(malicious)
+        claim_path.chmod(0o640)
+        claim_identity = (claim_path.stat().st_dev, claim_path.stat().st_ino)
+        config_identity = (config_path.stat().st_dev, config_path.stat().st_ino)
+        credentials_identity = (
+            credentials_path.stat().st_dev,
+            credentials_path.stat().st_ino,
+        )
+
+        class _FixedUuid:
+            hex = generation
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch("ouroboros.cli.runtime_activation.uuid4", return_value=_FixedUuid()),
+            patch("ouroboros.cli.commands.setup.print_success") as mock_success,
+        ):
+            assert setup_cmd._setup_claude("/usr/local/bin/claude") is False
+
+        assert claim_path.read_bytes() == malicious
+        assert stat.S_IMODE(claim_path.stat().st_mode) == 0o640
+        assert (claim_path.stat().st_dev, claim_path.stat().st_ino) == claim_identity
+        assert (config_path.stat().st_dev, config_path.stat().st_ino) == config_identity
+        assert (
+            credentials_path.stat().st_dev,
+            credentials_path.stat().st_ino,
+        ) == credentials_identity
+        assert config_path.read_bytes() == config_before
+        assert credentials_path.read_bytes() == credentials_before
+        assert not (config_dir / runtime_activation._JOURNAL_NAME).exists()
+        mock_success.assert_not_called()
+
+    def test_setup_claude_journal_publish_never_overwrites_last_moment_operator_file(
+        self, tmp_path: Path
+    ) -> None:
+        """Journal publication is create-if-absent at the final filesystem boundary."""
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        config_path.write_text(
+            "orchestrator:\n  runtime_backend: codex\nllm:\n  backend: codex\n",
+            encoding="utf-8",
+        )
+        credentials_path = self._write_credentials(config_dir)
+        config_before = config_path.read_bytes()
+        credentials_before = credentials_path.read_bytes()
+        operator_journal = b'{"operator":"journal-race"}\n'
+
+        def _inject_operator_journal(path: Path) -> None:
+            path.write_bytes(operator_journal)
+            path.chmod(0o640)
+            operator_identity.append((path.stat().st_dev, path.stat().st_ino))
+
+        operator_identity: list[tuple[int, int]] = []
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch(
+                "ouroboros.cli.runtime_activation._journal_publication_checkpoint",
+                side_effect=_inject_operator_journal,
+            ),
+            patch("ouroboros.cli.commands.setup.print_success") as mock_success,
+        ):
+            assert setup_cmd._setup_claude("/usr/local/bin/claude") is False
+
+        journal_path = config_dir / runtime_activation._JOURNAL_NAME
+        assert journal_path.read_bytes() == operator_journal
+        assert stat.S_IMODE(journal_path.stat().st_mode) == 0o640
+        assert (journal_path.stat().st_dev, journal_path.stat().st_ino) == operator_identity[0]
+        assert config_path.read_bytes() == config_before
+        assert credentials_path.read_bytes() == credentials_before
+        mock_success.assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("operation", "claim_label"),
+        [("claim", "config-original"), ("rollback-claim", "config-rollback")],
+    )
+    def test_setup_claude_claim_move_is_destination_absent_at_final_boundary(
+        self, tmp_path: Path, operation: str, claim_label: str
+    ) -> None:
+        """A claim created after validation is preserved and blocks the no-replace move."""
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        config_path.write_text(
+            "orchestrator:\n  runtime_backend: codex\nllm:\n  backend: codex\n",
+            encoding="utf-8",
+        )
+        self._write_credentials(config_dir)
+        generation = "2" * 32
+        claim_path = config_dir / (f".claude-runtime-activation.{generation}.{claim_label}.claim")
+        malicious = f"last-moment-{claim_label}\n".encode()
+        injected = False
+
+        class _FixedUuid:
+            hex = generation
+
+        def _inject_claim(current_operation: str, target: Path) -> None:
+            nonlocal injected
+            if current_operation != operation or target != config_path or injected:
+                return
+            injected = True
+            claim_path.write_bytes(malicious)
+            claim_path.chmod(0o600)
+            claim_identity.append((claim_path.stat().st_dev, claim_path.stat().st_ino))
+
+        claim_identity: list[tuple[int, int]] = []
+
+        def _fail_after_config(name: str) -> None:
+            if operation == "rollback-claim" and name == "config":
+                raise OSError("force rollback")
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch("ouroboros.cli.runtime_activation.uuid4", return_value=_FixedUuid()),
+            patch(
+                "ouroboros.cli.runtime_activation._promotion_checkpoint",
+                side_effect=_inject_claim,
+            ),
+            patch(
+                "ouroboros.cli.runtime_activation._publication_checkpoint",
+                side_effect=_fail_after_config,
+            ),
+            patch("ouroboros.cli.commands.setup.print_success") as mock_success,
+        ):
+            assert setup_cmd._setup_claude("/usr/local/bin/claude") is False
+
+        assert injected
+        assert claim_path.read_bytes() == malicious
+        assert stat.S_IMODE(claim_path.stat().st_mode) == 0o600
+        assert (claim_path.stat().st_dev, claim_path.stat().st_ino) == claim_identity[0]
+        assert config_path.is_file()
+        mock_success.assert_not_called()
+
     def test_setup_claude_serializes_competing_operator_generations(self, tmp_path: Path) -> None:
         """A second cooperative process cannot pass the first process's CAS boundary."""
         marker = tmp_path / "first-published"
@@ -4958,20 +5121,80 @@ raise SystemExit(0 if activate_claude_runtime("/second/claude") else 2)
         original = b"orchestrator:\n  runtime_backend: codex\nllm:\n  backend: codex\n"
         config_path.write_bytes(original)
         self._write_credentials(config_dir)
+        sync_calls = 0
+        observed_published_config = False
+
+        def _fail_live_config_sync(_path: Path) -> bool:
+            nonlocal sync_calls, observed_published_config
+            sync_calls += 1
+            if sync_calls == 3:
+                live = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+                observed_published_config = live["orchestrator"]["runtime_backend"] == "claude"
+                return False
+            return True
 
         with (
             patch("pathlib.Path.home", return_value=tmp_path),
             patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
             patch(
                 "ouroboros.cli.runtime_activation.fsync_parent_directory",
-                side_effect=[False, True],
+                side_effect=_fail_live_config_sync,
             ),
             patch("ouroboros.cli.commands.setup.print_success") as mock_success,
         ):
             assert setup_cmd._setup_claude("/usr/local/bin/claude") is False
 
         assert config_path.read_bytes() == original
+        assert observed_published_config
         mock_success.assert_not_called()
+
+    def test_setup_claude_cleanup_sync_failure_retains_rollback_evidence(
+        self, tmp_path: Path
+    ) -> None:
+        """A failed first cleanup sync occurs while journal/original claim still exist."""
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        original = b"orchestrator:\n  runtime_backend: codex\nllm:\n  backend: codex\n"
+        config_path.write_bytes(original)
+        self._write_credentials(config_dir)
+        sync_calls = 0
+        saw_recovery_evidence = False
+
+        def _fail_fourth_sync(_path: Path) -> bool:
+            nonlocal sync_calls, saw_recovery_evidence
+            sync_calls += 1
+            if sync_calls == 4:
+                saw_recovery_evidence = (
+                    (config_dir / runtime_activation._JOURNAL_NAME).is_file()
+                    and bool(tuple(config_dir.glob("*.config-original.claim")))
+                    and config_path.is_file()
+                )
+                return False
+            return True
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch(
+                "ouroboros.cli.runtime_activation.fsync_parent_directory",
+                side_effect=_fail_fourth_sync,
+            ),
+            patch("ouroboros.cli.commands.setup.print_success") as mock_success,
+        ):
+            assert setup_cmd._setup_claude("/usr/local/bin/claude") is False
+
+        assert sync_calls >= 4
+        assert saw_recovery_evidence
+        assert config_path.read_bytes() == original
+        assert not tuple(config_dir.glob("*.config-rollback.claim"))
+        mock_success.assert_not_called()
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+        ):
+            assert setup_cmd._setup_claude("/second/claude") is True
 
     def test_setup_claude_preserves_original_on_file_sync_failure(self, tmp_path: Path) -> None:
         config_dir = tmp_path / ".ouroboros"

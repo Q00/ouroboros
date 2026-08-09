@@ -14,12 +14,15 @@ interval is deliberately not advertised as non-cooperative CAS.
 
 from __future__ import annotations
 
+import ctypes
 from dataclasses import dataclass
+import errno
 import hashlib
 import json
 import os
 from pathlib import Path
 import stat
+import sys
 from typing import Any, Literal
 from uuid import uuid4
 
@@ -69,6 +72,10 @@ class _DurabilityError(OSError):
         super().__init__(f"Could not confirm replacement durability for {path}")
         self.path = path
         self.published_snapshot = published_snapshot
+
+
+class _CommittedCleanupError(OSError):
+    """Activation committed, but best-effort recovery-artifact cleanup failed."""
 
 
 class _UniqueKeyLoader(yaml.SafeLoader):
@@ -277,6 +284,54 @@ def _link_if_absent(source: Path, destination: Path) -> None:
     os.link(source, destination, follow_symlinks=False)
 
 
+def _rename_if_absent(source: Path, destination: Path) -> None:
+    """Atomically move ``source`` without ever replacing ``destination``."""
+    if os.name == "nt":  # pragma: no cover - exercised on Windows
+        # MoveFileEx without MOVEFILE_REPLACE_EXISTING is the behavior exposed
+        # by os.rename on Windows.
+        os.rename(source, destination)
+        return
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    source_bytes = os.fsencode(source)
+    destination_bytes = os.fsencode(destination)
+    result: int
+    if sys.platform == "darwin":
+        rename_exclusive = 0x00000004  # RENAME_EXCL
+        renamex_np = libc.renamex_np
+        renamex_np.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
+        renamex_np.restype = ctypes.c_int
+        result = renamex_np(source_bytes, destination_bytes, rename_exclusive)
+    elif sys.platform.startswith("linux"):
+        rename_noreplace = 1
+        try:
+            renameat2 = libc.renameat2
+        except AttributeError as exc:  # pragma: no cover - old libc
+            raise OSError(
+                errno.ENOTSUP,
+                "atomic no-replace rename is unavailable",
+                str(destination),
+            ) from exc
+        renameat2.argtypes = [
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        ]
+        renameat2.restype = ctypes.c_int
+        result = renameat2(-100, source_bytes, -100, destination_bytes, rename_noreplace)
+    else:  # pragma: no cover - fail closed on unimplemented POSIX variants
+        raise OSError(
+            errno.ENOTSUP,
+            "atomic no-replace rename is unavailable",
+            str(destination),
+        )
+    if result != 0:
+        error_number = ctypes.get_errno()
+        raise OSError(error_number, os.strerror(error_number), str(destination))
+
+
 def _restore_claim_if_absent(claim: Path, target: Path) -> bool:
     """Restore a claimed inode without overwriting a newer target generation."""
     try:
@@ -310,7 +365,7 @@ def _promote_prepared_under_lock(
     _require_snapshot(prepared.path, prepared.snapshot)
     if expected.kind == "file":
         _promotion_checkpoint("claim", target)
-        os.rename(target, claim)
+        _rename_if_absent(target, claim)
         claimed = _snapshot_target(claim)
         if not _same_owned_generation(claimed, expected):
             if not _restore_claim_if_absent(claim, target):
@@ -436,7 +491,9 @@ def _write_journal(
     )
     try:
         _require_snapshot(path, expected)
-        os.replace(staging, path)
+        _journal_publication_checkpoint(path)
+        _link_if_absent(staging, path)
+        staging.unlink()
         published = _snapshot_target(path)
         if not _same_owned_generation(published, prepared.snapshot):
             raise _ConcurrentActivationError("Activation journal generation changed during write")
@@ -473,6 +530,10 @@ def _load_journal(path: Path) -> tuple[dict[str, object], _FileSnapshot]:
     return loaded, snapshot
 
 
+def _journal_publication_checkpoint(_path: Path) -> None:
+    """Test seam immediately before destination-absent journal publication."""
+
+
 def _journal_stage_path(config_dir: Path, journal: dict[str, object], key: str) -> Path:
     raw_name = journal.get(key)
     generation = journal.get("generation")
@@ -507,7 +568,7 @@ def _discard_owned_target(
 ) -> None:
     """Remove only an owned live generation via atomic claim-and-inspect."""
     _promotion_checkpoint("rollback-claim", path)
-    os.rename(path, rollback_claim)
+    _rename_if_absent(path, rollback_claim)
     claimed = _snapshot_target(rollback_claim)
     if not _matches_guard(claimed, expected_guard, strict=False):
         if not _restore_claim_if_absent(rollback_claim, path):
@@ -526,26 +587,52 @@ def _cleanup_journal_artifacts(
     journal: dict[str, object],
     journal_snapshot: _FileSnapshot,
 ) -> None:
-    for name_key, guard_key in (
+    artifact_specs = (
         ("credentials_stage", "credentials_published"),
         ("config_stage", "config_published"),
-        ("credentials_claim", "credentials_original_owned"),
-        ("config_claim", "config_original_owned"),
         ("credentials_rollback_claim", "credentials_published"),
         ("config_rollback_claim", "config_published"),
-    ):
+        ("credentials_claim", "credentials_original_owned"),
+        ("config_claim", "config_original_owned"),
+    )
+    resolved: dict[str, Path] = {}
+    for name_key, guard_key in artifact_specs:
         stage = _journal_stage_path(config_dir, journal, name_key)
+        resolved[name_key] = stage
         current = _snapshot_target(stage)
         if current.kind == "missing":
             continue
         guard = journal.get(guard_key)
         if not _matches_guard(current, guard, strict=False):
             raise _ConcurrentActivationError(f"Recovery artifact changed concurrently: {stage}")
-        stage.unlink()
+
+    # Disposable stage/published-rollback links go first.  The journal and
+    # original-generation claims remain live until this deletion is durable,
+    # so a failure can still roll the activation back without losing config.
+    for name_key in (
+        "credentials_stage",
+        "config_stage",
+        "credentials_rollback_claim",
+        "config_rollback_claim",
+    ):
+        path = resolved[name_key]
+        if _snapshot_target(path).kind != "missing":
+            path.unlink()
+    if not fsync_parent_directory(journal_path):
+        raise OSError("Could not confirm disposable activation cleanup durability")
+
+    # Past this point config is the durable commit.  Cleanup failures must not
+    # enter rollback because original claims may already be gone.
+    for name_key in ("credentials_claim", "config_claim"):
+        path = resolved[name_key]
+        if _snapshot_target(path).kind != "missing":
+            path.unlink()
+    if not fsync_parent_directory(journal_path):
+        raise _CommittedCleanupError("Could not confirm original-claim cleanup durability")
     _require_snapshot(journal_path, journal_snapshot)
     journal_path.unlink()
     if not fsync_parent_directory(journal_path):
-        raise OSError("Could not confirm activation recovery cleanup durability")
+        raise _CommittedCleanupError("Could not confirm activation journal cleanup durability")
 
 
 def _recover_interrupted_activation(config_dir: Path) -> None:
@@ -629,7 +716,7 @@ def _rollback_file(
         return True
     try:
         _promotion_checkpoint("rollback-claim", path)
-        os.rename(path, rollback_claim)
+        _rename_if_absent(path, rollback_claim)
         current = _snapshot_target(rollback_claim)
         if not _same_owned_generation(current, expected_current):
             if not _restore_claim_if_absent(rollback_claim, path):
@@ -775,6 +862,16 @@ def activate_claude_runtime(claude_path: str) -> Path | None:
             credentials_rollback_claim = _new_claim_path(
                 credentials_path, generation, "credentials-rollback"
             )
+            for reserved_claim in (
+                config_claim,
+                credentials_claim,
+                config_rollback_claim,
+                credentials_rollback_claim,
+            ):
+                if _snapshot_target(reserved_claim).kind != "missing":
+                    raise _ConcurrentActivationError(
+                        f"Activation claim path is already occupied: {reserved_claim}"
+                    )
             try:
                 prepared_config = _prepare_file(
                     config_stage,
@@ -867,6 +964,12 @@ def activate_claude_runtime(claude_path: str) -> Path | None:
                     journal_path,
                     journal,
                     journal_snapshot,
+                )
+                return config_path
+            except _CommittedCleanupError as exc:
+                print_warning(
+                    "Claude configuration committed; recovery-artifact cleanup "
+                    f"will be retried on the next invocation: {exc}"
                 )
                 return config_path
             except BaseException as exc:
