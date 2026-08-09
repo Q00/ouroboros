@@ -162,14 +162,81 @@ def _load_state() -> dict[str, Any]:
         except Exception:
             state = {}
         if not state.get("distinct_id"):
-            state = {
+            candidate = {
                 "distinct_id": str(uuid.uuid4()),
                 "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                 "notice_shown": False,
             }
-            _write_state(state)
+            state = _publish_new_state(path, candidate)
         _state_cache = state
         return state
+
+
+def _publish_new_state(path: Path, candidate: dict[str, Any]) -> dict[str, Any]:
+    """Atomically publish a freshly generated identity, then adopt the winner.
+
+    Concurrent processes (multiple MCP sessions starting at once, the
+    installer racing a first `ooo` invocation) can all observe a missing
+    telemetry.json in the same instant. A plain read-then-write here would
+    let each one mint its own uuid and overwrite the file, so different
+    processes would end up caching different ids while only one survives on
+    disk. Instead: publish the candidate via a same-directory temp file plus
+    `os.link` (atomic create-if-not-exists — the content is fully written
+    before the link is made, so there is no partial-write window on this
+    path), falling back to O_CREAT|O_EXCL on filesystems without hard-link
+    support. Either way, every process then re-reads the file and adopts
+    whatever `distinct_id` actually landed there, rather than trusting its
+    own candidate. This is the process-local half of the fix; the installer
+    coordinates with the same create-if-not-exists protocol.
+    """
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        return candidate
+
+    payload = json.dumps(candidate, indent=2) + "\n"
+    tmp_path = path.parent / f"telemetry.json.{os.getpid()}.tmp"
+    try:
+        try:
+            tmp_path.write_text(payload, encoding="utf-8")
+            os.link(tmp_path, path)
+        except FileExistsError:
+            pass  # another process already published first; adopt it below
+        except OSError:
+            # No hard-link support (e.g. some network mounts) — fall back to
+            # an atomic create-exclusive write. This has a brief
+            # partial-write window between open and close, covered by the
+            # bounded re-read retry below.
+            try:
+                fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                try:
+                    os.write(fd, payload.encode("utf-8"))
+                finally:
+                    os.close(fd)
+            except FileExistsError:
+                pass
+            except Exception:
+                pass
+    finally:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    for attempt in range(3):
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            if (
+                isinstance(raw, dict)
+                and isinstance(raw.get("distinct_id"), str)
+                and raw["distinct_id"]
+            ):
+                return raw
+        except Exception:
+            pass
+        if attempt < 2:
+            time.sleep(0.02)
+    return candidate
 
 
 def _write_state(state: dict[str, Any]) -> None:

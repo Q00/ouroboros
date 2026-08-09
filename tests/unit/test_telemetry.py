@@ -404,6 +404,10 @@ class TestExitDoesNotBlock:
                     conn, _addr = server.accept()
                 except TimeoutError:
                     continue
+                except OSError:
+                    # Server socket was closed out from under a blocked
+                    # accept() during shutdown -- stop, don't propagate.
+                    break
                 stop.wait()
                 conn.close()
 
@@ -434,9 +438,13 @@ class TestExitDoesNotBlock:
             )
             elapsed = time.monotonic() - start
         finally:
+            # Signal and join the acceptor before closing the socket: the
+            # thread wakes on its own (0.5s accept timeout, or the stop
+            # event if it is parked past an accepted connection), so the
+            # socket never needs to be torn out from under a live accept().
             stop.set()
-            server.close()
             acceptor.join(timeout=2)
+            server.close()
 
         # Old (atexit-registered flush) behavior measured ~2s against a
         # stalled transport. Keep generous headroom for interpreter/import
@@ -445,3 +453,77 @@ class TestExitDoesNotBlock:
             f"subprocess took {elapsed:.2f}s to exit against a stalled transport "
             "-- telemetry may be blocking process exit again"
         )
+
+
+class TestConcurrentIdentityCreation:
+    """Regression for the first-use identity creation race (cross-process).
+
+    Concurrent processes can all observe a missing telemetry.json at once;
+    without cross-process atomic creation, each one mints its own uuid and
+    overwrites the file, so different processes end up caching different
+    ids while only one survives on disk. This spawns N processes sharing a
+    fresh HOME, synchronizes them on a sentinel file so their calls to
+    ``distinct_id()`` land as close together as possible, and asserts every
+    process converged on the single id that actually persisted.
+    """
+
+    def test_concurrent_first_use_converges_on_one_id(self, tmp_path: Path) -> None:
+        n_procs = 16
+        home = tmp_path / "home"
+        home.mkdir()
+        sentinel = tmp_path / "go"
+        repo_root = Path(__file__).resolve().parents[2]
+
+        env = os.environ.copy()
+        env["HOME"] = str(home)
+        env["PYTHONPATH"] = str(repo_root / "src")
+        # distinct_id()/_load_state() do not consult is_enabled() -- identity
+        # creation happens regardless of opt-out. Setting this only guards
+        # against any accidental network attempt in this test.
+        env["OUROBOROS_TELEMETRY"] = "0"
+        for key in ("DO_NOT_TRACK", "OUROBOROS_POSTHOG_API_KEY", "OUROBOROS_POSTHOG_HOST"):
+            env.pop(key, None)
+
+        # Import first, then busy-wait on the sentinel right before the
+        # call under test, so the race window is the distinct_id() calls
+        # themselves rather than staggered interpreter startup.
+        script = (
+            "import time\n"
+            "from pathlib import Path\n"
+            "from ouroboros import telemetry\n"
+            f"sentinel = Path({str(sentinel)!r})\n"
+            "deadline = time.monotonic() + 5.0\n"
+            "while not sentinel.exists():\n"
+            "    if time.monotonic() > deadline:\n"
+            "        raise SystemExit('sentinel never appeared')\n"
+            "    time.sleep(0.002)\n"
+            "print(telemetry.distinct_id())\n"
+        )
+
+        procs = [
+            subprocess.Popen(
+                [sys.executable, "-c", script],
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            for _ in range(n_procs)
+        ]
+        try:
+            time.sleep(0.3)  # let every child finish importing and reach the busy-wait
+            sentinel.write_text("go", encoding="utf-8")
+            outputs = []
+            for proc in procs:
+                out, err = proc.communicate(timeout=5)
+                assert proc.returncode == 0, f"child failed: {err}"
+                outputs.append(out.strip())
+        finally:
+            for proc in procs:
+                if proc.poll() is None:
+                    proc.kill()
+
+        assert len(set(outputs)) == 1, f"processes disagreed on distinct_id: {set(outputs)}"
+
+        state = json.loads((home / ".ouroboros" / "telemetry.json").read_text(encoding="utf-8"))
+        assert state["distinct_id"] == outputs[0]

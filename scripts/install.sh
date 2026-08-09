@@ -108,7 +108,12 @@ _telemetry_load_user_env() {
   while IFS= read -r line || [ -n "$line" ]; do
     line="${line#"${line%%[![:space:]]*}"}"
     case "$line" in ''|'#'*) continue ;; esac
-    case "$line" in 'export '*) line="${line#export }" ;; esac
+    case "$line" in
+      export[[:space:]]*)
+        line="${line#export}"
+        line="${line#"${line%%[![:space:]]*}"}"
+        ;;
+    esac
     case "$line" in *=*) ;; *) continue ;; esac
     key="${line%%=*}"
     key="${key%"${key##*[![:space:]]}"}"
@@ -263,8 +268,18 @@ PY
 
 _telemetry_enabled() {
   [ -n "$PH_API_KEY" ] || return 1
-  case "${DO_NOT_TRACK:-}" in 1|true|TRUE|True|on|yes) return 1 ;; esac
-  case "${OUROBOROS_TELEMETRY:-}" in 0|false|FALSE|False|off|no) return 1 ;; esac
+  local dnt oel
+  # Lowercase and trim each flag before matching so `OFF`, `Yes`, `TRUE`,
+  # or values with stray whitespace are recognized the same as their
+  # canonical lowercase forms (mirrors config/loader.py's `.strip().lower()`).
+  dnt=$(printf '%s' "${DO_NOT_TRACK:-}" | tr '[:upper:]' '[:lower:]')
+  dnt="${dnt#"${dnt%%[![:space:]]*}"}"
+  dnt="${dnt%"${dnt##*[![:space:]]}"}"
+  case "$dnt" in 1|true|on|yes) return 1 ;; esac
+  oel=$(printf '%s' "${OUROBOROS_TELEMETRY:-}" | tr '[:upper:]' '[:lower:]')
+  oel="${oel#"${oel%%[![:space:]]*}"}"
+  oel="${oel%"${oel##*[![:space:]]}"}"
+  case "$oel" in 0|false|off|no) return 1 ;; esac
   # OUROBOROS_TELEMETRY=1 is never an override: persisted opt-out and
   # malformed configuration stay authoritative (TELEMETRY.md: any one
   # disabling control wins), matching the application resolver.
@@ -274,7 +289,7 @@ _telemetry_enabled() {
 }
 
 _telemetry_distinct_id() {
-  local f="$HOME/.ouroboros/telemetry.json" id=""
+  local f="$HOME/.ouroboros/telemetry.json" id="" winner_id="" tmp
   if [ -f "$f" ]; then
     id=$(sed -n 's/.*"distinct_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$f" | head -1)
   fi
@@ -286,8 +301,23 @@ _telemetry_distinct_id() {
     fi
     [ -n "$id" ] || return 1
     mkdir -p "$HOME/.ouroboros" 2>/dev/null || return 1
+    # Publish via a same-directory temp file plus `ln` (hard link), which
+    # fails if `$f` already exists. This closes the race where the
+    # installer and a concurrently-starting Python process (e.g. `ouroboros
+    # setup` in step 4, or another MCP session) both observe a missing
+    # telemetry.json and would otherwise each mint and persist their own
+    # uuid, leaving different processes with different ids. Whichever side
+    # wins the `ln` is authoritative; both sides then re-read the file and
+    # adopt its distinct_id (mirrors telemetry.py's `_publish_new_state`).
+    tmp="$f.$$.tmp"
     printf '{"distinct_id": "%s", "created_at": "%s", "notice_shown": false}\n' \
-      "$id" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$f" 2>/dev/null || true
+      "$id" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$tmp" 2>/dev/null || true
+    ln "$tmp" "$f" 2>/dev/null || true
+    rm -f "$tmp" 2>/dev/null || true
+    if [ -f "$f" ]; then
+      winner_id=$(sed -n 's/.*"distinct_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$f" | head -1)
+    fi
+    [ -n "$winner_id" ] && id="$winner_id"
   fi
   printf '%s' "$id"
 }

@@ -356,6 +356,80 @@ def test_installer_honors_quoted_do_not_track_with_comment(tmp_path: Path) -> No
     assert "Anonymous usage stats help improve Ouroboros" not in result.stdout
 
 
+def test_installer_honors_user_env_opt_out_two_spaces_after_export(tmp_path: Path) -> None:
+    user_env = tmp_path / "home" / ".ouroboros" / ".env"
+    user_env.parent.mkdir(parents=True)
+    user_env.write_text("export  OUROBOROS_TELEMETRY=0\n", encoding="utf-8")
+
+    result = _run_installer(
+        tmp_path,
+        drop_env=("OUROBOROS_TELEMETRY",),
+        fake_commands=_telemetry_fake_commands(tmp_path),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not (tmp_path / "telemetry.log").exists()
+    assert "Anonymous usage stats help improve Ouroboros" not in result.stdout
+
+
+def test_installer_honors_user_env_opt_out_tab_after_export(tmp_path: Path) -> None:
+    user_env = tmp_path / "home" / ".ouroboros" / ".env"
+    user_env.parent.mkdir(parents=True)
+    user_env.write_text("export\tOUROBOROS_TELEMETRY=0\n", encoding="utf-8")
+
+    result = _run_installer(
+        tmp_path,
+        drop_env=("OUROBOROS_TELEMETRY",),
+        fake_commands=_telemetry_fake_commands(tmp_path),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not (tmp_path / "telemetry.log").exists()
+    assert "Anonymous usage stats help improve Ouroboros" not in result.stdout
+
+
+def test_installer_honors_export_multi_space_quoted_do_not_track_with_comment(
+    tmp_path: Path,
+) -> None:
+    user_env = tmp_path / "home" / ".ouroboros" / ".env"
+    user_env.parent.mkdir(parents=True)
+    user_env.write_text('export  DO_NOT_TRACK="1" # off\n', encoding="utf-8")
+
+    result = _run_installer(
+        tmp_path,
+        drop_env=("OUROBOROS_TELEMETRY", "DO_NOT_TRACK"),
+        fake_commands=_telemetry_fake_commands(tmp_path),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not (tmp_path / "telemetry.log").exists()
+    assert "Anonymous usage stats help improve Ouroboros" not in result.stdout
+
+
+def test_installer_honors_uppercase_telemetry_off_flag(tmp_path: Path) -> None:
+    result = _run_installer(
+        tmp_path,
+        env={"OUROBOROS_TELEMETRY": "OFF"},
+        fake_commands=_telemetry_fake_commands(tmp_path),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not (tmp_path / "telemetry.log").exists()
+    assert "Anonymous usage stats help improve Ouroboros" not in result.stdout
+
+
+def test_installer_honors_uppercase_do_not_track_yes_flag(tmp_path: Path) -> None:
+    result = _run_installer(
+        tmp_path,
+        env={"DO_NOT_TRACK": "YES", "OUROBOROS_TELEMETRY": "1"},
+        fake_commands=_telemetry_fake_commands(tmp_path),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not (tmp_path / "telemetry.log").exists()
+    assert "Anonymous usage stats help improve Ouroboros" not in result.stdout
+
+
 def test_installer_honors_single_quoted_user_env_opt_out_with_comment(tmp_path: Path) -> None:
     user_env = tmp_path / "home" / ".ouroboros" / ".env"
     user_env.parent.mkdir(parents=True)
