@@ -22,7 +22,11 @@ Both uses are declared here up front — there are no undisclosed uses:
 **Counting rule (fixed):** one "active user" = one distinct anonymous ID with
 at least one `workflow_outcome` where `command=evaluate`, `verified=true`, and
 `ci!=true` that week. Submission receipts, installs, reinstalls, retries, and
-CI runs are not users. Published numbers follow this rule, verbatim.
+CI runs are not users. Published numbers follow this rule, verbatim. An
+`ouroboros_evaluate` completion that OpenCode's plugin mode delegates out
+(`delegated_to_plugin`) finishes outside the Ouroboros process and cannot be
+observed by it, so it is never counted toward a verified outcome or the
+active-user rule — that's an undercount, never an overcount.
 
 **Identity honesty:** the ID in `~/.ouroboros/telemetry.json` is a random UUID
 — pseudonymous, stable across sessions so retention can be measured, derived
@@ -71,14 +75,22 @@ before its first notice or event.
 Identity is a random UUID (`~/.ouroboros/telemetry.json`) generated on first
 use — it is not derived from your machine, account, or network.
 
-| Event | When | Properties |
+Each row below is the *exact* property set that event can carry — not "these
+plus whatever base/context happens to be set". `src/ouroboros/telemetry.py`
+enforces this per event (and, for `command_run`, per `source`) at
+serialization time; a property not listed for a row is dropped before the
+event is queued, even if some other event's row does carry it. The table and
+the code's allowlist constants are one contract in two places — edited
+together, always.
+
+| Event | When | Properties (exact set) |
 |---|---|---|
-| `install_started` | `install.sh` begins | os, arch, version, is_local, pre |
-| `install_completed` | `install.sh` finishes | os, arch, method (uv/pipx/pip), runtime, detected_runtimes (count), version |
-| `command_run` (source=mcp) | An `ouroboros_*` MCP tool is invoked from any host CLI (Claude Code, Codex, OpenCode, …) | command (interview/seed/run/evolve/auto/evaluate/qa/…), tool, phase (`submission` or `completion`), accepted (submission only), ok (completion only), duration_ms, error_type, runtime_backend, execute_runtime_backend, interview_llm_backend, evaluate_llm_backend, frontdoor, app_version, os, python_version |
-| `command_run` (source=cli) | A direct `ooo <subcommand>` invocation in a terminal | command, app_version, os, python_version |
-| `workflow_outcome` | A background MCP job reaches a durable terminal event | command, phase (`terminal`), terminal_status, ok, verified, final_approved, `$insert_id` (one-way event deduplication digest), runtime/LLM context, app_version, os, python_version |
-| `mcp_serve_started` | A host CLI attaches the Ouroboros MCP server for a session | transport, tool_count, frontdoor, app_version, os |
+| `install_started` | `install.sh` begins | source, os, arch, version, is_local, pre |
+| `install_completed` | `install.sh` finishes | source, os, arch, method (uv/pipx/pip), runtime, detected_runtimes (count), version |
+| `command_run` (source=mcp) | An `ouroboros_*` MCP tool is invoked from any host CLI (Claude Code, Codex, OpenCode, …) | command (interview/seed/run/evolve/auto/evaluate/qa/…), tool, source, is_funnel, phase (`submission` or `completion`), accepted (submission only), ok (completion only), duration_ms, error_type, sample_rate (polling tools only), runtime_backend, execute_runtime_backend, interview_llm_backend, evaluate_llm_backend, frontdoor, app_version, os, python_version, ci |
+| `command_run` (source=cli) | A direct `ooo <subcommand>` invocation in a terminal | command, source, is_funnel, app_version, os, python_version, frontdoor, ci — no tool, phase, duration/outcome fields, or backend context: those are mcp-only |
+| `workflow_outcome` | A background MCP job reaches a durable terminal event | command, phase (`terminal`), terminal_status, ok, verified, final_approved, `$insert_id` (one-way event deduplication digest), runtime_backend, execute_runtime_backend, interview_llm_backend, evaluate_llm_backend, app_version, os, python_version, frontdoor, ci |
+| `mcp_serve_started` | A host CLI attaches the Ouroboros MCP server for a session | transport, tool_count, frontdoor, app_version, os, ci — no python_version, no backend/provider context |
 
 Notes:
 
@@ -89,8 +101,11 @@ Notes:
   boots, `job`/`dispatch` plumbing) is either not captured or captured as its
   own event, so the cli-vs-agent ratio is not inflated by automation.
 - High-frequency polling tools (`ouroboros_job_status`, `ouroboros_session_status`,
-  HUD/projection queries, …) are sampled at 1/50 and carry a `sample_rate`
-  property so counts can be re-weighted; everything else is captured 1:1.
+  HUD/projection queries, …) are sampled at 1/50 via an independent random
+  draw on every call — not a per-process counter — so the probability stays
+  1/50 regardless of how long a given process lives; sampled events carry a
+  `sample_rate` property so counts can be re-weighted. Everything else is
+  captured 1:1.
 - `error_type` is only the Python exception class name (e.g. `TimeoutError`),
   never a message or traceback.
 - Start-tool `command_run` events are submission receipts. They intentionally

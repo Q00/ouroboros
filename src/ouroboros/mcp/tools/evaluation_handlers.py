@@ -29,6 +29,7 @@ from ouroboros.core.seed import AcceptanceCriterionSpec, Seed, ac_text
 from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.job_manager import JobLinks, JobManager
+from ouroboros.mcp.telemetry_boundary import record_direct_evaluation_outcome
 from ouroboros.mcp.tools import background as background_jobs
 from ouroboros.mcp.tools.bridge_mixin import BridgeAwareMixin
 from ouroboros.mcp.tools.fanout_handler import (  # noqa: F401
@@ -798,6 +799,7 @@ class EvaluateHandler:
                     llm_backend=backend,
                     error=rendered_error,
                 )
+                record_direct_evaluation_outcome(final_approved=None, failed=True)
                 return Result.err(
                     MCPToolError(
                         f"Evaluation failed: {rendered_error}",
@@ -838,6 +840,7 @@ class EvaluateHandler:
                 "code_changes_detected": code_changes,
             }
 
+            record_direct_evaluation_outcome(final_approved=eval_result.final_approved)
             return Result.ok(
                 MCPToolResult(
                     content=(MCPContentItem(type=ContentType.TEXT, text=result_text),),
@@ -849,6 +852,7 @@ class EvaluateHandler:
             # Configuration/bootstrap errors (unsupported backend, missing
             # provider install) — actionable by the user, safe to surface.
             log.warning("mcp.tool.evaluate.config_error", error=str(e))
+            record_direct_evaluation_outcome(final_approved=None, failed=True)
             return Result.err(
                 MCPToolError(
                     f"Evaluation setup failed: {e}",
@@ -857,6 +861,7 @@ class EvaluateHandler:
             )
         except Exception:
             log.exception("mcp.tool.evaluate.error")
+            record_direct_evaluation_outcome(final_approved=None, failed=True)
             return Result.err(
                 MCPToolError(
                     "Evaluation failed due to an internal error. Check server logs for details.",
@@ -932,6 +937,7 @@ class EvaluateHandler:
         if first_result.is_err:
             err = first_result.error
             rendered = err.format_details() if hasattr(err, "format_details") else str(err)
+            record_direct_evaluation_outcome(final_approved=None, failed=True)
             return Result.err(
                 MCPToolError(
                     f"Evaluation failed: {rendered}",
@@ -976,6 +982,7 @@ class EvaluateHandler:
                     "mcp.tool.evaluate.multi_ac_exception",
                     session_id=session_id,
                 )
+                record_direct_evaluation_outcome(final_approved=None, failed=True)
                 return Result.err(
                     MCPToolError(
                         f"Evaluation failed during multi-AC run: {entry}",
@@ -990,6 +997,7 @@ class EvaluateHandler:
                     session_id=session_id,
                     error=rendered,
                 )
+                record_direct_evaluation_outcome(final_approved=None, failed=True)
                 return Result.err(
                     MCPToolError(
                         f"Evaluation failed: {rendered}",
@@ -1046,6 +1054,7 @@ class EvaluateHandler:
             all_passed=checklist.all_passed,
         )
 
+        record_direct_evaluation_outcome(final_approved=checklist.all_passed)
         return Result.ok(
             MCPToolResult(
                 content=(MCPContentItem(type=ContentType.TEXT, text=result_text),),

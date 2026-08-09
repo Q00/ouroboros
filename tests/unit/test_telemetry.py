@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import random
 import socket
 import subprocess
 import sys
@@ -266,6 +267,10 @@ class TestCapture:
         assert sent == []
 
     def test_polling_tools_sampled(self, sent: list[dict[str, Any]]) -> None:
+        # Sampling is a per-call random draw (see telemetry._poll_rng), not a
+        # deterministic 1-in-50 counter, so the batch needs a seed that is
+        # known (precomputed offline) to produce exactly one hit in 50 draws.
+        telemetry._poll_rng.seed(1)
         for _ in range(telemetry._POLL_SAMPLE_RATE):
             telemetry.capture_tool_call("ouroboros_job_status", ok=True)
         telemetry.flush(timeout=2.0)
@@ -281,6 +286,7 @@ class TestCapture:
         sent: list[dict[str, Any]],
         tool: str,
     ) -> None:
+        telemetry._poll_rng.seed(1)  # see test_polling_tools_sampled
         for _ in range(telemetry._POLL_SAMPLE_RATE):
             telemetry.capture_tool_call(tool, ok=True)
         telemetry.flush(timeout=2.0)
@@ -397,6 +403,195 @@ class TestPropertyAllowlist:
         assert props["command"] == "run"
         assert "tool" not in props
         assert "sample_rate" not in props
+
+
+def _no_ambient_frontdoor_or_ci(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Strip env vars that would otherwise make frontdoor/ci non-deterministic.
+
+    CLAUDECODE=1 is set in this very environment (we're running inside
+    Claude Code), so exact-key-set assertions need these cleared to get a
+    deterministic properties dict rather than one that varies by CI/host.
+    """
+    for key in (
+        "CLAUDECODE",
+        "CODEX_THREAD_ID",
+        "CODEX_SANDBOX_NETWORK_DISABLED",
+        "CI",
+        "GITHUB_ACTIONS",
+    ):
+        monkeypatch.delenv(key, raising=False)
+
+
+class TestExactPropertySets:
+    """Regression: the declared TELEMETRY.md table and the executable
+    per-variant allowlist must match key-for-key, not just "subset of a
+    generic base+context union". A prior round's union-based allowlist over-
+    granted every event every base+context key regardless of what that
+    event's row in TELEMETRY.md actually declared (e.g. mcp_serve_started
+    picked up python_version and all 4 backend fields; the two command_run
+    variants were indistinguishable).
+    """
+
+    def test_command_run_mcp_completion_exact_keys(
+        self, monkeypatch: pytest.MonkeyPatch, sent: list[dict[str, Any]]
+    ) -> None:
+        _no_ambient_frontdoor_or_ci(monkeypatch)
+        telemetry.set_context(
+            runtime_backend="claude",
+            execute_runtime_backend="claude",
+            interview_llm_backend="anthropic",
+            evaluate_llm_backend="anthropic",
+        )
+        telemetry.capture_tool_call(
+            "ouroboros_evaluate", ok=True, duration_ms=12.3, error_type="TimeoutError"
+        )
+        telemetry.flush(timeout=2.0)
+        assert len(sent) == 1
+        props = sent[0]["properties"]
+        keys = set(props)
+
+        assert keys <= telemetry._COMMAND_RUN_MCP_KEYS
+        assert keys == {
+            "command",
+            "tool",
+            "source",
+            "is_funnel",
+            "phase",
+            "ok",
+            "duration_ms",
+            "error_type",
+            "runtime_backend",
+            "execute_runtime_backend",
+            "interview_llm_backend",
+            "evaluate_llm_backend",
+            "app_version",
+            "os",
+            "python_version",
+        }
+        assert "accepted" not in props
+        assert "sample_rate" not in props
+
+    def test_command_run_mcp_submission_exact_keys(
+        self, monkeypatch: pytest.MonkeyPatch, sent: list[dict[str, Any]]
+    ) -> None:
+        _no_ambient_frontdoor_or_ci(monkeypatch)
+        telemetry.capture_tool_call("ouroboros_start_execute_seed", ok=True)
+        telemetry.flush(timeout=2.0)
+        assert len(sent) == 1
+        props = sent[0]["properties"]
+        keys = set(props)
+
+        assert keys <= telemetry._COMMAND_RUN_MCP_KEYS
+        assert keys == {
+            "command",
+            "tool",
+            "source",
+            "is_funnel",
+            "phase",
+            "accepted",
+            "app_version",
+            "os",
+            "python_version",
+        }
+        assert "ok" not in props  # submission receipts have accepted, never ok
+        assert props["accepted"] is True
+        assert props["phase"] == "submission"
+
+    def test_command_run_cli_exact_keys_even_with_context_set(
+        self, monkeypatch: pytest.MonkeyPatch, sent: list[dict[str, Any]]
+    ) -> None:
+        _no_ambient_frontdoor_or_ci(monkeypatch)
+        # Global context carries backend keys regardless of source -- the cli
+        # variant must strip them even though they're genuinely set, proving
+        # this is per-variant enforcement and not just "nobody happened to
+        # set context in this test".
+        telemetry.set_context(
+            runtime_backend="claude",
+            execute_runtime_backend="claude",
+            interview_llm_backend="anthropic",
+            evaluate_llm_backend="anthropic",
+        )
+        telemetry.capture_cli_command("run")
+        telemetry.flush(timeout=2.0)
+        assert len(sent) == 1
+        props = sent[0]["properties"]
+        keys = set(props)
+
+        assert keys <= telemetry._COMMAND_RUN_CLI_KEYS
+        assert keys == {"command", "source", "is_funnel", "app_version", "os", "python_version"}
+        for undeclared in (
+            "tool",
+            "phase",
+            "ok",
+            "accepted",
+            "duration_ms",
+            "error_type",
+            "sample_rate",
+            "runtime_backend",
+            "execute_runtime_backend",
+            "interview_llm_backend",
+            "evaluate_llm_backend",
+        ):
+            assert undeclared not in props, f"cli command_run leaked {undeclared!r}"
+
+    def test_workflow_outcome_exact_keys(
+        self, monkeypatch: pytest.MonkeyPatch, sent: list[dict[str, Any]]
+    ) -> None:
+        _no_ambient_frontdoor_or_ci(monkeypatch)
+        telemetry.set_context(
+            runtime_backend="claude",
+            execute_runtime_backend="claude",
+            interview_llm_backend="anthropic",
+            evaluate_llm_backend="anthropic",
+        )
+        telemetry.capture_job_outcome(
+            "job-x", "evaluate", terminal_status="completed", result_meta={"final_approved": True}
+        )
+        telemetry.flush(timeout=2.0)
+        assert len(sent) == 1
+        props = sent[0]["properties"]
+        keys = set(props)
+
+        assert keys <= telemetry._WORKFLOW_OUTCOME_KEYS
+        assert keys == {
+            "command",
+            "phase",
+            "terminal_status",
+            "ok",
+            "verified",
+            "final_approved",
+            "$insert_id",
+            "runtime_backend",
+            "execute_runtime_backend",
+            "interview_llm_backend",
+            "evaluate_llm_backend",
+            "app_version",
+            "os",
+            "python_version",
+        }
+
+    def test_mcp_serve_started_exact_keys_excludes_python_version_and_backends(
+        self, monkeypatch: pytest.MonkeyPatch, sent: list[dict[str, Any]]
+    ) -> None:
+        _no_ambient_frontdoor_or_ci(monkeypatch)
+        # Set context anyway -- mcp_serve_started must drop it regardless.
+        telemetry.set_context(
+            runtime_backend="claude",
+            execute_runtime_backend="claude",
+            interview_llm_backend="anthropic",
+            evaluate_llm_backend="anthropic",
+        )
+        telemetry.capture("mcp_serve_started", {"transport": "stdio", "tool_count": 12})
+        telemetry.flush(timeout=2.0)
+        assert len(sent) == 1
+        props = sent[0]["properties"]
+        keys = set(props)
+
+        assert keys <= telemetry._MCP_SERVE_STARTED_KEYS
+        assert keys == {"transport", "tool_count", "app_version", "os"}
+        assert "python_version" not in props
+        for backend_key in telemetry._CONTEXT_ALLOWLIST:
+            assert backend_key not in props
 
 
 class TestCliCapture:
@@ -811,3 +1006,94 @@ class TestNoticeRace:
         assert len(printed) == 1, (
             f"expected exactly one notice print, got {len(printed)}: {stderrs}"
         )
+
+
+class TestUnbiasedPollSampling:
+    """Regression: polling-tool sampling must stay 1/50 per call, not per
+    process (telemetry._poll_rng, replacing a per-process call counter).
+
+    A per-process counter always samples call #1, so a short-lived MCP
+    process that polls once or twice before exiting would be captured at
+    close to 1:1 while still reporting `sample_rate=50` -- an up-to-50x
+    over-count concentrated in exactly the processes least representative of
+    steady-state usage. An independent per-call random draw keeps the
+    probability 1/50 regardless of how long a given process lives.
+    """
+
+    def test_first_call_is_not_structurally_captured(self, sent: list[dict[str, Any]]) -> None:
+        # Precomputed offline: random.Random(1).random() == 0.1344 >= 1/50,
+        # so the very first polling draw with this seed is a miss. A
+        # per-process counter would have captured it regardless (call #1
+        # always sampled) -- this is exactly the bias being fixed.
+        telemetry._poll_rng.seed(1)
+        telemetry.capture_tool_call("ouroboros_job_status", ok=True)
+        telemetry.flush(timeout=2.0)
+        assert sent == []
+
+    def test_seeded_draw_below_threshold_is_captured(self, sent: list[dict[str, Any]]) -> None:
+        # Precomputed offline: random.Random(31).random() == 0.0123 < 1/50.
+        telemetry._poll_rng.seed(31)
+        telemetry.capture_tool_call("ouroboros_job_status", ok=True)
+        telemetry.flush(timeout=2.0)
+        assert len(sent) == 1
+        assert sent[0]["properties"]["sample_rate"] == telemetry._POLL_SAMPLE_RATE
+
+    def test_multi_process_sampling_matches_precomputed_expectation(self, tmp_path: Path) -> None:
+        """Fresh processes must NOT all capture their first polling call.
+
+        Ten fresh processes, each seeding telemetry._poll_rng with a
+        different precomputed seed and making exactly ONE polling capture
+        (their "call #1"). The old per-process-counter bug would have
+        captured every single one of these (5/5 CAPTURED). The expected
+        outcome per seed is precomputed offline from the same
+        random.Random(seed).random() draw the production code makes, so
+        this is a zero-flake proof that fresh-process sampling is unbiased.
+        """
+        # Precomputed offline (random.Random(seed).random() vs. 1/50):
+        # captured: 31, 139, 165, 206, 281 -- skipped: 1, 2, 3, 4, 5
+        seeds = [1, 2, 3, 4, 5, 31, 139, 165, 206, 281]
+        threshold = 1.0 / telemetry._POLL_SAMPLE_RATE
+        expected = [
+            "CAPTURED" if random.Random(seed).random() < threshold else "SKIPPED" for seed in seeds
+        ]
+        assert "CAPTURED" in expected and "SKIPPED" in expected, (
+            "seed selection must cover both outcomes or this test can't "
+            "distinguish the fix from the old always-captures-call-1 bug"
+        )
+
+        script_path = tmp_path / "sampling_worker.py"
+        script_path.write_text(
+            "import sys\n"
+            "from ouroboros import telemetry\n"
+            "\n"
+            "telemetry._poll_rng.seed(int(sys.argv[1]))\n"
+            "captured = []\n"
+            "telemetry._post = lambda batch: captured.extend(batch)\n"
+            "telemetry.capture_tool_call('ouroboros_job_status', ok=True)\n"
+            "telemetry.flush(timeout=2.0)\n"
+            "print('CAPTURED' if captured else 'SKIPPED')\n",
+            encoding="utf-8",
+        )
+
+        repo_root = Path(__file__).resolve().parents[2]
+        observed = []
+        for seed in seeds:
+            home = tmp_path / f"home_{seed}"
+            home.mkdir()
+            env = os.environ.copy()
+            env["HOME"] = str(home)
+            env["PYTHONPATH"] = str(repo_root / "src")
+            env["OUROBOROS_POSTHOG_API_KEY"] = "phc_test"
+            for key in ("DO_NOT_TRACK", "OUROBOROS_TELEMETRY", "OUROBOROS_POSTHOG_HOST"):
+                env.pop(key, None)
+            completed = subprocess.run(
+                [sys.executable, str(script_path), str(seed)],
+                env=env,
+                text=True,
+                capture_output=True,
+                timeout=10,
+                check=True,
+            )
+            observed.append(completed.stdout.strip())
+
+        assert observed == expected, f"seeds={seeds} expected={expected} observed={observed}"

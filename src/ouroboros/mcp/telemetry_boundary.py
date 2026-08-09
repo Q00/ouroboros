@@ -99,6 +99,34 @@ async def call_sdk_tool(
     return response
 
 
+def record_direct_evaluation_outcome(*, final_approved: bool | None, failed: bool = False) -> None:
+    """Durable-terminal telemetry for the direct (non-job) ouroboros_evaluate path.
+
+    Job-backed evaluations reach ``workflow_outcome`` via JobTelemetryBoundary's
+    terminal events; a direct ``ouroboros_evaluate`` call never creates a job,
+    so without this boundary its completions are invisible to the published
+    verified active-user rule and per-backend success rates. Emits the same
+    event shape as :func:`ouroboros.telemetry.capture_job_outcome` for
+    ``job_type="evaluate"``. No ``$insert_id``: each direct invocation is its
+    own outcome, there is no durable job row to replay/deduplicate against.
+    """
+    try:
+        status = "failed" if failed else "completed"
+        usage_telemetry.capture(
+            "workflow_outcome",
+            {
+                "command": "evaluate",
+                "phase": "terminal",
+                "terminal_status": status,
+                "ok": not failed,
+                "verified": (not failed) and final_approved is True,
+                "final_approved": final_approved if isinstance(final_approved, bool) else None,
+            },
+        )
+    except Exception:
+        pass
+
+
 class JobTelemetryBoundary:
     """Remember privacy-safe job classes and observe durable terminal appends."""
 
@@ -129,4 +157,9 @@ class JobTelemetryBoundary:
         )
 
 
-__all__ = ["JobTelemetryBoundary", "call_sdk_tool", "observe_adapter_tool_call"]
+__all__ = [
+    "JobTelemetryBoundary",
+    "call_sdk_tool",
+    "observe_adapter_tool_call",
+    "record_direct_evaluation_outcome",
+]

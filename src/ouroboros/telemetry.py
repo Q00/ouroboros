@@ -24,6 +24,7 @@ import os
 from pathlib import Path
 import platform
 import queue
+import random
 import ssl
 import threading
 import time
@@ -46,8 +47,14 @@ _BATCH_MAX = 25
 _HTTP_TIMEOUT_SECONDS = 4.0
 
 # Tools that skills poll in loops (job status, HUDs, projections). Captured
-# at 1/_POLL_SAMPLE_RATE with a ``sample_rate`` property so absolute counts
-# can be re-weighted in PostHog without flooding ingestion.
+# at 1/_POLL_SAMPLE_RATE via an independent per-call random draw (not a
+# per-process counter) with a ``sample_rate`` property so absolute counts
+# can be re-weighted in PostHog without flooding ingestion. A per-process
+# counter would always capture call #1, so short-lived processes (a fresh
+# MCP session that polls once or twice before exiting) would be captured at
+# ~1:1 instead of 1/50 -- an up-to-50x over-count skewed toward exactly the
+# processes least representative of steady-state usage. A per-call draw
+# keeps the probability 1/50 regardless of how long the process lives.
 _POLLING_TOOLS = frozenset(
     {
         "ouroboros_job_status",
@@ -64,6 +71,12 @@ _POLLING_TOOLS = frozenset(
     }
 )
 _POLL_SAMPLE_RATE = 50
+# Module-level so a test can seed it for a deterministic capture/skip
+# pattern (telemetry._poll_rng.seed(...)); a fresh Random() per call would
+# make sampling untestable, and reusing threading._lock's RNG would couple
+# unrelated concerns. random.Random() is not cryptographically secure, which
+# is fine here -- this is a sampling coin flip, not a security boundary.
+_poll_rng = random.Random()
 
 # Funnel step per MCP tool. Everything else is still captured (tool property)
 # but these get a stable ``command`` value so the interview -> seed -> run ->
@@ -122,6 +135,14 @@ _JOB_FUNNEL: dict[str, str] = {
 # call site cannot accidentally (or maliciously) smuggle an unlisted event
 # name or property -- e.g. prompt text or a file path -- into an outgoing
 # batch, even if a future edit passes one in.
+#
+# TELEMETRY.md's "What is sent" table and the sets below are one contract in
+# two places (SSOT pairing) -- edit both together, or the doc lies. Sets are
+# literal per (event, variant), not composed from a shared base + context
+# pool: variants deliberately differ in what they carry (e.g.
+# mcp_serve_started omits python_version; the cli command_run variant omits
+# every backend/provider context key entirely), so a generic union would
+# either under- or over-grant for at least one variant.
 _CONTEXT_ALLOWLIST = frozenset(
     {
         "runtime_backend",
@@ -130,35 +151,64 @@ _CONTEXT_ALLOWLIST = frozenset(
         "evaluate_llm_backend",
     }
 )
-_BASE_PROPERTY_KEYS = frozenset({"app_version", "os", "python_version", "frontdoor", "ci"})
-_EVENT_ALLOWLIST: dict[str, frozenset[str]] = {
-    "command_run": frozenset(
-        {
-            "command",
-            "tool",
-            "source",
-            "is_funnel",
-            "phase",
-            "accepted",
-            "ok",
-            "duration_ms",
-            "error_type",
-            "sample_rate",
-        }
-    ),
-    "workflow_outcome": frozenset(
-        {
-            "command",
-            "phase",
-            "terminal_status",
-            "ok",
-            "verified",
-            "final_approved",
-            "$insert_id",
-        }
-    ),
-    "mcp_serve_started": frozenset({"transport", "tool_count"}),
-}
+_COMMAND_RUN_MCP_KEYS = frozenset(
+    {
+        "command",
+        "tool",
+        "source",
+        "is_funnel",
+        "phase",
+        "accepted",
+        "ok",
+        "duration_ms",
+        "error_type",
+        "sample_rate",
+        "runtime_backend",
+        "execute_runtime_backend",
+        "interview_llm_backend",
+        "evaluate_llm_backend",
+        "frontdoor",
+        "app_version",
+        "os",
+        "python_version",
+        "ci",
+    }
+)
+_COMMAND_RUN_CLI_KEYS = frozenset(
+    {
+        "command",
+        "source",
+        "is_funnel",
+        "app_version",
+        "os",
+        "python_version",
+        "frontdoor",
+        "ci",
+    }
+)
+_WORKFLOW_OUTCOME_KEYS = frozenset(
+    {
+        "command",
+        "phase",
+        "terminal_status",
+        "ok",
+        "verified",
+        "final_approved",
+        "$insert_id",
+        "runtime_backend",
+        "execute_runtime_backend",
+        "interview_llm_backend",
+        "evaluate_llm_backend",
+        "app_version",
+        "os",
+        "python_version",
+        "frontdoor",
+        "ci",
+    }
+)
+_MCP_SERVE_STARTED_KEYS = frozenset(
+    {"transport", "tool_count", "frontdoor", "app_version", "os", "ci"}
+)
 # Bound on any single string property. Dropped, not truncated -- a truncated
 # value could still leak the start of a prompt or path.
 _MAX_PROPERTY_STR_LEN = 200
@@ -167,7 +217,6 @@ _lock = threading.Lock()
 _queue: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=_QUEUE_MAX)
 _worker: threading.Thread | None = None
 _context: dict[str, Any] = {}
-_poll_counters: dict[str, int] = {}
 _state_cache: dict[str, Any] | None = None
 
 
@@ -544,21 +593,39 @@ def flush(timeout: float = 1.5) -> None:
         pass
 
 
+def _resolve_allowed_keys(event: str, properties: dict[str, Any] | None) -> frozenset[str] | None:
+    """Look up the exact per-event(-variant) property set for `event`.
+
+    None means the event is not on the disclosed table at all -- capture()
+    drops it. `command_run` has two variants selected by the
+    caller-provided `source` property (`"cli"` vs. everything else,
+    including absent, which is `"mcp"`); every other event's set is fixed
+    by its name alone.
+    """
+    if event == "command_run":
+        source = (properties or {}).get("source")
+        return _COMMAND_RUN_CLI_KEYS if source == "cli" else _COMMAND_RUN_MCP_KEYS
+    if event == "workflow_outcome":
+        return _WORKFLOW_OUTCOME_KEYS
+    if event == "mcp_serve_started":
+        return _MCP_SERVE_STARTED_KEYS
+    return None
+
+
 def capture(event: str, properties: dict[str, Any] | None = None) -> None:
     """Queue one event. Non-blocking, never raises, drops when queue is full.
 
-    Enforces the event/property whitelist (_EVENT_ALLOWLIST): an event name
-    not on the disclosed table is dropped entirely, and any property not on
-    that event's list -- or that event's base/context keys -- is dropped
-    before the properties dict is built.
+    Enforces the event/property whitelist: an event (or command_run source
+    variant) not on the disclosed table is dropped entirely, and any
+    property not on that exact variant's set is dropped before the
+    properties dict is built. See _resolve_allowed_keys.
     """
     try:
         if not is_enabled():
             return
-        allowed_keys = _EVENT_ALLOWLIST.get(event)
+        allowed_keys = _resolve_allowed_keys(event, properties)
         if allowed_keys is None:
             return  # not on the disclosed event table -- drop, don't guess
-        allowed_keys = allowed_keys | _BASE_PROPERTY_KEYS | _CONTEXT_ALLOWLIST
         props = _base_properties()
         if properties:
             props.update({k: v for k, v in properties.items() if v is not None})
@@ -589,11 +656,8 @@ def capture_tool_call(
             return
         sample_rate = 1
         if name in _POLLING_TOOLS:
-            with _lock:
-                count = _poll_counters.get(name, 0)
-                _poll_counters[name] = count + 1
-            if count % _POLL_SAMPLE_RATE:
-                return
+            if _poll_rng.random() >= 1.0 / _POLL_SAMPLE_RATE:
+                return  # independent per-call draw -- see _POLLING_TOOLS comment
             sample_rate = _POLL_SAMPLE_RATE
         funnel = _TOOL_FUNNEL.get(name)
         properties: dict[str, Any] = {
@@ -769,7 +833,10 @@ def _reset_for_tests() -> None:
     with _lock:
         _state_cache = None
         _context.clear()
-        _poll_counters.clear()
+        # Reseed from OS entropy so a test that seeded _poll_rng for a
+        # deterministic capture/skip pattern can't leak that determinism
+        # into an unrelated later test.
+        _poll_rng.seed()
 
 
 __all__ = [
