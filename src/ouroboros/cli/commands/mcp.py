@@ -8,7 +8,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from enum import Enum
-import importlib
 import json
 import os
 from pathlib import Path
@@ -512,21 +511,24 @@ register_doctor_command(app)
 
 
 def _require_mcp_dependency() -> None:
-    """Fail before MCP server composition when the optional SDK is unavailable.
+    """Fail before MCP server composition when the MCP v2 API is unavailable.
 
     ``create_ouroboros_server()`` can build its internal tool catalogue without
-    importing the MCP SDK. Deferring that import until ``server.serve()`` makes
-    a missing dependency appear as a successful stdio startup followed by a
-    disconnected server. Validate it at the command boundary instead.
+    importing the MCP SDK v2 server surface. Deferring that import until
+    ``server.serve()`` makes a missing or incompatible dependency appear as a
+    successful stdio startup followed by a disconnected server. Validate the
+    exact API consumed by the adapter at the command boundary instead.
     """
     try:
-        importlib.import_module("mcp")
-    except ModuleNotFoundError as exc:
-        if exc.name == "mcp":
-            raise ImportError(
-                "mcp package not installed. Install with: pip install 'ouroboros-ai[mcp]'"
-            ) from exc
-        raise
+        from mcp.server import MCPServer as _sdk_mcp_server
+
+        if _sdk_mcp_server is None:  # pragma: no cover - defensive import contract.
+            raise ImportError
+    except ImportError as exc:
+        raise ImportError(
+            "MCP SDK v2 server API unavailable. "
+            "Install with: pip install 'ouroboros-ai[mcp]'"
+        ) from exc
 
 
 async def _run_mcp_server(
