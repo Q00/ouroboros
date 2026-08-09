@@ -940,6 +940,10 @@ def _goal_artifact_head_is_web_app(goal_text: str) -> bool:
     # the surviving alternatives looking affirmative.
     core = _strip_negated_signals(goal_text, _WEB_APP_GOAL_SIGNAL_FRAGMENT)
     core = _strip_consumed_dependencies(_SUBJECT_CLAUSE_RE.sub(" ", core))
+    # An implementation adjunct after the head ("in TypeScript", "using
+    # React") is an adverbial, not a re-heading compound (#1813 R116) —
+    # only bare noun continuation ("web app scaffolding CLI") re-heads.
+    core = re.sub(r"\b(?:in|using|via|atop|on\s+top\s+of|through)\s+[^,.;]*", " ", core)
     # "to test/analyze/deploy a web app" names the target of another
     # artifact, not the produced one (#1813 R28), and participial
     # relations ("SDK targeting web apps", "package used by web apps")
@@ -1327,6 +1331,10 @@ _MANIPULATED_TARGET_RE = re.compile(
     r"verif\w*|checks?|checking|asserts?|asserting)\s+"
     r"(?:an?\s+|the\s+)?(?:[\w\-'’]+\s+){0,2}?"
     r"(?:forms?|pages?|panels?|buttons?|screens?|dialogs?|modals?|menus?)\b"
+    # Coordinated targets are manipulated whole (#1813 R116):
+    # "aggregated login pages and signup forms" strips both conjuncts.
+    r"(?:\s*(?:,|\band\b|\bor\b)\s*(?:an?\s+|the\s+)?(?:[\w\-'’]+\s+){0,2}?"
+    r"(?:forms?|pages?|panels?|buttons?|screens?|dialogs?|modals?|menus?)\b){0,3}"
 )
 
 

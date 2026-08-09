@@ -337,6 +337,9 @@ _SECTION_BROWSER_ENV_RE = re.compile(
     # bundled engine, not the environment (#1813 R108): "Electron
     # desktop runtime with Chromium" ships Chromium inside the host.
     r"(?<!with )(?<!via )(?<!through )"
+    # A grouping adverbial ("aggregated ... by browser") names how data
+    # is organized, not where the product runs (#1813 R116).
+    r"(?<!by )"
     rf"\b(?:{_WEB_APP_GOAL_SIGNAL_FRAGMENT}|{_BROWSER_NAME_FRAGMENT})\b"
     r"(?!\s+(?!(?:and|or|nor|but|use|usage|without|with|for|on|in|at|by|"
     r"from|via|through|to|so|that|which|because|since|while|when|where|"

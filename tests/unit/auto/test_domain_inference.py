@@ -4864,6 +4864,36 @@ def test_later_ui_conjunct_takes_browser_corroboration() -> None:
     assert result.classes == frozenset({TaskClass.WEB_SERVICE, TaskClass.WEB_APP})
 
 
+@pytest.mark.parametrize(
+    "goal",
+    [
+        "Build a web app in TypeScript",
+        "Build a web app using React",
+    ],
+)
+def test_implementation_adjuncts_do_not_rehead(goal: str) -> None:
+    """R116 guard: an implementation adjunct after the head is an
+    adverbial, not a re-heading compound — the explicit web app owns
+    without widget-rich outputs or a runtime to rescue it."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value="Production bundle emitted to dist")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP
+
+
+def test_coordinated_manipulated_targets_strip_whole() -> None:
+    """R116 guard: coordinated manipulated targets are consumed whole
+    and a grouping adverbial names data organization, not the runtime —
+    the aggregation keeps its single data_pipeline class."""
+    ledger = _bare_ledger("Aggregate browser compatibility datasets into a matrix")
+    _seed_section(ledger, "inputs", value="Compatibility datasets in CSV")
+    _seed_section(ledger, "outputs", value="Aggregated login pages and signup forms by browser")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.DATA_PIPELINE
+
+
 def test_bare_frontend_respects_native_runtime() -> None:
     """R115 guard: bare "frontend" is not inherently browser-hosted — a
     native app's frontend stays native under an authoritative
