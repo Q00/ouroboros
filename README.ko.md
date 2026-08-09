@@ -476,7 +476,7 @@ uv run ouroboros tui monitor
 | `3` | **Logs** | 레벨별 색상 구분, 필터링 가능한 로그 뷰어 |
 | `4` | **Debug** | 상태 인스펙터, 원시 이벤트, 설정 |
 
-> 자세한 내용은 [TUI 사용 가이드](./docs/guides/tui-usage.md)를 참고하세요.
+> 자세한 내용은 [TUI 사용 가이드](./docs/guides/tui-usage.ko.md)를 참고하세요.
 
 ---
 

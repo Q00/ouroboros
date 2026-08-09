@@ -54,6 +54,7 @@ replayable execution contract on your choice of runtime backend.
 - [MCP Best Practices](./guides/mcp-best-practices.md) - Upstream MCP server configuration, security, and workflow mapping
 - [QA Backends](./guides/qa-backends.md) - External QA backend patterns, including OpenCron-style synthetic checks
 - [TUI Usage Guide](./guides/tui-usage.md) - Dashboard, screens, keyboard shortcuts
+- [TUI Usage Guide (한국어)](./guides/tui-usage.ko.md) - 같은 문서의 한국어판
 
 ### Contributing
 

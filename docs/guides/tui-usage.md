@@ -1,5 +1,7 @@
 # TUI Dashboard Reference
 
+> 한국어: [tui-usage.ko.md](./tui-usage.ko.md)
+
 Ouroboros includes an interactive terminal user interface (TUI) built with [Textual](https://textual.textualize.io/) for real-time workflow monitoring.
 
 > **New to Ouroboros?** See [Getting Started](../getting-started.md) for install and onboarding.
