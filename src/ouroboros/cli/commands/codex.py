@@ -48,13 +48,13 @@ _CANONICAL_CODEX_UVX_MCP_ARGS = (
     "mcp",
     "serve",
 )
+_CODEX_MCP_RUNTIME_SUFFIX = ("--runtime", "codex", "--llm-backend", "codex")
 _CANONICAL_CODEX_UVX_MCP_HOST_ARGS = (
     *_CANONICAL_CODEX_UVX_MCP_ARGS,
-    "--runtime",
-    "codex",
-    "--llm-backend",
-    "codex",
+    *_CODEX_MCP_RUNTIME_SUFFIX,
 )
+_CANONICAL_CODEX_DIRECT_MCP_ARGS = ("mcp", "serve")
+_CANONICAL_CODEX_MODULE_MCP_ARGS = ("-m", "ouroboros", "mcp", "serve")
 _CODEX_RUNTIME_ENV = {
     "OUROBOROS_AGENT_RUNTIME": "codex",
     "OUROBOROS_LLM_BACKEND": "codex",
@@ -422,16 +422,65 @@ def _check_mcp_runtime_dependency_surface(
                 "Codex MCP command installs `ouroboros-ai` without the `mcp` extra; "
                 "use `ouroboros-ai[mcp]` so stdio initialize/list_tools can start"
             )
-        return
-
-    if command_name != "ouroboros" or not check_local_import:
-        return
-
-    if importlib.util.find_spec("mcp") is None:
         failures.append(
-            "current `ouroboros` environment cannot import `mcp`; reinstall for Codex MCP "
-            "usage with `uv tool install --force 'ouroboros-ai[mcp]'`"
+            "Codex MCP `uv run` launchers are unsupported because they can inherit a "
+            "project environment; use the canonical isolated `uvx` launcher"
         )
+        return
+
+    normalized_command_name = (
+        Path(command_name).stem if command_name.lower().endswith(".exe") else command_name
+    )
+    if normalized_command_name == "ouroboros":
+        _check_exact_codex_runtime_contract(
+            string_args,
+            string_env,
+            base_args=_CANONICAL_CODEX_DIRECT_MCP_ARGS,
+            launcher="direct `ouroboros`",
+            failures=failures,
+        )
+        if check_local_import and importlib.util.find_spec("mcp") is None:
+            failures.append(
+                "current `ouroboros` environment cannot import `mcp`; reinstall for Codex MCP "
+                "usage with `uv tool install --force 'ouroboros-ai[mcp]'`"
+            )
+        return
+
+    if tuple(string_args[:2]) == ("-m", "ouroboros"):
+        _check_exact_codex_runtime_contract(
+            string_args,
+            string_env,
+            base_args=_CANONICAL_CODEX_MODULE_MCP_ARGS,
+            launcher="`python -m ouroboros`",
+            failures=failures,
+        )
+        if check_local_import and importlib.util.find_spec("mcp") is None:
+            failures.append(
+                "configured Python module environment cannot import `mcp`; install the "
+                "`ouroboros-ai[mcp]` profile before using it for Codex MCP"
+            )
+
+
+def _check_exact_codex_runtime_contract(
+    args: list[str],
+    env: Mapping[str, str],
+    *,
+    base_args: tuple[str, ...],
+    launcher: str,
+    failures: list[str],
+) -> None:
+    """Require one unambiguous Codex runtime selection for a local launcher."""
+    args_tuple = tuple(args)
+    if args_tuple == base_args:
+        _check_codex_runtime_env(env, failures, required=True)
+        return
+    if args_tuple == (*base_args, *_CODEX_MCP_RUNTIME_SUFFIX):
+        _check_codex_runtime_env(env, failures, required=False)
+        return
+    failures.append(
+        f"Codex MCP {launcher} command must use exactly `{' '.join(base_args)}` with "
+        "Codex selector env, or append exactly `--runtime codex --llm-backend codex`"
+    )
 
 
 def _check_codex_runtime_env(

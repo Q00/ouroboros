@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import sys
 import textwrap
+import time
 import tomllib
 from unittest.mock import AsyncMock, patch
 
@@ -939,7 +940,8 @@ class TestCodexDoctor:
         (codex_dir / "config.toml").write_text(
             "[mcp_servers.ouroboros]\n"
             'command = "/home/user/.local/bin/ouroboros"\n'
-            'args = ["mcp", "serve", "--runtime", "codex"]\n',
+            'args = ["mcp", "serve", "--runtime", "codex", '
+            '"--llm-backend", "codex"]\n',
             encoding="utf-8",
         )
 
@@ -957,7 +959,8 @@ class TestCodexDoctor:
         (codex_dir / "config.toml").write_text(
             "[mcp_servers.ouroboros]\n"
             'command = "ouroboros"\n'
-            'args = ["mcp", "serve", "--runtime", "codex"]\n',
+            'args = ["mcp", "serve", "--runtime", "codex", '
+            '"--llm-backend", "codex"]\n',
             encoding="utf-8",
         )
 
@@ -973,7 +976,8 @@ class TestCodexDoctor:
         (codex_dir / "config.toml").write_text(
             "[mcp_servers.ouroboros]\n"
             'command = "ouroboros"\n'
-            'args = ["mcp", "serve", "--runtime", "codex"]\n',
+            'args = ["mcp", "serve", "--runtime", "codex", '
+            '"--llm-backend", "codex"]\n',
             encoding="utf-8",
         )
         live_probe = AsyncMock(return_value=_REQUIRED_CODEX_AUTO_TOOLS_FOR_TEST)
@@ -986,7 +990,14 @@ class TestCodexDoctor:
 
         live_probe.assert_awaited_once_with(
             "ouroboros",
-            ("mcp", "serve", "--runtime", "codex"),
+            (
+                "mcp",
+                "serve",
+                "--runtime",
+                "codex",
+                "--llm-backend",
+                "codex",
+            ),
             {},
         )
 
@@ -999,9 +1010,10 @@ class TestCodexDoctor:
         (codex_dir / "config.toml").write_text(
             "[mcp_servers.ouroboros]\n"
             'command = "ouroboros"\n'
-            'args = ["mcp", "serve", "--runtime", "codex"]\n'
+            'args = ["mcp", "serve"]\n'
             "[mcp_servers.ouroboros.env]\n"
-            'OUROBOROS_AGENT_RUNTIME = "codex"\n',
+            'OUROBOROS_AGENT_RUNTIME = "codex"\n'
+            'OUROBOROS_LLM_BACKEND = "codex"\n',
             encoding="utf-8",
         )
 
@@ -1024,9 +1036,110 @@ class TestCodexDoctor:
 
         live_probe.assert_awaited_once_with(
             "ouroboros",
-            ("mcp", "serve", "--runtime", "codex"),
-            {"OUROBOROS_AGENT_RUNTIME": "codex"},
+            ("mcp", "serve"),
+            {
+                "OUROBOROS_AGENT_RUNTIME": "codex",
+                "OUROBOROS_LLM_BACKEND": "codex",
+            },
         )
+
+    @pytest.mark.parametrize("live_mcp", [False, True], ids=["static", "live"])
+    @pytest.mark.parametrize(
+        ("command", "args", "env_lines"),
+        [
+            (
+                "ouroboros",
+                '["mcp", "serve", "--runtime", "codex"]',
+                ('OUROBOROS_AGENT_RUNTIME = "codex"\nOUROBOROS_LLM_BACKEND = "claude_code"\n'),
+            ),
+            (
+                sys.executable,
+                '["-m", "ouroboros", "mcp", "serve", "--runtime", "claude-cli"]',
+                "",
+            ),
+            (
+                "uv",
+                '["run", "--with", "ouroboros-ai[mcp]", "ouroboros", "mcp", '
+                '"serve", "--runtime", "claude-cli"]',
+                "",
+            ),
+        ],
+    )
+    def test_check_auto_dispatch_surface_rejects_non_codex_runtime_for_every_launcher(
+        self,
+        tmp_path: Path,
+        live_mcp: bool,
+        command: str,
+        args: str,
+        env_lines: str,
+    ) -> None:
+        """Recognized launchers cannot route the MCP host to another backend."""
+        codex_dir = tmp_path / ".codex"
+        self._write_healthy_codex_surface(codex_dir)
+        env_table = "[mcp_servers.ouroboros.env]\n" + env_lines if env_lines else ""
+        (codex_dir / "config.toml").write_text(
+            "[mcp_servers.ouroboros]\n"
+            f"command = {json.dumps(command)}\n"
+            f"args = {args}\n" + env_table,
+            encoding="utf-8",
+        )
+        live_probe = AsyncMock(return_value=_REQUIRED_CODEX_AUTO_TOOLS_FOR_TEST)
+
+        with (
+            patch("ouroboros.cli.commands.codex.importlib.util.find_spec", return_value=object()),
+            patch("ouroboros.cli.commands.codex._list_stdio_mcp_tool_names", live_probe),
+        ):
+            failures = _check_auto_dispatch_surface(codex_dir, live_mcp=live_mcp)
+
+        assert failures
+        live_probe.assert_not_awaited()
+
+    @pytest.mark.parametrize(
+        ("command", "args", "env_lines"),
+        [
+            (
+                "ouroboros",
+                '["mcp", "serve", "--runtime", "codex", "--llm-backend", "codex"]',
+                "",
+            ),
+            (
+                "ouroboros",
+                '["mcp", "serve"]',
+                ('OUROBOROS_AGENT_RUNTIME = "codex"\nOUROBOROS_LLM_BACKEND = "codex"\n'),
+            ),
+            (
+                sys.executable,
+                '["-m", "ouroboros", "mcp", "serve", "--runtime", "codex", '
+                '"--llm-backend", "codex"]',
+                "",
+            ),
+            (
+                sys.executable,
+                '["-m", "ouroboros", "mcp", "serve"]',
+                ('OUROBOROS_AGENT_RUNTIME = "codex"\nOUROBOROS_LLM_BACKEND = "codex"\n'),
+            ),
+        ],
+    )
+    def test_check_auto_dispatch_surface_accepts_setup_generated_local_runtime_forms(
+        self,
+        tmp_path: Path,
+        command: str,
+        args: str,
+        env_lines: str,
+    ) -> None:
+        """Direct and module launchers accept only setup's two exact runtime forms."""
+        codex_dir = tmp_path / ".codex"
+        self._write_healthy_codex_surface(codex_dir)
+        env_table = "[mcp_servers.ouroboros.env]\n" + env_lines if env_lines else ""
+        (codex_dir / "config.toml").write_text(
+            "[mcp_servers.ouroboros]\n"
+            f"command = {json.dumps(command)}\n"
+            f"args = {args}\n" + env_table,
+            encoding="utf-8",
+        )
+
+        with patch("ouroboros.cli.commands.codex.importlib.util.find_spec", return_value=object()):
+            assert _check_auto_dispatch_surface(codex_dir) == []
 
     def test_list_stdio_mcp_tool_names_uses_jsonl_protocol_without_local_mcp_import(
         self,
@@ -1100,6 +1213,133 @@ class TestCodexDoctor:
         )
 
         assert tool_names >= _REQUIRED_CODEX_AUTO_TOOLS_FOR_TEST
+
+    @pytest.mark.skipif(os.name != "posix", reason="POSIX process-group contract")
+    @pytest.mark.parametrize(
+        ("ignore_sigterm", "expects_force"),
+        [(False, False), (True, True)],
+        ids=["normal-sigterm", "forced-sigkill"],
+    )
+    def test_list_stdio_mcp_tool_names_cleans_up_wrapper_process_group(
+        self,
+        tmp_path: Path,
+        ignore_sigterm: bool,
+        expects_force: bool,
+    ) -> None:
+        """The live probe must reap both a launcher wrapper and its MCP child."""
+        wrapper_path = tmp_path / "wrapper.py"
+        child_path = tmp_path / "child_mcp.py"
+        wrapper_pid_path = tmp_path / "wrapper.pid"
+        child_pid_path = tmp_path / "child.pid"
+        tool_names = sorted(_REQUIRED_CODEX_AUTO_TOOLS_FOR_TEST)
+        child_path.write_text(
+            textwrap.dedent(
+                f"""
+                import json
+                import os
+                from pathlib import Path
+                import signal
+                import sys
+                import time
+
+                if {ignore_sigterm!r}:
+                    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+                Path({str(child_pid_path)!r}).write_text(str(os.getpid()), encoding="utf-8")
+
+                def read_message():
+                    return json.loads(sys.stdin.buffer.readline())
+
+                def write_message(message):
+                    sys.stdout.buffer.write(json.dumps(message).encode("utf-8") + b"\\n")
+                    sys.stdout.buffer.flush()
+
+                initialize = read_message()
+                write_message({{
+                    "jsonrpc": "2.0",
+                    "id": initialize["id"],
+                    "result": {{
+                        "protocolVersion": initialize["params"]["protocolVersion"],
+                        "capabilities": {{"tools": {{}}}},
+                        "serverInfo": {{"name": "tree-child", "version": "1"}},
+                    }},
+                }})
+                read_message()
+                tools_list = read_message()
+                write_message({{
+                    "jsonrpc": "2.0",
+                    "id": tools_list["id"],
+                    "result": {{
+                        "tools": [{{"name": name, "inputSchema": {{"type": "object"}}}}
+                                  for name in {tool_names!r}],
+                    }},
+                }})
+                while True:
+                    time.sleep(1)
+                """
+            ),
+            encoding="utf-8",
+        )
+        wrapper_path.write_text(
+            textwrap.dedent(
+                f"""
+                import os
+                from pathlib import Path
+                import signal
+                import subprocess
+                import sys
+
+                if {ignore_sigterm!r}:
+                    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+                Path({str(wrapper_pid_path)!r}).write_text(str(os.getpid()), encoding="utf-8")
+                child = subprocess.Popen([sys.executable, {str(child_path)!r}])
+                child.wait()
+                """
+            ),
+            encoding="utf-8",
+        )
+        real_create_subprocess = asyncio.create_subprocess_exec
+        real_signal_process = codex_command._signal_stdio_mcp_process
+        spawn_options: dict[str, object] = {}
+
+        async def _capturing_create_subprocess(*command: str, **kwargs: object):
+            spawn_options.update(kwargs)
+            return await real_create_subprocess(*command, **kwargs)
+
+        with (
+            patch(
+                "ouroboros.cli.commands.codex.asyncio.create_subprocess_exec",
+                side_effect=_capturing_create_subprocess,
+            ),
+            patch(
+                "ouroboros.cli.commands.codex._signal_stdio_mcp_process",
+                wraps=real_signal_process,
+            ) as signal_process,
+        ):
+            exposed_tools = asyncio.run(
+                _list_stdio_mcp_tool_names(sys.executable, (str(wrapper_path),), {})
+            )
+
+        assert exposed_tools >= _REQUIRED_CODEX_AUTO_TOOLS_FOR_TEST
+        assert spawn_options["start_new_session"] is True
+        force_calls = [call.kwargs["force"] for call in signal_process.call_args_list]
+        assert force_calls[0] is False
+        assert (True in force_calls) is expects_force
+
+        wrapper_pid = int(wrapper_pid_path.read_text(encoding="utf-8"))
+        child_pid = int(child_pid_path.read_text(encoding="utf-8"))
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline:
+            live_pids = []
+            for pid in (wrapper_pid, child_pid):
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    continue
+                live_pids.append(pid)
+            if not live_pids:
+                break
+            time.sleep(0.02)
+        assert not live_pids
 
     def test_list_stdio_mcp_tool_names_preserves_content_length_fallback(
         self,
