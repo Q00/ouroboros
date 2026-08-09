@@ -11,12 +11,14 @@ changed nothing about what the CLI printed (#1955).
 
 Every CLI entry point that accepts ``--debug`` should call
 :func:`configure_cli_logging` instead of calling ``configure_logging`` directly,
-so the two field names cannot drift apart again at the call sites.
+so the two field names cannot drift apart again at the call sites. ``run`` must
+call it before importing the orchestrator, whose module-level ``get_logger()``
+would otherwise auto-configure logging at the default level first.
 """
 
 from __future__ import annotations
 
-from ouroboros.observability import LoggingConfig, configure_logging
+from ouroboros.observability import configure_logging, default_logging_config
 
 __all__ = ["configure_cli_logging", "resolve_cli_log_level"]
 
@@ -57,7 +59,13 @@ def resolve_cli_log_level(*, debug: bool) -> str:
 def configure_cli_logging(*, debug: bool) -> None:
     """Configure structlog for a CLI invocation.
 
+    Only the level is replaced. Everything else -- most importantly the mode
+    selected by ``OUROBOROS_LOG_MODE`` -- is carried over from the config
+    ``configure_logging()`` would have chosen, so applying a saved level cannot
+    knock an operator's ``prod`` JSON output back to human-readable ``dev``.
+
     Args:
         debug: Whether the caller passed ``--debug``.
     """
-    configure_logging(LoggingConfig(log_level=resolve_cli_log_level(debug=debug)))
+    base = default_logging_config()
+    configure_logging(base.model_copy(update={"log_level": resolve_cli_log_level(debug=debug)}))

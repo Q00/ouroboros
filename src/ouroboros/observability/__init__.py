@@ -24,6 +24,7 @@ from ouroboros.observability.logging import (
     LogMode,
     bind_context,
     configure_logging,
+    default_logging_config,
     get_logger,
     unbind_context,
 )
@@ -42,6 +43,7 @@ __all__ = [
     "LoggingConfig",
     "bind_context",
     "configure_logging",
+    "default_logging_config",
     "get_logger",
     "unbind_context",
     # Drift
