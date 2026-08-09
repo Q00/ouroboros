@@ -128,8 +128,8 @@ def test_textual_binding_contract_matches_documented_screen_overrides() -> None:
     ):
         assert screen in ko_keys
     assert ko_keys.count("재개하지 않음") == 5
-    assert "Dashboard is the only screen that exposes resume" in en_keys
-    assert "재개를 제공하는 화면은 대시보드뿐" in ko_keys
+    assert "Dashboard and Session Selector expose resume" in en_keys
+    assert "대시보드와 세션 선택 화면은 재개를 제공" in ko_keys
     assert "rewind" in en_keys and "rewind" in ko_keys
 
 

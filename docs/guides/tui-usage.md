@@ -165,7 +165,7 @@ View evolutionary lineage across generations when using evolutionary loops (`ooo
 | `e` | Lineage view |
 | `q` | Quit the TUI |
 | `p` | Request pause when an execution owner is connected |
-| `r` on Dashboard | Request resume when an execution owner is connected |
+| `r` on Dashboard or Session Selector | Request resume when an execution owner is connected |
 | `r` on Execution | Refresh the Execution view; it does **not** resume |
 | `r` on Debug | Refresh the Debug view; it does **not** resume |
 | `r` on Logs | No active binding; it does **not** resume |
@@ -181,7 +181,7 @@ View evolutionary lineage across generations when using evolutionary loops (`ooo
 > connects an execution owner
 > via `OuroborosTUI.set_pause_callback()` / `set_resume_callback()`. Even then,
 > a screen-level `r` binding in the table above wins over the app-level resume
-> binding. Dashboard is the only screen that exposes resume.
+> binding. Dashboard and Session Selector expose resume.
 >
 > The displayed lifecycle status changes only after the execution control path
 > persists an acknowledged lifecycle event — `orchestrator.session.paused` for a
