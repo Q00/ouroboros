@@ -165,9 +165,10 @@ View evolutionary lineage across generations when using evolutionary loops (`ooo
 | `e` | Lineage view |
 | `q` | Quit the TUI |
 | `p` | Request pause when an execution owner is connected |
-| `r` on Dashboard (and screens without an override) | Request resume when an execution owner is connected |
+| `r` on Dashboard | Request resume when an execution owner is connected |
 | `r` on Execution | Refresh the Execution view; it does **not** resume |
 | `r` on Debug | Refresh the Debug view; it does **not** resume |
+| `r` on Logs | No active binding; it does **not** resume |
 | `r` on Lineage selector | Refresh the lineage list; it does **not** resume |
 | `r` on Lineage detail | Open the rewind confirmation flow; it does **not** resume |
 
@@ -180,7 +181,7 @@ View evolutionary lineage across generations when using evolutionary loops (`ooo
 > connects an execution owner
 > via `OuroborosTUI.set_pause_callback()` / `set_resume_callback()`. Even then,
 > a screen-level `r` binding in the table above wins over the app-level resume
-> binding. The Dashboard is the unambiguous lifecycle-control surface.
+> binding. Dashboard is the only screen that exposes resume.
 >
 > The displayed lifecycle status changes only after the execution control path
 > persists an acknowledged lifecycle event — `orchestrator.session.paused` for a
@@ -259,8 +260,7 @@ message pipeline.
 
 ### Runtime contract sources
 
-These descriptions are tied to the checked-in runtime definitions, rather than
-to a traffic or behavior snapshot with an unverifiable date:
+These descriptions are tied to the checked-in runtime definitions:
 
 - Textual app bindings: [`src/ouroboros/tui/app.py`](../../src/ouroboros/tui/app.py)
 - Textual screen overrides: [`src/ouroboros/tui/screens/`](../../src/ouroboros/tui/screens/)

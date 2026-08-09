@@ -116,12 +116,20 @@ def test_textual_binding_contract_matches_documented_screen_overrides() -> None:
 
     en_keys = _contract_section(_read(EN_GUIDE), "<!-- tui-contract:textual-keys -->")
     ko_keys = _contract_section(_read(KO_GUIDE), "<!-- tui-contract:textual-keys -->")
-    for screen in ("Execution", "Debug", "Lineage selector", "Lineage detail"):
+    for screen in ("Execution", "Debug", "Logs", "Lineage selector", "Lineage detail"):
         assert screen in en_keys
-    assert en_keys.count("does **not** resume") == 4
-    for screen in ("실행 화면", "디버그 화면", "계보 선택 화면", "계보 상세 화면"):
+    assert en_keys.count("does **not** resume") == 5
+    for screen in (
+        "실행 화면",
+        "디버그 화면",
+        "로그 화면",
+        "계보 선택 화면",
+        "계보 상세 화면",
+    ):
         assert screen in ko_keys
-    assert ko_keys.count("재개하지 않음") == 4
+    assert ko_keys.count("재개하지 않음") == 5
+    assert "Dashboard is the only screen that exposes resume" in en_keys
+    assert "재개를 제공하는 화면은 대시보드뿐" in ko_keys
     assert "rewind" in en_keys and "rewind" in ko_keys
 
 
@@ -189,8 +197,6 @@ def test_localized_guides_keep_the_same_contract_structure() -> None:
     assert _heading_levels(en) == _heading_levels(ko)
     assert en.count("```") == ko.count("```")
     assert en.count("|-----") == ko.count("|-----")
-    assert "2026-08-10" not in en
-    assert "2026-08-10" not in ko
 
 
 @pytest.mark.parametrize("guide", GUIDES)

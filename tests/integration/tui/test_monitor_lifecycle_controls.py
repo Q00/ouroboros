@@ -124,6 +124,31 @@ class TestProductionMonitorOwnsNoExecution:
             assert "p" in tui.screen.active_bindings
             assert "r" in tui.screen.active_bindings
 
+    async def test_runtime_resolves_r_per_screen_without_app_fallback(self) -> None:
+        """The app-level resume binding is not inherited by every screen."""
+        tui = OuroborosTUI()
+        tui.set_pause_callback(MagicMock())
+        tui.set_resume_callback(MagicMock())
+
+        def active_r_action() -> str | None:
+            active = tui.screen.active_bindings.get("r")
+            return None if active is None else active.binding.action
+
+        async with tui.run_test() as pilot:
+            await pilot.pause()
+            assert active_r_action() == "resume"  # Dashboard
+
+            for screen, expected in (
+                ("execution", "refresh"),
+                ("debug", "refresh"),
+                ("logs", None),
+            ):
+                tui.push_screen(screen)
+                await pilot.pause()
+                assert active_r_action() == expected
+                tui.pop_screen()
+                await pilot.pause()
+
     async def test_pressing_p_without_an_owner_does_not_pause(self) -> None:
         """End-to-end: the key must not fake a lifecycle transition."""
         tui = OuroborosTUI()
