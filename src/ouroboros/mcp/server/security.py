@@ -459,6 +459,10 @@ class InputValidator:
         # payload was tried and removed; the exemption did not have to move with
         # it, because it never left ``answer``.
         "answer",
+        # The question the answer belongs to, echoed back so the round is filed
+        # under it. A PM question quotes the code it is about, so it carries the
+        # same terms an answer does.
+        "last_question",
         "current_approach",
         "problem_context",
         "acceptance_criterion",

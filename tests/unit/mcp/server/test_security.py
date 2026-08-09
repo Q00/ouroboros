@@ -416,10 +416,36 @@ class TestFreetextInsideContainers:
             ("cwd", "/tmp; rm -rf /"),
             ("cwd", "../../etc/shadow"),
             ("session_id", "__import__('os')"),
-            ("last_question", "os.system('curl evil')"),
+            ("session_id", "os.system('curl evil')"),
         ):
             result = validator.validate("ouroboros_pm_interview", {key: value})
             assert result.is_err, f"{key}={value} was accepted"
+
+    def test_a_pm_question_about_code_survives_validation(self) -> None:
+        """``last_question`` is the question, not a thing to run.
+
+        It is echoed back so the answer is filed under the question it belongs
+        to, and the handler stores it as the round's text. A PM question quotes
+        the code it asks about, so it carries the same terms an answer does --
+        and this list previously read those terms as execution and refused the
+        call, losing the answer and any confirmed finding with it.
+
+        It sat in the rejection case above until this test replaced it. That
+        assertion encoded the classification rather than checking it, which is
+        how a field stays misfiled: the scan and the test agreed, and both were
+        wrong about what the field carries.
+        """
+        validator = InputValidator()
+        for question in (
+            "How does subprocess.run() get used for retries?",
+            "What does open(config) read at startup?",
+            "A subscription lapses mid-period; what happens then?",
+        ):
+            result = validator.validate(
+                "ouroboros_pm_interview",
+                {"session_id": "pm-1", "answer": "grace period", "last_question": question},
+            )
+            assert result.is_ok, f"{question!r} was rejected: {result}"
 
     def test_a_non_freetext_field_inside_a_container_is_still_checked(self) -> None:
         """Containment does not launder a field that was never freetext."""
