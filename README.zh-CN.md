@@ -123,6 +123,10 @@ $ ouroboros init start --orchestrator "I want to build a task management CLI too
 <details>
 <summary><strong>Codex 插件快速开始</strong></summary>
 
+需要 `codex` 在 `PATH` 中，并且主机上有 `uvx`（插件的 MCP 描述符用它启动
+server）。可用 `pipx install uv`、`pip install --user uv` 或 `brew install uv`
+安装。
+
 ```bash
 codex plugin marketplace add Q00/ouroboros
 codex plugin add ouroboros@ouroboros
@@ -168,6 +172,7 @@ ouroboros setup --runtime copilot            # 实时获取模型列表并选择
 <summary><strong>其他安装方式</strong></summary>
 
 **仅安装 Claude Code 插件**（不装系统包）：
+主机上需要有 `uvx`。
 ```bash
 claude plugin marketplace add Q00/ouroboros && claude plugin install ouroboros@ouroboros
 ```

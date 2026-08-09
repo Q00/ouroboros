@@ -159,6 +159,10 @@ $ ouroboros init start --orchestrator "I want to build a task management CLI too
 <details>
 <summary><strong>Codex 플러그인 빠른 시작</strong></summary>
 
+`codex`가 `PATH`에 있어야 하고, 호스트에 `uvx`가 필요합니다(플러그인의 MCP
+서술자가 `uvx`로 서버를 띄웁니다). `pipx install uv`, `pip install --user uv`,
+`brew install uv` 중 하나로 설치하세요.
+
 ```bash
 codex plugin marketplace add Q00/ouroboros
 codex plugin add ouroboros@ouroboros
@@ -207,6 +211,7 @@ Copilot CLI 세션을 다시 시작한 뒤 세션 안에서 `ooo` 명령어를 �
 <summary><strong>다른 설치 방법</strong></summary>
 
 **Claude Code 플러그인만** (시스템 패키지 없이):
+호스트에 `uvx`가 있어야 합니다.
 ```bash
 claude plugin marketplace add Q00/ouroboros && claude plugin install ouroboros@ouroboros
 ```

@@ -156,6 +156,10 @@ $ ouroboros init start --orchestrator "I want to build a task management CLI too
 <details>
 <summary><strong>Codex plugin quick start</strong></summary>
 
+Needs `codex` on your `PATH` and `uvx` on the host (the plugin's MCP descriptor
+launches the server with it). Install uv with `pipx install uv`,
+`pip install --user uv`, or `brew install uv`.
+
 ```bash
 codex plugin marketplace add Q00/ouroboros
 codex plugin add ouroboros@ouroboros
@@ -203,7 +207,7 @@ See the [GitHub Copilot CLI runtime guide](./docs/runtime-guides/copilot.md) for
 <details>
 <summary><strong>Other install methods</strong></summary>
 
-**Claude Code plugin only** (no system package):
+**Claude Code plugin only** (no system package, but `uvx` must be on the host):
 ```bash
 claude plugin marketplace add Q00/ouroboros && claude plugin install ouroboros@ouroboros
 ```
