@@ -4473,6 +4473,21 @@ def test_browser_action_surfaces_are_components_under_generic_runtimes(goal: str
 
 
 @pytest.mark.parametrize(
+    "runtime",
+    ["Tracks user actions in real time", "Records user actions for analytics"],
+)
+def test_ordinary_user_actions_are_not_component_identity(runtime: str) -> None:
+    """R87 guard: action surfaces are components only in their qualified
+    forms — bare "actions" in runtime prose is ordinary vocabulary."""
+    ledger = _bare_ledger("Build a web app")
+    _seed_section(ledger, "outputs", value="Settings panel with save button")
+    _seed_section(ledger, "runtime_context", value=runtime)
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP
+
+
+@pytest.mark.parametrize(
     "goal",
     [
         "The product is an admin portal that runs in browsers",

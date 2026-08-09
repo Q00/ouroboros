@@ -1152,7 +1152,10 @@ _WEB_SIMILARITY_MODIFIER_RE = re.compile(
 _COMPONENT_ARTIFACT_FRAGMENT = (
     r"(?:extensions?|plugins?|add[\s\-]?ons?|addons?|sidebars?|popups?|"
     r"pop[\s\-]ups?|toolbars?|overlays?|menus?|devtools?|drivers?|"
-    r"automation|actions?)"
+    # Action surfaces are components only in their QUALIFIED forms
+    # (#1813 R86/R87): "browser action", "page action" — bare "actions"
+    # is ordinary prose ("tracks user actions").
+    r"automation|(?:browser|page)\s+actions?)"
 )
 # A browser/web token followed by a component-artifact noun is re-headed
 # by that component (#1813 R60): a "browser extension settings page" is
@@ -1160,7 +1163,7 @@ _COMPONENT_ARTIFACT_FRAGMENT = (
 # browser word carries no web-product evidence. The component noun stays
 # behind for the other matchers.
 _BROWSER_COMPONENT_RE = re.compile(
-    rf"\b(?:web|browsers?)[\s\-]+(?={_COMPONENT_ARTIFACT_FRAGMENT}\b)"
+    rf"\b(?:web|browsers?)[\s\-]+(?={_COMPONENT_ARTIFACT_FRAGMENT}\b|actions?\b)"
 )
 
 
@@ -1567,9 +1570,6 @@ _COMPONENT_NOUN_WORDS = frozenset(
         "overlays",
         "menu",
         "menus",
-        # Chrome browser-action / page-action surfaces (#1813 R86).
-        "action",
-        "actions",
     ]
 )
 # An activity noun after a component word marks the component as the
@@ -1794,6 +1794,12 @@ def _goal_first_np_head(goal_text: str) -> str | None:
         # component is the subject of what the artifact does ("plugin
         # management dashboard").
         possessive_base = re.sub(r"[’']s$", "", lowered)
+        # Action surfaces are components only when qualified by a
+        # browser/page word (#1813 R86/R87).
+        if possessive_base in ("action", "actions") and position > 0:
+            previous = segment_tokens[position - 1]
+            if previous in ("browser", "browsers", "page"):
+                return None
         if possessive_base in _COMPONENT_NOUN_WORDS:
             if possessive_base != lowered:
                 return None
