@@ -4488,6 +4488,26 @@ def test_ordinary_user_actions_are_not_component_identity(runtime: str) -> None:
 
 
 @pytest.mark.parametrize(
+    "runtime",
+    [
+        "Browser automation via Playwright for smoke tests",
+        "Chrome browser driver via Selenium",
+        "Playwright automation in CI",
+    ],
+)
+def test_verification_tooling_is_not_the_artifacts_identity(runtime: str) -> None:
+    """R88 guard: test tooling in the runtime verifies the explicitly
+    requested web app — it is not the app; surface components stay
+    authoritative."""
+    ledger = _bare_ledger("Build a web app")
+    _seed_section(ledger, "outputs", value="Interactive signup page")
+    _seed_section(ledger, "runtime_context", value=runtime)
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP
+
+
+@pytest.mark.parametrize(
     "goal",
     [
         "The product is an admin portal that runs in browsers",
