@@ -127,7 +127,7 @@ backend name:
 
 - `ouroboros setup --runtime copilot`
 - `ouroboros config backend copilot`
-- `ouroboros mcp serve --llm-backend copilot`
+- `ouroboros mcp serve --runtime copilot --llm-backend copilot`
 - `ouroboros init --llm-backend copilot`
 
 ## Headless contract

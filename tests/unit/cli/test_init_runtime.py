@@ -286,6 +286,18 @@ class TestInitWorkflowRuntimeHandoff:
         assert "Using LiteLLM" not in result.output
         assert mock_run_interview.await_args.args[6] is None
 
+    @pytest.mark.parametrize("runtime", ["claude", "claude-sdk"])
+    def test_public_claude_runtime_selects_sdk(self, runtime: str) -> None:
+        mock_run_interview = AsyncMock()
+        with patch("ouroboros.cli.commands.init._run_interview", new=mock_run_interview):
+            result = runner.invoke(
+                app,
+                ["init", "start", "Build a REST API", "--runtime", runtime],
+            )
+
+        assert result.exit_code == 0
+        assert mock_run_interview.await_args.args[5] == "claude"
+
     def test_get_adapter_uses_interview_use_case_for_opencode(self) -> None:
         """Interview adapter creation stays backend-neutral for OpenCode."""
         mock_adapter = MagicMock()

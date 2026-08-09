@@ -62,7 +62,15 @@ def test_runtime_and_optional_dependencies_have_upper_bounds():
         assert "<" in dep, f"Runtime dependency missing upper bound: {dep}"
 
     optional_deps = pyproject.get("project", {}).get("optional-dependencies", {})
-    for extra_name in ("claude", "litellm", "dashboard", "mcp", "tui"):
+    for extra_name in (
+        "claude",
+        "claude-cli",
+        "claude-sdk",
+        "litellm",
+        "dashboard",
+        "mcp",
+        "tui",
+    ):
         for dep in optional_deps[extra_name]:
             assert "<" in dep or "==" in dep, (
                 f"Optional dependency '{extra_name}' missing upper bound: {dep}"
@@ -144,8 +152,8 @@ def test_litellm_public_extra_excludes_unsupported_python():
     assert all("python_version < '3.14'" in dep for dep in optional_deps["litellm"])
 
 
-def test_mcp_and_claude_profiles_are_isolated():
-    """MCP 2 and the MCP 1.x-based Claude SDK never share an environment."""
+def test_mcp_claude_cli_and_sdk_profiles_have_explicit_contracts():
+    """Claude defaults to SDK/MCP 1; only the CLI profile co-installs with MCP 2."""
     root = Path(__file__).parent.parent.parent
     pyproject = tomllib.loads((root / "pyproject.toml").read_text())
 
@@ -154,16 +162,32 @@ def test_mcp_and_claude_profiles_are_isolated():
     conflicts = pyproject["tool"]["uv"]["conflicts"]
 
     assert optional_deps["mcp"] == ["mcp==2.0.0"]
+    sdk_pins = [
+        "claude-agent-sdk==0.2.123",
+        "anthropic==0.117.0",
+    ]
+    assert optional_deps["claude"] == sdk_pins
+    assert optional_deps["claude-cli"] == []
+    assert optional_deps["claude-sdk"] == sdk_pins
     assert "mcp" not in optional_deps["all"][0]
+    assert "claude-sdk" not in optional_deps["all"][0]
+    assert "claude" in optional_deps["all"][0]
     assert groups["mcp-test"] == ["mcp==2.0.0"]
-    assert groups["claude-test"] == ["ouroboros-ai[claude]"]
+    assert groups["claude-sdk-test"] == ["ouroboros-ai[claude-sdk]"]
     assert not any("mcp" in dep or "claude" in dep for dep in groups["dev"])
     assert [
         {"extra": "claude"},
         {"extra": "mcp"},
     ] in conflicts
     assert [{"extra": "claude"}, {"group": "mcp-test"}] in conflicts
+    assert [
+        {"extra": "claude-sdk"},
+        {"extra": "mcp"},
+    ] in conflicts
+    assert [{"extra": "claude-sdk"}, {"group": "mcp-test"}] in conflicts
+    assert [{"extra": "all"}, {"extra": "mcp"}] in conflicts
     assert [{"extra": "all"}, {"group": "mcp-test"}] in conflicts
+    assert [{"extra": "claude-cli"}, {"extra": "mcp"}] not in conflicts
 
 
 def test_shipped_mcp_launchers_use_the_isolated_mcp_profile() -> None:
@@ -187,9 +211,25 @@ def test_shipped_mcp_launchers_use_the_isolated_mcp_profile() -> None:
         "mcp_servers"
     ]["ouroboros"]
 
-    for entry in (repository_entry, plugin_entry, codex_entry):
+    claude_args = [
+        *expected_args,
+        "--runtime",
+        "claude-cli",
+        "--llm-backend",
+        "claude_code",
+    ]
+    for entry in (repository_entry, plugin_entry):
         assert entry["command"] == "uvx"
-        assert entry["args"] == expected_args
+        assert entry["args"] == claude_args
+
+    assert codex_entry["command"] == "uvx"
+    assert codex_entry["args"] == [
+        *expected_args,
+        "--runtime",
+        "codex",
+        "--llm-backend",
+        "codex",
+    ]
 
 
 def test_runtime_guides_require_isolated_mcp_host_launchers() -> None:
@@ -258,12 +298,12 @@ def test_runtime_guides_require_isolated_mcp_host_launchers() -> None:
         ".claude-plugin/skills/pm/SKILL.md",
     ],
 )
-def test_claude_skills_never_recommend_combined_mcp_profile(skill_path: str) -> None:
+def test_claude_skills_never_combine_sdk_and_mcp_profiles(skill_path: str) -> None:
     """Shipped Claude guidance must preserve the MCP 1.x / MCP 2 boundary."""
     content = Path(skill_path).read_text(encoding="utf-8")
 
-    assert "ouroboros-ai[mcp,claude]" not in content
-    assert "ouroboros-ai[claude,mcp]" not in content
+    assert "ouroboros-ai[mcp,claude-sdk]" not in content
+    assert "ouroboros-ai[claude-sdk,mcp]" not in content
 
 
 @pytest.mark.parametrize("skill_name", ["update", "pm", "unstuck"])
@@ -288,6 +328,102 @@ def test_claude_skills_do_not_use_mcp_json_as_setup_health(skill_path: str) -> N
 
     assert "grep -q ouroboros" not in content
     assert "grep -q '\"ouroboros\"' ~/.claude/mcp.json" not in content
+
+
+@pytest.mark.parametrize(
+    "skill_path",
+    ["skills/setup/SKILL.md", ".claude-plugin/skills/setup/SKILL.md"],
+)
+def test_claude_setup_surfaces_keep_default_sdk_distinct_from_cli_worker(
+    skill_path: str,
+) -> None:
+    """Both shipped setup summaries must reflect the selected package contract."""
+    content = Path(skill_path).read_text(encoding="utf-8")
+
+    assert "default Claude Agent SDK runtime\non MCP 1.x" in content
+    assert "Mode:                     Claude Agent SDK (MCP 1.x)" in content
+    assert (
+        "dependency-free Claude CLI worker remains a distinct, explicit `[claude-cli]`" in content
+    )
+    assert "saved Ouroboros config selects the Claude CLI runtime" not in content
+    assert "Mode:                     Claude CLI\n" not in content
+
+
+def test_mcp_serve_documentation_names_runtime_and_public_claude_aliases() -> None:
+    """Shipped commands cannot silently inherit the SDK default in an MCP 2 process."""
+    cli_reference = Path("docs/cli-reference.md").read_text(encoding="utf-8")
+
+    assert "`claude`, `claude-sdk`, `claude-cli`, `codex`" in cli_reference
+    assert "MCP 2 server rejects SDK-backed `claude`/`claude-sdk`" in cli_reference
+
+    shipped_markdown = [
+        *Path("docs").rglob("*.md"),
+        *Path("skills").rglob("*.md"),
+        *Path(".claude-plugin/skills").rglob("*.md"),
+    ]
+    for doc_path in dict.fromkeys(shipped_markdown):
+        in_fenced_code = False
+        for line in doc_path.read_text(encoding="utf-8").splitlines():
+            command = line.strip()
+            if command.startswith("```"):
+                in_fenced_code = not in_fenced_code
+                continue
+            assert command != "ouroboros mcp serve", doc_path
+            executable_command = command.removeprefix("$ ")
+            if (
+                in_fenced_code
+                and executable_command.startswith("ouroboros mcp serve")
+                and "[OPTIONS]" not in executable_command
+            ):
+                assert "--runtime" in executable_command, doc_path
+            if command.startswith("ouroboros mcp serve") and "--llm-backend" in command:
+                assert "--runtime" in command, doc_path
+
+
+def test_cli_reference_isolated_mcp_launchers_have_bootable_runtime_contract() -> None:
+    """Both documented isolated launchers pin the MCP 2 Claude worker explicitly."""
+    cli_reference = Path("docs/cli-reference.md").read_text(encoding="utf-8")
+    integration_section = cli_reference.split("**MCP host integration:**", 1)[1].split(
+        "**Runtime selection**",
+        1,
+    )[0]
+    launcher_blocks = [
+        json.loads(block.split("\n```", 1)[0])
+        for block in integration_section.split("```json\n")[1:]
+    ]
+    launchers = [block["mcpServers"]["ouroboros"] for block in launcher_blocks]
+
+    assert launchers == [
+        {
+            "command": "uvx",
+            "args": [
+                "--from",
+                "ouroboros-ai[mcp]",
+                "ouroboros",
+                "mcp",
+                "serve",
+                "--runtime",
+                "claude-cli",
+                "--llm-backend",
+                "claude_code",
+            ],
+        },
+        {
+            "command": "pipx",
+            "args": [
+                "run",
+                "--spec",
+                "ouroboros-ai[mcp]",
+                "ouroboros",
+                "mcp",
+                "serve",
+                "--runtime",
+                "claude-cli",
+                "--llm-backend",
+                "claude_code",
+            ],
+        },
+    ]
 
 
 def test_python_version_constraint():
