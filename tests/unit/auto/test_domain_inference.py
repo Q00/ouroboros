@@ -4535,6 +4535,8 @@ def test_browser_test_tools_are_not_ui_products(goal: str, outputs: str) -> None
         "Playwright tests exercise a Chrome browser extension installed temporarily",
         "Playwright tests exercise a Chrome browser extension provisioned briefly",
         "Playwright tests exercise a mock Chrome browser extension used by client fixtures",
+        "Playwright tests exercise a Chrome browser extension generated for every scenario",
+        "Playwright tests exercise a Chrome browser extension reset before each run",
     ],
 )
 def test_components_inside_verification_context_do_not_veto(runtime: str) -> None:
@@ -4599,6 +4601,7 @@ def test_verification_exemption_covers_qualified_web_ownership(goal: str) -> Non
         "Playwright tests exercise the Chrome browser extension preinstalled on company laptops",
         "Playwright tests exercise the Chrome browser extension managed through enterprise policy",
         "Playwright tests exercise the Chrome browser extension that ships with our desktop application",
+        "Production Chrome browser extension includes test diagnostics",
     ],
 )
 def test_production_identity_survives_adjacent_test_clauses(runtime: str) -> None:

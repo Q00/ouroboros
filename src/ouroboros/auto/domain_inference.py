@@ -1201,6 +1201,16 @@ _FIXTURE_MARKER_RE = re.compile(
     r"transient\w*|ephemeral|short[\s\-]lived|provisional|interim|scratch)\b"
 )
 
+# The harness owns what it creates and recycles (#1813 R98): a component
+# the tooling generates, resets, or stands up per scenario/run/case is a
+# verification target, not the produced artifact.
+_HARNESS_LIFECYCLE_RE = re.compile(
+    r"\b(?:generated|regenerated|created|recreated|rebuilt|reset|"
+    r"respawned|instantiated|spun\s+up|torn\s+down|"
+    r"(?:every|each|per)\s+(?:scenarios?|tests?|runs?|cases?|iterations?|"
+    r"sessions?|suites?))\b"
+)
+
 # Retention taint: a candidate identity phrase whose own words belong to
 # verification prose — a verification participle or a CI locus — is the
 # tooling's description, not the artifact's ("extension tested nightly",
@@ -1247,14 +1257,21 @@ def _strip_verification_clauses(text: str) -> str:
                 kept.append(prefix)
             for np_match in _COMPONENT_NP_SPAN_RE.finditer(part[len(prefix) :]):
                 phrase = np_match.group(0)
-                is_described = bool(np_match.group("window").strip()) or bool(
+                if _FIXTURE_MARKER_RE.search(phrase) or _HARNESS_LIFECYCLE_RE.search(phrase):
+                    continue
+                # A production-marked component owns its description even
+                # when that description mentions testing ("Production …
+                # extension includes test diagnostics") — the component
+                # possesses the diagnostics; the tooling does not possess
+                # the component (#1813 R98).
+                production_marked = bool(
                     _PRENOMINAL_STATE_QUALIFIER_RE.search(np_match.group("premods"))
                 )
-                if (
-                    is_described
-                    and not _VERIFICATION_CONTEXT_RE.search(phrase)
+                if not (bool(np_match.group("window").strip()) or production_marked):
+                    continue
+                if production_marked or (
+                    not _VERIFICATION_CONTEXT_RE.search(phrase)
                     and not _VERIFICATION_TAINT_RE.search(phrase)
-                    and not _FIXTURE_MARKER_RE.search(phrase)
                 ):
                     kept.append(phrase)
     return " ; ".join(kept)
