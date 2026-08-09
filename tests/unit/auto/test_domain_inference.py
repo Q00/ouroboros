@@ -4772,6 +4772,26 @@ def test_bundled_engine_accompaniment_keeps_native_ownership() -> None:
 
 
 @pytest.mark.parametrize(
+    "runtime",
+    [
+        "Electron desktop runtime embeds Chromium runtime",
+        "Electron desktop runtime uses a Chromium runtime",
+        "Electron desktop runtime bundles Chromium for rendering",
+        "Electron desktop runtime includes Chromium tabs",
+    ],
+)
+def test_contained_engines_are_not_the_environment(runtime: str) -> None:
+    """R110 guard: a browser token that is the object of a containment
+    or usage verb is the host's bundled engine — the verbal forms behave
+    exactly like the fixed-phrase attachments."""
+    ledger = _bare_ledger("Build a native desktop dashboard")
+    _seed_section(ledger, "outputs", value="Interactive settings form and navigation")
+    _seed_section(ledger, "runtime_context", value=runtime)
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes
+
+
+@pytest.mark.parametrize(
     ("goal", "outputs"),
     [
         ("Build a PDF report generator", "Report pages rendered to disk"),

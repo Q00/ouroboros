@@ -42,6 +42,7 @@ from ouroboros.auto.web_ownership import (
     _BROWSER_COMPONENT_RE,
     _BROWSER_QUALIFIED_UI_HEAD_RE,
     _COMPONENT_ARTIFACT_FRAGMENT,
+    _ENGINE_CONTAINMENT_RE,
     _EXPLICIT_WEB_VOCAB_RE,
     _GOAL_COMPONENT_IDENTITY_RE,
     _GOAL_COMPONENT_TARGET_RE,
@@ -1066,7 +1067,12 @@ def _section_browser_context_text(ledger: SeedDraftLedger) -> str:
     # in browsers" the browser hosts the tests, not the product, so it
     # cannot serve as section browser evidence. A genuine browser
     # runtime clause survives the strip and keeps its authority.
-    runtime = _strip_verification_clauses(_section_text(ledger, "runtime_context"))
+    # Contained engines leave with the verification clauses (#1813
+    # R110): a browser token that is the object of embeds/uses/bundles
+    # is the host's bundled engine, not the environment.
+    runtime = _ENGINE_CONTAINMENT_RE.sub(
+        " ", _strip_verification_clauses(_section_text(ledger, "runtime_context"))
+    )
     context_text = _strip_consumer_relations(outputs) + " " + runtime
     # Postpositive denials ("the browser is not supported", "browser
     # support disabled") negate from behind (#1813 R37).
@@ -1176,7 +1182,10 @@ def _ledger_has_browser_context(ledger: SeedDraftLedger) -> bool:
     # supply browser context — affirmative products still own through
     # the grants before context is consulted.
     runtime_env = _strip_negated_signals(
-        _POSTPOSITIVE_BROWSER_DENIAL_RE.sub(" ", _section_text(ledger, "runtime_context")),
+        _ENGINE_CONTAINMENT_RE.sub(
+            " ",
+            _POSTPOSITIVE_BROWSER_DENIAL_RE.sub(" ", _section_text(ledger, "runtime_context")),
+        ),
         _WEB_APP_GOAL_SIGNAL_FRAGMENT,
     )
     if _NON_BROWSER_RUNTIME_RE.search(runtime_env) and not _SECTION_BROWSER_ENV_RE.search(
@@ -1570,7 +1579,7 @@ def _matches_web_app(ledger: SeedDraftLedger) -> bool:
         if _EXPLICIT_WEB_VOCAB_RE.search(goal_text_raw):
             return True
         runtime_env = _strip_negated_signals(
-            _POSTPOSITIVE_BROWSER_DENIAL_RE.sub(" ", runtime),
+            _ENGINE_CONTAINMENT_RE.sub(" ", _POSTPOSITIVE_BROWSER_DENIAL_RE.sub(" ", runtime)),
             _WEB_APP_GOAL_SIGNAL_FRAGMENT,
         )
         runtime_bars_browser = bool(
@@ -1690,7 +1699,7 @@ def _matches_web_app(ledger: SeedDraftLedger) -> bool:
     # affirmative non-browser host keeps ownership over engine mentions
     # riding along in its own description.
     fallback_runtime_env = _strip_negated_signals(
-        _POSTPOSITIVE_BROWSER_DENIAL_RE.sub(" ", runtime),
+        _ENGINE_CONTAINMENT_RE.sub(" ", _POSTPOSITIVE_BROWSER_DENIAL_RE.sub(" ", runtime)),
         _WEB_APP_GOAL_SIGNAL_FRAGMENT,
     )
     if _NON_BROWSER_RUNTIME_RE.search(fallback_runtime_env) and not _SECTION_BROWSER_ENV_RE.search(

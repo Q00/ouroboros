@@ -30,6 +30,21 @@ _WEB_APP_GOAL_SIGNAL_RE = re.compile(rf"\b{_WEB_APP_GOAL_SIGNAL_FRAGMENT}\b")
 # vendor qualifier.
 _BROWSER_NAME_FRAGMENT = r"(?:chrome|chromium|firefox|safari|(?:microsoft|ms)\s+edge)"
 
+# A browser token that is the OBJECT of a containment/usage verb is the
+# host's bundled engine, not the execution environment (#1813 R110):
+# "embeds Chromium runtime", "uses a Chromium runtime", "bundles
+# Chromium for rendering". The span leaves before any environment
+# reading, so the verbal forms behave like the fixed-phrase attachments
+# ("powered by", "with").
+_ENGINE_CONTAINMENT_RE = re.compile(
+    rf"\b(?:embeds?|embedding|uses?|using|bundles?|bundling|includes?|"
+    rf"including|contains?|containing|ships?|shipping|wraps?|wrapping|"
+    rf"integrates?|integrating|carries?|carrying|packs?|packing|hosts?|"
+    rf"hosting|loads?|loading)\s+"
+    rf"(?:an?\s+|the\s+|its\s+)?(?:[\w\-'’]+\s+){{0,2}}?"
+    rf"(?:{_BROWSER_NAME_FRAGMENT}|browsers?)\b(?:\s+[\w\-'’]+){{0,2}}"
+)
+
 _WEB_APP_ARTIFACT_PHRASE_RE = re.compile(
     r"\b(?:web[\s\-]?app(?:lication)?s?|webapps?|websites?|web\s+uis?|frontends?|"
     r"front[\s\-]ends?|single[\s\-]page\s+app(?:lication)?s?)\b"
