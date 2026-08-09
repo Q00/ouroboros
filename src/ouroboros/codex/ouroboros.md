@@ -194,8 +194,9 @@ Ouroboros MCP server. If it is not ready, do not assume the user knows what
 
 Offer **설정하고 시작하기 (권장)** and **나중에**. If they choose setup, run
 `ouroboros setup --runtime codex`; when Ouroboros is available only through the
-Marketplace plugin, run `uvx --from 'ouroboros-ai[mcp]' ouroboros setup --runtime codex`
-instead. Do not make them copy the command.
+Marketplace plugin, run `uvx --isolated --python '>=3.12' --from
+'ouroboros-ai[mcp]' ouroboros setup --runtime codex` instead. Do not make them
+copy the command.
 
 After it succeeds, explain that Codex's currently selected default model will
 be used and that the user can change that choice any time through `ooo config`.

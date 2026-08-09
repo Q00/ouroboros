@@ -213,6 +213,9 @@ def test_shipped_mcp_launchers_use_the_isolated_mcp_profile() -> None:
     codex_entry = tomllib.loads((root / ".codex" / "config.toml").read_text(encoding="utf-8"))[
         "mcp_servers"
     ]["ouroboros"]
+    codex_plugin_entry = json.loads((root / ".mcp.codex.json").read_text(encoding="utf-8"))[
+        "mcpServers"
+    ]["ouroboros"]
 
     claude_args = [
         *expected_args,
@@ -225,14 +228,15 @@ def test_shipped_mcp_launchers_use_the_isolated_mcp_profile() -> None:
         assert entry["command"] == "uvx"
         assert entry["args"] == claude_args
 
-    assert codex_entry["command"] == "uvx"
-    assert codex_entry["args"] == [
-        *expected_args,
-        "--runtime",
-        "codex",
-        "--llm-backend",
-        "codex",
-    ]
+    for entry in (codex_entry, codex_plugin_entry):
+        assert entry["command"] == "uvx"
+        assert entry["args"] == [
+            *expected_args,
+            "--runtime",
+            "codex",
+            "--llm-backend",
+            "codex",
+        ]
 
 
 def test_runtime_guides_require_isolated_mcp_host_launchers() -> None:
@@ -246,19 +250,22 @@ def test_runtime_guides_require_isolated_mcp_host_launchers() -> None:
     exact_launcher_contracts = {
         "kiro": (
             '"command": "uvx"',
-            '"args": ["--isolated", "--from", "ouroboros-ai[mcp]", "ouroboros", "mcp", "serve"]',
+            '"args": ["--isolated", "--python", ">=3.12", "--from", '
+            '"ouroboros-ai[mcp]", "ouroboros", "mcp", "serve"]',
             '"command": "pipx"',
             '"args": ["run", "--spec", "ouroboros-ai[mcp]", "ouroboros", "mcp", "serve"]',
         ),
         "copilot": (
             '"command": "uvx"',
-            '"args": ["--isolated", "--from", "ouroboros-ai[mcp]", "ouroboros", "mcp", "serve"]',
+            '"args": ["--isolated", "--python", ">=3.12", "--from", '
+            '"ouroboros-ai[mcp]", "ouroboros", "mcp", "serve"]',
             '"command": "pipx"',
             '"args": ["run", "--spec", "ouroboros-ai[mcp]", "ouroboros", "mcp", "serve"]',
         ),
         "hermes": (
             "command: uvx",
-            'args: [--isolated, --from, "ouroboros-ai[mcp]", ouroboros, mcp, serve]',
+            'args: [--isolated, --python, ">=3.12", --from, "ouroboros-ai[mcp]", '
+            "ouroboros, mcp, serve]",
             "command: pipx",
             'args: [run, --spec, "ouroboros-ai[mcp]", ouroboros, mcp, serve]',
         ),
@@ -401,6 +408,8 @@ def test_cli_reference_isolated_mcp_launchers_have_bootable_runtime_contract() -
             "command": "uvx",
             "args": [
                 "--isolated",
+                "--python",
+                ">=3.12",
                 "--from",
                 "ouroboros-ai[mcp]",
                 "ouroboros",

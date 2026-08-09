@@ -484,7 +484,8 @@ class TestCodexDoctor:
         (codex_dir / "config.toml").write_text(
             "[mcp_servers.ouroboros]\n"
             'command = "uvx"\n'
-            'args = ["--isolated", "--from", "ouroboros-ai[mcp]", "ouroboros", "mcp", "serve"]\n',
+            'args = ["--isolated", "--python", ">=3.12", "--from", '
+            '"ouroboros-ai[mcp]", "ouroboros", "mcp", "serve"]\n',
             encoding="utf-8",
         )
 
@@ -575,6 +576,44 @@ class TestCodexDoctor:
         failures = _check_auto_dispatch_surface(codex_dir)
 
         assert any("may reuse an installed MCP 1.x tool" in failure for failure in failures)
+
+    def test_check_auto_dispatch_surface_reports_uvx_without_python_floor(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Isolation still needs a supported interpreter for package resolution."""
+        codex_dir = tmp_path / ".codex"
+        self._write_healthy_codex_surface(codex_dir)
+        (codex_dir / "config.toml").write_text(
+            "[mcp_servers.ouroboros]\n"
+            'command = "uvx"\n'
+            'args = ["--isolated", "--from", "ouroboros-ai[mcp]", '
+            '"ouroboros", "mcp", "serve"]\n',
+            encoding="utf-8",
+        )
+
+        failures = _check_auto_dispatch_surface(codex_dir)
+
+        assert any("does not select the supported Python floor" in failure for failure in failures)
+
+    def test_check_auto_dispatch_surface_reports_incompatible_python_selector(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A present but incompatible selector must not satisfy the floor contract."""
+        codex_dir = tmp_path / ".codex"
+        self._write_healthy_codex_surface(codex_dir)
+        (codex_dir / "config.toml").write_text(
+            "[mcp_servers.ouroboros]\n"
+            'command = "uvx"\n'
+            'args = ["--isolated", "--python", "3.11", "--from", '
+            '"ouroboros-ai[mcp]", "ouroboros", "mcp", "serve"]\n',
+            encoding="utf-8",
+        )
+
+        failures = _check_auto_dispatch_surface(codex_dir)
+
+        assert any("does not select the supported Python floor" in failure for failure in failures)
 
     def test_check_auto_dispatch_surface_reports_direct_ouroboros_without_mcp_import(
         self,
@@ -983,7 +1022,16 @@ class TestCodexDoctor:
 
         live_probe.assert_awaited_once_with(
             "uvx",
-            ("--isolated", "--from", "ouroboros-ai[mcp]", "ouroboros", "mcp", "serve"),
+            (
+                "--isolated",
+                "--python",
+                ">=3.12",
+                "--from",
+                "ouroboros-ai[mcp]",
+                "ouroboros",
+                "mcp",
+                "serve",
+            ),
             {},
         )
 

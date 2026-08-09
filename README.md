@@ -234,7 +234,7 @@ Core and non-LiteLLM installs support Python 3.12-3.14. LiteLLM-bearing installs
 Claude is the host. Never install `[mcp,claude]`, `[mcp,claude-sdk]`, or
 `[all,mcp]` in one interpreter. See the [package compatibility and migration matrix](./docs/platform-support.md#mcp-2-and-claude-package-profiles).
 
-`pip install 'ouroboros-ai[mcp]'` is valid for embedding the MCP client/server library in an already isolated Python environment, but host registration requires `uvx --isolated` or `pipx`. Use `pipx install 'ouroboros-ai[mcp]'` or `uv tool install 'ouroboros-ai[mcp]'` before `ouroboros setup --runtime <kiro|copilot|hermes>`; setup exits without changing runtime configuration when neither isolated launcher is available.
+`pip install 'ouroboros-ai[mcp]'` is valid for embedding the MCP client/server library in an already isolated Python environment, but host registration requires `uvx --isolated --python '>=3.12'` or `pipx`. Use `pipx install 'ouroboros-ai[mcp]'` or `uv tool install 'ouroboros-ai[mcp]'` before `ouroboros setup --runtime <kiro|copilot|hermes>`; setup exits without changing runtime configuration when neither isolated launcher is available.
 
 Legacy compatibility: `ouroboros-ai[dashboard]` is still accepted as a compatibility alias/no-op; it does not install dashboard runtime payload. `ouroboros-ai[all]` includes that no-op alias only for compatibility.
 

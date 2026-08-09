@@ -205,7 +205,7 @@ install method the wizard detected:
   "mcpServers": {
     "ouroboros": {
       "command": "uvx",
-      "args": ["--isolated", "--from", "ouroboros-ai[mcp]", "ouroboros", "mcp", "serve"],
+      "args": ["--isolated", "--python", ">=3.12", "--from", "ouroboros-ai[mcp]", "ouroboros", "mcp", "serve"],
       "env": {
         "OUROBOROS_AGENT_RUNTIME": "copilot",
         "OUROBOROS_LLM_BACKEND": "copilot"

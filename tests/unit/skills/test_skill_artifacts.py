@@ -184,6 +184,8 @@ def test_codex_plugin_manifest_starts_a_codex_composed_mcp_server() -> None:
         "command": "uvx",
         "args": [
             "--isolated",
+            "--python",
+            ">=3.12",
             "--from",
             "ouroboros-ai[mcp]",
             "ouroboros",
@@ -249,7 +251,8 @@ def test_first_use_onboarding_has_host_specific_model_settings_handoffs() -> Non
         "CODEX_SETUP_REQUIRED",
         "mcp_servers\\.ouroboros",
         "ouroboros setup --runtime codex",
-        "uvx --python '>=3.12' --from 'ouroboros-ai[mcp]' ouroboros setup --runtime codex",
+        "uvx --isolated --python '>=3.12' --from 'ouroboros-ai[mcp]' "
+        "ouroboros setup --runtime codex",
         "설정하고 시작하기",
         "직접 모델 설정하기",
         "모델은 언제든 나중에 바꿀 수 있어요",

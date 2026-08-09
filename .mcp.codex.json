@@ -4,6 +4,8 @@
       "command": "uvx",
       "args": [
         "--isolated",
+        "--python",
+        ">=3.12",
         "--from",
         "ouroboros-ai[mcp]",
         "ouroboros",

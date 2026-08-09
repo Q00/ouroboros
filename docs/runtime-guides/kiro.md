@@ -52,7 +52,7 @@ This will:
      "mcpServers": {
        "ouroboros": {
          "command": "uvx",
-         "args": ["--isolated", "--from", "ouroboros-ai[mcp]", "ouroboros", "mcp", "serve"],
+         "args": ["--isolated", "--python", ">=3.12", "--from", "ouroboros-ai[mcp]", "ouroboros", "mcp", "serve"],
          "disabled": false,
          "env": {
            "OUROBOROS_RUNTIME": "kiro",

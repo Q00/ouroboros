@@ -188,7 +188,7 @@ pip install 'ouroboros-ai[all]'           # Claude + LiteLLM + TUI + dashboard�
 ouroboros setup                         # 配置运行时
 ```
 
-`[claude]` 与 `[mcp]` 必须保持隔离：Claude Agent SDK 使用 MCP 1.x，而协议 server 使用 MCP 2。需要 MCP 的 host 应通过 `uvx --isolated --from 'ouroboros-ai[mcp]' ...` 或 `pipx run --spec 'ouroboros-ai[mcp]' ...` 启动独立进程，不要把两个 extra 安装到同一环境。
+`[claude]` 与 `[mcp]` 必须保持隔离：Claude Agent SDK 使用 MCP 1.x，而协议 server 使用 MCP 2。需要 MCP 的 host 应通过 `uvx --isolated --python '>=3.12' --from 'ouroboros-ai[mcp]' ...` 或 `pipx run --spec 'ouroboros-ai[mcp]' ...` 启动独立进程，不要把两个 extra 安装到同一环境。
 
 基础包和非 LiteLLM 安装支持 Python 3.12-3.14。包含 LiteLLM 的安装（`[litellm]`、`[all]`、source `--all-extras`）支持 Python 3.12-3.13；当前示例优先使用 Python 3.13。详见 [Platform Support](./docs/platform-support.md#python-profile-matrix)。
 

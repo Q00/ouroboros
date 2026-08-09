@@ -1186,7 +1186,7 @@ the marketplace plugin launches an isolated server equivalent to:
   "mcpServers": {
     "ouroboros": {
       "command": "uvx",
-      "args": ["--isolated", "--from", "ouroboros-ai[mcp]", "ouroboros", "mcp", "serve", "--runtime", "claude-cli", "--llm-backend", "claude_code"]
+      "args": ["--isolated", "--python", ">=3.12", "--from", "ouroboros-ai[mcp]", "ouroboros", "mcp", "serve", "--runtime", "claude-cli", "--llm-backend", "claude_code"]
     }
   }
 }

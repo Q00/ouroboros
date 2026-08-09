@@ -16,6 +16,7 @@ import typer
 
 from ouroboros.cli.formatters.panels import print_error, print_success, print_warning
 from ouroboros.codex import install_codex_artifacts, resolve_codex_home
+from ouroboros.package_profiles import UVX_PYTHON_FLOOR
 
 app = typer.Typer(
     name="codex",
@@ -253,6 +254,17 @@ def _check_mcp_runtime_dependency_surface(
                 "Codex MCP uvx command may reuse an installed MCP 1.x tool; "
                 "add `--isolated` before `--from ouroboros-ai[mcp]`"
             )
+        if command_name == "uvx" and "ouroboros-ai[mcp]" in string_args:
+            try:
+                python_index = string_args.index("--python")
+                python_selector = string_args[python_index + 1]
+            except (ValueError, IndexError):
+                python_selector = None
+            if python_selector != UVX_PYTHON_FLOOR:
+                failures.append(
+                    "Codex MCP uvx command does not select the supported Python floor; "
+                    "add `--python >=3.12` before `--from ouroboros-ai[mcp]`"
+                )
         return
 
     if command_name != "ouroboros":
@@ -296,7 +308,8 @@ async def _list_stdio_mcp_tool_names(
     This doctor probe intentionally speaks the small MCP initialize/list_tools
     JSON-RPC sequence directly instead of using :class:`MCPClientAdapter`.
     Codex can point at a self-contained command such as
-    ``uvx --isolated --from ouroboros-ai[mcp] ouroboros mcp serve``; validating that
+    ``uvx --isolated --python >=3.12 --from ouroboros-ai[mcp] ouroboros mcp serve``;
+    validating that
     setup must not first require the current ``ouroboros codex doctor``
     interpreter to have installed the optional local ``mcp`` extra.
     """
