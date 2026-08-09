@@ -85,13 +85,32 @@ class _ConcurrentActivationError(OSError):
     """An activation target no longer matches the generation that was read."""
 
 
-class _DurabilityError(OSError):
+class _PostPublicationError(OSError):
+    """A promotion failed after the prepared inode became live."""
+
+    def __init__(
+        self,
+        message: str,
+        path: Path,
+        owned_snapshot: _FileSnapshot,
+        observed_snapshot: _FileSnapshot,
+    ) -> None:
+        super().__init__(message)
+        self.path = path
+        self.owned_snapshot = owned_snapshot
+        self.observed_snapshot = observed_snapshot
+
+
+class _DurabilityError(_PostPublicationError):
     """A replacement was published but its directory sync was not confirmed."""
 
     def __init__(self, path: Path, published_snapshot: _FileSnapshot) -> None:
-        super().__init__(f"Could not confirm replacement durability for {path}")
-        self.path = path
-        self.published_snapshot = published_snapshot
+        super().__init__(
+            f"Could not confirm replacement durability for {path}",
+            path,
+            published_snapshot,
+            published_snapshot,
+        )
 
 
 class _CommittedCleanupError(OSError):
@@ -526,6 +545,7 @@ def _scrub_owned_artifact(
     expected: _FileSnapshot,
     *,
     durable: bool = True,
+    allow_multiple_links: bool = False,
 ) -> None:
     """Scrub one exact owned inode before retiring any remaining pathname.
 
@@ -534,7 +554,13 @@ def _scrub_owned_artifact(
     inode is scrubbed and the foreign pathname is restored by
     :func:`_remove_owned_artifact`.
     """
-    if expected.kind != "file" or expected.contents is None or expected.link_count != 1:
+    if (
+        expected.kind != "file"
+        or expected.contents is None
+        or expected.link_count is None
+        or expected.link_count < 1
+        or (expected.link_count != 1 and not allow_multiple_links)
+    ):
         raise _ConcurrentActivationError(f"Secret artifact is not a regular file: {path}")
     flags = os.O_RDWR | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     operand, directory_fd = _authority_operand(path)
@@ -656,6 +682,10 @@ def _promotion_checkpoint(_operation: str, _target: Path) -> None:
     """Test seam immediately before a live target is claimed or published."""
 
 
+def _post_publication_checkpoint(_target: Path) -> None:
+    """Test seam after no-replace publication and before validation returns."""
+
+
 def _promote_prepared_under_lock(
     target: Path,
     prepared: _PreparedFile,
@@ -695,10 +725,37 @@ def _promote_prepared_under_lock(
         if expected.kind == "file" and _snapshot_target(claim).kind == "file":
             _restore_claim_if_absent(claim, target)
         raise
-    published = _snapshot_target(target)
+    try:
+        _post_publication_checkpoint(target)
+        published = _snapshot_target(target)
+    except BaseException as exc:
+        try:
+            observed = _snapshot_target(target)
+        except OSError:
+            observed = prepared.snapshot
+        raise _PostPublicationError(
+            f"Could not validate published generation: {target}",
+            target,
+            prepared.snapshot,
+            observed,
+        ) from exc
     if not _matches_guard(published, _owned_guard(prepared.snapshot), strict=False):
-        raise _ConcurrentActivationError(f"Prepared generation was not published: {target}")
-    if not fsync_parent_directory(target):
+        raise _PostPublicationError(
+            f"Prepared generation changed after publication: {target}",
+            target,
+            prepared.snapshot,
+            published,
+        )
+    try:
+        durable = fsync_parent_directory(target)
+    except BaseException as exc:
+        raise _PostPublicationError(
+            f"Could not validate replacement durability: {target}",
+            target,
+            published,
+            published,
+        ) from exc
+    if not durable:
         raise _DurabilityError(target, published)
     return published
 
@@ -753,6 +810,22 @@ def _same_owned_generation(left: _FileSnapshot, right: _FileSnapshot) -> bool:
         and left.group_id == right.group_id
         and left.link_count == right.link_count
         and left.contents == right.contents
+    )
+
+
+def _same_owned_inode_and_contents(left: _FileSnapshot, right: _FileSnapshot) -> bool:
+    """Match one setup-owned inode while allowing only link-count growth."""
+    return (
+        left.kind == right.kind == "file"
+        and left.device == right.device
+        and left.inode == right.inode
+        and left.mode == right.mode
+        and left.owner_id == right.owner_id
+        and left.group_id == right.group_id
+        and left.contents == right.contents
+        and left.link_count is not None
+        and right.link_count is not None
+        and left.link_count >= right.link_count
     )
 
 
@@ -1082,7 +1155,11 @@ def _rollback_file(
         if original.kind == "missing":
             # The rollback claim is the activation-owned published generation.
             if scrub_created:
-                _scrub_owned_artifact(rollback_claim, current)
+                _scrub_owned_artifact(
+                    rollback_claim,
+                    current,
+                    allow_multiple_links=True,
+                )
             else:
                 _remove_owned_artifact(rollback_claim, _owned_guard(current))
             return True
@@ -1484,11 +1561,19 @@ def activate_claude_runtime(
                 )
                 return config_path
             except BaseException as exc:
-                if isinstance(exc, _DurabilityError):
+                if isinstance(exc, _PostPublicationError):
+                    rollback_snapshot = (
+                        exc.observed_snapshot
+                        if _same_owned_inode_and_contents(
+                            exc.observed_snapshot,
+                            exc.owned_snapshot,
+                        )
+                        else exc.owned_snapshot
+                    )
                     if exc.path == config_path:
-                        config_written = exc.published_snapshot
+                        config_written = rollback_snapshot
                     elif exc.path == credentials_path:
-                        credentials_written = exc.published_snapshot
+                        credentials_written = rollback_snapshot
                 config_restored = _rollback_file(
                     config_path,
                     config_generation,

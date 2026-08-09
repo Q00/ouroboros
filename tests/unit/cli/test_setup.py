@@ -5999,6 +5999,113 @@ raise SystemExit(0 if activate_claude_runtime("/second/claude") else 2)
             secret not in path.read_bytes() for path in config_dir.iterdir() if path.is_file()
         )
 
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX hard-link semantics")
+    def test_setup_claude_post_publish_hard_link_is_recorded_and_scrubbed(
+        self, tmp_path: Path
+    ) -> None:
+        """A link added after publication cannot strand fresh live credentials."""
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        original = b"orchestrator:\n  runtime_backend: codex\nllm:\n  backend: codex\n"
+        config_path.write_bytes(original)
+        credentials_path = config_dir / "credentials.yaml"
+        operator_link = config_dir / "operator-hardlink"
+        secret = b"sk-post-publish-hardlink-secret"
+        generated = CredentialsConfig(
+            providers={"openai": ProviderCredentials(api_key=secret.decode())}
+        )
+
+        def _link_published_credentials(path: Path) -> None:
+            if path == credentials_path:
+                os.link(credentials_path, operator_link)
+
+        with (
+            patch("ouroboros.config.models.get_config_dir", return_value=config_dir),
+            patch("ouroboros.config.models.get_default_credentials", return_value=generated),
+            patch(
+                "ouroboros.cli.runtime_activation._post_publication_checkpoint",
+                side_effect=_link_published_credentials,
+            ),
+        ):
+            assert setup_cmd._setup_claude("/usr/local/bin/claude") is False
+
+        assert config_path.read_bytes() == original
+        assert not credentials_path.exists()
+        assert operator_link.read_bytes() == b""
+        assert all(
+            secret not in path.read_bytes() for path in config_dir.iterdir() if path.is_file()
+        )
+
+    def test_setup_claude_post_publish_content_change_is_preserved(self, tmp_path: Path) -> None:
+        """An in-place operator content generation survives failed handoff."""
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        original = b"orchestrator:\n  runtime_backend: codex\nllm:\n  backend: codex\n"
+        config_path.write_bytes(original)
+        credentials_path = config_dir / "credentials.yaml"
+        operator = b"providers: {}\noperator: post-publication\n"
+
+        def _replace_published_contents(path: Path) -> None:
+            if path == credentials_path:
+                credentials_path.write_bytes(operator)
+
+        with (
+            patch("ouroboros.config.models.get_config_dir", return_value=config_dir),
+            patch(
+                "ouroboros.cli.runtime_activation._post_publication_checkpoint",
+                side_effect=_replace_published_contents,
+            ),
+        ):
+            assert setup_cmd._setup_claude("/usr/local/bin/claude") is False
+
+        assert config_path.read_bytes() == original
+        assert credentials_path.read_bytes() == operator
+        assert (config_dir / runtime_activation._JOURNAL_NAME).exists()
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX ownership semantics")
+    def test_setup_claude_post_publish_ownership_change_is_preserved(self, tmp_path: Path) -> None:
+        """An operator ownership generation is not scrubbed during rollback."""
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        original = b"orchestrator:\n  runtime_backend: codex\nllm:\n  backend: codex\n"
+        config_path.write_bytes(original)
+        credentials_path = config_dir / "credentials.yaml"
+        alternate_uid = os.getuid()
+        alternate_gid = next(
+            (group for group in os.getgroups() if group != os.getgid()),
+            None,
+        )
+        if os.geteuid() == 0:
+            alternate_uid = 65534
+            alternate_gid = 65534
+        elif alternate_gid is None:
+            pytest.skip("No alternate permitted ownership generation")
+        assert alternate_gid is not None
+
+        def _change_published_owner(path: Path) -> None:
+            if path == credentials_path:
+                os.chown(credentials_path, alternate_uid, alternate_gid)
+
+        with (
+            patch("ouroboros.config.models.get_config_dir", return_value=config_dir),
+            patch(
+                "ouroboros.cli.runtime_activation._post_publication_checkpoint",
+                side_effect=_change_published_owner,
+            ),
+        ):
+            assert setup_cmd._setup_claude("/usr/local/bin/claude") is False
+
+        assert config_path.read_bytes() == original
+        assert credentials_path.exists()
+        assert (credentials_path.stat().st_uid, credentials_path.stat().st_gid) == (
+            alternate_uid,
+            alternate_gid,
+        )
+        assert (config_dir / runtime_activation._JOURNAL_NAME).exists()
+
     @pytest.mark.skipif(os.name == "nt", reason="POSIX exact-inode scrub race")
     def test_secret_scrub_preserves_foreign_replacement_inode(self, tmp_path: Path) -> None:
         """Scrubbing a pinned stage never truncates a replacement at its pathname."""
