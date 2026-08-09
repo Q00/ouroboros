@@ -4985,6 +4985,66 @@ def test_browser_consuming_a_document_is_not_web_app_ownership() -> None:
     assert TaskClass.WEB_APP not in result.classes
 
 
+@pytest.mark.parametrize(
+    ("goal", "outputs", "runtime"),
+    [
+        (
+            "Write an interactive document",
+            "Document form and confirmation button",
+            "Shown through common browsers",
+        ),
+        (
+            "Create an HTML email template",
+            "Newsletter layout and call-to-action button",
+            "Presented via Chrome, Safari, and Firefox",
+        ),
+    ],
+)
+def test_passive_browser_consumption_covers_document_and_email_variants(
+    goal: str, outputs: str, runtime: str
+) -> None:
+    """R118 guard: passive browser consumption does not reclassify a
+    document or email whose first NP also contains UI-shaped vocabulary."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value=outputs)
+    _seed_section(ledger, "runtime_context", value=runtime)
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes
+
+
+def test_passive_consumer_strips_entire_oxford_browser_list() -> None:
+    """R118 guard: no browser in a passive Oxford-comma consumer list
+    may survive normalization and independently mint browser context."""
+    ledger = _bare_ledger("Build a kanban board")
+    _seed_section(ledger, "outputs", value="Drag-and-drop cards and navigation")
+    _seed_section(
+        ledger,
+        "runtime_context",
+        value="Presented via Chrome, Safari, and Firefox",
+    )
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
+        "Build a PDF editor web app",
+        "Build a browser-based PDF editor",
+        "Build a PDF editor for modern browsers",
+    ],
+)
+def test_explicit_browser_owned_pdf_editors_remain_web_apps(goal: str) -> None:
+    """R118 control: document subject vocabulary cannot erase an
+    explicitly owned web product or browser-qualified interaction head."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value="Editor canvas, toolbar, and save button")
+    _seed_section(ledger, "runtime_context", value="Displayed in modern browsers")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP
+
+
 def test_capability_exclusion_is_not_artifact_denial() -> None:
     """R105 guard: a transitive exclusion is the app's own compatibility
     policy — "a web app that excludes unsupported browsers" is still the

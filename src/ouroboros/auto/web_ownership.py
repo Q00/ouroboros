@@ -332,10 +332,12 @@ _NON_BROWSER_RUNTIME_RE = re.compile(
 _RUNTIME_BROWSER_CONSUMER_RE = re.compile(
     rf"\b(?:viewed|opened|previewed|read|rendered|displayed|presented|"
     rf"shown|printed|downloaded|exported|attached)\s+"
-    rf"(?:directly\s+)?(?:in|through|using|by|via)\s+"
+    rf"(?:directly\s+)?(?:in|on|through|using|by|via)\s+"
     rf"(?:(?:an?|the|modern|common|standard|supported|major|desktop|mobile)\s+)*"
     rf"(?:{_BROWSER_NAME_FRAGMENT}|browsers?)\b"
-    rf"(?:\s*(?:,|\band\b|\bor\b)\s*[\w\-'’]+(?:\s+[\w\-'’]+){{0,2}}){{0,3}}"
+    rf"(?:\s*(?:,\s*(?:and|or)\b|,|\band\b|\bor\b|/)\s*"
+    rf"(?:(?:an?|the|modern|common|standard|supported|major|desktop|mobile)\s+)*"
+    rf"(?:{_BROWSER_NAME_FRAGMENT}|browsers?)\b){{0,4}}"
 )
 
 
@@ -732,18 +734,41 @@ _NON_PRODUCT_HEAD_WORDS = frozenset(
     ]
 )
 
+# Document/message formats retain their artifact identity even when a UI
+# noun occurs later in the same first NP (#1813 R118): "interactive PDF
+# form" is still a PDF, and "HTML email template" is still an email.
+# Explicit web-product ownership is resolved before this fallback, so
+# "PDF editor web app" and "browser-based PDF editor" remain web apps.
+_NON_UI_ARTIFACT_WORDS = frozenset(
+    [
+        "pdf",
+        "pdfs",
+        "document",
+        "documents",
+        "ebook",
+        "ebooks",
+        "e-book",
+        "e-books",
+        "email",
+        "emails",
+        "e-mail",
+        "e-mails",
+    ]
+)
 
-def _goal_first_np_head(goal_text: str) -> str | None:
-    """Walk the goal's first noun phrase and return its final head.
+
+def _goal_first_np_words(goal_text: str) -> tuple[str, ...] | None:
+    """Walk the goal's first noun phrase and return its words.
 
     The walk mirrors the first-NP grammar: structural prepositions and
     relativizers end the phrase, a second determiner opens an embedded
     noun phrase, and participles are verbal outside phrase-initial
-    position and the nominal-gerund vocabulary. Returns ``None`` when no
-    product NP exists — a bare-verb walk ("Migrate from ..."), or a
-    qualified component compound ("browser extension settings page",
-    "Chrome plugin popup page"), whose surfaces belong to the component
-    (#1813 R61-R63)."""
+    position and the nominal-gerund vocabulary. Returning the full phrase
+    lets artifact identity consider nouns before the final head. Returns
+    ``None`` when no product NP exists — a bare-verb walk ("Migrate from
+    ..."), or a qualified component compound ("browser extension settings
+    page", "Chrome plugin popup page"), whose surfaces belong to the
+    component (#1813 R61-R63/R118)."""
     np_tokens: list[str] = []
     seen_determiner = False
     content_since_determiner = 0
@@ -798,7 +823,13 @@ def _goal_first_np_head(goal_text: str) -> str | None:
         return None
     if not seen_determiner and len(np_tokens) < 2 and np_tokens[0] in _BARE_ACTION_VERB_WORDS:
         return None
-    return np_tokens[-1]
+    return tuple(np_tokens)
+
+
+def _goal_first_np_head(goal_text: str) -> str | None:
+    """Return the final head of the goal's first product noun phrase."""
+    words = _goal_first_np_words(goal_text)
+    return words[-1] if words else None
 
 
 def _goal_first_np_has_ui_shape(goal_text: str) -> bool:
@@ -807,8 +838,12 @@ def _goal_first_np_has_ui_shape(goal_text: str) -> bool:
     legitimate UI product nouns need no pre-enumeration ("kanban board",
     "spreadsheet"), while report/tool/component-class heads keep their
     own artifact identity."""
-    head = _goal_first_np_head(goal_text)
-    return head is not None and head not in _NON_PRODUCT_HEAD_WORDS
+    words = _goal_first_np_words(goal_text)
+    return bool(
+        words
+        and words[-1] not in _NON_PRODUCT_HEAD_WORDS
+        and not _NON_UI_ARTIFACT_WORDS.intersection(words)
+    )
 
 
 def _goal_first_np_is_ui_headed(goal_text: str) -> bool:
