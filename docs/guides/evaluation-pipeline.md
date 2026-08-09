@@ -95,7 +95,9 @@ ouroboros detect --backend codex   # use a specific LLM backend for the detect c
 
 `ensure_mechanical_toml()` is idempotent: when the file already exists and `force` is false it returns immediately without an LLM call. It never raises — on any failure it returns `False`, leaving Stage 1 with no commands.
 
-> **If Stage 1 always passes, this is usually why.** With no `.ouroboros/mechanical.toml` and no explicitly configured `MechanicalConfig` commands, all five checks are skipped and treated as passed, which makes Stage 1 a no-op gate. Run `ouroboros detect`, or write the toml by hand.
+> **If Stage 1 always passes, this is usually why.** With no `.ouroboros/mechanical.toml` and no explicitly configured `MechanicalConfig` commands, all five checks are skipped and treated as passed, which makes Stage 1 a no-op gate.
+>
+> Reaching that state through `ouroboros run` or the MCP evaluation path takes a failure, not just a missing file. Both call `build_verification_artifacts()`, which invokes `_auto_detect_mechanical_toml()` and authors the file before reading it (`cli/commands/run.py:785`, `evaluation/verification_artifacts.py:413`, `mcp/tools/evaluation_handlers.py:724`). Stage 1 ends up empty when that best-effort detection fails — no LLM adapter, a provider error, an unwritable `.ouroboros/` — or when a caller drives the lower-level pipeline directly and skips detection. If you see the no-op symptom, look for a failed detection before running `ouroboros detect` by hand.
 
 > **Deprecated:** `detect_language()` no longer detects anything. It is a compatibility shim that reads `.ouroboros/mechanical.toml` and emits a `DeprecationWarning`; call `ensure_mechanical_toml()` plus `build_mechanical_config()` instead.
 
@@ -127,7 +129,8 @@ timeout = 120
 |---|---|---|
 | **TOML parse error** | All Stage 1 checks skipped; no error raised | Malformed `.ouroboros/mechanical.toml`; check TOML syntax |
 | **Blocked executable** | Check silently skipped | Executable not in allowlist; use an allowed tool or set the command in `MechanicalConfig` directly |
-| **No toml present** | All Stage 1 checks skipped | Run `ouroboros detect`, or set commands explicitly in `MechanicalConfig` |
+| **Auto-detection failed** | All Stage 1 checks skipped | `run` and the MCP path author the toml automatically; an empty Stage 1 means that attempt failed (no LLM adapter, provider error, unwritable `.ouroboros/`). Fix the cause, or run `ouroboros detect` / set commands explicitly in `MechanicalConfig` |
+| **No toml present, detection bypassed** | All Stage 1 checks skipped | A caller drove the lower-level pipeline directly instead of `build_verification_artifacts()`; run `ouroboros detect`, or set commands explicitly in `MechanicalConfig` |
 
 ### Stage 1 Configuration
 
@@ -144,7 +147,7 @@ mechanical:
   coverage_command: ["pytest", "--cov=src", "--cov-report=term-missing", "tests/"]
 ```
 
-> **Important:** These fields are the programmatic escape hatch. In the normal `ouroboros run` path the commands come from `.ouroboros/mechanical.toml`, and Stage 1 silently skips every check (treating it as passed) when that file is absent **and** no explicit commands are configured.
+> **Important:** These fields are the programmatic escape hatch. In the normal `ouroboros run` path the commands come from `.ouroboros/mechanical.toml`, which that path authors for you when it is missing. Stage 1 silently skips every check (treating it as passed) when the file is absent **and** that automatic detection failed **and** no explicit commands are configured.
 
 ### Diagnosing Stage 1 Failures
 
@@ -199,7 +202,9 @@ if reward_hacking_risk >= 0.7     → REJECTED (final veto, overrides any approv
 
 `_build_result()` applies one final gate that every approval path funnels through: if Stage 2 reported `reward_hacking_risk >= 0.7` (`REWARD_HACKING_VETO_THRESHOLD`), an otherwise-approved result is flipped to rejected. The threshold is deliberately high so that mild suspicion never blocks a genuine pass.
 
-The veto only turns approve into reject — it never rescues an already-rejected result, so a Stage 3 consensus rejection stays a rejection. When it fires, `failure_reason` names it explicitly rather than reporting `"Unknown failure"`.
+The veto only turns approve into reject — it never rescues an already-rejected result, so a Stage 3 consensus rejection stays a rejection.
+
+`failure_reason` names the veto explicitly only when no earlier branch matched. `_build_result()` tests Stage 1, then Stage 3, then Stage 2 AC non-compliance, and reaches the veto branch last (`evaluation/pipeline.py:307-326`). So when `trigger_consensus=True` carries an `ac_compliance=False` result to an approving Stage 3 and the veto then rejects it, the reported reason is Stage 2 AC non-compliance, not the veto. Read `stage2_result.reward_hacking_risk` directly when you need to know whether the veto fired.
 
 ### Stage 2 Failure Modes
 
@@ -234,7 +239,9 @@ If `ac_compliance` is `false` but `score` seems high, the LLM may have found a p
 
 ## Consensus Trigger Matrix (Stage 2 → Stage 3 Gate)
 
-After Stage 2 passes (`ac_compliance=True`, `score >= 0.8`), trigger conditions are evaluated **in priority order**. The first matching condition triggers Stage 3. If none match, the artifact is approved immediately.
+After a **compliant** Stage 2 result (`ac_compliance=True`), trigger conditions are evaluated **in priority order**. The first matching condition triggers Stage 3. If none match, the `score >= 0.8` gate decides and the artifact is approved immediately when it clears.
+
+Note the ordering: triggers are not gated on the score. The pipeline returns early only for `ac_compliance=False` without `trigger_consensus` (`evaluation/pipeline.py:178`). A compliant result scoring 0.7 with high drift still reaches Stage 3, and Stage 3 can approve it.
 
 | Priority | Trigger | Condition |
 |----------|---------|-----------|
@@ -437,7 +444,7 @@ config = PipelineConfig(stage3_enabled=False)
 | Stage 2 AC non-compliance (`ac_compliance=False`) | `"Stage 2 failed: AC non-compliance (score=0.62)"` |
 | Stage 2 score below threshold (`ac_compliance=True` but `score < 0.8`) | `"Unknown failure"` — the score check runs after Stage 2 but the `failure_reason` property only tests `ac_compliance`. Inspect `stage2_result.score` directly to distinguish this case. |
 | Stage 3 consensus not reached | `"Stage 3 failed: Consensus not reached (44%)"` |
-| Reward-hacking veto (`reward_hacking_risk >= 0.7`) | A message naming the risk score and the 0.70 threshold — the veto is reported, not hidden behind `"Unknown failure"` |
+| Reward-hacking veto (`reward_hacking_risk >= 0.7`) | A message naming the risk score and the 0.70 threshold, **as long as no earlier branch matched**. The order is Stage 1, Stage 3, Stage 2 AC non-compliance, then the veto, so a vetoed result that also had `ac_compliance=False` reports the AC failure instead. Read `stage2_result.reward_hacking_risk` to be sure. |
 | All stages passed/skipped but `final_approved=False` | `"Unknown failure"` |
 
 ---
