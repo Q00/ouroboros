@@ -4556,6 +4556,25 @@ class TestClaudeSetup:
         assert config_dict["orchestrator"]["runtime_backend"] == "claude"
         assert config_dict["llm"]["backend"] == "claude"
 
+    @pytest.mark.parametrize(
+        "setup_name",
+        ["_setup_claude", "_setup_claude_cli", "_setup_claude_sdk"],
+    )
+    def test_setup_claude_profile_activation_failure_prints_no_success(
+        self, setup_name: str
+    ) -> None:
+        with (
+            patch(
+                "ouroboros.cli.commands.claude_setup._activate_claude_runtime_config",
+                return_value=None,
+            ),
+            patch("ouroboros.cli.commands.claude_setup.print_success") as mock_success,
+        ):
+            setup_profile = getattr(setup_cmd, setup_name)
+            assert setup_profile("/usr/local/bin/claude") is False
+
+        mock_success.assert_not_called()
+
     def test_legacy_claude_mcp_registration_shim_is_fail_closed(self, tmp_path: Path) -> None:
         """Older plugin callers cannot reactivate the incompatible MCP path."""
         with patch("pathlib.Path.home", return_value=tmp_path):
@@ -4862,7 +4881,7 @@ raise SystemExit(0 if activate_claude_runtime("/third/claude") else 2)
                 "ouroboros.cli.runtime_activation._promotion_checkpoint",
                 side_effect=_replace_at_last_boundary,
             ),
-            patch("ouroboros.cli.commands.setup.print_success") as mock_success,
+            patch("ouroboros.cli.commands.claude_setup.print_success") as mock_success,
         ):
             assert setup_cmd._setup_claude("/usr/local/bin/claude") is False
 
@@ -5499,7 +5518,7 @@ raise SystemExit(0 if activate_claude_runtime("/second/claude") else 2)
                 "ouroboros.cli.runtime_activation._artifact_cleanup_checkpoint",
                 side_effect=_observe_published_stage_cleanup,
             ),
-            patch("ouroboros.cli.commands.setup.print_success") as mock_success,
+            patch("ouroboros.cli.commands.claude_setup.print_success") as mock_success,
         ):
             assert setup_cmd._setup_claude("/usr/local/bin/claude") is True
 
