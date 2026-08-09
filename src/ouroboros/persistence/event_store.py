@@ -129,7 +129,7 @@ _AC_ACCEPTANCE_DISPOSITIONS = frozenset(
 async def _run_to_settlement[T](
     coro: Coroutine[Any, Any, T],
     *,
-    registry: set[asyncio.Task[Any]] | None = None,
+    registry: set[asyncio.Future[Any]] | None = None,
     refuse_when: Callable[[], bool] | None = None,
     operation: str = "append",
 ) -> T:
@@ -580,7 +580,7 @@ class EventStore:
         await store.close()
     """
 
-    _settling_writes: set[asyncio.Task[Any]]
+    _settling_writes: set[asyncio.Future[Any]]
 
     def __init__(
         self,

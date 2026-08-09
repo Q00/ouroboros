@@ -44,7 +44,7 @@ async def _wait_terminal(job_manager: JobManager, job_id: str) -> JobSnapshot:
     # locally); 60s gives ample headroom without weakening the assertion.
     deadline = time.monotonic() + 60.0
     while time.monotonic() < deadline:
-        snapshot = await job_manager.get_snapshot(job_id)
+        snapshot = await asyncio.wait_for(job_manager.get_snapshot(job_id), timeout=5.0)
         if snapshot.is_terminal:
             return snapshot
         task = job_manager._tasks.get(job_id)

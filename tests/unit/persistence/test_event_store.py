@@ -3038,6 +3038,51 @@ class TestCancellationSettlement:
         await reopened.close()
 
     @pytest.mark.asyncio
+    async def test_close_drains_write_without_waiting_for_owner_task_lifetime(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A writer may await close after its write-specific work has settled."""
+        from ouroboros.persistence import event_store as event_store_module
+
+        db_path = tmp_path / "settle-close-owner-cycle.db"
+        store = EventStore(f"sqlite+aiosqlite:///{db_path}")
+        await store.initialize()
+
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        write_settled = asyncio.Event()
+        original_insert = event_store_module._insert_event
+        close_task: asyncio.Task[None] | None = None
+
+        async def gated_insert(connection, event, projection_ready):  # noqa: ANN001, ANN202
+            entered.set()
+            await release.wait()
+            return await original_insert(connection, event, projection_ready)
+
+        async def write_then_join_close() -> None:
+            await store.append(_make_event(aggregate_id="close-owner-cycle"))
+            write_settled.set()
+            assert close_task is not None
+            await close_task
+
+        monkeypatch.setattr(event_store_module, "_insert_event", gated_insert)
+        writer_task = asyncio.create_task(write_then_join_close())
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        close_task = asyncio.create_task(store.close())
+        await asyncio.sleep(0)
+
+        release.set()
+        await asyncio.wait_for(write_settled.wait(), timeout=5)
+        await asyncio.wait_for(close_task, timeout=5)
+        await asyncio.wait_for(writer_task, timeout=5)
+
+        monkeypatch.setattr(event_store_module, "_insert_event", original_insert)
+        reopened = EventStore(f"sqlite+aiosqlite:///{db_path}")
+        await reopened.initialize()
+        assert len(await reopened.replay("test", "close-owner-cycle")) == 1
+        await reopened.close()
+
+    @pytest.mark.asyncio
     async def test_close_waits_for_settling_batch(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
