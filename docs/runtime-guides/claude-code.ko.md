@@ -61,6 +61,7 @@ ooo
 
 - Claude Code CLI 설치 및 인증 완료 (Pro 또는 Max Plan)
 - **`uvx`** (uv에 포함) — 위에서 설명한 대로 플러그인 MCP 매니페스트가 이걸로 서버를 띄웁니다
+- **`python3`** — 번들 스킬이 셸에서 직접 호출합니다. `uvx`가 이걸 대신하지 않습니다 ([#2001](https://github.com/Q00/ouroboros/issues/2001))
 
 아래 독립 CLI 경로의 `Python >= 3.12` 요구사항은 **이 경로에는 해당하지 않습니다.**
 
