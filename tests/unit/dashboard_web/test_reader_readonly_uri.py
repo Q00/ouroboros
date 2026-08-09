@@ -19,7 +19,9 @@ from ouroboros.dashboard_web.reader import (
     _connect_readonly,
     list_recent_executions,
 )
+from ouroboros.events.base import BaseEvent
 from ouroboros.orchestrator.events import create_workflow_progress_event
+from ouroboros.persistence.event_store import EventStore
 from ouroboros.persistence.picker_index_provisioning import provision_picker_indexes
 from ouroboros.persistence.picker_indexes import (
     DIRECT_EVENT_INDEX,
@@ -1389,6 +1391,92 @@ def test_picker_limit_applies_after_malformed_start_rows_are_skipped(tmp_path) -
     assert [(run["execution_id"], run["goal"]) for run in runs] == [
         ("exec_visible", "Still listed")
     ]
+
+
+async def test_recent_runs_skip_blank_identity_and_preserve_resolvable_padded_identity(
+    tmp_path,
+) -> None:
+    db = tmp_path / "start-identity-whitespace.db"
+    store = EventStore(f"sqlite+aiosqlite:///{db}")
+    await store.initialize()
+    blank_execution_id = " \t\n"
+    padded_execution_id = "  exec-padded \t"
+    blank = BaseEvent(
+        type="orchestrator.session.started",
+        aggregate_type="session",
+        aggregate_id="orch-blank",
+        data={"execution_id": blank_execution_id, "seed_goal": "Never advertised"},
+    )
+    padded = BaseEvent(
+        type="orchestrator.session.started",
+        aggregate_type="session",
+        aggregate_id="orch-padded",
+        data={"execution_id": padded_execution_id, "seed_goal": "Still resolvable"},
+    )
+    await store.append(blank)
+    await store.append(padded)
+    await store.close()
+
+    runs = list_recent_executions(db, limit=10)
+
+    assert [(run["execution_id"], run["goal"]) for run in runs] == [
+        (padded_execution_id, "Still resolvable")
+    ]
+    events = EventTail(db, runs[0]["execution_id"]).fetch_new()
+    assert [(event["event_type"], event["payload"]["execution_id"]) for event in events] == [
+        ("orchestrator.session.started", padded_execution_id)
+    ]
+    conn = sqlite3.connect(db)
+    try:
+        assert conn.execute(
+            f"SELECT execution_id, session_id FROM {PICKER_START_TABLE} ORDER BY event_rowid"
+        ).fetchall() == [(None, "orch-blank"), (padded_execution_id, "orch-padded")]
+    finally:
+        conn.close()
+
+
+async def test_recent_runs_skip_blank_session_and_preserve_resolvable_padded_session(
+    tmp_path,
+) -> None:
+    db = tmp_path / "start-session-whitespace.db"
+    store = EventStore(f"sqlite+aiosqlite:///{db}")
+    await store.initialize()
+    blank_session_id = " \t\n"
+    padded_session_id = "  orch-padded \t"
+    blank = BaseEvent(
+        type="orchestrator.session.started",
+        aggregate_type="session",
+        aggregate_id=blank_session_id,
+        data={"execution_id": "exec-blank-session", "seed_goal": "Never advertised"},
+    )
+    padded = BaseEvent(
+        type="orchestrator.session.started",
+        aggregate_type="session",
+        aggregate_id=padded_session_id,
+        data={"execution_id": "exec-padded-session", "seed_goal": "Still resolvable"},
+    )
+    await store.append(blank)
+    await store.append(padded)
+    await store.close()
+
+    runs = list_recent_executions(db, limit=10)
+
+    assert [(run["execution_id"], run["session_id"], run["goal"]) for run in runs] == [
+        ("exec-padded-session", padded_session_id, "Still resolvable")
+    ]
+    for selected_id in ("exec-padded-session", padded_session_id):
+        events = EventTail(db, selected_id).fetch_new()
+        assert [event["event_type"] for event in events] == ["orchestrator.session.started"]
+    conn = sqlite3.connect(db)
+    try:
+        assert conn.execute(
+            f"SELECT execution_id, session_id FROM {PICKER_START_TABLE} ORDER BY event_rowid"
+        ).fetchall() == [
+            ("exec-blank-session", None),
+            ("exec-padded-session", padded_session_id),
+        ]
+    finally:
+        conn.close()
 
 
 def test_picker_limit_counts_distinct_valid_execution_ids(tmp_path) -> None:

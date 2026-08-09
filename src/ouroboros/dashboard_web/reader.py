@@ -626,14 +626,15 @@ def list_recent_executions(db_path: str | Path, *, limit: int = 10) -> list[dict
                     )
                 if not isinstance(start_payload, dict):
                     continue
-                execution_id = start_payload.get("execution_id")
-                if not isinstance(execution_id, str) or not execution_id:
+                execution_id = expected_execution_id
+                if execution_id is None:
+                    continue
+                session_id = expected_session_id
+                if session_id is None:
                     continue
                 if execution_id in seen_execution_ids:
                     continue
                 seen_execution_ids.add(execution_id)
-                raw_session_id = start["aggregate_id"] or start_payload.get("session_id")
-                session_id = raw_session_id if isinstance(raw_session_id, str) else ""
                 run_specs.append((start, start_payload, execution_id, session_id))
                 if len(run_specs) >= target_count:
                     break
