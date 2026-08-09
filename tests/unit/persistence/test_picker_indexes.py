@@ -14,6 +14,7 @@ import pytest
 from sqlalchemy.exc import IntegrityError, OperationalError
 
 from ouroboros.dashboard_web.reader import (
+    EventTail,
     PickerIndexContractError,
     list_recent_executions,
 )
@@ -27,6 +28,7 @@ from ouroboros.persistence.picker_indexes import (
     PICKER_META_TABLE,
     PICKER_PROGRESS_TABLE,
     PICKER_PROJECTION_SCOPE_SQL,
+    PICKER_PROJECTION_VERSION,
     PICKER_START_TABLE,
     matching_picker_contract,
 )
@@ -105,7 +107,9 @@ async def test_writable_initialize_backfills_exact_projection_on_existing_store(
             f"SELECT latest_valid_rowid, latest_running_rowid, latest_snapshot_rowid "
             f"FROM {PICKER_PROGRESS_TABLE}"
         ).fetchall() == [(3, 2, 2)]
-        assert conn.execute(f"SELECT * FROM {PICKER_META_TABLE}").fetchall() == [(1, 4)]
+        assert conn.execute(f"SELECT * FROM {PICKER_META_TABLE}").fetchall() == [
+            (PICKER_PROJECTION_VERSION, 4)
+        ]
         names = {row[0] for row in conn.execute("SELECT name FROM sqlite_master")}
         assert {DIRECT_EVENT_INDEX} <= names
         assert not (set(OBSOLETE_PICKER_INDEX_NAMES) & names)
@@ -156,7 +160,9 @@ async def test_application_heads_advance_independently(tmp_path) -> None:
     await store.close()
     conn = sqlite3.connect(db)
     try:
-        assert conn.execute(f"SELECT * FROM {PICKER_START_TABLE}").fetchall() == [(1,)]
+        assert conn.execute(f"SELECT * FROM {PICKER_START_TABLE}").fetchall() == [
+            (1, "exec", "orch")
+        ]
         assert conn.execute(
             f"SELECT latest_valid_rowid, latest_running_rowid, latest_snapshot_rowid "
             f"FROM {PICKER_PROGRESS_TABLE}"
@@ -246,7 +252,9 @@ async def test_writable_initialize_repairs_malformed_completion_marker(
     conn = sqlite3.connect(db)
     try:
         assert matching_picker_contract(conn) == frozenset(PICKER_CONTRACT_NAMES)
-        assert conn.execute(f"SELECT * FROM {PICKER_META_TABLE}").fetchall() == [(1, 0)]
+        assert conn.execute(f"SELECT * FROM {PICKER_META_TABLE}").fetchall() == [
+            (PICKER_PROJECTION_VERSION, 0)
+        ]
     finally:
         conn.close()
 
@@ -281,8 +289,13 @@ async def test_nonpositive_legacy_rowids_backfill_with_nonnegative_marker(tmp_pa
     try:
         assert conn.execute(
             f"SELECT * FROM {PICKER_START_TABLE} ORDER BY event_rowid"
-        ).fetchall() == [(-(2**63),), (0,)]
-        assert conn.execute(f"SELECT * FROM {PICKER_META_TABLE}").fetchall() == [(1, 0)]
+        ).fetchall() == [
+            (-(2**63), "exec-min", "orch-min"),
+            (0, "exec-zero", "orch-zero"),
+        ]
+        assert conn.execute(f"SELECT * FROM {PICKER_META_TABLE}").fetchall() == [
+            (PICKER_PROJECTION_VERSION, 0)
+        ]
     finally:
         conn.close()
 
@@ -305,7 +318,7 @@ async def test_raw_old_writer_gap_fails_closed_then_writable_repair_recovers(
                 "EXPLAIN QUERY PLAN SELECT 1 FROM events "
                 f"INDEXED BY {PICKER_GAP_INDEX} "
                 f"WHERE {PICKER_PROJECTION_SCOPE_SQL} "
-                "AND picker_projection_version IS NOT 1 LIMIT 1"
+                f"AND picker_projection_version IS NOT {PICKER_PROJECTION_VERSION} LIMIT 1"
             )
             for column in row
         ).upper()
@@ -316,13 +329,15 @@ async def test_raw_old_writer_gap_fails_closed_then_writable_repair_recovers(
 
     with pytest.raises(PickerIndexContractError, match="contains unprojected relevant events"):
         list_recent_executions(db)
+    with pytest.raises(PickerIndexContractError, match="contains unprojected relevant events"):
+        EventTail(db, "exec-old-writer").fetch_new()
 
     await _initialize(db)
     conn = sqlite3.connect(db)
     try:
         assert conn.execute(
             "SELECT picker_projection_version FROM events WHERE id = ?", (event.id,)
-        ).fetchone() == (1,)
+        ).fetchone() == (PICKER_PROJECTION_VERSION,)
     finally:
         conn.close()
     assert [run["execution_id"] for run in list_recent_executions(db)] == ["exec-old-writer"]
@@ -332,7 +347,8 @@ async def test_raw_old_writer_gap_fails_closed_then_writable_repair_recovers(
     "bad_version",
     [
         pytest.param(0, id="zero"),
-        pytest.param(2, id="future-integer"),
+        pytest.param(1, id="rolling-old-writer"),
+        pytest.param(3, id="future-integer"),
         pytest.param(1.5, id="real"),
         pytest.param("bad", id="text"),
         pytest.param(sqlite3.Binary(b"1"), id="blob"),
@@ -365,6 +381,8 @@ async def test_reader_fails_closed_for_every_malformed_projection_version(
 
     with pytest.raises(PickerIndexContractError, match="contains unprojected relevant events"):
         list_recent_executions(db)
+    with pytest.raises(PickerIndexContractError, match="contains unprojected relevant events"):
+        EventTail(db, "exec-version").fetch_new()
 
 
 def test_reader_fails_closed_for_legacy_events_table_without_version_column(tmp_path) -> None:
@@ -476,12 +494,16 @@ async def test_writable_initialize_backfills_100k_legacy_progress_rows(tmp_path)
 
     conn = sqlite3.connect(db)
     try:
-        assert conn.execute(f"SELECT * FROM {PICKER_START_TABLE}").fetchall() == [(1,)]
+        assert conn.execute(f"SELECT * FROM {PICKER_START_TABLE}").fetchall() == [
+            (1, "exec", "orch")
+        ]
         assert conn.execute(
             f"SELECT latest_valid_rowid, latest_running_rowid, latest_snapshot_rowid "
             f"FROM {PICKER_PROGRESS_TABLE}"
         ).fetchall() == [(100_001, 100_001, 100_001)]
-        assert conn.execute(f"SELECT * FROM {PICKER_META_TABLE}").fetchall() == [(1, 100_001)]
+        assert conn.execute(f"SELECT * FROM {PICKER_META_TABLE}").fetchall() == [
+            (PICKER_PROJECTION_VERSION, 100_001)
+        ]
     finally:
         conn.close()
 
@@ -809,7 +831,9 @@ async def test_writable_initialize_repairs_wrong_projection_objects_and_backfill
     conn = sqlite3.connect(db)
     try:
         assert matching_picker_contract(conn) == frozenset(PICKER_CONTRACT_NAMES)
-        assert conn.execute(f"SELECT * FROM {PICKER_START_TABLE}").fetchall() == [(1,)]
+        assert conn.execute(f"SELECT * FROM {PICKER_START_TABLE}").fetchall() == [
+            (1, "exec", "orch")
+        ]
         assert conn.execute(
             f"SELECT latest_valid_rowid, latest_running_rowid, latest_snapshot_rowid "
             f"FROM {PICKER_PROGRESS_TABLE}"

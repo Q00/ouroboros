@@ -2,9 +2,10 @@
 
 SQLite 3.45 can discard equality constraints on low-quality forced partial
 indexes and scan the complete index.  The writable EventStore therefore owns
-two small explicit-key projections: an append-only start-row keyset and one
-progress-head row per aggregate/event family.  The dashboard validates the
-complete contract before reading either projection and otherwise fails closed.
+two small explicit-key projections: an append-only start-row keyset with exact
+execution/session identity indexes, and one progress-head row per
+aggregate/event family.  The dashboard validates the complete contract before
+reading either projection and otherwise fails closed.
 """
 
 from __future__ import annotations
@@ -120,6 +121,22 @@ WORKFLOW_PROGRESS_SCOPE_SQL = "event_type = 'workflow.progress.updated'"
 SAFE_EXECUTION_ID_SQL = _safe_json_extract("payload", "$.execution_id")
 SAFE_SESSION_ID_SQL = _safe_json_extract("payload", "$.session_id")
 VALID_JSON_SQL = "json_valid(payload) = 1"
+
+
+def _nonblank_text_sql(value_sql: str) -> str:
+    return (
+        "CASE "
+        f"WHEN typeof({value_sql}) = 'text' "
+        f"AND trim({value_sql}, {RUNTIME_STATUS_ASCII_WHITESPACE_SQL}) != '' "
+        f"THEN {value_sql} END"
+    )
+
+
+PICKER_START_EXECUTION_ID_SQL = _nonblank_text_sql(SAFE_EXECUTION_ID_SQL)
+# Session identity is the start event's aggregate identity.  Current producers
+# do not duplicate it in the payload, and legacy EventStore history has always
+# used this aggregate as the orchestration session key.
+PICKER_START_SESSION_ID_SQL = _nonblank_text_sql("aggregate_id")
 PICKER_CANONICAL_LINK_ID_SQL = (
     "CASE "
     f"WHEN typeof({SAFE_EXECUTION_ID_SQL}) = 'text' "
@@ -150,7 +167,9 @@ OBSOLETE_PICKER_INDEX_NAMES: tuple[str, ...] = (
 PICKER_START_TABLE = "dashboard_picker_starts_v1"
 PICKER_PROGRESS_TABLE = "dashboard_picker_progress_v1"
 PICKER_META_TABLE = "dashboard_picker_projection_meta_v1"
-PICKER_PROJECTION_VERSION = 1
+PICKER_PROJECTION_VERSION = 2
+PICKER_START_EXECUTION_INDEX = "ix_dashboard_picker_starts_execution_v2"
+PICKER_START_SESSION_INDEX = "ix_dashboard_picker_starts_session_v2"
 
 DIRECT_EVENT_INDEX_DDL = (
     f"CREATE INDEX IF NOT EXISTS {DIRECT_EVENT_INDEX} "
@@ -160,10 +179,20 @@ DIRECT_EVENT_INDEX_DDL = (
 PICKER_GAP_INDEX_DDL = (
     f"CREATE INDEX IF NOT EXISTS {PICKER_GAP_INDEX} "
     "ON events (event_type) "
-    f"WHERE {PICKER_PROJECTION_SCOPE_SQL} AND picker_projection_version IS NOT 1"
+    f"WHERE {PICKER_PROJECTION_SCOPE_SQL} "
+    f"AND picker_projection_version IS NOT {PICKER_PROJECTION_VERSION}"
 )
 PICKER_START_TABLE_DDL = (
-    f"CREATE TABLE IF NOT EXISTS {PICKER_START_TABLE} (event_rowid INTEGER PRIMARY KEY)"
+    f"CREATE TABLE IF NOT EXISTS {PICKER_START_TABLE} ("
+    "event_rowid INTEGER PRIMARY KEY, execution_id TEXT, session_id TEXT)"
+)
+PICKER_START_EXECUTION_INDEX_DDL = (
+    f"CREATE INDEX IF NOT EXISTS {PICKER_START_EXECUTION_INDEX} "
+    f"ON {PICKER_START_TABLE} (execution_id) WHERE execution_id IS NOT NULL"
+)
+PICKER_START_SESSION_INDEX_DDL = (
+    f"CREATE INDEX IF NOT EXISTS {PICKER_START_SESSION_INDEX} "
+    f"ON {PICKER_START_TABLE} (session_id) WHERE session_id IS NOT NULL"
 )
 PICKER_PROGRESS_TABLE_DDL = (
     f"CREATE TABLE IF NOT EXISTS {PICKER_PROGRESS_TABLE} ("
@@ -178,7 +207,7 @@ PICKER_PROGRESS_TABLE_DDL = (
 )
 PICKER_META_TABLE_DDL = (
     f"CREATE TABLE IF NOT EXISTS {PICKER_META_TABLE} ("
-    "contract_version INTEGER PRIMARY KEY CHECK (contract_version = 1), "
+    f"contract_version INTEGER PRIMARY KEY CHECK (contract_version = {PICKER_PROJECTION_VERSION}), "
     "backfilled_through_rowid INTEGER NOT NULL "
     "CHECK (backfilled_through_rowid >= 0))"
 )
@@ -187,6 +216,8 @@ PICKER_CONTRACT_DDL_BY_NAME: dict[str, str] = {
     DIRECT_EVENT_INDEX: DIRECT_EVENT_INDEX_DDL,
     PICKER_GAP_INDEX: PICKER_GAP_INDEX_DDL,
     PICKER_START_TABLE: PICKER_START_TABLE_DDL,
+    PICKER_START_EXECUTION_INDEX: PICKER_START_EXECUTION_INDEX_DDL,
+    PICKER_START_SESSION_INDEX: PICKER_START_SESSION_INDEX_DDL,
     PICKER_PROGRESS_TABLE: PICKER_PROGRESS_TABLE_DDL,
     PICKER_META_TABLE: PICKER_META_TABLE_DDL,
 }
@@ -194,18 +225,28 @@ PICKER_CONTRACT_NAMES: tuple[str, ...] = tuple(PICKER_CONTRACT_DDL_BY_NAME)
 PICKER_INDEX_NAMES: tuple[str, ...] = (
     DIRECT_EVENT_INDEX,
     PICKER_GAP_INDEX,
+    PICKER_START_EXECUTION_INDEX,
+    PICKER_START_SESSION_INDEX,
 )
 PICKER_INDEX_DDL: tuple[str, ...] = (
     DIRECT_EVENT_INDEX_DDL,
     PICKER_GAP_INDEX_DDL,
+    PICKER_START_EXECUTION_INDEX_DDL,
+    PICKER_START_SESSION_INDEX_DDL,
 )
 PICKER_INDEX_DDL_BY_NAME = {
     DIRECT_EVENT_INDEX: DIRECT_EVENT_INDEX_DDL,
     PICKER_GAP_INDEX: PICKER_GAP_INDEX_DDL,
+    PICKER_START_EXECUTION_INDEX: PICKER_START_EXECUTION_INDEX_DDL,
+    PICKER_START_SESSION_INDEX: PICKER_START_SESSION_INDEX_DDL,
 }
 
 _EXPECTED_TABLE_COLUMNS: dict[str, tuple[tuple[object, ...], ...]] = {
-    PICKER_START_TABLE: (("event_rowid", "INTEGER", 0, 1, 0),),
+    PICKER_START_TABLE: (
+        ("event_rowid", "INTEGER", 0, 1, 0),
+        ("execution_id", "TEXT", 0, 0, 0),
+        ("session_id", "TEXT", 0, 0, 0),
+    ),
     PICKER_PROGRESS_TABLE: (
         ("aggregate_id", "TEXT", 1, 1, 0),
         ("event_type", "TEXT", 1, 2, 0),
@@ -285,6 +326,8 @@ def matching_picker_contract(conn: sqlite3.Connection) -> frozenset[str]:
             expected_keys = {
                 DIRECT_EVENT_INDEX: (None, "event_type"),
                 PICKER_GAP_INDEX: ("event_type",),
+                PICKER_START_EXECUTION_INDEX: ("execution_id",),
+                PICKER_START_SESSION_INDEX: ("session_id",),
             }
             if key_columns != expected_keys[name]:
                 continue
@@ -341,6 +384,12 @@ __all__ = [
     "PICKER_PROGRESS_TABLE_DDL",
     "PICKER_PROJECTION_VERSION",
     "PICKER_START_SCOPE_SQL",
+    "PICKER_START_EXECUTION_ID_SQL",
+    "PICKER_START_EXECUTION_INDEX",
+    "PICKER_START_EXECUTION_INDEX_DDL",
+    "PICKER_START_SESSION_ID_SQL",
+    "PICKER_START_SESSION_INDEX",
+    "PICKER_START_SESSION_INDEX_DDL",
     "PICKER_START_TABLE",
     "PICKER_START_TABLE_DDL",
     "RUNNING_PROGRESS_INDEX",

@@ -32,11 +32,15 @@ from ouroboros.persistence.picker_indexes import (
     PICKER_PROGRESS_TABLE,
     PICKER_PROJECTION_EVENT_TYPES,
     PICKER_PROJECTION_SCOPE_SQL,
+    PICKER_PROJECTION_VERSION,
     PICKER_RELEVANT_EVENT_TYPES,
+    PICKER_START_EXECUTION_ID_SQL,
+    PICKER_START_EXECUTION_INDEX,
+    PICKER_START_SESSION_ID_SQL,
+    PICKER_START_SESSION_INDEX,
     PICKER_START_TABLE,
     RUNNING_PROGRESS_SQL,
     RUNTIME_STATUS_ASCII_WHITESPACE,
-    SAFE_EXECUTION_ID_SQL,
     VALID_JSON_SQL,
     WORKFLOW_PROGRESS_SCOPE_SQL,
     WORKFLOW_SNAPSHOT_SQL,
@@ -249,15 +253,40 @@ class EventTail:
         if self._ids is not None:
             return self._ids
         ids = {self._run_id}
-        rows = conn.execute(
-            f"SELECT aggregate_id, {SAFE_EXECUTION_ID_SQL} AS eid "
-            "FROM events WHERE event_type = 'orchestrator.session.started' "
-            f"AND (aggregate_id = ? OR {SAFE_EXECUTION_ID_SQL} = ?)",
-            [self._run_id, self._run_id],
-        ).fetchall()
+        rows: list[sqlite3.Row] = []
+        for column, index in (
+            ("execution_id", PICKER_START_EXECUTION_INDEX),
+            ("session_id", PICKER_START_SESSION_INDEX),
+        ):
+            rows.extend(
+                conn.execute(
+                    "SELECT projected.event_rowid AS projected_rowid, "
+                    "projected.execution_id AS projected_execution_id, "
+                    "projected.session_id AS projected_session_id, "
+                    "events.rowid, events.event_type, "
+                    f"{PICKER_START_EXECUTION_ID_SQL} AS eid, "
+                    f"{PICKER_START_SESSION_ID_SQL} AS sid "
+                    f"FROM {PICKER_START_TABLE} AS projected INDEXED BY {index} "
+                    "LEFT JOIN events ON events.rowid = projected.event_rowid "
+                    f"WHERE projected.{column} = ?",
+                    [self._run_id],
+                ).fetchall()
+            )
         for row in rows:
-            if row["aggregate_id"]:
-                ids.add(row["aggregate_id"])
+            valid_pointer = (
+                row["rowid"] is not None
+                and row["event_type"] == "orchestrator.session.started"
+                and int(row["rowid"]) == int(row["projected_rowid"])
+                and row["projected_execution_id"] == row["eid"]
+                and row["projected_session_id"] == row["sid"]
+            )
+            if not valid_pointer:
+                raise PickerIndexContractError(
+                    frozenset(),
+                    detail=f"start identity pointer mismatch: {row['projected_rowid']}",
+                )
+            if row["sid"]:
+                ids.add(row["sid"])
             if row["eid"]:
                 ids.add(row["eid"])
         self._ids = sorted(ids)
@@ -269,10 +298,23 @@ class EventTail:
             return []
         conn = _connect_readonly(self._db_path)
         try:
+            conn.execute("BEGIN")
             matching_contract = matching_picker_contract(conn)
             missing_contract = frozenset(PICKER_CONTRACT_NAMES) - matching_contract
             if missing_contract:
                 raise PickerIndexContractError(missing_contract)
+            if (
+                conn.execute(
+                    "SELECT 1 FROM events "
+                    f"INDEXED BY {PICKER_GAP_INDEX} "
+                    f"WHERE {PICKER_PROJECTION_SCOPE_SQL} "
+                    f"AND picker_projection_version IS NOT {PICKER_PROJECTION_VERSION} LIMIT 1"
+                ).fetchone()
+                is not None
+            ):
+                raise PickerIndexContractError(
+                    frozenset(), detail="contains unprojected relevant events"
+                )
             ids = self._resolve_ids(conn)
             projection_type_ph = ",".join("?" for _ in PICKER_PROJECTION_EVENT_TYPES)
             projection_sql = (
@@ -433,6 +475,8 @@ def list_recent_executions(db_path: str | Path, *, limit: int = 10) -> list[dict
         return []
     start_page_sql = (
         "SELECT projected.event_rowid AS projected_rowid, events.rowid, "
+        "projected.execution_id AS projected_execution_id, "
+        "projected.session_id AS projected_session_id, "
         "events.aggregate_id, events.event_type, events.payload "
         f"FROM {PICKER_START_TABLE} AS projected "
         "LEFT JOIN events ON events.rowid = projected.event_rowid "
@@ -459,7 +503,7 @@ def list_recent_executions(db_path: str | Path, *, limit: int = 10) -> list[dict
                 "SELECT 1 FROM events "
                 f"INDEXED BY {PICKER_GAP_INDEX} "
                 f"WHERE {PICKER_PROJECTION_SCOPE_SQL} "
-                "AND picker_projection_version IS NOT 1 LIMIT 1"
+                f"AND picker_projection_version IS NOT {PICKER_PROJECTION_VERSION} LIMIT 1"
             ).fetchone()
             is not None
         ):
@@ -499,6 +543,30 @@ def list_recent_executions(db_path: str | Path, *, limit: int = 10) -> list[dict
                 before_rowid = oldest_rowid - 1
             for start in start_page:
                 start_payload = _decode_payload(start["payload"])
+                raw_execution_id = (
+                    start_payload.get("execution_id") if isinstance(start_payload, dict) else None
+                )
+                expected_execution_id = (
+                    raw_execution_id
+                    if isinstance(raw_execution_id, str)
+                    and raw_execution_id.strip(RUNTIME_STATUS_ASCII_WHITESPACE)
+                    else None
+                )
+                raw_session_id = start["aggregate_id"]
+                expected_session_id = (
+                    raw_session_id
+                    if isinstance(raw_session_id, str)
+                    and raw_session_id.strip(RUNTIME_STATUS_ASCII_WHITESPACE)
+                    else None
+                )
+                if (
+                    start["projected_execution_id"] != expected_execution_id
+                    or start["projected_session_id"] != expected_session_id
+                ):
+                    raise PickerIndexContractError(
+                        frozenset(),
+                        detail=f"start identity pointer mismatch: {start['projected_rowid']}",
+                    )
                 if not isinstance(start_payload, dict):
                     continue
                 execution_id = start_payload.get("execution_id")

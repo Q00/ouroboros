@@ -23,7 +23,13 @@ from ouroboros.persistence.picker_indexes import (
     PICKER_PROGRESS_TABLE_DDL,
     PICKER_PROJECTION_SCOPE_SQL,
     PICKER_PROJECTION_VERSION,
+    PICKER_START_EXECUTION_ID_SQL,
+    PICKER_START_EXECUTION_INDEX,
+    PICKER_START_EXECUTION_INDEX_DDL,
     PICKER_START_SCOPE_SQL,
+    PICKER_START_SESSION_ID_SQL,
+    PICKER_START_SESSION_INDEX,
+    PICKER_START_SESSION_INDEX_DDL,
     PICKER_START_TABLE,
     PICKER_START_TABLE_DDL,
     RUNNING_PROGRESS_SQL,
@@ -61,7 +67,11 @@ def picker_contract_is_complete(connection: Connection) -> bool:
         if normalize_schema_ddl(actual[2]) != normalize_schema_ddl(expected_sql):
             return False
 
-    if _table_columns(connection, PICKER_START_TABLE) != (("event_rowid", "INTEGER", 0, 1, 0),):
+    if _table_columns(connection, PICKER_START_TABLE) != (
+        ("event_rowid", "INTEGER", 0, 1, 0),
+        ("execution_id", "TEXT", 0, 0, 0),
+        ("session_id", "TEXT", 0, 0, 0),
+    ):
         return False
     if _table_columns(connection, PICKER_PROGRESS_TABLE) != (
         ("aggregate_id", "TEXT", 1, 1, 0),
@@ -95,6 +105,8 @@ def picker_contract_is_complete(connection: Connection) -> bool:
     expected_index_keys = {
         DIRECT_EVENT_INDEX: (None, "event_type"),
         PICKER_GAP_INDEX: ("event_type",),
+        PICKER_START_EXECUTION_INDEX: ("execution_id",),
+        PICKER_START_SESSION_INDEX: ("session_id",),
     }
     for name, expected_keys in expected_index_keys.items():
         key_columns = tuple(
@@ -156,7 +168,7 @@ def _projection_has_gaps(connection: Connection) -> bool:
             "SELECT 1 FROM events "
             f"INDEXED BY {PICKER_GAP_INDEX} "
             f"WHERE {PICKER_PROJECTION_SCOPE_SQL} "
-            "AND picker_projection_version IS NOT 1 LIMIT 1"
+            f"AND picker_projection_version IS NOT {PICKER_PROJECTION_VERSION} LIMIT 1"
         ).first()
         is not None
     )
@@ -182,9 +194,13 @@ def _rebuild_projection(connection: Connection) -> None:
     connection.exec_driver_sql(DIRECT_EVENT_INDEX_DDL)
 
     connection.exec_driver_sql(
-        f"INSERT INTO {PICKER_START_TABLE} (event_rowid) "
-        f"SELECT rowid FROM events WHERE {PICKER_START_SCOPE_SQL}"
+        f"INSERT INTO {PICKER_START_TABLE} "
+        "(event_rowid, execution_id, session_id) "
+        f"SELECT rowid, {PICKER_START_EXECUTION_ID_SQL}, "
+        f"{PICKER_START_SESSION_ID_SQL} FROM events WHERE {PICKER_START_SCOPE_SQL}"
     )
+    connection.exec_driver_sql(PICKER_START_EXECUTION_INDEX_DDL)
+    connection.exec_driver_sql(PICKER_START_SESSION_INDEX_DDL)
     connection.exec_driver_sql(
         f"INSERT INTO {PICKER_PROGRESS_TABLE} ("
         "aggregate_id, event_type, latest_valid_rowid, latest_running_rowid, "

@@ -32,7 +32,11 @@ from ouroboros.persistence.picker_indexes import (
     PICKER_PROJECTION_SCOPE_SQL,
     PICKER_PROJECTION_VERSION,
     PICKER_RELEVANT_EVENT_TYPES,
+    PICKER_START_EXECUTION_ID_SQL,
+    PICKER_START_EXECUTION_INDEX,
     PICKER_START_SCOPE_SQL,
+    PICKER_START_SESSION_ID_SQL,
+    PICKER_START_SESSION_INDEX,
     PICKER_START_TABLE,
     RUNNING_PROGRESS_SQL,
     VALID_JSON_SQL,
@@ -98,8 +102,10 @@ def _refresh_picker_contract(conn: sqlite3.Connection) -> None:
     conn.execute(f"DELETE FROM {PICKER_PROGRESS_TABLE}")
     conn.execute(f"DELETE FROM {PICKER_META_TABLE}")
     conn.execute(
-        f"INSERT INTO {PICKER_START_TABLE} (event_rowid) "
-        f"SELECT rowid FROM events WHERE {PICKER_START_SCOPE_SQL}"
+        f"INSERT INTO {PICKER_START_TABLE} "
+        "(event_rowid, execution_id, session_id) "
+        f"SELECT rowid, {PICKER_START_EXECUTION_ID_SQL}, "
+        f"{PICKER_START_SESSION_ID_SQL} FROM events WHERE {PICKER_START_SCOPE_SQL}"
     )
     conn.execute(
         f"INSERT INTO {PICKER_PROGRESS_TABLE} ("
@@ -1718,7 +1724,10 @@ def test_workflow_progress_queries_are_aggregate_bounded_at_scale(
         if "event_type = 'workflow.progress.updated'" in statement
     ]
     tail_workflow_queries = [
-        statement for statement in tail_statements if "'workflow.progress.updated'" in statement
+        statement
+        for statement in tail_statements
+        if "'workflow.progress.updated'" in statement
+        and f"INDEXED BY {PICKER_GAP_INDEX}" not in statement
     ]
     workflow_queries = picker_workflow_queries + tail_workflow_queries
     conn = sqlite3.connect(db)
@@ -2030,6 +2039,130 @@ def test_picker_bounds_large_start_history(tmp_path, monkeypatch) -> None:
     assert all("SCAN events" not in str(row[3]) for plan in start_plans for row in plan)
     assert all("TEMP B-TREE" not in str(row[3]) for plan in start_plans for row in plan)
     assert any("USING INTEGER PRIMARY KEY" in str(row[3]) for plan in start_plans for row in plan)
+
+
+@pytest.mark.parametrize(
+    ("run_id", "expected_index"),
+    [
+        ("exec_target", PICKER_START_EXECUTION_INDEX),
+        ("orch_target", PICKER_START_SESSION_INDEX),
+    ],
+)
+def test_event_tail_bounds_identity_resolution_across_100k_starts(
+    tmp_path,
+    run_id: str,
+    expected_index: str,
+) -> None:
+    db = tmp_path / f"tail-start-identity-{run_id}.db"
+    conn = sqlite3.connect(db)
+    try:
+        conn.execute("CREATE TABLE events (aggregate_id TEXT, event_type TEXT, payload TEXT)")
+        conn.execute("CREATE INDEX ix_events_event_type ON events (event_type)")
+        _install_picker_contract(conn)
+        conn.executemany(
+            "INSERT INTO events (aggregate_id, event_type, payload) VALUES (?, ?, ?)",
+            (
+                (
+                    f"orch_old_{index}",
+                    "orchestrator.session.started",
+                    json.dumps({"execution_id": f"exec_old_{index}"}),
+                )
+                for index in range(99_999)
+            ),
+        )
+        conn.execute(
+            "INSERT INTO events (aggregate_id, event_type, payload) VALUES (?, ?, ?)",
+            (
+                "orch_target",
+                "orchestrator.session.started",
+                json.dumps({"execution_id": "exec_target"}),
+            ),
+        )
+        _refresh_picker_contract(conn)
+        conn.commit()
+        conn.execute("ANALYZE")
+    finally:
+        conn.close()
+
+    traced = _connect_readonly(db)
+    statements: list[str] = []
+    vm_steps = 0
+
+    def count_step() -> int:
+        nonlocal vm_steps
+        vm_steps += 1
+        return 0
+
+    traced.set_trace_callback(statements.append)
+    traced.set_progress_handler(count_step, 1)
+    try:
+        resolved = EventTail(db, run_id)._resolve_ids(traced)
+    finally:
+        traced.close()
+
+    identity_queries = [
+        statement
+        for statement in statements
+        if f"FROM {PICKER_START_TABLE} AS projected INDEXED BY" in statement
+    ]
+    conn = sqlite3.connect(db)
+    try:
+        plans = [
+            conn.execute("EXPLAIN QUERY PLAN " + statement).fetchall()
+            for statement in identity_queries
+        ]
+    finally:
+        conn.close()
+
+    assert resolved == ["exec_target", "orch_target"]
+    assert vm_steps < 500, (vm_steps, plans)
+    assert len(identity_queries) == 2
+    access_paths = {str(row[3]) for plan in plans for row in plan}
+    assert any(expected_index in path for path in access_paths)
+    assert any("USING INTEGER PRIMARY KEY" in path for path in access_paths)
+    assert all("SCAN projected" not in path for path in access_paths)
+    assert all("SCAN events" not in path for path in access_paths)
+    assert all("TEMP B-TREE" not in path for path in access_paths)
+
+
+def test_event_tail_identity_projection_preserves_duplicate_execution_starts(tmp_path) -> None:
+    db = tmp_path / "tail-duplicate-starts.db"
+    _make_events_db(
+        db,
+        [
+            ("orch-one", "orchestrator.session.started", {"execution_id": "exec-shared"}),
+            ("orch-two", "orchestrator.session.started", {"execution_id": "exec-shared"}),
+        ],
+    )
+    conn = _connect_readonly(db)
+    try:
+        assert EventTail(db, "exec-shared")._resolve_ids(conn) == [
+            "exec-shared",
+            "orch-one",
+            "orch-two",
+        ]
+    finally:
+        conn.close()
+
+
+def test_event_tail_fails_closed_for_mismatched_start_identity(tmp_path) -> None:
+    db = tmp_path / "tail-mismatched-start-identity.db"
+    _make_events_db(
+        db,
+        [("orch-target", "orchestrator.session.started", {"execution_id": "exec-target"})],
+    )
+    conn = sqlite3.connect(db)
+    try:
+        conn.execute(
+            f"UPDATE {PICKER_START_TABLE} SET session_id = ? WHERE event_rowid = 1",
+            ("orch-corrupt",),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    with pytest.raises(PickerIndexContractError, match="start identity pointer mismatch"):
+        EventTail(db, "orch-corrupt").fetch_new()
 
 
 @pytest.mark.parametrize(

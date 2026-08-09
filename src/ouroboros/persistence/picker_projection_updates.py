@@ -13,8 +13,11 @@ from ouroboros.persistence.picker_indexes import (
     PICKER_PROGRESS_EVENT_TYPES,
     PICKER_PROGRESS_TABLE,
     PICKER_PROJECTION_VERSION,
+    PICKER_START_EXECUTION_ID_SQL,
+    PICKER_START_SESSION_ID_SQL,
     PICKER_START_TABLE,
     RUNNING_PROGRESS_SQL,
+    RUNTIME_STATUS_ASCII_WHITESPACE,
     VALID_JSON_SQL,
     WORKFLOW_PROGRESS_SCOPE_SQL,
     WORKFLOW_SNAPSHOT_SQL,
@@ -49,30 +52,48 @@ _PROGRESS_UPSERT_SQL = (
 )
 
 
-async def _write_start_rows(conn: Any, rowids: Sequence[int]) -> None:
-    if not rowids:
+def _nonblank_text(value: object) -> str | None:
+    if not isinstance(value, str) or not value.strip(RUNTIME_STATUS_ASCII_WHITESPACE):
+        return None
+    return value
+
+
+def _start_projection(event: BaseEvent, rowid: int) -> tuple[int, str | None, str | None]:
+    return (
+        rowid,
+        _nonblank_text(event.data.get("execution_id")),
+        _nonblank_text(event.aggregate_id),
+    )
+
+
+async def _write_start_rows(
+    conn: Any,
+    starts: Sequence[tuple[int, str | None, str | None]],
+) -> None:
+    if not starts:
         return
-    if len(rowids) == 1:
+    if len(starts) == 1:
         await conn.exec_driver_sql(
-            f"INSERT INTO {PICKER_START_TABLE} (event_rowid) VALUES (?)",
-            (rowids[0],),
+            f"INSERT INTO {PICKER_START_TABLE} "
+            "(event_rowid, execution_id, session_id) VALUES (?, ?, ?)",
+            starts[0],
         )
         return
     await conn.exec_driver_sql(
-        f"INSERT INTO {PICKER_START_TABLE} (event_rowid) "
-        "SELECT CAST(value AS INTEGER) FROM json_each(?)",
-        (json.dumps(rowids),),
+        f"INSERT INTO {PICKER_START_TABLE} "
+        "(event_rowid, execution_id, session_id) VALUES (?, ?, ?)",
+        list(starts),
     )
 
 
 async def _write_projection_rows(conn: Any, rows: Sequence[Any]) -> None:
-    starts: list[int] = []
+    starts: list[tuple[int, str | None, str | None]] = []
     heads: dict[tuple[str, str], list[int | None]] = {}
     for row in rows:
         rowid = int(row[0])
         event_type = str(row[2])
         if event_type == _START_EVENT_TYPE:
-            starts.append(rowid)
+            starts.append((rowid, row[6], row[7]))
             continue
         if not bool(row[3]):
             continue
@@ -97,7 +118,9 @@ async def _project_inserted_ids(conn: Any, event_ids: Sequence[str]) -> None:
         await conn.exec_driver_sql(
             "SELECT events.rowid, events.aggregate_id, events.event_type, "
             f"{VALID_JSON_SQL} AS is_valid, {RUNNING_PROGRESS_SQL} AS is_running, "
-            f"({WORKFLOW_PROGRESS_SCOPE_SQL} AND {WORKFLOW_SNAPSHOT_SQL}) AS is_snapshot "
+            f"({WORKFLOW_PROGRESS_SCOPE_SQL} AND {WORKFLOW_SNAPSHOT_SQL}) AS is_snapshot, "
+            f"{PICKER_START_EXECUTION_ID_SQL} AS start_execution_id, "
+            f"{PICKER_START_SESSION_ID_SQL} AS start_session_id "
             "FROM json_each(?) AS requested "
             "JOIN events ON events.id = requested.value",
             (json.dumps(event_ids),),
@@ -113,7 +136,9 @@ async def _project_inserted_range(conn: Any, first_rowid: int, last_rowid: int) 
         await conn.exec_driver_sql(
             "SELECT rowid, aggregate_id, event_type, "
             f"{VALID_JSON_SQL} AS is_valid, {RUNNING_PROGRESS_SQL} AS is_running, "
-            f"({WORKFLOW_PROGRESS_SCOPE_SQL} AND {WORKFLOW_SNAPSHOT_SQL}) AS is_snapshot "
+            f"({WORKFLOW_PROGRESS_SCOPE_SQL} AND {WORKFLOW_SNAPSHOT_SQL}) AS is_snapshot, "
+            f"{PICKER_START_EXECUTION_ID_SQL} AS start_execution_id, "
+            f"{PICKER_START_SESSION_ID_SQL} AS start_session_id "
             "FROM events WHERE rowid BETWEEN ? AND ? "
             "AND event_type IN (?, ?, ?)",
             (first_rowid, last_rowid, _START_EVENT_TYPE, *PICKER_PROGRESS_EVENT_TYPES),
@@ -149,7 +174,7 @@ async def insert_event_with_picker_projection(
     statement = _fenced_event_writes.insert().values(**_projected_values(event))
     rowid = int((await conn.execute(statement.returning(literal_column("rowid")))).scalar_one())
     if event.type == _START_EVENT_TYPE:
-        await _write_start_rows(conn, (rowid,))
+        await _write_start_rows(conn, (_start_projection(event, rowid),))
         return
     await _project_inserted_range(conn, rowid, rowid)
 
@@ -189,7 +214,12 @@ async def insert_events_with_picker_projection(
     if max(rowids) - min(rowids) + 1 != len(rowids):
         raise RuntimeError("Event batch INSERT rowids were not one contiguous SQLite range.")
     if all(event.type == _START_EVENT_TYPE for event in events):
-        await _write_start_rows(conn, rowids)
+        await _write_start_rows(
+            conn,
+            tuple(
+                _start_projection(event, rowid) for event, rowid in zip(events, rowids, strict=True)
+            ),
+        )
         return
     await _project_inserted_range(conn, min(rowids), max(rowids))
 

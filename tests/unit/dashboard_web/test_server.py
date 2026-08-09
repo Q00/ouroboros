@@ -44,8 +44,9 @@ def _make_events_db(path, *, contract: str) -> None:
         if contract != "missing":
             event_rowid = int(cursor.lastrowid)
             conn.execute(
-                f"INSERT INTO {PICKER_START_TABLE} (event_rowid) VALUES (?)",
-                (event_rowid,),
+                f"INSERT INTO {PICKER_START_TABLE} "
+                "(event_rowid, execution_id, session_id) VALUES (?, ?, ?)",
+                (event_rowid, "exec-http", "orch-http"),
             )
             conn.execute(
                 "UPDATE events SET picker_projection_version = ? WHERE rowid = ?",
