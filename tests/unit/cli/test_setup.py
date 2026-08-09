@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import json
 import os
 from pathlib import Path
@@ -4724,6 +4725,236 @@ raise SystemExit(0 if activate_claude_runtime("/usr/local/bin/claude") else 2)
         config_dir = tmp_path / ".ouroboros"
         assert stat.S_IMODE((config_dir / "config.yaml").stat().st_mode) == config_mode
         assert stat.S_IMODE((config_dir / "credentials.yaml").stat().st_mode) == 0o600
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX symlink semantics")
+    def test_setup_claude_supports_linked_home_with_real_activation_directory(
+        self, tmp_path: Path
+    ) -> None:
+        """A linked home parent resolves to one pinned physical generation."""
+        real_home = tmp_path / "real-home"
+        real_home.mkdir()
+        linked_home = tmp_path / "linked-home"
+        linked_home.symlink_to(real_home, target_is_directory=True)
+        config_dir = linked_home / ".ouroboros"
+        config_dir.mkdir()
+
+        with patch("ouroboros.config.models.get_config_dir", return_value=config_dir):
+            result = runtime_activation.activate_claude_runtime("/usr/local/bin/claude")
+
+        assert result == config_dir / "config.yaml"
+
+        physical_config_dir = real_home / ".ouroboros"
+        assert physical_config_dir.is_dir()
+        assert not physical_config_dir.is_symlink()
+        config = yaml.safe_load((physical_config_dir / "config.yaml").read_text(encoding="utf-8"))
+        assert config["orchestrator"]["cli_path"] == "/usr/local/bin/claude"
+        assert (physical_config_dir / "credentials.yaml").is_file()
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX symlink semantics")
+    def test_setup_claude_rejects_linked_home_retarget_before_parent_pin(
+        self, tmp_path: Path
+    ) -> None:
+        """A home link retarget during selection cannot redirect activation."""
+        real_home = tmp_path / "real-home"
+        real_home.mkdir()
+        real_config_dir = real_home / ".ouroboros"
+        real_config_dir.mkdir()
+        victim_home = tmp_path / "victim-home"
+        victim_home.mkdir()
+        victim_config_dir = victim_home / ".ouroboros"
+        victim_config_dir.mkdir()
+        victim_marker = victim_config_dir / "operator.marker"
+        victim_marker.write_bytes(b"foreign")
+        linked_home = tmp_path / "linked-home"
+        linked_home.symlink_to(real_home, target_is_directory=True)
+        config_dir = linked_home / ".ouroboros"
+        injected = False
+
+        def _retarget_parent(phase: str, path: Path) -> None:
+            nonlocal injected
+            if phase != "parent-resolved" or path != linked_home or injected:
+                return
+            injected = True
+            linked_home.unlink()
+            linked_home.symlink_to(victim_home, target_is_directory=True)
+
+        with (
+            patch("ouroboros.config.models.get_config_dir", return_value=config_dir),
+            patch(
+                "ouroboros.cli.runtime_activation._directory_authority_checkpoint",
+                side_effect=_retarget_parent,
+            ),
+        ):
+            assert setup_cmd._setup_claude("/usr/local/bin/claude") is False
+
+        assert injected
+        assert not (real_config_dir / "config.yaml").exists()
+        assert not (victim_config_dir / "config.yaml").exists()
+        assert victim_marker.read_bytes() == b"foreign"
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX symlink semantics")
+    def test_setup_claude_linked_home_retarget_after_publish_rolls_back_selected_parent(
+        self, tmp_path: Path
+    ) -> None:
+        """A late home retarget rolls back only within the pinned physical parent."""
+        real_home = tmp_path / "real-home"
+        real_home.mkdir()
+        real_config_dir = real_home / ".ouroboros"
+        real_config_dir.mkdir()
+        real_config = real_config_dir / "config.yaml"
+        original = b"orchestrator:\n  runtime_backend: codex\nllm:\n  backend: codex\n"
+        real_config.write_bytes(original)
+        real_credentials = self._write_credentials(real_config_dir)
+        credentials_before = real_credentials.read_bytes()
+        victim_home = tmp_path / "victim-home"
+        victim_home.mkdir()
+        victim_config_dir = victim_home / ".ouroboros"
+        victim_config_dir.mkdir()
+        victim_marker = victim_config_dir / "operator.marker"
+        victim_marker.write_bytes(b"foreign")
+        linked_home = tmp_path / "linked-home"
+        linked_home.symlink_to(real_home, target_is_directory=True)
+        requested_config_dir = linked_home / ".ouroboros"
+        injected = False
+
+        def _retarget_after_publish(name: str) -> None:
+            nonlocal injected
+            if name != "config" or injected:
+                return
+            injected = True
+            linked_home.unlink()
+            linked_home.symlink_to(victim_home, target_is_directory=True)
+
+        with (
+            patch(
+                "ouroboros.config.models.get_config_dir",
+                return_value=requested_config_dir,
+            ),
+            patch(
+                "ouroboros.cli.runtime_activation._publication_checkpoint",
+                side_effect=_retarget_after_publish,
+            ),
+        ):
+            assert setup_cmd._setup_claude("/usr/local/bin/claude") is False
+
+        assert injected
+        assert real_config.read_bytes() == original
+        assert real_credentials.read_bytes() == credentials_before
+        assert not (victim_config_dir / "config.yaml").exists()
+        assert victim_marker.read_bytes() == b"foreign"
+
+    def test_windows_junction_parent_contract_uses_resolved_physical_authority(
+        self, tmp_path: Path
+    ) -> None:
+        """The Windows branch leases physical paths behind a junction-like parent."""
+        real_home = tmp_path / "real-home"
+        real_home.mkdir()
+        physical_config_dir = real_home / ".ouroboros"
+        physical_config_dir.mkdir()
+        linked_home = tmp_path / "linked-home"
+        linked_home.symlink_to(real_home, target_is_directory=True)
+        requested_config_dir = linked_home / ".ouroboros"
+        locked: list[Path] = []
+        leased: list[Path] = []
+
+        @contextmanager
+        def _record_lock(path: Path, **_kwargs: object):
+            locked.append(path)
+            yield
+
+        @contextmanager
+        def _record_lease(path: Path):
+            leased.append(path)
+            yield
+
+        with (
+            patch("ouroboros.cli.runtime_activation.os.name", "nt"),
+            patch(
+                "ouroboros.cli.runtime_activation.file_lock",
+                side_effect=_record_lock,
+            ),
+            patch(
+                "ouroboros.cli.runtime_activation._windows_directory_lease",
+                side_effect=_record_lease,
+            ),
+        ):
+            with runtime_activation._activation_directory_authority(
+                requested_config_dir
+            ) as selected:
+                assert selected == physical_config_dir.resolve()
+                runtime_activation._require_active_directory_binding()
+
+        assert locked == [real_home.resolve() / runtime_activation._ACTIVATION_LOCK_NAME]
+        assert leased == [physical_config_dir.resolve()]
+
+    def test_windows_junction_parent_contract_rejects_visible_retarget(
+        self, tmp_path: Path
+    ) -> None:
+        """A junction-like binding change fails without selecting the new target."""
+        real_home = tmp_path / "real-home"
+        real_home.mkdir()
+        physical_config_dir = real_home / ".ouroboros"
+        physical_config_dir.mkdir()
+        victim_home = tmp_path / "victim-home"
+        victim_home.mkdir()
+        victim_config_dir = victim_home / ".ouroboros"
+        victim_config_dir.mkdir()
+        victim_marker = victim_config_dir / "operator.marker"
+        victim_marker.write_bytes(b"foreign")
+        linked_home = tmp_path / "linked-home"
+        linked_home.symlink_to(real_home, target_is_directory=True)
+        requested_config_dir = linked_home / ".ouroboros"
+
+        @contextmanager
+        def _no_op_authority(*_args: object, **_kwargs: object):
+            yield
+
+        with (
+            patch("ouroboros.cli.runtime_activation.os.name", "nt"),
+            patch(
+                "ouroboros.cli.runtime_activation.file_lock",
+                side_effect=_no_op_authority,
+            ),
+            patch(
+                "ouroboros.cli.runtime_activation._windows_directory_lease",
+                side_effect=_no_op_authority,
+            ),
+            pytest.raises(runtime_activation._ConcurrentActivationError),
+        ):
+            with runtime_activation._activation_directory_authority(requested_config_dir):
+                linked_home.unlink()
+                linked_home.symlink_to(victim_home, target_is_directory=True)
+
+        assert not (physical_config_dir / "config.yaml").exists()
+        assert not (victim_config_dir / "config.yaml").exists()
+        assert victim_marker.read_bytes() == b"foreign"
+
+    def test_windows_junction_parent_contract_still_rejects_reparse_leaf(
+        self, tmp_path: Path
+    ) -> None:
+        """Resolving the home parent never permits a linked `.ouroboros` leaf."""
+        real_home = tmp_path / "real-home"
+        real_home.mkdir()
+        victim_config_dir = tmp_path / "victim-config"
+        victim_config_dir.mkdir()
+        victim_marker = victim_config_dir / "operator.marker"
+        victim_marker.write_bytes(b"foreign")
+        (real_home / ".ouroboros").symlink_to(
+            victim_config_dir,
+            target_is_directory=True,
+        )
+        linked_home = tmp_path / "linked-home"
+        linked_home.symlink_to(real_home, target_is_directory=True)
+        requested_config_dir = linked_home / ".ouroboros"
+
+        with (
+            patch("ouroboros.cli.runtime_activation.os.name", "nt"),
+            pytest.raises(ValueError, match="Activation directory must be real"),
+        ):
+            with runtime_activation._activation_directory_authority(requested_config_dir):
+                pytest.fail("a reparse activation-directory leaf must never be selected")
+
+        assert victim_marker.read_bytes() == b"foreign"
 
     @pytest.mark.skipif(os.name == "nt", reason="POSIX directory-fd authority")
     def test_setup_claude_precreation_symlink_never_cleans_foreign_topology(

@@ -72,7 +72,10 @@ class _DirectoryAuthority:
 
     path: Path
     directory_fd: int | None
-    parent_directory_fd: int | None = None
+    parent_directory_fd: int | None
+    requested_parent: Path
+    directory_identity: tuple[int, int]
+    parent_identity: tuple[int, int]
 
 
 _ACTIVE_DIRECTORY_AUTHORITY: ContextVar[_DirectoryAuthority | None] = ContextVar(
@@ -173,21 +176,46 @@ def _require_active_directory_binding() -> None:
     authority = _ACTIVE_DIRECTORY_AUTHORITY.get()
     if authority is None:
         raise _ConcurrentActivationError("Activation directory authority is unavailable")
-    if authority.directory_fd is None or authority.parent_directory_fd is None:
-        current = _snapshot_target(authority.path)
-        if current.kind != "directory":
+    try:
+        selected_parent = os.stat(authority.path.parent, follow_symlinks=False)
+        requested_parent = os.stat(authority.requested_parent)
+        _require_real_directory(selected_parent, authority.path.parent)
+        _require_real_directory(requested_parent, authority.requested_parent)
+        if (
+            _directory_identity(selected_parent) != authority.parent_identity
+            or _directory_identity(requested_parent) != authority.parent_identity
+        ):
+            raise _ConcurrentActivationError(
+                f"Activation parent changed: {authority.requested_parent}"
+            )
+
+        if authority.directory_fd is None or authority.parent_directory_fd is None:
+            current = os.stat(authority.path, follow_symlinks=False)
+            _require_real_directory(current, authority.path)
+            if _directory_identity(current) != authority.directory_identity:
+                raise _ConcurrentActivationError(f"Activation directory changed: {authority.path}")
+            return
+
+        opened_parent = os.fstat(authority.parent_directory_fd)
+        current = os.stat(
+            authority.path.name,
+            dir_fd=authority.parent_directory_fd,
+            follow_symlinks=False,
+        )
+        opened = os.fstat(authority.directory_fd)
+        _require_real_directory(opened_parent, authority.path.parent)
+        _require_real_directory(current, authority.path)
+        _require_real_directory(opened, authority.path)
+        if (
+            _directory_identity(opened_parent) != authority.parent_identity
+            or _directory_identity(current) != authority.directory_identity
+            or _directory_identity(opened) != authority.directory_identity
+        ):
             raise _ConcurrentActivationError(f"Activation directory changed: {authority.path}")
-        return
-    current = os.stat(
-        authority.path.name,
-        dir_fd=authority.parent_directory_fd,
-        follow_symlinks=False,
-    )
-    opened = os.fstat(authority.directory_fd)
-    _require_real_directory(current, authority.path)
-    _require_real_directory(opened, authority.path)
-    if _directory_identity(current) != _directory_identity(opened):
-        raise _ConcurrentActivationError(f"Activation directory changed: {authority.path}")
+    except FileNotFoundError as exc:
+        raise _ConcurrentActivationError(
+            f"Activation directory binding disappeared: {authority.path}"
+        ) from exc
 
 
 def fsync_parent_directory(file_path: Path) -> bool:
@@ -1132,6 +1160,44 @@ def _require_real_directory(result: os.stat_result, path: Path) -> None:
         raise ValueError(f"Activation directory must be a real directory: {path}")
 
 
+def _select_activation_parent(parent: Path) -> tuple[Path, tuple[int, int]]:
+    """Resolve one requested home parent and prove the selected generation.
+
+    The user-visible home may itself be a POSIX symlink or Windows junction.
+    Descendant mutations use the resolved physical parent, while the original
+    binding remains part of the active authority and is revalidated throughout
+    activation.  The selected directory and the requested path must identify
+    the same generation before any lockfile or configuration mutation.
+    """
+    selected = parent.resolve(strict=True)
+    _directory_authority_checkpoint("parent-resolved", parent)
+    selected_result = os.stat(selected, follow_symlinks=False)
+    requested_result = os.stat(parent)
+    _require_real_directory(selected_result, selected)
+    _require_real_directory(requested_result, parent)
+    selected_identity = _directory_identity(selected_result)
+    if _directory_identity(requested_result) != selected_identity:
+        raise _ConcurrentActivationError(f"Activation parent changed: {parent}")
+    return selected, selected_identity
+
+
+def _require_selected_parent_binding(
+    requested: Path,
+    selected: Path,
+    expected_identity: tuple[int, int],
+) -> None:
+    """Revalidate both names for a previously selected parent generation."""
+    selected_result = os.stat(selected, follow_symlinks=False)
+    requested_result = os.stat(requested)
+    _require_real_directory(selected_result, selected)
+    _require_real_directory(requested_result, requested)
+    if (
+        _directory_identity(selected_result) != expected_identity
+        or _directory_identity(requested_result) != expected_identity
+    ):
+        raise _ConcurrentActivationError(f"Activation parent changed: {requested}")
+
+
 def _fsync_directory_descriptor(descriptor: int, path: Path) -> None:
     """Confirm one directory-entry mutation when the filesystem supports it."""
     try:
@@ -1192,52 +1258,78 @@ def _open_or_create_directory_at(
 
 @contextmanager
 def _activation_directory_authority(config_dir: Path) -> Iterator[Path]:
-    """Create and pin ``config_dir`` without following a replaced pathname."""
-    parent = config_dir.parent
-    lock_target = parent / _ACTIVATION_LOCK_NAME
+    """Resolve the home parent, then pin a no-follow activation-directory leaf."""
+    requested_parent = config_dir.parent
+    selected_parent, parent_identity = _select_activation_parent(requested_parent)
+    selected_config_dir = selected_parent / config_dir.name
+    lock_target = selected_parent / _ACTIVATION_LOCK_NAME
 
     if os.name == "nt":  # pragma: no cover - exercised on Windows
-        # The parent lease stabilizes the lock authority. A second lease on the
-        # config directory itself prevents rename/delete topology swaps while
-        # descendant operations remain path based on Windows.
-        before = _snapshot_target(config_dir)
+        # Resolve a junction-backed home before acquiring leases. The lock
+        # authority then pins the physical parent, and a second lease on the
+        # non-reparse config-directory leaf prevents rename/delete topology
+        # swaps while descendant operations remain path based on Windows.
+        before = _snapshot_target(selected_config_dir)
         if before.kind not in {"missing", "directory"}:
-            raise ValueError(f"Activation directory must be real: {config_dir}")
+            raise ValueError(f"Activation directory must be real: {selected_config_dir}")
         with file_lock(lock_target, stable_parent_authority=True):
+            _require_selected_parent_binding(
+                requested_parent,
+                selected_parent,
+                parent_identity,
+            )
             created: _FileSnapshot | None = None
             if before.kind == "missing":
-                _directory_authority_checkpoint("before-create", config_dir)
+                _directory_authority_checkpoint("before-create", selected_config_dir)
                 try:
-                    config_dir.mkdir()
+                    selected_config_dir.mkdir()
                 except FileExistsError as exc:
                     raise _ConcurrentActivationError(
-                        f"Activation directory appeared concurrently: {config_dir}"
+                        f"Activation directory appeared concurrently: {selected_config_dir}"
                     ) from exc
-                created = _snapshot_target(config_dir)
+                created = _snapshot_target(selected_config_dir)
                 if created.kind != "directory":
                     raise _ConcurrentActivationError(
-                        f"Created activation directory changed: {config_dir}"
+                        f"Created activation directory changed: {selected_config_dir}"
                     )
-                _directory_authority_checkpoint("created-snapshotted", config_dir)
-            with _windows_directory_lease(config_dir):
-                selected = _snapshot_target(config_dir)
+                _directory_authority_checkpoint("created-snapshotted", selected_config_dir)
+            with _windows_directory_lease(selected_config_dir):
+                selected = _snapshot_target(selected_config_dir)
                 if selected.kind != "directory":
-                    raise _ConcurrentActivationError(f"Activation directory changed: {config_dir}")
+                    raise _ConcurrentActivationError(
+                        f"Activation directory changed: {selected_config_dir}"
+                    )
                 if before.kind == "directory" and selected != before:
-                    raise _ConcurrentActivationError(f"Activation directory changed: {config_dir}")
+                    raise _ConcurrentActivationError(
+                        f"Activation directory changed: {selected_config_dir}"
+                    )
                 if created is not None and selected != created:
                     raise _ConcurrentActivationError(
-                        f"Created activation directory changed: {config_dir}"
+                        f"Created activation directory changed: {selected_config_dir}"
                     )
-                for child in (config_dir / "data", config_dir / "logs"):
+                if selected.device is None or selected.inode is None:
+                    raise _ConcurrentActivationError(
+                        f"Activation directory identity unavailable: {selected_config_dir}"
+                    )
+                for child in (selected_config_dir / "data", selected_config_dir / "logs"):
                     child_before = _snapshot_target(child)
                     if child_before.kind == "missing":
                         child.mkdir()
                     elif child_before.kind != "directory":
                         raise ValueError(f"Activation directory must be real: {child}")
-                token = _ACTIVE_DIRECTORY_AUTHORITY.set(_DirectoryAuthority(config_dir, None))
+                token = _ACTIVE_DIRECTORY_AUTHORITY.set(
+                    _DirectoryAuthority(
+                        selected_config_dir,
+                        None,
+                        None,
+                        requested_parent,
+                        (selected.device, selected.inode),
+                        parent_identity,
+                    )
+                )
                 try:
-                    yield config_dir
+                    _require_active_directory_binding()
+                    yield selected_config_dir
                     _require_active_directory_binding()
                 finally:
                     _ACTIVE_DIRECTORY_AUTHORITY.reset(token)
@@ -1245,36 +1337,53 @@ def _activation_directory_authority(config_dir: Path) -> Iterator[Path]:
 
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
     flags |= getattr(os, "O_CLOEXEC", 0)
-    parent_fd = os.open(parent, flags)
+    parent_fd = os.open(selected_parent, flags)
     config_fd = -1
     child_descriptors: list[int] = []
     try:
         opened_parent = os.fstat(parent_fd)
-        current_parent = os.stat(parent, follow_symlinks=False)
-        _require_real_directory(opened_parent, parent)
-        _require_real_directory(current_parent, parent)
-        if _directory_identity(opened_parent) != _directory_identity(current_parent):
-            raise _ConcurrentActivationError(f"Activation parent changed: {parent}")
+        _require_real_directory(opened_parent, selected_parent)
+        if _directory_identity(opened_parent) != parent_identity:
+            raise _ConcurrentActivationError(f"Activation parent changed: {requested_parent}")
+        _require_selected_parent_binding(
+            requested_parent,
+            selected_parent,
+            parent_identity,
+        )
         with file_lock(
             lock_target,
             parent_fd=parent_fd,
             stable_parent_authority=True,
         ):
+            _require_selected_parent_binding(
+                requested_parent,
+                selected_parent,
+                parent_identity,
+            )
             config_fd, _created_config = _open_or_create_directory_at(
-                parent_fd, config_dir.name, config_dir
+                parent_fd, selected_config_dir.name, selected_config_dir
             )
             for child_name in ("data", "logs"):
                 child_fd, _created_child = _open_or_create_directory_at(
                     config_fd,
                     child_name,
-                    config_dir / child_name,
+                    selected_config_dir / child_name,
                 )
                 child_descriptors.append(child_fd)
+            directory_identity = _directory_identity(os.fstat(config_fd))
             token = _ACTIVE_DIRECTORY_AUTHORITY.set(
-                _DirectoryAuthority(config_dir, config_fd, parent_fd)
+                _DirectoryAuthority(
+                    selected_config_dir,
+                    config_fd,
+                    parent_fd,
+                    requested_parent,
+                    directory_identity,
+                    parent_identity,
+                )
             )
             try:
-                yield config_dir
+                _require_active_directory_binding()
+                yield selected_config_dir
                 _require_active_directory_binding()
             finally:
                 _ACTIVE_DIRECTORY_AUTHORITY.reset(token)
@@ -1305,6 +1414,7 @@ def activate_claude_runtime(
     )
 
     config_dir_candidate = get_config_dir()
+    requested_config_path = config_dir_candidate / "config.yaml"
     try:
         with _activation_directory_authority(config_dir_candidate) as config_dir:
             _require_active_directory_binding()
@@ -1481,13 +1591,13 @@ def activate_claude_runtime(
                     journal,
                     journal_snapshot,
                 )
-                return config_path
+                return requested_config_path
             except _CommittedCleanupError as exc:
                 print_warning(
                     "Claude configuration committed; recovery-artifact cleanup "
                     f"will be retried on the next invocation: {exc}"
                 )
-                return config_path
+                return requested_config_path
             except BaseException as exc:
                 if isinstance(exc, _PostPublicationError):
                     rollback_snapshot = (

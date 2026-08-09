@@ -316,6 +316,11 @@ and disposal. Any concurrent hardlink alias keeps its original bytes. If the
 guarded move itself cannot be proven, setup preserves the pathname, recovery
 journal, and every observed generation for human handoff.
 
+Symlinked POSIX home directories and junction-backed Windows home directories
+are supported: setup resolves and pins the selected physical home generation
+before mutation. The `.ouroboros` directory itself must still be a regular,
+non-symlink/non-reparse directory and is identity-checked throughout activation.
+
 > **Codex config split:** use `ouroboros config` or `ouroboros config --web` to choose **Use Codex default model** (Codex's current default) or **Enter another model ID…** to pin a model for each pipeline stage, including Execute. The web view is the same settings UI as the terminal TUI. `~/.codex/config.toml` remains the Codex MCP/env hookup file; user-created Codex `--profile` settings remain supported. If you run a long-lived URL-based Ouroboros MCP server, setup preserves that user-managed entry in the default `--mcp-mode auto`; use `--mcp-mode stdio` only when you intentionally want setup to replace it.
 
 ### Brownfield Subcommands
