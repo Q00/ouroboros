@@ -1183,7 +1183,7 @@ If `uvx` is unavailable, use the package-isolated pipx runner:
   "mcpServers": {
     "ouroboros": {
       "command": "pipx",
-      "args": ["run", "--spec", "ouroboros-ai[mcp]", "ouroboros", "mcp", "serve"]
+      "args": ["run", "--spec", "ouroboros-ai[mcp]", "ouroboros", "mcp", "serve", "--runtime", "claude-cli", "--llm-backend", "claude_code"]
     }
   }
 }

@@ -382,6 +382,66 @@ class TestLoadConfig:
         assert config.execution.auto_evolve is True
         assert config.execution.auto_evolve_max_generations == 3
 
+    @pytest.mark.parametrize("surface", ["top_level", "default", "stage"])
+    def test_load_config_accepts_claude_mcp_runtime_surfaces(
+        self,
+        tmp_path: Path,
+        surface: str,
+    ) -> None:
+        orchestrator: dict[str, object]
+        if surface == "top_level":
+            orchestrator = {"runtime_backend": "claude_mcp"}
+        elif surface == "default":
+            orchestrator = {"runtime_profile": {"default": "claude_mcp"}}
+        else:
+            orchestrator = {
+                "runtime_profile": {"stages": {"execute": "claude_mcp"}},
+            }
+        config_path = tmp_path / f"{surface}.yaml"
+        config_path.write_text(
+            yaml.safe_dump({"orchestrator": orchestrator}),
+            encoding="utf-8",
+        )
+
+        config = load_config(config_path)
+
+        if surface == "top_level":
+            assert config.orchestrator.runtime_backend == "claude_mcp"
+        else:
+            assert config.orchestrator.runtime_profile is not None
+            if surface == "default":
+                assert config.orchestrator.runtime_profile.default == "claude_mcp"
+            else:
+                assert config.orchestrator.runtime_profile.stages == {"execute": "claude_mcp"}
+
+    @pytest.mark.parametrize(
+        ("orchestrator", "expected_surface"),
+        [
+            ({"runtime_backend": "unknown-runtime"}, "runtime_backend"),
+            ({"runtime_profile": {"default": "unknown-runtime"}}, "runtime_profile.default"),
+            (
+                {"runtime_profile": {"stages": {"execute": "unknown-runtime"}}},
+                "runtime_profile.stages",
+            ),
+        ],
+    )
+    def test_load_config_rejects_unknown_runtime_surfaces(
+        self,
+        tmp_path: Path,
+        orchestrator: dict[str, object],
+        expected_surface: str,
+    ) -> None:
+        config_path = tmp_path / "invalid-runtime.yaml"
+        config_path.write_text(
+            yaml.safe_dump({"orchestrator": orchestrator}),
+            encoding="utf-8",
+        )
+
+        with pytest.raises(ConfigError) as exc_info:
+            load_config(config_path)
+
+        assert expected_surface in str(exc_info.value)
+
     def test_load_config_execution_tui_autolaunch(self, tmp_path: Path) -> None:
         """load_config accepts the execution TUI auto-launch toggle."""
         config_path = tmp_path / "config.yaml"

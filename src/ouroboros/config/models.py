@@ -467,6 +467,7 @@ VALID_RUNTIME_BACKENDS = frozenset(
     {
         "claude",
         "claude_code",
+        "claude_mcp",
         "codex",
         "codex_cli",
         "opencode",

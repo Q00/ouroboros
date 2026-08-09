@@ -380,6 +380,52 @@ def test_mcp_serve_documentation_names_runtime_and_public_claude_aliases() -> No
                 assert "--runtime" in command, doc_path
 
 
+def test_cli_reference_isolated_mcp_launchers_have_bootable_runtime_contract() -> None:
+    """Both documented isolated launchers pin the MCP 2 Claude worker explicitly."""
+    cli_reference = Path("docs/cli-reference.md").read_text(encoding="utf-8")
+    integration_section = cli_reference.split("**MCP host integration:**", 1)[1].split(
+        "**Runtime selection**",
+        1,
+    )[0]
+    launcher_blocks = [
+        json.loads(block.split("\n```", 1)[0])
+        for block in integration_section.split("```json\n")[1:]
+    ]
+    launchers = [block["mcpServers"]["ouroboros"] for block in launcher_blocks]
+
+    assert launchers == [
+        {
+            "command": "uvx",
+            "args": [
+                "--from",
+                "ouroboros-ai[mcp]",
+                "ouroboros",
+                "mcp",
+                "serve",
+                "--runtime",
+                "claude-cli",
+                "--llm-backend",
+                "claude_code",
+            ],
+        },
+        {
+            "command": "pipx",
+            "args": [
+                "run",
+                "--spec",
+                "ouroboros-ai[mcp]",
+                "ouroboros",
+                "mcp",
+                "serve",
+                "--runtime",
+                "claude-cli",
+                "--llm-backend",
+                "claude_code",
+            ],
+        },
+    ]
+
+
 def test_python_version_constraint():
     """Test that Python version is set to >=3.12."""
     root = Path(__file__).parent.parent.parent
