@@ -687,9 +687,11 @@ def _matches_game_2d(ledger: SeedDraftLedger) -> bool:
         return True
     if not _GAME_SHARED_SHAPE_RE.search(visible):
         return False
-    if _GAME_DOMAIN_RE.search(visible):
-        return True
-    return not _ledger_has_browser_context(ledger)
+    # Shared render/screen/frame vocabulary requires POSITIVE game
+    # ownership (#1813 R108): the absence of browser context is not a
+    # game signal — a PDF generator rendering report pages to disk is
+    # not a game because it isn't a web app.
+    return bool(_GAME_DOMAIN_RE.search(visible))
 
 
 def _matches_refactor_in_place(ledger: SeedDraftLedger) -> bool:
@@ -1644,7 +1646,18 @@ def _matches_web_app(ledger: SeedDraftLedger) -> bool:
     # ordinary user-flow outputs ("users authenticate, manage roles")
     # need no widget vocabulary. The section token must be the
     # environment itself — a re-headed browser artifact ("browser
-    # extension runtime") does not qualify.
+    # extension runtime") does not qualify. The fallback honors the same
+    # runtime authority as the tiered grants (#1813 R108): an
+    # affirmative non-browser host keeps ownership over engine mentions
+    # riding along in its own description.
+    fallback_runtime_env = _strip_negated_signals(
+        _POSTPOSITIVE_BROWSER_DENIAL_RE.sub(" ", runtime),
+        _WEB_APP_GOAL_SIGNAL_FRAGMENT,
+    )
+    if _NON_BROWSER_RUNTIME_RE.search(fallback_runtime_env) and not _SECTION_BROWSER_ENV_RE.search(
+        _strip_verification_clauses(fallback_runtime_env)
+    ):
+        return False
     return bool(_SECTION_BROWSER_ENV_RE.search(_section_browser_context_text(ledger)))
 
 

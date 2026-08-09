@@ -4722,6 +4722,35 @@ def test_engine_attachment_is_not_the_environment() -> None:
     assert TaskClass.WEB_APP not in result.classes
 
 
+def test_bundled_engine_accompaniment_keeps_native_ownership() -> None:
+    """R108 guard: a bare accompaniment preposition before the engine
+    name ships the engine inside the host — an Electron desktop runtime
+    with Chromium stays native on every grant path."""
+    ledger = _bare_ledger("Build a native desktop dashboard")
+    _seed_section(ledger, "outputs", value="Settings form and navigation sidebar")
+    _seed_section(ledger, "runtime_context", value="Electron desktop runtime with Chromium")
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes
+
+
+@pytest.mark.parametrize(
+    ("goal", "outputs"),
+    [
+        ("Build a PDF report generator", "Report pages rendered to disk"),
+        ("Build an image renderer", "PNG frames written to the output folder"),
+        ("Build a documentation compiler", "HTML files rendered from markdown"),
+    ],
+)
+def test_shared_render_vocabulary_needs_positive_game_ownership(goal: str, outputs: str) -> None:
+    """R108 guard: render/screen/frame vocabulary owns game_2d only with
+    game-domain evidence — not being a web app is not being a game."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value=outputs)
+    _seed_section(ledger, "runtime_context", value="Local batch process")
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.GAME_2D not in result.classes
+
+
 def test_library_tokens_premodifying_ui_heads_are_content() -> None:
     """R106 guard: "package search form" and "package detail pages"
     render content about packages — the registry frontend keeps a clean
