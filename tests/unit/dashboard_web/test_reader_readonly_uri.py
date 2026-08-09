@@ -36,7 +36,7 @@ from ouroboros.persistence.picker_indexes import (
     PICKER_START_EXECUTION_INDEX,
     PICKER_START_SCOPE_SQL,
     PICKER_START_SESSION_ID_SQL,
-    PICKER_START_SESSION_INDEX,
+    PICKER_START_SESSION_TABLE,
     PICKER_START_TABLE,
     RUNNING_PROGRESS_SQL,
     VALID_JSON_SQL,
@@ -99,6 +99,7 @@ def _install_picker_contract(conn: sqlite3.Connection) -> None:
 def _refresh_picker_contract(conn: sqlite3.Connection) -> None:
     """Backfill fixtures using the production projection's stored-row rules."""
     conn.execute(f"DELETE FROM {PICKER_START_TABLE}")
+    conn.execute(f"DELETE FROM {PICKER_START_SESSION_TABLE}")
     conn.execute(f"DELETE FROM {PICKER_PROGRESS_TABLE}")
     conn.execute(f"DELETE FROM {PICKER_META_TABLE}")
     conn.execute(
@@ -106,6 +107,13 @@ def _refresh_picker_contract(conn: sqlite3.Connection) -> None:
         "(event_rowid, execution_id, session_id) "
         f"SELECT rowid, {PICKER_START_EXECUTION_ID_SQL}, "
         f"{PICKER_START_SESSION_ID_SQL} FROM events WHERE {PICKER_START_SCOPE_SQL}"
+    )
+    conn.execute(
+        f"INSERT OR IGNORE INTO {PICKER_START_SESSION_TABLE} "
+        "(session_id, execution_id, event_rowid) "
+        "SELECT session_id, coalesce(execution_id, ''), MIN(event_rowid) "
+        f"FROM {PICKER_START_TABLE} WHERE session_id IS NOT NULL "
+        "GROUP BY session_id, execution_id"
     )
     conn.execute(
         f"INSERT INTO {PICKER_PROGRESS_TABLE} ("
@@ -2045,7 +2053,7 @@ def test_picker_bounds_large_start_history(tmp_path, monkeypatch) -> None:
     ("run_id", "expected_index"),
     [
         ("exec_target", PICKER_START_EXECUTION_INDEX),
-        ("orch_target", PICKER_START_SESSION_INDEX),
+        ("orch_target", "PRIMARY KEY"),
     ],
 )
 def test_event_tail_bounds_identity_resolution_across_100k_starts(
@@ -2103,7 +2111,8 @@ def test_event_tail_bounds_identity_resolution_across_100k_starts(
     identity_queries = [
         statement
         for statement in statements
-        if f"FROM {PICKER_START_TABLE} AS projected INDEXED BY" in statement
+        if f"FROM {PICKER_START_TABLE} AS projected" in statement
+        or f"FROM {PICKER_START_SESSION_TABLE} AS lookup" in statement
     ]
     conn = sqlite3.connect(db)
     try:
@@ -2163,6 +2172,50 @@ def test_event_tail_fails_closed_for_mismatched_start_identity(tmp_path) -> None
 
     with pytest.raises(PickerIndexContractError, match="start identity pointer mismatch"):
         EventTail(db, "orch-corrupt").fetch_new()
+
+
+@pytest.mark.parametrize(
+    ("corruption_sql", "run_id", "expected_detail"),
+    [
+        (
+            f"DELETE FROM {PICKER_START_SESSION_TABLE}",
+            "orch-target",
+            "start identity pointer mismatch",
+        ),
+        (
+            f"DELETE FROM {PICKER_START_SESSION_TABLE}",
+            "exec-target",
+            "start identity pointer mismatch",
+        ),
+        (
+            f"DELETE FROM {PICKER_START_TABLE}",
+            "orch-target",
+            "start identity pointer mismatch",
+        ),
+        (
+            f"UPDATE {PICKER_START_SESSION_TABLE} SET execution_id = 'exec-corrupt'",
+            "orch-target",
+            "start identity pointer mismatch",
+        ),
+    ],
+)
+def test_event_tail_fails_closed_for_missing_dangling_or_mismatched_session_map(
+    tmp_path, corruption_sql: str, run_id: str, expected_detail: str
+) -> None:
+    db = tmp_path / "tail-corrupt-session-map.db"
+    _make_events_db(
+        db,
+        [("orch-target", "orchestrator.session.started", {"execution_id": "exec-target"})],
+    )
+    conn = sqlite3.connect(db)
+    try:
+        conn.execute(corruption_sql)
+        conn.commit()
+    finally:
+        conn.close()
+
+    with pytest.raises(PickerIndexContractError, match=expected_detail):
+        EventTail(db, run_id).fetch_new()
 
 
 @pytest.mark.parametrize(

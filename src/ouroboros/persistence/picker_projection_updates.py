@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from functools import lru_cache
 import json
 from typing import Any
 
@@ -15,6 +16,7 @@ from ouroboros.persistence.picker_indexes import (
     PICKER_PROJECTION_VERSION,
     PICKER_START_EXECUTION_ID_SQL,
     PICKER_START_SESSION_ID_SQL,
+    PICKER_START_SESSION_TABLE,
     PICKER_START_TABLE,
     RUNNING_PROGRESS_SQL,
     RUNTIME_STATUS_ASCII_WHITESPACE,
@@ -66,6 +68,30 @@ def _start_projection(event: BaseEvent, rowid: int) -> tuple[int, str | None, st
     )
 
 
+@lru_cache(maxsize=32)
+def _start_values_sql(table: str, prefix: str, row_count: int) -> str:
+    values = ",".join("(?, ?, ?)" for _ in range(row_count))
+    return f"{prefix} INTO {table} VALUES {values}"
+
+
+async def _write_start_batch(
+    conn: Any,
+    table: str,
+    prefix: str,
+    rows: Sequence[tuple[object, object, object]],
+) -> None:
+    # 5,000 rows stay below SQLite's long-standing 32,766 bind limit while
+    # avoiding the JSON encode/parse loop and per-row executemany VM setup.
+    chunk_size = 5_000
+    for offset in range(0, len(rows), chunk_size):
+        chunk = rows[offset : offset + chunk_size]
+        parameters = tuple(value for row in chunk for value in row)
+        await conn.exec_driver_sql(
+            _start_values_sql(table, prefix, len(chunk)),
+            parameters,
+        )
+
+
 async def _write_start_rows(
     conn: Any,
     starts: Sequence[tuple[int, str | None, str | None]],
@@ -78,12 +104,31 @@ async def _write_start_rows(
             "(event_rowid, execution_id, session_id) VALUES (?, ?, ?)",
             starts[0],
         )
-        return
-    await conn.exec_driver_sql(
-        f"INSERT INTO {PICKER_START_TABLE} "
-        "(event_rowid, execution_id, session_id) VALUES (?, ?, ?)",
-        list(starts),
-    )
+    else:
+        await _write_start_batch(
+            conn,
+            PICKER_START_TABLE,
+            "INSERT",
+            starts,
+        )
+    session_rows: dict[tuple[str, str], int] = {}
+    for event_rowid, execution_id, session_id in starts:
+        if session_id is None:
+            continue
+        key = (session_id, execution_id or "")
+        prior = session_rows.get(key)
+        if prior is None or event_rowid < prior:
+            session_rows[key] = event_rowid
+    if session_rows:
+        await _write_start_batch(
+            conn,
+            PICKER_START_SESSION_TABLE,
+            "INSERT OR IGNORE",
+            tuple(
+                (session_id, execution_id, event_rowid)
+                for (session_id, execution_id), event_rowid in session_rows.items()
+            ),
+        )
 
 
 async def _write_projection_rows(conn: Any, rows: Sequence[Any]) -> None:
@@ -187,12 +232,11 @@ async def insert_events_with_picker_projection(
     """Insert one batch while keeping every relevant projection in its transaction."""
     relevant = [event for event in events if event.type in _RELEVANT_TYPES]
     statement = events_table.insert()
-    values = [event.to_db_dict() for event in events]
     if not relevant:
-        await conn.execute(statement, values)
+        await conn.execute(statement, [event.to_db_dict() for event in events])
         return
     if not projection_ready:
-        await conn.execute(statement, values)
+        await conn.execute(statement, [event.to_db_dict() for event in events])
         return
     projected_statement = _fenced_event_writes.insert()
     projected_values = [_projected_values(event) for event in events]
@@ -201,6 +245,36 @@ async def insert_events_with_picker_projection(
         relevant_ids = [event.id for event in relevant]
         await _project_inserted_ids(conn, relevant_ids)
         return
+    if all(event.type == _START_EVENT_TYPE for event in events):
+        result = await conn.execute(projected_statement, projected_values)
+        if result.rowcount != len(events):
+            raise RuntimeError("Event batch INSERT did not write every requested start event.")
+        last_rowid = int((await conn.exec_driver_sql("SELECT last_insert_rowid()")).scalar_one())
+        first_rowid = last_rowid - len(events) + 1
+        if first_rowid <= 0:
+            raise RuntimeError("Start batch INSERT did not expose a valid SQLite rowid range.")
+        boundary_rows = (
+            await conn.exec_driver_sql(
+                "SELECT events.id, events.rowid FROM json_each(?) AS requested "
+                "JOIN events ON events.id = requested.value",
+                (json.dumps([events[0].id, events[-1].id]),),
+            )
+        ).fetchall()
+        boundaries = {str(row[0]): int(row[1]) for row in boundary_rows}
+        if boundaries != {events[0].id: first_rowid, events[-1].id: last_rowid}:
+            raise RuntimeError("Start batch INSERT rowids were not one contiguous SQLite range.")
+        await _write_start_rows(
+            conn,
+            tuple(
+                _start_projection(event, rowid)
+                for event, rowid in zip(
+                    events,
+                    range(first_rowid, last_rowid + 1),
+                    strict=True,
+                )
+            ),
+        )
+        return
     raw_rowids = list(
         (
             await conn.execute(
@@ -208,19 +282,11 @@ async def insert_events_with_picker_projection(
             )
         ).scalars()
     )
-    if len(raw_rowids) != len(values) or not all(isinstance(rowid, int) for rowid in raw_rowids):
+    if len(raw_rowids) != len(events) or not all(isinstance(rowid, int) for rowid in raw_rowids):
         raise RuntimeError("Event batch INSERT did not return one integer rowid per event.")
     rowids = [int(rowid) for rowid in raw_rowids]
     if max(rowids) - min(rowids) + 1 != len(rowids):
         raise RuntimeError("Event batch INSERT rowids were not one contiguous SQLite range.")
-    if all(event.type == _START_EVENT_TYPE for event in events):
-        await _write_start_rows(
-            conn,
-            tuple(
-                _start_projection(event, rowid) for event, rowid in zip(events, rowids, strict=True)
-            ),
-        )
-        return
     await _project_inserted_range(conn, min(rowids), max(rowids))
 
 

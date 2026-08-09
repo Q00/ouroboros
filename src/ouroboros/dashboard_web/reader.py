@@ -37,7 +37,7 @@ from ouroboros.persistence.picker_indexes import (
     PICKER_START_EXECUTION_ID_SQL,
     PICKER_START_EXECUTION_INDEX,
     PICKER_START_SESSION_ID_SQL,
-    PICKER_START_SESSION_INDEX,
+    PICKER_START_SESSION_TABLE,
     PICKER_START_TABLE,
     RUNNING_PROGRESS_SQL,
     RUNTIME_STATUS_ASCII_WHITESPACE,
@@ -253,28 +253,25 @@ class EventTail:
         if self._ids is not None:
             return self._ids
         ids = {self._run_id}
-        rows: list[sqlite3.Row] = []
-        for column, index in (
-            ("execution_id", PICKER_START_EXECUTION_INDEX),
-            ("session_id", PICKER_START_SESSION_INDEX),
-        ):
-            rows.extend(
-                conn.execute(
-                    "SELECT projected.event_rowid AS projected_rowid, "
-                    "projected.execution_id AS projected_execution_id, "
-                    "projected.session_id AS projected_session_id, "
-                    "events.rowid, events.event_type, "
-                    f"{PICKER_START_EXECUTION_ID_SQL} AS eid, "
-                    f"{PICKER_START_SESSION_ID_SQL} AS sid "
-                    f"FROM {PICKER_START_TABLE} AS projected INDEXED BY {index} "
-                    "LEFT JOIN events ON events.rowid = projected.event_rowid "
-                    f"WHERE projected.{column} = ?",
-                    [self._run_id],
-                ).fetchall()
-            )
-        for row in rows:
+        execution_rows = conn.execute(
+            "SELECT projected.event_rowid AS projected_rowid, "
+            "projected.execution_id AS projected_execution_id, "
+            "projected.session_id AS projected_session_id, "
+            "events.rowid, events.event_type, "
+            f"{PICKER_START_EXECUTION_ID_SQL} AS eid, "
+            f"{PICKER_START_SESSION_ID_SQL} AS sid "
+            f"FROM {PICKER_START_TABLE} AS projected "
+            f"INDEXED BY {PICKER_START_EXECUTION_INDEX} "
+            "LEFT JOIN events ON events.rowid = projected.event_rowid "
+            "WHERE projected.execution_id = ?",
+            [self._run_id],
+        ).fetchall()
+        expected_map_keys: set[tuple[str, str]] = set()
+        session_ids: set[str] = set()
+        for row in execution_rows:
             valid_pointer = (
-                row["rowid"] is not None
+                row["projected_rowid"] is not None
+                and row["rowid"] is not None
                 and row["event_type"] == "orchestrator.session.started"
                 and int(row["rowid"]) == int(row["projected_rowid"])
                 and row["projected_execution_id"] == row["eid"]
@@ -287,8 +284,68 @@ class EventTail:
                 )
             if row["sid"]:
                 ids.add(row["sid"])
+                session_ids.add(row["sid"])
+                expected_map_keys.add((row["sid"], row["eid"] or ""))
             if row["eid"]:
                 ids.add(row["eid"])
+
+        if not execution_rows:
+            session_ids.add(self._run_id)
+        map_rows: list[sqlite3.Row] = []
+        for session_id in session_ids:
+            map_rows.extend(
+                conn.execute(
+                    "SELECT projected.event_rowid AS projected_rowid, "
+                    "projected.execution_id AS projected_execution_id, "
+                    "projected.session_id AS projected_session_id, "
+                    "lookup.event_rowid AS lookup_rowid, "
+                    "lookup.execution_id AS lookup_execution_id, "
+                    "lookup.session_id AS lookup_session_id, "
+                    "events.rowid, events.event_type, "
+                    f"{PICKER_START_EXECUTION_ID_SQL} AS eid, "
+                    f"{PICKER_START_SESSION_ID_SQL} AS sid "
+                    f"FROM {PICKER_START_SESSION_TABLE} AS lookup "
+                    f"LEFT JOIN {PICKER_START_TABLE} AS projected "
+                    "ON projected.event_rowid = lookup.event_rowid "
+                    "LEFT JOIN events ON events.rowid = projected.event_rowid "
+                    "WHERE lookup.session_id = ?",
+                    [session_id],
+                ).fetchall()
+            )
+        if not execution_rows and not map_rows:
+            raise PickerIndexContractError(
+                frozenset(),
+                detail=f"start identity pointer mismatch: missing for {self._run_id}",
+            )
+        actual_map_keys: set[tuple[str, str]] = set()
+        for row in map_rows:
+            valid_pointer = (
+                row["projected_rowid"] is not None
+                and row["lookup_rowid"] is not None
+                and row["rowid"] is not None
+                and row["event_type"] == "orchestrator.session.started"
+                and int(row["rowid"]) == int(row["projected_rowid"])
+                and int(row["lookup_rowid"]) == int(row["projected_rowid"])
+                and row["lookup_execution_id"] == (row["projected_execution_id"] or "")
+                and row["lookup_session_id"] == row["projected_session_id"]
+                and row["projected_execution_id"] == row["eid"]
+                and row["projected_session_id"] == row["sid"]
+            )
+            if not valid_pointer:
+                raise PickerIndexContractError(
+                    frozenset(),
+                    detail=f"start identity pointer mismatch: {row['projected_rowid']}",
+                )
+            actual_map_keys.add((row["lookup_session_id"], row["lookup_execution_id"]))
+            if row["sid"]:
+                ids.add(row["sid"])
+            if row["eid"]:
+                ids.add(row["eid"])
+        if not expected_map_keys.issubset(actual_map_keys):
+            raise PickerIndexContractError(
+                frozenset(),
+                detail=f"start identity pointer mismatch: missing for {self._run_id}",
+            )
         self._ids = sorted(ids)
         return self._ids
 

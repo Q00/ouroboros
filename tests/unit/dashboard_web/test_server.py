@@ -17,6 +17,7 @@ from ouroboros.persistence.picker_indexes import (
     PICKER_CONTRACT_DDL_BY_NAME,
     PICKER_META_TABLE,
     PICKER_PROJECTION_VERSION,
+    PICKER_START_SESSION_TABLE,
     PICKER_START_TABLE,
 )
 
@@ -47,6 +48,11 @@ def _make_events_db(path, *, contract: str) -> None:
                 f"INSERT INTO {PICKER_START_TABLE} "
                 "(event_rowid, execution_id, session_id) VALUES (?, ?, ?)",
                 (event_rowid, "exec-http", "orch-http"),
+            )
+            conn.execute(
+                f"INSERT INTO {PICKER_START_SESSION_TABLE} "
+                "(session_id, execution_id, event_rowid) VALUES (?, ?, ?)",
+                ("orch-http", "exec-http", event_rowid),
             )
             conn.execute(
                 "UPDATE events SET picker_projection_version = ? WHERE rowid = ?",

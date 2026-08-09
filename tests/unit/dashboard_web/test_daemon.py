@@ -19,6 +19,7 @@ from ouroboros.persistence.picker_indexes import (
     PICKER_PROJECTION_VERSION,
     PICKER_START_EXECUTION_ID_SQL,
     PICKER_START_SESSION_ID_SQL,
+    PICKER_START_SESSION_TABLE,
     PICKER_START_TABLE,
 )
 
@@ -42,6 +43,13 @@ def _backfill_picker_starts(conn: sqlite3.Connection) -> None:
         f"INSERT INTO {PICKER_START_TABLE} (event_rowid, execution_id, session_id) "
         f"SELECT rowid, {PICKER_START_EXECUTION_ID_SQL}, {PICKER_START_SESSION_ID_SQL} "
         "FROM events WHERE event_type = 'orchestrator.session.started'"
+    )
+    conn.execute(
+        f"INSERT OR IGNORE INTO {PICKER_START_SESSION_TABLE} "
+        "(session_id, execution_id, event_rowid) "
+        "SELECT session_id, coalesce(execution_id, ''), MIN(event_rowid) "
+        f"FROM {PICKER_START_TABLE} WHERE session_id IS NOT NULL "
+        "GROUP BY session_id, execution_id"
     )
     conn.execute(
         f"UPDATE events SET picker_projection_version = ? WHERE {PICKER_PROJECTION_SCOPE_SQL}",

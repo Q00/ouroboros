@@ -158,6 +158,7 @@ RUNNING_PROGRESS_INDEX = "ix_events_picker_running_progress_v1"
 WORKFLOW_SNAPSHOT_INDEX = "ix_events_picker_workflow_snapshot_v1"
 OBSOLETE_PICKER_INDEX_NAMES: tuple[str, ...] = (
     "ix_events_picker_direct_aggregate_event_v1",
+    "ix_dashboard_picker_starts_session_v2",
     START_EVENT_INDEX,
     AGGREGATE_EVENT_INDEX,
     RUNNING_PROGRESS_INDEX,
@@ -165,11 +166,11 @@ OBSOLETE_PICKER_INDEX_NAMES: tuple[str, ...] = (
 )
 
 PICKER_START_TABLE = "dashboard_picker_starts_v1"
+PICKER_START_SESSION_TABLE = "dashboard_picker_start_sessions_v1"
 PICKER_PROGRESS_TABLE = "dashboard_picker_progress_v1"
 PICKER_META_TABLE = "dashboard_picker_projection_meta_v1"
-PICKER_PROJECTION_VERSION = 2
+PICKER_PROJECTION_VERSION = 3
 PICKER_START_EXECUTION_INDEX = "ix_dashboard_picker_starts_execution_v2"
-PICKER_START_SESSION_INDEX = "ix_dashboard_picker_starts_session_v2"
 
 DIRECT_EVENT_INDEX_DDL = (
     f"CREATE INDEX IF NOT EXISTS {DIRECT_EVENT_INDEX} "
@@ -190,9 +191,10 @@ PICKER_START_EXECUTION_INDEX_DDL = (
     f"CREATE INDEX IF NOT EXISTS {PICKER_START_EXECUTION_INDEX} "
     f"ON {PICKER_START_TABLE} (execution_id) WHERE execution_id IS NOT NULL"
 )
-PICKER_START_SESSION_INDEX_DDL = (
-    f"CREATE INDEX IF NOT EXISTS {PICKER_START_SESSION_INDEX} "
-    f"ON {PICKER_START_TABLE} (session_id) WHERE session_id IS NOT NULL"
+PICKER_START_SESSION_TABLE_DDL = (
+    f"CREATE TABLE IF NOT EXISTS {PICKER_START_SESSION_TABLE} ("
+    "session_id TEXT NOT NULL, execution_id TEXT NOT NULL, event_rowid INTEGER NOT NULL, "
+    "PRIMARY KEY (session_id, execution_id)) WITHOUT ROWID"
 )
 PICKER_PROGRESS_TABLE_DDL = (
     f"CREATE TABLE IF NOT EXISTS {PICKER_PROGRESS_TABLE} ("
@@ -217,7 +219,7 @@ PICKER_CONTRACT_DDL_BY_NAME: dict[str, str] = {
     PICKER_GAP_INDEX: PICKER_GAP_INDEX_DDL,
     PICKER_START_TABLE: PICKER_START_TABLE_DDL,
     PICKER_START_EXECUTION_INDEX: PICKER_START_EXECUTION_INDEX_DDL,
-    PICKER_START_SESSION_INDEX: PICKER_START_SESSION_INDEX_DDL,
+    PICKER_START_SESSION_TABLE: PICKER_START_SESSION_TABLE_DDL,
     PICKER_PROGRESS_TABLE: PICKER_PROGRESS_TABLE_DDL,
     PICKER_META_TABLE: PICKER_META_TABLE_DDL,
 }
@@ -226,19 +228,16 @@ PICKER_INDEX_NAMES: tuple[str, ...] = (
     DIRECT_EVENT_INDEX,
     PICKER_GAP_INDEX,
     PICKER_START_EXECUTION_INDEX,
-    PICKER_START_SESSION_INDEX,
 )
 PICKER_INDEX_DDL: tuple[str, ...] = (
     DIRECT_EVENT_INDEX_DDL,
     PICKER_GAP_INDEX_DDL,
     PICKER_START_EXECUTION_INDEX_DDL,
-    PICKER_START_SESSION_INDEX_DDL,
 )
 PICKER_INDEX_DDL_BY_NAME = {
     DIRECT_EVENT_INDEX: DIRECT_EVENT_INDEX_DDL,
     PICKER_GAP_INDEX: PICKER_GAP_INDEX_DDL,
     PICKER_START_EXECUTION_INDEX: PICKER_START_EXECUTION_INDEX_DDL,
-    PICKER_START_SESSION_INDEX: PICKER_START_SESSION_INDEX_DDL,
 }
 
 _EXPECTED_TABLE_COLUMNS: dict[str, tuple[tuple[object, ...], ...]] = {
@@ -246,6 +245,11 @@ _EXPECTED_TABLE_COLUMNS: dict[str, tuple[tuple[object, ...], ...]] = {
         ("event_rowid", "INTEGER", 0, 1, 0),
         ("execution_id", "TEXT", 0, 0, 0),
         ("session_id", "TEXT", 0, 0, 0),
+    ),
+    PICKER_START_SESSION_TABLE: (
+        ("session_id", "TEXT", 1, 1, 0),
+        ("execution_id", "TEXT", 1, 2, 0),
+        ("event_rowid", "INTEGER", 1, 0, 0),
     ),
     PICKER_PROGRESS_TABLE: (
         ("aggregate_id", "TEXT", 1, 1, 0),
@@ -327,7 +331,6 @@ def matching_picker_contract(conn: sqlite3.Connection) -> frozenset[str]:
                 DIRECT_EVENT_INDEX: (None, "event_type"),
                 PICKER_GAP_INDEX: ("event_type",),
                 PICKER_START_EXECUTION_INDEX: ("execution_id",),
-                PICKER_START_SESSION_INDEX: ("session_id",),
             }
             if key_columns != expected_keys[name]:
                 continue
@@ -388,8 +391,8 @@ __all__ = [
     "PICKER_START_EXECUTION_INDEX",
     "PICKER_START_EXECUTION_INDEX_DDL",
     "PICKER_START_SESSION_ID_SQL",
-    "PICKER_START_SESSION_INDEX",
-    "PICKER_START_SESSION_INDEX_DDL",
+    "PICKER_START_SESSION_TABLE",
+    "PICKER_START_SESSION_TABLE_DDL",
     "PICKER_START_TABLE",
     "PICKER_START_TABLE_DDL",
     "RUNNING_PROGRESS_INDEX",

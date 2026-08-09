@@ -11,6 +11,7 @@ from statistics import median
 import time
 
 import pytest
+from sqlalchemy import event as sqlalchemy_event
 from sqlalchemy.exc import IntegrityError, OperationalError
 
 from ouroboros.dashboard_web.reader import (
@@ -29,6 +30,7 @@ from ouroboros.persistence.picker_indexes import (
     PICKER_PROGRESS_TABLE,
     PICKER_PROJECTION_SCOPE_SQL,
     PICKER_PROJECTION_VERSION,
+    PICKER_START_SESSION_TABLE,
     PICKER_START_TABLE,
     matching_picker_contract,
 )
@@ -167,6 +169,217 @@ async def test_application_heads_advance_independently(tmp_path) -> None:
             f"SELECT latest_valid_rowid, latest_running_rowid, latest_snapshot_rowid "
             f"FROM {PICKER_PROGRESS_TABLE}"
         ).fetchall() == [(4, 3, 2)]
+    finally:
+        conn.close()
+
+
+async def test_start_batch_uses_one_bulk_insert_without_losing_identity_or_large_rowids(
+    tmp_path,
+) -> None:
+    from ouroboros.persistence.picker_projection_updates import (
+        insert_events_with_picker_projection,
+    )
+
+    db = tmp_path / "start-batch-json.db"
+    store = EventStore(f"sqlite+aiosqlite:///{db}")
+    await store.initialize()
+    assert store._engine is not None
+    starts = [
+        BaseEvent(
+            type="orchestrator.session.started",
+            aggregate_type="session",
+            aggregate_id="orch-雪-'\n",
+            data={"execution_id": 'exec-☃-"-\t'},
+        ),
+        BaseEvent(
+            type="orchestrator.session.started",
+            aggregate_type="session",
+            aggregate_id="orch-plain",
+            data={"execution_id": "exec-plain"},
+        ),
+        BaseEvent(
+            type="orchestrator.session.started",
+            aggregate_type="session",
+            aggregate_id="orch-雪-'\n",
+            data={"execution_id": 'exec-☃-"-\t'},
+        ),
+    ]
+    projection_inserts: list[tuple[str, bool]] = []
+    event_batch_inserts: list[str] = []
+
+    def capture_start_insert(
+        _connection, _cursor, statement, _parameters, _context, executemany
+    ) -> None:
+        if statement.lstrip().startswith("INSERT INTO dashboard_picker_starts_v1"):
+            projection_inserts.append((statement, bool(executemany)))
+        if statement.lstrip().startswith("INSERT INTO events") and executemany:
+            event_batch_inserts.append(statement)
+
+    sqlalchemy_event.listen(
+        store._engine.sync_engine,
+        "before_cursor_execute",
+        capture_start_insert,
+    )
+    large_rowid = 2**53 + 7
+    try:
+        async with store._engine.begin() as connection:
+            await connection.exec_driver_sql(
+                "INSERT INTO events "
+                "(rowid, id, aggregate_type, aggregate_id, event_type, payload, "
+                "picker_projection_version) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    large_rowid,
+                    "00000000-0000-0000-0000-000000000000",
+                    "noise",
+                    "noise",
+                    "telemetry.unrelated",
+                    "{}",
+                    None,
+                ),
+            )
+            await insert_events_with_picker_projection(
+                connection,
+                starts,
+                projection_ready=True,
+            )
+    finally:
+        sqlalchemy_event.remove(
+            store._engine.sync_engine,
+            "before_cursor_execute",
+            capture_start_insert,
+        )
+        await store.close()
+
+    assert len(projection_inserts) == 1
+    statement, executemany = projection_inserts[0]
+    assert statement.count("(?, ?, ?)") == len(starts)
+    assert executemany is False
+    assert len(event_batch_inserts) == 1
+    assert "RETURNING" not in event_batch_inserts[0]
+    conn = sqlite3.connect(db)
+    try:
+        assert conn.execute(
+            f"SELECT event_rowid, execution_id, session_id FROM {PICKER_START_TABLE} "
+            "ORDER BY event_rowid"
+        ).fetchall() == [
+            (large_rowid + 1, 'exec-☃-"-\t', "orch-雪-'\n"),
+            (large_rowid + 2, "exec-plain", "orch-plain"),
+            (large_rowid + 3, 'exec-☃-"-\t', "orch-雪-'\n"),
+        ]
+        assert conn.execute(
+            f"SELECT session_id, execution_id, event_rowid "
+            f"FROM {PICKER_START_SESSION_TABLE} ORDER BY session_id"
+        ).fetchall() == [
+            ("orch-plain", "exec-plain", large_rowid + 2),
+            ("orch-雪-'\n", 'exec-☃-"-\t', large_rowid + 1),
+        ]
+    finally:
+        conn.close()
+
+    traced = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    traced.row_factory = sqlite3.Row
+    vm_steps = 0
+
+    def count_step() -> int:
+        nonlocal vm_steps
+        vm_steps += 1
+        return 0
+
+    traced.set_progress_handler(count_step, 1)
+    try:
+        assert EventTail(db, "orch-雪-'\n")._resolve_ids(traced) == [
+            'exec-☃-"-\t',
+            "orch-雪-'\n",
+        ]
+        assert EventTail(db, 'exec-☃-"-\t')._resolve_ids(traced) == [
+            'exec-☃-"-\t',
+            "orch-雪-'\n",
+        ]
+    finally:
+        traced.close()
+    assert vm_steps < 1_000
+
+
+async def test_single_then_batch_start_writes_keep_earliest_session_pointer(tmp_path) -> None:
+    from ouroboros.persistence.picker_projection_updates import (
+        insert_event_with_picker_projection,
+        insert_events_with_picker_projection,
+    )
+
+    db = tmp_path / "single-then-batch-start.db"
+    store = EventStore(f"sqlite+aiosqlite:///{db}")
+    await store.initialize()
+    assert store._engine is not None
+    starts = [
+        BaseEvent(
+            type="orchestrator.session.started",
+            aggregate_type="session",
+            aggregate_id="orch-shared",
+            data={"execution_id": "exec-shared"},
+        )
+        for _ in range(3)
+    ]
+    async with store._engine.begin() as connection:
+        await insert_event_with_picker_projection(connection, starts[0], True)
+        await insert_events_with_picker_projection(connection, starts[1:], True)
+    await store.close()
+
+    conn = sqlite3.connect(db)
+    try:
+        first_rowid = conn.execute(f"SELECT MIN(event_rowid) FROM {PICKER_START_TABLE}").fetchone()[
+            0
+        ]
+        assert conn.execute(
+            f"SELECT session_id, execution_id, event_rowid FROM {PICKER_START_SESSION_TABLE}"
+        ).fetchall() == [("orch-shared", "exec-shared", first_rowid)]
+    finally:
+        conn.close()
+
+
+async def test_start_batch_rowid_gap_fails_closed_and_rolls_back(tmp_path) -> None:
+    from ouroboros.persistence.picker_projection_updates import (
+        insert_events_with_picker_projection,
+    )
+
+    db = tmp_path / "start-batch-gap.db"
+    store = EventStore(f"sqlite+aiosqlite:///{db}")
+    await store.initialize()
+    assert store._engine is not None
+    starts = [
+        BaseEvent(
+            type="orchestrator.session.started",
+            aggregate_type="session",
+            aggregate_id=f"orch-gap-{index}",
+            data={"execution_id": f"exec-gap-{index}"},
+        )
+        for index in range(2)
+    ]
+    async with store._engine.begin() as connection:
+        await connection.exec_driver_sql(
+            "CREATE TRIGGER inject_start_gap AFTER INSERT ON events "
+            "WHEN NEW.event_type = 'orchestrator.session.started' BEGIN "
+            "INSERT INTO events "
+            "(id, aggregate_type, aggregate_id, event_type, payload, "
+            "picker_projection_version) VALUES "
+            "('gap-' || NEW.id, 'noise', 'noise', 'telemetry.unrelated', '{}', NULL); "
+            "END"
+        )
+    with pytest.raises(RuntimeError, match="not one contiguous SQLite range"):
+        async with store._engine.begin() as connection:
+            await insert_events_with_picker_projection(
+                connection,
+                starts,
+                projection_ready=True,
+            )
+    await store.close()
+
+    conn = sqlite3.connect(db)
+    try:
+        event_ids = [event.id for event in starts]
+        assert conn.execute(
+            "SELECT COUNT(*) FROM events WHERE id IN (?, ?)", event_ids
+        ).fetchone() == (0,)
+        assert conn.execute(f"SELECT COUNT(*) FROM {PICKER_START_TABLE}").fetchone() == (0,)
     finally:
         conn.close()
 
@@ -348,7 +561,7 @@ async def test_raw_old_writer_gap_fails_closed_then_writable_repair_recovers(
     [
         pytest.param(0, id="zero"),
         pytest.param(1, id="rolling-old-writer"),
-        pytest.param(3, id="future-integer"),
+        pytest.param(PICKER_PROJECTION_VERSION + 1, id="future-integer"),
         pytest.param(1.5, id="real"),
         pytest.param("bad", id="text"),
         pytest.param(sqlite3.Binary(b"1"), id="blob"),

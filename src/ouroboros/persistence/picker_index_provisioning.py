@@ -28,8 +28,8 @@ from ouroboros.persistence.picker_indexes import (
     PICKER_START_EXECUTION_INDEX_DDL,
     PICKER_START_SCOPE_SQL,
     PICKER_START_SESSION_ID_SQL,
-    PICKER_START_SESSION_INDEX,
-    PICKER_START_SESSION_INDEX_DDL,
+    PICKER_START_SESSION_TABLE,
+    PICKER_START_SESSION_TABLE_DDL,
     PICKER_START_TABLE,
     PICKER_START_TABLE_DDL,
     RUNNING_PROGRESS_SQL,
@@ -73,6 +73,12 @@ def picker_contract_is_complete(connection: Connection) -> bool:
         ("session_id", "TEXT", 0, 0, 0),
     ):
         return False
+    if _table_columns(connection, PICKER_START_SESSION_TABLE) != (
+        ("session_id", "TEXT", 1, 1, 0),
+        ("execution_id", "TEXT", 1, 2, 0),
+        ("event_rowid", "INTEGER", 1, 0, 0),
+    ):
+        return False
     if _table_columns(connection, PICKER_PROGRESS_TABLE) != (
         ("aggregate_id", "TEXT", 1, 1, 0),
         ("event_type", "TEXT", 1, 2, 0),
@@ -106,7 +112,6 @@ def picker_contract_is_complete(connection: Connection) -> bool:
         DIRECT_EVENT_INDEX: (None, "event_type"),
         PICKER_GAP_INDEX: ("event_type",),
         PICKER_START_EXECUTION_INDEX: ("execution_id",),
-        PICKER_START_SESSION_INDEX: ("session_id",),
     }
     for name, expected_keys in expected_index_keys.items():
         key_columns = tuple(
@@ -178,7 +183,12 @@ def _rebuild_projection(connection: Connection) -> None:
     installed = _installed_contract(connection)
     # SQLite DDL is transactional, so a failed backfill restores the prior
     # complete contract without a partial marker becoming visible to readers.
-    for name in (PICKER_START_TABLE, PICKER_PROGRESS_TABLE, PICKER_META_TABLE):
+    for name in (
+        PICKER_START_TABLE,
+        PICKER_START_SESSION_TABLE,
+        PICKER_PROGRESS_TABLE,
+        PICKER_META_TABLE,
+    ):
         actual = installed.get(name)
         if actual is not None:
             _drop_object(connection, actual[0], actual[1])
@@ -189,6 +199,7 @@ def _rebuild_projection(connection: Connection) -> None:
 
     _drop_obsolete_indexes(connection)
     connection.exec_driver_sql(PICKER_START_TABLE_DDL)
+    connection.exec_driver_sql(PICKER_START_SESSION_TABLE_DDL)
     connection.exec_driver_sql(PICKER_PROGRESS_TABLE_DDL)
     connection.exec_driver_sql(PICKER_META_TABLE_DDL)
     connection.exec_driver_sql(DIRECT_EVENT_INDEX_DDL)
@@ -200,7 +211,13 @@ def _rebuild_projection(connection: Connection) -> None:
         f"{PICKER_START_SESSION_ID_SQL} FROM events WHERE {PICKER_START_SCOPE_SQL}"
     )
     connection.exec_driver_sql(PICKER_START_EXECUTION_INDEX_DDL)
-    connection.exec_driver_sql(PICKER_START_SESSION_INDEX_DDL)
+    connection.exec_driver_sql(
+        f"INSERT OR IGNORE INTO {PICKER_START_SESSION_TABLE} "
+        "(session_id, execution_id, event_rowid) "
+        "SELECT session_id, coalesce(execution_id, ''), MIN(event_rowid) "
+        f"FROM {PICKER_START_TABLE} WHERE session_id IS NOT NULL "
+        "GROUP BY session_id, execution_id"
+    )
     connection.exec_driver_sql(
         f"INSERT INTO {PICKER_PROGRESS_TABLE} ("
         "aggregate_id, event_type, latest_valid_rowid, latest_running_rowid, "
