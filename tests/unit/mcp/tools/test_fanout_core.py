@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 import json
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -620,6 +621,75 @@ async def test_advisory_reentry_partial_set_lists_missing_required_lane_ids(
     assert out["missing_required_keys"] == _required_advisory_lanes()
     assert out["missing_keys"] == out["missing_required_keys"]
     assert out["received_keys"] == [optional_first]
+
+
+@pytest.mark.asyncio
+async def test_a_completed_submission_is_the_only_reply_carrying_a_contract_id(
+    tmp_path: Any,
+) -> None:
+    """Regression (#1941): what the skills read to tell success apart.
+
+    This tool answers in two shapes. An incomplete submission answers with a
+    ``status`` and the fields it implies; a complete one answers with the
+    disposable-memory envelope, which has no ``status`` of its own -- its
+    ``result.status`` is that subsystem's word for its own run, and the envelope
+    is ``extra="forbid"`` because ``artifact_validation`` re-parses the same
+    model out of the manifest event. So the tool cannot add a discriminator
+    without making the reply stop being that model.
+
+    ``contract_id`` is the discriminator it already has: only the completed
+    reply carries one. The PM and interview skills both read it, and the PM
+    skill previously read a top-level ``status`` instead -- which meant it
+    resubmitted every successful fan-out and then discarded the evidence it had
+    just been told was valid. Asserted across the branches together rather than
+    one by one, because what broke was not a branch but their agreement.
+    """
+    registry = FanoutRegistry(tmp_path)
+    session_id = "sess-discriminator"
+    fanout_id, correlation_key, lane_keys, meta = _emitted_advisory_contract(registry, session_id)
+    outputs = _advisory_lane_outputs(meta, lane_keys)
+    submit, _disposable = _bounded_submit(registry, tmp_path)
+
+    async def reply(results: list[dict[str, Any]]) -> dict[str, Any]:
+        result = await submit.handle(
+            {
+                "session_id": session_id,
+                "fanout_id": fanout_id,
+                "correlation_key": correlation_key,
+                "results": results,
+            }
+        )
+        assert result.is_ok, result
+        return result.unwrap().meta
+
+    optional_first = next(key for key in lane_keys if key not in _required_advisory_lanes())
+    partial = await reply([{"key": optional_first, "content": f"{optional_first}-advice"}])
+    invalid = await reply([{"key": lane_keys[0]}])
+    complete = await reply([{"key": key, "content": outputs[key]} for key in lane_keys])
+
+    # What the skills key on: present on the completed reply, absent everywhere
+    # else. Both directions, so neither drifts without this failing.
+    assert complete["contract_id"].startswith("fanout:")
+    for name, out in (("partial", partial), ("invalid", invalid)):
+        assert "contract_id" not in out, f"{name} reply carries a contract_id: {sorted(out)}"
+
+    # And the incomplete replies keep saying why, which is the other half of
+    # what the skills act on.
+    assert partial["status"] == "partial"
+    assert partial["missing_required_keys"]
+    assert invalid["status"] == "invalid_result_entry"
+    assert "status" not in complete
+
+    # The skills are the consumers, so the same assertion is made against what
+    # they say. A rule written in prose and a reply built in code drifted apart
+    # three times on this branch; reading both in one test is what stops the
+    # fourth. Both mirrors, because a rule that holds in one of them is not the
+    # rule -- it is a copy of it.
+    repo_root = Path(__file__).resolve().parents[4]
+    for root in (repo_root / "skills", repo_root / ".claude-plugin" / "skills"):
+        skill = (root / "pm" / "SKILL.md").read_text(encoding="utf-8")
+        assert "A `contract_id` means every required lane passed" in skill, root
+        assert "Still no `contract_id`" in skill, root
 
 
 # --------------------------------------------------------------------------- #

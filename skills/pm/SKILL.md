@@ -166,13 +166,14 @@ you could not spawn at all is submitted as
 `content` beside it. Never invent output for a lane you did not run; a
 fabricated finding is worse than a missing one.
 
-**Reading the reply.** `complete` means every required lane passed its contract.
-Anything else names its reason — `missing_required_keys`, `contract_violations`.
+**Reading the reply.** A `contract_id` means every required lane passed its
+contract — synthesize from the outputs you hold. A reply without one names its
+reason instead: `missing_required_keys`, `contract_violations`.
 **A rejected lane's finding is not evidence:** leave it out of the block.
 
-Resubmit once with every lane you hold. Still not `complete` — go to B with what
-survived, or with none, saying in one line that the investigation did not come
-back. The interview does not wait on this.
+Resubmit once with every lane you hold. Still no `contract_id` — go to B with
+what survived, or with none, saying in one line that the investigation did not
+come back. The interview does not wait on this.
 
 There are two lanes and both are required: `code_context` and `data_context`.
 A `code_context` lane that carries a policy returns `answer_prefix:

@@ -189,7 +189,16 @@ _EXPECTED_OUROBOROS_REQUIRED_CONTEXT_KEYS = {
     "ouroboros_measure_drift": ("session_id", "current_output", "seed_content"),
     # No ``evidence``: a confirmed lane finding arrives on ``answer`` like any
     # other adopted fact, which is the one entrance the sibling tool has too.
-    "ouroboros_pm_interview": ("initial_context", "cwd", "session_id", "answer"),
+    # ``last_question`` names the question an answer belongs to, which the
+    # passive-plugin runtime cannot recover on its own -- it is interview-state
+    # context like the rest of this row, not a transport detail.
+    "ouroboros_pm_interview": (
+        "initial_context",
+        "cwd",
+        "session_id",
+        "last_question",
+        "answer",
+    ),
     "ouroboros_project_status": (),
     "ouroboros_qa": (
         "artifact",
