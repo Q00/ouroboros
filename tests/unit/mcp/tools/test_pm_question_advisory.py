@@ -201,6 +201,71 @@ def test_no_lane_produces_a_recommended_draft() -> None:
     assert contract["preserve_user_agency"] is True
 
 
+# ── Decision 10: the rule the child reads is the rule the catalog declares ─
+
+
+def _code_lane_prompt(roster: list[dict[str, str]]) -> str:
+    """Return the prompt actually emitted to the PM ``code_context`` child."""
+    meta: dict[str, Any] = {}
+    attach_question_advisory(
+        meta,
+        tool_name="ouroboros_pm_interview",
+        session_id="pm-prompt",
+        question=QUESTION,
+        repository_roster=roster,
+    )
+    payloads = build_question_advisory_subagents(meta["question_advisory_request"])
+    return next(
+        payload.to_dict()["prompt"]
+        for payload in payloads
+        if payload.context["lane_id"] == "code_context"
+    )
+
+
+def test_the_emitted_prompt_renders_the_catalog_answer_rule(
+    roster: list[dict[str, str]],
+) -> None:
+    """The lane brief renders ``child_answer_rule``; it does not restate it.
+
+    Read from the catalog rather than compared against a literal, so this fails
+    the moment the two spellings diverge again. They did diverge: the rule was
+    changed in the catalog while a hand-written copy in the brief was left
+    behind, and ``child_answer_rule`` had no reader at all to notice.
+    """
+    rule = _pm_question_advisory_fanout_metadata()["child_answer_rule"]
+    assert rule and rule in _code_lane_prompt(roster)
+
+
+def test_the_emitted_prompt_does_not_retract_the_confirmation_it_asks_for(
+    roster: list[dict[str, str]],
+) -> None:
+    """One prompt told the child both to produce and not to produce a finding.
+
+    The task preamble said the finding is shown for confirmation and recorded;
+    the lane brief, still carrying the retired design, said there was nothing to
+    confirm. A child following the second omits the fields the contract requires
+    and the required lane is rejected.
+    """
+    prompt = _code_lane_prompt(roster)
+    assert "shown to the user for confirmation" in prompt
+    assert "nothing to confirm" not in prompt
+    assert "no answer to send" not in prompt
+
+
+def test_the_emitted_prompt_names_the_fields_a_carried_finding_requires(
+    roster: list[dict[str, str]],
+) -> None:
+    """A schema the child is never shown is one it satisfies by luck.
+
+    The three forwarding fields are required by the contract and were named
+    nowhere in the emitted prompt, so removing the contradiction alone would
+    have left the child with no instruction at all about them.
+    """
+    prompt = _code_lane_prompt(roster)
+    for field in ("answer_prefix", "requires_user_confirmation", "user_confirmation_prompt"):
+        assert field in prompt
+
+
 # ── Decision 2: one door in, and no prefix that skips the person ─────────
 
 

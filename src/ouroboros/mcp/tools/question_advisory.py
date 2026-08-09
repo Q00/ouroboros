@@ -1,21 +1,24 @@
-"""The PM interview's question-advisory fan-out.
+"""The question-advisory fan-out, shared by the interview and the PM interview.
 
-The lanes are described entirely by the tool's catalog in the capability
-registry — ``orchestration.question_advisory_fanout`` — which is the same road
-the interview's catalog travels, read by tool name. What each lane asks of its
-child, which are required, and which answer contract each carries are read from
-there rather than written here.
+The lanes are described entirely by the calling tool's catalog in the capability
+registry — ``orchestration.question_advisory_fanout`` — read by tool name. What
+each lane asks of its child, which are required, and which answer contract each
+carries are read from there rather than written here.
 
-The interview keeps its own builder. These are two tools with two catalogs, and
-this file is the PM half; the pieces that genuinely are one thing are shared
-rather than copied — the ``data_context`` lane's task and brief come from
-``advisory_prompts`` unchanged, so PM reuses that lane rather than restating it,
-and the payload, output-section and re-entry machinery are the shared ones.
+One builder serves both tools. Where the two genuinely differ the branch is on
+what the request carries rather than on which tool is calling, so no tool is
+named on the payload path; where they do not differ the lane is reused outright
+— the ``data_context`` lane's task and brief come from ``advisory_prompts``
+unchanged.
 
-What is deliberately *not* shared is the rule about what a child may do with a
-clear finding. In the interview a code fact may stand in for the answer; here
-nothing may, and that difference is the reason this file exists rather than a
-flag on the interview's builder.
+The rule about what a child may do with a clear finding is the one thing that
+does differ, and it is not written here either. It lives in each tool's catalog
+as ``child_answer_rule`` and is rendered into the lane brief, so the rule the
+child reads and the rule the catalog declares are one text rather than two
+copies that can drift. In the interview a code fact may stand in for the
+answer; in PM it may not — a PM finding is shown to the user for confirmation
+and then travels the ordinary ``answer`` parameter, recorded as an adopted fact
+and never as their decision.
 """
 
 from __future__ import annotations
@@ -72,23 +75,30 @@ def _tool_advisory_catalog(tool_name: str) -> Mapping[str, Any]:
     return catalog if isinstance(catalog, Mapping) else {}
 
 
-def _pm_code_context_lane_brief(roster: Any) -> str:
+def _pm_code_context_lane_brief(roster: Any, child_answer_rule: str) -> str:
     """Render the PM code lane's standing rules plus the roster it may cite.
 
     The roster is printed rather than described because the boundary is decided
     by value: an evidence item whose ``repo_id`` is not in this list is rejected
     at re-entry, so a child that cannot see the list cannot satisfy the contract
     except by luck. Everything else here is a boundary the child cannot be
-    trusted to rediscover -- what its output is for (the PM's judgment, never the
-    answer), what it may not do with a disagreement (resolve it), and what it
-    must not claim (that a policy does not exist, as opposed to not being found
-    in what it read).
+    trusted to rediscover -- what it may not do with a disagreement (resolve
+    it), what it must not claim (that a policy does not exist, as opposed to not
+    being found in what it read), and which fields the contract requires of a
+    carried finding.
+
+    ``child_answer_rule`` comes in from the calling tool's catalog rather than
+    being written here. It was written here once, and when the rule changed the
+    catalog was updated while this copy was not -- one prompt then told the
+    child both that its finding is confirmed and recorded, and that there is
+    nothing to confirm. A rule with two spellings is a rule that stops agreeing
+    with itself, so this brief renders the declared one.
     """
     roster_json = _bounded_json(roster, _INTERVIEW_ADVISORY_MAX_JSON_CHARS)
     return f"""Read these repositories and report what they implement today for this
-question. Describe only: what the code does is an input to the PM's decision and
-is never the decision. There is no answer to send and nothing to confirm — your
-output is put beside the question, and the PM answers in their own words.
+question.
+
+{child_answer_rule}
 
 **Say what you read.** Put every repository you actually opened in
 `examined_repository_ids`. Everything else you report is scoped to that list, and
@@ -107,6 +117,12 @@ PRD author.
 this list, that is not evidence and it will be rejected: report it in your
 finding as a repository worth adding, and leave `evidence` to the roster.
 
+**Fill what a carried finding requires.** When you carry a policy, set
+`answer_prefix` to `[from-code]`, `requires_user_confirmation` to true, and write
+`user_confirmation_prompt` as the question the user should be asked before your
+finding is recorded on their behalf. There is no prefix that skips that step.
+When you carry none, those three fields do not exist in your answer.
+
 **Stop while the answer is still useful.** Read the roster in order and stop
 once you can answer, reporting in `examined_repository_ids` what you actually
 opened. A partial scope named honestly is a complete answer; an exhaustive
@@ -122,6 +138,7 @@ def _lane_instructions(
     lane_id: str,
     raw_lane: Mapping[str, Any],
     request: Mapping[str, Any],
+    catalog: Mapping[str, Any],
 ) -> tuple[str, str] | None:
     """Return ``(task, extra)`` for one declared lane, or ``None`` to skip it.
 
@@ -130,6 +147,10 @@ def _lane_instructions(
     exactly that case: PM reuses the interview's lane unchanged, so it reuses
     its task and brief here rather than getting a second wording that would have
     to be kept in step.
+
+    ``catalog`` is the calling tool's advisory catalog, and it is passed in for
+    the same reason: a rule the catalog declares is rendered from there rather
+    than restated here.
     """
     if lane_id == "code_context":
         # Two tools declare this lane and each hands it a different bounding
@@ -142,7 +163,7 @@ def _lane_instructions(
                 "Find the policy the roster repositories implement today for this "
                 "question, and report it descriptively. If they do not implement "
                 "one, say which repositories you read and give the reason.",
-                _pm_code_context_lane_brief(roster),
+                _pm_code_context_lane_brief(roster, str(catalog.get("child_answer_rule") or "")),
             )
         return (
             "Inspect the local repository for facts that directly answer or "
@@ -262,7 +283,7 @@ def build_question_advisory_subagents(request: Mapping[str, Any]) -> list[Subage
         lane_capability = str(raw_lane.get("capability") or "").strip()
         if not lane_id or lane_id in seen:
             continue
-        instructions = _lane_instructions(lane_id, raw_lane, request)
+        instructions = _lane_instructions(lane_id, raw_lane, request, catalog)
         if instructions is None:
             # A lane this build has no instructions for is skipped rather than
             # given a generic prompt: a child told only "help with this" against

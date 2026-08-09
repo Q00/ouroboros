@@ -6,7 +6,11 @@ Adds PM-specific behavior on top of the existing InterviewEngine:
 - Deferred item tracking for dev-only questions
 - PMSeed generation from completed interview
 - Brownfield repo management via the configured runtime database
-- CodebaseExplorer scan-once semantics (shared context)
+
+The engine does not read repositories (RFC Q00/ouroboros#1937 decision 9).
+Reading code belongs to the advisory lanes, which run in the session that fans
+out and put their findings beside the question; an engine-side summary would be
+evidence the person judging never receives.
 
 Composition pattern: PMInterviewEngine *wraps* InterviewEngine without
 modifying its internals. The inner engine handles question generation,
