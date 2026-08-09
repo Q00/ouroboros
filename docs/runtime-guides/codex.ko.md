@@ -59,7 +59,7 @@ codex plugin add ouroboros@ouroboros
 - 로그인된 **Codex CLI** 계정 (위와 동일). `codex`가 `PATH`에 있으면 좋지만, 이 경로에서는 필수가 아닙니다
 - **Python >= 3.12**
 - **Ouroboros 설치**
-- **MCP launcher** — 아래 셋 중 **하나**. `_codex_release_mcp_launcher()`가 이 순서로 찾고, 셋 다 없으면 `_register_codex_mcp_server()`가 `Install uv, or install Ouroboros with the [mcp] extra.`로 중단합니다:
+- **MCP launcher** — 아래 셋 중 **하나**. `_codex_release_mcp_launcher()`가 이 순서로 찾고, 셋 다 없으면 `_register_codex_mcp_server()`가 중단합니다. 메시지는 `Could not find a launchable Ouroboros MCP command. Install uv, or install Ouroboros with the [mcp] extra, then rerun setup.` 인데, **화면에서는 `[mcp]`가 Rich 마크업으로 소비되어 `with the extra`로 보입니다** — 터미널 출력과 소스 문자열이 다릅니다:
   1. `uvx` (uv에 포함) ← 가장 간단
   2. `ouroboros mcp serve --help`가 성공하는 설치, 즉 **`[mcp]` extra 포함**
   3. `mcp` 패키지가 들어 있는 Python 환경
@@ -175,8 +175,10 @@ codex --version
 > `codex --version`이 `command not found`로 나와도 **독립 설치 경로에서는 고장이 아닙니다.** 이 경로는 macOS ChatGPT 앱 번들 실행 파일만 있고 `PATH`에는 없는 사용자를 지원하며, setup은 그 번들을 찾아냅니다. 그 경우 setup이 기록한 경로로 확인하세요:
 >
 > ```bash
-> ouroboros config show | grep codex_cli_path
+> ouroboros config show
 > ```
+>
+> 출력의 **`CLI path:`** 줄이 setup이 실제로 해석한 실행 파일입니다(`cli/commands/config.py:696-701`). `codex_cli_path`라는 문자열은 출력에 나오지 않으니 그걸로 grep하지 마세요.
 >
 > `codex`를 `PATH`에 올린 경우와 권장(플러그인) 경로에서는 `codex --version`이 정상 확인 방법입니다.
 
