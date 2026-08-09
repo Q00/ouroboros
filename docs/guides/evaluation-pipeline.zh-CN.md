@@ -120,13 +120,13 @@ timeout = 120
 ```
 
 **覆写优先级**（从高到低）：
-1. 以编程方式传入的显式 `overrides` 字典（来自 MCP 参数）
+1. 以编程方式传入的显式 `overrides` 字典（**仅限受信任的 Python 调用方，不存在 MCP 路径**）
 2. 项目根目录的 `.ouroboros/mechanical.toml`
 3. 全部为 `None`（所有检查优雅跳过）
 
 **TOML 解析错误**会被记为一条警告（`mechanical.toml_parse_error`）后静默忽略。没有预设可以回退，所以所有命令保持 `None`，Stage 1 跳过全部检查。
 
-**安全：可执行文件白名单。** `.ouroboros/mechanical.toml` 中的命令只能使用内置白名单里的可执行文件（如 `pytest`、`ruff`、`cargo`、`go`、`npm`、`make`）。如果命令指定了不在白名单里的可执行文件——或者用了 shell 操作符、绝对路径——它会被静默拦截（记为 `mechanical.blocked_executable`），该项检查被跳过。通过 `MechanicalConfig` 或 MCP `overrides` 字典以编程方式传入的命令绕过这道检查，因为它们在上游已经过审。这道机制防止不受信任的仓库配置在 CI/CD 环境里执行任意命令。
+**安全：可执行文件白名单。** `.ouroboros/mechanical.toml` 中的命令只能使用内置白名单里的可执行文件（如 `pytest`、`ruff`、`cargo`、`go`、`npm`、`make`）。如果命令指定了不在白名单里的可执行文件——或者用了 shell 操作符、绝对路径——它会被静默拦截（记为 `mechanical.blocked_executable`），该项检查被跳过。通过 `MechanicalConfig`，或通过 Python 代码交给 `build_mechanical_config()` 的 `overrides` 字典传入的命令会绕过这道检查，因为调用方是受信任的。**不存在这样做的 MCP 路径**：`ouroboros_evaluate` 没有暴露任何机械命令参数（`mcp/tools/evaluation_handlers.py:437`），其 handler 调用 `build_mechanical_config(working_dir)` 时也不传 `overrides`（`:742`）。这道机制防止不受信任的仓库配置在 CI/CD 环境里执行任意命令。
 
 | 覆写失败模式 | 现象 | 原因 / 处理 |
 |---|---|---|
