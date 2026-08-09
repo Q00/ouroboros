@@ -131,6 +131,43 @@ Respond ONLY with valid JSON in this exact format:
 _PM_CONTRACT_MARKER = "contract between the PM and the developers"
 
 
+def _decision_only_view(state: InterviewState) -> InterviewState:
+    """Project ``state`` as the ambiguity scorer should read it.
+
+    Scoring asks how clear the *requirements* are, and requirements are what
+    the person decided.  What they weighed on the way is neither clearer nor
+    vaguer for having been consulted, so an observation's content must not
+    reach the scorer: a well-researched question would otherwise read as a
+    well-decided one, which is the same confusion ``check_completion`` avoids
+    by counting decisions rather than rounds.
+
+    The answer is dropped, not the round.  This mirrors the per-role rule in
+    ``answer_provenance``: an observation is withheld from the slot that
+    carries authority and left alone in the slot that carries the question.
+    The scorer then sees the grounded question standing unanswered — which is
+    what it is until the person answers it — so the finding raises the
+    remaining ambiguity instead of lowering it.
+
+    The initial-context summary round is passed through untouched.
+    ``prompt_safe_initial_context`` recovers a long context from that answer,
+    and blanking it would make scoring fail closed on exactly the sessions
+    that carry the most context.
+
+    This is a PM-local projection on purpose.  The same gap exists in
+    ``AmbiguityScorer`` for every other caller, but closing it there is an
+    interview-core change this PR does not own; see the Out-of-scope section
+    of the PR body.  When the shared projection lands, this collapses into it.
+    """
+    projected = [
+        round_data
+        if round_data.question == INITIAL_CONTEXT_SUMMARY_QUESTION
+        or round_data.provenance != "observation"
+        else round_data.model_copy(update={"user_response": None})
+        for round_data in state.rounds
+    ]
+    return state.model_copy(update={"rounds": projected})
+
+
 @dataclass
 class PMInterviewEngine:
     """PM interview engine — wraps InterviewEngine via composition.
@@ -999,7 +1036,7 @@ class PMInterviewEngine:
                 model=self.model,
             )
             score_result = await scorer.score(
-                state,
+                _decision_only_view(state),
                 is_brownfield=state.is_brownfield,
                 additional_context=additional_context,
             )

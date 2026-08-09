@@ -741,6 +741,70 @@ class TestPMInterviewHandlerSubagentDispatch:
         assert observed not in prompt
         assert "observation withheld" in prompt
 
+    async def test_generate_rejects_an_incomplete_observation_only_session(
+        self, handler, monkeypatch
+    ) -> None:
+        """Regression (#1941): a forwarded finding cannot authorise generation.
+
+        A confirmed lane finding occupies a round while being a fact the user
+        adopted, and ``generate`` withholds its content three lines later.
+        Counting it as interview evidence would let a session where the user
+        decided nothing produce a PM seed from an empty transcript, under a
+        prompt telling the child the interview is complete.
+        """
+
+        async def _load_observation_only(
+            state_dir: Path, session_id: str
+        ) -> Result[InterviewState, str]:
+            del state_dir
+            state = InterviewState(
+                interview_id=session_id,
+                initial_context="test context",
+                status=InterviewStatus.IN_PROGRESS,
+            )
+            state.record_answer("What retry policy exists?", "[from-code] three retries")
+            return Result.ok(state)
+
+        import ouroboros.mcp.tools.authoring_handlers as ah
+
+        monkeypatch.setattr(ah, "_plugin_load_state", _load_observation_only)
+
+        result = await handler.handle({"session_id": "sess-obs-only", "action": "generate"})
+
+        assert result.is_err
+        assert "Continue the interview" in str(result.error)
+
+    async def test_generate_accepts_one_user_decision_beside_an_observation(
+        self, handler, monkeypatch
+    ) -> None:
+        """The gate counts decisions, not provenance-blind rounds.
+
+        The mirror of the case above: once the user has decided once, the
+        session is generatable even though an observation shares the
+        transcript. The gate must not have become a blanket rejection of
+        sessions that carry findings.
+        """
+
+        async def _load_mixed(state_dir: Path, session_id: str) -> Result[InterviewState, str]:
+            del state_dir
+            state = InterviewState(
+                interview_id=session_id,
+                initial_context="test context",
+                status=InterviewStatus.IN_PROGRESS,
+            )
+            state.record_answer("What retry policy exists?", "[from-code] three retries")
+            state.record_answer("What should it be?", "Five retries, capped at 30s")
+            return Result.ok(state)
+
+        import ouroboros.mcp.tools.authoring_handlers as ah
+
+        monkeypatch.setattr(ah, "_plugin_load_state", _load_mixed)
+
+        result = await handler.handle({"session_id": "sess-mixed", "action": "generate"})
+
+        assert result.is_ok
+        assert result.value.meta["_subagent"]["tool_name"] == "ouroboros_pm_interview"
+
     async def test_plugin_path_records_a_confirmed_finding_like_any_answer(
         self, handler, monkeypatch
     ) -> None:

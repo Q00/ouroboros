@@ -593,12 +593,6 @@ class AmbiguityScorer:
         """
         parts = [f"Initial Context: {prompt_safe_initial_context(state)}"]
 
-        # Evidence is deliberately absent. This scores how clear the
-        # requirements are, and requirements are what the person decided —
-        # what they weighed on the way is neither clearer nor vaguer for having
-        # been consulted. Including it would also let a well-researched
-        # question read as a well-decided one, which is the same confusion
-        # ``check_completion`` avoids by counting decisions rather than rounds.
         for round_data in state.rounds:
             if round_data.question == INITIAL_CONTEXT_SUMMARY_QUESTION:
                 continue

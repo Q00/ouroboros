@@ -701,13 +701,26 @@ class PMInterviewHandler:
                         if not initial_context and meta.get("initial_context"):
                             initial_context = meta["initial_context"]
 
-                # Gate: generate requires interview evidence.  In plugin
-                # mode is_complete is never set (child owns progression),
-                # so we gate on answered rounds instead.  The child session
-                # performs the real completeness validation.
+                # Gate: generate requires an interview decision.  In plugin
+                # mode is_complete is never set (child owns progression), so
+                # we gate on the rounds instead.  The child session performs
+                # the real completeness validation.
+                #
+                # A round is not a decision.  A confirmed lane finding occupies
+                # one while being a fact the user adopted, and the transcript
+                # built three lines down withholds its content -- so counting it
+                # here would authorise a PM seed from a session where the user
+                # decided nothing and hand the child an empty transcript under a
+                # prompt saying the interview is complete.  Read ``provenance``
+                # rather than the marker, the same field ``check_completion``
+                # counts in-process, so the two runtimes agree by default.
                 if action == "generate":
-                    answered_rounds = [r for r in state.rounds if r.user_response is not None]
-                    if not state.is_complete and not answered_rounds:
+                    decided_rounds = [
+                        r
+                        for r in state.rounds
+                        if r.user_response is not None and r.provenance == "user"
+                    ]
+                    if not state.is_complete and not decided_rounds:
                         return Result.err(
                             MCPToolError(
                                 "Interview has no answered rounds and is not "

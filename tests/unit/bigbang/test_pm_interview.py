@@ -1154,6 +1154,121 @@ class TestCheckCompletion:
         assert result is None
         adapter.complete.assert_not_called()
 
+    @pytest.mark.asyncio
+    async def test_confirmed_finding_never_reaches_the_scorer(self, tmp_path: Path) -> None:
+        """A confirmed lane finding informs the next question, not the score.
+
+        The minimum decision count is already met here, so recording the
+        finding invokes scoring immediately. Its content must not be in the
+        scored context: a well-researched question would otherwise read as a
+        well-decided one and end the interview on a question the user has not
+        answered. The question itself stays — unanswered is what it is.
+        """
+        adapter = MagicMock()
+        adapter.complete = AsyncMock(
+            return_value=Result.ok(
+                _mock_completion(
+                    json.dumps(
+                        {
+                            "goal_clarity_score": 0.95,
+                            "goal_clarity_justification": "g",
+                            "constraint_clarity_score": 0.95,
+                            "constraint_clarity_justification": "c",
+                            "success_criteria_clarity_score": 0.95,
+                            "success_criteria_clarity_justification": "s",
+                        }
+                    )
+                )
+            )
+        )
+        engine = _make_engine(adapter, tmp_path)
+        grounded_question = "What retry policy do you want?"
+        finding = "[from-code] three retries with 2s/4s/8s backoff in sync/worker.py"
+        state = InterviewState(
+            interview_id="test_pm_observation_scoring",
+            initial_context="Improve the sync job",
+            rounds=[
+                InterviewRound(
+                    round_number=1, question="Who are the users?", user_response="Small teams"
+                ),
+                InterviewRound(
+                    round_number=2, question="What problem?", user_response="Syncs fail silently"
+                ),
+                InterviewRound(
+                    round_number=3, question="How measured?", user_response="Sync success rate"
+                ),
+                InterviewRound(round_number=4, question=grounded_question, user_response=finding),
+            ],
+        )
+        assert state.rounds[3].provenance == "observation"
+
+        await engine.check_completion(state)
+
+        adapter.complete.assert_called()
+        scored = "\n".join(
+            message.content for call in adapter.complete.call_args_list for message in call.args[0]
+        )
+        assert "2s/4s/8s backoff" not in scored
+        assert "sync/worker.py" not in scored
+        assert grounded_question in scored
+        # The interview keeps the round intact; only the scorer's view drops it.
+        assert state.rounds[3].user_response == finding
+
+    @pytest.mark.asyncio
+    async def test_summary_answer_survives_the_scored_view(self, tmp_path: Path) -> None:
+        """The initial-context summary is read as context, not scored as one.
+
+        ``prompt_safe_initial_context`` recovers a long context from that
+        round's answer. Blanking it alongside the observations would make
+        scoring fail closed on exactly the sessions carrying the most context.
+        """
+        adapter = MagicMock()
+        adapter.complete = AsyncMock(
+            return_value=Result.ok(
+                _mock_completion(
+                    json.dumps(
+                        {
+                            "goal_clarity_score": 0.4,
+                            "goal_clarity_justification": "g",
+                            "constraint_clarity_score": 0.4,
+                            "constraint_clarity_justification": "c",
+                            "success_criteria_clarity_score": 0.4,
+                            "success_criteria_clarity_justification": "s",
+                        }
+                    )
+                )
+            )
+        )
+        engine = _make_engine(adapter, tmp_path)
+        state = InterviewState(
+            interview_id="test_pm_summary_survives",
+            initial_context=("A" * 4_000) + "RAW_TAIL",
+            rounds=[
+                InterviewRound(
+                    round_number=1,
+                    question=INITIAL_CONTEXT_SUMMARY_QUESTION,
+                    user_response="RECOVERED_SUMMARY",
+                ),
+                InterviewRound(
+                    round_number=2, question="Who are the users?", user_response="Small teams"
+                ),
+                InterviewRound(
+                    round_number=3, question="What problem?", user_response="Syncs fail"
+                ),
+                InterviewRound(
+                    round_number=4, question="How measured?", user_response="Success rate"
+                ),
+            ],
+        )
+
+        await engine.check_completion(state)
+
+        adapter.complete.assert_called()
+        scored = "\n".join(
+            message.content for call in adapter.complete.call_args_list for message in call.args[0]
+        )
+        assert "RECOVERED_SUMMARY" in scored
+
 
 class TestRecordResponse:
     """Test response recording delegation."""
