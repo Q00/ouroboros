@@ -21,6 +21,7 @@ from ouroboros.verification.models import (
     SpecAssertion,
     SpecVerificationResult,
     SpecVerificationSummary,
+    VerificationOutcome,
     VerificationTier,
 )
 from ouroboros.verification.verifier import SpecVerifier
@@ -58,6 +59,43 @@ class TestVerificationModels:
         )
         assert r.discrepancy
         assert not r.verified
+        assert r.outcome is VerificationOutcome.DISCREPANCY
+
+    def test_verification_result_preserves_legacy_json_and_round_trips_outcome(self) -> None:
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="test",
+            tier=VerificationTier.T1_CONSTANT,
+        )
+        legacy = SpecVerificationResult.model_validate(
+            {"assertion": assertion.model_dump(mode="json"), "verified": True}
+        )
+        assert legacy.outcome is VerificationOutcome.VERIFIED
+        assert legacy.verified is True
+
+        result = SpecVerificationResult(
+            assertion=assertion,
+            outcome=VerificationOutcome.UNVERIFIABLE,
+            detail="No files matched hint: *.rs",
+        )
+        payload = result.model_dump(mode="json")
+        assert payload["outcome"] == "unverifiable"
+        assert payload["verified"] is False
+        assert payload["discrepancy"] is False
+        assert SpecVerificationResult.model_validate(payload) == result
+
+    def test_explicit_outcome_rejects_contradictory_legacy_boolean(self) -> None:
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="test",
+            tier=VerificationTier.T1_CONSTANT,
+        )
+        with pytest.raises(ValueError, match="verified contradicts"):
+            SpecVerificationResult(
+                assertion=assertion,
+                outcome=VerificationOutcome.UNVERIFIABLE,
+                verified=True,
+            )
 
     def test_ac_report_verified_pass_all_pass(self) -> None:
         assertion = SpecAssertion(ac_index=0, ac_text="test", tier=VerificationTier.T1_CONSTANT)
@@ -143,6 +181,45 @@ class TestVerificationModels:
         summary = SpecVerificationSummary.from_reports(reports)
         assert not summary.has_discrepancies
         assert summary.override_approval is None
+
+    def test_strict_policy_blocks_incomplete_evidence_without_minting_discrepancy(self) -> None:
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="test",
+            tier=VerificationTier.T1_CONSTANT,
+        )
+        report = ACVerificationReport(
+            ac_index=0,
+            ac_text="test",
+            results=(
+                SpecVerificationResult(
+                    assertion=assertion,
+                    outcome=VerificationOutcome.UNVERIFIABLE,
+                    detail="No pattern to verify",
+                ),
+            ),
+            agent_reported_pass=True,
+        )
+
+        strict = SpecVerificationSummary.from_reports((report,), strict=True)
+        exploratory = SpecVerificationSummary.from_reports((report,), strict=False)
+
+        assert strict.unverifiable_count == 1
+        assert strict.confirmed_discrepancy_count == 0
+        assert strict.override_approval is False
+        assert exploratory.override_approval is None
+        assert exploratory.reports[0].verified_pass is False
+
+    def test_legacy_summary_payload_keeps_fail_closed_override(self) -> None:
+        summary = SpecVerificationSummary.model_validate(
+            {
+                "project_dir": "/tmp/project",
+                "discrepancy_count": 1,
+            }
+        )
+
+        assert summary.confirmed_discrepancy_count == 1
+        assert summary.override_approval is False
 
 
 # -- Verifier Tests --
@@ -383,7 +460,7 @@ class TestSpecVerifier:
         assert summary.discrepancy_count == 1
 
     def test_t3_t4_skipped(self) -> None:
-        """T3 and T4 assertions are skipped (no results)."""
+        """T3 and T4 assertions stay visible as explicit skipped outcomes."""
         project = self._create_project({"main.py": ""})
         verifier = SpecVerifier(project_dir=project)
         assertions = (
@@ -391,8 +468,14 @@ class TestSpecVerifier:
             SpecAssertion(ac_index=1, ac_text="subjective", tier=VerificationTier.T4_UNVERIFIABLE),
         )
         summary = verifier.verify_all(assertions)
-        assert summary.total_assertions == 0
+        assert summary.total_assertions == 2
         assert summary.skipped_count == 2
+        assert all(report.results for report in summary.reports)
+        assert {result.outcome for report in summary.reports for result in report.results} == {
+            VerificationOutcome.SKIPPED
+        }
+        assert summary.verified_count == 0
+        assert summary.override_approval is False
 
     def test_no_files_match_hint(self) -> None:
         """File hint matches nothing → verification fails closed."""
@@ -409,7 +492,46 @@ class TestSpecVerifier:
         summary = verifier.verify_all((assertion,), agent_results={0: True})
         assert summary.verified_count == 0
         assert summary.failed_count == 1
+        assert summary.unverifiable_count == 1
         assert summary.discrepancy_count == 1
+        assert summary.confirmed_discrepancy_count == 0
+        assert summary.reports[0].results[0].outcome is VerificationOutcome.UNVERIFIABLE
+
+    @pytest.mark.parametrize("tier", [VerificationTier.T1_CONSTANT, VerificationTier.T2_STRUCTURAL])
+    @pytest.mark.parametrize(
+        ("pattern", "detail"),
+        [("", "No pattern to verify"), ("(", "Unusable regex pattern")],
+        ids=["empty", "invalid"],
+    )
+    def test_unusable_pattern_is_unverifiable_not_a_false_pass_or_discrepancy(
+        self,
+        tier: VerificationTier,
+        pattern: str,
+        detail: str,
+    ) -> None:
+        project = self._create_project({"main.py": "VALUE = 1\n"})
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="test",
+            tier=tier,
+            pattern=pattern,
+            expected_value="1" if tier is VerificationTier.T1_CONSTANT else "",
+            file_hint="*.py",
+        )
+
+        summary = SpecVerifier(project_dir=project).verify_all(
+            (assertion,), agent_results={0: True}
+        )
+        result = summary.reports[0].results[0]
+
+        assert result.outcome is VerificationOutcome.UNVERIFIABLE
+        assert result.verified is False
+        assert result.discrepancy is False
+        assert detail in result.detail
+        assert summary.verified_count == 0
+        assert summary.unverifiable_count == 1
+        assert summary.confirmed_discrepancy_count == 0
+        assert summary.override_approval is False
 
     def test_multiple_assertions_per_ac(self) -> None:
         """Multiple assertions for one AC — all must pass."""

@@ -55,6 +55,7 @@ from ouroboros.verification.models import (
     SpecAssertion,
     SpecVerificationResult,
     SpecVerificationSummary,
+    VerificationOutcome,
     VerificationTier,
 )
 from ouroboros.verification.verifier import SpecVerifier
@@ -477,8 +478,7 @@ Parallel Execution Verification Report
                     results=(
                         SpecVerificationResult(
                             assertion=assertion,
-                            verified=False,
-                            discrepancy=True,
+                            outcome=VerificationOutcome.UNVERIFIABLE,
                             detail="No files matched hint: *.rs",
                         ),
                     ),
@@ -493,9 +493,61 @@ Parallel Execution Verification Report
         assert summary is not None
         assert summary.final_approved is False
         assert summary.ac_results[0].passed is False
+        assert summary.ac_results[0].ac_verdict_state == "not_evaluated"
+        assert summary.ac_results[0].rendered_verdict == "NOT_EVALUATED"
         assert summary.ac_results[0].evidence == "No files matched hint: *.rs"
         assert summary.approval_status == "rejected"
         assert summary.run_verdict == "FAIL"
+
+    def test_skipped_spec_verification_result_does_not_approve_run(self) -> None:
+        """A visible T3/T4 skip remains NOT_EVALUATED at the formal gate."""
+        mechanical = EvaluationSummary(
+            final_approved=False,
+            highest_stage_passed=2,
+            task_results=(
+                TaskResult(
+                    task_index=0,
+                    task_content="Interaction feels natural",
+                    status="completed",
+                    completed=True,
+                    source_ac_index=0,
+                    execution_method="legacy_parallel_report",
+                ),
+            ),
+            execution_completion_status="completed",
+            approval_status="not_evaluated",
+        )
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text="Interaction feels natural",
+            tier=VerificationTier.T4_UNVERIFIABLE,
+        )
+        verification = SpecVerificationSummary.from_reports(
+            (
+                ACVerificationReport(
+                    ac_index=0,
+                    ac_text="Interaction feels natural",
+                    results=(
+                        SpecVerificationResult(
+                            assertion=assertion,
+                            outcome=VerificationOutcome.SKIPPED,
+                            detail="Subjective assertion is not independently verifiable",
+                        ),
+                    ),
+                    agent_reported_pass=True,
+                ),
+            ),
+            project_dir="/tmp/project",
+        )
+
+        summary = _evaluation_summary_from_spec_verification(mechanical, verification)
+
+        assert summary is not None
+        assert summary.final_approved is False
+        assert summary.ac_results[0].passed is False
+        assert summary.ac_results[0].ac_verdict_state == "not_evaluated"
+        assert summary.ac_results[0].rendered_verdict == "NOT_EVALUATED"
+        assert "source verification skipped for AC 1" in (summary.failure_reason or "")
 
     def test_spec_verification_promotes_checked_reports_to_formal_ac_results(self) -> None:
         """Verifier-checked reports become formal AC verdicts without synthetic drift."""
@@ -1164,7 +1216,7 @@ Parallel Execution Verification Report
         assert summary.ac_results[0].ac_verdict_state == "not_evaluated"
         assert summary.ac_results[0].rendered_verdict == "NOT_EVALUATED"
         assert summary.approval_status == "rejected"
-        assert "no independently verifiable assertions for AC 1" in (summary.failure_reason or "")
+        assert "unverifiable assertion evidence for AC 1" in (summary.failure_reason or "")
         assert summary.run_verdict == "FAIL"
 
     def test_extract_feedback_metadata_from_artifact_parses_structured_warning(self) -> None:

@@ -645,6 +645,7 @@ def _evaluation_summary_from_spec_verification(
 ) -> Any | None:
     """Promote complete verifier coverage into Seed-bound formal AC verdicts."""
     from ouroboros.core.lineage import ACResult, EvaluationSummary
+    from ouroboros.verification.models import VerificationOutcome
 
     reports = tuple(getattr(verification_summary, "reports", ()) or ())
     if not reports:
@@ -673,6 +674,7 @@ def _evaluation_summary_from_spec_verification(
     ac_results: list[ACResult] = []
     missing_indices: list[int] = []
     unverifiable_indices: list[int] = []
+    skipped_indices: list[int] = []
     for ac_index in result_indices:
         report = reports_by_index.get(ac_index)
         if report is None:
@@ -697,19 +699,42 @@ def _evaluation_summary_from_spec_verification(
 
         details = [result.detail for result in report.results if result.detail]
         evidence = "; ".join(details)
+        outcomes = {result.outcome for result in report.results}
         if not report.results:
             unverifiable_indices.append(ac_index)
             evidence = "No independently verifiable assertions; formal AC verdict not evaluated."
             passed = False
             verdict_state = "not_evaluated"
             rendered_verdict = "NOT_EVALUATED"
-        else:
-            passed = bool(report.verified_pass)
-            verifier_overrode_pass = bool(report.agent_reported_pass) and not passed
+        elif VerificationOutcome.DISCREPANCY in outcomes:
+            passed = False
+            verifier_overrode_pass = bool(report.agent_reported_pass)
             verdict_state = "overridden" if verifier_overrode_pass else "evaluated"
-            rendered_verdict = "PASS" if passed else "FAIL"
+            rendered_verdict = "FAIL"
+            if VerificationOutcome.UNVERIFIABLE in outcomes:
+                unverifiable_indices.append(ac_index)
+            if VerificationOutcome.SKIPPED in outcomes:
+                skipped_indices.append(ac_index)
+            if not evidence:
+                evidence = "Spec verifier found a discrepancy without evidence details."
+        elif outcomes == {VerificationOutcome.VERIFIED}:
+            passed = True
+            verdict_state = "evaluated"
+            rendered_verdict = "PASS"
             if not evidence:
                 evidence = "Spec verifier produced no evidence details."
+        else:
+            # Missing evidence is not a discrepancy, but this formal adapter is
+            # a strict gate: only an all-VERIFIED report may mint a PASS.
+            passed = False
+            verdict_state = "not_evaluated"
+            rendered_verdict = "NOT_EVALUATED"
+            if VerificationOutcome.UNVERIFIABLE in outcomes:
+                unverifiable_indices.append(ac_index)
+            if VerificationOutcome.SKIPPED in outcomes:
+                skipped_indices.append(ac_index)
+            if not evidence:
+                evidence = "Spec verification did not produce independently usable evidence."
 
         ac_results.append(
             ACResult(
@@ -735,8 +760,14 @@ def _evaluation_summary_from_spec_verification(
 
     failure_reason = None
     if not approved:
-        failed_indices = [result.ac_index + 1 for result in ac_results if result.unresolved]
-        discrepancy_count = getattr(verification_summary, "discrepancy_count", 0)
+        failed_indices = [
+            result.ac_index + 1 for result in ac_results if result.rendered_verdict == "FAIL"
+        ]
+        discrepancy_count = sum(
+            1
+            for report in reports
+            if getattr(report, "has_confirmed_discrepancy", report.has_discrepancy)
+        )
         reason_parts = []
         if failed_indices:
             reason_parts.append(
@@ -751,8 +782,13 @@ def _evaluation_summary_from_spec_verification(
             )
         if unverifiable_indices:
             reason_parts.append(
-                "no independently verifiable assertions for AC "
+                "unverifiable assertion evidence for AC "
                 + ", ".join(str(i + 1) for i in unverifiable_indices)
+            )
+        if skipped_indices:
+            reason_parts.append(
+                "source verification skipped for AC "
+                + ", ".join(str(i + 1) for i in skipped_indices)
             )
         if not execution_completed:
             reason_parts.append(
@@ -2024,13 +2060,18 @@ def create_ouroboros_server(
 
         agent_results = _agent_results_from_execution_summary(mechanical)
 
-        verifier = SpecVerifier(project_dir=project_dir)
+        # The evolutionary self-improvement loop is an evidence gate, not an
+        # exploratory report: unavailable/skipped outcomes must block approval.
+        verifier = SpecVerifier(project_dir=project_dir, strict=True)
         summary = verifier.verify_all(assertions, agent_results)
 
-        if summary.has_discrepancies:
+        if summary.has_confirmed_discrepancies:
+            override_count = sum(
+                1 for report in summary.reports if report.has_confirmed_discrepancy
+            )
             log.warning(
                 "spec_verification.discrepancies_found",
-                count=summary.discrepancy_count,
+                count=override_count,
                 project_dir=project_dir,
             )
 
