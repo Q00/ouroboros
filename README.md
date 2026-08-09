@@ -125,6 +125,14 @@ in your browser. You can return to those settings any time with `ooo config`.
 > ooo interview "I want to build a task management CLI"
 ```
 
+<p align="center">
+  <img src="./docs/images/ooo-interview.gif" width="760" alt="ooo interview asking about storage, scope, and identifiers, then stopping at an ambiguity score of 0.28">
+</p>
+
+<p align="center">
+  <sub>Four rounds in, ambiguity is still 0.28 and no Seed is generated. The threshold is 0.2.</sub>
+</p>
+
 > Works with Claude Code, Codex CLI, GitHub Copilot CLI, OpenCode, Hermes, Gemini, Kiro CLI, Pi CLI, Zcode, Goose, GJC, Antigravity CLI, and Grok Build CLI. The installer detects available runtimes and registers the MCP server where the host supports it. For explicit selection, run `ouroboros setup --runtime <opencode|kiro|copilot|gemini|pi|zcode|goose|gjc|antigravity|grok>` after installation. The Copilot CLI runtime live-discovers its model catalog via the GitHub Copilot models API and lets you pick a default during setup.
 
 <details>
