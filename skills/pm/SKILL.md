@@ -153,9 +153,8 @@ Write the line in the language the user is speaking.
 **Do not go to step A3 or B while the lanes are still running.** Step B is where
 you ask the user, and asking before the evidence arrives is the exact failure
 this mechanism exists to prevent: the PM decides without the two things they
-could not have looked up themselves. Waiting is for lanes still in flight —
-lanes that came back empty, broke their contract, or could not be spawned have
-returned, and you go on without them rather than waiting for what is not coming.
+could not have looked up themselves. Waiting is for lanes still in flight: one
+that came back empty, broke its contract, or could not be spawned has returned.
 
 **Submitting results back.** Correlate by
 `meta.question_advisory_result_correlation_key` (`context.lane_id`) and call
@@ -167,17 +166,13 @@ you could not spawn at all is submitted as
 `content` beside it. Never invent output for a lane you did not run; a
 fabricated finding is worse than a missing one.
 
-**Reading the reply.** `status: "complete"` means every required lane passed its
-contract; synthesize from the outputs you submitted. Anything else carries its
-own reason — `missing_required_keys` for lanes that did not arrive,
-`contract_violations` for lanes the server rejected. **A rejected lane's finding
-is not evidence.** Leave it out of the block; it never reaches the user.
+**Reading the reply.** `complete` means every required lane passed its contract.
+Anything else names its reason — `missing_required_keys`, `contract_violations`.
+**A rejected lane's finding is not evidence:** leave it out of the block.
 
-Resubmit once, carrying every lane you hold rather than only the named ones. If
-it still is not `complete`, go to B with the evidence you do have — or with none
-— and say in one line that the investigation did not come back. The interview
-does not stop for this: evidence sharpens the question, it is not a condition of
-asking it.
+Resubmit once with every lane you hold. Still not `complete` — go to B with what
+survived, or with none, saying in one line that the investigation did not come
+back. The interview does not wait on this.
 
 There are two lanes and both are required: `code_context` and `data_context`.
 A `code_context` lane that carries a policy returns `answer_prefix:
