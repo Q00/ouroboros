@@ -4532,13 +4532,17 @@ def test_browser_test_tools_are_not_ui_products(goal: str, outputs: str) -> None
         "Compatibility tests for Chrome extensions",
         "Compatibility tests for Chrome extensions in CI",
         "Playwright covers a browser extension tested in the nightly suite",
+        "Playwright tests exercise a Chrome browser extension installed temporarily",
+        "Playwright tests exercise a Chrome browser extension provisioned briefly",
     ],
 )
 def test_components_inside_verification_context_do_not_veto(runtime: str) -> None:
-    """R89/R94 guard: components used or targeted by verification tooling
-    are not the runtime's identity — a verification-owned tail ("in CI",
-    "tested in the nightly suite") is the tooling's description, and the
-    explicit web app keeps its durable class."""
+    """R89/R94/R96 guard: components used or targeted by verification
+    tooling are not the runtime's identity — a verification-owned tail
+    ("in CI", "tested in the nightly suite") or a fixture description
+    without an ownership anchor ("installed temporarily") is the
+    tooling's detail, and the explicit web app keeps its durable
+    class."""
     ledger = _bare_ledger("Build a web app")
     _seed_section(ledger, "outputs", value="Interactive signup page")
     _seed_section(ledger, "runtime_context", value=runtime)
@@ -4589,6 +4593,7 @@ def test_verification_exemption_covers_qualified_web_ownership(goal: str) -> Non
         "Playwright tests exercise a customer-facing Chrome browser extension",
         "Playwright tests exercise a Chrome browser extension serving paying customers",
         "Playwright tests exercise a Chrome browser extension deployed globally",
+        "Playwright tests exercise the Chrome browser extension customers use daily",
     ],
 )
 def test_production_identity_survives_adjacent_test_clauses(runtime: str) -> None:
