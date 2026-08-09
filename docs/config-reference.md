@@ -324,7 +324,7 @@ economics:
 | Field | Type | Description |
 |-------|------|-------------|
 | `provider` | `string` | Provider name (`openai`, `anthropic`, `google`, `openrouter`). |
-| `model` | `string` | Model identifier (e.g., `gpt-4o-mini`, `claude-opus-4-8`). |
+| `model` | `string` | Model identifier. Provider formats differ: Anthropic uses `claude-opus-4-8`, while OpenRouter uses `openrouter/anthropic/claude-opus-4.8`. |
 
 ---
 
@@ -430,24 +430,26 @@ Controls Phase 4 — the 3-stage evaluation pipeline.
 
 ```yaml
 evaluation:
-  stage1_enabled: true         # Mechanical checks (lint, build, tests)
-  stage2_enabled: true         # Semantic evaluation (AC compliance, drift)
-  stage3_enabled: true         # Multi-model consensus (when triggered)
-  satisfaction_threshold: 0.8  # Currently inert — the Stage 2 gate is hardcoded to 0.8
-  uncertainty_threshold: 0.3   # Currently inert — see the field table below
+  stage1_enabled: true         # Currently inert in config.yaml; see below
+  stage2_enabled: true         # Currently inert in config.yaml; see below
+  stage3_enabled: true         # Currently inert in config.yaml; see below
+  satisfaction_threshold: 0.8  # Currently inert; the pipeline gate is hardcoded to 0.8
+  uncertainty_threshold: 0.3   # Currently inert in config.yaml; see below
   semantic_model: claude-opus-4-8
   assertion_extraction_model: claude-sonnet-4-6
 ```
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `stage1_enabled` | `bool` | `true` | **Currently inert.** No production code builds `PipelineConfig` from this field. The evolution pipeline hardcodes the stage flags (`mcp/server/adapter.py:1893`, gated on `OUROBOROS_EVOLVE_STAGE1`), and the evaluate handler passes only `mechanical` and `semantic` (`mcp/tools/evaluation_handlers.py:743`), so stages take `PipelineConfig` defaults. |
-| `stage2_enabled` | `bool` | `true` | **Currently inert.** Same reason as `stage1_enabled`. |
-| `stage3_enabled` | `bool` | `true` | **Currently inert.** Same reason as `stage1_enabled`. |
-| `satisfaction_threshold` | `float [0.0, 1.0]` | `0.8` | **Currently inert.** `EvaluationPipeline` compares `stage2_result.score >= 0.8` literally and never reads this field. Changing it neither tightens nor relaxes evaluation. See [Evaluation Pipeline Guide](./guides/evaluation-pipeline.md#stage-2-semantic-evaluation). |
-| `uncertainty_threshold` | `float [0.0, 1.0]` | `0.3` | **Currently inert.** The value that actually gates Stage 3 is `TriggerConfig.uncertainty_threshold` inside `PipelineConfig`, and nothing copies this YAML field into it. |
+| `stage1_enabled` | `bool` | `true` | **Currently inert in `config.yaml`.** Runtime builders do not copy this field into `PipelineConfig`. |
+| `stage2_enabled` | `bool` | `true` | **Currently inert in `config.yaml`.** Runtime builders do not copy this field into `PipelineConfig`. |
+| `stage3_enabled` | `bool` | `true` | **Currently inert in `config.yaml`.** Runtime builders do not copy this field into `PipelineConfig`. |
+| `satisfaction_threshold` | `float [0.0, 1.0]` | `0.8` | **Currently inert.** The field is validated but the pipeline compares Stage 2 scores against a hardcoded `0.8`; changing this value does not change the gate. See [Evaluation Pipeline Guide](./guides/evaluation-pipeline.md#stage-2-semantic-evaluation). |
+| `uncertainty_threshold` | `float [0.0, 1.0]` | `0.3` | **Currently inert in `config.yaml`.** Runtime builders do not copy it into `TriggerConfig`. |
 | `semantic_model` | `string` | `"claude-opus-4-8"` | Model used for Stage 2 semantic evaluation. Overridable via `OUROBOROS_SEMANTIC_MODEL`. |
 | `assertion_extraction_model` | `string` | `"claude-sonnet-4-6"` | Model used for extracting verification assertions from seed criteria. Overridable via `OUROBOROS_ASSERTION_EXTRACTION_MODEL`. |
+
+> **Configuration boundary:** the top-level `evaluation.stage1_enabled`, `stage2_enabled`, `stage3_enabled`, and `uncertainty_threshold` keys are schema-validated placeholders, not runtime controls. The similarly named direct-Python `PipelineConfig.stage*_enabled` fields and `TriggerConfig.uncertainty_threshold` are separate and active when explicitly supplied to `EvaluationPipeline`; see [Disabling Stages](./guides/evaluation-pipeline.md#disabling-stages) and [Trigger Configuration](./guides/evaluation-pipeline.md#trigger-configuration).
 
 ---
 
@@ -465,8 +467,8 @@ Controls Phase 5 — multi-model consensus voting and deliberation.
 
 ```yaml
 consensus:
-  min_models: 3             # Currently inert — see the field table below
-  threshold: 0.67           # Currently inert — the vote uses majority_threshold = 0.66
+  min_models: 3             # Currently inert — runtime requires 2 collected votes
+  threshold: 0.67           # Currently inert — runtime default is 0.66
   diversity_required: true  # Currently inert — see the field table below
   models:
     - openrouter/openai/gpt-4o
@@ -479,14 +481,16 @@ consensus:
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `min_models` | `int >= 2` | `3` | **Currently inert.** Defined in `ConsensusConfig` (`config/models.py:378`) and never read; no code enforces a minimum voter count. |
-| `threshold` | `float [0.0, 1.0]` | `0.67` | **Currently inert.** The approval comparison uses `evaluation.consensus.ConsensusConfig.majority_threshold`, which defaults to `0.66` (`evaluation/consensus.py:141,508`) and is a different class from this YAML field. Changing this value does not move the bar. |
-| `diversity_required` | `bool` | `true` | **Currently inert.** The field exists on `ConsensusConfig` and in the schema, but nothing reads it. Provider diversity comes from the model roster itself, not from this flag. See [Evaluation Pipeline Guide](./guides/evaluation-pipeline.md#stage-3-multi-model-consensus). |
+| `min_models` | `int >= 2` | `3` | **Currently inert.** Simple consensus requires at least two successfully collected votes; this top-level field is not wired to that rule. |
+| `threshold` | `float [0.0, 1.0]` | `0.67` | **Currently inert.** Runtime simple consensus uses direct-Python `ConsensusConfig.majority_threshold` (default `0.66`); this top-level field is not copied into it. |
+| `diversity_required` | `bool` | `true` | **Currently inert.** The field exists on `ConsensusConfig` and in the schema, but nothing reads it. Provider diversity depends on actual adapter routing; neither this flag nor differently named roster entries attest it. See [Evaluation Pipeline Guide](./guides/evaluation-pipeline.md#stage-3-consensus-multi-model-or-single-model-fallback). |
 | `models` | `list[string]` | (see above) | Model roster for Stage 3 simple voting. With `llm.backend: litellm`, use `provider/model` or `openrouter/provider/model`. With `llm.backend: codex`, use Codex/OpenAI model IDs such as `gpt-5.4`. Overridable via `OUROBOROS_CONSENSUS_MODELS` (comma-separated). |
 | `advocate_model` | `string` | `"openrouter/anthropic/claude-opus-4.8"` | Model that argues in favor of the proposed solution in deliberative consensus. With `llm.backend: codex`, this can be a Codex/OpenAI model ID such as `gpt-5.4`. Overridable via `OUROBOROS_CONSENSUS_ADVOCATE_MODEL`. |
 | `devil_model` | `string` | `"openrouter/openai/gpt-4o"` | Model that argues against (devil's advocate) in deliberative consensus. With `llm.backend: codex`, this can be a Codex/OpenAI model ID such as `gpt-5.4`. Overridable via `OUROBOROS_CONSENSUS_DEVIL_MODEL`. |
 | `judge_model` | `string` | `"openrouter/google/gemini-2.5-pro"` | Model that renders a final verdict after deliberation. With `llm.backend: codex`, this can be a Codex/OpenAI model ID such as `gpt-5.4`. Overridable via `OUROBOROS_CONSENSUS_JUDGE_MODEL`. |
 
+> **Configuration boundary:** `consensus.min_models` and `consensus.threshold` are schema-validated placeholders. Runtime simple consensus hardcodes a minimum of two collected votes and reads the separate direct-Python `ConsensusConfig.majority_threshold`. Changing these YAML keys does not change either rule.
+>
 > **Backend note:** With `llm.backend: litellm`, consensus models typically go through OpenRouter/LiteLLM and require the corresponding provider credentials (commonly `OPENROUTER_API_KEY`). With `llm.backend: codex`, the configured model strings are sent through Codex CLI instead.
 
 ---
@@ -840,18 +844,19 @@ orchestrator:
 
 llm:
   backend: copilot
-  default_model: claude-opus-4.6           # written by `ouroboros setup --runtime copilot`
 
 clarification:
-  default_model: claude-opus-4.6           # same value written by setup
+  default_model: claude-opus-4.6           # example live-discovered Copilot ID
 ```
 
-The Copilot CLI runtime is unique in that `ouroboros setup --runtime copilot` **live-discovers the available models** from the GitHub Copilot models API at setup time and writes the chosen default into the config above. Re-run setup after GitHub publishes new models. Authentication uses `gh auth login`; no separate API key is required. Model-ID normalization is narrower than it looks, so check your explicit overrides before switching backends. `map_to_copilot_model()` (`copilot/model_discovery.py:247`) resolves in this order: a verbatim match against the discovered model list; a static name map that currently covers `claude-opus-4-6` and `openrouter/anthropic/claude-opus-4-6` (both to `claude-opus-4.6`); then a hyphen-to-dot fallback. Two consequences:
+The Copilot CLI runtime is unique in that `ouroboros setup --runtime copilot` **live-discovers the available models** from the GitHub Copilot models API at setup time. There is no `llm.default_model` contract: setup removes that key and writes the selected dotted Copilot ID into supported per-role fields that are absent or still carry shipped defaults, while preserving explicit user overrides. Re-run setup after GitHub publishes new models. Authentication uses `gh auth login`; no separate API key is required.
+
+Model-ID normalization is narrower than it looks, so check your explicit overrides before switching backends. `map_to_copilot_model()` (`copilot/model_discovery.py:247`) resolves in this order: a verbatim match against the discovered model list; a static name map that currently covers `claude-opus-4-6` and `openrouter/anthropic/claude-opus-4-6` (both to `claude-opus-4.6`); then a hyphen-to-dot fallback. Two consequences:
 
 - Any ID already containing a `.` short-circuits at the top and is passed through unchanged (`:276`).
 - The hyphen-to-dot fallback calls `replace("-", ".")`, which rewrites *every* hyphen. `claude-opus-4-8` becomes `claude.opus.4.8`, which is not a Copilot ID, so it also passes through unchanged.
 
-The current direct-provider default `claude-opus-4-8` therefore has no Copilot mapping, unlike the previous default `claude-opus-4-6`. Leave role models unset to use the value setup discovered and wrote, or set a Copilot-valid ID explicitly. See [Copilot CLI runtime guide](runtime-guides/copilot.md) for full details.
+The current direct-provider default `claude-opus-4-8` therefore has no Copilot mapping, unlike the previous default `claude-opus-4-6`. Leave role models unset to use the value setup discovered and wrote, or set a Copilot-valid ID explicitly. Mapping never changes the model generation. See [Copilot CLI runtime guide](runtime-guides/copilot.md) for full details.
 
 ### Pi CLI Runtime
 
@@ -947,18 +952,18 @@ resilience:
   reflect_model: claude-opus-4-8
 
 evaluation:
-  stage1_enabled: true
-  stage2_enabled: true
-  stage3_enabled: true
+  stage1_enabled: true         # Currently inert in config.yaml
+  stage2_enabled: true         # Currently inert in config.yaml
+  stage3_enabled: true         # Currently inert in config.yaml
   satisfaction_threshold: 0.8  # Currently inert; score gate is hardcoded to 0.8
-  uncertainty_threshold: 0.3
+  uncertainty_threshold: 0.3   # Currently inert in config.yaml
   semantic_model: claude-opus-4-8
   assertion_extraction_model: claude-sonnet-4-6
 
 consensus:
-  min_models: 3
-  threshold: 0.67
-  diversity_required: true
+  min_models: 3               # Currently inert
+  threshold: 0.67             # Currently inert; runtime default is 0.66
+  diversity_required: true    # Currently inert
   models:
     - openrouter/openai/gpt-4o
     - openrouter/anthropic/claude-opus-4.8

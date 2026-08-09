@@ -319,9 +319,11 @@ OpenCode is easy to miss here: it is not a separate member of the union, it ride
 
 **Changing the roster does not change the adapter.** `ConsensusEvaluator` holds a single `self._llm` and sends every vote through it (`evaluation/consensus.py:281`, and the `tracked_complete(self._llm, ...)` calls at `:476`, `:563`, `:886`, `:1030`). The roster only decides the model **string** handed to that one adapter.
 
-Setting `OUROBOROS_CONSENSUS_MODELS` or `consensus.models` alone therefore does not replace the adapter or prove cross-vendor routing. An adapter that is already OpenRouter-capable may interpret provider-qualified strings and route the calls to those providers through that same adapter. A local CLI adapter instead receives an `openrouter/...` entry as its own model argument; the string does not switch the call to OpenRouter, so it may fail as unsupported or remain on that adapter under a different label.
+**Actual per-vote resolution chain.** Each roster entry becomes `CompletionConfig(model=entry, role="consensus_vote")`. The already-selected adapter then resolves `llm_role_profiles.consensus_vote` and the referenced `llm_profiles` entry for its own backend before dispatching the resulting effective model through that same adapter and transport. With `ConsensusConfig(models=None)`, `models_are_explicit` remains false even when the resolved roster came from `OUROBOROS_CONSENSUS_MODELS` or `config.consensus.models`; a `consensus_vote` profile model can therefore replace every roster entry, collapsing differently named slots onto one effective model. A direct caller that passes `ConsensusConfig(models=(...))` marks non-empty, non-`default` entries as request pins, but still sends all votes through the same adapter.
 
-Cross-vendor independence requires the active LLM backend to be one that can actually reach those providers. Pick the roster to match the backend you are on, not the other way round, and verify actual transport/provider evidence: the requested roster and `reviewer_independence` label are classifications, not routing attestation.
+Setting `OUROBOROS_CONSENSUS_MODELS` or `consensus.models` alone therefore does not replace the adapter or prove cross-vendor routing. An adapter that is already OpenRouter-capable may interpret provider-qualified strings and route the calls to those providers through that same adapter. A local CLI adapter instead receives the profile-resolved model as its own argument; an `openrouter/...` string does not switch the call to OpenRouter, so it may fail as unsupported or remain on that adapter under a different label.
+
+Cross-vendor independence requires the active LLM backend to be one that can actually reach those providers. Pick the roster to match the backend you are on, not the other way round, and verify effective dispatch plus transport/provider response evidence. Consensus parsing records the original roster string in `Vote.model` and Stage 3 events rather than the provider-returned model, so requested/recorded labels and `reviewer_independence` are classifications, not routing attestation.
 
 Each successful vote call returns `{ approved, confidence, reasoning }`.
 
@@ -427,7 +429,7 @@ There is **no explicit cap on the number of files**. File collection is bounded 
 | **Directory fallback finds no eligible files** | Semantic prompt falls back to `EvaluationContext.artifact` | The project root is empty, inaccessible, or all files are excluded; the bundle still retains `text_summary`, but prompt fallback reads the context's `artifact` field. |
 | **Path traversal blocked** | File silently skipped | File path resolves outside `project_dir`. This is a security boundary, not a bug. |
 | **Permission error** | File silently skipped | Execution ran as a different user. Verify file permissions. |
-| **Large files skipped** | Missing context in evaluation | File > 100 KB. Refactor to split large files, or accept that the evaluator works from the text summary. |
+| **Large files skipped** | That file is absent from the file-based semantic prompt | Files > 100 KB are skipped. If other eligible collected files remain, Stage 2 evaluates those files; if no files remain, the prompt inlines `EvaluationContext.artifact`. It does not read `ArtifactBundle.text_summary` directly. |
 
 ---
 
@@ -461,6 +463,8 @@ config = PipelineConfig(stage1_enabled=False)
 # Skip consensus (cost-constrained runs)
 config = PipelineConfig(stage3_enabled=False)
 ```
+
+These are direct-Python runtime controls. The same-named top-level `evaluation.stage1_enabled`, `stage2_enabled`, and `stage3_enabled` keys in `~/.ouroboros/config.yaml` are currently schema-validated but are not copied into `PipelineConfig` by runtime builders. Likewise, top-level `evaluation.uncertainty_threshold` does not populate `TriggerConfig.uncertainty_threshold`.
 
 > **Warning:** Disabling Stage 1 means that broken code can pass through to semantic evaluation. Disabling Stage 3 means that high-drift or high-uncertainty outputs will never be submitted to multi-model review.
 
