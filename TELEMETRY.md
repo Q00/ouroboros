@@ -100,7 +100,9 @@ Notes:
   `verified=true`.
 - Events are sent to PostHog via a fire-and-forget background thread using a
   **public, write-only** project API key. Telemetry never blocks a command,
-  never raises, and silently drops events when offline.
+  never raises, and silently drops events when offline. The worker is a
+  daemon thread, so process exit never waits on it either — events queued or
+  in flight when a process terminates are dropped, not delivered.
 
 ## Where the code lives
 

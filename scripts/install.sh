@@ -103,7 +103,7 @@ _prompt() {
 # Only the four allowlisted telemetry keys are read, and an already-set real
 # process environment value is never overridden (mirrors config/loader.py).
 _telemetry_load_user_env() {
-  local f="$HOME/.ouroboros/.env" line key value
+  local f="$HOME/.ouroboros/.env" line key value rest after trailing
   { [ -f "$f" ] && [ -r "$f" ]; } || return 0
   while IFS= read -r line || [ -n "$line" ]; do
     line="${line#"${line%%[![:space:]]*}"}"
@@ -119,8 +119,41 @@ _telemetry_load_user_env() {
     value="${line#*=}"
     value="${value#"${value%%[![:space:]]*}"}"
     case "$value" in
-      \"*\") value="${value%\"}"; value="${value#\"}" ;;
-      \'*\') value="${value%\'}"; value="${value#\'}" ;;
+      \"*)
+        # A quoted value's content runs to the FIRST matching quote; only
+        # trailing whitespace and/or a `# comment` may follow it (matches
+        # python-dotenv). This is what makes a normal persisted opt-out like
+        # `OUROBOROS_TELEMETRY="0" # persisted opt-out` parse to "0" instead
+        # of falling into the unquoted branch below and keeping its quotes.
+        # No closing quote, or anything but whitespace/comment after it, is
+        # a parse error in python-dotenv -- skip the binding entirely.
+        rest="${value#\"}"
+        case "$rest" in
+          *\"*) ;;
+          *) continue ;;
+        esac
+        after="${rest#*\"}"
+        trailing="${after#"${after%%[![:space:]]*}"}"
+        case "$trailing" in
+          ''|'#'*) ;;
+          *) continue ;;
+        esac
+        value="${rest%%\"*}"
+        ;;
+      \'*)
+        rest="${value#\'}"
+        case "$rest" in
+          *\'*) ;;
+          *) continue ;;
+        esac
+        after="${rest#*\'}"
+        trailing="${after#"${after%%[![:space:]]*}"}"
+        case "$trailing" in
+          ''|'#'*) ;;
+          *) continue ;;
+        esac
+        value="${rest%%\'*}"
+        ;;
       *)
         # Unquoted values follow dotenv grammar: an inline ` # comment` is
         # not part of the value. Dropping it here matters for opt-outs --

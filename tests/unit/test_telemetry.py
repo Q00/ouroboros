@@ -5,8 +5,11 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import socket
 import subprocess
 import sys
+import threading
+import time
 from typing import Any
 
 import pytest
@@ -368,3 +371,77 @@ class TestNotice:
     def test_no_notice_when_disabled(self, capsys: pytest.CaptureFixture[str]) -> None:
         telemetry.show_first_run_notice()
         assert capsys.readouterr().err == ""
+
+
+class TestExitDoesNotBlock:
+    """Regression for the atexit-flush blocking bug.
+
+    ``_ensure_worker()`` used to register ``flush()`` with ``atexit``, so a
+    process with a queued event and an unresponsive destination would block
+    exit for up to the flush timeout on top of whatever the stalled HTTP call
+    was doing. The worker thread is now a plain daemon thread with nothing
+    registered at exit: process termination must not wait on it, even if the
+    destination never responds.
+    """
+
+    def test_stalled_transport_does_not_delay_process_exit(self, tmp_path: Path) -> None:
+        # A local socket that accepts a connection but never reads or writes
+        # anything simulates an unreachable/hanging PostHog endpoint without
+        # touching the network. `_post()`'s urlopen() will send the request
+        # (it fits in the OS send buffer) and then block reading a response
+        # until its own HTTP timeout — the fix is that nothing at process
+        # exit waits around for that.
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server.bind(("127.0.0.1", 0))
+        server.listen(1)
+        host, port = server.getsockname()[:2]
+        stop = threading.Event()
+
+        def accept_and_stall() -> None:
+            server.settimeout(0.5)
+            while not stop.is_set():
+                try:
+                    conn, _addr = server.accept()
+                except TimeoutError:
+                    continue
+                stop.wait()
+                conn.close()
+
+        acceptor = threading.Thread(target=accept_and_stall, daemon=True)
+        acceptor.start()
+        try:
+            env = os.environ.copy()
+            for key in ("DO_NOT_TRACK", "OUROBOROS_TELEMETRY", "OUROBOROS_POSTHOG_HOST"):
+                env.pop(key, None)
+            env["HOME"] = str(tmp_path)
+            env["OUROBOROS_POSTHOG_API_KEY"] = "phc_test"
+            env["OUROBOROS_POSTHOG_HOST"] = f"http://{host}:{port}"
+            repo_root = Path(__file__).resolve().parents[2]
+            env["PYTHONPATH"] = str(repo_root / "src")
+
+            start = time.monotonic()
+            subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    "from ouroboros import telemetry; telemetry.capture('test_event')",
+                ],
+                env=env,
+                text=True,
+                capture_output=True,
+                timeout=10,
+                check=True,
+            )
+            elapsed = time.monotonic() - start
+        finally:
+            stop.set()
+            server.close()
+            acceptor.join(timeout=2)
+
+        # Old (atexit-registered flush) behavior measured ~2s against a
+        # stalled transport. Keep generous headroom for interpreter/import
+        # startup while staying strictly below the old blocking bound.
+        assert elapsed < 1.2, (
+            f"subprocess took {elapsed:.2f}s to exit against a stalled transport "
+            "-- telemetry may be blocking process exit again"
+        )

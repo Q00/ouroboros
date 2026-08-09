@@ -11,12 +11,13 @@ Privacy contract — see TELEMETRY.md at the repository root:
   ``telemetry.enabled: false`` in ``~/.ouroboros/config.yaml``.
 - Fire-and-forget: events go through a bounded queue drained by a daemon
   thread using stdlib urllib. Telemetry never raises, never blocks the
-  caller, and silently drops events on any failure.
+  caller, and silently drops events on any failure. The worker thread is a
+  daemon, so process exit never waits on it either: events still queued or
+  in flight when the process terminates are dropped, not delivered.
 """
 
 from __future__ import annotations
 
-import atexit
 import hashlib
 import json
 import os
@@ -34,7 +35,9 @@ from ouroboros import __version__
 
 # PostHog project API key. This is a *public, write-only* key (it can only
 # ingest events, never read them) — embedding it in an open-source repo is
-# the documented PostHog pattern. Empty string disables telemetry entirely.
+# the documented PostHog pattern. An empty constant (e.g. stripped in a fork)
+# disables telemetry entirely; a blank/unset OUROBOROS_POSTHOG_API_KEY env
+# var does not — it just falls back to this embedded key (see _api_key()).
 _EMBEDDED_API_KEY = "phc_mSoetD4ExLDDCi3vNua635NhwRTgHfRaCG9WYNKmrvv5"
 _DEFAULT_HOST = "https://us.i.posthog.com"
 
@@ -262,11 +265,17 @@ def _ensure_worker() -> None:
         if _worker is None or not _worker.is_alive():
             _worker = threading.Thread(target=_worker_loop, name="ouroboros-telemetry", daemon=True)
             _worker.start()
-            atexit.register(flush)
 
 
 def flush(timeout: float = 1.5) -> None:
-    """Best-effort wait for queued events to be sent (bounded, never raises)."""
+    """Best-effort wait for queued events to be sent (bounded, never raises).
+
+    Not called automatically at process exit — the worker thread is a daemon,
+    so the process can terminate with events still queued or in flight, and
+    those are silently dropped. Callers that need delivery before exiting
+    (e.g. a short-lived script that wants its one event to land) may call
+    this explicitly.
+    """
     try:
         deadline = time.monotonic() + timeout
         with _queue.all_tasks_done:

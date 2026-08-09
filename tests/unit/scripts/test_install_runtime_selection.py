@@ -324,6 +324,108 @@ def test_installer_honors_user_env_opt_out(tmp_path: Path) -> None:
     assert "Anonymous usage stats help improve Ouroboros" not in result.stdout
 
 
+def test_installer_honors_quoted_user_env_opt_out_with_comment(tmp_path: Path) -> None:
+    user_env = tmp_path / "home" / ".ouroboros" / ".env"
+    user_env.parent.mkdir(parents=True)
+    user_env.write_text('OUROBOROS_TELEMETRY="0" # persisted opt-out\n', encoding="utf-8")
+
+    result = _run_installer(
+        tmp_path,
+        drop_env=("OUROBOROS_TELEMETRY",),
+        fake_commands=_telemetry_fake_commands(tmp_path),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not (tmp_path / "telemetry.log").exists()
+    assert "Anonymous usage stats help improve Ouroboros" not in result.stdout
+
+
+def test_installer_honors_quoted_do_not_track_with_comment(tmp_path: Path) -> None:
+    user_env = tmp_path / "home" / ".ouroboros" / ".env"
+    user_env.parent.mkdir(parents=True)
+    user_env.write_text('DO_NOT_TRACK="1" # off\n', encoding="utf-8")
+
+    result = _run_installer(
+        tmp_path,
+        drop_env=("OUROBOROS_TELEMETRY", "DO_NOT_TRACK"),
+        fake_commands=_telemetry_fake_commands(tmp_path),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not (tmp_path / "telemetry.log").exists()
+    assert "Anonymous usage stats help improve Ouroboros" not in result.stdout
+
+
+def test_installer_honors_single_quoted_user_env_opt_out_with_comment(tmp_path: Path) -> None:
+    user_env = tmp_path / "home" / ".ouroboros" / ".env"
+    user_env.parent.mkdir(parents=True)
+    user_env.write_text("OUROBOROS_TELEMETRY='0' # off\n", encoding="utf-8")
+
+    result = _run_installer(
+        tmp_path,
+        drop_env=("OUROBOROS_TELEMETRY",),
+        fake_commands=_telemetry_fake_commands(tmp_path),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not (tmp_path / "telemetry.log").exists()
+    assert "Anonymous usage stats help improve Ouroboros" not in result.stdout
+
+
+def test_installer_honors_quoted_user_env_opt_out_without_comment(tmp_path: Path) -> None:
+    user_env = tmp_path / "home" / ".ouroboros" / ".env"
+    user_env.parent.mkdir(parents=True)
+    user_env.write_text('OUROBOROS_TELEMETRY="0"\n', encoding="utf-8")
+
+    result = _run_installer(
+        tmp_path,
+        drop_env=("OUROBOROS_TELEMETRY",),
+        fake_commands=_telemetry_fake_commands(tmp_path),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not (tmp_path / "telemetry.log").exists()
+    assert "Anonymous usage stats help improve Ouroboros" not in result.stdout
+
+
+def test_installer_user_env_unclosed_quote_is_skipped(tmp_path: Path) -> None:
+    user_env = tmp_path / "home" / ".ouroboros" / ".env"
+    user_env.parent.mkdir(parents=True)
+    user_env.write_text('OUROBOROS_TELEMETRY="0\n', encoding="utf-8")
+
+    result = _run_installer(
+        tmp_path,
+        local_repo=False,
+        drop_env=("OUROBOROS_TELEMETRY",),
+        fake_commands=_telemetry_fake_commands(tmp_path),
+    )
+
+    assert result.returncode == 0, result.stderr
+    captures = _wait_for_telemetry(tmp_path)
+    assert "capture-before-notice" not in captures
+    assert '"event":"install_completed"' in captures
+    assert result.stdout.count("Anonymous usage stats help improve Ouroboros") == 1
+
+
+def test_installer_user_env_trailing_garbage_after_quote_is_skipped(tmp_path: Path) -> None:
+    user_env = tmp_path / "home" / ".ouroboros" / ".env"
+    user_env.parent.mkdir(parents=True)
+    user_env.write_text('OUROBOROS_TELEMETRY="0"x\n', encoding="utf-8")
+
+    result = _run_installer(
+        tmp_path,
+        local_repo=False,
+        drop_env=("OUROBOROS_TELEMETRY",),
+        fake_commands=_telemetry_fake_commands(tmp_path),
+    )
+
+    assert result.returncode == 0, result.stderr
+    captures = _wait_for_telemetry(tmp_path)
+    assert "capture-before-notice" not in captures
+    assert '"event":"install_completed"' in captures
+    assert result.stdout.count("Anonymous usage stats help improve Ouroboros") == 1
+
+
 def test_installer_honors_user_env_destination_override(tmp_path: Path) -> None:
     user_env = tmp_path / "home" / ".ouroboros" / ".env"
     user_env.parent.mkdir(parents=True)
