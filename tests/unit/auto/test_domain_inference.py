@@ -4927,6 +4927,31 @@ def test_spa_abbreviation_owns_like_its_expansion() -> None:
     assert result.single is TaskClass.WEB_APP
 
 
+def test_pwa_abbreviation_owns_like_its_expansion() -> None:
+    """R117 guard: PWA is the canonical progressive-web-application
+    abbreviation and owns the web-app class outright."""
+    ledger = _bare_ledger("Build a PWA")
+    _seed_section(ledger, "outputs", value="Interactive signup page and settings panel")
+    _seed_section(
+        ledger,
+        "runtime_context",
+        value="Service worker and installable manifest",
+    )
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP
+
+
+def test_browser_consuming_a_document_is_not_web_app_ownership() -> None:
+    """R117 guard: a browser merely viewing a document is its consumer,
+    not proof that the produced artifact is a browser application."""
+    ledger = _bare_ledger("Generate a PDF ebook")
+    _seed_section(ledger, "outputs", value="Downloadable PDF with chapters")
+    _seed_section(ledger, "runtime_context", value="Viewed in modern browsers")
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes
+
+
 def test_capability_exclusion_is_not_artifact_denial() -> None:
     """R105 guard: a transitive exclusion is the app's own compatibility
     policy — "a web app that excludes unsupported browsers" is still the

@@ -51,6 +51,7 @@ from ouroboros.auto.web_ownership import (
     _NON_BROWSER_RUNTIME_RE,
     _POSTNOMINAL_BROWSER_QUALIFIER_RE,
     _POSTPOSITIVE_BROWSER_DENIAL_RE,
+    _RUNTIME_BROWSER_CONSUMER_RE,
     _SECTION_BROWSER_ENV_RE,
     _SUBJECT_COMPOUND_NOUN_FRAGMENT,
     _UI_PRODUCT_HEAD_FRAGMENT,
@@ -1132,6 +1133,7 @@ def _section_browser_context_text(ledger: SeedDraftLedger) -> str:
     runtime = _ENGINE_CONTAINMENT_RE.sub(
         " ", _strip_verification_clauses(_section_text(ledger, "runtime_context"))
     )
+    runtime = _RUNTIME_BROWSER_CONSUMER_RE.sub(" ", runtime)
     context_text = _strip_consumer_relations(outputs) + " " + runtime
     # Postpositive denials ("the browser is not supported", "browser
     # support disabled") negate from behind (#1813 R37).

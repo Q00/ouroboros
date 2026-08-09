@@ -19,7 +19,7 @@ import re
 # only the full single-page-application phrase denotes browser context.
 _WEB_APP_GOAL_SIGNAL_FRAGMENT = (
     r"(?:browsers?|web[\s\-]?app(?:lication)?s?|websites?|web\s+uis?|frontends?|"
-    r"front[\s\-]ends?|single[\s\-]page\s+app(?:lication)?s?|spas?)"
+    r"front[\s\-]ends?|single[\s\-]page\s+app(?:lication)?s?|spas?|pwas?)"
 )
 _WEB_APP_GOAL_SIGNAL_RE = re.compile(rf"\b{_WEB_APP_GOAL_SIGNAL_FRAGMENT}\b")
 
@@ -49,7 +49,7 @@ _ENGINE_CONTAINMENT_RE = re.compile(
 # subtype (#1813 R115) — token-bounded so ordinary words stay words.
 _WEB_APP_ARTIFACT_PHRASE_RE = re.compile(
     r"\b(?:web[\s\-]?app(?:lication)?s?|webapps?|websites?|web\s+uis?|frontends?|"
-    r"front[\s\-]ends?|single[\s\-]page\s+app(?:lication)?s?|spas?)\b"
+    r"front[\s\-]ends?|single[\s\-]page\s+app(?:lication)?s?|spas?|pwas?)\b"
 )
 _UI_PRODUCT_HEAD_FRAGMENT = (
     r"(?:apps?|applications?|webapps?|uis?|interfaces?|pages?|"
@@ -297,7 +297,7 @@ _BROWSER_COMPONENT_RE = re.compile(
 
 _EXPLICIT_WEB_VOCAB_RE = re.compile(
     r"\b(?:web[\s\-]?app(?:lication)?s?|webapps?|websites?|web\s+uis?|"
-    r"frontends?|front[\s\-]ends?|single[\s\-]page\s+app(?:lication)?s?|spas?)\b"
+    r"frontends?|front[\s\-]ends?|single[\s\-]page\s+app(?:lication)?s?|spas?|pwas?)\b"
     r"|\bweb[\s\-]based\b|\bin[\s\-]browser\b"
 )
 _BARE_ADJACENT_QUALIFIER_RE = re.compile(
@@ -318,6 +318,20 @@ _INTERACTION_HEAD_TAIL_RE = re.compile(
 _NON_BROWSER_RUNTIME_RE = re.compile(
     r"\b(?:desktop|native|terminal|shell|mobile|ios|android|electron|"
     r"batch|cron|headless|processes?|local(?:ly)?|python|node|jvm|java)\b"
+)
+
+
+# A browser can consume an artifact without being that artifact's
+# execution environment (#1813 R117): PDFs and similar deliverables are
+# commonly viewed, opened, previewed, or read in a browser. Strip only
+# these unambiguously passive-consumer relations; declarations such as
+# "runs in browsers" and "accessible in browsers" remain authoritative
+# browser-runtime evidence.
+_RUNTIME_BROWSER_CONSUMER_RE = re.compile(
+    rf"\b(?:viewed|opened|previewed|read)\s+"
+    rf"(?:directly\s+)?(?:in|through|using)\s+"
+    rf"(?:(?:an?|the|modern|common|standard|supported|major|desktop|mobile)\s+)*"
+    rf"(?:{_BROWSER_NAME_FRAGMENT}|browsers?)\b"
 )
 
 
