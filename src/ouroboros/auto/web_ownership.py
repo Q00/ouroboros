@@ -322,16 +322,20 @@ _NON_BROWSER_RUNTIME_RE = re.compile(
 
 
 # A browser can consume an artifact without being that artifact's
-# execution environment (#1813 R117): PDFs and similar deliverables are
-# commonly viewed, opened, previewed, or read in a browser. Strip only
-# these unambiguously passive-consumer relations; declarations such as
-# "runs in browsers" and "accessible in browsers" remain authoritative
-# browser-runtime evidence.
+# execution environment (#1813 R117/R118): PDFs, documents, and email
+# artifacts are commonly viewed, opened, rendered, displayed, or
+# presented in a browser. Strip these passive-consumer relations,
+# including coordinated consumers ("in Chrome and Firefox", "in
+# browsers and email clients"); declarations such as "runs in browsers"
+# and "accessible in browsers" remain authoritative browser-runtime
+# evidence.
 _RUNTIME_BROWSER_CONSUMER_RE = re.compile(
-    rf"\b(?:viewed|opened|previewed|read)\s+"
-    rf"(?:directly\s+)?(?:in|through|using)\s+"
+    rf"\b(?:viewed|opened|previewed|read|rendered|displayed|presented|"
+    rf"shown|printed|downloaded|exported|attached)\s+"
+    rf"(?:directly\s+)?(?:in|through|using|by|via)\s+"
     rf"(?:(?:an?|the|modern|common|standard|supported|major|desktop|mobile)\s+)*"
     rf"(?:{_BROWSER_NAME_FRAGMENT}|browsers?)\b"
+    rf"(?:\s*(?:,|\band\b|\bor\b)\s*[\w\-'’]+(?:\s+[\w\-'’]+){{0,2}}){{0,3}}"
 )
 
 

@@ -4711,6 +4711,39 @@ def test_displayed_content_carries_no_foreign_ownership(goal: str, outputs: str)
     assert result.single is TaskClass.WEB_APP
 
 
+@pytest.mark.parametrize(
+    ("goal", "outputs", "runtime"),
+    [
+        (
+            "Generate a fillable PDF",
+            "Registration form and submit button",
+            "Rendered in Chrome and Firefox",
+        ),
+        (
+            "Build an interactive PDF form",
+            "Registration form and submit button",
+            "Displayed in modern browsers",
+        ),
+        (
+            "Build an HTML email template",
+            "Header banner and CTA button",
+            "Rendered in browsers and email clients",
+        ),
+    ],
+)
+def test_passively_consumed_documents_are_not_browser_apps(
+    goal: str, outputs: str, runtime: str
+) -> None:
+    """R118 guard: a document rendered, displayed, or presented in a
+    browser is browser-consumed, not browser-executed — the passive
+    relation covers coordinated consumers too."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value=outputs)
+    _seed_section(ledger, "runtime_context", value=runtime)
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes
+
+
 def test_engine_attachment_is_not_the_environment() -> None:
     """R106 guard: an engine attachment names the host's implementation —
     a desktop app powered by Chromium is hosted natively and the
