@@ -4684,6 +4684,29 @@ def test_passive_consumption_relations_do_not_own(goal: str) -> None:
     assert TaskClass.WEB_APP not in result.classes
 
 
+def test_capability_exclusion_is_not_artifact_denial() -> None:
+    """R105 guard: a transitive exclusion is the app's own compatibility
+    policy — "a web app that excludes unsupported browsers" is still the
+    requested web app."""
+    ledger = _bare_ledger("Build a web app that excludes unsupported browsers")
+    _seed_section(ledger, "outputs", value="Interactive account settings panel")
+    _seed_section(ledger, "runtime_context", value="Modern browsers")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP
+
+
+def test_coordinated_web_dashboard_keeps_honest_ambiguity() -> None:
+    """R105 guard: a coordinated conjunct uses the same ownership grammar
+    as a standalone goal — "a CLI and a local web dashboard" is an
+    honest cli/web_app ambiguity, not a single cli."""
+    ledger = _bare_ledger("Build a CLI and a local web dashboard")
+    _seed_section(ledger, "outputs", value="Deterministic stdout and an interactive admin panel")
+    _seed_section(ledger, "runtime_context", value="Local shell and browser")
+    result = derive_domain_from_ledger(ledger)
+    assert result.classes == frozenset({TaskClass.CLI, TaskClass.WEB_APP})
+
+
 def test_neither_nor_denies_both_alternatives() -> None:
     """R102 guard: "neither a web app nor a website" denies BOTH
     alternatives — a denied artifact can never become a match or a

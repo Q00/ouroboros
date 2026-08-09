@@ -243,6 +243,14 @@ _POSTPOSITIVE_BROWSER_DENIAL_RE = re.compile(
     r"denied|denylisted|off[\s\-]limits|out\s+of\s+scope|"
     r"outside\s+(?:the\s+)?scope|"
     r"not\s+in\s+scope|beyond\s+(?:the\s+)?scope)\b"
+    # A denial predicate followed by a bare noun is that noun's
+    # premodifier, not the artifact's state (#1813 R105): "excludes
+    # unsupported browsers" states the app's compatibility policy —
+    # function words and adverbs may follow, an object may not.
+    r"(?!\s+(?!(?:and|or|nor|but|on|in|for|at|by|from|via|through|to|so|"
+    r"that|which|because|since|while|when|where|during|after|before|"
+    r"anymore|either|though|yet|now|currently|entirely|completely|"
+    r"altogether|everywhere|here|there)\b)(?![\w'’]+ly\b)[\w'’\-]+)"
 )
 
 _WEB_SIMILARITY_MODIFIER_RE = re.compile(

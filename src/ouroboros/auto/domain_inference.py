@@ -938,9 +938,19 @@ def _goal_has_web_co_product_conjunct(goal_text: str) -> bool:
     piece_cores = [_CONTENT_CLAUSE_RE.sub(" ", piece) for piece in pieces]
 
     def _piece_declares_web_product(core: str) -> bool:
-        matches = list(_WEB_APP_ARTIFACT_PHRASE_RE.finditer(core))
-        if not matches or _LIBRARY_INTENT_RE.search(core):
+        if _LIBRARY_INTENT_RE.search(core):
             return False
+        matches = list(_WEB_APP_ARTIFACT_PHRASE_RE.finditer(core))
+        if not matches:
+            # A coordinated conjunct uses the SAME positive ownership
+            # grammar as a standalone goal (#1813 R105): a browser/web-
+            # qualified UI head ("a local web dashboard") declares a web
+            # product in its own conjunct too, under the same finality
+            # rule.
+            qualified = _BROWSER_QUALIFIED_UI_HEAD_RE.search(core)
+            if qualified is None:
+                return False
+            return not re.search(r"\w", core[qualified.end() :])
         # The web phrase must be the piece's own head ("an admin web
         # app"), not a modifier of something else ("broken website
         # links") — same finality rule as the goal head (#1813 W1).
