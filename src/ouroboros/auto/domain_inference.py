@@ -1259,13 +1259,21 @@ def _matches_web_app(ledger: SeedDraftLedger) -> bool:
     # "Playwright tests with a browser extension" and "Compatibility
     # tests for Chrome extensions" describe how the app is verified —
     # the components there are used or targeted by the tooling.
-    if _EXPLICIT_WEB_VOCAB_RE.search(_goal_text(ledger)) and re.search(
-        r"\b(?:tests?|testing|smoke|e2e|end[\s\-]to[\s\-]end|playwright|"
-        r"selenium|puppeteer|cypress|webdriver|qa|verification|"
-        r"compatibility|automation|drivers?)\b",
-        runtime_identity,
-    ):
-        runtime_identity = ""
+    if _EXPLICIT_WEB_VOCAB_RE.search(_goal_text(ledger)):
+        verification_re = re.compile(
+            r"\b(?:tests?|testing|smoke|e2e|end[\s\-]to[\s\-]end|playwright|"
+            r"selenium|puppeteer|cypress|webdriver|qa|verification|"
+            r"compatibility|automation|drivers?)\b"
+        )
+        # Scoped per clause (#1813 R90): only segments syntactically
+        # owned by verification prose are exempt — an independent
+        # production-identity clause keeps its authority in either
+        # clause order.
+        runtime_identity = " ; ".join(
+            segment
+            for segment in re.split(r"[.;]", runtime_identity)
+            if not verification_re.search(segment)
+        )
     if re.search(rf"\b{component_fragment}\b", runtime_identity):
         residual = re.sub(
             rf"\b(?:[\w\-'’]+\s+){{0,2}}?{component_fragment}\b", " ", runtime_identity

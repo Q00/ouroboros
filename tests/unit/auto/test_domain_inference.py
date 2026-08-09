@@ -4545,6 +4545,24 @@ def test_components_inside_verification_context_do_not_veto(runtime: str) -> Non
 
 
 @pytest.mark.parametrize(
+    "runtime",
+    [
+        "Production runtime is a Chrome browser extension; Playwright tests run in CI",
+        "Playwright tests run in CI; production runtime is a Chrome browser extension",
+    ],
+)
+def test_production_identity_survives_adjacent_test_clauses(runtime: str) -> None:
+    """R90 guard: the verification exemption is scoped per clause — an
+    independent production-identity segment keeps its authority in
+    either clause order."""
+    ledger = _bare_ledger("Build a web app")
+    _seed_section(ledger, "outputs", value="Interactive signup page")
+    _seed_section(ledger, "runtime_context", value=runtime)
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes
+
+
+@pytest.mark.parametrize(
     "goal",
     [
         "The product is an admin portal that runs in browsers",
