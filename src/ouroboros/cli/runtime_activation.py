@@ -344,7 +344,7 @@ def _prepare_file(
     requested_mode: int,
     preserve_exact_mode: bool,
     requested_owner: tuple[int, int] | None = None,
-    scrub_on_failure: bool = False,
+    contains_secret: bool = False,
 ) -> _PreparedFile:
     """Create and fsync a new file, preserving supported metadata exactly."""
     flags = os.O_RDWR | os.O_CREAT | os.O_EXCL
@@ -394,7 +394,7 @@ def _prepare_file(
         os.close(descriptor)
         descriptor = -1
         if failed_prepared is not None:
-            _discard_prepared(failed_prepared, scrub_contents=scrub_on_failure)
+            _discard_prepared(failed_prepared, contains_secret=contains_secret)
         raise
     finally:
         if descriptor >= 0:
@@ -501,16 +501,12 @@ def _artifact_cleanup_checkpoint(_path: Path) -> None:
     """Test seam immediately before an artifact is atomically quarantined."""
 
 
-def _secret_scrub_checkpoint(_path: Path) -> None:
-    """Test seam after an exact secret inode is pinned and before it is scrubbed."""
-
-
 def _remove_owned_artifact(
     path: Path,
     expected_guard: object,
     *,
     durable: bool = True,
-) -> None:
+) -> Path | None:
     """Retire only the exact owned generation at ``path``.
 
     Portable filesystems do not expose unlink-if-inode.  Consequently even an
@@ -522,7 +518,7 @@ def _remove_owned_artifact(
     """
     current = _snapshot_target(path)
     if current.kind == "missing":
-        return
+        return None
     quarantine = path.parent / f".{path.name}.{uuid4().hex}.retired"
     _artifact_cleanup_checkpoint(path)
     _rename_if_absent(path, quarantine)
@@ -538,21 +534,25 @@ def _remove_owned_artifact(
     # foreign inode inserted after the guard snapshot.
     if durable and not fsync_parent_directory(path):
         raise OSError(f"Could not confirm owned artifact cleanup: {path}")
+    return quarantine
 
 
-def _scrub_owned_artifact(
+def _retire_owned_secret(
     path: Path,
     expected: _FileSnapshot,
     *,
     durable: bool = True,
     allow_multiple_links: bool = False,
 ) -> None:
-    """Scrub one exact owned inode before retiring any remaining pathname.
+    """Move an exact setup-owned secret name into durable operator quarantine.
 
-    The writable descriptor pins the expected inode before truncation. If a
-    same-UID observer replaces the pathname afterwards, only the setup-owned
-    inode is scrubbed and the foreign pathname is restored by
-    :func:`_remove_owned_artifact`.
+    Portable filesystems cannot prove that a same-UID observer did not create
+    a hardlink immediately before a destructive inode mutation.  Credential
+    cleanup therefore never truncates, overwrites, or path-unlinks an inode.
+    It retires only the guarded name and retains the bytes in an unpredictable
+    owner-only tombstone for explicit human recovery or disposal.  If link
+    topology or any other guarded property changes, name retirement restores
+    the observed generation and fails closed without altering its bytes.
     """
     if (
         expected.kind != "file"
@@ -562,117 +562,38 @@ def _scrub_owned_artifact(
         or (expected.link_count != 1 and not allow_multiple_links)
     ):
         raise _ConcurrentActivationError(f"Secret artifact is not a regular file: {path}")
-    flags = os.O_RDWR | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
-    operand, directory_fd = _authority_operand(path)
-    descriptor = os.open(operand, flags, dir_fd=directory_fd)
-
-    def _descriptor_generation(result: os.stat_result) -> tuple[int, ...]:
-        return (
-            result.st_dev,
-            result.st_ino,
-            stat.S_IMODE(result.st_mode),
-            result.st_size,
-            result.st_mtime_ns,
-            result.st_ctime_ns,
-            result.st_nlink,
-            result.st_uid,
-            result.st_gid,
+    retired = _remove_owned_artifact(path, _owned_guard(expected), durable=durable)
+    if retired is not None:
+        print_warning(
+            "Secure credential scrubbing cannot be proven on this filesystem; "
+            f"retained setup-owned bytes for explicit recovery at {retired}"
         )
 
-    try:
-        opened = os.fstat(descriptor)
-        expected_generation = (
-            expected.device,
-            expected.inode,
-            expected.mode,
-            len(expected.contents),
-            expected.modified_ns,
-            expected.changed_ns,
-            expected.link_count,
-            expected.owner_id,
-            expected.group_id,
-        )
-        if (
-            not stat.S_ISREG(opened.st_mode)
-            or _descriptor_generation(opened) != expected_generation
-        ):
-            raise _ConcurrentActivationError(f"Secret artifact changed concurrently: {path}")
-        _secret_scrub_checkpoint(path)
-        before_scrub = os.fstat(descriptor)
-        before_scrub_generation = (
-            before_scrub.st_dev,
-            before_scrub.st_ino,
-            stat.S_IMODE(before_scrub.st_mode),
-            before_scrub.st_size,
-            before_scrub.st_mtime_ns,
-            before_scrub.st_nlink,
-            before_scrub.st_uid,
-            before_scrub.st_gid,
-        )
-        expected_before_scrub = (
-            expected.device,
-            expected.inode,
-            expected.mode,
-            len(expected.contents),
-            expected.modified_ns,
-            expected.link_count,
-            expected.owner_id,
-            expected.group_id,
-        )
-        if not stat.S_ISREG(before_scrub.st_mode) or (
-            before_scrub_generation != expected_before_scrub
-        ):
-            raise _ConcurrentActivationError(f"Secret artifact changed before scrub: {path}")
-        os.lseek(descriptor, 0, os.SEEK_SET)
-        observed_contents = bytearray()
-        remaining = len(expected.contents) + 1
-        while remaining:
-            chunk = os.read(descriptor, min(1024 * 1024, remaining))
-            if not chunk:
-                break
-            observed_contents.extend(chunk)
-            remaining -= len(chunk)
-        if bytes(observed_contents) != expected.contents:
-            raise _ConcurrentActivationError(f"Secret artifact contents changed: {path}")
-        validated = os.fstat(descriptor)
-        if not stat.S_ISREG(validated.st_mode) or _descriptor_generation(
-            validated
-        ) != _descriptor_generation(before_scrub):
-            raise _ConcurrentActivationError(
-                f"Secret artifact metadata changed during validation: {path}"
-            )
-        os.ftruncate(descriptor, 0)
-        os.fsync(descriptor)
-        scrubbed = _snapshot_from_stat(b"", os.fstat(descriptor))
-    finally:
-        os.close(descriptor)
-    _remove_owned_artifact(path, _owned_guard(scrubbed), durable=durable)
 
-
-def _scrub_guarded_artifact(
+def _retire_guarded_secret(
     path: Path,
     expected_guard: object,
     *,
     durable: bool = True,
 ) -> None:
-    """Scrub only a generation that still matches its durable journal guard."""
+    """Retire only a secret generation that matches its durable journal guard."""
     current = _snapshot_target(path)
     if current.kind == "missing":
         return
     if not _matches_guard(current, expected_guard, strict=False):
         raise _ConcurrentActivationError(f"Secret artifact changed concurrently: {path}")
-    _scrub_owned_artifact(path, current, durable=durable)
+    _retire_owned_secret(path, current, durable=durable)
 
 
 def _discard_prepared(
     prepared: _PreparedFile,
     *,
-    scrub_contents: bool = False,
+    contains_secret: bool = False,
 ) -> None:
-    """Best-effort cleanup that never path-unlinks a changed stage."""
+    """Best-effort retirement that never mutates or path-unlinks an inode."""
     try:
-        if scrub_contents:
-            _scrub_owned_artifact(prepared.path, prepared.snapshot, durable=False)
+        if contains_secret:
+            _retire_owned_secret(prepared.path, prepared.snapshot, durable=True)
         else:
             _remove_owned_artifact(
                 prepared.path,
@@ -962,9 +883,9 @@ def _discard_owned_target(
     expected_guard: object,
     rollback_claim: Path,
     *,
-    scrub_contents: bool = False,
+    contains_secret: bool = False,
 ) -> None:
-    """Remove only an owned live generation via atomic claim-and-inspect."""
+    """Retire only an owned live generation via atomic claim-and-inspect."""
     _promotion_checkpoint("rollback-claim", path)
     _rename_if_absent(path, rollback_claim)
     claimed = _snapshot_target(rollback_claim)
@@ -974,8 +895,8 @@ def _discard_owned_target(
                 f"Changed target and a newer replacement were both preserved: {path}"
             )
         raise _ConcurrentActivationError(f"Refusing to remove a changed generation: {path}")
-    if scrub_contents:
-        _scrub_owned_artifact(rollback_claim, claimed)
+    if contains_secret:
+        _retire_owned_secret(rollback_claim, claimed)
     else:
         _remove_owned_artifact(rollback_claim, expected_guard)
 
@@ -1012,8 +933,8 @@ def _cleanup_journal_artifacts(
         if not _matches_guard(current, guard, strict=False):
             raise _ConcurrentActivationError(f"Recovery artifact changed concurrently: {stage}")
 
-    # Disposable stage/published-rollback links go first.  The journal and
-    # original-generation claims remain live until this deletion is durable,
+    # Disposable stage/published-rollback names go first.  The journal and
+    # original-generation claims remain live until this retirement is durable,
     # so a failure can still roll the activation back without losing config.
     for name_key in (
         "credentials_stage",
@@ -1024,7 +945,7 @@ def _cleanup_journal_artifacts(
         path = resolved[name_key]
         guard_key = dict(artifact_specs)[name_key]
         if name_key in {"credentials_stage", "credentials_rollback_claim"}:
-            _scrub_guarded_artifact(
+            _retire_guarded_secret(
                 path,
                 journal.get(guard_key),
                 durable=False,
@@ -1128,7 +1049,7 @@ def _recover_interrupted_activation(config_dir: Path) -> None:
             credentials_path,
             journal.get("credentials_published"),
             credentials_rollback_claim,
-            scrub_contents=True,
+            contains_secret=True,
         )
         _cleanup_journal_artifacts(config_dir, journal_path, journal, journal_snapshot)
         return
@@ -1145,7 +1066,7 @@ def _rollback_file(
     *,
     original_claim: Path,
     rollback_claim: Path,
-    scrub_created: bool = False,
+    retire_created_secret: bool = False,
 ) -> bool:
     if expected_current is None:
         return True
@@ -1161,8 +1082,8 @@ def _rollback_file(
             raise _ConcurrentActivationError(f"Activation rollback generation changed: {path}")
         if original.kind == "missing":
             # The rollback claim is the activation-owned published generation.
-            if scrub_created:
-                _scrub_owned_artifact(
+            if retire_created_secret:
+                _retire_owned_secret(
                     rollback_claim,
                     current,
                     allow_multiple_links=True,
@@ -1473,7 +1394,7 @@ def activate_claude_runtime(
                         credentials_content.encode(),
                         requested_mode=0o600,
                         preserve_exact_mode=False,
-                        scrub_on_failure=True,
+                        contains_secret=True,
                     )
                     prepared_files.append(prepared_credentials)
                 if not fsync_parent_directory(config_stage):
@@ -1482,7 +1403,7 @@ def activate_claude_runtime(
                 for prepared in prepared_files:
                     _discard_prepared(
                         prepared,
-                        scrub_contents=prepared is prepared_credentials,
+                        contains_secret=prepared is prepared_credentials,
                     )
                 raise
 
@@ -1522,7 +1443,7 @@ def activate_claude_runtime(
                 for prepared in prepared_files:
                     _discard_prepared(
                         prepared,
-                        scrub_contents=prepared is prepared_credentials,
+                        contains_secret=prepared is prepared_credentials,
                     )
                 raise
 
@@ -1594,7 +1515,7 @@ def activate_claude_runtime(
                     credentials_written,
                     original_claim=credentials_claim,
                     rollback_claim=credentials_rollback_claim,
-                    scrub_created=True,
+                    retire_created_secret=True,
                 )
                 # Rollback may already have restored both original generations.
                 # Let the durable journal verify that fact and clean only owned
