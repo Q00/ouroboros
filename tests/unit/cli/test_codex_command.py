@@ -3,16 +3,19 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from pathlib import Path
 import sys
 import textwrap
+import tomllib
 from unittest.mock import AsyncMock, patch
 
 import pytest
 from typer.testing import CliRunner
 
 from ouroboros.cli.commands import codex as codex_command
+from ouroboros.cli.commands import setup as setup_command
 from ouroboros.cli.commands.codex import (
     _MCP_PROTOCOL_VERSION,
     _check_auto_dispatch_surface,
@@ -33,6 +36,7 @@ _REQUIRED_CODEX_AUTO_TOOLS_FOR_TEST = {
     "ouroboros_interview",
     "ouroboros_generate_seed",
 }
+_REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
 class TestCodexRefresh:
@@ -485,7 +489,10 @@ class TestCodexDoctor:
             "[mcp_servers.ouroboros]\n"
             'command = "uvx"\n'
             'args = ["--isolated", "--python", ">=3.12", "--from", '
-            '"ouroboros-ai[mcp]", "ouroboros", "mcp", "serve"]\n',
+            '"ouroboros-ai[mcp]", "ouroboros", "mcp", "serve"]\n'
+            "[mcp_servers.ouroboros.env]\n"
+            'OUROBOROS_AGENT_RUNTIME = "codex"\n'
+            'OUROBOROS_LLM_BACKEND = "codex"\n',
             encoding="utf-8",
         )
 
@@ -671,7 +678,7 @@ class TestCodexDoctor:
                     "serve",
                     "--python=3.11",
                 ],
-                "launcher flags belong before",
+                "arbitrary arguments are not allowed after",
             ),
             (
                 [
@@ -684,7 +691,7 @@ class TestCodexDoctor:
                     "--from",
                     "ouroboros-ai[mcp]",
                 ],
-                "launcher flags belong before",
+                "arbitrary arguments are not allowed after",
             ),
             (
                 [
@@ -721,6 +728,120 @@ class TestCodexDoctor:
 
         assert any(expected_failure in failure for failure in failures)
         assert any("is not canonical" in failure for failure in failures)
+
+    def test_check_auto_dispatch_surface_accepts_shipped_codex_config(self, tmp_path: Path) -> None:
+        """The repository's host-specific Codex config is a doctor-positive contract."""
+        codex_dir = tmp_path / ".codex"
+        self._write_healthy_codex_surface(codex_dir)
+        (codex_dir / "config.toml").write_text(
+            (_REPO_ROOT / ".codex" / "config.toml").read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+
+        assert _check_auto_dispatch_surface(codex_dir) == []
+
+    def test_shipped_mcp_codex_json_uses_doctor_accepted_launcher(self) -> None:
+        """The second shipped Codex registration must share the same static contract."""
+        document = json.loads((_REPO_ROOT / ".mcp.codex.json").read_text(encoding="utf-8"))
+        entry = document["mcpServers"]["ouroboros"]
+        failures: list[str] = []
+
+        codex_command._check_mcp_runtime_dependency_surface(
+            entry["command"], entry["args"], entry.get("env", {}), failures
+        )
+
+        assert failures == []
+
+    def test_check_auto_dispatch_surface_accepts_setup_generated_release_config(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Setup's env-selected release launcher must remain doctor-compatible."""
+        codex_dir = tmp_path / ".codex"
+        self._write_healthy_codex_surface(codex_dir)
+        with (
+            patch.object(setup_command, "_is_dev_ouroboros_build", return_value=False),
+            patch.object(
+                setup_command,
+                "_codex_release_mcp_launcher",
+                return_value=("/usr/local/bin/uvx", list(setup_command._CODEX_UVX_MCP_ARGS)),
+            ),
+        ):
+            rendered = setup_command._render_codex_mcp_section()
+
+        assert rendered is not None
+        parsed = tomllib.loads(rendered)
+        entry = parsed["mcp_servers"]["ouroboros"]
+        assert entry["env"] == {
+            "OUROBOROS_AGENT_RUNTIME": "codex",
+            "OUROBOROS_LLM_BACKEND": "codex",
+        }
+        (codex_dir / "config.toml").write_text(rendered, encoding="utf-8")
+        assert _check_auto_dispatch_surface(codex_dir) == []
+
+    @pytest.mark.parametrize(
+        "env_lines",
+        [
+            "",
+            '[mcp_servers.ouroboros.env]\nOUROBOROS_AGENT_RUNTIME = "codex"\n',
+            (
+                '[mcp_servers.ouroboros.env]\nOUROBOROS_AGENT_RUNTIME = "codex"\n'
+                'OUROBOROS_LLM_BACKEND = "claude"\n'
+            ),
+            (
+                '[mcp_servers.ouroboros.env]\nOUROBOROS_AGENT_RUNTIME = "codex"\n'
+                'OUROBOROS_LLM_BACKEND = "codex"\nOUROBOROS_RUNTIME = "claude"\n'
+            ),
+        ],
+    )
+    def test_check_auto_dispatch_surface_rejects_unsafe_base_launcher_runtime_env(
+        self,
+        tmp_path: Path,
+        env_lines: str,
+    ) -> None:
+        """The default server runtime must never choose a non-Codex backend implicitly."""
+        codex_dir = tmp_path / ".codex"
+        self._write_healthy_codex_surface(codex_dir)
+        (codex_dir / "config.toml").write_text(
+            "[mcp_servers.ouroboros]\n"
+            'command = "uvx"\n'
+            'args = ["--isolated", "--python", ">=3.12", "--from", '
+            '"ouroboros-ai[mcp]", "ouroboros", "mcp", "serve"]\n' + env_lines,
+            encoding="utf-8",
+        )
+
+        failures = _check_auto_dispatch_surface(codex_dir)
+
+        assert any(
+            "requires runtime environment selectors" in failure
+            or "conflicting selectors" in failure
+            for failure in failures
+        )
+
+    def test_check_auto_dispatch_surface_live_rejects_hostile_runtime_env_before_probe(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Live tool exposure cannot override an unsafe static runtime selection."""
+        codex_dir = tmp_path / ".codex"
+        self._write_healthy_codex_surface(codex_dir)
+        (codex_dir / "config.toml").write_text(
+            "[mcp_servers.ouroboros]\n"
+            'command = "uvx"\n'
+            'args = ["--isolated", "--python", ">=3.12", "--from", '
+            '"ouroboros-ai[mcp]", "ouroboros", "mcp", "serve"]\n'
+            "[mcp_servers.ouroboros.env]\n"
+            'OUROBOROS_AGENT_RUNTIME = "codex"\n'
+            'OUROBOROS_LLM_BACKEND = "claude"\n',
+            encoding="utf-8",
+        )
+        live_probe = AsyncMock(return_value=_REQUIRED_CODEX_AUTO_TOOLS_FOR_TEST)
+
+        with patch("ouroboros.cli.commands.codex._list_stdio_mcp_tool_names", live_probe):
+            failures = _check_auto_dispatch_surface(codex_dir, live_mcp=True)
+
+        assert any("conflicting selectors" in failure for failure in failures)
+        live_probe.assert_not_awaited()
 
     def test_check_auto_dispatch_surface_reports_direct_ouroboros_without_mcp_import(
         self,
@@ -1139,7 +1260,10 @@ class TestCodexDoctor:
                 "mcp",
                 "serve",
             ),
-            {},
+            {
+                "OUROBOROS_AGENT_RUNTIME": "codex",
+                "OUROBOROS_LLM_BACKEND": "codex",
+            },
         )
 
     def test_check_auto_dispatch_surface_live_mcp_reports_missing_auto_tool(

@@ -9,6 +9,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import signal
 import tomllib
 from typing import Annotated, Any
 
@@ -47,6 +48,18 @@ _CANONICAL_CODEX_UVX_MCP_ARGS = (
     "mcp",
     "serve",
 )
+_CANONICAL_CODEX_UVX_MCP_HOST_ARGS = (
+    *_CANONICAL_CODEX_UVX_MCP_ARGS,
+    "--runtime",
+    "codex",
+    "--llm-backend",
+    "codex",
+)
+_CODEX_RUNTIME_ENV = {
+    "OUROBOROS_AGENT_RUNTIME": "codex",
+    "OUROBOROS_LLM_BACKEND": "codex",
+}
+_CODEX_RUNTIME_SELECTOR_ENV_KEYS = frozenset({*_CODEX_RUNTIME_ENV, "OUROBOROS_RUNTIME"})
 
 
 class _StdioMcpFramingMismatch(RuntimeError):
@@ -220,8 +233,13 @@ def _check_auto_dispatch_surface(codex_dir: Path, *, live_mcp: bool = False) -> 
             else {}
         )
         command_entry = _CodexMCPCommandEntry(command=command, args=args, env=env)
-        if not live_mcp:
-            _check_mcp_runtime_dependency_surface(command, list(args), failures)
+        _check_mcp_runtime_dependency_surface(
+            command,
+            list(args),
+            env,
+            failures,
+            check_local_import=not live_mcp,
+        )
 
     if live_mcp and command_entry is not None and not failures:
         _check_live_mcp_tool_exposure(command_entry, failures)
@@ -236,7 +254,12 @@ def _check_auto_dispatch_surface(codex_dir: Path, *, live_mcp: bool = False) -> 
 
 
 def _check_mcp_runtime_dependency_surface(
-    command: str, args: list[object], failures: list[str]
+    command: str,
+    args: list[object],
+    env: Mapping[str, str],
+    failures: list[str],
+    *,
+    check_local_import: bool = True,
 ) -> None:
     """Detect Codex MCP server entries that cannot import the MCP runtime.
 
@@ -256,7 +279,12 @@ def _check_mcp_runtime_dependency_surface(
                 "use `ouroboros-ai[mcp]` so stdio initialize/list_tools can start"
             )
 
-        if tuple(string_args) == _CANONICAL_CODEX_UVX_MCP_ARGS:
+        args_tuple = tuple(string_args)
+        if args_tuple == _CANONICAL_CODEX_UVX_MCP_ARGS:
+            _check_codex_runtime_env(env, failures, required=True)
+            return
+        if args_tuple == _CANONICAL_CODEX_UVX_MCP_HOST_ARGS:
+            _check_codex_runtime_env(env, failures, required=False)
             return
 
         command_tail = ("ouroboros", "mcp", "serve")
@@ -324,16 +352,22 @@ def _check_mcp_runtime_dependency_surface(
                 "`--from ouroboros-ai[mcp]` before the launched command"
             )
 
-        if command_index is None or tuple(string_args[command_index:]) != command_tail:
+        allowed_command_tails = {
+            command_tail,
+            (*command_tail, "--runtime", "codex", "--llm-backend", "codex"),
+        }
+        if command_index is None or tuple(string_args[command_index:]) not in allowed_command_tails:
             failures.append(
-                "Codex MCP uvx command must end with `ouroboros mcp serve`; "
-                "uvx launcher flags belong before that command"
+                "Codex MCP uvx command must end with `ouroboros mcp serve` or the exact "
+                "Codex host selector `--runtime codex --llm-backend codex`; uvx launcher "
+                "flags and arbitrary arguments are not allowed after that command"
             )
 
         failures.append(
-            "Codex MCP uvx command is not canonical; expected: "
+            "Codex MCP uvx command is not canonical; expected the isolated base launcher "
+            "with Codex runtime env, or: "
             "`uvx --isolated --python >=3.12 --from ouroboros-ai[mcp] "
-            "ouroboros mcp serve`"
+            "ouroboros mcp serve --runtime codex --llm-backend codex`"
         )
         return
 
@@ -346,13 +380,41 @@ def _check_mcp_runtime_dependency_surface(
             )
         return
 
-    if command_name != "ouroboros":
+    if command_name != "ouroboros" or not check_local_import:
         return
 
     if importlib.util.find_spec("mcp") is None:
         failures.append(
             "current `ouroboros` environment cannot import `mcp`; reinstall for Codex MCP "
             "usage with `uv tool install --force 'ouroboros-ai[mcp]'`"
+        )
+
+
+def _check_codex_runtime_env(
+    env: Mapping[str, str], failures: list[str], *, required: bool
+) -> None:
+    """Validate runtime selectors accompanying a canonical Codex uvx launcher."""
+    hostile = {
+        key: value
+        for key, value in env.items()
+        if key in _CODEX_RUNTIME_SELECTOR_ENV_KEYS and value != "codex"
+    }
+    if hostile:
+        rendered = ", ".join(f"{key}={value!r}" for key, value in sorted(hostile.items()))
+        failures.append("Codex MCP runtime environment contains conflicting selectors: " + rendered)
+
+    if not required:
+        return
+
+    missing_or_invalid = [
+        f"{key}={expected!r}"
+        for key, expected in _CODEX_RUNTIME_ENV.items()
+        if env.get(key) != expected
+    ]
+    if missing_or_invalid:
+        failures.append(
+            "Codex MCP base uvx launcher requires runtime environment selectors: "
+            + ", ".join(missing_or_invalid)
         )
 
 
@@ -417,6 +479,7 @@ async def _list_stdio_mcp_tool_names_with_framing(
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         env=process_env,
+        start_new_session=os.name == "posix",
     )
     stderr_buffer = bytearray()
     stderr_task = (
@@ -626,12 +689,29 @@ def _format_stdio_mcp_stderr(stderr_buffer: bytearray) -> str:
 async def _terminate_stdio_mcp_process(proc: asyncio.subprocess.Process) -> None:
     if proc.returncode is not None:
         return
-    proc.terminate()
+    if proc.stdin is not None:
+        proc.stdin.close()
+    _signal_stdio_mcp_process(proc, force=False)
     try:
         await asyncio.wait_for(proc.wait(), timeout=2.0)
     except TimeoutError:
-        proc.kill()
+        _signal_stdio_mcp_process(proc, force=True)
         await proc.wait()
+
+
+def _signal_stdio_mcp_process(proc: asyncio.subprocess.Process, *, force: bool) -> None:
+    """Stop the uvx wrapper and the MCP child that inherits its stdio pipes."""
+    if os.name != "posix":  # pragma: no cover - exercised by Windows CI/runtime
+        if force:
+            proc.kill()
+        else:
+            proc.terminate()
+        return
+
+    try:
+        os.killpg(proc.pid, signal.SIGKILL if force else signal.SIGTERM)
+    except ProcessLookupError:
+        return
 
 
 def _read_codex_text(path: Path, label: str, failures: list[str]) -> str | None:
