@@ -694,7 +694,7 @@ runtime. For a Korean conversation, use:
 - **설정하고 시작하기**: Run the setup command for the active host. In Codex
   App or Codex CLI, use `ouroboros setup --runtime codex` when the executable
   is installed. For a Marketplace-plugin-only install, use
-  `uvx --from 'ouroboros-ai[mcp]' ouroboros setup --runtime codex` instead.
+  `uvx --python '>=3.12' --from 'ouroboros-ai[mcp]' ouroboros setup --runtime codex` instead.
   In Claude Code, follow `../setup/SKILL.md`. Do not ask the user to copy a
   command when the current host can run it.
 - **나중에**: Continue with the welcome flow, but do not claim that MCP-only
@@ -960,7 +960,7 @@ Just include these naturally in your request:
 
 REAL-TIME MONITORING (TUI):
 When running ooo run or ooo evolve, open a separate terminal:
-  uvx --from 'ouroboros-ai[tui]' ouroboros tui monitor
+  uvx --python '>=3.12' --from 'ouroboros-ai[tui]' ouroboros tui monitor
 Press 1-4 to switch screens (Dashboard, Execution, Logs, Debug).
 
 READY TO BUILD:

@@ -5,6 +5,12 @@ from __future__ import annotations
 from enum import Enum
 from importlib import metadata as importlib_metadata
 
+# uvx resolves tool dependencies against its default interpreter, which can be
+# an older system Python even when a compatible one is installed. Every
+# generated ``uvx`` launch must carry this floor so uv selects — or downloads —
+# an interpreter satisfying the package's requires-python (pyproject.toml).
+UVX_PYTHON_FLOOR = ">=3.12"
+
 MCP_PROFILE = "mcp"
 CLAUDE_CLI_PROFILE = "claude-cli"
 CLAUDE_SDK_COMPAT_PROFILE = "claude"

@@ -121,7 +121,7 @@ def check_mcp_import() -> CheckResult:
             message="mcp package not importable",
             remediation=(
                 "Run the server in its isolated profile: "
-                "uvx --from 'ouroboros-ai[mcp]' ouroboros mcp serve"
+                "uvx --python '>=3.12' --from 'ouroboros-ai[mcp]' ouroboros mcp serve"
             ),
         )
 
@@ -145,8 +145,8 @@ def check_mcp_import() -> CheckResult:
             message=f"mcp {version} is not the required MCP 2 runtime",
             remediation=(
                 "Do not add MCP 2 to the Claude SDK environment. Launch the "
-                "separate server process with: uvx --from 'ouroboros-ai[mcp]' "
-                "ouroboros mcp serve"
+                "separate server process with: uvx --python '>=3.12' --from "
+                "'ouroboros-ai[mcp]' ouroboros mcp serve"
             ),
         )
     return CheckResult(

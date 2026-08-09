@@ -685,13 +685,13 @@ if [ -t 0 ] && [ -z "${OUROBOROS_INSTALL_SKIP_CONFIG_GUI:-}" ]; then
         # The selected extras may not include [tui]; run the GUI from an
         # ephemeral env with the tui extra instead of fattening the install.
         _info "Settings GUI needs the tui extra; running it via uvx..."
-        if uvx --from "${PACKAGE_NAME}[tui]" ouroboros config; then
+        if uvx --python "$DEFAULT_PYTHON_SPEC" --from "${PACKAGE_NAME}[tui]" ouroboros config; then
           GUI_OK=true
         fi
       fi
       if [ "$GUI_OK" = false ]; then
         _warn "Could not open the settings GUI."
-        _info "Run it later with: uvx --from '${PACKAGE_NAME}[tui]' ouroboros config"
+        _info "Run it later with: uvx --python '>=3.12' --from '${PACKAGE_NAME}[tui]' ouroboros config"
       fi
       ;;
     *)

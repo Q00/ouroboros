@@ -87,6 +87,7 @@ from ouroboros.config._model_defaults import (
 from ouroboros.core.errors import ConfigError
 from ouroboros.package_profiles import (
     UNSUPPORTED_CLAUDE_SDK_MCP_MESSAGE,
+    UVX_PYTHON_FLOOR,
     has_unsupported_claude_sdk_mcp_mix,
 )
 from ouroboros.persistence.brownfield import BrownfieldStore
@@ -105,7 +106,7 @@ class _SetupCodexCliLogger:
 
 def _build_uvx_mcp_args(package_spec: str) -> list[str]:
     """Return the canonical uvx args for the requested Ouroboros package spec."""
-    return ["--from", package_spec, "ouroboros", "mcp", "serve"]
+    return ["--python", UVX_PYTHON_FLOOR, "--from", package_spec, "ouroboros", "mcp", "serve"]
 
 
 def _detect_mcp_entry(*, package_spec: str = "ouroboros-ai[mcp]") -> dict[str, object] | None:
@@ -434,9 +435,18 @@ _CODEX_MCP_COMMENT_LINES = (
 
 CodexMcpMode = Literal["auto", "preserve", "stdio"]
 _CODEX_APP_CLI_PATH = Path("/Applications/ChatGPT.app/Contents/Resources/codex")
-_CODEX_UVX_MCP_ARGS = ["--from", "ouroboros-ai[mcp]", "ouroboros", "mcp", "serve"]
+_CODEX_UVX_MCP_ARGS = [
+    "--python",
+    UVX_PYTHON_FLOOR,
+    "--from",
+    "ouroboros-ai[mcp]",
+    "ouroboros",
+    "mcp",
+    "serve",
+]
 _CODEX_LEGACY_UVX_MCP_ARGS: tuple[tuple[str, ...], ...] = (
     tuple(_CODEX_UVX_MCP_ARGS),
+    ("--from", "ouroboros-ai[mcp]", "ouroboros", "mcp", "serve"),
     ("--from", "ouroboros-ai", "ouroboros", "mcp", "serve"),
     ("ouroboros", "mcp", "serve"),
 )
@@ -4042,7 +4052,18 @@ def _detect_opencode_mcp_command() -> dict[str, list[str]] | None:
     stale global binary and a newer uvx install use the newer one.
     """
     if shutil.which("uvx"):
-        return {"command": ["uvx", "--from", "ouroboros-ai[mcp]", "ouroboros", "mcp", "serve"]}
+        return {
+            "command": [
+                "uvx",
+                "--python",
+                UVX_PYTHON_FLOOR,
+                "--from",
+                "ouroboros-ai[mcp]",
+                "ouroboros",
+                "mcp",
+                "serve",
+            ]
+        }
     if shutil.which("pipx"):
         return {
             "command": [

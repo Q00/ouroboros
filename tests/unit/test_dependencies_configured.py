@@ -194,6 +194,8 @@ def test_shipped_mcp_launchers_use_the_isolated_mcp_profile() -> None:
     """Repository and plugin launchers must never combine MCP 2 with Claude."""
     root = Path(__file__).parent.parent.parent
     expected_args = [
+        "--python",
+        ">=3.12",
         "--from",
         "ouroboros-ai[mcp]",
         "ouroboros",
