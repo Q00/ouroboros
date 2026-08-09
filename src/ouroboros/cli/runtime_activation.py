@@ -539,19 +539,22 @@ def _scrub_owned_artifact(
     flags = os.O_RDWR | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     operand, directory_fd = _authority_operand(path)
     descriptor = os.open(operand, flags, dir_fd=directory_fd)
+
+    def _descriptor_generation(result: os.stat_result) -> tuple[int, ...]:
+        return (
+            result.st_dev,
+            result.st_ino,
+            stat.S_IMODE(result.st_mode),
+            result.st_size,
+            result.st_mtime_ns,
+            result.st_ctime_ns,
+            result.st_nlink,
+            result.st_uid,
+            result.st_gid,
+        )
+
     try:
         opened = os.fstat(descriptor)
-        opened_generation = (
-            opened.st_dev,
-            opened.st_ino,
-            stat.S_IMODE(opened.st_mode),
-            opened.st_size,
-            opened.st_mtime_ns,
-            opened.st_ctime_ns,
-            opened.st_nlink,
-            opened.st_uid,
-            opened.st_gid,
-        )
         expected_generation = (
             expected.device,
             expected.inode,
@@ -563,9 +566,37 @@ def _scrub_owned_artifact(
             expected.owner_id,
             expected.group_id,
         )
-        if not stat.S_ISREG(opened.st_mode) or opened_generation != expected_generation:
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or _descriptor_generation(opened) != expected_generation
+        ):
             raise _ConcurrentActivationError(f"Secret artifact changed concurrently: {path}")
         _secret_scrub_checkpoint(path)
+        before_scrub = os.fstat(descriptor)
+        before_scrub_generation = (
+            before_scrub.st_dev,
+            before_scrub.st_ino,
+            stat.S_IMODE(before_scrub.st_mode),
+            before_scrub.st_size,
+            before_scrub.st_mtime_ns,
+            before_scrub.st_nlink,
+            before_scrub.st_uid,
+            before_scrub.st_gid,
+        )
+        expected_before_scrub = (
+            expected.device,
+            expected.inode,
+            expected.mode,
+            len(expected.contents),
+            expected.modified_ns,
+            expected.link_count,
+            expected.owner_id,
+            expected.group_id,
+        )
+        if not stat.S_ISREG(before_scrub.st_mode) or (
+            before_scrub_generation != expected_before_scrub
+        ):
+            raise _ConcurrentActivationError(f"Secret artifact changed before scrub: {path}")
         os.ftruncate(descriptor, 0)
         os.fsync(descriptor)
         scrubbed = _snapshot_from_stat(b"", os.fstat(descriptor))

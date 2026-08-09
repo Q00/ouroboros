@@ -6055,6 +6055,34 @@ raise SystemExit(0 if activate_claude_runtime("/second/claude") else 2)
         assert observer_link.read_bytes() == secret
         assert stage.stat().st_nlink == 2
 
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX hard-link semantics")
+    def test_secret_scrub_rechecks_hard_link_immediately_before_truncate(
+        self, tmp_path: Path
+    ) -> None:
+        """A link added after descriptor pinning causes fail-closed cleanup."""
+        secret = b"sk-hard-link-after-pin-secret"
+        stage = tmp_path / ".credentials.stage"
+        stage.write_bytes(secret)
+        expected = runtime_activation._snapshot_target(stage)
+        observer_link = tmp_path / "operator-link"
+
+        def _link_after_pin(path: Path) -> None:
+            if path == stage:
+                os.link(stage, observer_link)
+
+        with (
+            patch(
+                "ouroboros.cli.runtime_activation._secret_scrub_checkpoint",
+                side_effect=_link_after_pin,
+            ),
+            pytest.raises(runtime_activation._ConcurrentActivationError),
+        ):
+            runtime_activation._scrub_owned_artifact(stage, expected)
+
+        assert stage.read_bytes() == secret
+        assert observer_link.read_bytes() == secret
+        assert stage.stat().st_nlink == 2
+
     def test_journal_cleanup_rechecks_secret_guard_immediately_before_scrub(
         self, tmp_path: Path
     ) -> None:
