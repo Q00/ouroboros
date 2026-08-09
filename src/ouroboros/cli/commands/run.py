@@ -5,7 +5,6 @@ Supports both standard workflow execution and agent-runtime orchestrator mode.
 """
 
 import asyncio
-from enum import Enum
 import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any
@@ -42,6 +41,12 @@ from ouroboros.orchestrator.decomposition_limits import (
     DEFAULT_MAX_DECOMPOSITION_DEPTH,
     MAX_DURABLE_DECOMPOSITION_DEPTH,
     validate_max_decomposition_depth,
+)
+from ouroboros.package_profiles import (
+    PublicAgentRuntimeBackend as AgentRuntimeBackend,
+)
+from ouroboros.package_profiles import (
+    public_runtime_backend,
 )
 
 
@@ -131,24 +136,6 @@ app = typer.Typer(
     no_args_is_help=True,
     cls=_DefaultWorkflowGroup,
 )
-
-
-class AgentRuntimeBackend(str, Enum):  # noqa: UP042
-    """Supported orchestrator runtime backends for CLI selection."""
-
-    CLAUDE = "claude"
-    CODEX = "codex"
-    OPENCODE = "opencode"
-    HERMES = "hermes"
-    GEMINI = "gemini"
-    COPILOT = "copilot"
-    GOOSE = "goose"
-    KIRO = "kiro"
-    PI = "pi"
-    GJC = "gjc"
-    ANTIGRAVITY = "antigravity"
-    GROK = "grok"
-    ZCODE = "zcode"
 
 
 def _derive_quality_bar(seed: "Seed") -> str:
@@ -908,7 +895,8 @@ def workflow(
         typer.Option(
             "--runtime",
             help=(
-                "Agent runtime backend for orchestrator mode (claude, codex, "
+                "Agent runtime backend for orchestrator mode (claude, claude-sdk, "
+                "claude-cli, codex, "
                 "opencode, hermes, gemini, copilot, goose, kiro, pi, gjc, "
                 "antigravity, grok, or zcode)."
             ),
@@ -1012,7 +1000,7 @@ def workflow(
                     debug,
                     parallel=not sequential,
                     no_qa=no_qa,
-                    runtime_backend=runtime.value if runtime else None,
+                    runtime_backend=public_runtime_backend(runtime.value if runtime else None),
                     max_decomposition_depth=max_decomposition_depth,
                     skip_completed=skip_completed,
                     project_dir=project_dir,

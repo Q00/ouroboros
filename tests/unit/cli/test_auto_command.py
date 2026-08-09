@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import re
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from typer.testing import CliRunner
@@ -157,6 +157,30 @@ def test_auto_goal_skip_run_does_not_require_subcommand() -> None:
     assert run_auto.called
     assert "Auto session:" in result.output
     assert "auto_test" in result.output
+
+
+@pytest.mark.parametrize("runtime", ["claude", "claude-sdk"])
+def test_auto_public_claude_runtime_selects_sdk(runtime: str) -> None:
+    result_value = AutoPipelineResult(
+        status="complete",
+        auto_session_id="auto_claude_cli",
+        phase="complete",
+        grade="A",
+        seed_path="/tmp/seed.yaml",
+        interview_session_id="interview_test",
+    )
+
+    with patch(
+        "ouroboros.cli.commands.auto._run_auto",
+        new=AsyncMock(return_value=result_value),
+    ) as run_auto:
+        result = runner.invoke(
+            app,
+            ["auto", "safe test goal", "--skip-run", "--runtime", runtime],
+        )
+
+    assert result.exit_code == 0
+    assert run_auto.await_args.kwargs["runtime"] == "claude"
 
 
 def test_auto_detached_start_output_includes_handles_and_wait_retrieve_guidance() -> None:

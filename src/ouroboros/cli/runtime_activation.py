@@ -842,8 +842,12 @@ def _publication_checkpoint(_name: str) -> None:
     """Test seam for deterministic process-death recovery checks."""
 
 
-def activate_claude_runtime(claude_path: str) -> Path | None:
-    """Activate config/credentials and return config path, or fail closed."""
+def activate_claude_runtime(
+    claude_path: str,
+    *,
+    runtime_backend: Literal["claude", "claude_mcp"] = "claude",
+) -> Path | None:
+    """Activate one Claude profile plus credentials, or fail closed."""
     from ouroboros.config.loader import ensure_config_dir
     from ouroboros.config.models import (
         CredentialsConfig,
@@ -914,7 +918,7 @@ def activate_claude_runtime(claude_path: str) -> Path | None:
                 config["orchestrator"] = orchestrator
             if not isinstance(orchestrator, dict):
                 raise ValueError("Invalid non-mapping 'orchestrator' section in config.yaml")
-            orchestrator["runtime_backend"] = "claude"
+            orchestrator["runtime_backend"] = runtime_backend
             orchestrator["cli_path"] = claude_path
             llm = config.get("llm")
             if llm is None:

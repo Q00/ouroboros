@@ -21,7 +21,10 @@ Ouroboros can use **Claude Code** as a runtime backend, leveraging your **Claude
 - Python >= 3.12
 - Ouroboros installed (see [Getting Started](../getting-started.md) for install options)
 
-> Install `ouroboros-ai[claude]` for standalone Claude SDK workflows. The current Claude Agent SDK embeds MCP 1.x while Ouroboros MCP uses MCP 2, so do not install both extras into one environment. Claude setup deliberately skips MCP registration: an isolated `[mcp]` process cannot load the configured standalone Claude backend. Use a supported CLI-backed runtime and LLM adapter before registering the modern protocol server with a host.
+> Install `ouroboros-ai[claude]` for the default in-process SDK runtime on MCP
+> 1.x. The marketplace plugin launches the MCP 2 server from an isolated
+> `ouroboros-ai[mcp]` environment and selects the `[claude-cli]` worker. Never
+> combine `[mcp]` with `[claude]`, `[claude-sdk]`, or `[all]` in one interpreter.
 
 ## Configuration
 
@@ -29,7 +32,7 @@ To select Claude Code as the runtime backend, set the following in your Ouroboro
 
 ```yaml
 orchestrator:
-  runtime_backend: claude
+  runtime_backend: claude  # written by `ouroboros setup --runtime claude`
 ```
 
 When using the `--orchestrator` CLI flag, Claude Code is the default runtime backend.
@@ -54,7 +57,10 @@ When using the `--orchestrator` CLI flag, Claude Code is the default runtime bac
                         +------------------+
 ```
 
-The orchestrator uses `claude-agent-sdk` which connects directly to your authenticated Claude Code session. No API key required. For LiteLLM consensus models, see [`credentials.yaml`](../config-reference.md#credentialsyaml).
+The default profile uses the Agent SDK and its bundled/authenticated Claude Code
+transport. The SDK remains on MCP 1.x. The plugin-owned MCP 2 server is a
+separate `uvx` process and uses `--runtime claude-cli`, so no interpreter loads
+both MCP majors. For LiteLLM consensus models, see [`credentials.yaml`](../config-reference.md#credentialsyaml).
 
 > For a side-by-side comparison of all runtime backends, see the [runtime capability matrix](../runtime-capability-matrix.md).
 

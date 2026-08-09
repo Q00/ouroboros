@@ -12,6 +12,7 @@ import tomllib
 from unittest.mock import AsyncMock, patch
 
 import pytest
+import typer
 from typer.testing import CliRunner
 import yaml
 
@@ -4436,6 +4437,125 @@ class TestCodexSetup:
 class TestClaudeSetup:
     """Tests for Claude-specific setup behavior."""
 
+    @pytest.mark.parametrize(
+        ("persisted", "profile"),
+        [("claude_mcp", "claude-cli"), ("claude", "claude")],
+    )
+    def test_current_backend_preserves_claude_profile_identity(
+        self, tmp_path: Path, persisted: str, profile: str
+    ) -> None:
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            f"orchestrator:\n  runtime_backend: {persisted}\n",
+            encoding="utf-8",
+        )
+
+        with patch("pathlib.Path.home", return_value=tmp_path):
+            assert setup_cmd._get_current_backend() == profile
+
+    def test_setup_claude_selects_sdk_runtime(self, tmp_path: Path) -> None:
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        config_path.write_text("{}", encoding="utf-8")
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+        ):
+            setup_cmd._setup_claude("/usr/local/bin/claude")
+
+        config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert config_dict["orchestrator"]["runtime_backend"] == "claude"
+        assert config_dict["orchestrator"]["cli_path"] == "/usr/local/bin/claude"
+        assert config_dict["llm"]["backend"] == "claude"
+
+    def test_forced_mcp2_sdk_mix_fails_before_setup_detection(self, tmp_path: Path) -> None:
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        original = "orchestrator:\n  runtime_backend: codex\n"
+        config_path.write_text(original, encoding="utf-8")
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch(
+                "ouroboros.cli.commands.setup.has_unsupported_claude_sdk_mcp_mix",
+                return_value=True,
+            ),
+            patch(
+                "ouroboros.cli.commands.setup._detect_runtimes",
+                side_effect=AssertionError("must fail before runtime detection"),
+            ),
+        ):
+            result = CliRunner().invoke(setup_cmd.app, ["--runtime", "codex"])
+
+        assert result.exit_code == 1
+        for profile in (
+            "ouroboros-ai[mcp]",
+            "ouroboros-ai[claude]",
+            "[claude-sdk]",
+            "[claude-cli]",
+        ):
+            assert profile in result.output
+        assert config_path.read_text(encoding="utf-8") == original
+
+    def test_setup_claude_cli_selects_dependency_free_worker(self, tmp_path: Path) -> None:
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        config_path.write_text("{}", encoding="utf-8")
+
+        with patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir):
+            setup_cmd._setup_claude_cli("/usr/local/bin/claude")
+
+        config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert config_dict["orchestrator"]["runtime_backend"] == "claude_mcp"
+        assert config_dict["orchestrator"]["cli_path"] == "/usr/local/bin/claude"
+
+    def test_setup_claude_sdk_fails_closed_before_config_write(self, tmp_path: Path) -> None:
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        original = "orchestrator:\n  runtime_backend: codex\n"
+        config_path.write_text(original, encoding="utf-8")
+
+        with (
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch(
+                "ouroboros.cli.commands.claude_setup.has_unsupported_claude_sdk_mcp_mix",
+                return_value=True,
+            ),
+            pytest.raises(typer.Exit) as exc_info,
+        ):
+            setup_cmd._setup_claude_sdk("/usr/local/bin/claude")
+
+        assert exc_info.value.exit_code == 1
+        assert config_path.read_text(encoding="utf-8") == original
+
+    def test_setup_claude_sdk_reports_requested_alias_but_persists_sdk_backend(
+        self, tmp_path: Path
+    ) -> None:
+        """The explicit alias remains visible without creating a new backend identity."""
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        config_path.write_text("{}", encoding="utf-8")
+
+        with (
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch("ouroboros.cli.commands.claude_setup.print_info") as print_info,
+        ):
+            setup_cmd._setup_claude_sdk("/usr/local/bin/claude")
+
+        messages = [str(call.args[0]).replace("\\", "") for call in print_info.call_args_list]
+        assert any("ouroboros-ai[claude-sdk]" in message for message in messages)
+        assert all("ouroboros-ai[claude] (SDK" not in message for message in messages)
+        config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert config_dict["orchestrator"]["runtime_backend"] == "claude"
+        assert config_dict["llm"]["backend"] == "claude"
+
     def test_legacy_claude_mcp_registration_shim_is_fail_closed(self, tmp_path: Path) -> None:
         """Older plugin callers cannot reactivate the incompatible MCP path."""
         with patch("pathlib.Path.home", return_value=tmp_path):
@@ -4456,8 +4576,15 @@ class TestClaudeSetup:
         credentials_path.chmod(mode)
         return credentials_path
 
-    def test_setup_claude_preserves_operator_keys_modes_and_never_reads_mcp(
-        self, tmp_path: Path
+    @pytest.mark.parametrize(
+        ("setup_name", "expected_backend"),
+        [("_setup_claude", "claude"), ("_setup_claude_cli", "claude_mcp")],
+    )
+    def test_setup_claude_profile_preserves_operator_keys_modes_and_never_reads_mcp(
+        self,
+        tmp_path: Path,
+        setup_name: str,
+        expected_backend: str,
     ) -> None:
         config_dir = tmp_path / ".ouroboros"
         config_dir.mkdir()
@@ -4491,20 +4618,25 @@ class TestClaudeSetup:
             patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
             patch("pathlib.Path.read_text", autospec=True, side_effect=_read_text),
         ):
-            assert setup_cmd._setup_claude("/usr/local/bin/claude") is True
+            setup_profile = getattr(setup_cmd, setup_name)
+            assert setup_profile("/usr/local/bin/claude") is True
 
         config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
         assert config["operator"] == {"keep": True}
-        assert config["orchestrator"]["runtime_backend"] == "claude"
+        assert config["orchestrator"]["runtime_backend"] == expected_backend
         assert config["orchestrator"]["cli_path"] == "/usr/local/bin/claude"
         assert config["llm"]["backend"] == "claude"
         assert stat.S_IMODE(config_path.stat().st_mode) == 0o640
         assert stat.S_IMODE(credentials_path.stat().st_mode) == 0o640
         assert mcp_path.read_bytes() == mcp_bytes
 
+    @pytest.mark.parametrize(
+        "setup_name",
+        ["_setup_claude", "_setup_claude_cli"],
+    )
     @pytest.mark.parametrize("target_name", ["config.yaml", "credentials.yaml"])
     def test_setup_claude_rejects_duplicate_yaml_keys_before_rewrite(
-        self, tmp_path: Path, target_name: str
+        self, tmp_path: Path, target_name: str, setup_name: str
     ) -> None:
         """YAML's default last-key-wins behavior must not erase ambiguous input."""
         config_dir = tmp_path / ".ouroboros"
@@ -4532,7 +4664,8 @@ class TestClaudeSetup:
             patch("pathlib.Path.home", return_value=tmp_path),
             patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
         ):
-            assert setup_cmd._setup_claude("/usr/local/bin/claude") is False
+            setup_profile = getattr(setup_cmd, setup_name)
+            assert setup_profile("/usr/local/bin/claude") is False
 
         assert target.read_bytes() == before
         assert other.read_bytes() == other_before
@@ -5789,7 +5922,7 @@ raise SystemExit(0 if activate_claude_runtime("/second/claude") else 2)
                 side_effect=lambda cmd: "/usr/local/bin/uvx" if cmd == "uvx" else None,
             ),
         ):
-            setup_cmd._setup_claude("/usr/local/bin/claude")
+            setup_cmd._setup_claude_sdk("/usr/local/bin/claude")
 
         claude_mcp = json.loads(claude_config.read_text(encoding="utf-8"))
         config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8"))
@@ -5831,7 +5964,7 @@ raise SystemExit(0 if activate_claude_runtime("/second/claude") else 2)
             patch("ouroboros.cli.commands.setup.shutil.which", side_effect=which_side_effect),
             patch("ouroboros.cli.commands.setup.subprocess.run"),
         ):
-            setup_cmd._setup_claude("/usr/local/bin/claude")
+            setup_cmd._setup_claude_sdk("/usr/local/bin/claude")
 
         claude_mcp = json.loads(claude_config.read_text(encoding="utf-8"))
         assert "ouroboros" not in claude_mcp["mcpServers"]
@@ -5850,7 +5983,7 @@ raise SystemExit(0 if activate_claude_runtime("/second/claude") else 2)
             patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
             patch("ouroboros.cli.commands.setup.shutil.which", return_value=None),
         ):
-            setup_cmd._setup_claude("/usr/local/bin/claude")
+            setup_cmd._setup_claude_sdk("/usr/local/bin/claude")
 
         data = json.loads(claude_config.read_text(encoding="utf-8"))
         assert "ouroboros" not in data["mcpServers"]
@@ -5888,7 +6021,7 @@ raise SystemExit(0 if activate_claude_runtime("/second/claude") else 2)
                 side_effect=lambda cmd: "/usr/local/bin/uvx" if cmd == "uvx" else None,
             ),
         ):
-            setup_cmd._setup_claude("/usr/local/bin/claude")
+            setup_cmd._setup_claude_sdk("/usr/local/bin/claude")
 
         claude_mcp = json.loads(claude_config.read_text(encoding="utf-8"))
         # Custom command (docker) should be left untouched
@@ -5928,7 +6061,7 @@ raise SystemExit(0 if activate_claude_runtime("/second/claude") else 2)
                 side_effect=lambda cmd: "/usr/local/bin/uvx" if cmd == "uvx" else None,
             ),
         ):
-            setup_cmd._setup_claude("/usr/local/bin/claude")
+            setup_cmd._setup_claude_sdk("/usr/local/bin/claude")
 
         claude_mcp = json.loads(claude_config.read_text(encoding="utf-8"))
         assert claude_mcp["mcpServers"]["ouroboros"] == {
@@ -5961,7 +6094,7 @@ raise SystemExit(0 if activate_claude_runtime("/second/claude") else 2)
                 side_effect=lambda cmd: "/usr/local/bin/uvx" if cmd == "uvx" else None,
             ),
         ):
-            setup_cmd._setup_claude("/usr/local/bin/claude")
+            setup_cmd._setup_claude_sdk("/usr/local/bin/claude")
 
         # File should not be rewritten when nothing changed
         assert claude_config.stat().st_mtime == mtime_before
@@ -9305,6 +9438,24 @@ class TestNonInteractiveAutoSelect:
             result = runner.invoke(
                 setup_cmd.app,
                 ["--runtime", "claude", "--non-interactive"],
+            )
+
+        assert result.exit_code == 1
+
+    def test_claude_cli_activation_failure_propagates_nonzero(self) -> None:
+        runner = CliRunner()
+        with (
+            patch.object(setup_cmd, "_get_current_backend", return_value="codex"),
+            patch.object(
+                setup_cmd,
+                "_detect_runtimes",
+                return_value={"claude": "/usr/bin/claude"},
+            ),
+            patch.object(setup_cmd, "_setup_claude_cli", return_value=False),
+        ):
+            result = runner.invoke(
+                setup_cmd.app,
+                ["--runtime", "claude-cli", "--non-interactive"],
             )
 
         assert result.exit_code == 1
