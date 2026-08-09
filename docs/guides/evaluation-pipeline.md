@@ -319,7 +319,7 @@ OpenCode is easy to miss here: it is not a separate member of the union, it ride
 
 **Changing the roster does not change the adapter.** `ConsensusEvaluator` holds a single `self._llm` and sends every vote through it (`evaluation/consensus.py:281`, and the `tracked_complete(self._llm, ...)` calls at `:476`, `:563`, `:886`, `:1030`). The roster only decides the model **string** handed to that one adapter.
 
-So setting `OUROBOROS_CONSENSUS_MODELS` or `consensus.models` does not route votes to other vendors. On a local CLI backend, an `openrouter/...` entry is passed to that CLI as a model name and has to exist in its supported catalog; it does not become a request to OpenRouter. Depending on the backend you get an unsupported-model failure, or three votes from the same backend under different labels.
+Setting `OUROBOROS_CONSENSUS_MODELS` or `consensus.models` alone therefore does not replace the adapter or prove cross-vendor routing. An adapter that is already OpenRouter-capable may interpret provider-qualified strings and route the calls to those providers through that same adapter. A local CLI adapter instead receives an `openrouter/...` entry as its own model argument; the string does not switch the call to OpenRouter, so it may fail as unsupported or remain on that adapter under a different label.
 
 Cross-vendor independence requires the active LLM backend to be one that can actually reach those providers. Pick the roster to match the backend you are on, not the other way round, and verify actual transport/provider evidence: the requested roster and `reviewer_independence` label are classifications, not routing attestation.
 

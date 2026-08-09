@@ -266,11 +266,11 @@ economics:
       intelligence_range: [9, 11]
       models:
         - provider: openai
-          model: gpt-4o-mini
+          model: gpt-5.1-codex-mini
         - provider: google
           model: gemini-2.0-flash
         - provider: anthropic
-          model: claude-3-5-haiku
+          model: claude-haiku-4-5
       use_cases:
         - routine_coding
         - log_analysis
@@ -280,7 +280,7 @@ economics:
       intelligence_range: [14, 16]
       models:
         - provider: openai
-          model: gpt-4o
+          model: gpt-5-codex
         - provider: anthropic
           model: claude-sonnet-4-6
         - provider: google
@@ -294,7 +294,7 @@ economics:
       intelligence_range: [18, 20]
       models:
         - provider: openai
-          model: o3
+          model: gpt-5.2
         - provider: anthropic
           model: claude-opus-4-8
       use_cases:
@@ -901,18 +901,18 @@ economics:
       intelligence_range: [9, 11]
       models:
         - provider: openai
-          model: gpt-4o-mini
+          model: gpt-5.1-codex-mini
         - provider: google
           model: gemini-2.0-flash
         - provider: anthropic
-          model: claude-3-5-haiku
+          model: claude-haiku-4-5
       use_cases: [routine_coding, log_analysis, stage1_fix]
     standard:
       cost_factor: 10
       intelligence_range: [14, 16]
       models:
         - provider: openai
-          model: gpt-4o
+          model: gpt-5-codex
         - provider: anthropic
           model: claude-sonnet-4-6
         - provider: google
@@ -923,7 +923,7 @@ economics:
       intelligence_range: [18, 20]
       models:
         - provider: openai
-          model: o3
+          model: gpt-5.2
         - provider: anthropic
           model: claude-opus-4-8
       use_cases: [consensus, lateral_thinking, big_bang]
@@ -950,7 +950,7 @@ evaluation:
   stage1_enabled: true
   stage2_enabled: true
   stage3_enabled: true
-  satisfaction_threshold: 0.8
+  satisfaction_threshold: 0.8  # Currently inert; score gate is hardcoded to 0.8
   uncertainty_threshold: 0.3
   semantic_model: claude-opus-4-8
   assertion_extraction_model: claude-sonnet-4-6
