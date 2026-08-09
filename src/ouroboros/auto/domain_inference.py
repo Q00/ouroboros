@@ -1152,6 +1152,64 @@ _UI_SIGNAL_STRIP_FRAGMENT = (
 )
 
 
+_VERIFICATION_CONTEXT_RE = re.compile(
+    r"\b(?:tests?|testing|smoke|e2e|end[\s\-]to[\s\-]end|playwright|"
+    r"selenium|puppeteer|cypress|webdriver|qa|verification|"
+    r"compatibility|automation|drivers?)\b"
+)
+
+# A hyphenated verification compound premodifies its head without owning
+# it ("Playwright-tested extension runtime") — the compound token drops,
+# the identity it modifies stays.
+_VERIFICATION_COMPOUND_RE = re.compile(
+    r"\b[\w'’]+-(?:tested|verified|validated|checked|covered|driven|exercised)\b"
+)
+
+# Introducers that attach a verification description to a preceding
+# production identity: participial modifiers, relativizers, and the
+# prepositions/markers that govern a tooling phrase.
+_VERIFICATION_ATTACHMENT_CUT_RE = re.compile(
+    r"\b(?:that|which|tested|verified|validated|checked|exercised|covered|"
+    r"driven|with|via|using|by|for|to|under|through|alongside)\b"
+)
+
+
+def _strip_verification_clauses(text: str) -> str:
+    """Remove verification-owned prose while keeping production identity.
+
+    Scoped per relation, not per punctuation block (#1813 R91): a
+    segment mixing both — "a Chrome browser extension and Playwright
+    tests run in CI", the comma form, or "extension runtime tested with
+    Playwright" — keeps the production identity and sheds only the
+    clause or attachment the verification vocabulary owns. A clause
+    with no attachment boundary before its first verification word is
+    verification prose outright and drops whole.
+    """
+    kept: list[str] = []
+    for segment in re.split(r"[.;]", text):
+        normalized = _VERIFICATION_COMPOUND_RE.sub(" ", segment)
+        if not _VERIFICATION_CONTEXT_RE.search(normalized):
+            kept.append(normalized)
+            continue
+        for part in re.split(r",|\b(?:and|while|but|whereas|or)\b", normalized):
+            if not _VERIFICATION_CONTEXT_RE.search(part):
+                kept.append(part)
+                continue
+            # The retained prefix ends at the last attachment introducer
+            # before the clause's first verification word — everything
+            # after it is the verification description.
+            prefix = ""
+            for cut in _VERIFICATION_ATTACHMENT_CUT_RE.finditer(part):
+                candidate = part[: cut.start()]
+                if _VERIFICATION_CONTEXT_RE.search(candidate):
+                    break
+                if re.search(r"\w", candidate):
+                    prefix = candidate
+            if prefix:
+                kept.append(prefix)
+    return " ; ".join(kept)
+
+
 def _matches_web_app(ledger: SeedDraftLedger) -> bool:
     outputs = _section_text(ledger, "outputs")
     runtime = _section_text(ledger, "runtime_context")
@@ -1260,20 +1318,11 @@ def _matches_web_app(ledger: SeedDraftLedger) -> bool:
     # tests for Chrome extensions" describe how the app is verified —
     # the components there are used or targeted by the tooling.
     if _EXPLICIT_WEB_VOCAB_RE.search(_goal_text(ledger)):
-        verification_re = re.compile(
-            r"\b(?:tests?|testing|smoke|e2e|end[\s\-]to[\s\-]end|playwright|"
-            r"selenium|puppeteer|cypress|webdriver|qa|verification|"
-            r"compatibility|automation|drivers?)\b"
-        )
-        # Scoped per clause (#1813 R90): only segments syntactically
-        # owned by verification prose are exempt — an independent
-        # production-identity clause keeps its authority in either
-        # clause order.
-        runtime_identity = " ; ".join(
-            segment
-            for segment in re.split(r"[.;]", runtime_identity)
-            if not verification_re.search(segment)
-        )
+        # Scoped per relation (#1813 R90/R91): only the prose the
+        # verification vocabulary syntactically owns is exempt — a
+        # production identity sharing a segment through a conjunction,
+        # comma, or participial attachment keeps its authority.
+        runtime_identity = _strip_verification_clauses(runtime_identity)
     if re.search(rf"\b{component_fragment}\b", runtime_identity):
         residual = re.sub(
             rf"\b(?:[\w\-'’]+\s+){{0,2}}?{component_fragment}\b", " ", runtime_identity

@@ -4549,12 +4549,19 @@ def test_components_inside_verification_context_do_not_veto(runtime: str) -> Non
     [
         "Production runtime is a Chrome browser extension; Playwright tests run in CI",
         "Playwright tests run in CI; production runtime is a Chrome browser extension",
+        "Production runtime is a Chrome browser extension and Playwright tests run in CI",
+        "Production runtime is a Chrome browser extension, Playwright tests run in CI",
+        "Chrome browser extension runtime tested with Playwright in CI",
+        "Chrome browser extension runtime exercised by Playwright in CI",
+        "Playwright-tested Chrome browser extension runtime in CI",
     ],
 )
 def test_production_identity_survives_adjacent_test_clauses(runtime: str) -> None:
-    """R90 guard: the verification exemption is scoped per clause — an
-    independent production-identity segment keeps its authority in
-    either clause order."""
+    """R90/R91 guard: the verification exemption is scoped per relation —
+    a production identity keeps its authority whether the verification
+    prose sits in its own punctuated clause, shares the segment through
+    a conjunction or comma, or attaches within the same clause as a
+    participial, passive, or hyphenated-compound modifier."""
     ledger = _bare_ledger("Build a web app")
     _seed_section(ledger, "outputs", value="Interactive signup page")
     _seed_section(ledger, "runtime_context", value=runtime)
