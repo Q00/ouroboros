@@ -4612,6 +4612,27 @@ def test_web_nouns_as_relation_objects_do_not_own(goal: str, outputs: str) -> No
     assert TaskClass.WEB_APP not in result.classes
 
 
+@pytest.mark.parametrize(
+    "goal",
+    [
+        "Build a reusable widget consumed in web apps",
+        "Build a reusable widget used inside web apps",
+        "Build a reusable widget loaded by web apps",
+        "Build a reusable widget imported by web apps",
+        "Build a reusable widget called from web apps",
+    ],
+)
+def test_passive_consumption_relations_do_not_own(goal: str) -> None:
+    """R103 guard: passive consumption reads the same through any
+    preposition — a widget consumed in, loaded by, imported by, or
+    called from web apps is their component, not the app."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value="Signup form component and settings panel")
+    _seed_section(ledger, "runtime_context", value="Python process")
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes
+
+
 def test_neither_nor_denies_both_alternatives() -> None:
     """R102 guard: "neither a web app nor a website" denies BOTH
     alternatives — a denied artifact can never become a match or a

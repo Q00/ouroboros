@@ -775,7 +775,14 @@ _GAME_CONJUNCT_VOCAB_RE = re.compile(rf"\b{_GAME_GOAL_SIGNAL_FRAGMENT}\b")
 _INFINITIVE_TARGET_RE = re.compile(r"\bto\s+(?!be\b|an?\b|the\b)[\w\-]+\s+[^,.;]*")
 _RELATIONAL_TARGET_RE = re.compile(
     r"\b(?:targeting|supporting|serving|powering|backing|aimed\s+at|"
-    r"used\s+by|consumed\s+by|embedded\s+(?:in|into|within|inside)|"
+    # Passive consumption reads the same through any preposition (#1813
+    # R103): what is consumed in, loaded by, imported by, or called from
+    # web apps is their component, not the app.
+    r"used\s+(?:by|in|inside|within)|consumed\s+(?:by|in|inside|within)|"
+    r"loaded\s+(?:by|in|into|inside|within|from)|"
+    r"imported\s+(?:by|into|in|from)|called\s+(?:from|by)|"
+    r"invoked\s+(?:by|from)|referenced\s+(?:by|from)|required\s+by|"
+    r"embedded\s+(?:in|into|within|inside)|"
     r"nested\s+(?:in|within|inside)|contained\s+(?:in|within|inside)|"
     # Active containment consumes its component (#1813 R59): an app that
     # "embeds a web browser" hosts the browser, it is not one.
