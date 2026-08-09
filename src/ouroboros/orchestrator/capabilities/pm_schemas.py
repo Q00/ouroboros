@@ -109,9 +109,8 @@ _PM_REPO_ID_PATTERN = r"^[A-Za-z0-9_.:\-]{1,128}$"
 #: needs more than this is not making one policy claim, it is a file listing.
 _PM_CLAIMS_MAX_PER_REPOSITORY = 20
 
-#: How many repositories one answer may report on. The roster is what the lane
-#: was handed and every entry must be in it, so this is a ceiling on the roster
-#: rather than a judgement about the answer.
+#: How many repositories one answer may report on. Bounds the answer, not the
+#: roster.
 _PM_EXAMINED_MAX_REPOSITORIES = 64
 
 

@@ -77,44 +77,22 @@ def _tool_advisory_catalog(tool_name: str) -> Mapping[str, Any]:
     return catalog if isinstance(catalog, Mapping) else {}
 
 
-#: ``name`` and ``desc`` are the roster fields a person types freely at
-#: ``ooo brownfield`` registration, and they are the two the child does not act
-#: on: it cites by ``repo_id`` and reads at ``path``. So they are the fields that
-#: may be shortened, and shortening them is what keeps the list itself whole.
-#:
-#: Both, not just the longer one. ``desc`` is the field that grows in practice,
-#: but ``name`` is typed in the same box and stored the same way, and bounding
-#: one while leaving the other is how this defect was written the first time.
-#: Shortening ``name`` here reaches only the rendered roster: ``repo_id`` is
-#: already derived and slug-capped by ``pm_repo_id``, so nothing keyed on it
-#: moves.
+#: ``name`` and ``desc`` are free text typed at ``ooo brownfield`` registration,
+#: and shortening them is render-only: the child cites by ``repo_id``, which
+#: ``pm_repo_id`` has already derived, and reads at ``path``.
 _PM_ROSTER_FREETEXT_MAX_CHARS = 200
 _PM_ROSTER_FREETEXT_FIELDS = ("name", "desc")
 
 
 def _pm_roster_json(roster: Any) -> str:
-    """Render every roster entry, shortening only the field nothing depends on.
+    """Render every roster entry, shortening only the free-text fields.
 
-    Deliberately not ``_bounded_json``, which cuts the JSON mid-array. Losing
-    entries does not produce a rejected answer, it produces an accepted one that
-    is wrong: the child reports honestly on everything it was given and says it
-    examined the roster, and neither it nor the parent can see what went
-    missing. Losing the tail of a description costs nothing by comparison --
-    nothing is keyed on it.
-
-    This replaces a size ceiling that refused the lane outright. That was the
-    same defect wearing the opposite sign: it bounded the list, whose truncation
-    is fatal, and left ``desc`` unbounded, whose truncation is free -- so a
-    registration with long notes silently produced a PM turn with no lanes at
-    all, indistinguishable from an ordinary greenfield question. Bounding the
-    free-text field instead removes the state rather than reporting it: there is
-    no roster a valid session can hold that fails to render.
+    Not ``_bounded_json``: it cuts mid-array, and a dropped entry is one the
+    child cannot know it never saw.
     """
     if not isinstance(roster, (list, tuple)):
-        # Rendered as it came rather than as an empty list. A roster of the
-        # wrong shape is a caller bug and shows as one; rendering ``[]`` would
-        # tell the child there are no repositories, which is the silent
-        # falsehood this function exists to prevent.
+        # As it came, not as ``[]`` -- an empty list would say there are no
+        # repositories.
         return json.dumps(roster, ensure_ascii=False, sort_keys=True, indent=2)
     entries: list[Any] = []
     for entry in roster:
@@ -153,22 +131,17 @@ def _pm_code_context_lane_brief(
     nothing to confirm. A rule with two spellings is a rule that stops agreeing
     with itself, so this brief renders the declared one.
 
-    ``answer_contract`` is rendered for the same reason the roster is, and it was
-    missing for longer. The prose above names the fields a finding needs; it does
-    not carry the closed part -- the three ``nothing_examined_reason`` literals,
-    ``additionalProperties``, the array and length bounds. The Output section
-    then told the child its contract was "rendered in full above" while nothing
-    had rendered it, so the ordinary empty-roster answer required guessing an
-    unshown literal, and a reasonable one was rejected. This lane is required, so
-    a rejected answer is not a worse answer -- it is no consultation at all.
+    ``answer_contract`` is rendered for the same reason the roster is: the prose
+    above names the fields a finding needs but not the closed part -- the
+    ``nothing_examined_reason`` literals, ``additionalProperties``, the bounds --
+    which the Output section already claims is "rendered in full above".
     """
     roster_json = _pm_roster_json(roster)
     contract_json = _bounded_json(answer_contract, _INTERVIEW_DATA_CONTRACT_MAX_JSON_CHARS)
     contract_id = ""
     if isinstance(answer_contract, Mapping):
         contract_id = str(answer_contract.get("contract_id") or "")
-    # Named from the contract's own id rather than spelled here, so the heading
-    # cannot outlive a rename the way a hand-written one would.
+    # From the contract's own id, so the heading cannot outlive a rename.
     contract_heading = (
         f"## Answer Contract ({contract_id})" if contract_id else "## Answer Contract"
     )
