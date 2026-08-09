@@ -249,10 +249,16 @@ cannot declare itself pre-confirmed.
 Tool: ouroboros_pm_interview
 Arguments:
   session_id: <meta.session_id>
+  last_question: <meta.question>
   answer: |
     [from-code] billing-api src/billing/lapse.py: access continues to period end.
     [from-code] storefront src/checkout.ts: access is revoked immediately.
 ```
+
+Send `meta.question`, never the response text — the text carries the fan-out
+directive. Omitting it files the finding under a placeholder question, and
+since the answer slot is withheld by design, the finding is then lost from
+both slots.
 
 4. The server records it as an **adopted fact**: the round is marked
    `observation`, requirement extraction reads a withheld-note in its place, and
@@ -370,8 +376,13 @@ difference later.
 Tool: ouroboros_pm_interview
 Arguments:
   session_id: <meta.session_id>
+  last_question: <meta.question>
   <meta.response_param>: <the refined answer, or "[decide_later]" / "[deferred]">
 ```
+
+Ignored while the server holds the question unanswered; required otherwise —
+plugin mode never persists the child's questions, and an answer with no pending
+question is refused without it.
 
 There is no second parameter carrying findings. The tool has exactly the fields
 the regular interview has, and a finding travels the same way any adopted fact
