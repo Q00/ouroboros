@@ -81,7 +81,7 @@ llm_profiles:
       codex:
         reasoning_effort: high
       claude_code:
-        model: claude-opus-4.8
+        model: claude-opus-4-8
       gemini:
         model: gemini-2.5-pro
       opencode:
@@ -296,7 +296,7 @@ economics:
         - provider: openai
           model: o3
         - provider: anthropic
-          model: claude-opus-4.8
+          model: claude-opus-4-8
       use_cases:
         - consensus
         - lateral_thinking
@@ -324,7 +324,7 @@ economics:
 | Field | Type | Description |
 |-------|------|-------------|
 | `provider` | `string` | Provider name (`openai`, `anthropic`, `google`, `openrouter`). |
-| `model` | `string` | Model identifier (e.g., `gpt-4o-mini`, `claude-opus-4.8`). |
+| `model` | `string` | Model identifier (e.g., `gpt-4o-mini`, `claude-opus-4-8`). |
 
 ---
 
@@ -337,7 +337,7 @@ clarification:
   ambiguity_threshold: 0.2    # Interview completes when ambiguity score <= this value
   max_interview_rounds: 10    # Hard ceiling on clarification rounds
   model_tier: standard        # "frugal" | "standard" | "frontier"
-  default_model: claude-opus-4.8
+  default_model: claude-opus-4-8
 ```
 
 | Option | Type | Default | Description |
@@ -345,7 +345,7 @@ clarification:
 | `ambiguity_threshold` | `float [0.0, 1.0]` | `0.2` | Maximum ambiguity score to allow seed generation to proceed. Interview loops until the score falls at or below this value. |
 | `max_interview_rounds` | `int >= 1` | `10` | Maximum number of question-answer rounds regardless of ambiguity score. |
 | `model_tier` | `"frugal"` \| `"standard"` \| `"frontier"` | `"standard"` | PAL tier used for the clarification phase. |
-| `default_model` | `string` | `"claude-opus-4.8"` | Default model for interview and seed generation. Overridable via `OUROBOROS_CLARIFICATION_MODEL`. |
+| `default_model` | `string` | `"claude-opus-4-8"` | Default model for interview and seed generation. Overridable via `OUROBOROS_CLARIFICATION_MODEL`. |
 
 ---
 
@@ -409,8 +409,8 @@ resilience:
   lateral_thinking_enabled: true
   lateral_model_tier: frontier   # "frugal" | "standard" | "frontier"
   lateral_temperature: 0.8
-  wonder_model: claude-opus-4.8
-  reflect_model: claude-opus-4.8
+  wonder_model: claude-opus-4-8
+  reflect_model: claude-opus-4-8
 ```
 
 | Option | Type | Default | Description |
@@ -419,8 +419,8 @@ resilience:
 | `lateral_thinking_enabled` | `bool` | `true` | Whether lateral thinking persona rotation is active when stagnation is detected. |
 | `lateral_model_tier` | `"frugal"` \| `"standard"` \| `"frontier"` | `"frontier"` | PAL tier used for lateral thinking calls. Frontier is the default because creative re-framing requires high model capability. |
 | `lateral_temperature` | `float [0.0, 2.0]` | `0.8` | LLM sampling temperature for lateral thinking prompts. Higher values produce more divergent outputs. |
-| `wonder_model` | `string` | `"claude-opus-4.8"` | Model for the Wonder phase (divergent exploration). Overridable via `OUROBOROS_WONDER_MODEL`. |
-| `reflect_model` | `string` | `"claude-opus-4.8"` | Model for the Reflect phase (convergent synthesis). Overridable via `OUROBOROS_REFLECT_MODEL`. |
+| `wonder_model` | `string` | `"claude-opus-4-8"` | Model for the Wonder phase (divergent exploration). Overridable via `OUROBOROS_WONDER_MODEL`. |
+| `reflect_model` | `string` | `"claude-opus-4-8"` | Model for the Reflect phase (convergent synthesis). Overridable via `OUROBOROS_REFLECT_MODEL`. |
 
 ---
 
@@ -435,7 +435,7 @@ evaluation:
   stage3_enabled: true         # Multi-model consensus (when triggered)
   satisfaction_threshold: 0.8  # Currently inert — the Stage 2 gate is hardcoded to 0.8
   uncertainty_threshold: 0.3   # Uncertainty score above which consensus is triggered
-  semantic_model: claude-opus-4.8
+  semantic_model: claude-opus-4-8
   assertion_extraction_model: claude-sonnet-4-6
 ```
 
@@ -446,7 +446,7 @@ evaluation:
 | `stage3_enabled` | `bool` | `true` | Enable multi-model consensus evaluation (triggered by the consensus trigger matrix). |
 | `satisfaction_threshold` | `float [0.0, 1.0]` | `0.8` | **Currently inert.** `EvaluationPipeline` compares `stage2_result.score >= 0.8` literally and never reads this field. Changing it neither tightens nor relaxes evaluation. See [Evaluation Pipeline Guide](./guides/evaluation-pipeline.md#stage-2-semantic-evaluation). |
 | `uncertainty_threshold` | `float [0.0, 1.0]` | `0.3` | Semantic uncertainty score above which Stage 3 consensus is triggered even if `satisfaction_threshold` is met. |
-| `semantic_model` | `string` | `"claude-opus-4.8"` | Model used for Stage 2 semantic evaluation. Overridable via `OUROBOROS_SEMANTIC_MODEL`. |
+| `semantic_model` | `string` | `"claude-opus-4-8"` | Model used for Stage 2 semantic evaluation. Overridable via `OUROBOROS_SEMANTIC_MODEL`. |
 | `assertion_extraction_model` | `string` | `"claude-sonnet-4-6"` | Model used for extracting verification assertions from seed criteria. Overridable via `OUROBOROS_ASSERTION_EXTRACTION_MODEL`. |
 
 ---
@@ -838,7 +838,12 @@ clarification:
   default_model: claude-opus-4.6           # same value written by setup
 ```
 
-The Copilot CLI runtime is unique in that `ouroboros setup --runtime copilot` **live-discovers the available models** from the GitHub Copilot models API at setup time and writes the chosen default into the config above. Re-run setup after GitHub publishes new models. Authentication uses `gh auth login`; no separate API key is required. Hyphenated Anthropic IDs (for example `claude-opus-4.8`) used elsewhere in your config are auto-mapped to the dotted Copilot form (`claude-opus-4.6`) at runtime, so existing per-role overrides keep working when you switch backends. See [Copilot CLI runtime guide](runtime-guides/copilot.md) for full details.
+The Copilot CLI runtime is unique in that `ouroboros setup --runtime copilot` **live-discovers the available models** from the GitHub Copilot models API at setup time and writes the chosen default into the config above. Re-run setup after GitHub publishes new models. Authentication uses `gh auth login`; no separate API key is required. Model-ID normalization is narrower than it looks, so check your explicit overrides before switching backends. `map_to_copilot_model()` (`copilot/model_discovery.py:247`) resolves in this order: a verbatim match against the discovered model list; a static name map that currently covers `claude-opus-4-6` and `openrouter/anthropic/claude-opus-4-6` (both to `claude-opus-4.6`); then a hyphen-to-dot fallback. Two consequences:
+
+- Any ID already containing a `.` short-circuits at the top and is passed through unchanged (`:276`).
+- The hyphen-to-dot fallback calls `replace("-", ".")`, which rewrites *every* hyphen. `claude-opus-4-8` becomes `claude.opus.4.8`, which is not a Copilot ID, so it also passes through unchanged.
+
+The current direct-provider default `claude-opus-4-8` therefore has no Copilot mapping, unlike the previous default `claude-opus-4-6`. Leave role models unset to use the value setup discovered and wrote, or set a Copilot-valid ID explicitly. See [Copilot CLI runtime guide](runtime-guides/copilot.md) for full details.
 
 ### Pi CLI Runtime
 
@@ -912,14 +917,14 @@ economics:
         - provider: openai
           model: o3
         - provider: anthropic
-          model: claude-opus-4.8
+          model: claude-opus-4-8
       use_cases: [consensus, lateral_thinking, big_bang]
 
 clarification:
   ambiguity_threshold: 0.2
   max_interview_rounds: 10
   model_tier: standard
-  default_model: claude-opus-4.8
+  default_model: claude-opus-4-8
 
 execution:
   max_iterations_per_ac: 10
@@ -930,8 +935,8 @@ resilience:
   lateral_thinking_enabled: true
   lateral_model_tier: frontier
   lateral_temperature: 0.8
-  wonder_model: claude-opus-4.8
-  reflect_model: claude-opus-4.8
+  wonder_model: claude-opus-4-8
+  reflect_model: claude-opus-4-8
 
 evaluation:
   stage1_enabled: true
@@ -939,7 +944,7 @@ evaluation:
   stage3_enabled: true
   satisfaction_threshold: 0.8
   uncertainty_threshold: 0.3
-  semantic_model: claude-opus-4.8
+  semantic_model: claude-opus-4-8
   assertion_extraction_model: claude-sonnet-4-6
 
 consensus:

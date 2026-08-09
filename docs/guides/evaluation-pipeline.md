@@ -544,13 +544,15 @@ config = PipelineConfig(
 
     # Stage 3: Simple consensus evaluation
     #
-    # models=None keeps the backend-aware default: OpenRouter-capable backends
-    # get the shipped roster, sentinel backends get ("default",) * 3. Passing an
-    # explicit tuple marks the roster as configured and skips that
-    # normalization, so the OpenRouter ids below are only correct on a backend
-    # that can actually reach OpenRouter. See "Sentinel-model backends" above.
+    # models=None keeps the backend-aware default: NON-SENTINEL backends get the
+    # shipped OpenRouter roster, sentinel backends get ("default",) * 3. Note that
+    # non-sentinel is not the same as OpenRouter-routed: claude_code, gemini,
+    # goose, and ourocode receive the roster but send those ids to their own
+    # adapter. Passing an explicit tuple marks the roster as configured and skips
+    # the normalization, so the ids below are only correct on a backend that can
+    # actually reach OpenRouter. See "Sentinel-model backends" above.
     consensus=ConsensusConfig(
-        models=None,  # or, on an OpenRouter-capable backend only:
+        models=None,  # or, on an OpenRouter-routed backend only:
         # models=(
         #     "openrouter/openai/gpt-4o",
         #     "openrouter/anthropic/claude-opus-4.8",
