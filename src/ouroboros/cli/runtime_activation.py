@@ -1,22 +1,38 @@
-"""Crash-safe activation for setup-owned runtime configuration.
+"""Crash-recoverable activation for setup-owned runtime configuration.
 
 The standalone Claude profile deliberately has no Claude MCP-file side effect.
-This module owns only ``~/.ouroboros/config.yaml`` and ``credentials.yaml``.
+This module owns only ``~/.ouroboros/config.yaml`` and the creation of a
+missing ``credentials.yaml``.
+
+All Ouroboros activation writers cooperate through :func:`file_lock`.  The
+lock closes the portable check/promote and check/unlink race between those
+writers.  A process that ignores the lock cannot be made transactional by the
+cross-platform Python filesystem API; generation fingerprints make edits that
+are visible at validation or recovery fail closed, but the narrow native rename
+interval is deliberately not advertised as non-cooperative CAS.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
+import json
 import os
 from pathlib import Path
 import stat
-import tempfile
-from typing import Literal
+from typing import Any, Literal
+from uuid import uuid4
 
 import yaml
+from yaml.constructor import ConstructorError
 
 from ouroboros.cli.formatters.panels import print_error, print_warning
+from ouroboros.core.file_lock import file_lock
 from ouroboros.core.owner_only import fsync_parent_directory
+
+_ACTIVATION_LOCK_NAME = ".claude-runtime-activation"
+_JOURNAL_NAME = ".claude-runtime-activation.journal.json"
+_JOURNAL_VERSION = 1
 
 
 @dataclass(frozen=True)
@@ -34,6 +50,14 @@ class _FileSnapshot:
     link_target: str | None = None
 
 
+@dataclass(frozen=True)
+class _PreparedFile:
+    """A fsync'd file ready for one same-directory promotion."""
+
+    path: Path
+    snapshot: _FileSnapshot
+
+
 class _ConcurrentActivationError(OSError):
     """An activation target no longer matches the generation that was read."""
 
@@ -45,6 +69,45 @@ class _DurabilityError(OSError):
         super().__init__(f"Could not confirm replacement durability for {path}")
         self.path = path
         self.published_snapshot = published_snapshot
+
+
+class _UniqueKeyLoader(yaml.SafeLoader):
+    """Safe YAML loader that rejects every duplicate mapping key."""
+
+
+def _construct_unique_mapping(
+    loader: _UniqueKeyLoader,
+    node: yaml.nodes.MappingNode,
+    deep: bool = False,
+) -> dict[object, object]:
+    loader.flatten_mapping(node)
+    mapping: dict[object, object] = {}
+    for key_node, value_node in node.value:
+        key = loader.construct_object(key_node, deep=deep)
+        try:
+            duplicate = key in mapping
+        except TypeError as exc:
+            raise ConstructorError(
+                "while constructing a mapping",
+                node.start_mark,
+                "found an unhashable key",
+                key_node.start_mark,
+            ) from exc
+        if duplicate:
+            raise ConstructorError(
+                "while constructing a mapping",
+                node.start_mark,
+                f"found duplicate key {key!r}",
+                key_node.start_mark,
+            )
+        mapping[key] = loader.construct_object(value_node, deep=deep)
+    return mapping
+
+
+_UniqueKeyLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
+    _construct_unique_mapping,
+)
 
 
 def _read_regular_snapshot(path: Path, initial_stat: os.stat_result) -> _FileSnapshot:
@@ -136,12 +199,147 @@ def _yaml_mapping(path: Path, snapshot: _FileSnapshot) -> dict[str, object]:
     if snapshot.kind != "file" or snapshot.contents is None:
         raise ValueError(f"{path.name} is not a regular file")
     try:
-        loaded = yaml.safe_load(snapshot.contents.decode("utf-8"))
+        loaded = yaml.load(snapshot.contents.decode("utf-8"), Loader=_UniqueKeyLoader)
     except (UnicodeDecodeError, yaml.YAMLError, RecursionError) as exc:
         raise ValueError(f"Could not parse {path.name}: {exc}") from exc
     if not isinstance(loaded, dict):
         raise ValueError(f"Invalid non-mapping {path.name} contents")
+    if not all(isinstance(key, str) for key in loaded):
+        raise ValueError(f"Invalid non-string key in {path.name}")
     return loaded
+
+
+def _snapshot_from_stat(contents: bytes, result: os.stat_result) -> _FileSnapshot:
+    return _FileSnapshot(
+        kind="file",
+        mode=stat.S_IMODE(result.st_mode),
+        contents=contents,
+        device=result.st_dev,
+        inode=result.st_ino,
+        modified_ns=result.st_mtime_ns,
+        changed_ns=result.st_ctime_ns,
+        link_count=result.st_nlink,
+    )
+
+
+def _prepare_file(
+    path: Path,
+    contents: bytes,
+    *,
+    requested_mode: int,
+    preserve_exact_mode: bool,
+) -> _PreparedFile:
+    """Create and fsync a new file, applying umask only for fresh targets."""
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags, requested_mode)
+    try:
+        if preserve_exact_mode and hasattr(os, "fchmod"):
+            os.fchmod(descriptor, requested_mode)
+        view = memoryview(contents)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise OSError(f"Could not prepare replacement for {path}")
+            view = view[written:]
+        os.fsync(descriptor)
+        prepared = os.fstat(descriptor)
+        if not stat.S_ISREG(prepared.st_mode) or prepared.st_nlink != 1:
+            raise OSError(f"Could not prepare regular replacement for {path}")
+        if preserve_exact_mode and stat.S_IMODE(prepared.st_mode) != requested_mode:
+            raise OSError(f"Could not preserve file mode for {path}")
+        if stat.S_IMODE(prepared.st_mode) & ~requested_mode:
+            raise OSError(f"Prepared file mode exceeds the secure default for {path}")
+        return _PreparedFile(path, _snapshot_from_stat(contents, prepared))
+    except BaseException:
+        os.close(descriptor)
+        descriptor = -1
+        try:
+            path.unlink()
+        except OSError:
+            pass
+        raise
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def _new_staging_path(target: Path, generation: str, label: str) -> Path:
+    return target.parent / f".claude-runtime-activation.{generation}.{label}.stage"
+
+
+def _new_claim_path(target: Path, generation: str, label: str) -> Path:
+    return target.parent / f".claude-runtime-activation.{generation}.{label}.claim"
+
+
+def _link_if_absent(source: Path, destination: Path) -> None:
+    """Publish ``source`` only while ``destination`` is atomically absent."""
+    os.link(source, destination, follow_symlinks=False)
+
+
+def _restore_claim_if_absent(claim: Path, target: Path) -> bool:
+    """Restore a claimed inode without overwriting a newer target generation."""
+    try:
+        _link_if_absent(claim, target)
+    except FileExistsError:
+        return False
+    claim.unlink()
+    if not fsync_parent_directory(target):
+        raise OSError(f"Could not confirm claimed generation restoration: {target}")
+    return True
+
+
+def _promotion_checkpoint(_operation: str, _target: Path) -> None:
+    """Test seam immediately before a live target is claimed or published."""
+
+
+def _promote_prepared_under_lock(
+    target: Path,
+    prepared: _PreparedFile,
+    expected: _FileSnapshot,
+    claim: Path,
+) -> _FileSnapshot:
+    """Promote one prepared generation while the cooperative lock is held.
+
+    The caller owns the cross-platform activation lock for the entire snapshot,
+    validation, and promotion interval.  This is the portable guarded-CAS
+    boundary for Ouroboros writers; an external writer that ignores that lock
+    is detected by the before/after generation checks but is not promised
+    impossible at the exact OS rename instruction.
+    """
+    _require_snapshot(prepared.path, prepared.snapshot)
+    if expected.kind == "file":
+        _promotion_checkpoint("claim", target)
+        os.rename(target, claim)
+        claimed = _snapshot_target(claim)
+        if not _same_owned_generation(claimed, expected):
+            if not _restore_claim_if_absent(claim, target):
+                raise _ConcurrentActivationError(
+                    f"Changed target was claimed and a newer generation now occupies {target}; "
+                    f"preserved the claimed generation at {claim}"
+                )
+            raise _ConcurrentActivationError(
+                f"Activation target changed before guarded promotion: {target}"
+            )
+    elif expected.kind != "missing":
+        raise ValueError(f"Cannot promote over unsupported target kind: {expected.kind}")
+
+    try:
+        _promotion_checkpoint("publish", target)
+        _link_if_absent(prepared.path, target)
+    except BaseException:
+        if expected.kind == "file" and _snapshot_target(claim).kind == "file":
+            _restore_claim_if_absent(claim, target)
+        raise
+    # The destination now names the prepared inode.  Remove only our
+    # generation-specific staging link; no destination check/unlink occurs.
+    prepared.path.unlink()
+    published = _snapshot_target(target)
+    if not _same_owned_generation(published, prepared.snapshot):
+        raise _ConcurrentActivationError(f"Prepared generation was not published: {target}")
+    if not fsync_parent_directory(target):
+        raise _DurabilityError(target, published)
+    return published
 
 
 def _atomic_write_text_if_current_matches(
@@ -151,93 +349,312 @@ def _atomic_write_text_if_current_matches(
     *,
     mode: int,
 ) -> _FileSnapshot:
-    """Fsync and replace only the exact regular or missing generation read."""
-    _require_snapshot(path, expected)
-    fd, temporary_name = tempfile.mkstemp(
-        prefix=f".{path.name}.",
-        suffix=".tmp",
-        dir=str(path.parent),
+    """Prepare and promote one exact generation under the activation lock."""
+    staging = _new_staging_path(path, uuid4().hex, path.stem)
+    claim = _new_claim_path(path, uuid4().hex, path.stem)
+    prepared = _prepare_file(
+        staging,
+        content.encode("utf-8"),
+        requested_mode=mode,
+        preserve_exact_mode=expected.kind == "file",
     )
-    replacement_fd: int | None = None
     try:
-        if hasattr(os, "fchmod"):
-            os.fchmod(fd, mode)
-        with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
-            fd = -1
-            handle.write(content)
-            handle.flush()
-            os.fsync(handle.fileno())
+        published = _promote_prepared_under_lock(path, prepared, expected, claim)
+        # This helper is used only for a one-file rollback write.  Its old
+        # generation is no longer needed once the replacement is durable.
+        claimed = _snapshot_target(claim)
+        if claimed.kind == "file":
+            claim.unlink()
+            if not fsync_parent_directory(path):
+                raise _DurabilityError(path, published)
+        return published
+    finally:
         try:
-            os.chmod(temporary_name, mode)
+            staging.unlink()
         except OSError:
             pass
-        replacement_fd = os.open(temporary_name, os.O_RDONLY)
-        prepared_stat = os.fstat(replacement_fd)
-        if not stat.S_ISREG(prepared_stat.st_mode):
-            raise OSError(f"Could not prepare regular replacement for {path}")
+
+
+def _same_owned_generation(left: _FileSnapshot, right: _FileSnapshot) -> bool:
+    return (
+        left.kind == right.kind == "file"
+        and left.device == right.device
+        and left.inode == right.inode
+        and left.mode == right.mode
+        and left.link_count == right.link_count == 1
+        and left.contents == right.contents
+    )
+
+
+def _digest(contents: bytes | None) -> str | None:
+    return hashlib.sha256(contents).hexdigest() if contents is not None else None
+
+
+def _strict_guard(snapshot: _FileSnapshot) -> dict[str, object]:
+    return {
+        "kind": snapshot.kind,
+        "mode": snapshot.mode,
+        "device": snapshot.device,
+        "inode": snapshot.inode,
+        "modified_ns": snapshot.modified_ns,
+        "changed_ns": snapshot.changed_ns,
+        "link_count": snapshot.link_count,
+        "sha256": _digest(snapshot.contents),
+    }
+
+
+def _owned_guard(snapshot: _FileSnapshot) -> dict[str, object]:
+    return {
+        "kind": snapshot.kind,
+        "mode": snapshot.mode,
+        "device": snapshot.device,
+        "inode": snapshot.inode,
+        "sha256": _digest(snapshot.contents),
+    }
+
+
+def _matches_guard(snapshot: _FileSnapshot, guard: object, *, strict: bool) -> bool:
+    if not isinstance(guard, dict):
+        return False
+    expected = _strict_guard(snapshot) if strict else _owned_guard(snapshot)
+    return guard == expected
+
+
+def _write_journal(
+    path: Path,
+    payload: dict[str, object],
+    expected: _FileSnapshot,
+) -> _FileSnapshot:
+    _require_snapshot(path, expected)
+    encoded = (json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    staging = path.parent / f".{path.name}.{uuid4().hex}.tmp"
+    prepared = _prepare_file(
+        staging,
+        encoded,
+        requested_mode=0o600,
+        preserve_exact_mode=False,
+    )
+    try:
         _require_snapshot(path, expected)
-        os.replace(temporary_name, path)
-        published_stat = os.fstat(replacement_fd)
-        published = _FileSnapshot(
-            kind="file",
-            mode=stat.S_IMODE(published_stat.st_mode),
-            contents=content.encode("utf-8"),
-            device=published_stat.st_dev,
-            inode=published_stat.st_ino,
-            modified_ns=published_stat.st_mtime_ns,
-            changed_ns=published_stat.st_ctime_ns,
-            link_count=published_stat.st_nlink,
-        )
-        try:
-            os.close(replacement_fd)
-        except OSError:
-            pass
-        replacement_fd = None
+        os.replace(staging, path)
+        published = _snapshot_target(path)
+        if not _same_owned_generation(published, prepared.snapshot):
+            raise _ConcurrentActivationError("Activation journal generation changed during write")
         if not fsync_parent_directory(path):
             raise _DurabilityError(path, published)
         return published
-    except BaseException:
-        if fd >= 0:
-            try:
-                os.close(fd)
-            except OSError:
-                pass
-        if replacement_fd is not None:
-            try:
-                os.close(replacement_fd)
-            except OSError:
-                pass
+    finally:
         try:
-            Path(temporary_name).unlink()
+            staging.unlink()
         except OSError:
             pass
-        raise
+
+
+def _load_journal(path: Path) -> tuple[dict[str, object], _FileSnapshot]:
+    snapshot = _snapshot_target(path)
+    _require_file_target(path, snapshot)
+    if snapshot.kind != "file" or snapshot.contents is None:
+        raise ValueError("Activation recovery journal is not a regular file")
+
+    def _unique_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"Duplicate activation journal key: {key}")
+            result[key] = value
+        return result
+
+    try:
+        loaded = json.loads(snapshot.contents, object_pairs_hook=_unique_pairs)
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        raise ValueError(f"Invalid activation recovery journal: {exc}") from exc
+    if not isinstance(loaded, dict) or loaded.get("version") != _JOURNAL_VERSION:
+        raise ValueError("Unsupported activation recovery journal")
+    return loaded, snapshot
+
+
+def _journal_stage_path(config_dir: Path, journal: dict[str, object], key: str) -> Path:
+    raw_name = journal.get(key)
+    generation = journal.get("generation")
+    label_by_key = {
+        "config_stage": "config",
+        "credentials_stage": "credentials",
+        "config_claim": "config-original",
+        "credentials_claim": "credentials-original",
+        "config_rollback_claim": "config-rollback",
+        "credentials_rollback_claim": "credentials-rollback",
+    }
+    label = label_by_key.get(key)
+    if (
+        not isinstance(raw_name, str)
+        or not isinstance(generation, str)
+        or len(generation) != 32
+        or any(character not in "0123456789abcdef" for character in generation)
+        or label is None
+    ):
+        raise ValueError("Incomplete activation recovery journal")
+    suffix = "stage" if key.endswith("_stage") else "claim"
+    expected_name = f".claude-runtime-activation.{generation}.{label}.{suffix}"
+    if raw_name != expected_name:
+        raise ValueError("Unsafe activation recovery artifact name")
+    return config_dir / raw_name
+
+
+def _discard_owned_target(
+    path: Path,
+    expected_guard: object,
+    rollback_claim: Path,
+) -> None:
+    """Remove only an owned live generation via atomic claim-and-inspect."""
+    _promotion_checkpoint("rollback-claim", path)
+    os.rename(path, rollback_claim)
+    claimed = _snapshot_target(rollback_claim)
+    if not _matches_guard(claimed, expected_guard, strict=False):
+        if not _restore_claim_if_absent(rollback_claim, path):
+            raise _ConcurrentActivationError(
+                f"Changed target and a newer replacement were both preserved: {path}"
+            )
+        raise _ConcurrentActivationError(f"Refusing to remove a changed generation: {path}")
+    rollback_claim.unlink()
+    if not fsync_parent_directory(path):
+        raise OSError(f"Could not confirm owned generation cleanup: {path}")
+
+
+def _cleanup_journal_artifacts(
+    config_dir: Path,
+    journal_path: Path,
+    journal: dict[str, object],
+    journal_snapshot: _FileSnapshot,
+) -> None:
+    for name_key, guard_key in (
+        ("credentials_stage", "credentials_published"),
+        ("config_stage", "config_published"),
+        ("credentials_claim", "credentials_original_owned"),
+        ("config_claim", "config_original_owned"),
+        ("credentials_rollback_claim", "credentials_published"),
+        ("config_rollback_claim", "config_published"),
+    ):
+        stage = _journal_stage_path(config_dir, journal, name_key)
+        current = _snapshot_target(stage)
+        if current.kind == "missing":
+            continue
+        guard = journal.get(guard_key)
+        if not _matches_guard(current, guard, strict=False):
+            raise _ConcurrentActivationError(f"Recovery artifact changed concurrently: {stage}")
+        stage.unlink()
+    _require_snapshot(journal_path, journal_snapshot)
+    journal_path.unlink()
+    if not fsync_parent_directory(journal_path):
+        raise OSError("Could not confirm activation recovery cleanup durability")
+
+
+def _recover_interrupted_activation(config_dir: Path) -> None:
+    """Recover the only partial state: fresh credentials before config commit."""
+    journal_path = config_dir / _JOURNAL_NAME
+    if _snapshot_target(journal_path).kind == "missing":
+        return
+    journal, journal_snapshot = _load_journal(journal_path)
+    config_path = config_dir / "config.yaml"
+    credentials_path = config_dir / "credentials.yaml"
+    config_claim = _journal_stage_path(config_dir, journal, "config_claim")
+    credentials_rollback_claim = _journal_stage_path(
+        config_dir, journal, "credentials_rollback_claim"
+    )
+    config_now = _snapshot_target(config_path)
+    credentials_now = _snapshot_target(credentials_path)
+    config_is_original = _matches_guard(config_now, journal.get("config_original"), strict=True)
+    config_is_published = _matches_guard(config_now, journal.get("config_published"), strict=False)
+    credentials_is_original = _matches_guard(
+        credentials_now, journal.get("credentials_original"), strict=True
+    )
+    credentials_is_published = _matches_guard(
+        credentials_now, journal.get("credentials_published"), strict=False
+    )
+    raw_creates_credentials = journal.get("creates_credentials")
+    if not isinstance(raw_creates_credentials, bool):
+        raise ValueError("Invalid activation recovery journal credentials state")
+    creates_credentials = raw_creates_credentials
+
+    # A crash can occur after atomically claiming the old config and before
+    # conditionally publishing the new one.  Restore that exact claimed inode
+    # only if no newer operator generation occupies the destination.
+    claimed_config = _snapshot_target(config_claim)
+    if (
+        config_now.kind == "missing"
+        and claimed_config.kind == "file"
+        and _matches_guard(
+            claimed_config,
+            journal.get("config_original_owned"),
+            strict=False,
+        )
+    ):
+        if not _restore_claim_if_absent(config_claim, config_path):
+            raise _ConcurrentActivationError(
+                "A newer config generation prevented interrupted-claim recovery"
+            )
+        config_now = _snapshot_target(config_path)
+        config_is_original = True
+
+    if config_is_published and (credentials_is_published or not creates_credentials):
+        # Config is the commit point.  A crash after its atomic promotion but
+        # before journal cleanup is a committed activation, not partial state.
+        _cleanup_journal_artifacts(config_dir, journal_path, journal, journal_snapshot)
+        return
+    if config_is_original and (credentials_is_original or not creates_credentials):
+        _cleanup_journal_artifacts(config_dir, journal_path, journal, journal_snapshot)
+        return
+    if config_is_original and creates_credentials and credentials_is_published:
+        _discard_owned_target(
+            credentials_path,
+            journal.get("credentials_published"),
+            credentials_rollback_claim,
+        )
+        _cleanup_journal_artifacts(config_dir, journal_path, journal, journal_snapshot)
+        return
+    raise _ConcurrentActivationError(
+        "Interrupted activation overlaps a non-cooperative config/credential generation; "
+        "preserved all files and the recovery journal"
+    )
 
 
 def _rollback_file(
     path: Path,
     original: _FileSnapshot,
     expected_current: _FileSnapshot | None,
+    *,
+    original_claim: Path,
+    rollback_claim: Path,
 ) -> bool:
     if expected_current is None:
         return True
     try:
-        _require_snapshot(path, expected_current)
+        _promotion_checkpoint("rollback-claim", path)
+        os.rename(path, rollback_claim)
+        current = _snapshot_target(rollback_claim)
+        if not _same_owned_generation(current, expected_current):
+            if not _restore_claim_if_absent(rollback_claim, path):
+                raise _ConcurrentActivationError(
+                    f"Changed rollback target and its replacement were both preserved: {path}"
+                )
+            raise _ConcurrentActivationError(f"Activation rollback generation changed: {path}")
         if original.kind == "missing":
-            path.unlink()
+            # The rollback claim is the activation-owned published generation.
+            rollback_claim.unlink()
             if not fsync_parent_directory(path):
                 raise OSError(f"Could not confirm rollback durability for {path}")
             return True
         if original.kind != "file" or original.contents is None or original.mode is None:
             raise OSError(f"Cannot restore unsupported activation target: {path}")
-        _atomic_write_text_if_current_matches(
-            path,
-            original.contents.decode("utf-8"),
-            expected_current,
-            mode=original.mode,
-        )
+        claimed_original = _snapshot_target(original_claim)
+        if not _same_owned_generation(claimed_original, original):
+            raise _ConcurrentActivationError(f"Original rollback claim changed: {original_claim}")
+        if not _restore_claim_if_absent(original_claim, path):
+            raise _ConcurrentActivationError(f"Newer generation prevented rollback: {path}")
+        rollback_claim.unlink()
+        if not fsync_parent_directory(path):
+            raise OSError(f"Could not confirm rollback cleanup durability for {path}")
         return True
-    except (OSError, UnicodeDecodeError) as exc:
+    except OSError as exc:
         print_warning(f"Preserved current {path.name}; activation rollback was incomplete: {exc}")
         return False
 
@@ -256,6 +673,10 @@ def _restore_directory_topology(snapshot: dict[Path, bool]) -> None:
             path.rmdir()
         except (FileNotFoundError, NotADirectoryError, OSError):
             pass
+
+
+def _publication_checkpoint(_name: str) -> None:
+    """Test seam for deterministic process-death recovery checks."""
 
 
 def activate_claude_runtime(claude_path: str) -> Path | None:
@@ -281,6 +702,7 @@ def activate_claude_runtime(claude_path: str) -> Path | None:
             f"found {directory_generation.kind}."
         )
         return None
+
     topology = _directory_topology(
         (
             config_dir_candidate / "data",
@@ -291,91 +713,196 @@ def activate_claude_runtime(claude_path: str) -> Path | None:
 
     try:
         config_dir = ensure_config_dir()
-        if directory_generation.kind == "directory":
-            _require_snapshot(config_dir_candidate, directory_generation)
-        elif _snapshot_target(config_dir).kind != "directory":
-            raise ValueError("Ouroboros config directory was not created safely")
-        config_path = config_dir / "config.yaml"
-        credentials_path = config_dir / "credentials.yaml"
-        config_generation = _snapshot_target(config_path)
-        credentials_generation = _snapshot_target(credentials_path)
-        _require_file_target(config_path, config_generation)
-        _require_file_target(credentials_path, credentials_generation)
+        # The lock lives beside the managed directory so a failed first setup
+        # can remove the fresh directory topology without deleting a lockfile
+        # that another cooperative process may already be waiting on.
+        lock_target = config_dir.parent / _ACTIVATION_LOCK_NAME
+        with file_lock(lock_target, stable_parent_authority=True):
+            if directory_generation.kind == "directory":
+                _require_snapshot(config_dir_candidate, directory_generation)
+            elif _snapshot_target(config_dir).kind != "directory":
+                raise ValueError("Ouroboros config directory was not created safely")
+            _recover_interrupted_activation(config_dir)
+            config_path = config_dir / "config.yaml"
+            credentials_path = config_dir / "credentials.yaml"
+            config_generation = _snapshot_target(config_path)
+            credentials_generation = _snapshot_target(credentials_path)
+            _require_file_target(config_path, config_generation)
+            _require_file_target(credentials_path, credentials_generation)
 
-        config = (
-            get_default_config().model_dump(mode="json")
-            if config_generation.kind == "missing"
-            else _yaml_mapping(config_path, config_generation)
-        )
-        if config_generation.kind == "file":
+            config = (
+                get_default_config().model_dump(mode="json")
+                if config_generation.kind == "missing"
+                else _yaml_mapping(config_path, config_generation)
+            )
+            if config_generation.kind == "file":
+                OuroborosConfig.model_validate(config)
+            credentials = (
+                get_default_credentials().model_dump(mode="json")
+                if credentials_generation.kind == "missing"
+                else _yaml_mapping(credentials_path, credentials_generation)
+            )
+            if credentials_generation.kind == "file":
+                CredentialsConfig.model_validate(credentials)
+
+            orchestrator = config.get("orchestrator")
+            if orchestrator is None:
+                orchestrator = {}
+                config["orchestrator"] = orchestrator
+            if not isinstance(orchestrator, dict):
+                raise ValueError("Invalid non-mapping 'orchestrator' section in config.yaml")
+            orchestrator["runtime_backend"] = "claude"
+            orchestrator["cli_path"] = claude_path
+            llm = config.get("llm")
+            if llm is None:
+                llm = {}
+                config["llm"] = llm
+            if not isinstance(llm, dict):
+                raise ValueError("Invalid non-mapping 'llm' section in config.yaml")
+            llm["backend"] = "claude"
             OuroborosConfig.model_validate(config)
-        credentials = (
-            get_default_credentials().model_dump(mode="json")
-            if credentials_generation.kind == "missing"
-            else _yaml_mapping(credentials_path, credentials_generation)
-        )
-        if credentials_generation.kind == "file":
-            CredentialsConfig.model_validate(credentials)
+            config_content = yaml.dump(config, default_flow_style=False, sort_keys=False)
+            credentials_content = yaml.dump(credentials, default_flow_style=False, sort_keys=False)
 
-        orchestrator = config.get("orchestrator")
-        if orchestrator is None:
-            orchestrator = {}
-            config["orchestrator"] = orchestrator
-        if not isinstance(orchestrator, dict):
-            raise ValueError("Invalid non-mapping 'orchestrator' section in config.yaml")
-        orchestrator["runtime_backend"] = "claude"
-        orchestrator["cli_path"] = claude_path
-        llm = config.get("llm")
-        if llm is None:
-            llm = {}
-            config["llm"] = llm
-        if not isinstance(llm, dict):
-            raise ValueError("Invalid non-mapping 'llm' section in config.yaml")
-        llm["backend"] = "claude"
-        OuroborosConfig.model_validate(config)
-        config_content = yaml.dump(config, default_flow_style=False, sort_keys=False)
-        credentials_content = yaml.dump(credentials, default_flow_style=False, sort_keys=False)
+            generation = uuid4().hex
+            config_stage = _new_staging_path(config_path, generation, "config")
+            credentials_stage = _new_staging_path(credentials_path, generation, "credentials")
+            config_claim = _new_claim_path(config_path, generation, "config-original")
+            credentials_claim = _new_claim_path(
+                credentials_path, generation, "credentials-original"
+            )
+            config_rollback_claim = _new_claim_path(config_path, generation, "config-rollback")
+            credentials_rollback_claim = _new_claim_path(
+                credentials_path, generation, "credentials-rollback"
+            )
+            try:
+                prepared_config = _prepare_file(
+                    config_stage,
+                    config_content.encode(),
+                    requested_mode=(
+                        config_generation.mode if config_generation.mode is not None else 0o644
+                    ),
+                    preserve_exact_mode=config_generation.kind == "file",
+                )
+                prepared_credentials = _prepare_file(
+                    credentials_stage,
+                    credentials_content.encode(),
+                    requested_mode=(
+                        credentials_generation.mode
+                        if credentials_generation.mode is not None
+                        else 0o600
+                    ),
+                    preserve_exact_mode=credentials_generation.kind == "file",
+                )
+                if not fsync_parent_directory(config_stage):
+                    raise OSError("Could not confirm prepared activation durability")
+            except BaseException:
+                for stage in (config_stage, credentials_stage):
+                    try:
+                        stage.unlink()
+                    except OSError:
+                        pass
+                raise
+
+            journal_path = config_dir / _JOURNAL_NAME
+            # Both staged contents and their directory entries are durable
+            # before this journal becomes durable.  Only then may credentials
+            # be published.  Config is published last and is the commit point.
+            journal = {
+                "version": _JOURNAL_VERSION,
+                "generation": generation,
+                "creates_credentials": credentials_generation.kind == "missing",
+                "config_original": _strict_guard(config_generation),
+                "config_original_owned": _owned_guard(config_generation),
+                "config_published": _owned_guard(prepared_config.snapshot),
+                "credentials_original": _strict_guard(credentials_generation),
+                "credentials_original_owned": _owned_guard(credentials_generation),
+                "credentials_published": _owned_guard(prepared_credentials.snapshot),
+                "config_stage": config_stage.name,
+                "credentials_stage": credentials_stage.name,
+                "config_claim": config_claim.name,
+                "credentials_claim": credentials_claim.name,
+                "config_rollback_claim": config_rollback_claim.name,
+                "credentials_rollback_claim": credentials_rollback_claim.name,
+            }
+            try:
+                journal_snapshot = _write_journal(
+                    journal_path,
+                    journal,
+                    _FileSnapshot(kind="missing"),
+                )
+            except BaseException:
+                for stage in (config_stage, credentials_stage):
+                    try:
+                        stage.unlink()
+                    except OSError:
+                        pass
+                raise
+
+            config_written: _FileSnapshot | None = None
+            credentials_written: _FileSnapshot | None = None
+            try:
+                if credentials_generation.kind == "missing":
+                    credentials_written = _promote_prepared_under_lock(
+                        credentials_path,
+                        prepared_credentials,
+                        credentials_generation,
+                        credentials_claim,
+                    )
+                    _publication_checkpoint("credentials")
+                else:
+                    _require_snapshot(credentials_path, credentials_generation)
+                config_written = _promote_prepared_under_lock(
+                    config_path,
+                    prepared_config,
+                    config_generation,
+                    config_claim,
+                )
+                _publication_checkpoint("config")
+                expected_credentials = credentials_written or credentials_generation
+                _require_snapshot(credentials_path, expected_credentials)
+                _require_snapshot(config_path, config_written)
+                _cleanup_journal_artifacts(
+                    config_dir,
+                    journal_path,
+                    journal,
+                    journal_snapshot,
+                )
+                return config_path
+            except BaseException as exc:
+                if isinstance(exc, _DurabilityError):
+                    if exc.path == config_path:
+                        config_written = exc.published_snapshot
+                    elif exc.path == credentials_path:
+                        credentials_written = exc.published_snapshot
+                config_restored = _rollback_file(
+                    config_path,
+                    config_generation,
+                    config_written,
+                    original_claim=config_claim,
+                    rollback_claim=config_rollback_claim,
+                )
+                credentials_restored = _rollback_file(
+                    credentials_path,
+                    credentials_generation,
+                    credentials_written,
+                    original_claim=credentials_claim,
+                    rollback_claim=credentials_rollback_claim,
+                )
+                # Rollback may already have restored both original generations.
+                # Let the durable journal verify that fact and clean only owned
+                # artifacts.  If an external writer intervened it is preserved.
+                if config_restored and credentials_restored:
+                    _cleanup_journal_artifacts(
+                        config_dir,
+                        journal_path,
+                        journal,
+                        journal_snapshot,
+                    )
+                else:
+                    _recover_interrupted_activation(config_dir)
+                raise
     except (OSError, ValueError, RecursionError) as exc:
         _restore_directory_topology(topology)
-        print_error(f"Claude setup validation failed; aborting without changes: {exc}")
+        print_error(f"Claude setup activation failed; aborting safely: {exc}")
         return None
-
-    config_written: _FileSnapshot | None = None
-    credentials_written: _FileSnapshot | None = None
-    try:
-        _require_snapshot(config_path, config_generation)
-        _require_snapshot(credentials_path, credentials_generation)
-        if credentials_generation.kind == "missing":
-            credentials_written = _atomic_write_text_if_current_matches(
-                credentials_path,
-                credentials_content,
-                credentials_generation,
-                mode=0o600,
-            )
-        expected_credentials = credentials_written or credentials_generation
-        _require_snapshot(credentials_path, expected_credentials)
-        config_written = _atomic_write_text_if_current_matches(
-            config_path,
-            config_content,
-            config_generation,
-            mode=config_generation.mode if config_generation.mode is not None else 0o644,
-        )
-        _require_snapshot(credentials_path, expected_credentials)
-        _require_snapshot(config_path, config_written)
-    except _DurabilityError as exc:
-        if exc.path == config_path:
-            config_written = exc.published_snapshot
-        elif exc.path == credentials_path:
-            credentials_written = exc.published_snapshot
-        _rollback_file(config_path, config_generation, config_written)
-        _rollback_file(credentials_path, credentials_generation, credentials_written)
-        _restore_directory_topology(topology)
-        print_error(f"Claude setup could not durably activate configuration: {exc}")
-        return None
-    except OSError as exc:
-        _rollback_file(config_path, config_generation, config_written)
-        _rollback_file(credentials_path, credentials_generation, credentials_written)
-        _restore_directory_topology(topology)
-        print_error(f"Claude setup could not activate configuration: {exc}")
-        return None
-    return config_path
