@@ -6221,6 +6221,118 @@ raise SystemExit(0 if activate_claude_runtime("/second/claude") else 2)
         assert stage.read_bytes() == operator
         assert stage.stat().st_nlink == 1
 
+    def test_secret_scrub_rechecks_mode_after_content_validation(self, tmp_path: Path) -> None:
+        """A mode change during descriptor reads is preserved without truncation."""
+        secret = b"sk-mode-during-read-secret"
+        stage = tmp_path / ".credentials.stage"
+        stage.write_bytes(secret)
+        stage.chmod(0o600)
+        expected = runtime_activation._snapshot_target(stage)
+        real_read = os.read
+        mutated = False
+
+        def _read_then_change_mode(descriptor: int, amount: int) -> bytes:
+            nonlocal mutated
+            chunk = real_read(descriptor, amount)
+            if chunk and not mutated:
+                mutated = True
+                stage.chmod(0o640)
+            return chunk
+
+        with (
+            patch(
+                "ouroboros.cli.runtime_activation.os.read",
+                side_effect=_read_then_change_mode,
+            ),
+            pytest.raises(runtime_activation._ConcurrentActivationError),
+        ):
+            runtime_activation._scrub_owned_artifact(stage, expected)
+
+        assert mutated
+        assert stage.read_bytes() == secret
+        assert stat.S_IMODE(stage.stat().st_mode) == 0o640
+        assert not tuple(tmp_path.glob("*.retired"))
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX hard-link semantics")
+    def test_secret_scrub_rechecks_link_count_after_content_validation(
+        self, tmp_path: Path
+    ) -> None:
+        """A link added during descriptor reads is preserved without truncation."""
+        secret = b"sk-link-during-read-secret"
+        stage = tmp_path / ".credentials.stage"
+        stage.write_bytes(secret)
+        expected = runtime_activation._snapshot_target(stage)
+        operator_link = tmp_path / "operator-link"
+        real_read = os.read
+        mutated = False
+
+        def _read_then_link(descriptor: int, amount: int) -> bytes:
+            nonlocal mutated
+            chunk = real_read(descriptor, amount)
+            if chunk and not mutated:
+                mutated = True
+                os.link(stage, operator_link)
+            return chunk
+
+        with (
+            patch(
+                "ouroboros.cli.runtime_activation.os.read",
+                side_effect=_read_then_link,
+            ),
+            pytest.raises(runtime_activation._ConcurrentActivationError),
+        ):
+            runtime_activation._scrub_owned_artifact(stage, expected)
+
+        assert mutated
+        assert stage.read_bytes() == secret
+        assert operator_link.read_bytes() == secret
+        assert stage.stat().st_nlink == 2
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX ownership semantics")
+    def test_secret_scrub_rechecks_owner_after_content_validation(self, tmp_path: Path) -> None:
+        """An ownership change during descriptor reads is preserved without truncation."""
+        alternate_uid = os.getuid()
+        alternate_gid = next(
+            (group for group in os.getgroups() if group != os.getgid()),
+            None,
+        )
+        if os.geteuid() == 0:
+            alternate_uid = 65534
+            alternate_gid = 65534
+        elif alternate_gid is None:
+            pytest.skip("No alternate permitted ownership generation")
+        assert alternate_gid is not None
+        secret = b"sk-owner-during-read-secret"
+        stage = tmp_path / ".credentials.stage"
+        stage.write_bytes(secret)
+        expected = runtime_activation._snapshot_target(stage)
+        real_read = os.read
+        mutated = False
+
+        def _read_then_change_owner(descriptor: int, amount: int) -> bytes:
+            nonlocal mutated
+            chunk = real_read(descriptor, amount)
+            if chunk and not mutated:
+                mutated = True
+                os.chown(stage, alternate_uid, alternate_gid)
+            return chunk
+
+        with (
+            patch(
+                "ouroboros.cli.runtime_activation.os.read",
+                side_effect=_read_then_change_owner,
+            ),
+            pytest.raises(runtime_activation._ConcurrentActivationError),
+        ):
+            runtime_activation._scrub_owned_artifact(stage, expected)
+
+        assert mutated
+        assert stage.read_bytes() == secret
+        assert (stage.stat().st_uid, stage.stat().st_gid) == (
+            alternate_uid,
+            alternate_gid,
+        )
+
     def test_journal_cleanup_rechecks_secret_guard_immediately_before_scrub(
         self, tmp_path: Path
     ) -> None:

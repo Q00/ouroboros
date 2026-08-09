@@ -634,6 +634,13 @@ def _scrub_owned_artifact(
             remaining -= len(chunk)
         if bytes(observed_contents) != expected.contents:
             raise _ConcurrentActivationError(f"Secret artifact contents changed: {path}")
+        validated = os.fstat(descriptor)
+        if not stat.S_ISREG(validated.st_mode) or _descriptor_generation(
+            validated
+        ) != _descriptor_generation(before_scrub):
+            raise _ConcurrentActivationError(
+                f"Secret artifact metadata changed during validation: {path}"
+            )
         os.ftruncate(descriptor, 0)
         os.fsync(descriptor)
         scrubbed = _snapshot_from_stat(b"", os.fstat(descriptor))
