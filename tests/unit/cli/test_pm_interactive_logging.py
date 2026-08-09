@@ -67,7 +67,9 @@ def test_pm_command_enables_debug_logging_when_requested() -> None:
 
     with (
         patch("ouroboros.cli.commands.pm.asyncio.run", side_effect=fake_run),
-        patch("ouroboros.cli.commands.pm.configure_logging") as mock_configure,
+        # pm now routes through the shared bridge (#1955), so patch the
+        # structlog call inside it and keep asserting the effective level.
+        patch("ouroboros.cli.logging_setup.configure_logging") as mock_configure,
         patch("ouroboros.cli.commands.pm.print_info") as mock_print_info,
     ):
         pm_command(_build_ctx(), model="test-model", debug=True)

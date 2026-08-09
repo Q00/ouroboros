@@ -20,6 +20,7 @@ if TYPE_CHECKING:
 
 from ouroboros.cli.formatters import console
 from ouroboros.cli.formatters.panels import print_error, print_info, print_success, print_warning
+from ouroboros.cli.logging_setup import configure_cli_logging
 from ouroboros.config.loader import (
     get_config_dir,
     get_max_parallel_workers,
@@ -978,6 +979,11 @@ def workflow(
         # Skip ACs already satisfied by the working tree
         ouroboros run seed.yaml --skip-completed docs/completed.yaml
     """
+    # Apply the saved logging.level before the orchestrator is imported: its
+    # module-level get_logger() auto-configures logging at the default level,
+    # and whichever runs first wins.
+    configure_cli_logging(debug=debug)
+
     # Validate MCP config requires orchestrator mode
     if mcp_config and not orchestrator and not resume_session:
         print_warning("--mcp-config requires --orchestrator flag. Enabling orchestrator mode.")
