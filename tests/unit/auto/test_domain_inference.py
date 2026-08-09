@@ -4579,6 +4579,38 @@ def test_verification_exemption_covers_qualified_web_ownership(goal: str) -> Non
     assert result.single is TaskClass.WEB_APP
 
 
+def test_displayed_web_apps_are_content_not_artifact() -> None:
+    """R100 guard: a participial content clause names what the product
+    displays — "a desktop dashboard showing a list of web apps" shows
+    web apps and is not one."""
+    ledger = _bare_ledger("Build a desktop dashboard showing a list of web apps")
+    _seed_section(ledger, "outputs", value="Interactive charts with a filters panel")
+    _seed_section(ledger, "runtime_context", value="Desktop application")
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes
+
+
+@pytest.mark.parametrize(
+    ("runtime", "expect_web_app"),
+    [
+        ("Native desktop application; Playwright tests run in browsers", False),
+        ("Native desktop application; Selenium tests run in browsers", False),
+        ("Runs in browsers; Playwright tests run in CI", True),
+    ],
+)
+def test_test_environment_browsers_are_not_section_evidence(
+    runtime: str, expect_web_app: bool
+) -> None:
+    """R100 guard: a browser that hosts the tests is not the product's
+    execution environment — the explicit native runtime keeps authority,
+    while a genuine browser runtime clause survives the strip."""
+    ledger = _bare_ledger("Build an interactive dashboard")
+    _seed_section(ledger, "outputs", value="Interactive charts with a filters panel")
+    _seed_section(ledger, "runtime_context", value=runtime)
+    result = derive_domain_from_ledger(ledger)
+    assert (TaskClass.WEB_APP in result.classes) is expect_web_app
+
+
 @pytest.mark.parametrize(
     "runtime",
     [

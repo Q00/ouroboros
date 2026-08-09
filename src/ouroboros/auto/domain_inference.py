@@ -810,6 +810,15 @@ _RELATIONAL_TARGET_RE = re.compile(
 )
 
 
+# A participial content clause names what the product DISPLAYS, not what
+# is produced (#1813 R100): "desktop dashboard showing a list of web
+# apps" shows web apps; it is not one.
+_PARTICIPIAL_CONTENT_CLAUSE_RE = re.compile(
+    r"\b(?:showing|displaying|listing|presenting|visualizing|summarizing|"
+    r"highlighting|cataloging|cataloguing|enumerating)\b.*$"
+)
+
+
 def _goal_artifact_head_is_web_app(goal_text: str) -> bool:
     """Ownership follows the goal's artifact head (#1813 R21): in
     "package delivery tracking web app" or "SDK documentation web app"
@@ -847,6 +856,10 @@ def _goal_artifact_head_is_web_app(goal_text: str) -> bool:
     # name the consumer (#1813 R29).
     core = _INFINITIVE_TARGET_RE.sub(" ", core)
     core = _strip_consumer_relations(core)
+    # Content participles ("showing a list of web apps") name displayed
+    # content, not the produced artifact (#1813 R100) — the same
+    # ownership normalization the browser-context path applies.
+    core = _PARTICIPIAL_CONTENT_CLAUSE_RE.sub(" ", core)
     web_matches = list(_WEB_APP_ARTIFACT_PHRASE_RE.finditer(core))
     if not web_matches:
         # A browser-qualified UI head ("browser-based admin portal",
@@ -960,7 +973,12 @@ def _section_browser_context_text(ledger: SeedDraftLedger) -> str:
     postpositive strips.
     """
     outputs = _section_text(ledger, "outputs")
-    runtime = _section_text(ledger, "runtime_context")
+    # Verification-owned clauses are not the execution environment
+    # (#1813 R100): in "Native desktop application; Playwright tests run
+    # in browsers" the browser hosts the tests, not the product, so it
+    # cannot serve as section browser evidence. A genuine browser
+    # runtime clause survives the strip and keeps its authority.
+    runtime = _strip_verification_clauses(_section_text(ledger, "runtime_context"))
     context_text = _strip_consumer_relations(outputs) + " " + runtime
     # Postpositive denials ("the browser is not supported", "browser
     # support disabled") negate from behind (#1813 R37).
