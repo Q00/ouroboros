@@ -1398,14 +1398,10 @@ _GOAL_COMPONENT_TARGET_RE = re.compile(
     r"(?:[\w\-'’]+\s+){0,3}?"
     r"(?:extension|plugin|add[\s\-]?on|addon|sidebar|popup|toolbar|overlay|devtool)\b(?!s)))\s+"
     r"(?:(?:an?|the|our|my|your|their|its)\s+)?"
-    # Manipulation verbs mark the component as managed content, not the
-    # artifact's identity (#1813 R81).
-    r"(?:(?!(?:not|no|never|manage|manages|managing|install|installs|"
-    r"installing|list|lists|listing|organize|organizes|organizing|"
-    r"track|tracks|tracking|catalog|catalogs|cataloging|browse|browses|"
-    r"browsing|review|reviews|reviewing|audit|audits|auditing|update|"
-    r"updates|updating|remove|removes|removing|uninstall\w*)\b)"
-    r"[\w\-'’]+\s+){0,3}?"
+    # A gerund in the target NP marks the component as managed content
+    # ("for configuring browser extensions"), whatever the activity —
+    # structural, no verb enumeration (#1813 R81/R82).
+    r"(?:(?!(?:not|no|never)\b)(?![\w\-'’]+ing\b)[\w\-'’]+\s+){0,3}?"
     r"(?:extensions?|plugins?|add[\s\-]?ons?|addons?|sidebars?|popups?|"
     r"toolbars?|overlays?|devtools?)\b"
     r"(?!\s+(?!(?:and|or|nor|but|without|with|for|on|in|at|by|from|via|"
@@ -1903,6 +1899,9 @@ def _matches_web_app(ledger: SeedDraftLedger) -> bool:
     )
     if any(
         not any(start <= m.start() < end for start, end in content_regions)
+        and not re.match(
+            r"\s+(?:when|if|unless|while|whenever|wherever)\b", goal_text_value[m.end() :]
+        )
         and not re.match(
             r"\s+(?:from|in|within|inside|for|on|by|under|across|during|"
             r"except|only|outside)\b"

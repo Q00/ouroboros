@@ -4321,6 +4321,43 @@ def test_condition_qualified_exclusions_still_deny(goal: str) -> None:
 @pytest.mark.parametrize(
     "goal",
     [
+        "Build a web app for configuring browser extensions",
+        "Build a web app for enabling browser extensions",
+        "Build a web app for comparing browser extensions",
+    ],
+)
+def test_gerund_targets_are_managed_content(goal: str) -> None:
+    """R82 guard: a gerund in the target NP marks the component as
+    managed content whatever the activity — structural, no verb list."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value="Extension catalog with install buttons")
+    _seed_section(ledger, "runtime_context", value="Browser")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
+        "Build a web app; browsers are unsupported when offline",
+        "Build a web app; browsers are unsupported if JavaScript is disabled",
+    ],
+)
+def test_conditional_clauses_qualify_rather_than_deny(goal: str) -> None:
+    """R82 guard: when/if clauses constrain operating conditions — they
+    do not deny that the artifact is a web app."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value="Interactive charts with a filters panel")
+    _seed_section(ledger, "runtime_context", value="Browser")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
         "The product is an admin portal that runs in browsers",
         "The deliverable is an admin portal available in browsers",
     ],
