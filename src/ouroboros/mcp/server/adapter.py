@@ -1642,7 +1642,6 @@ def create_ouroboros_server(
         AutoHandler,
         CancelExecutionHandler,
         CancelJobHandler,
-        ChecklistVerifyHandler,
         EvaluateHandler,
         EvolveRewindHandler,
         EvolveStepHandler,
@@ -1667,6 +1666,7 @@ def create_ouroboros_server(
         StartRalphHandler,
         create_fanout_handlers,
     )
+    from ouroboros.mcp.tools.evaluation_composition import create_shared_evaluation_handlers
     from ouroboros.mcp.tools.fanout import FanoutRegistry
     from ouroboros.mcp.tools.pm_handler import PMInterviewHandler
     from ouroboros.mcp.tools.qa import QAHandler
@@ -2337,15 +2337,8 @@ def create_ouroboros_server(
         agent_runtime_backend=execute_runtime_backend,
         opencode_mode=None,
     )
-    evaluate_handler = EvaluateHandler(
-        event_store=event_store,
-        llm_backend=evaluate_llm_backend,
-        agent_runtime_backend=evaluate_runtime_backend,
-        opencode_mode=opencode_mode,
-    )
-    checklist_verify_handler = ChecklistVerifyHandler(
-        evaluate_handler=evaluate_handler,
-        llm_backend=evaluate_llm_backend,
+    evaluate_handler, checklist_verify_handler = create_shared_evaluation_handlers(
+        EvaluateHandler, event_store, evaluate_llm_backend, evaluate_runtime_backend, opencode_mode
     )
     start_evaluate_handler = StartEvaluateHandler(
         evaluate_handler=evaluate_handler,
