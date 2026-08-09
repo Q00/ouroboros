@@ -26,7 +26,7 @@ Artifact ready
              │ passed
              ▼
         ┌────┴────┐
-        │ Trigger │ ← 6 conditions checked
+        │ Trigger │ ← 7 conditions checked
         │ matrix  │
         └────┬────┘
              │ triggered?
