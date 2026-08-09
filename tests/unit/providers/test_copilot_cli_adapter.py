@@ -11,6 +11,8 @@ from unittest.mock import patch
 
 import pytest
 
+from ouroboros.config._model_defaults import DEFAULT_OPUS_MODEL
+from ouroboros.copilot.model_discovery import CopilotModel
 from ouroboros.core.errors import ProviderError
 from ouroboros.providers.base import CompletionConfig, Message, MessageRole
 from ouroboros.providers.copilot_cli_adapter import CopilotCliLLMAdapter
@@ -248,6 +250,19 @@ class TestCommandBuilding:
         command = adapter._build_command(model="claude-opus-4-6")
         idx = command.index("--model")
         assert command[idx + 1] == "claude-opus-4.6"
+
+    def test_command_maps_current_default_from_catalog(self) -> None:
+        adapter = CopilotCliLLMAdapter(cli_path="copilot")
+        catalog = [CopilotModel(id="claude-opus-4.8", family="claude-opus-4.8")]
+
+        with patch(
+            "ouroboros.copilot.model_discovery.list_copilot_models",
+            return_value=catalog,
+        ):
+            command = adapter._build_command(model=DEFAULT_OPUS_MODEL)
+
+        idx = command.index("--model")
+        assert command[idx + 1] == "claude-opus-4.8"
 
     def test_command_uses_agent_over_model_when_runtime_profile_set(self) -> None:
         adapter = CopilotCliLLMAdapter(cli_path="copilot", runtime_profile="worker")

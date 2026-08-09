@@ -15,9 +15,12 @@ from __future__ import annotations
 from dataclasses import replace
 import os
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
+from ouroboros.config._model_defaults import DEFAULT_OPUS_MODEL
+from ouroboros.copilot.model_discovery import CopilotModel
 from ouroboros.orchestrator.adapter import ParamSupport
 from ouroboros.orchestrator.copilot_cli_runtime import (
     _MAX_OUROBOROS_DEPTH,
@@ -99,6 +102,23 @@ def test_build_command_maps_anthropic_hyphen_id_to_dotted_form() -> None:
     )
     idx = command.index("--model")
     assert command[idx + 1] == "claude-opus-4.6"
+
+
+def test_build_command_maps_current_default_from_catalog() -> None:
+    runtime = _make_runtime(model=DEFAULT_OPUS_MODEL)
+    catalog = [CopilotModel(id="claude-opus-4.8", family="claude-opus-4.8")]
+
+    with patch(
+        "ouroboros.copilot.model_discovery.list_copilot_models",
+        return_value=catalog,
+    ):
+        command = runtime._build_command(
+            output_last_message_path="/tmp/ignored",
+            prompt="task",
+        )
+
+    idx = command.index("--model")
+    assert command[idx + 1] == "claude-opus-4.8"
 
 
 def test_build_command_passes_dotted_model_through_unchanged() -> None:
