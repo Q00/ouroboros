@@ -1254,13 +1254,18 @@ def _matches_web_app(ledger: SeedDraftLedger) -> bool:
     runtime_identity = _strip_negated_signals(
         _section_text(ledger, "runtime_context"), component_fragment
     )
-    # Test/verification tooling in the runtime is not the artifact's
-    # identity when the goal explicitly names a web product (#1813 R88):
-    # "Browser automation via Playwright for smoke tests" verifies the
-    # app, it is not the app. Surface components (extension, popup)
-    # remain authoritative regardless.
-    if _EXPLICIT_WEB_VOCAB_RE.search(_goal_text(ledger)):
-        runtime_identity = re.sub(r"\b(?:automation|drivers?)\b", " ", runtime_identity)
+    # A verification-context runtime is not the artifact's identity
+    # when the goal explicitly names a web product (#1813 R88/R89):
+    # "Playwright tests with a browser extension" and "Compatibility
+    # tests for Chrome extensions" describe how the app is verified —
+    # the components there are used or targeted by the tooling.
+    if _EXPLICIT_WEB_VOCAB_RE.search(_goal_text(ledger)) and re.search(
+        r"\b(?:tests?|testing|smoke|e2e|end[\s\-]to[\s\-]end|playwright|"
+        r"selenium|puppeteer|cypress|webdriver|qa|verification|"
+        r"compatibility|automation|drivers?)\b",
+        runtime_identity,
+    ):
+        runtime_identity = ""
     if re.search(rf"\b{component_fragment}\b", runtime_identity):
         residual = re.sub(
             rf"\b(?:[\w\-'’]+\s+){{0,2}}?{component_fragment}\b", " ", runtime_identity
@@ -1354,7 +1359,11 @@ def _matches_web_app(ledger: SeedDraftLedger) -> bool:
     if _INSPECTION_TOOL_GOAL_RE.search(_goal_text(ledger)) and not (
         _goal_has_browser_ui_product_head(_goal_text(ledger))
         or (
-            _goal_first_np_has_ui_shape(_goal_text(ledger))
+            # The escape from the inspection guard demands an
+            # AFFIRMATIVE UI product head (#1813 R61/R89) — a testing
+            # framework or runner under a browser runtime is still a
+            # tool, while a monitoring/testing DASHBOARD is a product.
+            _goal_first_np_is_ui_headed(_goal_text(ledger))
             and _SECTION_BROWSER_ENV_RE.search(_section_browser_context_text(ledger))
         )
     ):

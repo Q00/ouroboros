@@ -4508,6 +4508,43 @@ def test_verification_tooling_is_not_the_artifacts_identity(runtime: str) -> Non
 
 
 @pytest.mark.parametrize(
+    ("goal", "outputs"),
+    [
+        ("Build a browser testing framework", "Reusable test fixtures and assertions"),
+        ("Build an end-to-end test runner", "Test results and failure reports"),
+    ],
+)
+def test_browser_test_tools_are_not_ui_products(goal: str, outputs: str) -> None:
+    """R89 guard: a testing framework or runner under a browser runtime
+    is a tool — affirmative UI-product ownership is required, and the
+    monitoring/testing DASHBOARD pins keep theirs."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value=outputs)
+    _seed_section(ledger, "runtime_context", value="Runs in browsers")
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes
+
+
+@pytest.mark.parametrize(
+    "runtime",
+    [
+        "Playwright tests with a browser extension",
+        "Compatibility tests for Chrome extensions",
+    ],
+)
+def test_components_inside_verification_context_do_not_veto(runtime: str) -> None:
+    """R89 guard: components used or targeted by verification tooling
+    are not the runtime's identity — the explicit web app keeps its
+    durable class."""
+    ledger = _bare_ledger("Build a web app")
+    _seed_section(ledger, "outputs", value="Interactive signup page")
+    _seed_section(ledger, "runtime_context", value=runtime)
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP
+
+
+@pytest.mark.parametrize(
     "goal",
     [
         "The product is an admin portal that runs in browsers",
