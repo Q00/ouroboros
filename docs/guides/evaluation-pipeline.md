@@ -81,7 +81,7 @@ The mechanical verifier runs zero-cost automated shell commands and checks the e
 
 ### Where Stage 1 Commands Come From
 
-Ouroboros does **not** ship hardcoded per-language presets. For configuration authored in the repository, Stage 1 trusts exactly one file: `.ouroboros/mechanical.toml` in the project root. Explicit `MechanicalConfig` commands are a separate trusted input, documented under [Project-Level Command Overrides](#project-level-command-overrides). That override dict is a **programmatic Python API**, not an MCP surface: `ouroboros_evaluate` exposes no mechanical-command parameter (`mcp/tools/evaluation_handlers.py:437`) and its handler calls `build_mechanical_config(working_dir)` with no overrides (`:742`). `build_mechanical_config(working_dir)` is the deterministic reader for that file — when the file is absent, every command resolves to `None` and Stage 1 skips gracefully rather than running the wrong tool.
+Ouroboros does **not** ship hardcoded per-language presets. For configuration authored in the repository, Stage 1 trusts exactly one file: `.ouroboros/mechanical.toml` in the project root. `build_mechanical_config(working_dir)` is the deterministic reader for that file — when the file and Python `overrides` argument are both absent, every command resolves to `None` and Stage 1 skips gracefully rather than running the wrong tool. A direct Python caller can instead pass `overrides` to that builder or construct `MechanicalConfig` itself; those are separate programmatic authorities, documented under [Project-Level Command Overrides](#project-level-command-overrides). Neither is an MCP request parameter: `ouroboros_evaluate` exposes no mechanical-command parameter (`mcp/tools/evaluation_handlers.py:437`) and its handler calls `build_mechanical_config(working_dir)` without `overrides` (`:742`).
 
 The file is written by `ouroboros.evaluation.detector`, which makes **one AI call** that inspects the project's manifest files (`pyproject.toml`, `uv.lock`, `package.json`, `Cargo.toml`, `go.mod`, `pom.xml`, `build.gradle`, `Makefile`, `justfile`, `Taskfile.yml`, `build.zig`, `CMakeLists.txt`, `mix.exs`, `Gemfile`, and others) and proposes commands for this specific repository. Each proposed command is validated before it is persisted — against the executable allowlist, against shell-operator and absolute-path injection, and against the repo itself (for example, a `cargo` command is only kept when `Cargo.toml` exists) — so the toml contains only safe, repository-supported commands.
 
@@ -120,14 +120,17 @@ coverage_threshold = 0.85
 timeout = 120
 ```
 
-**Override priority** (highest to lowest):
-1. Explicit `overrides` dict passed to `build_mechanical_config()` from Python. No MCP tool exposes this.
+Within the Python `build_mechanical_config()` API, **override priority** is:
+
+1. The function's explicit `overrides` dictionary
 2. `.ouroboros/mechanical.toml` in the project root
 3. All `None` (all checks skip gracefully)
 
+Constructing `MechanicalConfig(...)` directly and passing it to `PipelineConfig` bypasses this merge entirely. Neither Python mechanism is an MCP request parameter: the MCP evaluation handler reads the repository TOML without supplying the builder's optional `overrides` argument.
+
 **TOML parse errors** are logged as a warning (`mechanical.toml_parse_error`) and silently ignored. There is no preset to fall back to, so every command stays `None` and Stage 1 skips all checks.
 
-**Security: executable allowlist.** Commands in `.ouroboros/mechanical.toml` may only use executables from a built-in allowlist (e.g., `pytest`, `ruff`, `cargo`, `go`, `npm`, `make`). If a command specifies an executable not in the allowlist — or uses shell operators or an absolute path — it is silently blocked (logged as `mechanical.blocked_executable`) and the check is skipped. Commands passed programmatically through `MechanicalConfig`, or through the `overrides` dict handed to `build_mechanical_config()` from Python, bypass this check because the caller is trusted. **There is no MCP path that does this** — see the note under [Language Auto-Detection](#language-auto-detection). This prevents untrusted repository configs from running arbitrary commands in CI/CD environments.
+**Security: executable allowlist.** Commands in `.ouroboros/mechanical.toml` may only use executables from a built-in allowlist (e.g., `pytest`, `ruff`, `cargo`, `go`, `npm`, `make`). If a command specifies an executable not in the allowlist — or uses shell operators or an absolute executable path — it is silently blocked (logged as `mechanical.blocked_executable`) and the check is skipped. Python `build_mechanical_config(..., overrides=...)` values still pass the shell-operator and executable-head allowlist/path parser, but skip the repository entry-point and argument-containment validation applied to TOML values. A directly constructed `MechanicalConfig` bypasses both parsers and is therefore trusted caller input. **Neither mechanism is an MCP request parameter**: the MCP evaluation path does not supply `overrides` or construct a privileged `MechanicalConfig`. This prevents untrusted repository configs from running arbitrary commands while keeping an explicit Python escape hatch.
 
 | Override failure mode | Symptom | Cause / Action |
 |---|---|---|
@@ -284,15 +287,15 @@ Raising these thresholds reduces Stage 3 cost but may allow low-confidence outpu
 
 ---
 
-## Stage 3: Multi-Model Consensus
+## Stage 3: Consensus (Multi-Model or Single-Model Fallback)
 
-Stage 3 calls multiple Frontier-tier models concurrently. Each votes independently; a **2/3 majority** is required for approval.
+Stage 3 is the consensus stage; its simple evaluator has two execution paths. The multi-model path launches the configured roster's vote calls concurrently and requires a **2/3 majority**, but every call still goes through the evaluator's one LLM adapter. Separate calls or model labels are not, by themselves, evidence of separate models, vendors, or backends. The fallback path queries the adapter's session model three times with different perspective prompts.
 
 ### Simple Consensus (Default)
 
-Three models are queried in parallel. **What those three are depends on the active LLM backend**, and the difference matters when you audit reviewer independence.
+On the multi-model path, the configured roster slots are queried in parallel through the same adapter. **How the default roster is resolved depends on the configured consensus-role backend**, and that setting need not match an adapter supplied independently by a direct API caller.
 
-**OpenRouter-routed backends.** When the active adapter really is LiteLLM/OpenRouter, the shipped roster routes through OpenRouter so the voters come from three different vendors:
+**Roster-resolution priority.** `get_consensus_models()` first returns a non-empty `OUROBOROS_CONSENSUS_MODELS` list verbatim. Otherwise it reads `config.consensus.models`: a recognized shipped roster is normalized for the configured backend, while a genuinely custom roster is preserved. If config loading fails or has no roster, the shipped fallback is also normalized for the backend. Outside the sentinel set below, that backend-aware config/default resolution retains these shipped OpenRouter identifiers:
 
 ```
 openrouter/openai/gpt-4o
@@ -300,17 +303,17 @@ openrouter/anthropic/claude-opus-4.8
 openrouter/google/gemini-2.5-pro
 ```
 
-**Local adapters that still receive the OpenRouter roster.** `claude_code`, `gemini`, `goose`, and `ourocode` are not in `_SENTINEL_DEFAULT_BACKENDS`, so `get_consensus_models()` hands them the shipped OpenRouter roster. But they are not routed to OpenRouter: the ids go to their own active adapter, exactly as described under **Changing the roster does not change the adapter** below.
+**OpenRouter-routed adapters.** When the adapter already supplied to `ConsensusEvaluator` is LiteLLM/OpenRouter-capable and actually routes these provider-qualified identifiers, the one adapter can dispatch the three calls to three vendors. The roster alone neither selects that adapter nor attests that this routing occurred. `ConsensusConfig(models=None)` resolves `get_llm_backend_for_role("consensus")` and then `get_consensus_models()` at construction time (still subject to the environment-first priority above); it does not inspect the evaluator's adapter. Direct Python callers must keep the resolved roster and their `llm_adapter` aligned and verify actual transport/provider evidence.
 
-What you actually get on these depends on the environment. Without an OpenRouter key, simple consensus falls back to the session model. With a key present incidentally, it attempts the `openrouter/...` identifiers through the local adapter. Deliberative mode has no such fallback.
+**Local adapters that still receive the OpenRouter roster.** `claude_code`, `gemini`, `goose`, and `ourocode` are not in `_SENTINEL_DEFAULT_BACKENDS`, so backend-aware default resolution can hand them the shipped OpenRouter strings. That does not switch adapters. Without an OpenRouter key, simple consensus sees the `openrouter/` entries and falls back to the session model. With a key present incidentally, it takes the multi-model code path but passes those strings through the local adapter, where they may be unsupported or resolve according to that adapter. Deliberative mode has no credential-based single-model fallback.
 
-So the OpenRouter roster appearing in your config is **not** evidence that three vendors voted. Read the recorded votes, not the roster.
+In all three backend categories, an OpenRouter-looking roster or recorded requested-model label is not proof that three vendors voted.
 
-**Sentinel-model backends.** For the backends in `_SENTINEL_DEFAULT_BACKENDS` (`config/loader.py:101`), `get_consensus_models()` maps the shipped roster to the literal string `"default"` for all three slots (`config/loader.py:1947`). That set is Codex, **OpenCode**, Kiro, Copilot, Hermes, Pi, GJC, Antigravity, Grok, and Zcode.
+**Sentinel-model backends.** With no `OUROBOROS_CONSENSUS_MODELS` override, backend-aware config/default resolution maps a recognized shipped roster to the literal string `"default"` for all three slots when the backend is in `_SENTINEL_DEFAULT_BACKENDS` (`config/loader.py:101`, `:2028-2049`, `:2226-2245`). An environment roster or a non-shipped custom config roster is preserved verbatim instead. The sentinel set is Codex, **OpenCode**, Kiro, Copilot, Hermes, Pi, GJC, Antigravity, Grok, and Zcode.
 
-OpenCode is easy to miss here: it is not a separate member of the union, it rides in through `_CODEX_LLM_BACKENDS`, which is `frozenset({"codex", "codex_cli", "opencode", "opencode_cli"})` (`config/loader.py:76`). So `get_consensus_models("opencode")` returns `("default", "default", "default")` exactly as Codex does. The unrelated `_OPENCODE_BACKENDS` constant at `config/loader.py:113` is used for permission-mode resolution, not for model defaults.
+OpenCode is easy to miss here: it is not a separate member of the union, it rides in through `_CODEX_LLM_BACKENDS`, which is `frozenset({"codex", "codex_cli", "opencode", "opencode_cli"})` (`config/loader.py:76`). Therefore its shipped config/default roster normalizes to `("default", "default", "default")` under the same no-environment-override condition as Codex. The unrelated `_OPENCODE_BACKENDS` constant at `config/loader.py:113` is used for permission-mode resolution, not for model defaults.
 
-`_should_use_multi_model()` treats anything that does not start with `openrouter/` as a genuine multi-model roster (`evaluation/consensus.py:313`), so `"default"` does **not** trigger the single-model perspective fallback below. On these backends Stage 3 casts three votes labeled `default`, all from the one model that backend is configured to use.
+`_should_use_multi_model()` selects the code's `_evaluate_multi_model()` branch for any roster with no `openrouter/` entry (`evaluation/consensus.py:313`), so `"default"` does **not** trigger the single-model perspective fallback below. The branch name does not prove model diversity: on these backends Stage 3 casts three votes labeled `default`, all from the one model that backend is configured to use.
 
 > **Auditing note.** Three votes labeled `default` are not three independent reviewers. If your consensus evidence shows that, the roster resolved to the sentinel and the votes came from one model.
 
@@ -320,11 +323,11 @@ So setting `OUROBOROS_CONSENSUS_MODELS` or `consensus.models` does not route vot
 
 Cross-vendor independence requires the active LLM backend to be one that can actually reach those providers. Pick the roster to match the backend you are on, not the other way round, and verify actual transport/provider evidence: the requested roster and `reviewer_independence` label are classifications, not routing attestation.
 
-Each returns `{ approved, confidence, reasoning }`.
+Each successful vote call returns `{ approved, confidence, reasoning }`.
 
 **Approval rule:** `approving_votes / total_votes >= 0.66` (i.e., at least 2 of 3). The ratio is computed over the votes actually **collected**, not over the number of configured models — see [Parallel Consensus Failure Tolerance](#parallel-consensus-failure-tolerance).
 
-> **Single-model fallback.** When the configured models are `openrouter/*` but `OPENROUTER_API_KEY` is missing or still a `YOUR_…` placeholder, `ConsensusEvaluator` silently switches to a single-model mode: the session model is queried three times with the advocate, devil's advocate, and judge system prompts, and those three perspectives vote. The 2-of-3 rule and the `<2` votes error are unchanged, but the reviewers are the same vendor by construction, so reviewer independence is reported as unavailable. Stage 3 events carry `session/<perspective>` model names and a `single-model-perspectives:` trigger reason — check for those if Stage 3 looks cheaper than expected. Configuring non-`openrouter/*` models skips the check and uses them as-is.
+> **Single-model fallback.** When the configured roster contains an `openrouter/*` entry but `OPENROUTER_API_KEY` is missing or still a `YOUR_…` placeholder, `ConsensusEvaluator` silently switches to a single-model mode: the session model is queried three times with the advocate, devil's advocate, and judge system prompts, and those three perspectives vote. The 2-of-3 rule and the `<2` votes error are unchanged, but the reviewers are the same vendor by construction, so reviewer independence is reported as unavailable. Stage 3 events carry `session/<perspective>` model names and a `single-model-perspectives:` trigger reason — check for those if Stage 3 looks cheaper than expected. A roster with no `openrouter/*` entry skips the credential check and uses the multi-model code path, still through the same adapter.
 
 ### Deliberative Consensus
 
@@ -338,10 +341,10 @@ An alternative two-round mode:
 
 | Failure mode | Symptom | Cause / Action |
 |---|---|---|
-| **Fewer than 2 votes collected** | `ValidationError: Not enough votes collected: N/3` | Multiple models returned API errors. Check API keys for all configured consensus models. At least 2 of 3 models must respond. |
-| **All models vote differently** | `majority_ratio` around 0.33–0.50 | Genuine disagreement. Inspect `disagreements` list in the event payload. Consider refining the AC or the artifact. |
+| **Fewer than 2 votes collected** | `ValidationError: Not enough votes collected: N/3` | Multiple vote calls returned errors. Check that the active adapter can route the configured roster. At least 2 of 3 calls must succeed. |
+| **Votes disagree** | `majority_ratio` around 0.33–0.50 | The collected calls disagreed. Inspect `disagreements` in the event payload; model labels alone do not establish independent reviewers. |
 | **Majority ratio below threshold** | `Stage 3 failed: Consensus not reached (XX%)` | Less than 2/3 approval. The `disagreements` tuple in `ConsensusResult` contains dissenters' reasoning. |
-| **Individual model API error** | Logged but tolerated | One model fails; the remaining votes are used. If only 1 remains, a `ValidationError` is raised. |
+| **Individual vote-call error** | Logged but tolerated | One call fails; the remaining votes are used. If only 1 remains, a `ValidationError` is raised. |
 | **Deliberative: Advocate fails** | `ValidationError: Advocate failed: ...` | Advocate model API error. The error is not tolerated in deliberative mode — the entire Stage 3 fails. |
 | **Deliberative: Devil's Advocate LLM error** | Devil votes `approved=False` with low confidence | The `DevilAdvocateStrategy` handles LLM errors internally and returns `AnalysisResult.invalid` (soft failure) rather than propagating the error. A Devil LLM failure does **not** abort Stage 3; it results in the Devil casting a failing vote, which may cause the Judge to reject. |
 | **Deliberative: Judge fails** | `ProviderError` or `ValidationError` | Judge model error. Stage 3 fails. Deliberative mode has no partial-vote tolerance for the Judge. |
@@ -355,6 +358,8 @@ An alternative two-round mode:
 ```yaml
 # In PipelineConfig.consensus (ConsensusConfig)
 consensus:
+  # Requested model identifiers; all are sent through the one active adapter.
+  # Use this OpenRouter roster only when that adapter actually routes it.
   models:
     - "openrouter/openai/gpt-4o"
     - "openrouter/anthropic/claude-opus-4.8"
@@ -365,11 +370,11 @@ consensus:
   diversity_required: true     # Currently inert — see note below
 ```
 
-> **`diversity_required` is not enforced.** The field exists on `ConsensusConfig` and in the config schema, but nothing reads it. Provider diversity comes from the default model roster itself, not from this flag. If you replace the roster with three models from one vendor, setting `diversity_required: true` will not object.
+> **`diversity_required` is not enforced.** The field exists on `ConsensusConfig` and in the config schema, but nothing reads it. Provider diversity depends on what the active adapter actually routes; neither this flag nor a roster of differently named models enforces it. If all names resolve through one vendor, setting `diversity_required: true` will not object.
 
 **Deliberative Consensus (`DeliberativeConfig`)**
 
-Used with `DeliberativeConsensus` (not `ConsensusEvaluator`). Each role uses a separate model:
+Used with `DeliberativeConsensus` (not `ConsensusEvaluator`). Each role has a separate requested model field, but all calls still use the one `llm_adapter` passed to `DeliberativeConsensus`; the configured names do not attest separate providers:
 
 ```python
 from ouroboros.evaluation.consensus import DeliberativeConfig, DeliberativeConsensus
@@ -400,16 +405,16 @@ Look for event `evaluation.stage3.completed`. Key fields:
 
 ## Artifact Collection
 
-Before Stage 2 runs, the `ArtifactCollector` attempts to read the actual source files changed during execution. This gives the semantic evaluator real code rather than just agent text summaries.
+The MCP evaluation paths run `ArtifactCollector` before Stage 2 and attach its result to `EvaluationContext`. Direct `EvaluationPipeline` callers must collect and supply an `artifact_bundle` themselves; the pipeline does not instantiate the collector. When `artifact_bundle.files` is non-empty, the semantic prompt uses those files and does not inline `EvaluationContext.artifact`; when no files are available, it falls back to the full `EvaluationContext.artifact` text. `ArtifactBundle.text_summary` is retained for compatibility but is not read directly by the semantic prompt builder.
 
 ### Collection Limits
 
 | Limit | Value | Effect when exceeded |
 |-------|-------|---------------------|
 | Max file size (`MAX_FILE_SIZE`) | 100 KB | Files larger than 100 KB are silently skipped |
-| Max total content (`MAX_TOTAL_CHARS`) | 150,000 chars (~37K tokens) | Content is truncated at the remaining budget; `FileArtifact.truncated=True` |
+| Max collected file content (`MAX_TOTAL_CHARS`) | 150,000 chars (~37K tokens) | The aggregate `FileArtifact.content` budget is shared across files; the last included file is truncated to the remaining budget and marked `FileArtifact.truncated=True` |
 
-There is **no cap on the number of files**. The character budget is the sole limiter, so a change touching many small files is collected in full while one oversized file is dropped.
+There is **no explicit cap on the number of files**. File collection is bounded by both the 100 KB per-file limit and the 150,000-character aggregate file-content budget. `ArtifactBundle.text_summary` is stored separately and is not charged to `MAX_TOTAL_CHARS`, so 150,000 characters is not a cap on the whole bundle or eventual prompt.
 
 > The two limits behave differently. A file over the per-file size limit is **skipped entirely** (never truncated); a file that only exhausts the shared character budget is **truncated** and marked `truncated=True`. If a critical file is always missing, check whether it is a generated binary or minified output that should be excluded from evaluation.
 
@@ -417,8 +422,9 @@ There is **no cap on the number of files**. The character budget is the sole lim
 
 | Failure mode | Symptom | Cause / Action |
 |---|---|---|
-| **project_dir not set** | Evaluation uses only text summary | `ArtifactBundle` built without file content; semantic evaluator falls back to agent text output. Set `project_dir` in the execution context. |
-| **No file paths extracted** | Usually **not** text-only | Execution output did not contain recognizable `Write:` / `Edit:` / `file_path:` patterns, so `ArtifactCollector.collect()` falls back to `_scan_directory(project_dir)` and collects eligible project files anyway (`evaluation/artifact_collector.py:197`). Stage 2 sees repository files, not just the summary. It degrades to text alone only when that scan yields no readable files. |
+| **`project_dir` not passed to the collector** | Semantic prompt falls back to `EvaluationContext.artifact` | `collect()` returns an `ArtifactBundle` with `text_summary` and no files. MCP paths normally resolve and pass a working directory; direct callers must pass their project root. |
+| **No file paths extracted** | Collector scans the project directory | If execution output has no recognizable `Write:` / `Edit:` / `file_path:` paths, `_scan_directory()` falls back to eligible files under `project_dir`, newest first, subject to directory, sensitive-file, size, and aggregate-budget filters (`evaluation/artifact_collector.py:197-201`). |
+| **Directory fallback finds no eligible files** | Semantic prompt falls back to `EvaluationContext.artifact` | The project root is empty, inaccessible, or all files are excluded; the bundle still retains `text_summary`, but prompt fallback reads the context's `artifact` field. |
 | **Path traversal blocked** | File silently skipped | File path resolves outside `project_dir`. This is a security boundary, not a bug. |
 | **Permission error** | File silently skipped | Execution ran as a different user. Verify file permissions. |
 | **Large files skipped** | Missing context in evaluation | File > 100 KB. Refactor to split large files, or accept that the evaluator works from the text summary. |
@@ -544,15 +550,15 @@ config = PipelineConfig(
 
     # Stage 3: Simple consensus evaluation
     #
-    # models=None keeps the backend-aware default: NON-SENTINEL backends get the
-    # shipped OpenRouter roster, sentinel backends get ("default",) * 3. Note that
-    # non-sentinel is not the same as OpenRouter-routed: claude_code, gemini,
-    # goose, and ourocode receive the roster but send those ids to their own
-    # adapter. Passing an explicit tuple marks the roster as configured and skips
-    # the normalization, so the ids below are only correct on a backend that can
-    # actually reach OpenRouter. See "Sentinel-model backends" above.
+    # models=None resolves a roster when ConsensusConfig is constructed. It first
+    # honors OUROBOROS_CONSENSUS_MODELS verbatim; otherwise the configured
+    # `consensus` role backend normalizes the shipped config/default roster:
+    # sentinel backends get ("default",) * 3, while non-sentinel backends retain
+    # the OpenRouter roster. Non-sentinel does not mean OpenRouter-routed — all
+    # votes still use the one adapter later supplied to ConsensusEvaluator.
+    # Direct callers must align the roster with that adapter.
     consensus=ConsensusConfig(
-        models=None,  # or, on an OpenRouter-routed backend only:
+        models=None,  # or, only when the active adapter routes these identifiers:
         # models=(
         #     "openrouter/openai/gpt-4o",
         #     "openrouter/anthropic/claude-opus-4.8",
