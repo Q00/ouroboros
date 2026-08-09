@@ -942,6 +942,16 @@ def _goal_artifact_head_is_web_app(goal_text: str) -> bool:
     return web_matches[-1].end() > intent_matches[-1].end()
 
 
+# An adjectival containment premodifier marks the web phrase as a
+# component of its host, not a co-produced artifact (#1813 R111): "a
+# native mobile app with an embedded web UI" ships one app.
+_CONTAINED_WEB_PHRASE_RE = re.compile(
+    rf"\b(?:embedded|built[\s\-]?in|integrated|inline|internal|bundled|"
+    rf"in[\s\-]app|nested)\s+(?:[\w\-'’]+\s+){{0,2}}?"
+    rf"{_WEB_APP_GOAL_SIGNAL_FRAGMENT}\b"
+)
+
+
 def _goal_has_web_co_product_conjunct(goal_text: str) -> bool:
     """True only for genuinely coordinated goals where a SEPARATE conjunct
     requests a web product by artifact phrase (#1813 R30) — a lone goal
@@ -956,8 +966,11 @@ def _goal_has_web_co_product_conjunct(goal_text: str) -> bool:
     goal_text = _strip_negated_signals(goal_text, _WEB_APP_GOAL_SIGNAL_FRAGMENT)
     # Infinitive/PP action targets ("and upload the docs to our website",
     # "to scaffold and deploy a web app") are not product declarations
-    # (#1813 W1).
+    # (#1813 W1). A containment-premodified web phrase ("an embedded web
+    # UI") is its host's component, not a conjunct of its own (#1813
+    # R111).
     goal_text = _INFINITIVE_TARGET_RE.sub(" ", goal_text)
+    goal_text = _CONTAINED_WEB_PHRASE_RE.sub(" ", goal_text)
     pieces = _GOAL_CONJUNCT_SPLIT_RE.split(goal_text)
     if len(pieces) < 2:
         return False

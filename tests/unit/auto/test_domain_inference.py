@@ -4844,6 +4844,39 @@ def test_capability_exclusion_is_not_artifact_denial() -> None:
     assert result.single is TaskClass.WEB_APP
 
 
+@pytest.mark.parametrize(
+    ("goal", "outputs", "runtime", "expected_only"),
+    [
+        (
+            "Build a native mobile app with an embedded web UI",
+            "Login form and account settings panel",
+            "Native iOS runtime",
+            None,
+        ),
+        (
+            "Build a CLI with an embedded web UI for help",
+            "Deterministic stdout and exit code 0",
+            "Local shell / terminal",
+            TaskClass.CLI,
+        ),
+    ],
+)
+def test_embedded_web_phrases_are_components_not_co_products(
+    goal: str, outputs: str, runtime: str, expected_only: TaskClass | None
+) -> None:
+    """R111 guard: an adjectival containment premodifier ("an embedded
+    web UI") marks the web phrase as its host's component — the native
+    or CLI host keeps its actual classification."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value=outputs)
+    _seed_section(ledger, "runtime_context", value=runtime)
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes
+    if expected_only is not None:
+        assert result.is_single
+        assert result.single is expected_only
+
+
 def test_coordinated_web_dashboard_keeps_honest_ambiguity() -> None:
     """R105 guard: a coordinated conjunct uses the same ownership grammar
     as a standalone goal — "a CLI and a local web dashboard" is an
