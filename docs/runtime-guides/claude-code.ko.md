@@ -18,24 +18,51 @@ Ouroboros는 **Claude Code**를 런타임 백엔드로 쓸 수 있습니다. **C
 >
 > 아래 코드 블록마다 어디서 치는지 표시했습니다.
 
-## 사전 조건
+## 시작하기 (권장 경로)
+
+대부분의 사람은 이 길로 오면 됩니다. **Python도 pip도 API 키 설정도 필요 없습니다** — 런타임은 Claude Code가 맡습니다.
+
+**터미널:**
+
+```bash
+claude plugin marketplace add Q00/ouroboros
+claude plugin install ouroboros@ouroboros
+```
+
+그다음 **Claude Code 세션 안에서:**
+
+```
+ooo setup
+ooo help        # 설치 확인
+```
+
+여기까지 하면 끝입니다. 첫 워크플로우도 세션 안에서 `ooo`로 시작합니다.
+
+```
+ooo
+```
+
+전체 첫 실행 흐름(인터뷰 → seed → 실행)은 [Getting Started](../getting-started.md)(영문)를 보세요.
+
+### 사전 조건 (권장 경로)
 
 - Claude Code CLI 설치 및 인증 완료 (Pro 또는 Max Plan)
-- Python >= 3.12
+
+그게 전부입니다. **Python 요구사항은 아래 독립 CLI 경로에만 해당합니다.**
+
+## 독립 CLI로 쓰기 (선택)
+
+Claude Code 세션 밖, 평소 쓰는 셸에서 `ouroboros` 명령을 직접 치고 싶을 때만 이 경로를 씁니다.
+
+### 사전 조건 (독립 CLI 경로)
+
+- Claude Code CLI 설치 및 인증 완료 (Pro 또는 Max Plan)
+- **Python >= 3.12**
 - Ouroboros 설치 (설치 방법은 [Getting Started](../getting-started.md) 참고)
 
 > 기본값인 in-process SDK 런타임(MCP 1.x)을 쓰려면 `ouroboros-ai[claude]`를 설치하세요. 마켓플레이스 플러그인은 격리된 `ouroboros-ai[mcp]` 환경에서 MCP 2 서버를 띄우고 `[claude-cli]` 워커를 고릅니다. **`[mcp]`를 `[claude]`·`[claude-sdk]`·`[all]`과 한 인터프리터에 같이 넣지 마세요.**
 
-## 설정
-
-런타임 백엔드로 Claude Code를 고르려면 설정에 이렇게 씁니다.
-
-```yaml
-orchestrator:
-  runtime_backend: claude  # `ouroboros setup --runtime claude`가 써주는 값
-```
-
-CLI에서 `--orchestrator` 플래그를 쓰면 Claude Code가 기본 런타임 백엔드입니다.
+### 동작 방식
 
 ## 동작 방식
 
@@ -69,7 +96,7 @@ CLI에서 `--orchestrator` 플래그를 쓰면 Claude Code가 기본 런타임 �
 
 ## CLI 옵션
 
-이 절의 명령은 전부 **평소 쓰는 터미널**에서 칩니다. Claude Code 세션 안이 아닙니다.
+이 절의 명령은 전부 **독립 CLI 경로**용입니다. 평소 쓰는 터미널에서 치며, Claude Code 세션 안이 아닙니다. 플러그인으로 설치했다면 세션 안에서 `ooo` 명령을 쓰세요.
 
 ### 인터뷰 명령
 
