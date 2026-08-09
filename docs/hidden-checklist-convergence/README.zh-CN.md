@@ -4,7 +4,7 @@
 > [requirements.md](./requirements.md) · [architecture.md](./architecture.md) · [implementation.md](./implementation.md)。
 > RFC 原文：[#1917](https://github.com/Q00/ouroboros/issues/1917)，实现：[#1916](https://github.com/Q00/ouroboros/pull/1916)。
 
-这份改动把 `ooo run` 从「执行一次然后报告」变成一个循环：run → 正式评估 → 有预算上限的 Ralph 演化，全部由一次 `ooo run` 驱动。循环的目标是让 seed 的隐藏清单全部通过，但它是有边界的：收敛、震荡、等级回退、墙钟、世代预算中任何一条先触发，循环就会提前停止（见下文「3. 被拒绝的评估进入有预算的 Ralph 循环」）。
+这份改动把 `ooo run` 从「执行一次然后报告」变成一个循环：run → 正式评估 → 有预算上限的 Ralph 演化，全部由一次 `ooo run` 驱动。循环的目标是让 seed 的隐藏清单全部通过，但它是有边界的：收敛、震荡、等级回退、墙钟、世代预算——这些是主要的几条，Ralph 的公开契约里还有迭代超时、取消、终态演化动作、QA 失败等出口。任何一条先触发，循环就会提前停止（见下文「3. 被拒绝的评估进入有预算的 Ralph 循环」）。
 
 ## 动机：两个让单次执行不可靠的结构性问题
 
@@ -41,7 +41,7 @@ verify gate（[#1591](https://github.com/Q00/ouroboros/issues/1591)）、run→e
 
 ### 2. 失败的 run 也进入评估
 
-放宽 `_run_succeeded` 的门槛：任何产生了 session 的 run 都会链接到正式的 evaluate 作业。保持 fail-open——入队失败绝不反过来改写 run 的结论。`deadline_seconds` 现在显式传入（0 表示无限等待，该陷阱已在文档中说明）。
+放宽 `_run_succeeded` 的门槛：**只要 run 留下了可评估的证据**，即使 AC 执行失败，也会链接到正式的 evaluate 作业。「可评估」有明确定义（`is_evaluable_run_result()`）：终态是 `completed` 或 `failed`，并且文本内容非空。暂停（paused）和取消（cancelled）的会话被显式排除，不会入队。保持 fail-open——入队失败绝不反过来改写 run 的结论。`deadline_seconds` 现在显式传入（0 表示无限等待，该陷阱已在文档中说明）。
 
 ### 3. 被拒绝的评估进入有预算的 Ralph 循环
 
@@ -50,7 +50,7 @@ verify gate（[#1591](https://github.com/Q00/ouroboros/issues/1591)）、run→e
 - evaluate 作业的终态路径在 `final_approved is False` 时入队 `ouroboros_start_ralph`。
 - **Gen1 bridge（真正新增的部分）**：把 run 的 seed 和链式评估的多 AC 清单投影成谱系事件（`lineage_created` + 带 `seed_json` 和完整 `EvaluationSummary` 的 `lineage_generation_completed`），使 `evolve_step` 把这次普通的 run 当作第 1 代回放，并从第 2 代开始带着焦点继续。
 - 新的 checklist→`ACResult` 转换器（`mcp/tools/evaluate_ralph_chain.py`）满足 `validate_seed_ac_coverage` 的严格要求：完整的索引覆盖、逐字一致的 `ac_content`、`semantic_ac_key` 同一性。这正是 `focus.select_evolution_focus` 能够冻结已通过 AC 的前提。
-- Ralph 已有的停止条件为循环设定边界：QA 通过、收敛、震荡、等级回退、墙钟。`execution.auto_evolve_max_generations` 默认为 3（钳制在 1..10）。
+- Ralph 已有的停止条件为循环设定边界，主要的几条是：QA 通过、收敛、震荡、等级回退、墙钟；此外还有迭代超时、取消和终态演化动作。`execution.auto_evolve_max_generations` 默认为 3（钳制在 1..10）。
 
 ## 保障与决策
 
@@ -60,7 +60,7 @@ verify gate（[#1591](https://github.com/Q00/ouroboros/issues/1591)）、run→e
 - **auto 流水线保护**：`ooo auto` 以 `auto_evolve: false` 派发执行——auto 拥有自己的 RALPH_HANDOFF 谱系；没有这个保护，auto 会话内一次失败的链式评估会与另一条谱系上的第二个 Ralph 循环竞争。
 - **降级**：单 AC 评估（无清单）以空 `ac_results` 继续（只有一条 AC 时冻结没有意义）。seed 无法解析则 fail-closed 跳过 Ralph 链（第 2 代重建必须依赖 `seed_json`）。
 - **修复静默的评估丢失**：`evolution/loop.py` 的裸 `except`（三条静默通往 `evaluation_summary=None` 的路径）现在会记录一份带失败原因的 rejected summary，既保持 fail-closed 的焦点语义，又让失败成为持久化的事实。
-- **行为变更**：`execution.auto_evolve` 默认为 `true`。每一次正式评估被拒绝的普通 `ooo run`，现在都会自动运行至多 3 个聚焦世代。可按调用退出（`auto_evolve: false`）或通过配置关闭。
+- **行为变更**：`execution.auto_evolve` 默认为 `true`。正式评估被拒绝的普通 `ooo run`，现在会**尝试**自动接上演化链，最多 3 个聚焦世代。这是尝试而不是保证：seed 解析失败或 Ralph 入队失败时，一个世代都不会启动；单 AC 评估走的是全图聚焦而不是逐 AC 的聚焦世代（这两种降级见上面两条）。链路被跳过或失败时，**先前的评估结论仍然是权威的**——fail-open 的方向始终是不改写已有判定。可按调用退出（`auto_evolve: false`）或通过配置关闭。
 
 ## 不在本次范围内
 
