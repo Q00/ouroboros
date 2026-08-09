@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from enum import Enum
+import importlib
 import json
 import os
 from pathlib import Path
@@ -18,6 +19,7 @@ import time
 from typing import Annotated, Any
 
 from rich.console import Console
+from rich.text import Text
 import structlog
 import typer
 
@@ -509,6 +511,24 @@ app = typer.Typer(
 register_doctor_command(app)
 
 
+def _require_mcp_dependency() -> None:
+    """Fail before MCP server composition when the optional SDK is unavailable.
+
+    ``create_ouroboros_server()`` can build its internal tool catalogue without
+    importing the MCP SDK. Deferring that import until ``server.serve()`` makes
+    a missing dependency appear as a successful stdio startup followed by a
+    disconnected server. Validate it at the command boundary instead.
+    """
+    try:
+        importlib.import_module("mcp")
+    except ModuleNotFoundError as exc:
+        if exc.name == "mcp":
+            raise ImportError(
+                "mcp package not installed. Install with: pip install 'ouroboros-ai[mcp]'"
+            ) from exc
+        raise
+
+
 async def _run_mcp_server(
     host: str,
     port: int,
@@ -527,14 +547,7 @@ async def _run_mcp_server(
         runtime_backend: Optional orchestrator runtime backend override.
         llm_backend: Optional LLM-only backend override.
     """
-    # Ensure login-shell environment is available (critical for gateway-spawned processes)
-    _ensure_shell_env()
-
-    from ouroboros.config.models import resolve_event_store_path
-    from ouroboros.mcp.server.adapter import create_ouroboros_server, validate_transport
-    from ouroboros.orchestrator.session import SessionRepository
-    from ouroboros.persistence.brownfield import BrownfieldStore
-    from ouroboros.persistence.event_store import EventStore, sqlite_database_url
+    from ouroboros.mcp.server.adapter import validate_transport
 
     # Validate transport early, before any expensive startup work
     try:
@@ -545,6 +558,17 @@ async def _run_mcp_server(
             f"{transport!r}. Must be 'stdio', 'sse', or 'streamable-http'.[/red]"
         )
         raise typer.Exit(code=1)
+
+    _require_mcp_dependency()
+
+    # Ensure login-shell environment is available (critical for gateway-spawned processes)
+    _ensure_shell_env()
+
+    from ouroboros.config.models import resolve_event_store_path
+    from ouroboros.mcp.server.adapter import create_ouroboros_server
+    from ouroboros.orchestrator.session import SessionRepository
+    from ouroboros.persistence.brownfield import BrownfieldStore
+    from ouroboros.persistence.event_store import EventStore, sqlite_database_url
 
     _console_out = _stderr_console if transport == "stdio" else Console()
 
@@ -1003,7 +1027,7 @@ def serve(
     except KeyboardInterrupt:
         _stderr_console.print("[blue]MCP Server stopped[/blue]")
     except ImportError as e:
-        _stderr_console.print(f"[red]MCP dependencies not installed: {e}[/red]")
+        _stderr_console.print(Text(f"MCP dependencies not installed: {e}", style="red"))
         _stderr_console.print(
             "[blue]Run MCP 2 in an isolated profile:\n"
             "  uvx --from 'ouroboros-ai\\[mcp]' ouroboros mcp serve\n"

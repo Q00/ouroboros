@@ -8,12 +8,14 @@ Ensures that:
 
 from __future__ import annotations
 
+import asyncio
 import os
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
+import pytest
 from typer.testing import CliRunner
 
-from ouroboros.cli.commands.mcp import app
+from ouroboros.cli.commands.mcp import _run_mcp_server, app
 
 runner = CliRunner()
 
@@ -53,6 +55,44 @@ def test_serve_sets_nested_env_var(monkeypatch):
 
     # _OUROBOROS_NESTED should have been set to "1" before asyncio.run was called
     assert captured_env.get("_OUROBOROS_NESTED") == "1"
+
+
+def test_run_mcp_server_checks_dependency_before_startup(monkeypatch):
+    """A missing MCP SDK must not initialize the server or stores."""
+    monkeypatch.delenv("_OUROBOROS_NESTED", raising=False)
+    preflight = Mock(side_effect=ImportError("mcp package not installed"))
+    shell_env = Mock()
+
+    with (
+        patch("ouroboros.cli.commands.mcp._require_mcp_dependency", preflight),
+        patch("ouroboros.cli.commands.mcp._ensure_shell_env", shell_env),
+    ):
+        with pytest.raises(ImportError, match="mcp package not installed"):
+            asyncio.run(_run_mcp_server("localhost", 8080, "stdio"))
+
+    preflight.assert_called_once_with()
+    shell_env.assert_not_called()
+
+
+def test_serve_reports_missing_mcp_dependency(monkeypatch):
+    """The CLI returns one actionable failure for a missing MCP SDK."""
+    monkeypatch.delenv("_OUROBOROS_NESTED", raising=False)
+
+    with patch(
+        "ouroboros.cli.commands.mcp._run_mcp_server",
+        new=AsyncMock(
+            side_effect=ImportError(
+                "mcp package not installed. Install with: pip install 'ouroboros-ai[mcp]'"
+            )
+        ),
+    ):
+        result = runner.invoke(app, ["serve"])
+
+    assert result.exit_code == 1
+    assert "MCP dependencies not installed: mcp package not installed" in result.output
+    assert "Install with: pip" in result.output
+    assert "ouroboros-ai[mcp]" in result.output
+    assert "uvx --from 'ouroboros-ai[mcp]' ouroboros mcp serve" in result.output
 
 
 def test_serve_defaults_to_port_8080_when_port_omitted(monkeypatch):
