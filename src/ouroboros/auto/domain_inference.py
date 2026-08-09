@@ -1206,9 +1206,23 @@ _FIXTURE_MARKER_RE = re.compile(
 # verification target, not the produced artifact.
 _HARNESS_LIFECYCLE_RE = re.compile(
     r"\b(?:generated|regenerated|created|recreated|rebuilt|reset|"
-    r"respawned|instantiated|spun\s+up|torn\s+down|"
+    r"respawned|instantiated|discarded|disposed|replaced|swapped|"
+    r"refreshed|spun\s+up|torn\s+down|"
     r"(?:every|each|per)\s+(?:scenarios?|tests?|runs?|cases?|iterations?|"
     r"sessions?|suites?))\b"
+)
+
+# A component that is the SUBJECT of a possession or provision verb owns
+# what follows (#1813 R99): "extension includes a QA feedback panel"
+# describes the extension's own feature — the QA vocabulary is
+# possessed, not possessing.
+_COMPONENT_POSSESSION_RE = re.compile(
+    r"^\s*(?:(?:that|which)\s+)?(?:includes?|including|contains?|containing|"
+    r"provides?|providing|offers?|offering|features?|featuring|embeds?|"
+    r"embedding|exposes?|exposing|adds?|adding|bundles?|bundling|ships?|"
+    r"shipping|comes?|coming|carries?|carrying|hosts?|hosting|renders?|"
+    r"rendering|displays?|displaying|supports?|supporting|integrates?|"
+    r"integrating)\b"
 )
 
 # Retention taint: a candidate identity phrase whose own words belong to
@@ -1263,15 +1277,33 @@ def _strip_verification_clauses(text: str) -> str:
                 # when that description mentions testing ("Production …
                 # extension includes test diagnostics") — the component
                 # possesses the diagnostics; the tooling does not possess
-                # the component (#1813 R98).
+                # the component (#1813 R98). The same holds when the
+                # component is the subject of a possession verb (#1813
+                # R99): "extension includes a QA feedback panel" is the
+                # extension's own feature.
                 production_marked = bool(
                     _PRENOMINAL_STATE_QUALIFIER_RE.search(np_match.group("premods"))
                 )
-                if not (bool(np_match.group("window").strip()) or production_marked):
+                window = np_match.group("window")
+                possesses = bool(_COMPONENT_POSSESSION_RE.search(window))
+                if not (bool(window.strip()) or production_marked):
                     continue
-                if production_marked or (
-                    not _VERIFICATION_CONTEXT_RE.search(phrase)
-                    and not _VERIFICATION_TAINT_RE.search(phrase)
+                # Ownership is decided over the component's COMPLETE
+                # relation (#1813 R99): a fixture or lifecycle marker
+                # anywhere in the segment disowns an unmarked component
+                # even when a conjunction separates them.
+                segment_owned_by_harness = bool(
+                    _FIXTURE_MARKER_RE.search(normalized)
+                    or _HARNESS_LIFECYCLE_RE.search(normalized)
+                )
+                if (
+                    production_marked
+                    or possesses
+                    or (
+                        not segment_owned_by_harness
+                        and not _VERIFICATION_CONTEXT_RE.search(phrase)
+                        and not _VERIFICATION_TAINT_RE.search(phrase)
+                    )
                 ):
                     kept.append(phrase)
     return " ; ".join(kept)
