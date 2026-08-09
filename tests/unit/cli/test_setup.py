@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 import json
 import os
 from pathlib import Path
@@ -43,6 +43,31 @@ from ouroboros.config.models import (
 )
 from ouroboros.providers.base import CompletionConfig
 from ouroboros.providers.profiles import resolve_completion_profile
+
+
+def _terminate_and_reap_test_process(process: subprocess.Popen[str] | None) -> None:
+    """Best-effort test cleanup that never replaces the triggering failure."""
+    if process is None:
+        return
+    try:
+        running = process.poll() is None
+    except Exception:
+        running = True
+    if running:
+        with suppress(Exception):
+            process.terminate()
+    try:
+        process.communicate(timeout=5)
+        return
+    except Exception:
+        pass
+    with suppress(Exception):
+        process.kill()
+    with suppress(Exception):
+        process.communicate(timeout=5)
+    with suppress(Exception):
+        process.wait(timeout=5)
+
 
 # ── Codex setup tests ────────────────────────────────────────────
 
@@ -5841,12 +5866,117 @@ raise SystemExit(0 if activate_claude_runtime("/second/claude") else 2)
                 else:
                     raise AssertionError(details) from cleanup_errors[0][1]
 
+        assert first.poll() is not None
         assert first.returncode == 0, first_stdout + first_stderr
+        assert second is not None
+        assert second.poll() is not None
         assert second.returncode == 0, second_stdout + second_stderr
         config_dir = tmp_path / ".ouroboros"
         config = yaml.safe_load((config_dir / "config.yaml").read_text(encoding="utf-8"))
         assert config["orchestrator"]["cli_path"] == "/second/claude"
         assert not (config_dir / runtime_activation._JOURNAL_NAME).exists()
+        with runtime_activation.file_lock(
+            tmp_path / runtime_activation._ACTIVATION_LOCK_NAME,
+            blocking=False,
+            stable_parent_authority=True,
+        ):
+            pass
+
+    def test_setup_process_cleanup_reaps_after_communicate_failure(self) -> None:
+        """Cleanup escalates and reaps even when its first communicate call fails."""
+        process = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        real_communicate = process.communicate
+        attempts = 0
+
+        def fail_once_then_communicate(*, timeout: float) -> tuple[str, str]:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise subprocess.TimeoutExpired(process.args, timeout)
+            return real_communicate(timeout=timeout)
+
+        with patch.object(process, "communicate", side_effect=fail_once_then_communicate):
+            _terminate_and_reap_test_process(process)
+
+        assert attempts == 2
+        assert process.poll() is not None
+
+    def test_setup_process_cleanup_releases_lock_after_release_write_failure(
+        self, tmp_path: Path
+    ) -> None:
+        """A failed parent release write cannot strand either lock participant."""
+        lock_target = tmp_path / "activation-test"
+        marker = tmp_path / "first-holds-lock"
+        first_script = """
+import os
+import time
+from pathlib import Path
+from ouroboros.core.file_lock import file_lock
+lock_target = Path(os.environ["TEST_LOCK_TARGET"])
+marker = Path(os.environ["TEST_MARKER"])
+with file_lock(lock_target, stable_parent_authority=True):
+    marker.write_text("ready")
+    time.sleep(60)
+"""
+        second_script = """
+import os
+from pathlib import Path
+from ouroboros.core.file_lock import file_lock
+with file_lock(Path(os.environ["TEST_LOCK_TARGET"]), stable_parent_authority=True):
+    pass
+"""
+        env = os.environ.copy()
+        env.update(TEST_LOCK_TARGET=str(lock_target), TEST_MARKER=str(marker))
+        root = Path(__file__).resolve().parents[3]
+        first = subprocess.Popen(
+            [sys.executable, "-c", first_script],
+            cwd=root,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        second: subprocess.Popen[str] | None = None
+        try:
+            startup_deadline = time.monotonic() + 30
+            while time.monotonic() < startup_deadline:
+                if marker.exists() or first.poll() is not None:
+                    break
+                time.sleep(0.01)
+            assert marker.exists(), "first process did not acquire the activation lock"
+            second = subprocess.Popen(
+                [sys.executable, "-c", second_script],
+                cwd=root,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            time.sleep(0.1)
+            assert second.poll() is None
+            with (
+                patch.object(Path, "write_text", side_effect=OSError("release write failed")),
+                pytest.raises(OSError, match="release write failed"),
+            ):
+                (tmp_path / "release-first").write_text("go", encoding="utf-8")
+        finally:
+            _terminate_and_reap_test_process(second)
+            _terminate_and_reap_test_process(first)
+
+        assert first.poll() is not None
+        assert second is not None
+        assert second.poll() is not None
+        with runtime_activation.file_lock(
+            lock_target,
+            blocking=False,
+            stable_parent_authority=True,
+        ):
+            pass
 
     @pytest.mark.parametrize(
         ("target_name", "kind"),
