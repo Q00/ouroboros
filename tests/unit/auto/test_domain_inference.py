@@ -4928,6 +4928,26 @@ def test_coordinated_web_dashboard_keeps_honest_ambiguity() -> None:
         "Build a CLI; skip the web UI",
     ],
 )
+@pytest.mark.parametrize(
+    "goal",
+    [
+        "Existing system is a CLI. Replace it with a web app.",
+        "We currently expose a REST API. Replace it with a browser dashboard.",
+        "Migrate from a CLI to a web app.",
+    ],
+)
+def test_replaced_background_artifacts_do_not_own(goal: str) -> None:
+    """R114 guard: background/current-state clauses describe the
+    artifact being replaced — only the replacement product owns, so the
+    web app keeps its clean single class."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value="Interactive signup form and settings panel")
+    _seed_section(ledger, "runtime_context", value="Modern browsers")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP
+
+
 def test_exclusion_predicates_deny_like_negators(goal: str) -> None:
     """R112 guard: "avoid a browser UI" rejects the UI it names — the
     excluded phrase cannot become a co-product and the CLI keeps its

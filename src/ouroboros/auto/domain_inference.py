@@ -486,8 +486,43 @@ def _any_of(text: str, keywords: Iterable[str]) -> bool:
     return any(keyword in text for keyword in keywords)
 
 
+# Replacement goals carry the replaced artifact as background (#1813
+# R114): "Existing system is a CLI. Replace it with a web app" produces
+# the web app. When a replacement directive is present, current-state
+# segments describe what leaves, and the directive's own object is the
+# replaced artifact up to the with/by phrase that names the product.
+_REPLACEMENT_DIRECTIVE_RE = re.compile(
+    r"\b(?:replac\w+|migrat\w+|supersed\w+|retir\w+|sunsett?\w*|"
+    r"switch\w*\s+(?:from|to|away)|transition\w*|"
+    r"mov\w+\s+(?:away\s+)?(?:from|to))\b"
+)
+_CURRENT_STATE_MARKER_RE = re.compile(
+    r"\b(?:existing|currently|current|legacy|today|at\s+present|"
+    r"as[\s\-]is|previous(?:ly)?)\b"
+)
+# Migration "from X to Y" keeps its own shape — the destination rule
+# already reads Y as the produced artifact and needs the source phrase
+# for its context.
+_REPLACED_OBJECT_RE = re.compile(
+    r"\b(?:replaces?|replacing|supersedes?|superseding|retires?|retiring|"
+    r"sunsets?|sunsetting)\s+[^,.;]*?(?=\bwith\b|\bby\b|[,.;]|$)"
+)
+
+
+def _strip_replaced_background(text: str) -> str:
+    if not _REPLACEMENT_DIRECTIVE_RE.search(text):
+        return text
+    kept = [
+        segment
+        for segment in re.split(r"(?<=[.;!?])", text)
+        if not _CURRENT_STATE_MARKER_RE.search(segment)
+        or _REPLACEMENT_DIRECTIVE_RE.search(segment)
+    ]
+    return _REPLACED_OBJECT_RE.sub(" ", "".join(kept))
+
+
 def _goal_text(ledger: SeedDraftLedger) -> str:
-    return _section_text(ledger, "goal")
+    return _strip_replaced_background(_section_text(ledger, "goal"))
 
 
 # Displayed content is the UI's subject, not the produced artifact
