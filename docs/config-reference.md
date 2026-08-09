@@ -434,18 +434,18 @@ evaluation:
   stage2_enabled: true         # Semantic evaluation (AC compliance, drift)
   stage3_enabled: true         # Multi-model consensus (when triggered)
   satisfaction_threshold: 0.8  # Currently inert — the Stage 2 gate is hardcoded to 0.8
-  uncertainty_threshold: 0.3   # Uncertainty score above which consensus is triggered
+  uncertainty_threshold: 0.3   # Currently inert — see the field table below
   semantic_model: claude-opus-4-8
   assertion_extraction_model: claude-sonnet-4-6
 ```
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `stage1_enabled` | `bool` | `true` | Enable mechanical checks (lint, build, test, static analysis). When `false`, skipped entirely — use only for debugging. |
-| `stage2_enabled` | `bool` | `true` | Enable semantic evaluation (AC compliance, goal alignment, drift scoring). |
-| `stage3_enabled` | `bool` | `true` | Enable multi-model consensus evaluation (triggered by the consensus trigger matrix). |
+| `stage1_enabled` | `bool` | `true` | **Currently inert.** No production code builds `PipelineConfig` from this field. The evolution pipeline hardcodes the stage flags (`mcp/server/adapter.py:1893`, gated on `OUROBOROS_EVOLVE_STAGE1`), and the evaluate handler passes only `mechanical` and `semantic` (`mcp/tools/evaluation_handlers.py:743`), so stages take `PipelineConfig` defaults. |
+| `stage2_enabled` | `bool` | `true` | **Currently inert.** Same reason as `stage1_enabled`. |
+| `stage3_enabled` | `bool` | `true` | **Currently inert.** Same reason as `stage1_enabled`. |
 | `satisfaction_threshold` | `float [0.0, 1.0]` | `0.8` | **Currently inert.** `EvaluationPipeline` compares `stage2_result.score >= 0.8` literally and never reads this field. Changing it neither tightens nor relaxes evaluation. See [Evaluation Pipeline Guide](./guides/evaluation-pipeline.md#stage-2-semantic-evaluation). |
-| `uncertainty_threshold` | `float [0.0, 1.0]` | `0.3` | Semantic uncertainty score above which Stage 3 consensus is triggered even if `satisfaction_threshold` is met. |
+| `uncertainty_threshold` | `float [0.0, 1.0]` | `0.3` | **Currently inert.** The value that actually gates Stage 3 is `TriggerConfig.uncertainty_threshold` inside `PipelineConfig`, and nothing copies this YAML field into it. |
 | `semantic_model` | `string` | `"claude-opus-4-8"` | Model used for Stage 2 semantic evaluation. Overridable via `OUROBOROS_SEMANTIC_MODEL`. |
 | `assertion_extraction_model` | `string` | `"claude-sonnet-4-6"` | Model used for extracting verification assertions from seed criteria. Overridable via `OUROBOROS_ASSERTION_EXTRACTION_MODEL`. |
 
@@ -455,10 +455,18 @@ evaluation:
 
 Controls Phase 5 — multi-model consensus voting and deliberation.
 
+> **Inert fields in `evaluation` and `consensus`.** Eight fields in these two
+> sections are schema-only: they validate, persist, and appear in `ouroboros config
+> show`, but no production code reads them. In `evaluation`: `stage1_enabled`,
+> `stage2_enabled`, `stage3_enabled`, `satisfaction_threshold`, and
+> `uncertainty_threshold`. In `consensus`: `min_models`, `threshold`, and
+> `diversity_required`. Each is marked in its field table below with what actually
+> controls the behaviour instead. The model fields in both sections **are** wired.
+
 ```yaml
 consensus:
-  min_models: 3
-  threshold: 0.67           # Fraction of models that must agree (2/3 majority)
+  min_models: 3             # Currently inert — see the field table below
+  threshold: 0.67           # Currently inert — the vote uses majority_threshold = 0.66
   diversity_required: true  # Currently inert — see the field table below
   models:
     - openrouter/openai/gpt-4o
@@ -471,8 +479,8 @@ consensus:
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `min_models` | `int >= 2` | `3` | Minimum number of models required for a consensus vote. |
-| `threshold` | `float [0.0, 1.0]` | `0.67` | Fraction of models that must agree for consensus to pass (e.g., `0.67` = 2/3 majority). |
+| `min_models` | `int >= 2` | `3` | **Currently inert.** Defined in `ConsensusConfig` (`config/models.py:378`) and never read; no code enforces a minimum voter count. |
+| `threshold` | `float [0.0, 1.0]` | `0.67` | **Currently inert.** The approval comparison uses `evaluation.consensus.ConsensusConfig.majority_threshold`, which defaults to `0.66` (`evaluation/consensus.py:141,508`) and is a different class from this YAML field. Changing this value does not move the bar. |
 | `diversity_required` | `bool` | `true` | **Currently inert.** The field exists on `ConsensusConfig` and in the schema, but nothing reads it. Provider diversity comes from the model roster itself, not from this flag. See [Evaluation Pipeline Guide](./guides/evaluation-pipeline.md#stage-3-multi-model-consensus). |
 | `models` | `list[string]` | (see above) | Model roster for Stage 3 simple voting. With `llm.backend: litellm`, use `provider/model` or `openrouter/provider/model`. With `llm.backend: codex`, use Codex/OpenAI model IDs such as `gpt-5.4`. Overridable via `OUROBOROS_CONSENSUS_MODELS` (comma-separated). |
 | `advocate_model` | `string` | `"openrouter/anthropic/claude-opus-4.8"` | Model that argues in favor of the proposed solution in deliberative consensus. With `llm.backend: codex`, this can be a Codex/OpenAI model ID such as `gpt-5.4`. Overridable via `OUROBOROS_CONSENSUS_ADVOCATE_MODEL`. |
