@@ -4684,6 +4684,33 @@ def test_passive_consumption_relations_do_not_own(goal: str) -> None:
     assert TaskClass.WEB_APP not in result.classes
 
 
+@pytest.mark.parametrize(
+    ("goal", "outputs"),
+    [
+        (
+            "Build a web app that invokes an existing CLI",
+            "Exit code and stdout shown in a status panel",
+        ),
+        (
+            "Build an admin web app",
+            "Login page and settings panel; REST API responses displayed to users",
+        ),
+        ("Build a browser-based dashboard", "SDK authentication token status dashboard"),
+    ],
+)
+def test_displayed_content_carries_no_foreign_ownership(goal: str, outputs: str) -> None:
+    """R107 guard: what the app renders from a consumed tool, service, or
+    SDK — displayed exit codes, displayed API responses, long library-
+    subject compounds ending at a UI head — is content, and the web app
+    keeps its clean single class."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value=outputs)
+    _seed_section(ledger, "runtime_context", value="Modern browsers")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP
+
+
 def test_engine_attachment_is_not_the_environment() -> None:
     """R106 guard: an engine attachment names the host's implementation —
     a desktop app powered by Chromium is hosted natively and the

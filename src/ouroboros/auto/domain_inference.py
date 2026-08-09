@@ -485,6 +485,17 @@ def _goal_text(ledger: SeedDraftLedger) -> str:
     return _section_text(ledger, "goal")
 
 
+# Displayed content is the UI's subject, not the produced artifact
+# (#1813 R107): "exit code and stdout shown in a status panel" and
+# "REST API responses displayed to users" describe what the app renders
+# from a consumed tool or service — the clause carries no ownership for
+# the tool's own class.
+_DISPLAYED_CONTENT_CLAUSE_RE = re.compile(
+    r"[^,.;]*\b(?:shown|displayed|rendered|presented|surfaced|visualized|"
+    r"visualised|streamed|mirrored|echoed)\s+(?:in|on|within|inside|to|for)\b[^,.;]*"
+)
+
+
 def _matches_cli(ledger: SeedDraftLedger) -> bool:
     outputs = _section_text(ledger, "outputs")
     runtime = _section_text(ledger, "runtime_context")
@@ -493,7 +504,7 @@ def _matches_cli(ledger: SeedDraftLedger) -> bool:
         # so single-word "cli" mentions in goal cannot classify alone.
         return False
     output_signal = _any_of(
-        outputs,
+        _DISPLAYED_CONTENT_CLAUSE_RE.sub(" ", outputs),
         ("stdout", "exit code", "printed", "console output", "command output"),
     )
     runtime_signal = _any_of(runtime, ("shell", "terminal", "subprocess", "command line"))
@@ -577,8 +588,13 @@ def _matches_web_service(ledger: SeedDraftLedger) -> bool:
     # The sections are joined with a sentence boundary so the destination
     # rule sees the goal's own imperative segment (#1813 R53) — keyword
     # matching never legitimately spans the outputs/goal seam.
+    # Displayed responses are the client's rendered content, not a
+    # produced service (#1813 R107) — the display clause leaves before
+    # keyword matching.
     visible = _strip_consumed_dependencies(
-        outputs + ". " + ("" if ui_headed_goal else service_goal)
+        _DISPLAYED_CONTENT_CLAUSE_RE.sub(" ", outputs)
+        + ". "
+        + ("" if ui_headed_goal else service_goal)
     )
     # Response nouns describe service ownership only when a server-like
     # artifact governs a production verb (#1813 R37).  Browser clients also
@@ -1730,13 +1746,14 @@ def _matches_library(ledger: SeedDraftLedger) -> bool:
     # library shape (#1813 R23).
     produced_outputs = _strip_consumed_dependencies(outputs)
     # A library token premodifying a UI head is the app's displayed
-    # subject matter, not a produced surface (#1813 R106): "package
-    # search form" and "API documentation pages" render content ABOUT
-    # packages and APIs. Prepositions break the chain, so "package with
-    # a CLI client" keeps its library reading.
+    # subject matter, not a produced surface (#1813 R106/R107): "package
+    # search form" and "SDK authentication token status dashboard"
+    # render content ABOUT packages and SDKs. The premodifier chain is
+    # structural — any length, broken only by function words — so
+    # "package with a CLI client" keeps its library reading.
     produced_outputs = re.sub(
         rf"\b(?:packages?|apis?|sdks?|librar(?:y|ies))\s+"
-        rf"(?:(?!(?:with|and|or|for|plus|via|from|to|in|on)\b)[\w\-'’]+\s+){{0,2}}?"
+        rf"(?:(?!(?:with|and|or|for|plus|via|from|to|in|on)\b)[\w\-'’]+\s+)*?"
         rf"{_UI_PRODUCT_HEAD_FRAGMENT}\b",
         " ",
         produced_outputs,
