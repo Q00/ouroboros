@@ -116,6 +116,53 @@ _JOB_FUNNEL: dict[str, str] = {
     "ralph": "ralph",
 }
 
+# Executable form of the TELEMETRY.md event table. Auditing call sites for
+# compliance is not the same as enforcing it: capture() and set_context()
+# below drop anything outside these sets before it reaches the queue, so a
+# call site cannot accidentally (or maliciously) smuggle an unlisted event
+# name or property -- e.g. prompt text or a file path -- into an outgoing
+# batch, even if a future edit passes one in.
+_CONTEXT_ALLOWLIST = frozenset(
+    {
+        "runtime_backend",
+        "execute_runtime_backend",
+        "interview_llm_backend",
+        "evaluate_llm_backend",
+    }
+)
+_BASE_PROPERTY_KEYS = frozenset({"app_version", "os", "python_version", "frontdoor", "ci"})
+_EVENT_ALLOWLIST: dict[str, frozenset[str]] = {
+    "command_run": frozenset(
+        {
+            "command",
+            "tool",
+            "source",
+            "is_funnel",
+            "phase",
+            "accepted",
+            "ok",
+            "duration_ms",
+            "error_type",
+            "sample_rate",
+        }
+    ),
+    "workflow_outcome": frozenset(
+        {
+            "command",
+            "phase",
+            "terminal_status",
+            "ok",
+            "verified",
+            "final_approved",
+            "$insert_id",
+        }
+    ),
+    "mcp_serve_started": frozenset({"transport", "tool_count"}),
+}
+# Bound on any single string property. Dropped, not truncated -- a truncated
+# value could still leak the start of a prompt or path.
+_MAX_PROPERTY_STR_LEN = 200
+
 _lock = threading.Lock()
 _queue: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=_QUEUE_MAX)
 _worker: threading.Thread | None = None
@@ -148,26 +195,80 @@ def _state_path() -> Path:
     return Path.home() / ".ouroboros" / "telemetry.json"
 
 
+def _read_valid_state(path: Path) -> dict[str, Any] | None:
+    """Read and validate telemetry.json, or None if absent/unparseable/empty."""
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if isinstance(raw, dict) and isinstance(raw.get("distinct_id"), str) and raw["distinct_id"]:
+        return raw
+    return None
+
+
+def _atomic_write(path: Path, state: dict[str, Any]) -> None:
+    """Write state via a same-directory temp file + os.replace (atomic swap).
+
+    Unlike a direct ``path.write_text``, this can never leave a truncated or
+    half-written file on disk for another process to read mid-write.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.parent / f"{path.name}.{os.getpid()}.tmp"
+    try:
+        tmp_path.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+        os.replace(tmp_path, path)
+    except Exception:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        raise
+
+
 def _load_state() -> dict[str, Any]:
     global _state_cache
     with _lock:
         if _state_cache is not None:
             return _state_cache
         path = _state_path()
-        state: dict[str, Any] = {}
+        # Distinguish ABSENT (nothing to fix; race is over who creates it
+        # first) from INVALID (a file exists but is corrupt/unparseable; a
+        # create-if-not-exists primitive cannot fix that -- see
+        # _repair_state).
+        file_absent = False
+        raw_text: str | None
         try:
-            raw = json.loads(path.read_text(encoding="utf-8"))
-            if isinstance(raw, dict) and isinstance(raw.get("distinct_id"), str):
-                state = raw
+            raw_text = path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            raw_text = None
+            file_absent = True
         except Exception:
-            state = {}
+            raw_text = None  # exists but unreadable -- treat as invalid, not absent
+
+        state: dict[str, Any] = {}
+        if raw_text is not None:
+            try:
+                raw = json.loads(raw_text)
+                if (
+                    isinstance(raw, dict)
+                    and isinstance(raw.get("distinct_id"), str)
+                    and raw["distinct_id"]
+                ):
+                    state = raw
+            except Exception:
+                state = {}
+
         if not state.get("distinct_id"):
             candidate = {
                 "distinct_id": str(uuid.uuid4()),
                 "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                 "notice_shown": False,
             }
-            state = _publish_new_state(path, candidate)
+            state = (
+                _publish_new_state(path, candidate)
+                if file_absent
+                else _repair_state(path, candidate)
+            )
         _state_cache = state
         return state
 
@@ -224,16 +325,72 @@ def _publish_new_state(path: Path, candidate: dict[str, Any]) -> dict[str, Any]:
             pass
 
     for attempt in range(3):
+        state = _read_valid_state(path)
+        if state is not None:
+            return state
+        if attempt < 2:
+            time.sleep(0.02)
+    return candidate
+
+
+def _repair_state(path: Path, candidate: dict[str, Any]) -> dict[str, Any]:
+    """Atomically replace a corrupt/invalid telemetry.json, then adopt the winner.
+
+    ``_publish_new_state``'s create-if-absent primitives (``os.link`` /
+    ``O_EXCL``) both refuse when the target already exists, so neither can
+    fix a file that is present but unparseable or missing ``distinct_id`` --
+    every process would otherwise mint its own uuid on every call, forever,
+    and no id would ever persist. Exactly one process wins a repair lock,
+    atomically replaces the bad file, and every process (winner and losers
+    alike) adopts whatever ends up on disk afterward. Without that, retention
+    and weekly-active metrics would fragment across as many ids as there were
+    racing processes, every time the file happened to get corrupted.
+    """
+    lock_path = path.with_name(path.name + ".repair.lock")
+    try:
+        fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except Exception:
+        fd = None  # lock held by another repairer, or lock creation failed
+
+    if fd is not None:
         try:
-            raw = json.loads(path.read_text(encoding="utf-8"))
-            if (
-                isinstance(raw, dict)
-                and isinstance(raw.get("distinct_id"), str)
-                and raw["distinct_id"]
-            ):
-                return raw
-        except Exception:
-            pass
+            # Re-validate under the lock: another process may have repaired
+            # the file between our first read and acquiring this lock.
+            state = _read_valid_state(path)
+            if state is None:
+                try:
+                    _atomic_write(path, candidate)
+                except Exception:
+                    pass
+                state = _read_valid_state(path) or candidate
+        finally:
+            try:
+                os.close(fd)
+            except Exception:
+                pass
+            try:
+                lock_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+        return state
+
+    # Someone else holds the lock: wait, bounded, for a valid file to land.
+    for _ in range(10):
+        time.sleep(0.02)
+        state = _read_valid_state(path)
+        if state is not None:
+            return state
+
+    # Lock never cleared (stale lock from a killed process) -- take over the
+    # replace ourselves rather than waiting forever, accepting the tiny race.
+    try:
+        _atomic_write(path, candidate)
+    except Exception:
+        pass
+    for attempt in range(3):
+        state = _read_valid_state(path)
+        if state is not None:
+            return state
         if attempt < 2:
             time.sleep(0.02)
     return candidate
@@ -241,9 +398,7 @@ def _publish_new_state(path: Path, candidate: dict[str, Any]) -> dict[str, Any]:
 
 def _write_state(state: dict[str, Any]) -> None:
     try:
-        path = _state_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+        _atomic_write(_state_path(), state)
     except Exception:
         pass
 
@@ -253,11 +408,35 @@ def distinct_id() -> str:
     return str(_load_state()["distinct_id"])
 
 
+def _is_allowed_scalar(value: Any) -> bool:
+    """Whether a property value is a plain scalar within the size bound.
+
+    Dicts, lists, and other structured values are rejected outright: the
+    whitelist covers keys, but an allowed key with an unbounded/nested value
+    would still be a hole for the same reason unlisted keys are.
+    """
+    if isinstance(value, (bool, int, float)):
+        return True
+    if isinstance(value, str):
+        return len(value) <= _MAX_PROPERTY_STR_LEN
+    return False
+
+
+def _sanitize_properties(props: dict[str, Any], allowed_keys: frozenset[str]) -> dict[str, Any]:
+    """Keep only allowlisted keys with plain, bounded scalar values."""
+    return {k: v for k, v in props.items() if k in allowed_keys and _is_allowed_scalar(v)}
+
+
 def set_context(**props: Any) -> None:
-    """Merge properties (e.g. runtime_backend) into every subsequent event."""
+    """Merge properties (e.g. runtime_backend) into every subsequent event.
+
+    Only keys in _CONTEXT_ALLOWLIST are accepted: this is a global sink read
+    by _base_properties() on every capture() call, so an unvetted key here
+    would leak into every event, not just one call site's.
+    """
     with _lock:
         for key, value in props.items():
-            if value is not None:
+            if key in _CONTEXT_ALLOWLIST and _is_allowed_scalar(value):
                 _context[key] = value
 
 
@@ -356,13 +535,24 @@ def flush(timeout: float = 1.5) -> None:
 
 
 def capture(event: str, properties: dict[str, Any] | None = None) -> None:
-    """Queue one event. Non-blocking, never raises, drops when queue is full."""
+    """Queue one event. Non-blocking, never raises, drops when queue is full.
+
+    Enforces the event/property whitelist (_EVENT_ALLOWLIST): an event name
+    not on the disclosed table is dropped entirely, and any property not on
+    that event's list -- or that event's base/context keys -- is dropped
+    before the properties dict is built.
+    """
     try:
         if not is_enabled():
             return
+        allowed_keys = _EVENT_ALLOWLIST.get(event)
+        if allowed_keys is None:
+            return  # not on the disclosed event table -- drop, don't guess
+        allowed_keys = allowed_keys | _BASE_PROPERTY_KEYS | _CONTEXT_ALLOWLIST
         props = _base_properties()
         if properties:
             props.update({k: v for k, v in properties.items() if v is not None})
+        props = _sanitize_properties(props, allowed_keys)
         _queue.put_nowait(
             {
                 "event": event,
@@ -482,13 +672,32 @@ _NOTICE = (
 
 
 def show_first_run_notice() -> None:
-    """Print the one-time telemetry notice to stderr (safe for MCP stdio)."""
+    """Print the one-time telemetry notice to stderr (safe for MCP stdio).
+
+    Concurrent first-use processes (multiple MCP sessions starting together)
+    can all read ``notice_shown=False`` before any of them has written the
+    file, so the json check alone isn't enough to keep the print to once.
+    Claimed with an ``O_EXCL`` marker file instead: only the process that
+    successfully creates the marker prints, everyone else -- having lost the
+    race or found it already claimed -- returns silently. ``notice_shown``
+    is still persisted into telemetry.json as before (the installer reads
+    that field), via the now-atomic ``_write_state``.
+    """
     try:
         if not is_enabled():
             return
         state = _load_state()
         if state.get("notice_shown"):
             return
+        marker_path = _state_path().with_name("telemetry.notice")
+        try:
+            fd = os.open(marker_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.close(fd)
+        except FileExistsError:
+            return  # another process already claimed the notice
+        except Exception:
+            pass  # best-effort marker; don't let it suppress the notice forever
+
         state["notice_shown"] = True
         _write_state(state)
         import sys

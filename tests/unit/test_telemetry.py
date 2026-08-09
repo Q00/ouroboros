@@ -46,6 +46,26 @@ def sent(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
     return events
 
 
+def _sentinel_wait_snippet(sentinel: Path) -> str:
+    """Python source: busy-wait on a sentinel file before proceeding.
+
+    Used by cross-process regression tests to synchronize subprocess starts
+    so their calls to the function under test land as close together as
+    possible, tightening the race window instead of relying on interpreter
+    startup jitter alone.
+    """
+    return (
+        "import time\n"
+        "from pathlib import Path\n"
+        f"sentinel = Path({str(sentinel)!r})\n"
+        "deadline = time.monotonic() + 5.0\n"
+        "while not sentinel.exists():\n"
+        "    if time.monotonic() > deadline:\n"
+        "        raise SystemExit('sentinel never appeared')\n"
+        "    time.sleep(0.002)\n"
+    )
+
+
 class TestOptOut:
     def test_disabled_without_api_key(self) -> None:
         assert telemetry.is_enabled() is False
@@ -318,6 +338,67 @@ class TestCapture:
         telemetry.flush(timeout=2.0)
 
 
+class TestPropertyAllowlist:
+    """Regression for enforcing the event/property whitelist at serialization.
+
+    Auditing call sites for TELEMETRY.md compliance is not the same as
+    enforcing it: capture() and set_context() must drop unlisted events,
+    unlisted properties, and oversized/non-scalar values before anything
+    reaches the transport, even if a caller passes them in directly.
+    """
+
+    def test_unknown_event_dropped_entirely(self, sent: list[dict[str, Any]]) -> None:
+        telemetry.capture("not_whitelisted", {"prompt": "x"})
+        telemetry.flush(timeout=2.0)
+        assert sent == []
+
+    def test_unlisted_properties_dropped_but_known_ones_kept(
+        self, sent: list[dict[str, Any]]
+    ) -> None:
+        telemetry.capture(
+            "command_run",
+            {"command": "run", "prompt": "secret", "file_path": "/etc/passwd"},
+        )
+        telemetry.flush(timeout=2.0)
+        assert len(sent) == 1
+        props = sent[0]["properties"]
+        assert props["command"] == "run"
+        assert "prompt" not in props
+        assert "file_path" not in props
+
+    def test_set_context_ignores_unlisted_keys(self, sent: list[dict[str, Any]]) -> None:
+        telemetry.set_context(prompt="secret", runtime_backend="claude")
+        telemetry.capture("command_run", {"command": "run"})
+        telemetry.flush(timeout=2.0)
+        assert len(sent) == 1
+        props = sent[0]["properties"]
+        assert "prompt" not in props
+        assert props["runtime_backend"] == "claude"
+
+    def test_oversized_string_property_dropped(self, sent: list[dict[str, Any]]) -> None:
+        telemetry.capture(
+            "command_run",
+            {"command": "run", "error_type": "E" * (telemetry._MAX_PROPERTY_STR_LEN + 1)},
+        )
+        telemetry.flush(timeout=2.0)
+        assert len(sent) == 1
+        props = sent[0]["properties"]
+        assert props["command"] == "run"
+        assert "error_type" not in props
+
+    def test_non_scalar_property_dropped(self, sent: list[dict[str, Any]]) -> None:
+        telemetry.capture(
+            "command_run",
+            {"command": "run", "tool": {"nested": "value"}, "sample_rate": [1, 2]},
+        )
+        telemetry.flush(timeout=2.0)
+        assert len(sent) == 1
+        props = sent[0]["properties"]
+        assert props["command"] == "run"
+        assert "tool" not in props
+        assert "sample_rate" not in props
+
+
 class TestCliCapture:
     def test_init_normalized_to_interview(self, sent: list[dict[str, Any]]) -> None:
         telemetry.capture_cli_command("init")
@@ -527,3 +608,163 @@ class TestConcurrentIdentityCreation:
 
         state = json.loads((home / ".ouroboros" / "telemetry.json").read_text(encoding="utf-8"))
         assert state["distinct_id"] == outputs[0]
+
+
+class TestStateRepair:
+    """Regression for repairing a corrupt/invalid telemetry.json.
+
+    _publish_new_state's create-if-absent primitives (os.link / O_EXCL) both
+    refuse when the target already exists, so neither can fix a file that is
+    present but unparseable -- without _repair_state's lock-and-replace,
+    every process would mint its own uuid on every call, forever, and no id
+    would ever persist to disk.
+    """
+
+    def test_sequential_processes_converge_after_repair(self, tmp_path: Path) -> None:
+        home = tmp_path / "home"
+        state_dir = home / ".ouroboros"
+        state_dir.mkdir(parents=True)
+        state_path = state_dir / "telemetry.json"
+        state_path.write_text("not-json{{{", encoding="utf-8")
+
+        repo_root = Path(__file__).resolve().parents[2]
+        env = os.environ.copy()
+        env["HOME"] = str(home)
+        env["PYTHONPATH"] = str(repo_root / "src")
+        env["OUROBOROS_TELEMETRY"] = "0"
+        for key in ("DO_NOT_TRACK", "OUROBOROS_POSTHOG_API_KEY", "OUROBOROS_POSTHOG_HOST"):
+            env.pop(key, None)
+
+        script = "from ouroboros import telemetry\nprint(telemetry.distinct_id())\n"
+
+        first = subprocess.run(
+            [sys.executable, "-c", script],
+            env=env,
+            text=True,
+            capture_output=True,
+            timeout=5,
+            check=True,
+        )
+        second = subprocess.run(
+            [sys.executable, "-c", script],
+            env=env,
+            text=True,
+            capture_output=True,
+            timeout=5,
+            check=True,
+        )
+        first_id = first.stdout.strip()
+        second_id = second.stdout.strip()
+        assert first_id, "first (repairing) process printed no id"
+        assert first_id == second_id
+
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        assert state["distinct_id"] == first_id
+
+    def test_concurrent_processes_converge_after_repair(self, tmp_path: Path) -> None:
+        n_procs = 8
+        home = tmp_path / "home"
+        state_dir = home / ".ouroboros"
+        state_dir.mkdir(parents=True)
+        state_path = state_dir / "telemetry.json"
+        state_path.write_text("not-json{{{", encoding="utf-8")
+
+        sentinel = tmp_path / "go"
+        repo_root = Path(__file__).resolve().parents[2]
+        env = os.environ.copy()
+        env["HOME"] = str(home)
+        env["PYTHONPATH"] = str(repo_root / "src")
+        env["OUROBOROS_TELEMETRY"] = "0"
+        for key in ("DO_NOT_TRACK", "OUROBOROS_POSTHOG_API_KEY", "OUROBOROS_POSTHOG_HOST"):
+            env.pop(key, None)
+
+        script = (
+            "from ouroboros import telemetry\n"
+            + _sentinel_wait_snippet(sentinel)
+            + "print(telemetry.distinct_id())\n"
+        )
+
+        procs = [
+            subprocess.Popen(
+                [sys.executable, "-c", script],
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            for _ in range(n_procs)
+        ]
+        try:
+            time.sleep(0.3)  # let every child finish importing and reach the busy-wait
+            sentinel.write_text("go", encoding="utf-8")
+            outputs = []
+            for proc in procs:
+                out, err = proc.communicate(timeout=5)
+                assert proc.returncode == 0, f"child failed: {err}"
+                outputs.append(out.strip())
+        finally:
+            for proc in procs:
+                if proc.poll() is None:
+                    proc.kill()
+
+        assert len(set(outputs)) == 1, f"processes disagreed on distinct_id: {set(outputs)}"
+
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        assert state["distinct_id"] == outputs[0]
+
+
+class TestNoticeRace:
+    """Regression: concurrent first-use processes must print the notice once.
+
+    Reading notice_shown=False out of telemetry.json is not enough to
+    dedupe by itself -- every concurrent process can observe False before
+    any of them has written the file. show_first_run_notice() must claim an
+    exclusive marker so only the winner prints.
+    """
+
+    def test_concurrent_first_use_prints_notice_exactly_once(self, tmp_path: Path) -> None:
+        n_procs = 8
+        home = tmp_path / "home"
+        home.mkdir()
+        sentinel = tmp_path / "go"
+        repo_root = Path(__file__).resolve().parents[2]
+        env = os.environ.copy()
+        env["HOME"] = str(home)
+        env["PYTHONPATH"] = str(repo_root / "src")
+        env["OUROBOROS_POSTHOG_API_KEY"] = "phc_test"
+        for key in ("DO_NOT_TRACK", "OUROBOROS_TELEMETRY", "OUROBOROS_POSTHOG_HOST"):
+            env.pop(key, None)
+
+        script = (
+            "from ouroboros import telemetry\n"
+            + _sentinel_wait_snippet(sentinel)
+            + "telemetry.show_first_run_notice()\n"
+        )
+
+        procs = [
+            subprocess.Popen(
+                [sys.executable, "-c", script],
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            for _ in range(n_procs)
+        ]
+        try:
+            time.sleep(0.3)  # let every child finish importing and reach the busy-wait
+            sentinel.write_text("go", encoding="utf-8")
+            stderrs = []
+            for proc in procs:
+                out, err = proc.communicate(timeout=5)
+                assert proc.returncode == 0, f"child failed: {err}"
+                stderrs.append(err)
+        finally:
+            for proc in procs:
+                if proc.poll() is None:
+                    proc.kill()
+
+        printed = [e for e in stderrs if "anonymous" in e.lower()]
+        assert len(printed) == 1, (
+            f"expected exactly one notice print, got {len(printed)}: {stderrs}"
+        )

@@ -289,8 +289,9 @@ _telemetry_enabled() {
 }
 
 _telemetry_distinct_id() {
-  local f="$HOME/.ouroboros/telemetry.json" id="" winner_id="" tmp
+  local f="$HOME/.ouroboros/telemetry.json" id="" winner_id="" tmp file_existed=false
   if [ -f "$f" ]; then
+    file_existed=true
     id=$(sed -n 's/.*"distinct_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$f" | head -1)
   fi
   if [ -z "$id" ]; then
@@ -301,18 +302,29 @@ _telemetry_distinct_id() {
     fi
     [ -n "$id" ] || return 1
     mkdir -p "$HOME/.ouroboros" 2>/dev/null || return 1
-    # Publish via a same-directory temp file plus `ln` (hard link), which
-    # fails if `$f` already exists. This closes the race where the
-    # installer and a concurrently-starting Python process (e.g. `ouroboros
-    # setup` in step 4, or another MCP session) both observe a missing
-    # telemetry.json and would otherwise each mint and persist their own
-    # uuid, leaving different processes with different ids. Whichever side
-    # wins the `ln` is authoritative; both sides then re-read the file and
-    # adopt its distinct_id (mirrors telemetry.py's `_publish_new_state`).
+    # Publish the freshly generated identity via a same-directory temp file,
+    # then re-read whatever actually landed on disk instead of trusting our
+    # own candidate:
+    #   - `$f` absent: publish with `ln` (hard link) — atomic
+    #     create-if-not-exists, it fails if a concurrently-starting process
+    #     (e.g. `ouroboros setup` in step 4, or another MCP session) already
+    #     won, so nothing here is ever clobbered.
+    #   - `$f` present but invalid (unparseable / no distinct_id): `ln`
+    #     would refuse forever since the target already exists, permanently
+    #     wedging every process into minting its own unpersisted uuid.
+    #     Repair it instead with an atomic rename (`mv`), which replaces the
+    #     corrupt file in one step.
+    # Either way, every process then adopts whichever distinct_id survives
+    # in `$f` (mirrors telemetry.py's `_publish_new_state`, which now makes
+    # the same absent-vs-invalid distinction).
     tmp="$f.$$.tmp"
     printf '{"distinct_id": "%s", "created_at": "%s", "notice_shown": false}\n' \
       "$id" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$tmp" 2>/dev/null || true
-    ln "$tmp" "$f" 2>/dev/null || true
+    if [ "$file_existed" = true ]; then
+      mv "$tmp" "$f" 2>/dev/null || true
+    else
+      ln "$tmp" "$f" 2>/dev/null || true
+    fi
     rm -f "$tmp" 2>/dev/null || true
     if [ -f "$f" ]; then
       winner_id=$(sed -n 's/.*"distinct_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$f" | head -1)

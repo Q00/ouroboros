@@ -600,6 +600,37 @@ def test_installer_notice_is_persisted_before_first_capture(tmp_path: Path) -> N
     assert '"notice_shown": true' in state
 
 
+def test_installer_repairs_corrupt_telemetry_json_and_persists_events(tmp_path: Path) -> None:
+    """A pre-existing but unparseable telemetry.json must be repaired, not wedged.
+
+    `ln` create-if-not-exists refuses forever once `$f` exists, so a corrupt
+    file (partial write, disk error, garbage) would otherwise strand every
+    future process on its own unpersisted uuid. The installer must instead
+    replace it atomically (`mv`) and every process must adopt the survivor.
+    """
+    state_dir = tmp_path / "home" / ".ouroboros"
+    state_dir.mkdir(parents=True)
+    state = state_dir / "telemetry.json"
+    state.write_text("not-json{{{\n", encoding="utf-8")
+
+    result = _run_installer(
+        tmp_path,
+        env={"OUROBOROS_TELEMETRY": ""},
+        fake_commands=_telemetry_fake_commands(tmp_path),
+    )
+
+    assert result.returncode == 0, result.stderr
+    repaired = state.read_text(encoding="utf-8")
+    match = re.search(r'"distinct_id"\s*:\s*"([^"]*)"', repaired)
+    assert match is not None, f"telemetry.json was not repaired with a distinct_id: {repaired!r}"
+    repaired_id = match.group(1)
+    assert repaired_id
+
+    captures = _wait_for_telemetry(tmp_path)
+    assert '"event":"install_completed"' in captures
+    assert f'"distinct_id":"{repaired_id}"' in captures
+
+
 def test_fresh_install_keeps_direct_model_settings_optional() -> None:
     """The installer should start with the runtime default instead of forcing pins."""
     text = INSTALL_SH.read_text(encoding="utf-8")
