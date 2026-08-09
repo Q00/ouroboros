@@ -356,11 +356,26 @@ def test_mcp_serve_documentation_names_runtime_and_public_claude_aliases() -> No
     assert "`claude`, `claude-sdk`, `claude-cli`, `codex`" in cli_reference
     assert "MCP 2 server rejects SDK-backed `claude`/`claude-sdk`" in cli_reference
 
-    docs_with_commands = [Path("docs/cli-reference.md"), *Path("docs").rglob("*.md")]
-    for doc_path in dict.fromkeys(docs_with_commands):
+    shipped_markdown = [
+        *Path("docs").rglob("*.md"),
+        *Path("skills").rglob("*.md"),
+        *Path(".claude-plugin/skills").rglob("*.md"),
+    ]
+    for doc_path in dict.fromkeys(shipped_markdown):
+        in_fenced_code = False
         for line in doc_path.read_text(encoding="utf-8").splitlines():
             command = line.strip()
+            if command.startswith("```"):
+                in_fenced_code = not in_fenced_code
+                continue
             assert command != "ouroboros mcp serve", doc_path
+            executable_command = command.removeprefix("$ ")
+            if (
+                in_fenced_code
+                and executable_command.startswith("ouroboros mcp serve")
+                and "[OPTIONS]" not in executable_command
+            ):
+                assert "--runtime" in executable_command, doc_path
             if command.startswith("ouroboros mcp serve") and "--llm-backend" in command:
                 assert "--runtime" in command, doc_path
 
