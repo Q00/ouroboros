@@ -21,6 +21,16 @@ Ouroboros는 **OpenAI Codex**를 런타임 백엔드로 쓸 수 있습니다. [C
 
 Codex 플러그인으로 시작하는 게 가장 짧습니다.
 
+시작하기 전에 두 가지가 필요합니다. **`codex`가 `PATH`에 있어야 하고**(아래 명령을 셸에서 치기 때문입니다), 호스트에 **`uvx`가 있어야 합니다**(플러그인의 MCP 서술자가 `uvx`로 서버를 띄웁니다 — [`.mcp.codex.json`](../../.mcp.codex.json)). `uvx`가 없으면 다음 중 하나로 uv를 설치하세요:
+
+```bash
+pipx install uv
+pip install --user uv
+brew install uv          # macOS / Linuxbrew
+```
+
+**Python은 직접 깔지 않아도 됩니다.** `uvx`가 패키지의 `requires-python = ">=3.12"`를 보고 맞는 인터프리터를 확보합니다.
+
 **터미널:**
 
 ```bash
@@ -34,15 +44,9 @@ codex plugin add ouroboros@ouroboros
 
 - **Codex CLI**가 설치돼 있고 **`PATH`에 있을 것.** 위 `codex plugin ...` 명령을 셸에서 실행하므로 이 경로에서는 `PATH` 등록이 필수입니다. macOS ChatGPT 앱에 딸린 실행 파일만 있고 `PATH`에는 없다면, 그 실행 파일을 `PATH`에 올리거나([설치 절차](#codex-cli-설치) 참고) 아래 [독립 설치](#독립-설치-플러그인-없이) 경로를 쓰세요. Ouroboros setup은 앱 번들 실행 파일을 찾아낼 수 있지만, **셸은 `codex plugin` 명령을 해석하지 못합니다.**
 - 로그인된 **Codex CLI** 계정. API 키 인증도 됩니다: `printenv OPENAI_API_KEY | codex login --with-api-key`. 파일 기반 키 관리는 [`credentials.yaml`](../config-reference.md#credentialsyaml) 참고
-- **`uvx`** (uv에 포함). 플러그인의 MCP 서술자가 `uvx`로 서버를 띄웁니다 ([`.mcp.codex.json`](../../.mcp.codex.json)). 없으면 다음 중 하나로 설치하세요:
+- **`uvx`** (uv에 포함) — 위에서 설명한 대로 플러그인 MCP 서술자가 이걸로 서버를 띄웁니다
 
-  ```bash
-  pipx install uv
-  pip install --user uv
-  brew install uv          # macOS / Linuxbrew
-  ```
-
-**Python은 직접 깔지 않아도 됩니다.** `uvx`가 패키지의 `requires-python = ">=3.12"`를 보고 맞는 인터프리터를 확보합니다. 아래 독립 설치 경로의 `Python >= 3.12` 요구사항은 **이 경로에는 해당하지 않습니다.**
+아래 독립 설치 경로의 `Python >= 3.12` 요구사항은 **이 경로에는 해당하지 않습니다.**
 
 ## 독립 설치 (플러그인 없이)
 
