@@ -289,7 +289,7 @@ _telemetry_enabled() {
 }
 
 _telemetry_distinct_id() {
-  local f="$HOME/.ouroboros/telemetry.json" id="" winner_id="" tmp file_existed=false
+  local f="$HOME/.ouroboros/telemetry.json" id="" winner_id="" tmp file_existed=false lockdir wait_i
   if [ -f "$f" ]; then
     file_existed=true
     id=$(sed -n 's/.*"distinct_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$f" | head -1)
@@ -309,19 +309,52 @@ _telemetry_distinct_id() {
     #     create-if-not-exists, it fails if a concurrently-starting process
     #     (e.g. `ouroboros setup` in step 4, or another MCP session) already
     #     won, so nothing here is ever clobbered.
-    #   - `$f` present but invalid (unparseable / no distinct_id): `ln`
-    #     would refuse forever since the target already exists, permanently
-    #     wedging every process into minting its own unpersisted uuid.
-    #     Repair it instead with an atomic rename (`mv`), which replaces the
-    #     corrupt file in one step.
+    #   - `$f` present but invalid (unparseable / no distinct_id): `ln`/`mv`
+    #     alone are not enough here — every racing process would each `mv`
+    #     its own uuid over the others', with the last writer silently
+    #     winning and everyone else adopting a distinct_id different from
+    #     what they just emitted events under. Exactly one process must own
+    #     the repair. `$f.repair.lock` is the SAME lock name telemetry.py's
+    #     `_repair_state` uses (it creates the path with `O_CREAT|O_EXCL` as
+    #     a file; here `mkdir` is the atomic create-if-not-exists primitive).
+    #     Both primitives only check whether *something* already exists at
+    #     that path, regardless of type, so a shell `mkdir` and a Python
+    #     `O_EXCL` file open correctly exclude each other at the same path
+    #     (verified on macOS: whichever side creates the path first, the
+    #     other's create call fails with EEXIST).
     # Either way, every process then adopts whichever distinct_id survives
-    # in `$f` (mirrors telemetry.py's `_publish_new_state`, which now makes
-    # the same absent-vs-invalid distinction).
+    # in `$f` (mirrors telemetry.py's `_publish_new_state` / `_repair_state`,
+    # which now make the same absent-vs-invalid, lock-vs-create distinction).
     tmp="$f.$$.tmp"
     printf '{"distinct_id": "%s", "created_at": "%s", "notice_shown": false}\n' \
       "$id" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$tmp" 2>/dev/null || true
     if [ "$file_existed" = true ]; then
-      mv "$tmp" "$f" 2>/dev/null || true
+      lockdir="$f.repair.lock"
+      if mkdir "$lockdir" 2>/dev/null; then
+        # WINNER: re-validate under the lock -- another process may have
+        # repaired the file between our first read and acquiring it.
+        winner_id=$(sed -n 's/.*"distinct_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$f" 2>/dev/null | head -1)
+        [ -n "$winner_id" ] || mv "$tmp" "$f" 2>/dev/null || true
+        rmdir "$lockdir" 2>/dev/null || true
+      else
+        # LOSER: someone else owns the repair (or a stale lock). Wait,
+        # bounded, for a valid id to land.
+        winner_id=""
+        wait_i=0
+        while [ "$wait_i" -lt 10 ]; do
+          sleep 0.05
+          winner_id=$(sed -n 's/.*"distinct_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$f" 2>/dev/null | head -1)
+          [ -n "$winner_id" ] && break
+          wait_i=$((wait_i + 1))
+        done
+        if [ -z "$winner_id" ]; then
+          # Lock never cleared (stale, from a killed process) -- take over
+          # the replace ourselves rather than waiting forever, accepting
+          # the tiny remaining race.
+          mv "$tmp" "$f" 2>/dev/null || true
+          rmdir "$lockdir" 2>/dev/null || rm -f "$lockdir" 2>/dev/null || true
+        fi
+      fi
     else
       ln "$tmp" "$f" 2>/dev/null || true
     fi

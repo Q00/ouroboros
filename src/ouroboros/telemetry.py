@@ -521,6 +521,16 @@ def flush(timeout: float = 1.5) -> None:
     those are silently dropped. Callers that need delivery before exiting
     (e.g. a short-lived script that wants its one event to land) may call
     this explicitly.
+
+    The one production caller is ``mcp/detached_worker.py``'s ``main()``: a
+    detached job worker is a short-lived background process, not an
+    interactive command, and its terminal ``workflow_outcome`` event is the
+    only event the published counting rule (TELEMETRY.md) reads. Without an
+    explicit flush before that process exits, the queued event would be
+    dropped along with everything else still in flight, silently
+    undercounting every detached run. A bounded exit delay there does not
+    violate the "never blocks a command" contract above -- there is no
+    interactive command left to block by the time this runs.
     """
     try:
         deadline = time.monotonic() + timeout
@@ -671,17 +681,68 @@ _NOTICE = (
 )
 
 
+_NOTICE_MARKER_STALE_SECONDS = 10.0
+
+
+def _claim_notice_marker(marker_path: Path) -> bool:
+    """Try to become the one process that prints the first-run notice.
+
+    True means this process won the ``O_EXCL`` create and should print and
+    persist ``notice_shown``. False means someone else already holds it.
+
+    A process can crash between creating the marker and finishing the print
+    + persist step in ``show_first_run_notice``, leaving a marker behind
+    with ``notice_shown`` still false forever -- every later process would
+    then see the marker, assume a live claimer, and silently never disclose.
+    That's distinguished from an actually-live claimer by marker age: a
+    marker younger than ``_NOTICE_MARKER_STALE_SECONDS`` is plausibly still
+    mid-print (return False, don't duplicate); one older than that is crash
+    residue, so reclaim it once. A benign duplicate print is preferable to
+    silently violating the disclosure contract.
+    """
+    try:
+        fd = os.open(marker_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.close(fd)
+        return True
+    except FileExistsError:
+        pass
+    except Exception:
+        return True  # best-effort marker; don't let creation failure silence the notice forever
+
+    try:
+        age = time.time() - marker_path.stat().st_mtime
+    except Exception:
+        return False  # can't tell; assume a live claimer rather than risk a duplicate flood
+
+    if age < _NOTICE_MARKER_STALE_SECONDS:
+        return False  # a concurrent claimer is plausibly still mid-print
+
+    # Stale marker from a crashed claimer -- reclaim once. If someone else
+    # reclaims it first, they own the print and we return quietly.
+    try:
+        marker_path.unlink(missing_ok=True)
+        fd = os.open(marker_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.close(fd)
+        return True
+    except FileExistsError:
+        return False
+    except Exception:
+        return False
+
+
 def show_first_run_notice() -> None:
     """Print the one-time telemetry notice to stderr (safe for MCP stdio).
 
     Concurrent first-use processes (multiple MCP sessions starting together)
     can all read ``notice_shown=False`` before any of them has written the
     file, so the json check alone isn't enough to keep the print to once.
-    Claimed with an ``O_EXCL`` marker file instead: only the process that
-    successfully creates the marker prints, everyone else -- having lost the
-    race or found it already claimed -- returns silently. ``notice_shown``
-    is still persisted into telemetry.json as before (the installer reads
-    that field), via the now-atomic ``_write_state``.
+    Claimed via ``_claim_notice_marker`` instead. ``notice_shown`` is
+    persisted into telemetry.json as before (the installer reads that
+    field), via the now-atomic ``_write_state`` -- but only *after* printing:
+    a crash between the print and the persist leaves the flag false, so the
+    notice may print again next time (benign duplicate) rather than the flag
+    getting set with nothing ever having been shown (silent, permanent
+    non-disclosure).
     """
     try:
         if not is_enabled():
@@ -690,19 +751,14 @@ def show_first_run_notice() -> None:
         if state.get("notice_shown"):
             return
         marker_path = _state_path().with_name("telemetry.notice")
-        try:
-            fd = os.open(marker_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            os.close(fd)
-        except FileExistsError:
-            return  # another process already claimed the notice
-        except Exception:
-            pass  # best-effort marker; don't let it suppress the notice forever
+        if not _claim_notice_marker(marker_path):
+            return
 
-        state["notice_shown"] = True
-        _write_state(state)
         import sys
 
         print(f"\n{_NOTICE}\n", file=sys.stderr)
+        state["notice_shown"] = True
+        _write_state(state)
     except Exception:
         pass
 

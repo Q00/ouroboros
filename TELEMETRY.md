@@ -102,7 +102,11 @@ Notes:
   **public, write-only** project API key. Telemetry never blocks a command,
   never raises, and silently drops events when offline. The worker is a
   daemon thread, so process exit never waits on it either — events queued or
-  in flight when a process terminates are dropped, not delivered.
+  in flight when a process terminates are dropped, not delivered, with one
+  exception: the detached background-job worker explicitly flushes (bounded,
+  5s) before it exits, so the durable-job `workflow_outcome` that the
+  counting rule above depends on survives even though that worker is a
+  short-lived process with no interactive command left to keep responsive.
 
 ## Where the code lives
 

@@ -631,6 +631,87 @@ def test_installer_repairs_corrupt_telemetry_json_and_persists_events(tmp_path: 
     assert f'"distinct_id":"{repaired_id}"' in captures
 
 
+def _extract_distinct_id_function() -> str:
+    """Pull `_telemetry_distinct_id` verbatim out of install.sh.
+
+    Lets a driver script race the real repair-lock logic directly, without
+    paying for N full installer subprocess trees per concurrency test.
+    """
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    match = re.search(r"(?ms)^_telemetry_distinct_id\(\) \{.*?\n\}\n", text)
+    assert match is not None, "could not locate _telemetry_distinct_id() in install.sh"
+    return match.group(0)
+
+
+def test_concurrent_corrupt_telemetry_json_repair_converges_on_one_id(tmp_path: Path) -> None:
+    """N processes racing a corrupt telemetry.json must all adopt the SAME id.
+
+    Regression for a last-writer-wins race: an unconditional `mv` in the
+    repair path let every process that saw the corrupt file mint and persist
+    its own uuid, so different processes emitted events under different
+    distinct_ids while only the last writer's id survived on disk. The
+    repair-lock protocol (mkdir "$f.repair.lock") must make every racer
+    converge on exactly one id — whoever's file is actually on disk after
+    all of them finish.
+    """
+    home = tmp_path / "home"
+    state_dir = home / ".ouroboros"
+    state_dir.mkdir(parents=True)
+    state = state_dir / "telemetry.json"
+    state.write_text("not-json{{{\n", encoding="utf-8")
+
+    barrier = tmp_path / "go"
+    driver = tmp_path / "driver.sh"
+    driver.write_text(
+        "#!/bin/bash\nset -u\n"
+        + _extract_distinct_id_function()
+        + f"""
+while [ ! -f {shlex.quote(str(barrier))} ]; do
+  sleep 0.01
+done
+_telemetry_distinct_id
+""",
+        encoding="utf-8",
+    )
+    driver.chmod(0o755)
+
+    n_procs = 6
+    driver_env = os.environ.copy()
+    driver_env["HOME"] = str(home)
+    procs = [
+        subprocess.Popen(
+            ["bash", str(driver)],
+            env=driver_env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        for _ in range(n_procs)
+    ]
+    # All drivers are already spawned and spinning on the barrier file before
+    # it's created, so releasing them here maximizes the actual race window.
+    barrier.write_text("go", encoding="utf-8")
+
+    outputs = []
+    for proc in procs:
+        out, err = proc.communicate(timeout=10)
+        assert proc.returncode == 0, err
+        outputs.append(out.strip())
+
+    assert all(outputs), f"a driver returned an empty distinct_id: {outputs}"
+    assert len(set(outputs)) == 1, f"driver processes disagreed on distinct_id: {outputs}"
+
+    repaired = state.read_text(encoding="utf-8")
+    match = re.search(r'"distinct_id"\s*:\s*"([^"]*)"', repaired)
+    assert match is not None, repaired
+    assert match.group(1) == outputs[0], (
+        "the id every process adopted does not match what's actually persisted"
+    )
+
+    leftovers = [p.name for p in state_dir.iterdir() if p.name != "telemetry.json"]
+    assert not leftovers, f"repair left stray tmp/lock artifacts behind: {leftovers}"
+
+
 def test_fresh_install_keeps_direct_model_settings_optional() -> None:
     """The installer should start with the runtime default instead of forcing pins."""
     text = INSTALL_SH.read_text(encoding="utf-8")

@@ -453,6 +453,49 @@ class TestNotice:
         telemetry.show_first_run_notice()
         assert capsys.readouterr().err == ""
 
+    def test_recovers_from_stale_crash_marker(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+    ) -> None:
+        """A process that creates the marker then dies must not silence the
+        notice forever -- a later process should reclaim the stale marker
+        and actually disclose."""
+        monkeypatch.setenv("OUROBOROS_POSTHOG_API_KEY", "phc_test")
+        telemetry.distinct_id()  # create .ouroboros/ and telemetry.json (notice_shown=false)
+        state_dir = tmp_path / ".ouroboros"
+        marker = state_dir / "telemetry.notice"
+        marker.write_text("", encoding="utf-8")
+        stale = time.time() - telemetry._NOTICE_MARKER_STALE_SECONDS - 5
+        os.utime(marker, (stale, stale))
+
+        telemetry.show_first_run_notice()
+
+        assert "anonymous" in capsys.readouterr().err.lower()
+        state = json.loads((state_dir / "telemetry.json").read_text(encoding="utf-8"))
+        assert state["notice_shown"] is True
+
+    def test_fresh_marker_assumes_live_claimer(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+    ) -> None:
+        """A marker younger than the stale threshold is assumed to belong to
+        a concurrent process still mid-print -- do not duplicate."""
+        monkeypatch.setenv("OUROBOROS_POSTHOG_API_KEY", "phc_test")
+        telemetry.distinct_id()
+        state_dir = tmp_path / ".ouroboros"
+        marker = state_dir / "telemetry.notice"
+        marker.write_text("", encoding="utf-8")  # fresh mtime
+
+        telemetry.show_first_run_notice()
+
+        assert capsys.readouterr().err == ""
+        state = json.loads((state_dir / "telemetry.json").read_text(encoding="utf-8"))
+        assert state.get("notice_shown") is False
+
 
 class TestExitDoesNotBlock:
     """Regression for the atexit-flush blocking bug.
