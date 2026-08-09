@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 from pathlib import Path
+import shutil
 import sys
 import textwrap
 import time
@@ -537,7 +538,7 @@ class TestCodexDoctor:
         assert any("uses `url`" in failure for failure in failures)
         assert any("verifies only stdio `command` entries" in failure for failure in failures)
 
-    def test_check_auto_dispatch_surface_accepts_custom_command_mcp_entry(
+    def test_check_auto_dispatch_surface_rejects_custom_command_mcp_entry(
         self,
         tmp_path: Path,
     ) -> None:
@@ -548,7 +549,9 @@ class TestCodexDoctor:
             encoding="utf-8",
         )
 
-        assert _check_auto_dispatch_surface(codex_dir) == []
+        failures = _check_auto_dispatch_surface(codex_dir)
+
+        assert any("not a setup-supported executable" in failure for failure in failures)
 
     def test_check_auto_dispatch_surface_reports_uvx_without_mcp_extra(
         self,
@@ -760,12 +763,14 @@ class TestCodexDoctor:
         """Setup's env-selected release launcher must remain doctor-compatible."""
         codex_dir = tmp_path / ".codex"
         self._write_healthy_codex_surface(codex_dir)
+        uvx_path = shutil.which("uvx")
+        assert uvx_path is not None
         with (
             patch.object(setup_command, "_is_dev_ouroboros_build", return_value=False),
             patch.object(
                 setup_command,
                 "_codex_release_mcp_launcher",
-                return_value=("/usr/local/bin/uvx", list(setup_command._CODEX_UVX_MCP_ARGS)),
+                return_value=(uvx_path, list(setup_command._CODEX_UVX_MCP_ARGS)),
             ),
         ):
             rendered = setup_command._render_codex_mcp_section()
@@ -1141,6 +1146,44 @@ class TestCodexDoctor:
         with patch("ouroboros.cli.commands.codex.importlib.util.find_spec", return_value=object()):
             assert _check_auto_dispatch_surface(codex_dir) == []
 
+    @pytest.mark.parametrize("live_mcp", [False, True], ids=["static", "live"])
+    @pytest.mark.parametrize(
+        ("command", "args"),
+        [
+            ("/bin/true", "[]"),
+            (
+                "/bin/echo",
+                '["-m", "ouroboros", "mcp", "serve", "--runtime", "codex", '
+                '"--llm-backend", "codex"]',
+            ),
+            (
+                sys.executable,
+                '["-I", "-m", "ouroboros", "mcp", "serve", "--runtime", "claude-cli"]',
+            ),
+        ],
+    )
+    def test_check_auto_dispatch_surface_rejects_unsupported_executable_arg_pairs(
+        self,
+        tmp_path: Path,
+        live_mcp: bool,
+        command: str,
+        args: str,
+    ) -> None:
+        """Canonical-looking argv cannot authorize an unknown or modified executable."""
+        codex_dir = tmp_path / ".codex"
+        self._write_healthy_codex_surface(codex_dir)
+        (codex_dir / "config.toml").write_text(
+            f"[mcp_servers.ouroboros]\ncommand = {json.dumps(command)}\nargs = {args}\n",
+            encoding="utf-8",
+        )
+        live_probe = AsyncMock(return_value=_REQUIRED_CODEX_AUTO_TOOLS_FOR_TEST)
+
+        with patch("ouroboros.cli.commands.codex._list_stdio_mcp_tool_names", live_probe):
+            failures = _check_auto_dispatch_surface(codex_dir, live_mcp=live_mcp)
+
+        assert failures
+        live_probe.assert_not_awaited()
+
     def test_list_stdio_mcp_tool_names_uses_jsonl_protocol_without_local_mcp_import(
         self,
         tmp_path: Path,
@@ -1216,15 +1259,26 @@ class TestCodexDoctor:
 
     @pytest.mark.skipif(os.name != "posix", reason="POSIX process-group contract")
     @pytest.mark.parametrize(
-        ("ignore_sigterm", "expects_force"),
-        [(False, False), (True, True)],
-        ids=["normal-sigterm", "forced-sigkill"],
+        ("ignore_sigterm", "expects_force", "wrapper_exits"),
+        [
+            (False, False, False),
+            (True, True, False),
+            (False, False, True),
+            (True, True, True),
+        ],
+        ids=[
+            "waiting-wrapper-normal-sigterm",
+            "waiting-wrapper-forced-sigkill",
+            "exited-wrapper-normal-sigterm",
+            "exited-wrapper-forced-sigkill",
+        ],
     )
     def test_list_stdio_mcp_tool_names_cleans_up_wrapper_process_group(
         self,
         tmp_path: Path,
         ignore_sigterm: bool,
         expects_force: bool,
+        wrapper_exits: bool,
     ) -> None:
         """The live probe must reap both a launcher wrapper and its MCP child."""
         wrapper_path = tmp_path / "wrapper.py"
@@ -1292,7 +1346,7 @@ class TestCodexDoctor:
                     signal.signal(signal.SIGTERM, signal.SIG_IGN)
                 Path({str(wrapper_pid_path)!r}).write_text(str(os.getpid()), encoding="utf-8")
                 child = subprocess.Popen([sys.executable, {str(child_path)!r}])
-                child.wait()
+                {"" if wrapper_exits else "child.wait()"}
                 """
             ),
             encoding="utf-8",

@@ -9,7 +9,9 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import shutil
 import signal
+import sys
 import tomllib
 from typing import Annotated, Any, cast
 
@@ -316,6 +318,10 @@ def _check_mcp_runtime_dependency_surface(
     string_env = cast(Mapping[str, str], env)
 
     if command_name == "uvx":
+        if not _command_matches_path_program(command, "uvx"):
+            failures.append(
+                "Codex MCP uvx command does not resolve to the `uvx` executable on PATH"
+            )
         joined_args = " ".join(string_args)
         if "ouroboros-ai" in joined_args and "ouroboros-ai[mcp]" not in joined_args:
             failures.append(
@@ -432,6 +438,10 @@ def _check_mcp_runtime_dependency_surface(
         Path(command_name).stem if command_name.lower().endswith(".exe") else command_name
     )
     if normalized_command_name == "ouroboros":
+        if not _command_matches_path_program(command, "ouroboros"):
+            failures.append(
+                "Codex MCP direct command does not resolve to the `ouroboros` executable on PATH"
+            )
         _check_exact_codex_runtime_contract(
             string_args,
             string_env,
@@ -446,7 +456,7 @@ def _check_mcp_runtime_dependency_surface(
             )
         return
 
-    if tuple(string_args[:2]) == ("-m", "ouroboros"):
+    if _command_is_current_python(command):
         _check_exact_codex_runtime_contract(
             string_args,
             string_env,
@@ -459,6 +469,32 @@ def _check_mcp_runtime_dependency_surface(
                 "configured Python module environment cannot import `mcp`; install the "
                 "`ouroboros-ai[mcp]` profile before using it for Codex MCP"
             )
+        return
+
+    failures.append(
+        "Codex MCP command is not a setup-supported executable; use canonical `uvx`, "
+        "the `ouroboros` executable on PATH, or the current Python executable with "
+        "`-m ouroboros`"
+    )
+
+
+def _command_matches_path_program(command: str, program: str) -> bool:
+    """Return whether command resolves to the exact PATH-selected program."""
+    expected = shutil.which(program)
+    configured = shutil.which(command)
+    if expected is None or configured is None:
+        return False
+    try:
+        return Path(configured).resolve(strict=True) == Path(expected).resolve(strict=True)
+    except OSError:
+        return False
+
+
+def _command_is_current_python(command: str) -> bool:
+    """Match setup's exact ``sys.executable`` module launcher, without aliases."""
+    configured = os.path.normcase(os.path.abspath(os.path.expanduser(command)))
+    current = os.path.normcase(os.path.abspath(sys.executable))
+    return configured == current
 
 
 def _check_exact_codex_runtime_contract(
@@ -780,16 +816,49 @@ def _format_stdio_mcp_stderr(stderr_buffer: bytearray) -> str:
 
 
 async def _terminate_stdio_mcp_process(proc: asyncio.subprocess.Process) -> None:
-    if proc.returncode is not None:
-        return
     if proc.stdin is not None:
         proc.stdin.close()
+
+    if os.name != "posix":  # pragma: no cover - exercised by Windows CI/runtime
+        if proc.returncode is not None:
+            return
+        proc.terminate()
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=2.0)
+        except TimeoutError:
+            proc.kill()
+            await proc.wait()
+        return
+
+    process_group_id = proc.pid
     _signal_stdio_mcp_process(proc, force=False)
-    try:
-        await asyncio.wait_for(proc.wait(), timeout=2.0)
-    except TimeoutError:
+    forced = False
+    if proc.returncode is None:
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=2.0)
+        except TimeoutError:
+            forced = True
+    if not forced:
+        try:
+            await asyncio.wait_for(
+                _wait_for_stdio_mcp_process_group_exit(process_group_id), timeout=2.0
+            )
+        except TimeoutError:
+            forced = True
+    if forced:
         _signal_stdio_mcp_process(proc, force=True)
-        await proc.wait()
+        if proc.returncode is None:
+            await proc.wait()
+
+
+async def _wait_for_stdio_mcp_process_group_exit(process_group_id: int) -> None:
+    """Wait until no wrapper descendant remains in the probe's POSIX group."""
+    while True:
+        try:
+            os.killpg(process_group_id, 0)
+        except ProcessLookupError:
+            return
+        await asyncio.sleep(0.02)
 
 
 def _signal_stdio_mcp_process(proc: asyncio.subprocess.Process, *, force: bool) -> None:
