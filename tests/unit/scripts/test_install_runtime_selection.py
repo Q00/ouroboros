@@ -1911,7 +1911,8 @@ def test_all_runtime_uv_install_uses_litellm_python_range(tmp_path: Path) -> Non
     assert ("uv tool install --upgrade --python >=3.12,<3.14 . --with click>=8.1.0,<9.0.0") in calls
     assert "--with litellm==1.91.0" in calls
 
-    assert "--with claude-agent-sdk==0.2.123" in calls
+    assert "--with claude-agent-sdk==0.2.128" in calls
+    assert "--with anthropic==0.120.2" in calls
 
 
 def test_non_litellm_uv_install_retains_python_312_floor(tmp_path: Path) -> None:
@@ -2260,4 +2261,5 @@ def test_install_all_extras_match_pyproject_pins(tmp_path: Path) -> None:
 
     _assert_calls_include_pyproject_pins(calls, *_ALL_AGGREGATED_EXTRAS)
     assert "--with mcp==" not in calls
-    assert "--with claude-agent-sdk==0.2.123" in calls
+    assert "--with claude-agent-sdk==0.2.128" in calls
+    assert "--with anthropic==0.120.2" in calls
