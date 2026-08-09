@@ -83,7 +83,9 @@ The mechanical verifier runs zero-cost automated shell commands and checks the e
 
 Ouroboros does **not** ship hardcoded per-language presets. Stage 1 trusts exactly one source: `.ouroboros/mechanical.toml` in the project root. `build_mechanical_config(working_dir)` is the deterministic reader for that file — when the file is absent, every command resolves to `None` and Stage 1 skips gracefully rather than running the wrong tool.
 
-The file is written by `ouroboros.evaluation.detector`, which makes **one AI call** that inspects the project's manifest files (`pyproject.toml`, `uv.lock`, `package.json`, `Cargo.toml`, `go.mod`, `pom.xml`, `build.gradle`, `Makefile`, `justfile`, `Taskfile.yml`, `build.zig`, `CMakeLists.txt`, `mix.exs`, `Gemfile`, and others) and proposes commands for this specific repository. Each proposed command is validated before it is persisted — against the executable allowlist, against shell-operator and absolute-path injection, and against the repo itself (for example, a `cargo` command is only kept when `Cargo.toml` exists) — so the toml contains only commands the project can actually run.
+The file is written by `ouroboros.evaluation.detector`, which makes **one AI call** that inspects the project's manifest files (`pyproject.toml`, `uv.lock`, `package.json`, `Cargo.toml`, `go.mod`, `pom.xml`, `build.gradle`, `Makefile`, `justfile`, `Taskfile.yml`, `build.zig`, `CMakeLists.txt`, `mix.exs`, `Gemfile`, and others) and proposes commands for this specific repository. Each proposed command is validated before it is persisted — against the executable allowlist, against shell-operator and absolute-path injection, and against the repo itself (for example, a `cargo` command is only kept when `Cargo.toml` exists) — so the toml contains only safe, repository-supported commands.
+
+Validation stops there. `_command_is_valid()` deliberately does not consult the host `PATH` (`evaluation/detector.py:496`), so it proves the command is safe and that the repository declares it, not that the executable is installed here. A manifest-declared `pytest` command is persisted even when `pytest` is missing from the environment, and Stage 1 reports "Command not found" at run time.
 
 Generate or refresh it explicitly:
 
@@ -97,7 +99,7 @@ ouroboros detect --backend codex   # use a specific LLM backend for the detect c
 
 > **If Stage 1 always passes, this is usually why.** With no `.ouroboros/mechanical.toml` and no explicitly configured `MechanicalConfig` commands, all five checks are skipped and treated as passed, which makes Stage 1 a no-op gate.
 >
-> Reaching that state through `ouroboros run` or the MCP evaluation path takes a failure, not just a missing file. Both call `build_verification_artifacts()`, which invokes `_auto_detect_mechanical_toml()` and authors the file before reading it (`cli/commands/run.py:785`, `evaluation/verification_artifacts.py:413`, `mcp/tools/evaluation_handlers.py:724`). Stage 1 ends up empty when that best-effort detection fails — no LLM adapter, a provider error, an unwritable `.ouroboros/` — or when a caller drives the lower-level pipeline directly and skips detection. If you see the no-op symptom, look for a failed detection before running `ouroboros detect` by hand.
+> Reaching that state through `ouroboros run` or the MCP evaluation path takes a failure, not just a missing file. Both author the file before reading it, by different routes: `run` calls `build_verification_artifacts()`, which invokes `_auto_detect_mechanical_toml()` (`cli/commands/run.py:785`, `evaluation/verification_artifacts.py:413`), while the MCP evaluation handler checks `has_mechanical_toml()` and calls `ensure_mechanical_toml()` followed by `build_mechanical_config()` directly (`mcp/tools/evaluation_handlers.py:724`). The auto-detection behavior is the same; the call path is not. Stage 1 ends up empty when that best-effort detection fails — no LLM adapter, a provider error, an unwritable `.ouroboros/` — or when a caller drives the lower-level pipeline directly and skips detection. If you see the no-op symptom, look for a failed detection before running `ouroboros detect` by hand.
 
 > **Deprecated:** `detect_language()` no longer detects anything. It is a compatibility shim that reads `.ouroboros/mechanical.toml` and emits a `DeprecationWarning`; call `ensure_mechanical_toml()` plus `build_mechanical_config()` instead.
 
@@ -286,13 +288,21 @@ Stage 3 calls multiple Frontier-tier models concurrently. Each votes independent
 
 ### Simple Consensus (Default)
 
-Three models are queried in parallel. The defaults route through OpenRouter so the voters come from three different vendors:
+Three models are queried in parallel. **What those three are depends on the active LLM backend**, and the difference matters when you audit reviewer independence.
+
+**OpenRouter-capable backends.** The shipped roster routes through OpenRouter so the voters come from three different vendors:
 
 ```
 openrouter/openai/gpt-4o
 openrouter/anthropic/claude-opus-4.8
 openrouter/google/gemini-2.5-pro
 ```
+
+**Sentinel-model backends.** Codex, Kiro, Copilot, Hermes, Pi, GJC, Antigravity, Grok, and Zcode select their model through their own CLI config rather than a `--model` flag, so `get_consensus_models()` maps the shipped roster to the literal string `"default"` for all three slots (`config/loader.py:1947`, `_SENTINEL_DEFAULT_BACKENDS` at `config/loader.py:101`).
+
+`_should_use_multi_model()` treats anything that does not start with `openrouter/` as a genuine multi-model roster (`evaluation/consensus.py:313`), so `"default"` does **not** trigger the single-model perspective fallback below. On these backends Stage 3 casts three votes labeled `default`, all from the one model that backend is configured to use.
+
+> **Auditing note.** Three votes labeled `default` are not three independent reviewers. If your consensus evidence shows that, the roster was resolved to the sentinel and the votes came from one model. Set `OUROBOROS_CONSENSUS_MODELS` or `consensus.models` explicitly when you need genuine cross-vendor independence on those backends.
 
 Each returns `{ approved, confidence, reasoning }`.
 
