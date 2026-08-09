@@ -82,6 +82,15 @@ from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.job_manager import JobLinks, JobManager, JobSnapshot, JobStatus
 from ouroboros.mcp.tools._dashboard import resolve_dashboard_base_url
 from ouroboros.mcp.tools.authoring_handlers import GenerateSeedHandler, InterviewHandler
+from ouroboros.mcp.tools.auto_start_lease_store import (
+    CORRUPT_START_LEASE,
+)
+from ouroboros.mcp.tools.auto_start_lease_store import (
+    read_start_lease_locked as _read_start_lease_locked,
+)
+from ouroboros.mcp.tools.auto_start_lease_store import (
+    write_start_lease_locked as _write_start_lease_locked,
+)
 from ouroboros.mcp.tools.background import start_background_tool_job
 from ouroboros.mcp.tools.evaluation_handlers import LateralThinkHandler
 from ouroboros.mcp.tools.execution_handlers import ExecuteSeedHandler, StartExecuteSeedHandler
@@ -104,7 +113,10 @@ from ouroboros.mcp.types import (
     ToolInputType,
 )
 from ouroboros.orchestrator import resolve_agent_runtime_backend
-from ouroboros.orchestrator.heartbeat import current_process_identity, is_process_identity_alive
+from ouroboros.orchestrator.persisted_process_identity import (
+    current_persisted_process_owner,
+    persisted_process_owner_alive,
+)
 from ouroboros.persistence.event_store import EventStore
 from ouroboros.providers.factory import resolve_llm_backend
 from ouroboros.runtime.controls import load_runtime_controls
@@ -1096,6 +1108,8 @@ class StartAutoHandler:
         lease = _read_start_lease(self._store, auto_session_id)
         if lease is None:
             return None, False
+        if lease is CORRUPT_START_LEASE:
+            return _lease_conflict_error(auto_session_id, lease), False
         if _lease_is_expired(lease):
             _release_start_lease(self._store, auto_session_id, token=lease.get("token"))
             return None, True
@@ -1318,16 +1332,6 @@ def _read_start_lease(store: AutoStore, auto_session_id: str) -> dict[str, Any] 
         return _read_start_lease_locked(path)
 
 
-def _read_start_lease_locked(path: Path) -> dict[str, Any] | None:
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return None
-    except json.JSONDecodeError:
-        return None
-    return payload if isinstance(payload, dict) else None
-
-
 def _reserve_start_lease(
     store: AutoStore,
     auto_session_id: str,
@@ -1388,10 +1392,9 @@ def _release_start_lease(
 ) -> None:
     path = _start_lease_path(store, auto_session_id)
     with file_lock(path):
-        if token is not None:
-            lease = _read_start_lease_locked(path)
-            if lease is not None and lease.get("token") != token:
-                return
+        lease = _read_start_lease_locked(path)
+        if lease is None or not isinstance(token, str) or lease.get("token") != token:
+            return
         path.unlink(missing_ok=True)
 
 
@@ -1452,6 +1455,8 @@ def _validate_start_lease_payload(
             is_retriable=True,
             details={"auto_session_id": auto_session_id, "session_id": auto_session_id},
         )
+    if lease is CORRUPT_START_LEASE:
+        return _lease_conflict_error(auto_session_id, lease)
     if _lease_is_expired(lease):
         return MCPToolError(
             "Invalid start_auto lease token: lease has expired for "
@@ -1479,11 +1484,6 @@ def _validate_start_lease_payload(
     return None
 
 
-def _write_start_lease_locked(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
-
-
 def _lease_is_expired(lease: dict[str, Any]) -> bool:
     expires_at = lease.get("expires_at")
     if not isinstance(expires_at, str) or not expires_at:
@@ -1498,29 +1498,24 @@ def _lease_is_expired(lease: dict[str, Any]) -> bool:
 
 
 def _current_lease_owner() -> dict[str, Any]:
-    pid, start_time = current_process_identity()
-    return {
-        "owner_pid": pid,
-        "owner_start_time": start_time,
-    }
+    return current_persisted_process_owner()
 
 
 def _lease_owner_is_alive(lease: dict[str, Any]) -> bool:
-    pid = lease.get("owner_pid")
-    if not isinstance(pid, int):
-        # Legacy non-expiring job leases did not record an owner. Treat them as
-        # active because process-local task state cannot prove cross-process
-        # staleness.
-        return True
-    start_time = lease.get("owner_start_time")
-    if start_time is not None and not isinstance(start_time, int | float):
-        start_time = None
-    if isinstance(start_time, int | float) and start_time <= 0:
-        return False
-    return is_process_identity_alive(pid, float(start_time) if start_time is not None else None)
+    # Unknown, malformed, future-version, and legacy Linux identities cannot
+    # authorize releasing another process's durable lease.
+    return persisted_process_owner_alive(lease) is not False
 
 
 def _lease_conflict_error(auto_session_id: str, lease: dict[str, Any]) -> MCPToolError:
+    if lease is CORRUPT_START_LEASE:
+        return MCPToolError(
+            "Auto session start lease is corrupt or unreadable; refusing to replace or "
+            f"release it for auto_session_id={auto_session_id}.",
+            tool_name="ouroboros_start_auto",
+            is_retriable=True,
+            details={"auto_session_id": auto_session_id, "session_id": auto_session_id},
+        )
     mode = str(lease.get("mode") or "unknown")
     return MCPToolError(
         "Auto session already has a pending start lease: "

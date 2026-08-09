@@ -12,6 +12,64 @@ The RFC narrows itself deliberately. *Lifecycle verbs* (spawn / pause / resume /
 
 Disposable Memory is, in one sentence, the discipline that makes the slide promise *"main ledger holds only `contract_id + artifact_ref`"* survive in code.
 
+## Runtime implementation
+
+The accepted C2-C5 contract is implemented by these production surfaces:
+
+- `core/disposable_memory.py` defines the frozen, extra-forbidden result
+  envelope. It has no body or transcript field and is capped by regression
+  tests at less than 4 KiB.
+- `persistence/artifact_store.py` stores canonical JSON bodies under
+  `.ouroboros/artifacts/<sha256-prefix>/<sha256>.json`, binds them to durable
+  per-contract manifests, verifies hashes on every explicit fetch, rejects
+  Python values that cannot round-trip as JSON, and refuses contract reuse for
+  different content. Per-contract manifests, binding files, and
+  `.tombstoned` files are recoverable projections. Initial contract records
+  and immutable lifecycle genesis/epoch records live in the stable parent.
+  A separately committed expected sequence/head digest makes missing tails
+  fail closed; retention and terminal transitions are content-addressed and
+  hash chained, so projection rollback, substitution, or a crash between
+  authority and projection publication is repaired or rejected before replay
+  or GC. An epoch is published before its expected head, allowing a uniquely
+  validated successor left by a crash to advance the head during recovery.
+- `orchestrator/disposable_memory.py` runs child work through `AgentProcess`,
+  serializes each contract's effects with a cross-process lock, persists the
+  body before completion, and returns only the bounded envelope. Ordinary retry
+  recovery reads only the manifest envelope; default replay reads the artifact,
+  and explicit force-rerun requires a new contract id.
+- The shipped MCP composition routes terminal `ouroboros_submit_fanout_results`
+  synthesis through that service. Complete fan-out bodies live only in the
+  project-local artifact store; the tool response and EventStore receive the
+  bounded envelope. The disposable contract binds the fan-out record and
+  canonical validated terminal inputs: an identical retry returns the existing
+  envelope without synthesis, while changed child results allocate a distinct
+  contract and cannot receive a stale artifact.
+- `ouroboros artifacts fetch|replay|prune` exposes explicit inspection and
+  dry-run-first GC. `prune --apply` writes a tombstone for every referencing
+  contract before deleting a shared blob.
+
+The encoded JSON artifact limit is exactly 1 MiB: 1,048,576 bytes is accepted
+and the next byte is rejected. The 1 MiB regression fixture also proves that
+the EventStore row and caller envelope remain below 4 KiB and contain no body
+substring. A global cross-process file lock serializes reference publication
+with pruning, while per-contract locks prevent overlapping retry deliveries
+from dispatching child effects twice. Required store directories are created one
+component at a time from a pinned project/store anchor; the final directory
+handle stays held across lock acquisition and publication. Windows retains a
+no-share-delete lease for every ancestor. Failed in-place manifest publication
+restores the prior file through the pinned directory handle before reporting
+failure. Applied prune pins the digest directory, revalidates the planned body
+inode and size through that handle, and performs a directory-relative unlink.
+Malformed manifests abort GC fail-closed.
+
+The authority boundary follows the RFC's cooperative local trust model.
+Manifest and cache corruption is untrusted and must fail closed or recover from
+the stable authority. An actor able to coherently roll back the stable expected
+head together with its matching lifecycle tail and every projection, delete or
+replace the stable authority itself, or restore the whole project to an older
+filesystem snapshot is outside this local store's security contract; detecting
+that requires an external rollback-resistant counter or journal.
+
 ## Scope
 
 This document **does** decide:
@@ -61,11 +119,17 @@ This RFC does **not** add a Python `multiprocessing` or `os.fork` layer.
   ab/                          # 2-level prefix avoids huge directories
     abc123<sha256>.json        # content-addressed result envelope body
   contracts/
-    01HXAB.../
+    <sha256(contract_id)>/       # portable; raw ID remains inside the manifest
       events.json              # optional per-contract event dump/manifest
 ```
 
 `artifact_ref = "sha256:abc123..."` (matches the result envelope shape in [#511](https://github.com/Q00/ouroboros/issues/511) D2). Event dumps are keyed by `contract_id`, not by body hash, so content dedup never overwrites per-contract history.
+The public contract ID remains byte-for-byte in the manifest and envelope, but
+its filesystem directory is the lowercase SHA-256 of that ID. This avoids
+Windows reserved/invalid components and case-insensitive aliasing without
+changing semantic identity. The raw-directory layout existed only on unmerged
+development snapshots; it is rejected fail-closed rather than auto-migrated,
+because case-colliding legacy directories cannot be migrated unambiguously.
 
 **Why content-addressed FS.**
 - **Auto-dedup.** Identical sub-agent results across contracts collapse to one file.
@@ -83,6 +147,8 @@ This RFC does **not** add a Python `multiprocessing` or `os.fork` layer.
 ouroboros artifacts prune              # dry-run; prints what would be deleted
 ouroboros artifacts prune --apply      # actually delete
 ouroboros artifacts prune --ttl 30d    # override default TTL of 90 days
+ouroboros artifacts fetch CONTRACT_ID  # explicit body fetch + hash verification
+ouroboros artifacts replay CONTRACT_ID # deterministic read; never re-executes
 ```
 
 **Algorithm.**
@@ -185,4 +251,10 @@ sequenceDiagram
 
 ## Rollback
 
-Docs PR with no runtime impact. Rollback = revert the docs PR. The proposal comment in [#512](https://github.com/Q00/ouroboros/issues/512) remains as the working draft.
+This RFC is implemented by the artifact store, `DisposableMemory` orchestration,
+artifact CLI commands, and MCP fan-out synthesis. A rollback must disable the
+executable fan-out registration before reverting those runtime surfaces; it must
+not restore inline child bodies. Existing `.ouroboros/artifacts` data can remain
+on disk for explicit fetch/replay or be removed later through the dry-run-first
+prune command. The proposal comment in [#512](https://github.com/Q00/ouroboros/issues/512)
+remains the design record.

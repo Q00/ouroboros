@@ -7,6 +7,7 @@ from pathlib import Path
 import subprocess
 import sys
 
+import pytest
 import yaml
 
 from ouroboros.skills.artifacts import resolve_packaged_skills_dir
@@ -183,7 +184,7 @@ def test_codex_plugin_manifest_starts_a_codex_composed_mcp_server() -> None:
         "command": "uvx",
         "args": [
             "--from",
-            "ouroboros-ai[mcp,claude]",
+            "ouroboros-ai[mcp]",
             "ouroboros",
             "mcp",
             "serve",
@@ -196,6 +197,20 @@ def test_codex_plugin_manifest_starts_a_codex_composed_mcp_server() -> None:
     assert (repo_root / "skills" / "config" / "SKILL.md").is_file()
     assert (repo_root / "skills" / "ooo" / "SKILL.md").is_file()
     assert (repo_root / ".claude-plugin" / "skills" / "config" / "SKILL.md").is_file()
+
+
+def test_fanout_synthesis_fetch_contract_is_shipped_to_every_host() -> None:
+    """Every MCP-only host must be able to consume a completed fan-out."""
+    repo_root = Path(__file__).resolve().parents[3]
+
+    for skill_root in (repo_root / "skills", repo_root / ".claude-plugin" / "skills"):
+        skill_path = skill_root / "interview" / "SKILL.md"
+        content = skill_path.read_text(encoding="utf-8")
+        assert "A complete set returns a bounded artifact envelope" in content, skill_path
+        assert "`ouroboros_fetch_artifact` with its `contract_id`" in content, skill_path
+        assert "correlated synthesis in the fetched `body`" in content, skill_path
+        assert "Continue the interview from the fetched synthesis" in content, skill_path
+        assert "Continue the interview from the returned synthesis" not in content, skill_path
 
 
 def test_shipped_skill_metadata_never_claims_claude_reserved_command_names() -> None:
@@ -262,7 +277,8 @@ def test_first_use_onboarding_has_host_specific_model_settings_handoffs() -> Non
     assert "../setup/SKILL.md" in claude_welcome
     assert "previously completed welcome must never hide the setup gate" in claude_welcome
     assert "runtime_backend: claude" in claude_welcome
-    assert '"ouroboros"' in claude_welcome
+    assert "marketplace plugin owns its MCP capability" in claude_welcome
+    assert 'python3 - "$HOME/.ouroboros/config.yaml" "$HOME/.claude/mcp.json"' not in claude_welcome
     for codex_only_phrase in (
         "CODEX_SETUP_REQUIRED",
         "LEGACY_CODEX_MODEL_MIGRATION_REQUIRED",
@@ -652,18 +668,15 @@ def test_codex_legacy_gpt5_migration_gate_targets_legacy_and_partial_migration(
     )
 
 
-def test_claude_setup_gate_accepts_reordered_yaml_and_json_mcp_key(tmp_path: Path) -> None:
-    """Claude's mirrored first-use gate uses the same structural YAML check."""
+def test_claude_setup_gate_accepts_default_sdk_without_host_mcp_file(tmp_path: Path) -> None:
+    """Default SDK setup is ready without the host-owned Claude MCP file."""
     repo_root = Path(__file__).resolve().parents[3]
     config_path = tmp_path / ".ouroboros" / "config.yaml"
-    mcp_path = tmp_path / ".claude" / "mcp.json"
     config_path.parent.mkdir()
-    mcp_path.parent.mkdir()
     config_path.write_text(
         """llm:\n  qa_model: claude\n  backend: claude\norchestrator:\n  retries: 3\n  timeout: 20\n  runtime_backend: claude\n""",
         encoding="utf-8",
     )
-    mcp_path.write_text('{"mcpServers": {"ouroboros": {"command": "ouroboros"}}}', encoding="utf-8")
     skill = (repo_root / ".claude-plugin" / "skills" / "welcome" / "SKILL.md").read_text(
         encoding="utf-8"
     )
@@ -674,19 +687,16 @@ def test_claude_setup_gate_accepts_reordered_yaml_and_json_mcp_key(tmp_path: Pat
     assert _run_setup_gate(gate, home=tmp_path) == "SETUP_READY"
 
 
-def test_claude_setup_gate_accepts_yaml_flow_mappings(tmp_path: Path) -> None:
-    """Claude's mirrored gate accepts valid YAML flow mappings too."""
+@pytest.mark.parametrize("runtime_backend", ["claude", "claude_mcp"])
+def test_claude_setup_gate_accepts_yaml_flow_mappings_without_host_mcp_file(
+    tmp_path: Path, runtime_backend: str
+) -> None:
+    """Both shipped Claude profiles are ready from durable config alone."""
     repo_root = Path(__file__).resolve().parents[3]
     config_path = tmp_path / ".ouroboros" / "config.yaml"
-    mcp_path = tmp_path / ".claude" / "mcp.json"
     config_path.parent.mkdir()
-    mcp_path.parent.mkdir()
     config_path.write_text(
-        "orchestrator: {runtime_backend: claude}\nllm: {backend: claude}\n",
-        encoding="utf-8",
-    )
-    mcp_path.write_text(
-        '{"mcpServers": {"ouroboros": {"command": "ouroboros"}}}',
+        f"orchestrator: {{runtime_backend: {runtime_backend}}}\nllm: {{backend: claude}}\n",
         encoding="utf-8",
     )
     skill = (repo_root / ".claude-plugin" / "skills" / "welcome" / "SKILL.md").read_text(
@@ -699,18 +709,44 @@ def test_claude_setup_gate_accepts_yaml_flow_mappings(tmp_path: Path) -> None:
     assert _run_setup_gate(gate, home=tmp_path) == "SETUP_READY"
 
 
-def test_claude_setup_gate_rejects_empty_mcp_server_mapping(tmp_path: Path) -> None:
-    """Claude mirror uses the same minimum MCP server structural check."""
+def test_claude_completed_welcome_precheck_is_idempotent_without_host_mcp_file(
+    tmp_path: Path,
+) -> None:
+    """A completed SDK setup does not reopen onboarding when mcp.json is absent."""
     repo_root = Path(__file__).resolve().parents[3]
     config_path = tmp_path / ".ouroboros" / "config.yaml"
-    mcp_path = tmp_path / ".claude" / "mcp.json"
     config_path.parent.mkdir()
-    mcp_path.parent.mkdir()
+    (tmp_path / ".ouroboros" / "prefs.json").write_text(
+        '{"welcomeCompleted": "2026-08-09"}\n', encoding="utf-8"
+    )
     config_path.write_text(
         "orchestrator:\n  runtime_backend: claude\nllm:\n  backend: claude\n",
         encoding="utf-8",
     )
-    mcp_path.write_text('{"mcpServers": {"ouroboros": {}}}', encoding="utf-8")
+    skill = (repo_root / ".claude-plugin" / "skills" / "welcome" / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
+    precheck_context = skill.index("Before honoring that completion marker")
+    start = skill.index('if python3 - "$HOME/.ouroboros/config.yaml"', precheck_context)
+    gate = skill[start : skill.index("\n```", start)] + '\nprintf "%s" "${SETUP_READY:-}"\n'
+
+    assert _run_setup_gate(gate, home=tmp_path) == "true"
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        "orchestrator:\n  runtime_backend: codex\nllm:\n  backend: claude\n",
+        "orchestrator:\n  runtime_backend: claude\nllm:\n  backend: codex\n",
+        "orchestrator:\n  runtime_backend: claude\n",
+    ],
+)
+def test_claude_setup_gate_rejects_incomplete_runtime_config(tmp_path: Path, config: str) -> None:
+    """Removing the MCP-file requirement does not accept unrelated config."""
+    repo_root = Path(__file__).resolve().parents[3]
+    config_path = tmp_path / ".ouroboros" / "config.yaml"
+    config_path.parent.mkdir()
+    config_path.write_text(config, encoding="utf-8")
     skill = (repo_root / ".claude-plugin" / "skills" / "welcome" / "SKILL.md").read_text(
         encoding="utf-8"
     )
@@ -721,30 +757,22 @@ def test_claude_setup_gate_rejects_empty_mcp_server_mapping(tmp_path: Path) -> N
     assert _run_setup_gate(gate, home=tmp_path) == "SETUP_REQUIRED"
 
 
-def test_claude_setup_gate_rejects_blank_mcp_endpoint_values(tmp_path: Path) -> None:
-    """Claude mirror must not accept blank command/url endpoint strings."""
+def test_welcome_surfaces_describe_default_claude_sdk_profile() -> None:
     repo_root = Path(__file__).resolve().parents[3]
-    config_path = tmp_path / ".ouroboros" / "config.yaml"
-    mcp_path = tmp_path / ".claude" / "mcp.json"
-    config_path.parent.mkdir()
-    mcp_path.parent.mkdir()
-    config_path.write_text(
-        "orchestrator:\n  runtime_backend: claude\nllm:\n  backend: claude\n",
-        encoding="utf-8",
-    )
-    skill = (repo_root / ".claude-plugin" / "skills" / "welcome" / "SKILL.md").read_text(
+    expected = "Ordinary Claude setup uses the default `[claude]` Agent SDK profile on MCP 1.x."
+
+    for relative_path in (
+        Path("skills/welcome/SKILL.md"),
+        Path(".claude-plugin/skills/welcome/SKILL.md"),
+    ):
+        content = (repo_root / relative_path).read_text(encoding="utf-8")
+        assert expected in content
+        assert "Ordinary Claude setup uses the dependency-free CLI profile" not in content
+
+    plugin_welcome = (repo_root / ".claude-plugin" / "skills" / "welcome" / "SKILL.md").read_text(
         encoding="utf-8"
     )
-    setup_gate_start = skill.index("### Setup Gate: First Use")
-    start = skill.index('if python3 - "$HOME/.ouroboros/config.yaml"', setup_gate_start)
-    gate = skill[start : skill.index("\n```", start)]
-
-    for payload in (
-        {"mcpServers": {"ouroboros": {"command": ""}}},
-        {"mcpServers": {"ouroboros": {"url": "   "}}},
-    ):
-        mcp_path.write_text(json.dumps(payload), encoding="utf-8")
-        assert _run_setup_gate(gate, home=tmp_path) == "SETUP_REQUIRED"
+    assert 'python3 - "$HOME/.ouroboros/config.yaml" "$HOME/.claude/mcp.json"' not in plugin_welcome
 
 
 def test_resolve_packaged_skills_dir_falls_back_to_repo_root_bundle_when_package_is_stub(

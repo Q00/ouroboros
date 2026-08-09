@@ -66,7 +66,7 @@ backend name:
 
 - `ouroboros setup --runtime gemini`
 - `ouroboros config backend gemini`
-- `ouroboros mcp serve --llm-backend gemini`
+- `ouroboros mcp serve --runtime gemini --llm-backend gemini`
 - `ouroboros init --llm-backend gemini`
 
 ## Headless contract

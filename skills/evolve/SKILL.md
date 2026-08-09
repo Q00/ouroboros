@@ -131,7 +131,7 @@ If MCP tools are not available, explain the evolutionary loop concept and
 suggest installing the Ouroboros MCP server. See [Getting Started](docs/getting-started.md) for install options, then run:
 
 ```
-ouroboros mcp serve
+ouroboros mcp serve --runtime claude-cli
 ```
 
 Then add to your runtime's MCP configuration (e.g., `~/.claude/mcp.json` for Claude Code).

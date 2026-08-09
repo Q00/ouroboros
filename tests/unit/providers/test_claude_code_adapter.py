@@ -1026,7 +1026,7 @@ class TestJsonSchemaHandling:
         production.
 
         Skipped when ``claude-agent-sdk`` is not installed — the SDK is
-        an optional extra (``ouroboros-ai[claude]``) and the rest of
+        an optional extra (``ouroboros-ai[claude-sdk]``) and the rest of
         this file mocks ``sys.modules['claude_agent_sdk']`` so it does
         not require the real package.  This particular invariant only
         matters when the real package IS installed; otherwise there is

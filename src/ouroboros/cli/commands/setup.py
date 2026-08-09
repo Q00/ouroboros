@@ -30,12 +30,22 @@ import sys
 import tomllib
 from typing import Annotated, Literal
 
+from rich.markup import escape
 from rich.prompt import Prompt
 from rich.table import Table
 import typer
 import yaml
 
 from ouroboros.bigbang.brownfield import scan_and_register, set_default_repo
+from ouroboros.cli.commands.claude_setup import (
+    setup_claude as _setup_claude,
+)
+from ouroboros.cli.commands.claude_setup import (
+    setup_claude_cli as _setup_claude_cli,
+)
+from ouroboros.cli.commands.claude_setup import (
+    setup_claude_sdk as _setup_claude_sdk,
+)
 from ouroboros.cli.formatters import console
 from ouroboros.cli.formatters.panels import (
     print_error,
@@ -56,8 +66,18 @@ from ouroboros.cli.opencode_config import (
 from ouroboros.cli.opencode_config import (
     is_bridge_plugin_entry as _is_bridge_plugin_entry,
 )
+from ouroboros.cli.setup_model_config import (
+    has_explicit_codex_model_override as _has_explicit_codex_model_override,
+)
+from ouroboros.cli.setup_model_config import (
+    is_shipped_default_roster as _is_shipped_default_roster,
+)
+from ouroboros.cli.setup_model_config import (
+    neutralize_fresh_codex_model_defaults as _neutralize_fresh_codex_model_defaults,
+)
 from ouroboros.codex.cli_policy import resolve_codex_cli_path
 from ouroboros.codex.home import resolve_codex_home
+from ouroboros.codex.runtime_profile import codex_uses_profile_v2 as _shared_codex_uses_profile_v2
 from ouroboros.config._model_defaults import (
     DEFAULT_CONSENSUS_OPUS_MODEL,
     DEFAULT_OPUS_MODEL,
@@ -65,6 +85,10 @@ from ouroboros.config._model_defaults import (
     recognized_shipped_defaults,
 )
 from ouroboros.core.errors import ConfigError
+from ouroboros.package_profiles import (
+    UNSUPPORTED_CLAUDE_SDK_MCP_MESSAGE,
+    has_unsupported_claude_sdk_mcp_mix,
+)
 from ouroboros.persistence.brownfield import BrownfieldStore
 
 
@@ -170,7 +194,7 @@ def _commit_runtime_activation(
 
 
 def _ensure_claude_mcp_entry() -> None:
-    """Fail closed for the standalone Claude SDK profile.
+    """Explain the process boundary for legacy callers.
 
     Kept as a compatibility shim for callers from older plugin artifacts. The
     current Claude Agent SDK requires MCP 1.x, while the Ouroboros protocol
@@ -178,8 +202,10 @@ def _ensure_claude_mcp_entry() -> None:
     isolated process. Never mutate user-owned Claude MCP configuration here.
     """
     print_warning(
-        "Skipped Ouroboros MCP registration for the standalone Claude SDK profile. "
-        "Use a supported CLI-backed runtime setup for the isolated MCP 2 server."
+        escape(
+            "Claude SDK stays on MCP 1.x. Launch the Ouroboros MCP 2 server from "
+            "the separate ouroboros-ai[mcp] profile with --runtime claude-cli."
+        )
     )
 
 
@@ -200,7 +226,10 @@ def _get_current_backend() -> str | None:
         return None
     try:
         data = yaml.safe_load(config_path.read_text()) or {}
-        return data.get("orchestrator", {}).get("runtime_backend")
+        backend = data.get("orchestrator", {}).get("runtime_backend")
+        if backend == "claude_mcp":
+            return "claude-cli"
+        return backend
     except Exception:
         return None
 
@@ -219,6 +248,16 @@ def _resolve_setup_codex_cli_path(
     ).cli_path
 
 
+def _runtime_cli_from_env(env_key: str, command_name: str) -> str | None:
+    """Resolve an explicit runtime executable before consulting PATH."""
+    configured = os.environ.get(env_key, "").strip()
+    if configured:
+        resolved = shutil.which(str(Path(configured).expanduser()))
+        return str(Path(resolved).absolute()) if resolved is not None else None
+    resolved = shutil.which(command_name)
+    return str(Path(resolved).absolute()) if resolved is not None else None
+
+
 def _detect_runtimes() -> dict[str, str | None]:
     """Detect available runtime CLIs in PATH.
 
@@ -226,10 +265,12 @@ def _detect_runtimes() -> dict[str, str | None]:
     and persisted orchestrator ``*_cli_path`` settings so users with non-PATH
     installs are still detected.
     """
-    runtimes: dict[str, str | None] = {}
-    for name in ("claude", "codex", "opencode", "hermes"):
-        path = shutil.which(name)
-        runtimes[name] = path
+    runtimes: dict[str, str | None] = {
+        "claude": _runtime_cli_from_env("OUROBOROS_CLI_PATH", "claude"),
+        "codex": shutil.which("codex"),
+        "opencode": _runtime_cli_from_env("OUROBOROS_OPENCODE_CLI_PATH", "opencode"),
+        "hermes": _runtime_cli_from_env("OUROBOROS_HERMES_CLI_PATH", "hermes"),
+    }
 
     # Codex: mirror the shared runtime launch resolver so setup persists the
     # executable that nested execution will actually use.
@@ -476,37 +517,6 @@ _CODEX_DEFAULT_LLM_ROLE_PROFILES: dict[str, str] = {
     "agent_runtime_interview": "deep",
     "agent_runtime_coordinator": "standard",
     "agent_runtime_evaluation": "deep",
-}
-
-_DEFAULT_CONSENSUS_MODELS = (
-    "openrouter/openai/gpt-4o",
-    DEFAULT_CONSENSUS_OPUS_MODEL,
-    "openrouter/google/gemini-2.5-pro",
-)
-
-_MISSING = object()
-
-_CODEX_ROLE_MODEL_OVERRIDE_DEFAULTS: dict[str, tuple[tuple[tuple[str, ...], object], ...]] = {
-    "ambiguity": ((("clarification", "default_model"), DEFAULT_OPUS_MODEL),),
-    "assertion_extraction": ((("evaluation", "assertion_extraction_model"), DEFAULT_SONNET_MODEL),),
-    "brownfield_explore": ((("clarification", "default_model"), DEFAULT_OPUS_MODEL),),
-    "clarification": ((("clarification", "default_model"), DEFAULT_OPUS_MODEL),),
-    "consensus_advocate": ((("consensus", "advocate_model"), DEFAULT_CONSENSUS_OPUS_MODEL),),
-    "consensus_judge": ((("consensus", "judge_model"), "openrouter/google/gemini-2.5-pro"),),
-    "consensus_vote": ((("consensus", "models"), _DEFAULT_CONSENSUS_MODELS),),
-    "context_compression": ((("llm", "context_compression_model"), "gpt-4"),),
-    "dependency_analysis": ((("llm", "dependency_analysis_model"), DEFAULT_SONNET_MODEL),),
-    "mechanical_detection": ((("evaluation", "assertion_extraction_model"), DEFAULT_SONNET_MODEL),),
-    "ontology_analysis": (
-        (("llm", "ontology_analysis_model"), DEFAULT_SONNET_MODEL),
-        (("consensus", "devil_model"), "openrouter/openai/gpt-4o"),
-    ),
-    "pm_interview": ((("clarification", "default_model"), DEFAULT_OPUS_MODEL),),
-    "qa": ((("llm", "qa_model"), DEFAULT_SONNET_MODEL),),
-    "reflect": ((("resilience", "reflect_model"), DEFAULT_OPUS_MODEL),),
-    "seed_generation": ((("clarification", "default_model"), DEFAULT_OPUS_MODEL),),
-    "semantic_evaluation": ((("evaluation", "semantic_model"), DEFAULT_OPUS_MODEL),),
-    "wonder": ((("resilience", "wonder_model"), DEFAULT_OPUS_MODEL),),
 }
 
 
@@ -1141,43 +1151,7 @@ def _upsert_codex_mcp_section(raw: str, section: str) -> tuple[str, bool]:
 
 def _codex_uses_profile_v2(codex_path: str | None = None) -> bool:
     """Return whether ``codex --profile`` expects ``<name>.config.toml`` files."""
-    if codex_path is None:
-        return False
-
-    command = codex_path or "codex"
-    try:
-        result = subprocess.run(
-            [command, "--help"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            check=False,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-        return False
-
-    help_text = f"{result.stdout}\n{result.stderr}"
-    lines = help_text.splitlines()
-    for index, line in enumerate(lines):
-        if "--profile-v2" in line:
-            continue
-        if "--profile" not in line:
-            continue
-
-        description_lines: list[str] = []
-        for description_line in lines[index + 1 :]:
-            stripped = description_line.strip()
-            if stripped.startswith("-") or stripped.startswith("--"):
-                break
-            if stripped:
-                description_lines.append(stripped)
-        return any(
-            "Layer $CODEX_HOME/<name>.config.toml on top of the base user config"
-            in description_line
-            for description_line in description_lines
-        )
-
-    return False
+    return _shared_codex_uses_profile_v2(codex_path, run_command=subprocess.run) is True
 
 
 def _register_codex_mcp_server(
@@ -2107,41 +2081,6 @@ def _ensure_codex_profile_provider_mapping(profile: dict) -> dict:
     return provider_config
 
 
-def _get_nested_value(config_dict: dict, path: tuple[str, ...]) -> object:
-    """Read a nested config value, returning _MISSING when absent."""
-    current: object = config_dict
-    for part in path:
-        if not isinstance(current, dict) or part not in current:
-            return _MISSING
-        current = current[part]
-    return current
-
-
-def _has_explicit_codex_model_override(config_dict: dict, role: str) -> bool:
-    """Return True only when an existing legacy setting is a real user pin.
-
-    Default configs serialize their legacy model fields, including values from
-    prior shipped releases.  Field presence is consequently not provenance:
-    match the loader's shipped-default classification before deciding a field
-    should suppress the role's Codex effort profile.
-    """
-    for path, default in _CODEX_ROLE_MODEL_OVERRIDE_DEFAULTS.get(role, ()):
-        value = _get_nested_value(config_dict, path)
-        if value is _MISSING:
-            continue
-        if isinstance(default, str) and value in recognized_shipped_defaults(default):
-            continue
-        if (
-            isinstance(default, tuple)
-            and isinstance(value, (list, tuple))
-            and _is_shipped_default_roster(value, default)
-        ):
-            continue
-        if value != default:
-            return True
-    return False
-
-
 def _install_codex_default_llm_profiles(
     config_dict: dict,
     *,
@@ -2668,7 +2607,12 @@ def _config_execute_runtime_backend(config_dict: dict) -> str:
     return "codex" if backend.strip().lower() in {"codex", "codex_cli"} else backend
 
 
-def _setup_codex(codex_path: str, *, mcp_mode: CodexMcpMode = "auto") -> bool:
+def _setup_codex(
+    codex_path: str,
+    *,
+    mcp_mode: CodexMcpMode = "auto",
+    preserve_existing_llm: bool = False,
+) -> bool:
     """Configure Ouroboros for the Codex runtime."""
     from ouroboros.config.loader import ensure_config_dir, get_default_config
     from ouroboros.config.models import get_config_dir, get_default_credentials
@@ -2718,13 +2662,19 @@ def _setup_codex(codex_path: str, *, mcp_mode: CodexMcpMode = "auto") -> bool:
 
     try:
         previous_execute_backend = _config_execute_runtime_backend(config_dict)
-        # Set runtime and LLM backend to codex
+        # Runtime integration and authoring/evaluation provider selection are
+        # independent. Interactive setup keeps its historical behavior, while
+        # updater-driven refreshes preserve an explicitly split LLM backend.
         orchestrator_config = _ensure_mapping_section(config_dict, "orchestrator")
         orchestrator_config["runtime_backend"] = "codex"
         orchestrator_config["codex_cli_path"] = codex_path
 
         llm_config = _ensure_mapping_section(config_dict, "llm")
-        llm_config["backend"] = "codex"
+        if not preserve_existing_llm or fresh_config or not llm_config.get("backend"):
+            llm_config["backend"] = "codex"
+
+        if fresh_config:
+            _neutralize_fresh_codex_model_defaults(config_dict)
 
         added_profiles, updated_profiles, added_role_profiles = _install_codex_default_llm_profiles(
             config_dict,
@@ -3388,25 +3338,6 @@ def _apply_copilot_default_model(
             section[key] = list(model_roster)
 
 
-def _is_shipped_default_roster(
-    current: list | tuple,
-    shipped_roster: tuple[str, ...],
-) -> bool:
-    """True when ``current`` is a shipped default roster (current or legacy).
-
-    Element-wise match against ``recognized_shipped_defaults`` so a roster
-    persisted before a pin bump (e.g. the old OpenRouter Opus slug in the
-    consensus slot) is still recognized as an untouched shipped default.
-    """
-    current_tuple = tuple(current)
-    if len(current_tuple) != len(shipped_roster):
-        return False
-    return all(
-        str(candidate) in recognized_shipped_defaults(default)
-        for candidate, default in zip(current_tuple, shipped_roster, strict=True)
-    )
-
-
 def _setup_copilot(copilot_path: str, *, non_interactive: bool = False) -> bool:
     """Configure Ouroboros for the GitHub Copilot CLI runtime.
 
@@ -3950,47 +3881,6 @@ def _setup_goose(goose_path: str) -> None:
     print_info(f"Config saved to: {config_path}")
 
 
-def _setup_claude(claude_path: str) -> None:
-    """Configure Ouroboros for the Claude Code runtime."""
-    from ouroboros.config.loader import create_default_config, ensure_config_dir
-
-    config_dir = ensure_config_dir()
-    config_path = config_dir / "config.yaml"
-
-    if config_path.exists():
-        config_dict = yaml.safe_load(config_path.read_text()) or {}
-    else:
-        create_default_config(config_dir)
-        config_dict = yaml.safe_load(config_path.read_text()) or {}
-
-    # Set runtime and LLM backend to claude
-    config_dict.setdefault("orchestrator", {})
-    config_dict["orchestrator"]["runtime_backend"] = "claude"
-    config_dict["orchestrator"]["cli_path"] = claude_path
-
-    config_dict.setdefault("llm", {})
-    config_dict["llm"]["backend"] = "claude"
-
-    with config_path.open("w") as f:
-        yaml.dump(config_dict, f, default_flow_style=False, sort_keys=False)
-
-    # Do not register the isolated MCP 2 server with this Claude SDK profile.
-    # The protocol server excludes ``claude-agent-sdk`` (it pins MCP 1.x), and
-    # the persisted *runtime* backend below still requires it — a registration
-    # here would boot and then fail lazily on execution tools. The *LLM* half of
-    # that dependency is gone as of Q00/ouroboros#1839 (``ClaudeCodeAdapter``
-    # falls back to the ``claude`` CLI), so lifting this skip now needs the same
-    # fallback on ``ClaudeAgentAdapter``, not a change here.
-    print_warning(
-        "Skipped Ouroboros MCP registration for the standalone Claude SDK profile: "
-        "its MCP 1.x runtime cannot share the isolated MCP 2 server process. "
-        "Use a supported CLI-backed runtime setup to register the MCP server."
-    )
-
-    print_success(f"Configured Claude Code runtime (CLI: {claude_path})")
-    print_info(f"Config saved to: {config_path}")
-
-
 def _strip_jsonc(text: str) -> str:
     """Strip JSONC features (comments, trailing commas) to produce valid JSON.
 
@@ -4217,12 +4107,10 @@ def _atomic_write_text(
     mode: int | None = None,
     expected_current: _PathSnapshot | None = None,
 ) -> _PathSnapshot:
-    """Write *content* to *path* atomically — temp file + ``os.replace``.
+    """Write *content* atomically through a temp file and ``os.replace``.
 
-    Readers always see either the pre-existing file or the final content —
-    never a truncated partial.  Caller is expected to have created
-    ``path.parent`` already.  Raises :class:`OSError` on failure; callers
-    decide how to surface that.
+    Readers see either the previous file or the final content, never partial
+    bytes. Raises :class:`OSError` on failure for callers to surface.
     """
     import os
     import tempfile
@@ -4240,17 +4128,19 @@ def _atomic_write_text(
         dir=str(write_path.parent),
     )
     try:
-        os.fchmod(fd, mode)
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
+        if hasattr(os, "fchmod"):
+            os.fchmod(fd, mode)
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
             f.write(content)
+        try:
+            os.chmod(tmp_name, mode)
+        except OSError:
+            pass  # e.g. Windows FAT — not fatal
+        actual_mode = stat.S_IMODE(Path(tmp_name).lstat().st_mode)
         if expected_current is not None:
             _require_path_snapshot(path, expected_current)
         os.replace(tmp_name, write_path)
-        try:
-            os.chmod(write_path, mode)
-        except OSError:
-            pass  # e.g. Windows FAT — not fatal
-        return _PathSnapshot(kind="file", mode=mode, contents=content.encode("utf-8"))
+        return _PathSnapshot(kind="file", mode=actual_mode, contents=content.encode("utf-8"))
     except OSError:
         try:
             os.close(fd)
@@ -4724,7 +4614,7 @@ def setup(
         typer.Option(
             "--runtime",
             "-r",
-            help="Runtime backend to configure (claude, codex, opencode, hermes, gemini, goose, kiro, copilot, pi, gjc, antigravity, grok, zcode).",
+            help="Runtime backend to configure (claude, claude-sdk, claude-cli, codex, opencode, hermes, gemini, goose, kiro, copilot, pi, gjc, antigravity, grok, zcode).",
         ),
     ] = None,
     non_interactive: Annotated[
@@ -4748,6 +4638,14 @@ def setup(
             help="Codex MCP config mode: auto preserves user-managed entries, preserve skips MCP changes, stdio replaces with the managed stdio entry.",
         ),
     ] = "auto",
+    preserve_existing_llm: Annotated[
+        bool,
+        typer.Option(
+            "--preserve-existing-llm",
+            help="Preserve an existing independent LLM backend during runtime refresh.",
+            hidden=True,
+        ),
+    ] = False,
 ) -> None:
     """Set up Ouroboros for your environment.
 
@@ -4772,6 +4670,9 @@ def setup(
     """
     if ctx.invoked_subcommand is not None:
         return
+    if has_unsupported_claude_sdk_mcp_mix():
+        print_error(escape(UNSUPPORTED_CLAUDE_SDK_MCP_MESSAGE))
+        raise typer.Exit(1)
 
     console.print("\n[bold cyan]Ouroboros Setup[/bold cyan]\n")
 
@@ -4784,6 +4685,10 @@ def setup(
     # Detect available runtimes
     detected = _detect_runtimes()
     available = {k: v for k, v in detected.items() if v is not None}
+    # All Claude profiles share one executable. Expose an explicit alias only
+    # when already configured so no-argument setup preserves its transport.
+    if current_backend in {"claude-sdk", "claude-cli"} and "claude" in available:
+        available[current_backend] = available["claude"]
 
     if available:
         console.print("[bold]Detected runtimes:[/bold]")
@@ -4858,6 +4763,18 @@ def setup(
             print_error("Claude Code CLI not found in PATH.")
             raise typer.Exit(1)
         _setup_claude(claude_path)
+    elif selected in ("claude-cli", "claude_mcp"):
+        claude_path = available.get("claude")
+        if not claude_path:
+            print_error("Claude Code CLI not found in PATH.")
+            raise typer.Exit(1)
+        _setup_claude_cli(claude_path)
+    elif selected in ("claude-sdk", "claude_sdk"):
+        claude_path = available.get("claude")
+        if not claude_path:
+            print_error("Claude Code CLI not found in PATH.")
+            raise typer.Exit(1)
+        _setup_claude_sdk(claude_path)
     elif selected in ("codex", "codex_cli"):
         codex_path = available.get("codex")
         if not codex_path:
@@ -4870,7 +4787,11 @@ def setup(
             else:
                 print_error("Codex CLI not found in PATH or Codex App bundle.")
             raise typer.Exit(1)
-        if not _setup_codex(codex_path, mcp_mode=_normalize_codex_mcp_mode(mcp_mode)):
+        if not _setup_codex(
+            codex_path,
+            mcp_mode=_normalize_codex_mcp_mode(mcp_mode),
+            preserve_existing_llm=preserve_existing_llm,
+        ):
             raise typer.Exit(1)
     elif selected in ("opencode", "opencode_cli"):
         opencode_path = available.get("opencode")

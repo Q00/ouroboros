@@ -18,6 +18,7 @@ import asyncio
 import contextlib
 from dataclasses import asdict, dataclass
 import json
+import logging
 import os
 from pathlib import Path
 import subprocess
@@ -25,12 +26,32 @@ import sys
 import threading
 from typing import Any
 
+from ouroboros.mcp.errors import MCPToolError
 from ouroboros.mcp.job_manager import JobManager, JobSnapshot
 from ouroboros.persistence.event_store import EventStore
 
 _STARTUP_TIMEOUT_SECONDS = 20.0
 _POLL_INTERVAL_SECONDS = 0.05
 _STATE_DIR_NAME = "detached-jobs"
+_TOOL_ERROR_REJECTION_PROTOCOL = "ouroboros.detached.mcp-tool-error"
+_TOOL_ERROR_REJECTION_VERSION = 1
+_TOOL_ERROR_REJECTION_FIELDS = frozenset(
+    {
+        "protocol",
+        "version",
+        "message",
+        "server_name",
+        "tool_name",
+        "error_code",
+        "is_retriable",
+        "details",
+    }
+)
+_REJECTED_STATUS_FIELDS = frozenset(
+    {"state", "worker_pid", "job_id", "request_tool_name", "rejection"}
+)
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -151,6 +172,110 @@ def read_status(path: Path) -> dict[str, Any] | None:
     return payload if isinstance(payload, dict) else None
 
 
+def encode_tool_error_rejection(error: MCPToolError) -> dict[str, Any]:
+    """Encode a pre-acceptance tool rejection without serializing a class name.
+
+    Detached status files are data, never an exception-object transport.  The
+    fixed protocol discriminator and explicit scalar fields keep decoding
+    closed to arbitrary class construction while preserving the public
+    ``MCPToolError`` contract across the process boundary.
+    """
+    details = error.details
+    if details is not None:
+        if not isinstance(details, dict):
+            raise ValueError("Detached tool-error details must be a JSON object")
+        try:
+            normalized_details = json.loads(
+                json.dumps(details, ensure_ascii=False, allow_nan=False)
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Detached tool-error details must be JSON-safe") from exc
+        if not isinstance(normalized_details, dict):  # pragma: no cover - guarded above.
+            raise ValueError("Detached tool-error details must be a JSON object")
+        if normalized_details != details:
+            raise ValueError("Detached tool-error details must use canonical JSON values")
+    else:
+        normalized_details = None
+    return {
+        "protocol": _TOOL_ERROR_REJECTION_PROTOCOL,
+        "version": _TOOL_ERROR_REJECTION_VERSION,
+        "message": error.message,
+        "server_name": error.server_name,
+        "tool_name": error.tool_name,
+        "error_code": error.error_code,
+        "is_retriable": error.is_retriable,
+        "details": normalized_details,
+    }
+
+
+def decode_tool_error_rejection(payload: object) -> MCPToolError:
+    """Validate and reconstruct one detached pre-acceptance rejection."""
+    if not isinstance(payload, dict):
+        raise ValueError("Detached tool-error rejection must be a JSON object")
+    if set(payload) != _TOOL_ERROR_REJECTION_FIELDS:
+        raise ValueError("Detached tool-error rejection has unexpected fields")
+    if payload.get("protocol") != _TOOL_ERROR_REJECTION_PROTOCOL:
+        raise ValueError("Detached tool-error rejection has an unknown protocol")
+    version = payload.get("version")
+    if type(version) is not int or version != _TOOL_ERROR_REJECTION_VERSION:
+        raise ValueError("Detached tool-error rejection has an unsupported version")
+
+    message = payload.get("message")
+    if not isinstance(message, str):
+        raise ValueError("Detached tool-error rejection requires a string message")
+    server_name = payload.get("server_name")
+    if server_name is not None and not isinstance(server_name, str):
+        raise ValueError("Detached tool-error rejection has an invalid server_name")
+    tool_name = payload.get("tool_name")
+    if tool_name is not None and not isinstance(tool_name, str):
+        raise ValueError("Detached tool-error rejection has an invalid tool_name")
+    error_code = payload.get("error_code")
+    if error_code is not None and not isinstance(error_code, str):
+        raise ValueError("Detached tool-error rejection has an invalid error_code")
+    is_retriable = payload.get("is_retriable")
+    if not isinstance(is_retriable, bool):
+        raise ValueError("Detached tool-error rejection requires boolean is_retriable")
+    details = payload.get("details")
+    if details is not None and not isinstance(details, dict):
+        raise ValueError("Detached tool-error rejection details must be a JSON object")
+    try:
+        json.dumps(details, ensure_ascii=False, allow_nan=False)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Detached tool-error rejection details must be JSON-safe") from exc
+
+    return MCPToolError(
+        message,
+        server_name=server_name,
+        tool_name=tool_name,
+        error_code=error_code,
+        is_retriable=is_retriable,
+        details=details,
+    )
+
+
+def _preacceptance_rejection(
+    status: dict[str, Any] | None,
+    *,
+    job_id: str,
+    request_tool_name: str,
+    worker_pid: int,
+) -> MCPToolError | None:
+    if status is None or status.get("state") != "rejected":
+        return None
+    if set(status) != _REJECTED_STATUS_FIELDS:
+        raise RuntimeError("Detached worker rejection has unexpected fields")
+    if status.get("job_id") != job_id:
+        raise RuntimeError("Detached worker rejection has an unexpected job id")
+    if status.get("request_tool_name") != request_tool_name:
+        raise RuntimeError("Detached worker rejection has an unexpected request tool")
+    if status.get("worker_pid") != worker_pid:
+        raise RuntimeError("Detached worker rejection has an unexpected worker pid")
+    try:
+        return decode_tool_error_rejection(status.get("rejection"))
+    except ValueError as exc:
+        raise RuntimeError(f"Malformed detached worker rejection: {exc}") from exc
+
+
 def _spawn_worker(request_path: Path, *, cwd: str) -> subprocess.Popen[bytes]:
     env = os.environ.copy()
     env["OUROBOROS_DETACHED_JOB_WORKER"] = "1"
@@ -174,11 +299,24 @@ def _spawn_worker(request_path: Path, *, cwd: str) -> subprocess.Popen[bytes]:
     )
     # Reap the child if this MCP process remains alive.  If the MCP process
     # exits first, the detached worker is reparented and the OS reaps it.
-    threading.Thread(
-        target=process.wait,
-        name=f"ooo-detached-reaper-{process.pid}",
-        daemon=True,
-    ).start()
+    try:
+        threading.Thread(
+            target=process.wait,
+            name=f"ooo-detached-reaper-{process.pid}",
+            daemon=True,
+        ).start()
+    except BaseException:
+        # Popen already transferred ownership to an independent process. A
+        # best-effort local reaper failure must not report definitive launch
+        # rejection and allow a duplicate job to start.
+        try:
+            logger.warning(
+                "detached worker reaper registration failed after spawn",
+                extra={"worker_pid": process.pid},
+                exc_info=True,
+            )
+        except BaseException:
+            pass
     return process
 
 
@@ -190,26 +328,37 @@ async def launch_detached_job(
     startup_timeout_seconds: float = _STARTUP_TIMEOUT_SECONDS,
 ) -> JobSnapshot:
     """Spawn a durable owner and wait for its persisted acceptance receipt."""
-    if request.database_url != event_store.database_url:
-        raise ValueError("Detached worker request must use the accepting EventStore database URL")
-
-    request_path = request_path_for(request.job_id)
-    status_path = status_path_for(request_path)
-    for stale in (request_path, status_path):
-        try:
-            stale.unlink()
-        except FileNotFoundError:
-            pass
+    request_path: Path | None = None
+    status_path: Path | None = None
     try:
+        if request.database_url != event_store.database_url:
+            raise ValueError(
+                "Detached worker request must use the accepting EventStore database URL"
+            )
+        request_path = request_path_for(request.job_id)
+        status_path = status_path_for(request_path)
+        for stale in (request_path, status_path):
+            try:
+                stale.unlink()
+            except FileNotFoundError:
+                pass
         write_private_json(request_path, asdict(request), exclusive=True)
         process = _spawn_worker(request_path, cwd=request.cwd)
     except BaseException:
         job_manager.abandon_reserved_job_id(request.job_id)
-        try:
-            request_path.unlink()
-        except OSError:
-            pass
+        for artifact in (request_path, status_path):
+            if artifact is None:
+                continue
+            try:
+                artifact.unlink()
+            except OSError:
+                pass
         raise
+
+    # From successful Popen onward, the worker may accept independently. No
+    # ordinary receipt/read failure below is definitive launch rejection.
+    assert request_path is not None
+    assert status_path is not None
 
     deadline = asyncio.get_running_loop().time() + max(0.1, startup_timeout_seconds)
     while True:
@@ -219,26 +368,56 @@ async def launch_detached_job(
             pass
 
         status = read_status(status_path)
-        if status is not None and status.get("state") == "failed":
-            error = str(status.get("error") or "detached worker failed before job acceptance")
+        try:
+            rejection = _preacceptance_rejection(
+                status,
+                job_id=request.job_id,
+                request_tool_name=request.tool_name,
+                worker_pid=process.pid,
+            )
+        except RuntimeError:
             job_manager.abandon_reserved_job_id(request.job_id)
-            for artifact in (request_path, status_path):
-                try:
-                    artifact.unlink()
-                except OSError:
-                    pass
-            raise RuntimeError(error)
-
+            cleanup_worker_artifacts(request_path)
+            raise
+        if rejection is not None:
+            job_manager.abandon_reserved_job_id(request.job_id)
+            cleanup_worker_artifacts(request_path)
+            raise rejection
         if process.poll() is not None:
-            # The reaper may already have consumed the exact return code; the
-            # worker status is authoritative when present.
+            # A failed status can precede the worker's fallback created receipt,
+            # and a created commit can race the initial read immediately before
+            # process exit. Once the child is dead no further writes are
+            # possible, so only this final durable read can prove rejection.
+            try:
+                snapshot = await job_manager.get_snapshot(request.job_id)
+            except ValueError:
+                pass
+            else:
+                cleanup_worker_artifacts(request_path)
+                return snapshot
             status = read_status(status_path)
+            try:
+                rejection = _preacceptance_rejection(
+                    status,
+                    job_id=request.job_id,
+                    request_tool_name=request.tool_name,
+                    worker_pid=process.pid,
+                )
+            except RuntimeError:
+                job_manager.abandon_reserved_job_id(request.job_id)
+                cleanup_worker_artifacts(request_path)
+                raise
+            if rejection is not None:
+                job_manager.abandon_reserved_job_id(request.job_id)
+                cleanup_worker_artifacts(request_path)
+                raise rejection
             error = (
                 str(status.get("error"))
                 if status is not None and status.get("error")
                 else "detached worker exited before persisting job acceptance"
             )
             job_manager.abandon_reserved_job_id(request.job_id)
+            cleanup_worker_artifacts(request_path)
             raise RuntimeError(error)
 
         if asyncio.get_running_loop().time() >= deadline:
@@ -267,6 +446,8 @@ __all__ = [
     "DetachedJobAcceptanceTimeout",
     "DetachedJobRequest",
     "cleanup_worker_artifacts",
+    "decode_tool_error_rejection",
+    "encode_tool_error_rejection",
     "launch_detached_job",
     "read_status",
     "request_path_for",

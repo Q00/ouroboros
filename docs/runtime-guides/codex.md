@@ -168,7 +168,7 @@ After running `ouroboros setup --runtime codex`, the bundled `ooo` skills are in
 | `ooo unstuck` | Yes | *(MCP only)* |
 | `ooo tutorial` | Yes | *(MCP only)* |
 | `ooo welcome` | Yes | *(MCP only)* |
-| `ooo update` | Yes | `pip install --upgrade ouroboros-ai` |
+| `ooo update` | Yes | `ouroboros update` |
 | `ooo help` | Yes | `ouroboros --help` |
 | `ooo qa` | Yes | *(MCP only)* |
 | `ooo setup` | Yes | `ouroboros setup --runtime codex` |
@@ -215,6 +215,38 @@ ouroboros --help
 ```
 
 The `CodexCliRuntime` adapter launches `codex` (or `codex-cli`) as its transport layer, but wraps it with session handles, resume support, and deterministic skill/MCP dispatch so the runtime behaves like a persistent Ouroboros session.
+
+### Executable version attestation
+
+The adapter records successful `codex --version` evidence together with the
+selected path, effective target's device/inode pair, content digest, and
+symlink identity when the runtime is created, then verifies that evidence
+before each launch. The policy is fail-closed but does not confuse unavailable
+evidence with confirmed drift:
+
+- A timeout or execution failure during initialization leaves no positive
+  baseline, so execution is blocked and a new runtime session is required.
+- A timeout or execution failure during a later check blocks that attempt but
+  is reported as unavailable attestation evidence; the same runtime may be
+  retried.
+- Before running the selected executable for `--version`, the adapter compares
+  its non-executing path, content, device/inode, and complete semantic symlink
+  evidence with the verified initialization baseline. Known drift is rejected
+  without executing the changed candidate.
+- Every started probe is post-sampled even when it times out or fails. If that
+  evidence proves probe-window mutation, mutation takes precedence over the
+  transient probe outcome.
+- A containing-directory generation change alone is broader than executable
+  identity: it can come from an unrelated sibling or an entry swap-and-restore.
+  The attempt therefore fails closed as retryable, indeterminate authority
+  without claiming confirmed executable drift.
+- Version drift is reported only when two successful version attestations
+  differ. Path, content, symlink, device/inode, or probe-window generation
+  drift can fail closed before a second successful version probe. Two missing
+  attestations never count as proof that the executable is unchanged.
+
+The Copilot, Gemini, Goose, and Grok runtimes inherit the same attestation and
+comparison policy.
 
 > For a side-by-side comparison of all runtime backends, see the [runtime capability matrix](../runtime-capability-matrix.md).
 

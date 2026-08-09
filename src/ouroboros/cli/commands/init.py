@@ -27,6 +27,7 @@ from ouroboros.bigbang.seed_generator import SeedGenerator
 from ouroboros.cli.formatters import console
 from ouroboros.cli.formatters.panels import print_error, print_info, print_success, print_warning
 from ouroboros.cli.formatters.prompting import multiline_prompt_async
+from ouroboros.cli.logging_setup import configure_cli_logging
 from ouroboros.config import get_clarification_model, get_llm_backend
 from ouroboros.core.errors import ProviderError
 from ouroboros.core.hitl_contract import (
@@ -47,7 +48,12 @@ from ouroboros.events.hitl import (
     create_hitl_answered_event,
     create_hitl_requested_event,
 )
-from ouroboros.observability import LoggingConfig, configure_logging
+from ouroboros.package_profiles import (
+    PublicAgentRuntimeBackend as AgentRuntimeBackend,
+)
+from ouroboros.package_profiles import (
+    public_runtime_backend,
+)
 from ouroboros.providers import create_llm_adapter, resolve_llm_backend
 from ouroboros.providers.base import LLMAdapter
 
@@ -60,24 +66,6 @@ class SeedGenerationResult(Enum):
     SUCCESS = auto()
     CANCELLED = auto()
     CONTINUE_INTERVIEW = auto()
-
-
-class AgentRuntimeBackend(str, Enum):  # noqa: UP042
-    """Supported orchestrator runtime backends for workflow handoff."""
-
-    CLAUDE = "claude"
-    CODEX = "codex"
-    OPENCODE = "opencode"
-    HERMES = "hermes"
-    GEMINI = "gemini"
-    GOOSE = "goose"
-    KIRO = "kiro"
-    COPILOT = "copilot"
-    PI = "pi"
-    GJC = "gjc"
-    ANTIGRAVITY = "antigravity"
-    GROK = "grok"
-    ZCODE = "zcode"
 
 
 class LLMBackend(str, Enum):  # noqa: UP042
@@ -994,9 +982,9 @@ def start(
         print_error("Initial context is required when not resuming.")
         raise typer.Exit(code=1)
 
-    # Configure logging based on debug flag
+    # Apply the saved logging.level, with --debug overriding it.
+    configure_cli_logging(debug=debug)
     if debug:
-        configure_logging(LoggingConfig(log_level="DEBUG"))
         print_info("Debug mode enabled - showing verbose logs")
 
     if runtime and not orchestrator:
@@ -1032,7 +1020,7 @@ def start(
                 state_dir,
                 orchestrator,
                 debug,
-                runtime.value if runtime else None,
+                public_runtime_backend(runtime.value if runtime else None),
                 llm_backend.value if llm_backend else None,
             )
         )

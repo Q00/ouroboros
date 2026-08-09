@@ -74,6 +74,7 @@ _EXPECTED_OUROBOROS_TOOL_EXECUTION_MODES = {
     "ouroboros_evolve_rewind": "blocking",
     "ouroboros_evolve_step": "blocking",
     "ouroboros_execute_seed": "blocking",
+    "ouroboros_fetch_artifact": "status",
     "ouroboros_generate_seed": "blocking",
     "ouroboros_interview": "subagent_orchestration",
     "ouroboros_job_result": "status",
@@ -94,7 +95,7 @@ _EXPECTED_OUROBOROS_TOOL_EXECUTION_MODES = {
     "ouroboros_start_evolve_step": "background",
     "ouroboros_start_execute_seed": "background",
     "ouroboros_start_ralph": "background",
-    "ouroboros_submit_fanout_results": "status",
+    "ouroboros_submit_fanout_results": "blocking",
 }
 
 _VALID_OUROBOROS_TOOL_EXECUTION_MODES = frozenset(
@@ -228,6 +229,7 @@ _EXPECTED_OUROBOROS_REQUIRED_CONTEXT_KEYS = {
         "session_id",
     ),
     "ouroboros_start_ralph": ("lineage_id",),
+    "ouroboros_fetch_artifact": ("contract_id",),
     "ouroboros_submit_fanout_results": ("fanout_id", "results"),
 }
 
@@ -461,7 +463,9 @@ _EXPECTED_OUROBOROS_TOOL_COMPANIONS = {
     "ouroboros_submit_fanout_results": (
         "ouroboros_interview",
         "ouroboros_lateral_think",
+        "ouroboros_fetch_artifact",
     ),
+    "ouroboros_fetch_artifact": ("ouroboros_submit_fanout_results",),
 }
 
 _EXPECTED_OUROBOROS_TOOL_SIDE_EFFECTS = {
@@ -484,6 +488,7 @@ _EXPECTED_OUROBOROS_TOOL_SIDE_EFFECTS = {
     "ouroboros_evolve_rewind": ("session_state_write",),
     "ouroboros_evolve_step": ("workspace_write", "event_store_write"),
     "ouroboros_execute_seed": ("workspace_write", "event_store_write"),
+    "ouroboros_fetch_artifact": (),
     "ouroboros_generate_seed": ("workspace_write", "event_store_write"),
     "ouroboros_interview": ("subagent_dispatch", "session_state_write"),
     "ouroboros_job_result": (),
@@ -504,7 +509,7 @@ _EXPECTED_OUROBOROS_TOOL_SIDE_EFFECTS = {
     "ouroboros_start_evolve_step": ("workspace_write", "event_store_write"),
     "ouroboros_start_execute_seed": ("workspace_write", "event_store_write"),
     "ouroboros_start_ralph": ("workspace_write", "event_store_write"),
-    "ouroboros_submit_fanout_results": (),
+    "ouroboros_submit_fanout_results": ("workspace_write", "event_store_write"),
 }
 
 _EXPECTED_MUTATION_TARGETS_BY_SIDE_EFFECT = {
@@ -805,6 +810,7 @@ _EXPECTED_OUROBOROS_TOOL_MUTATION_TARGETS = {
 
 _EXPECTED_READ_ONLY_OUROBOROS_TOOLS = {
     "ouroboros_ac_tree_hud",
+    "ouroboros_fetch_artifact",
     "ouroboros_job_result",
     "ouroboros_job_status",
     "ouroboros_job_wait",
@@ -813,7 +819,6 @@ _EXPECTED_READ_ONLY_OUROBOROS_TOOLS = {
     "ouroboros_query_events",
     "ouroboros_query_projection",
     "ouroboros_session_status",
-    "ouroboros_submit_fanout_results",
 }
 
 _EXPECTED_OUROBOROS_TOOL_RETRY = {
@@ -827,6 +832,7 @@ _EXPECTED_OUROBOROS_TOOL_RETRY = {
     "ouroboros_evolve_rewind": {"supported": True, "mode": "handler_owned"},
     "ouroboros_evolve_step": {"supported": True, "mode": "handler_owned"},
     "ouroboros_execute_seed": {"supported": True, "mode": "handler_owned"},
+    "ouroboros_fetch_artifact": {"supported": True, "mode": "handler_owned"},
     "ouroboros_generate_seed": {"supported": True, "mode": "handler_owned"},
     "ouroboros_interview": {"supported": True, "mode": "handler_owned"},
     "ouroboros_job_result": {"supported": True, "mode": "handler_owned"},
@@ -919,6 +925,7 @@ _EXPECTED_OUROBOROS_TOOL_INTERRUPT = {
     "ouroboros_evolve_rewind": _blocking_interrupt(),
     "ouroboros_evolve_step": _blocking_interrupt("ouroboros_start_evolve_step"),
     "ouroboros_execute_seed": _blocking_interrupt("ouroboros_start_execute_seed"),
+    "ouroboros_fetch_artifact": _READ_ONLY_INTERRUPT,
     "ouroboros_generate_seed": _blocking_interrupt(),
     "ouroboros_interview": {"supported": True, "mode": "soft"},
     "ouroboros_job_result": _READ_ONLY_INTERRUPT,
@@ -939,7 +946,7 @@ _EXPECTED_OUROBOROS_TOOL_INTERRUPT = {
     "ouroboros_start_evolve_step": _BACKGROUND_INTERRUPT,
     "ouroboros_start_execute_seed": _BACKGROUND_INTERRUPT,
     "ouroboros_start_ralph": _BACKGROUND_INTERRUPT,
-    "ouroboros_submit_fanout_results": _READ_ONLY_INTERRUPT,
+    "ouroboros_submit_fanout_results": _blocking_interrupt(),
 }
 
 _UNSUPPORTED_CANCEL = {
@@ -991,6 +998,7 @@ _EXPECTED_OUROBOROS_TOOL_CANCEL = {
     "ouroboros_evolve_rewind": _UNSUPPORTED_CANCEL,
     "ouroboros_evolve_step": _UNSUPPORTED_CANCEL,
     "ouroboros_execute_seed": _EXECUTION_SESSION_CANCEL,
+    "ouroboros_fetch_artifact": _UNSUPPORTED_CANCEL,
     "ouroboros_generate_seed": _UNSUPPORTED_CANCEL,
     "ouroboros_interview": _UNSUPPORTED_CANCEL,
     "ouroboros_job_result": _UNSUPPORTED_CANCEL,
@@ -2842,6 +2850,7 @@ def test_read_only_query_status_projection_tools_have_non_mutating_interrupt_met
     descriptors = {descriptor.name: descriptor for descriptor in graph.capabilities}
     expected_query_status_projection_tools = {
         "ouroboros_ac_tree_hud",
+        "ouroboros_fetch_artifact",
         "ouroboros_job_result",
         "ouroboros_job_status",
         "ouroboros_job_wait",
@@ -2850,7 +2859,6 @@ def test_read_only_query_status_projection_tools_have_non_mutating_interrupt_met
         "ouroboros_query_events",
         "ouroboros_query_projection",
         "ouroboros_session_status",
-        "ouroboros_submit_fanout_results",
     }
 
     assert expected_query_status_projection_tools == _EXPECTED_READ_ONLY_OUROBOROS_TOOLS
@@ -3022,6 +3030,7 @@ def test_blocking_ouroboros_tools_have_synchronous_interrupt_metadata() -> None:
         "ouroboros_evolve_rewind",
         "ouroboros_evolve_step",
         "ouroboros_execute_seed",
+        "ouroboros_submit_fanout_results",
         "ouroboros_generate_seed",
         "ouroboros_measure_drift",
         "ouroboros_qa",
@@ -3269,6 +3278,7 @@ def test_non_cancel_ouroboros_owned_tools_explicitly_do_not_expose_cancel_semant
         "ouroboros_evaluate",
         "ouroboros_evolve_rewind",
         "ouroboros_evolve_step",
+        "ouroboros_fetch_artifact",
         "ouroboros_generate_seed",
         "ouroboros_interview",
         "ouroboros_job_result",

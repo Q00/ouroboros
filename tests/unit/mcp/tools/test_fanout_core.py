@@ -24,6 +24,7 @@ from ouroboros.mcp.tools.authoring_handlers import (
     _attach_question_assist_requests,
 )
 from ouroboros.mcp.tools.evaluation_handlers import (
+    FetchArtifactHandler,
     LateralThinkHandler,
     SubmitFanoutResultsHandler,
 )
@@ -43,6 +44,25 @@ from ouroboros.mcp.tools.subagent import (
 from ouroboros.orchestrator.capabilities import (
     stable_code_investigation_question_identity,
 )
+from ouroboros.orchestrator.disposable_memory import DisposableMemory
+from ouroboros.persistence.artifact_store import ContentAddressedArtifactStore
+
+
+def _bounded_submit(
+    registry: FanoutRegistry,
+    project_dir: Any,
+) -> tuple[SubmitFanoutResultsHandler, DisposableMemory]:
+    disposable = DisposableMemory(
+        artifact_store=ContentAddressedArtifactStore.for_project(project_dir)
+    )
+    return (
+        SubmitFanoutResultsHandler(
+            fanout_registry=registry,
+            disposable_memory=disposable,
+        ),
+        disposable,
+    )
+
 
 # --------------------------------------------------------------------------- #
 # build_fanout_subagents
@@ -542,7 +562,7 @@ async def test_advisory_reentry_follows_stamped_meta_contract(tmp_path: Any) -> 
     fanout_id, correlation_key, lane_keys, meta = _emitted_advisory_contract(registry, session_id)
     outputs = _advisory_lane_outputs(meta, lane_keys)
 
-    submit = SubmitFanoutResultsHandler(fanout_registry=registry)
+    submit, disposable = _bounded_submit(registry, tmp_path)
     submit_result = await submit.handle(
         {
             "session_id": session_id,
@@ -552,7 +572,14 @@ async def test_advisory_reentry_follows_stamped_meta_contract(tmp_path: Any) -> 
         }
     )
     assert submit_result.is_ok, submit_result
-    out = submit_result.unwrap().meta
+    envelope = submit_result.unwrap().meta
+    contract_id = envelope["contract_id"]
+    contract_component = disposable.artifact_store._manifest_path(contract_id).parent.name
+    assert contract_id.startswith("fanout:")
+    assert contract_id not in str(disposable.artifact_store._manifest_path(contract_id))
+    assert len(contract_component) == 64
+    assert set(contract_component) <= set("0123456789abcdef")
+    out = disposable.fetch(envelope["contract_id"]).body
     assert out["status"] == "complete"
     assert out["kind"] == FANOUT_KIND_QUESTION_ADVISORY
     assert out["correlation_key"] == correlation_key
@@ -679,7 +706,7 @@ async def test_lateral_handler_registers_fanout_and_submit_tool_synthesizes(
     fanout_id = meta["fanout_id"]
     assert meta["host_action"] == "process_payloads_sequentially"
 
-    submit = SubmitFanoutResultsHandler(fanout_registry=registry)
+    submit, disposable = _bounded_submit(registry, tmp_path)
     submit_result = await submit.handle(
         {
             "correlation_key": "context.persona",
@@ -688,7 +715,8 @@ async def test_lateral_handler_registers_fanout_and_submit_tool_synthesizes(
         }
     )
     assert submit_result.is_ok, submit_result
-    out = submit_result.unwrap().meta
+    envelope = submit_result.unwrap().meta
+    out = disposable.fetch(envelope["contract_id"]).body
     assert out["status"] == "complete"
     assert out["result"]["ready_for_synthesis"] is True
 
@@ -733,7 +761,7 @@ async def test_submit_tool_omitting_the_envelope_does_not_redeem_a_bound_fanout(
     fanout_id = produced.unwrap().meta["fanout_id"]
     results = [{"key": persona, "content": f"{persona}-out"} for persona in personas]
 
-    submit = SubmitFanoutResultsHandler(fanout_registry=registry)
+    submit, disposable = _bounded_submit(registry, tmp_path)
     omitted = await submit.handle({"fanout_id": fanout_id, "results": results})
 
     assert omitted.is_ok, omitted
@@ -749,7 +777,8 @@ async def test_submit_tool_omitting_the_envelope_does_not_redeem_a_bound_fanout(
     )
 
     assert honored.is_ok, honored
-    assert honored.unwrap().meta["status"] == "complete"
+    envelope = honored.unwrap().meta
+    assert disposable.fetch(envelope["contract_id"]).body["status"] == "complete"
 
 
 def test_an_id_that_is_not_a_registry_filename_redeems_nothing(tmp_path: Any) -> None:
@@ -846,7 +875,7 @@ async def test_submit_tool_rejects_forged_ids_and_still_redeems_issued_ones(
     outside = tmp_path / "forged.json"
     outside.write_text((state_dir / "fanout" / f"{issued_id}.json").read_text(), encoding="utf-8")
 
-    submit = SubmitFanoutResultsHandler(fanout_registry=registry)
+    submit, disposable = _bounded_submit(registry, tmp_path)
     results = [{"key": persona, "content": f"{persona}-out"} for persona in personas]
 
     for forged in (str(tmp_path / "forged"), "../forged", "sub/forged"):
@@ -870,7 +899,8 @@ async def test_submit_tool_rejects_forged_ids_and_still_redeems_issued_ones(
     )
 
     assert honored.is_ok, honored
-    assert honored.unwrap().meta["status"] == "complete"
+    envelope = honored.unwrap().meta
+    assert disposable.fetch(envelope["contract_id"]).body["status"] == "complete"
 
 
 @pytest.mark.asyncio
@@ -897,7 +927,7 @@ async def test_submit_tool_partial_retry_is_judged_on_the_whole_set(tmp_path: An
     )
     assert produced.is_ok, produced
     fanout_id = produced.unwrap().meta["fanout_id"]
-    submit = SubmitFanoutResultsHandler(fanout_registry=registry)
+    submit, disposable = _bounded_submit(registry, tmp_path)
 
     async def send(*keys: str) -> dict[str, Any]:
         result = await submit.handle(
@@ -909,7 +939,10 @@ async def test_submit_tool_partial_retry_is_judged_on_the_whole_set(tmp_path: An
             }
         )
         assert result.is_ok, result
-        return dict(result.unwrap().meta)
+        outcome = dict(result.unwrap().meta)
+        if "contract_id" in outcome:
+            return dict(disposable.fetch(outcome["contract_id"]).body)
+        return outcome
 
     first = await send("researcher")
     assert first["status"] == "partial"
@@ -939,6 +972,40 @@ async def test_submit_tool_requires_fanout_id() -> None:
     submit = SubmitFanoutResultsHandler()
     result = await submit.handle({"results": []})
     assert result.is_err
+
+
+@pytest.mark.asyncio
+async def test_fetch_tool_without_project_artifact_service_fails_closed() -> None:
+    result = await FetchArtifactHandler().handle({"contract_id": "fanout:missing"})
+
+    assert result.is_err
+    assert "requires a configured project artifact service" in str(result.error)
+
+
+@pytest.mark.asyncio
+async def test_terminal_submit_without_disposable_service_fails_closed(
+    tmp_path: Any,
+) -> None:
+    registry = FanoutRegistry(tmp_path)
+    fanout_id = _advisory_fanout(registry)
+    marker = "must-not-return-inline-" * 512
+
+    result = await SubmitFanoutResultsHandler(fanout_registry=registry).handle(
+        {
+            "session_id": "s1",
+            "correlation_key": "context.lane_id",
+            "fanout_id": fanout_id,
+            "results": [
+                {"key": "data_context", "content": marker},
+                {"key": "code_context", "content": marker},
+            ],
+        }
+    )
+
+    assert result.is_err
+    assert "requires a configured disposable artifact service" in str(result.error)
+    assert marker not in repr(result)
+    assert len(repr(result).encode()) < 4 * 1024
 
 
 def _advisory_fanout(registry: FanoutRegistry) -> str:

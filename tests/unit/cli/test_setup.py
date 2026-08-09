@@ -12,6 +12,7 @@ import tomllib
 from unittest.mock import AsyncMock, patch
 
 import pytest
+import typer
 from typer.testing import CliRunner
 import yaml
 
@@ -28,12 +29,81 @@ from ouroboros.cli.commands.setup import (
     _set_default_repo,
 )
 from ouroboros.codex import CodexArtifactInstallResult
+from ouroboros.codex.runtime_profile import codex_uses_profile_v2
 from ouroboros.config._model_defaults import DEFAULT_OPUS_MODEL
 from ouroboros.config.models import OuroborosConfig, get_default_config
 from ouroboros.providers.base import CompletionConfig
 from ouroboros.providers.profiles import resolve_completion_profile
 
 # ── Codex setup tests ────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("runtime", "env_key"),
+    [
+        ("claude", "OUROBOROS_CLI_PATH"),
+        ("opencode", "OUROBOROS_OPENCODE_CLI_PATH"),
+        ("hermes", "OUROBOROS_HERMES_CLI_PATH"),
+    ],
+)
+def test_detect_runtimes_prefers_exact_override_over_stale_path(
+    tmp_path: Path,
+    runtime: str,
+    env_key: str,
+) -> None:
+    configured = tmp_path / "configured" / f"{runtime}-wrapper"
+    configured.parent.mkdir()
+    configured.write_text("#!/bin/sh\n", encoding="utf-8")
+    configured.chmod(0o755)
+
+    def which(candidate: str) -> str | None:
+        if candidate == str(configured):
+            return str(configured)
+        if candidate == runtime:
+            return f"/stale/path/{runtime}"
+        return None
+
+    with (
+        patch.dict(os.environ, {env_key: str(configured)}, clear=True),
+        patch("ouroboros.cli.commands.setup.shutil.which", side_effect=which),
+        patch("ouroboros.config.get_codex_cli_path", return_value=None),
+        patch("ouroboros.cli.commands.setup._CODEX_APP_CLI_PATH", tmp_path / "missing-codex"),
+    ):
+        detected = setup_cmd._detect_runtimes()
+
+    assert detected[runtime] == str(configured.resolve())
+
+
+@pytest.mark.parametrize(
+    ("runtime", "env_key"),
+    [
+        ("claude", "OUROBOROS_CLI_PATH"),
+        ("opencode", "OUROBOROS_OPENCODE_CLI_PATH"),
+        ("hermes", "OUROBOROS_HERMES_CLI_PATH"),
+    ],
+)
+def test_detect_runtimes_invalid_override_does_not_use_stale_path(
+    tmp_path: Path,
+    runtime: str,
+    env_key: str,
+) -> None:
+    missing = tmp_path / "missing" / f"{runtime}-wrapper"
+    probes: list[str] = []
+
+    def which(candidate: str) -> str | None:
+        probes.append(candidate)
+        return f"/stale/path/{runtime}" if candidate == runtime else None
+
+    with (
+        patch.dict(os.environ, {env_key: str(missing)}, clear=True),
+        patch("ouroboros.cli.commands.setup.shutil.which", side_effect=which),
+        patch("ouroboros.config.get_codex_cli_path", return_value=None),
+        patch("ouroboros.cli.commands.setup._CODEX_APP_CLI_PATH", tmp_path / "missing-codex"),
+    ):
+        detected = setup_cmd._detect_runtimes()
+
+    assert detected[runtime] is None
+    assert runtime not in probes
 
 
 class TestCodexSetup:
@@ -187,6 +257,24 @@ class TestCodexSetup:
 
         with patch("ouroboros.cli.commands.setup.subprocess.run", return_value=completed):
             assert _codex_uses_profile_v2("/Applications/Codex.app/codex") is False
+
+    @pytest.mark.parametrize(
+        "failure",
+        (
+            subprocess.TimeoutExpired(["codex", "--help"], timeout=5),
+            OSError("cannot execute Codex help"),
+        ),
+    )
+    def test_shared_codex_profile_detection_preserves_unknown_failures(
+        self,
+        failure: BaseException,
+    ) -> None:
+        """Help failures are unknown and must not be reported as legacy evidence."""
+
+        def failing_run(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            raise failure
+
+        assert codex_uses_profile_v2("/configured/codex", run_command=failing_run) is None
 
     def test_register_codex_mcp_server_writes_guidance_comment(self, tmp_path: Path) -> None:
         """The generated Codex config should explain the config file split."""
@@ -2079,7 +2167,8 @@ class TestCodexSetup:
 
         assert (config_dir / "config.yaml").exists()
         assert credentials_path.exists()
-        assert credentials_path.stat().st_mode & 0o777 == 0o600
+        if os.name != "nt":
+            assert credentials_path.stat().st_mode & 0o777 == 0o600
 
     def test_setup_codex_rolls_back_fresh_config_when_credentials_write_fails(
         self, tmp_path: Path
@@ -2777,6 +2866,45 @@ class TestCodexSetup:
             setup_cmd._atomic_write_text_if_current_matches(target, "setup edit\n", expected)
 
         assert target.read_text(encoding="utf-8") == "operator edit\n"
+        assert not list(tmp_path.glob(".config.yaml.*.tmp"))
+
+    def test_atomic_setup_write_tracks_actual_mode_without_fchmod(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Windows writes must snapshot the mode the filesystem actually kept."""
+        target = tmp_path / "credentials.yaml"
+        monkeypatch.delattr(setup_cmd.os, "fchmod", raising=False)
+        monkeypatch.setattr(setup_cmd.os, "chmod", lambda *_args, **_kwargs: None)
+
+        snapshot = setup_cmd._atomic_write_text(target, "token: secret\n", mode=0o644)
+
+        assert target.read_text(encoding="utf-8") == "token: secret\n"
+        assert target.read_bytes() == b"token: secret\n"
+        assert snapshot == setup_cmd._snapshot_path(target)
+        assert setup_cmd._require_path_snapshot(target, snapshot) == snapshot
+        assert not list(tmp_path.glob(".credentials.yaml.*.tmp"))
+
+    def test_atomic_setup_write_metadata_failure_preserves_previous_generation(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A reported metadata failure must happen before replacement commits."""
+        target = tmp_path / "config.yaml"
+        target.write_text("operator: original\n", encoding="utf-8")
+
+        with (
+            patch(
+                "pathlib.Path.lstat",
+                autospec=True,
+                side_effect=PermissionError("transient metadata failure"),
+            ),
+            pytest.raises(PermissionError, match="transient metadata failure"),
+        ):
+            setup_cmd._atomic_write_text(target, "setup: new\n", mode=0o644)
+
+        assert target.read_text(encoding="utf-8") == "operator: original\n"
         assert not list(tmp_path.glob(".config.yaml.*.tmp"))
 
     def test_setup_codex_refuses_concurrent_codex_edit_before_profile_retirement(
@@ -3707,7 +3835,7 @@ class TestCodexSetup:
         assert "Setup complete!" not in result.output
 
     def test_fresh_codex_setup_installs_every_role_effort_mapping(self, tmp_path: Path) -> None:
-        """Generated legacy defaults are not user pins that suppress Codex roles."""
+        """Fresh config is model-neutral while Codex role defaults stay effective."""
         config_dir = tmp_path / ".ouroboros"
         config_dir.mkdir()
 
@@ -3722,6 +3850,20 @@ class TestCodexSetup:
             setup_cmd._setup_codex("/usr/local/bin/codex")
 
         config_dict = yaml.safe_load((config_dir / "config.yaml").read_text(encoding="utf-8"))
+        assert "qa_model" not in config_dict["llm"]
+        assert "dependency_analysis_model" not in config_dict["llm"]
+        assert "ontology_analysis_model" not in config_dict["llm"]
+        assert "context_compression_model" not in config_dict["llm"]
+        assert "default_model" not in config_dict["clarification"]
+        assert "semantic_model" not in config_dict["evaluation"]
+        assert "assertion_extraction_model" not in config_dict["evaluation"]
+        assert "wonder_model" not in config_dict["resilience"]
+        assert "reflect_model" not in config_dict["resilience"]
+        assert "models" not in config_dict["consensus"]
+        assert "advocate_model" not in config_dict["consensus"]
+        assert "devil_model" not in config_dict["consensus"]
+        assert "judge_model" not in config_dict["consensus"]
+
         role_profiles = config_dict["llm_role_profiles"]
         assert role_profiles == setup_cmd._CODEX_DEFAULT_LLM_ROLE_PROFILES
         for profile_name in set(role_profiles.values()):
@@ -3729,6 +3871,19 @@ class TestCodexSetup:
                 "reasoning_effort"
             ]
             assert effort in {"low", "medium", "high", "xhigh"}
+
+        from ouroboros.config.loader import get_qa_model, load_config
+
+        loaded = load_config(config_dir / "config.yaml")
+        with patch("ouroboros.config.loader.load_config", return_value=loaded):
+            assert get_qa_model(backend="codex") == "default"
+        with patch("ouroboros.providers.profiles.load_config", return_value=loaded):
+            resolved = resolve_completion_profile(
+                CompletionConfig(model="default", role="qa"),
+                backend="codex",
+            )
+        assert resolved.config.model == "default"
+        assert resolved.config.reasoning_effort == "xhigh"
 
     def test_existing_default_config_installs_every_role_effort_mapping(self) -> None:
         """Serialized shipped defaults must not suppress Codex effort profiles."""
@@ -3989,6 +4144,43 @@ class TestCodexSetup:
         assert "consensus_judge" not in config_dict["llm_role_profiles"]
         assert "ontology_analysis" not in config_dict["llm_role_profiles"]
 
+    def test_setup_codex_update_refresh_preserves_split_llm_backend(self, tmp_path: Path) -> None:
+        """Updater refreshes Codex integration without rerouting LLM traffic."""
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        config_path.write_text(
+            yaml.safe_dump(
+                {
+                    "orchestrator": {"runtime_backend": "codex"},
+                    "llm": {"backend": "litellm", "qa_model": "openai/gpt-5.4"},
+                },
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch("ouroboros.cli.commands.setup._install_codex_artifacts"),
+            patch("ouroboros.cli.commands.setup._register_codex_mcp_server"),
+            patch("ouroboros.cli.commands.setup._register_codex_worker_profile"),
+        ):
+            assert (
+                setup_cmd._setup_codex(
+                    "/usr/local/bin/codex",
+                    preserve_existing_llm=True,
+                )
+                is True
+            )
+
+        config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert config_dict["orchestrator"]["runtime_backend"] == "codex"
+        assert config_dict["orchestrator"]["codex_cli_path"] == "/usr/local/bin/codex"
+        assert config_dict["llm"]["backend"] == "litellm"
+        assert config_dict["llm"]["qa_model"] == "openai/gpt-5.4"
+
     def test_setup_codex_clears_execute_default_model_when_execute_switches_to_codex(
         self, tmp_path: Path
     ) -> None:
@@ -4062,6 +4254,31 @@ class TestCodexSetup:
         assert config_dict["llm"]["backend"] == "codex"
         assert config_dict["llm"]["qa_model"] == "claude-sonnet-4-20250514"
         assert config_dict["llm_role_profiles"]["qa"] == "frontier"
+
+    def test_setup_codex_preserves_existing_custom_consensus_roster(self, tmp_path: Path) -> None:
+        """A user-authored consensus roster remains a pin across Codex setup."""
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        custom_roster = ["vendor/alpha", "vendor/beta", "vendor/gamma"]
+        config_path.write_text(
+            yaml.safe_dump({"consensus": {"models": custom_roster}}, sort_keys=False),
+            encoding="utf-8",
+        )
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch("ouroboros.cli.commands.setup._install_codex_artifacts"),
+            patch("ouroboros.cli.commands.setup._register_codex_mcp_server"),
+            patch("ouroboros.cli.commands.setup._retire_codex_default_profiles"),
+            patch("ouroboros.cli.commands.setup._register_codex_worker_profile"),
+        ):
+            assert setup_cmd._setup_codex("/usr/local/bin/codex") is True
+
+        config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert config_dict["consensus"]["models"] == custom_roster
+        assert "consensus_vote" not in config_dict["llm_role_profiles"]
 
     def test_setup_codex_merges_codex_mapping_into_existing_profiles(self, tmp_path: Path) -> None:
         """Existing same-name profiles should be made safe before role mappings target them."""
@@ -4219,6 +4436,125 @@ class TestCodexSetup:
 class TestClaudeSetup:
     """Tests for Claude-specific setup behavior."""
 
+    @pytest.mark.parametrize(
+        ("persisted", "profile"),
+        [("claude_mcp", "claude-cli"), ("claude", "claude")],
+    )
+    def test_current_backend_preserves_claude_profile_identity(
+        self, tmp_path: Path, persisted: str, profile: str
+    ) -> None:
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            f"orchestrator:\n  runtime_backend: {persisted}\n",
+            encoding="utf-8",
+        )
+
+        with patch("pathlib.Path.home", return_value=tmp_path):
+            assert setup_cmd._get_current_backend() == profile
+
+    def test_setup_claude_selects_sdk_runtime(self, tmp_path: Path) -> None:
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        config_path.write_text("{}", encoding="utf-8")
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+        ):
+            setup_cmd._setup_claude("/usr/local/bin/claude")
+
+        config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert config_dict["orchestrator"]["runtime_backend"] == "claude"
+        assert config_dict["orchestrator"]["cli_path"] == "/usr/local/bin/claude"
+        assert config_dict["llm"]["backend"] == "claude"
+
+    def test_forced_mcp2_sdk_mix_fails_before_setup_detection(self, tmp_path: Path) -> None:
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        original = "orchestrator:\n  runtime_backend: codex\n"
+        config_path.write_text(original, encoding="utf-8")
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch(
+                "ouroboros.cli.commands.setup.has_unsupported_claude_sdk_mcp_mix",
+                return_value=True,
+            ),
+            patch(
+                "ouroboros.cli.commands.setup._detect_runtimes",
+                side_effect=AssertionError("must fail before runtime detection"),
+            ),
+        ):
+            result = CliRunner().invoke(setup_cmd.app, ["--runtime", "codex"])
+
+        assert result.exit_code == 1
+        for profile in (
+            "ouroboros-ai[mcp]",
+            "ouroboros-ai[claude]",
+            "[claude-sdk]",
+            "[claude-cli]",
+        ):
+            assert profile in result.output
+        assert config_path.read_text(encoding="utf-8") == original
+
+    def test_setup_claude_cli_selects_dependency_free_worker(self, tmp_path: Path) -> None:
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        config_path.write_text("{}", encoding="utf-8")
+
+        with patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir):
+            setup_cmd._setup_claude_cli("/usr/local/bin/claude")
+
+        config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert config_dict["orchestrator"]["runtime_backend"] == "claude_mcp"
+        assert config_dict["orchestrator"]["cli_path"] == "/usr/local/bin/claude"
+
+    def test_setup_claude_sdk_fails_closed_before_config_write(self, tmp_path: Path) -> None:
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        original = "orchestrator:\n  runtime_backend: codex\n"
+        config_path.write_text(original, encoding="utf-8")
+
+        with (
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch(
+                "ouroboros.cli.commands.claude_setup.has_unsupported_claude_sdk_mcp_mix",
+                return_value=True,
+            ),
+            pytest.raises(typer.Exit) as exc_info,
+        ):
+            setup_cmd._setup_claude_sdk("/usr/local/bin/claude")
+
+        assert exc_info.value.exit_code == 1
+        assert config_path.read_text(encoding="utf-8") == original
+
+    def test_setup_claude_sdk_reports_requested_alias_but_persists_sdk_backend(
+        self, tmp_path: Path
+    ) -> None:
+        """The explicit alias remains visible without creating a new backend identity."""
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        config_path.write_text("{}", encoding="utf-8")
+
+        with (
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch("ouroboros.cli.commands.claude_setup.print_info") as print_info,
+        ):
+            setup_cmd._setup_claude_sdk("/usr/local/bin/claude")
+
+        messages = [str(call.args[0]).replace("\\", "") for call in print_info.call_args_list]
+        assert any("ouroboros-ai[claude-sdk]" in message for message in messages)
+        assert all("ouroboros-ai[claude] (SDK" not in message for message in messages)
+        config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert config_dict["orchestrator"]["runtime_backend"] == "claude"
+        assert config_dict["llm"]["backend"] == "claude"
+
     def test_legacy_claude_mcp_registration_shim_is_fail_closed(self, tmp_path: Path) -> None:
         """Older plugin callers cannot reactivate the incompatible MCP path."""
         with patch("pathlib.Path.home", return_value=tmp_path):
@@ -4259,7 +4595,7 @@ class TestClaudeSetup:
                 side_effect=lambda cmd: "/usr/local/bin/uvx" if cmd == "uvx" else None,
             ),
         ):
-            setup_cmd._setup_claude("/usr/local/bin/claude")
+            setup_cmd._setup_claude_sdk("/usr/local/bin/claude")
 
         claude_mcp = json.loads(claude_config.read_text(encoding="utf-8"))
         config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8"))
@@ -4301,7 +4637,7 @@ class TestClaudeSetup:
             patch("ouroboros.cli.commands.setup.shutil.which", side_effect=which_side_effect),
             patch("ouroboros.cli.commands.setup.subprocess.run"),
         ):
-            setup_cmd._setup_claude("/usr/local/bin/claude")
+            setup_cmd._setup_claude_sdk("/usr/local/bin/claude")
 
         claude_mcp = json.loads(claude_config.read_text(encoding="utf-8"))
         assert "ouroboros" not in claude_mcp["mcpServers"]
@@ -4320,7 +4656,7 @@ class TestClaudeSetup:
             patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
             patch("ouroboros.cli.commands.setup.shutil.which", return_value=None),
         ):
-            setup_cmd._setup_claude("/usr/local/bin/claude")
+            setup_cmd._setup_claude_sdk("/usr/local/bin/claude")
 
         data = json.loads(claude_config.read_text(encoding="utf-8"))
         assert "ouroboros" not in data["mcpServers"]
@@ -4358,7 +4694,7 @@ class TestClaudeSetup:
                 side_effect=lambda cmd: "/usr/local/bin/uvx" if cmd == "uvx" else None,
             ),
         ):
-            setup_cmd._setup_claude("/usr/local/bin/claude")
+            setup_cmd._setup_claude_sdk("/usr/local/bin/claude")
 
         claude_mcp = json.loads(claude_config.read_text(encoding="utf-8"))
         # Custom command (docker) should be left untouched
@@ -4398,7 +4734,7 @@ class TestClaudeSetup:
                 side_effect=lambda cmd: "/usr/local/bin/uvx" if cmd == "uvx" else None,
             ),
         ):
-            setup_cmd._setup_claude("/usr/local/bin/claude")
+            setup_cmd._setup_claude_sdk("/usr/local/bin/claude")
 
         claude_mcp = json.loads(claude_config.read_text(encoding="utf-8"))
         assert claude_mcp["mcpServers"]["ouroboros"] == {
@@ -4431,7 +4767,7 @@ class TestClaudeSetup:
                 side_effect=lambda cmd: "/usr/local/bin/uvx" if cmd == "uvx" else None,
             ),
         ):
-            setup_cmd._setup_claude("/usr/local/bin/claude")
+            setup_cmd._setup_claude_sdk("/usr/local/bin/claude")
 
         # File should not be rewritten when nothing changed
         assert claude_config.stat().st_mtime == mtime_before

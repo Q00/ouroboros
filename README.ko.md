@@ -105,7 +105,7 @@ curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.
 > ooo interview "I want to build a task management CLI"
 ```
 
-> Claude Code, Codex CLI, GitHub Copilot CLI, OpenCode, Hermes, Gemini, Kiro CLI, Pi CLI를 지원합니다. 설치 프로그램은 Claude Code, Codex CLI, Hermes CLI를 자동으로 감지하고 호스트가 지원하는 경우 MCP 서버를 등록합니다. OpenCode, Kiro, GitHub Copilot CLI, Gemini CLI 또는 Pi CLI는 설치 후 `ouroboros setup --runtime <opencode|kiro|copilot|gemini|pi>`를 실행하세요. Copilot CLI 런타임은 GitHub Copilot models API를 통해 모델 카탈로그를 실시간으로 검색하고 설정 중 기본값을 선택할 수 있습니다.
+> Claude Code, Codex CLI, GitHub Copilot CLI, OpenCode, Hermes, Gemini, Kiro CLI, Pi CLI, Zcode, Goose, GJC, Antigravity CLI, Grok Build CLI를 지원합니다. 설치 프로그램은 사용 가능한 런타임을 자동으로 감지하고 호스트가 지원하는 경우 MCP 서버를 등록합니다. 런타임을 명시적으로 선택하려면 설치 후 `ouroboros setup --runtime <opencode|kiro|copilot|gemini|pi|zcode|goose|gjc|antigravity|grok>`를 실행하세요. Copilot CLI 런타임은 GitHub Copilot models API를 통해 모델 카탈로그를 실시간으로 검색하고 설정 중 기본값을 선택할 수 있습니다.
 
 <details>
 <summary><strong>Codex 플러그인 빠른 시작</strong></summary>
@@ -127,12 +127,11 @@ codex plugin add ouroboros@ouroboros
 
 ```bash
 pipx install 'ouroboros-ai[mcp]'       # 또는: uv tool install 'ouroboros-ai[mcp]'
-ouroboros setup            # Kiro CLI 감지 및 MCP 서버 등록
-```
-
-`.env`에 런타임 설정:
-```
-OUROBOROS_RUNTIME=kiro
+ouroboros setup --runtime kiro         # Kiro CLI 감지, MCP 서버 등록과 함께
+                                        # OUROBOROS_RUNTIME=kiro 를
+                                        # ~/.kiro/settings/mcp.json (setup이 관리하는
+                                        # 신뢰된 위치)에 기록합니다 — 프로젝트 .env는
+                                        # 신뢰되지 않는 입력이라 이 키는 거기서 무시됩니다
 ```
 
 이후 Kiro CLI 세션에서 `ooo` 명령어를 사용합니다.
@@ -183,7 +182,7 @@ ouroboros setup                         # 런타임 설정
 
 호환성 참고: extras 전환 기간 동안 `ouroboros-ai[dashboard]`도 no-op alias로 계속 허용됩니다.
 
-런타임별 가이드: [Claude Code](./docs/runtime-guides/claude-code.md) · [Codex CLI](./docs/runtime-guides/codex.md)
+런타임별 가이드: [Claude Code](./docs/runtime-guides/claude-code.md) · [Codex CLI](./docs/runtime-guides/codex.md) · [Hermes](./docs/runtime-guides/hermes.md) · [OpenCode](./docs/runtime-guides/opencode.md) · [Kiro CLI](./docs/runtime-guides/kiro.md) · [Gemini CLI](./docs/runtime-guides/gemini.md) · [GitHub Copilot CLI](./docs/runtime-guides/copilot.md) · [Zcode](./docs/runtime-guides/zcode.md) · [Pi JSON mode](https://pi.dev/docs/latest/json) · [Goose](./docs/runtime-guides/goose.md) · [GJC](./docs/runtime-guides/gjc.md) · [Antigravity CLI](./docs/runtime-guides/antigravity.md) · [Grok Build CLI](./docs/runtime-guides/grok.md)
 
 </details>
 

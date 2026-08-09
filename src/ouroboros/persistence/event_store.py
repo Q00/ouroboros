@@ -38,6 +38,7 @@ from ouroboros.persistence.schema import (
     session_start_guards_table,
     session_terminal_guards_table,
 )
+from ouroboros.persistence.write_lifecycle import run_with_write_lifecycle
 
 logger = logging.getLogger(__name__)
 
@@ -178,36 +179,6 @@ async def _await_sqlite_write_atomically[T](awaitable: Coroutine[Any, Any, T]) -
     callers and regressions that only need transaction settlement.
     """
     return await _run_to_settlement(awaitable)
-
-
-async def _run_with_write_lifecycle[T](
-    coro: Coroutine[Any, Any, T],
-    *,
-    registry: set[asyncio.Task[Any]],
-    refuse_when: Callable[[], bool],
-    operation: str,
-) -> T:
-    """Keep a complete logical write registered across retries and backoff."""
-    if refuse_when():
-        coro.close()
-        raise PersistenceError(
-            "EventStore is closing; write refused.",
-            operation=operation,
-        )
-    task = asyncio.current_task()
-    if task is None:  # pragma: no cover - async functions always have a task here.
-        coro.close()
-        raise PersistenceError(
-            "EventStore write has no owning task.",
-            operation=operation,
-        )
-    already_registered = task in registry
-    registry.add(task)
-    try:
-        return await coro
-    finally:
-        if not already_registered:
-            registry.discard(task)
 
 
 def acceptance_generation_id_for_session(session_id: str, execution_id: str) -> str:
@@ -763,13 +734,13 @@ class EventStore:
         shared database with normal connection-scoped transactions, and a
         keepalive connection anchors the database's lifetime.
         """
-        # Mutually exclusive with close() in BOTH orders (review rounds
-        # seven and eight): initialization during an in-flight close waits for
-        # the full drain/checkpoint/dispose sequence, and a close started
-        # during initialization waits for initialization to finish.
+        # Serialize with close; once work starts, settle it before surfacing cancellation.
         async with self._lifecycle_lock:
             self._closing = False
-            await self._initialize_locked(create_schema=create_schema)
+            await _run_to_settlement(
+                self._initialize_locked(create_schema=create_schema),
+                operation="initialize",
+            )
 
     async def _initialize_locked(self, *, create_schema: bool | None = None) -> None:
         if self._configuration_error is not None:
@@ -1419,6 +1390,35 @@ class EventStore:
         """Return whether ``event`` requires the Foundation B final gate CAS."""
         return _is_ac_acceptance_finalized_event(event)
 
+    async def settle_transactional_write[T](
+        self,
+        transaction: Callable[[AsyncEngine], Coroutine[Any, Any, T]],
+        *,
+        operation: str,
+    ) -> T:
+        """Run an external transaction inside this store's write lifecycle.
+        Persistence helpers that need a custom atomic transaction must still
+        share close admission and draining with ordinary EventStore writes.
+        Accepting a factory keeps engine access behind that lifecycle fence,
+        including after the store has closed.
+        """
+        if self._closing:
+            raise PersistenceError(
+                "EventStore is closing; write refused.",
+                operation=operation,
+            )
+        if self._engine is None:
+            raise PersistenceError(
+                "EventStore not initialized. Call initialize() first.",
+                operation=operation,
+            )
+        return await _run_to_settlement(
+            transaction(self._engine),
+            registry=self._settling_writes,
+            refuse_when=lambda: self._closing,
+            operation=operation,
+        )
+
     async def append_with_rowid(
         self,
         event: BaseEvent,
@@ -1426,7 +1426,7 @@ class EventStore:
         _skip_workflow_ir_guard: bool = False,
     ) -> int:
         """Append an event and return its exact SQLite rowid."""
-        return await _run_with_write_lifecycle(
+        return await run_with_write_lifecycle(
             self._append_with_rowid_registered(
                 event,
                 _skip_workflow_ir_guard=_skip_workflow_ir_guard,
@@ -1564,7 +1564,7 @@ class EventStore:
             PersistenceError: If the batch operation fails. No events
                              will be persisted if this is raised.
         """
-        await _run_with_write_lifecycle(
+        await run_with_write_lifecycle(
             self._append_batch_registered(events),
             registry=self._settling_writes,
             refuse_when=lambda: self._closing,
