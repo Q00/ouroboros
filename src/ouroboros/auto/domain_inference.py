@@ -1873,16 +1873,25 @@ def _matches_web_app(ledger: SeedDraftLedger) -> bool:
     # denial the app DISPLAYS ("showing which browsers are unsupported")
     # is content, not scope.
     goal_text_value = _goal_text(ledger)
-    content_regions = [m.span() for m in _CONTENT_CLAUSE_RE.finditer(goal_text_value)]
+    # Subordinate clauses ("where embedded browsers are disabled") scope
+    # a denial to the conjunct they modify (#1813 R79), and an exclusion
+    # with a from/in tail ("excluded from the report") names its own
+    # scope object — neither erases the whole ledger.
+    content_regions = [m.span() for m in _CONTENT_CLAUSE_RE.finditer(goal_text_value)] + [
+        m.span() for m in re.finditer(r"\bwhere\s+[^,.;]*", goal_text_value)
+    ]
     if any(
         not any(start <= m.start() < end for start, end in content_regions)
+        and not re.match(r"\s+(?:from|in|within|inside)\b", goal_text_value[m.end() :])
         for m in _POSTPOSITIVE_BROWSER_DENIAL_RE.finditer(goal_text_value)
     ):
         return False
     # An explicit component runtime is authoritative (#1813 R77) — as an
-    # IDENTITY (#1813 R78): negated mentions ("No browser extension")
-    # and companion co-products ("plus companion extension") are not the
-    # runtime's own identity and do not veto.
+    # IDENTITY (#1813 R78/R79): negated mentions do not count, and the
+    # decision is order-independent — the component owns only when NO
+    # browser/web identity survives outside its own noun phrase, so a
+    # two-product runtime keeps web ownership whichever side is named
+    # first.
     component_fragment = (
         r"(?:extensions?|plugins?|add[\s\-]?ons?|addons?|devtools?|"
         r"sidebars?|popups?|toolbars?|overlays?)"
@@ -1890,11 +1899,12 @@ def _matches_web_app(ledger: SeedDraftLedger) -> bool:
     runtime_identity = _strip_negated_signals(
         _section_text(ledger, "runtime_context"), component_fragment
     )
-    runtime_identity = re.sub(
-        r"\b(?:plus|and|alongside|with|companion)\b[^,.;]*", " ", runtime_identity
-    )
     if re.search(rf"\b{component_fragment}\b", runtime_identity):
-        return False
+        residual = re.sub(
+            rf"\b(?:[\w\-'’]+\s+){{0,2}}?{component_fragment}\b", " ", runtime_identity
+        )
+        if not _WEB_APP_GOAL_SIGNAL_RE.search(residual):
+            return False
     # An affirmative web-product request owns its output description
     # (#1813 R27): when the goal's artifact head is a web app, the
     # standardized outputs describe that requested product, and no widget

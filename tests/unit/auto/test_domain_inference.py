@@ -4216,6 +4216,40 @@ def test_companion_component_runtimes_do_not_veto() -> None:
 
 
 @pytest.mark.parametrize(
+    "runtime",
+    [
+        "Browser extension runtime and standalone website runtime",
+        "Standalone website runtime and browser extension runtime",
+    ],
+)
+def test_two_product_runtimes_are_order_independent(runtime: str) -> None:
+    """R79 guard: the component owns only when no browser/web identity
+    survives outside its noun phrase — whichever side is named first."""
+    ledger = _bare_ledger("Build a standalone website and a browser extension")
+    _seed_section(ledger, "outputs", value="Login form with a settings panel shown in the browser")
+    _seed_section(ledger, "runtime_context", value=runtime)
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP in result.classes
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
+        "Build a web app and a native desktop client where embedded browsers are disabled",
+        "Build a web app and a compatibility report; unsupported browsers are excluded from the report",
+    ],
+)
+def test_conjunct_scoped_denials_do_not_erase_the_web_app(goal: str) -> None:
+    """R79 guard: a where-clause denial and a from-scoped exclusion
+    modify their own conjunct, not the whole ledger."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value="Login form with a settings panel shown in the browser")
+    _seed_section(ledger, "runtime_context", value="Browser")
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP in result.classes
+
+
+@pytest.mark.parametrize(
     "goal",
     [
         "The product is an admin portal that runs in browsers",
