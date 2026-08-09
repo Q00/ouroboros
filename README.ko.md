@@ -229,7 +229,7 @@ ouroboros setup                         # 런타임 설정
 
 기본 및 비-LiteLLM 설치는 Python 3.12-3.14를 지원합니다. LiteLLM 포함 설치(`[litellm]`, `[all]`, source `--all-extras`)는 Python 3.12-3.13을 지원하며, 현재 예시는 Python 3.13을 권장합니다. 자세한 내용은 [Platform Support](./docs/platform-support.md#python-profile-matrix)를 참고하세요.
 
-`[mcp]`와 `[claude]`는 의도적으로 분리된 프로필입니다. MCP 2와 현재 Claude Agent SDK가 서로 다른 `mcp` 메이저 버전을 요구하기 때문입니다. 지원되는 MCP 호스트 설정은 별도 프로세스에서 `uvx --from 'ouroboros-ai[mcp]' ...`를 실행합니다. 독립 Claude SDK 설정은 격리 프로세스 안에서 구성된 Claude backend를 사용할 수 없으므로 MCP를 등록하지 않습니다. MCP 실행에는 지원되는 CLI 기반 runtime과 LLM backend를 설정해야 합니다.
+`[mcp]`와 `[claude]`는 의도적으로 분리된 프로필입니다. MCP 2와 현재 Claude Agent SDK가 서로 다른 `mcp` 메이저 버전을 요구하기 때문입니다. 지원되는 MCP 호스트 설정은 별도 프로세스에서 `uvx --isolated --from 'ouroboros-ai[mcp]' ...`를 실행합니다. 독립 Claude SDK 설정은 격리 프로세스 안에서 구성된 Claude backend를 사용할 수 없으므로 MCP를 등록하지 않습니다. MCP 실행에는 지원되는 CLI 기반 runtime과 LLM backend를 설정해야 합니다.
 
 `pip install 'ouroboros-ai[mcp]'`는 이미 격리된 Python 환경에서 MCP 클라이언트/서버 라이브러리를 직접 사용할 때만 유효합니다. 호스트 등록에는 `uvx` 또는 `pipx`가 필요하므로 `ouroboros setup --runtime <kiro|copilot|hermes>` 실행 전 `pipx install 'ouroboros-ai[mcp]'` 또는 `uv tool install 'ouroboros-ai[mcp]'`를 사용하세요. 격리 launcher가 없으면 setup은 runtime 설정을 변경하지 않고 실패합니다.
 

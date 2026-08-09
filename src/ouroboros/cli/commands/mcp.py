@@ -1042,7 +1042,8 @@ def serve(
         _stderr_console.print(Text(f"MCP dependencies not installed: {e}", style="red"))
         _stderr_console.print(
             "[blue]Run MCP 2 in an isolated profile:\n"
-            "  uvx --python '>=3.12' --from 'ouroboros-ai\\[mcp]' ouroboros mcp serve "
+            "  uvx --isolated --python '>=3.12' --from 'ouroboros-ai\\[mcp]' "
+            "ouroboros mcp serve "
             "--runtime claude-cli\n"
             "or:\n"
             "  pipx run --spec 'ouroboros-ai\\[mcp]' ouroboros mcp serve "

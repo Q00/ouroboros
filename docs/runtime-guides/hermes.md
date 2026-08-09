@@ -38,7 +38,7 @@ With `uvx`, the generated host entry is:
 mcp_servers:
   ouroboros:
     command: uvx
-    args: [--from, "ouroboros-ai[mcp]", ouroboros, mcp, serve]
+    args: [--isolated, --from, "ouroboros-ai[mcp]", ouroboros, mcp, serve]
     enabled: true
 ```
 

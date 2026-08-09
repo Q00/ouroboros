@@ -244,6 +244,15 @@ def _check_mcp_runtime_dependency_surface(
                 "Codex MCP command installs `ouroboros-ai` without the `mcp` extra; "
                 "use `ouroboros-ai[mcp]` so stdio initialize/list_tools can start"
             )
+        if (
+            command_name == "uvx"
+            and "ouroboros-ai[mcp]" in string_args
+            and "--isolated" not in string_args
+        ):
+            failures.append(
+                "Codex MCP uvx command may reuse an installed MCP 1.x tool; "
+                "add `--isolated` before `--from ouroboros-ai[mcp]`"
+            )
         return
 
     if command_name != "ouroboros":
@@ -287,7 +296,7 @@ async def _list_stdio_mcp_tool_names(
     This doctor probe intentionally speaks the small MCP initialize/list_tools
     JSON-RPC sequence directly instead of using :class:`MCPClientAdapter`.
     Codex can point at a self-contained command such as
-    ``uvx --from ouroboros-ai[mcp] ouroboros mcp serve``; validating that
+    ``uvx --isolated --from ouroboros-ai[mcp] ouroboros mcp serve``; validating that
     setup must not first require the current ``ouroboros codex doctor``
     interpreter to have installed the optional local ``mcp`` extra.
     """

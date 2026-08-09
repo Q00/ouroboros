@@ -124,7 +124,8 @@ def test_serve_reports_missing_mcp_dependency(monkeypatch):
     assert "pip install" in result.output
     assert "ouroboros-ai[mcp]" in result.output
     assert (
-        "uvx --python '>=3.12' --from 'ouroboros-ai[mcp]' ouroboros mcp serve --runtime claude-cli"
+        "uvx --isolated --python '>=3.12' --from 'ouroboros-ai[mcp]' "
+        "ouroboros mcp serve --runtime claude-cli"
     ) in normalized_output
 
 

@@ -106,7 +106,16 @@ class _SetupCodexCliLogger:
 
 def _build_uvx_mcp_args(package_spec: str) -> list[str]:
     """Return the canonical uvx args for the requested Ouroboros package spec."""
-    return ["--python", UVX_PYTHON_FLOOR, "--from", package_spec, "ouroboros", "mcp", "serve"]
+    return [
+        "--isolated",
+        "--python",
+        UVX_PYTHON_FLOOR,
+        "--from",
+        package_spec,
+        "ouroboros",
+        "mcp",
+        "serve",
+    ]
 
 
 def _detect_mcp_entry(*, package_spec: str = "ouroboros-ai[mcp]") -> dict[str, object] | None:
@@ -114,8 +123,10 @@ def _detect_mcp_entry(*, package_spec: str = "ouroboros-ai[mcp]") -> dict[str, o
 
     Direct ``ouroboros`` and ``python -m`` fallbacks are deliberately excluded:
     their environments may contain the Claude SDK's MCP 1.x dependency or no
-    MCP extra at all. ``uvx`` and ``pipx run`` both create a package-isolated
-    process whose ``[mcp]`` extra is known to contain MCP 2.
+    MCP extra at all. ``uvx --isolated`` and ``pipx run`` both create a
+    package-isolated process whose ``[mcp]`` extra is known to contain MCP 2.
+    ``uvx --from`` without ``--isolated`` is insufficient: uv may reuse an
+    already installed Ouroboros tool whose environment contains MCP 1.x.
     Matches the contract in install.sh and skills/setup/SKILL.md.
     """
     if shutil.which("uvx"):
@@ -435,17 +446,18 @@ _CODEX_MCP_COMMENT_LINES = (
 
 CodexMcpMode = Literal["auto", "preserve", "stdio"]
 _CODEX_APP_CLI_PATH = Path("/Applications/ChatGPT.app/Contents/Resources/codex")
-_CODEX_UVX_MCP_ARGS = [
-    "--python",
-    UVX_PYTHON_FLOOR,
-    "--from",
-    "ouroboros-ai[mcp]",
-    "ouroboros",
-    "mcp",
-    "serve",
-]
+_CODEX_UVX_MCP_ARGS = _build_uvx_mcp_args("ouroboros-ai[mcp]")
 _CODEX_LEGACY_UVX_MCP_ARGS: tuple[tuple[str, ...], ...] = (
     tuple(_CODEX_UVX_MCP_ARGS),
+    (
+        "--python",
+        UVX_PYTHON_FLOOR,
+        "--from",
+        "ouroboros-ai[mcp]",
+        "ouroboros",
+        "mcp",
+        "serve",
+    ),
     ("--from", "ouroboros-ai[mcp]", "ouroboros", "mcp", "serve"),
     ("--from", "ouroboros-ai", "ouroboros", "mcp", "serve"),
     ("ouroboros", "mcp", "serve"),
@@ -643,9 +655,9 @@ def _codex_release_mcp_launcher() -> tuple[str, list[str]] | None:
 def _render_codex_mcp_section() -> str | None:
     """Render the managed Codex MCP block for the current install source.
 
-    Release installs keep the historical ``uvx --from ouroboros-ai[mcp]``
-    command so Codex can bootstrap the MCP extra even if the invoking Python
-    environment lacks it. Dev/git installs must instead point Codex at this
+    Release installs use ``uvx --isolated --from ouroboros-ai[mcp]`` so Codex
+    can bootstrap the MCP extra without reusing a conflicting installed tool.
+    Dev/git installs must instead point Codex at this
     Python environment; otherwise setup silently downgrades the MCP server back
     to the latest PyPI release and hides main-branch fixes under test.
     """
@@ -4053,18 +4065,7 @@ def _detect_opencode_mcp_command() -> dict[str, list[str]] | None:
     stale global binary and a newer uvx install use the newer one.
     """
     if shutil.which("uvx"):
-        return {
-            "command": [
-                "uvx",
-                "--python",
-                UVX_PYTHON_FLOOR,
-                "--from",
-                "ouroboros-ai[mcp]",
-                "ouroboros",
-                "mcp",
-                "serve",
-            ]
-        }
+        return {"command": ["uvx", *_build_uvx_mcp_args("ouroboros-ai[mcp]")]}
     if shutil.which("pipx"):
         return {
             "command": [

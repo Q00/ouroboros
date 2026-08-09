@@ -484,7 +484,7 @@ class TestCodexDoctor:
         (codex_dir / "config.toml").write_text(
             "[mcp_servers.ouroboros]\n"
             'command = "uvx"\n'
-            'args = ["--from", "ouroboros-ai[mcp]", "ouroboros", "mcp", "serve"]\n',
+            'args = ["--isolated", "--from", "ouroboros-ai[mcp]", "ouroboros", "mcp", "serve"]\n',
             encoding="utf-8",
         )
 
@@ -557,6 +557,24 @@ class TestCodexDoctor:
         failures = _check_auto_dispatch_surface(codex_dir)
 
         assert any("without the `mcp` extra" in failure for failure in failures)
+
+    def test_check_auto_dispatch_surface_reports_uvx_without_tool_isolation(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """An installed MCP 1 tool must not satisfy an MCP 2 ``--from`` entry."""
+        codex_dir = tmp_path / ".codex"
+        self._write_healthy_codex_surface(codex_dir)
+        (codex_dir / "config.toml").write_text(
+            "[mcp_servers.ouroboros]\n"
+            'command = "uvx"\n'
+            'args = ["--from", "ouroboros-ai[mcp]", "ouroboros", "mcp", "serve"]\n',
+            encoding="utf-8",
+        )
+
+        failures = _check_auto_dispatch_surface(codex_dir)
+
+        assert any("may reuse an installed MCP 1.x tool" in failure for failure in failures)
 
     def test_check_auto_dispatch_surface_reports_direct_ouroboros_without_mcp_import(
         self,
@@ -965,7 +983,7 @@ class TestCodexDoctor:
 
         live_probe.assert_awaited_once_with(
             "uvx",
-            ("--from", "ouroboros-ai[mcp]", "ouroboros", "mcp", "serve"),
+            ("--isolated", "--from", "ouroboros-ai[mcp]", "ouroboros", "mcp", "serve"),
             {},
         )
 

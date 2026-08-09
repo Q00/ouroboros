@@ -308,7 +308,7 @@ class TestCodexSetup:
         assert "tool_timeout_sec" not in contents
         assert 'command = "/usr/local/bin/uvx"' in contents
         assert (
-            'args = ["--python", ">=3.12", "--from", "ouroboros-ai[mcp]", '
+            'args = ["--isolated", "--python", ">=3.12", "--from", "ouroboros-ai[mcp]", '
             '"ouroboros", "mcp", "serve"]' in contents
         )
 
@@ -7190,6 +7190,31 @@ raise SystemExit(0 if activate_claude_runtime("/second/claude") else 2)
 class TestIsolatedMCPLaunchers:
     """MCP 2 registrations must never inherit an arbitrary host environment."""
 
+    def test_uvx_launchers_explicitly_disable_installed_tool_reuse(self) -> None:
+        """``--from`` alone may reuse an installed Ouroboros MCP 1 environment."""
+        with patch(
+            "ouroboros.cli.commands.setup.shutil.which",
+            side_effect=lambda command: "/usr/local/bin/uvx" if command == "uvx" else None,
+        ):
+            common = setup_cmd._detect_mcp_entry()
+            kiro = setup_cmd._detect_mcp_entry_for_kiro()
+            opencode = setup_cmd._detect_opencode_mcp_command()
+
+        expected_args = [
+            "--isolated",
+            "--python",
+            ">=3.12",
+            "--from",
+            "ouroboros-ai[mcp]",
+            "ouroboros",
+            "mcp",
+            "serve",
+        ]
+        assert common == {"command": "uvx", "args": expected_args}
+        assert kiro == common
+        assert opencode == {"command": ["uvx", *expected_args]}
+        assert expected_args == setup_cmd._CODEX_UVX_MCP_ARGS
+
     def test_direct_binary_and_python_fallbacks_are_rejected(self) -> None:
         def direct_only(command: str) -> str | None:
             if command in {"ouroboros", "python", "python3"}:
@@ -7466,6 +7491,7 @@ class TestHermesSetup:
         config = yaml.safe_load((hermes_dir / "config.yaml").read_text(encoding="utf-8"))
         assert config["mcp_servers"]["ouroboros"]["command"] == "uvx"
         assert config["mcp_servers"]["ouroboros"]["args"] == [
+            "--isolated",
             "--python",
             ">=3.12",
             "--from",
@@ -7556,6 +7582,7 @@ class TestHermesSetup:
         result = yaml.safe_load((hermes_dir / "config.yaml").read_text(encoding="utf-8"))
         assert result["mcp_servers"]["ouroboros"]["command"] == "uvx"
         assert result["mcp_servers"]["ouroboros"]["args"] == [
+            "--isolated",
             "--python",
             ">=3.12",
             "--from",
@@ -9447,6 +9474,7 @@ class TestGjcSetup:
 
         assert entry["command"] == "uvx"
         assert entry["args"] == [
+            "--isolated",
             "--python",
             ">=3.12",
             "--from",
