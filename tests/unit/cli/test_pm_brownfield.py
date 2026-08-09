@@ -8,6 +8,7 @@ command does not fan out.
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -158,6 +159,36 @@ class TestBrownfieldIsNotAnEntranceHere:
             pytest.raises(typer.Exit) as exc,
         ):
             await _run_pm_interview(resume_id="pm-bf", model="m", backend=None, debug=False)
+
+        assert exc.value.exit_code == 1
+
+    @pytest.mark.asyncio
+    async def test_a_roster_held_only_in_pm_meta_is_refused_too(self, tmp_path) -> None:
+        """The guard asks the repositories, not a flag kept beside them.
+
+        A session that selected its roster through the passive-plugin path wrote
+        it to ``pm_meta`` and left ``is_brownfield`` false, so reading the flag
+        let the resume through — and the very next step restored those
+        repositories and carried on without lanes.
+        """
+        state = InterviewState(interview_id="pm-plugin", initial_context="ctx")
+        assert not state.is_brownfield and not state.codebase_paths
+        data_dir = tmp_path / ".ouroboros" / "data"
+        data_dir.mkdir(parents=True)
+        (data_dir / "pm_meta_pm-plugin.json").write_text(
+            json.dumps({"brownfield_repos": [{"path": "/repo/api"}]}), encoding="utf-8"
+        )
+        engine = SimpleNamespace(load_state=AsyncMock(return_value=Result.ok(state)))
+        with (
+            patch("ouroboros.cli.commands.pm.Path.home", return_value=tmp_path),
+            patch("ouroboros.cli.commands.pm.create_llm_adapter", return_value=object()),
+            patch(
+                "ouroboros.bigbang.pm_interview.PMInterviewEngine.create",
+                return_value=engine,
+            ),
+            pytest.raises(typer.Exit) as exc,
+        ):
+            await _run_pm_interview(resume_id="pm-plugin", model="m", backend=None, debug=False)
 
         assert exc.value.exit_code == 1
 

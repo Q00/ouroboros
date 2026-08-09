@@ -592,6 +592,15 @@ class PMInterviewHandler:
                         state.is_brownfield = True
                         state.codebase_paths = [{"path": cwd, "role": "primary"}]
 
+                # The selected roster is recorded on the state, in the field the
+                # other start paths already write. It was held only in
+                # ``pm_meta``, so anything reading the state saw a session with
+                # no repositories: the direct CLI's brownfield refusal, and the
+                # seed generator's own check.
+                if selected_repos:
+                    state.codebase_paths = [
+                        {"path": str(path), "role": "primary"} for path in selected_repos
+                    ]
                 save_result = await _plugin_save_state(state_dir, state)
                 if save_result.is_err:
                     return Result.err(
@@ -660,6 +669,19 @@ class PMInterviewHandler:
                 selected_repos = _plugin_repo_paths(persisted_repos)
                 meta["brownfield_repos"] = persisted_repos
                 meta["status"] = "interview_started"
+                # The other entrance to the same roster, recorded the same way.
+                if selected_repos:
+                    repo_state = await _plugin_load_state(state_dir, session_id)
+                    if repo_state.is_ok:
+                        repo_state.value.codebase_paths = [
+                            {"path": str(path), "role": "primary"} for path in selected_repos
+                        ]
+                        repo_state.value.mark_updated()
+                        marked = await _plugin_save_state(state_dir, repo_state.value)
+                        if marked.is_err:
+                            return Result.err(
+                                MCPToolError(str(marked.error), tool_name="ouroboros_pm_interview")
+                            )
                 _save_pm_meta(
                     session_id,
                     engine=None,
@@ -742,16 +764,26 @@ class PMInterviewHandler:
                 if answer:
                     # ``record_answer`` fills a round persisted question-only or
                     # appends a new one, and settles provenance where the answer
-                    # arrives rather than at construction. Fall back to a
-                    # descriptive placeholder for backward compatibility
-                    # (callers that don't supply last_question yet).
+                    # arrives rather than at construction.
                     plugin_pending = _pending_round(state)
-                    has_pending = plugin_pending is not None
-                    if has_pending and plugin_pending is not None:
+                    if plugin_pending is not None:
                         question_text = last_question or plugin_pending.question
+                    elif last_question:
+                        question_text = last_question
                     else:
-                        question_text = (
-                            last_question if last_question else "(continued from subagent)"
+                        # The same refusal the in-process path gives, because a
+                        # question this server never asked is worse here: the
+                        # placeholder that stood here was written into the
+                        # durable transcript, and later questions and extraction
+                        # read it back as something the user was asked.
+                        return Result.err(
+                            MCPToolError(
+                                "Cannot record answer - the previous round is already "
+                                "answered and no follow-up question was provided. Pass "
+                                "the question this answer belongs to as 'last_question' "
+                                "alongside 'answer'.",
+                                tool_name="ouroboros_pm_interview",
+                            )
                         )
                     # One call for every answer, whatever its provenance. A
                     # confirmed lane finding arrives here as an ordinary

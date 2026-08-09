@@ -228,6 +228,20 @@ def _refuse_brownfield_in_direct_cli(repos: list[dict[str, str]]) -> None:
     raise typer.Exit(code=1)
 
 
+def _resume_covers_repositories(state: Any, meta: dict[str, Any] | None) -> bool:
+    """Whether the session being resumed covers a codebase.
+
+    Asked of the repositories each time rather than kept as a flag beside them.
+    A PM session records its roster in two places depending on how it started —
+    ``codebase_paths`` on the state, ``brownfield_repos`` in ``pm_meta`` — and a
+    boolean maintained alongside them is one more thing that can disagree with
+    both. It did: the plugin selection path wrote only ``pm_meta``.
+    """
+    if getattr(state, "is_brownfield", False) or getattr(state, "codebase_paths", None):
+        return True
+    return bool((meta or {}).get("brownfield_repos"))
+
+
 def _check_existing_pm_seeds() -> bool:
     """Check for existing PM seeds and prompt for overwrite confirmation.
 
@@ -415,33 +429,41 @@ async def _run_pm_interview(
             raise typer.Exit(code=1)
         state = state_result.value
 
-        # The other edge of the same rule. A session started through MCP may be
-        # brownfield, and continuing it here would generate the rest of its
-        # questions ungrounded under a Seed that still claims the repositories.
-        # Refusing at both edges is what makes the property total: this command
-        # can neither create nor continue a brownfield PM interview.
-        if state.is_brownfield:
+        # Restore PM-specific metadata (deferred items, decide-later, etc.)
+        data_dir = Path.home() / ".ouroboros" / "data"
+        pm_meta_path = data_dir / f"pm_meta_{resume_id}.json"
+        meta: dict[str, Any] | None = None
+        if pm_meta_path.exists():
+            import json
+
+            try:
+                meta = json.loads(pm_meta_path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                meta = None
+
+        # The other edge of the same rule. A session started through MCP may
+        # cover repositories, and continuing it here would generate the rest of
+        # its questions ungrounded under a Seed that still claims them. Refusing
+        # at both edges is what makes the property total: this command can
+        # neither create nor continue a PM interview over a codebase.
+        #
+        # Asked of the repositories rather than of a flag beside them. The two
+        # disagreed: a session that selected its roster through the plugin path
+        # held it in ``pm_meta`` alone, so a resume read ``is_brownfield`` as
+        # false, passed here, and restored the roster on the next line.
+        if _resume_covers_repositories(state, meta):
             print_error(
                 f"Session {resume_id} is a brownfield PM interview.\n\n"
                 f"{_BROWNFIELD_IS_AN_MCP_ENTRANCE}"
             )
             raise typer.Exit(code=1)
 
-        # Restore PM-specific metadata (deferred items, decide-later, etc.)
-        data_dir = Path.home() / ".ouroboros" / "data"
-        pm_meta_path = data_dir / f"pm_meta_{resume_id}.json"
-        if pm_meta_path.exists():
-            import json
-
-            try:
-                meta = json.loads(pm_meta_path.read_text(encoding="utf-8"))
-                engine.restore_meta(meta)
-            except (json.JSONDecodeError, OSError):
-                print_warning("Could not load PM metadata; continuing without it.")
-                # Still install PM steering even without full meta
-                engine._install_pm_steering()
+        if meta is not None:
+            engine.restore_meta(meta)
         else:
-            # No pm_meta file — still install PM steering for resumed session
+            if pm_meta_path.exists():
+                print_warning("Could not load PM metadata; continuing without it.")
+            # Still install PM steering without full meta, as when there is none.
             engine._install_pm_steering()
 
         print_success(f"Resumed session: {resume_id}")
