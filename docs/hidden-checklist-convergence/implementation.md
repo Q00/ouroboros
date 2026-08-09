@@ -1,5 +1,7 @@
 # Hidden-Checklist Convergence Implementation
 
+> 中文说明：[README.zh-CN.md](./README.zh-CN.md)
+
 > Completed: 2026-08-07
 > Branch: detached worktree HEAD
 

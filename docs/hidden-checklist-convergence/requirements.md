@@ -1,5 +1,7 @@
 # Hidden-Checklist Convergence Requirements
 
+> 中文说明：[README.zh-CN.md](./README.zh-CN.md)
+
 > Generated: 2026-08-07
 > Status: Implemented
 
