@@ -17,9 +17,10 @@ No additional Python SDK is required beyond the base `ouroboros-ai` package.
 
 ## Prerequisites
 
-- **Codex CLI** installed and on your `PATH`, or the bundled executable from the macOS ChatGPT app (see [install steps](#installing-codex-cli) below)
+- **Codex CLI** installed and on your `PATH`. The marketplace-plugin path runs `codex plugin ...` from a shell, so `PATH` registration is required there. If you only have the bundled executable from the macOS ChatGPT app, put it on `PATH` (see [install steps](#installing-codex-cli) below) or use the standalone path — Ouroboros setup can discover a bundled executable, but your shell cannot resolve `codex plugin`
 - A signed-in **Codex CLI** account. API-key authentication is also supported: `printenv OPENAI_API_KEY | codex login --with-api-key`. See [`credentials.yaml`](../config-reference.md#credentialsyaml) for file-based key management
-- **Python >= 3.12**
+- **`uvx`** (ships with uv) for the marketplace-plugin path. The plugin's MCP descriptor launches the server with `uvx` ([`.mcp.codex.json`](../../.mcp.codex.json)). Install uv with `pipx install uv`, `pip install --user uv`, or `brew install uv`
+- **Python >= 3.12** for the standalone installation only. On the plugin path `uvx` provisions an interpreter from the package's `requires-python = ">=3.12"`
 
 ## Installing Codex CLI
 
