@@ -1175,14 +1175,22 @@ _VERIFICATION_ATTACHMENT_CUT_RE = re.compile(
 
 # A production-marked noun phrase declares the artifact's identity even
 # inside verification prose ("tests cover the production Chrome browser
-# extension runtime") — the declaration survives the exemption. A bare
-# tooling object ("tests with a browser extension") carries no such
-# marker and stays exempt.
+# extension runtime") — the declaration survives the exemption. The
+# marker may premodify the head, head the phrase as "runtime", or
+# follow the component as a deployment/release clause (#1813 R93:
+# "extension shipped to users", "extension that is deployed in
+# production"). A bare tooling object ("tests with a browser
+# extension") carries no such marker and stays exempt.
 _PRODUCTION_IDENTITY_NP_RE = re.compile(
     rf"(?:(?:the|an?|our|its|this|that)\s+)?"
     rf"(?:production|shipped|deployed|released|live)\s+"
     rf"(?:[\w\-'’]+\s+){{0,3}}?(?:{_COMPONENT_ARTIFACT_FRAGMENT}|runtimes?)\b"
     rf"|(?:(?:the|an?|our|its|this|that)\s+)?(?:[\w\-'’]+\s+){{0,4}}?runtimes?\b"
+    rf"|(?:(?:the|an?|our|its|this|that)\s+)?(?:[\w\-'’]+\s+){{0,3}}?"
+    rf"(?:{_COMPONENT_ARTIFACT_FRAGMENT})\s+"
+    rf"(?:(?:that|which)\s+(?:is|are|was|were|gets?|runs?|(?:has|have)\s+been)\s+)?"
+    rf"(?:shipped|deployed|released|launched|distributed|published|live|"
+    rf"in\s+production)\b"
 )
 
 
