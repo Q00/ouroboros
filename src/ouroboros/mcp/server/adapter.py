@@ -1642,6 +1642,7 @@ def create_ouroboros_server(
         AutoHandler,
         CancelExecutionHandler,
         CancelJobHandler,
+        ChecklistVerifyHandler,
         EvaluateHandler,
         EvolveRewindHandler,
         EvolveStepHandler,
@@ -2342,6 +2343,10 @@ def create_ouroboros_server(
         agent_runtime_backend=evaluate_runtime_backend,
         opencode_mode=opencode_mode,
     )
+    checklist_verify_handler = ChecklistVerifyHandler(
+        evaluate_handler=evaluate_handler,
+        llm_backend=evaluate_llm_backend,
+    )
     start_evaluate_handler = StartEvaluateHandler(
         evaluate_handler=evaluate_handler,
         event_store=event_store,
@@ -2490,6 +2495,7 @@ def create_ouroboros_server(
         BrownfieldHandler(_store=brownfield_store),
         evaluate_handler,
         start_evaluate_handler,
+        checklist_verify_handler,
         LateralThinkHandler(
             agent_runtime_backend=reflect_runtime_backend,
             opencode_mode=opencode_mode,
