@@ -127,7 +127,7 @@ timeout = 120
 
 **TOML parse errors** are logged as a warning (`mechanical.toml_parse_error`) and silently ignored. There is no preset to fall back to, so every command stays `None` and Stage 1 skips all checks.
 
-**Security: executable allowlist.** Commands in `.ouroboros/mechanical.toml` may only use executables from a built-in allowlist (e.g., `pytest`, `ruff`, `cargo`, `go`, `npm`, `make`). If a command specifies an executable not in the allowlist — or uses shell operators or an absolute path — it is silently blocked (logged as `mechanical.blocked_executable`) and the check is skipped. Commands passed programmatically through `MechanicalConfig` or the MCP `overrides` dict bypass this check, because they are vetted upstream. This prevents untrusted repository configs from running arbitrary commands in CI/CD environments.
+**Security: executable allowlist.** Commands in `.ouroboros/mechanical.toml` may only use executables from a built-in allowlist (e.g., `pytest`, `ruff`, `cargo`, `go`, `npm`, `make`). If a command specifies an executable not in the allowlist — or uses shell operators or an absolute path — it is silently blocked (logged as `mechanical.blocked_executable`) and the check is skipped. Commands passed programmatically through `MechanicalConfig`, or through the `overrides` dict handed to `build_mechanical_config()` from Python, bypass this check because the caller is trusted. **There is no MCP path that does this** — see the note under [Language Auto-Detection](#language-auto-detection). This prevents untrusted repository configs from running arbitrary commands in CI/CD environments.
 
 | Override failure mode | Symptom | Cause / Action |
 |---|---|---|
