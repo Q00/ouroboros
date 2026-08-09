@@ -23,6 +23,13 @@ _WEB_APP_GOAL_SIGNAL_FRAGMENT = (
 )
 _WEB_APP_GOAL_SIGNAL_RE = re.compile(rf"\b{_WEB_APP_GOAL_SIGNAL_FRAGMENT}\b")
 
+# Concrete browser names are ordinary browser evidence (#1813 R104): a
+# runtime of "Chrome and Firefox" declares the same environment as
+# "Modern browsers". The set is closed to unambiguous names — bare
+# "edge" and "opera" collide with ordinary vocabulary and need their
+# vendor qualifier.
+_BROWSER_NAME_FRAGMENT = r"(?:chrome|chromium|firefox|safari|(?:microsoft|ms)\s+edge)"
+
 _WEB_APP_ARTIFACT_PHRASE_RE = re.compile(
     r"\b(?:web[\s\-]?app(?:lication)?s?|webapps?|websites?|web\s+uis?|frontends?|"
     r"front[\s\-]ends?|single[\s\-]page\s+app(?:lication)?s?)\b"
@@ -267,7 +274,7 @@ _EXPLICIT_WEB_VOCAB_RE = re.compile(
     r"|\bweb[\s\-]based\b|\bin[\s\-]browser\b"
 )
 _BARE_ADJACENT_QUALIFIER_RE = re.compile(
-    r"\b(?:browsers?|web)[\s\-]+"
+    rf"\b(?:browsers?|web|{_BROWSER_NAME_FRAGMENT})[\s\-]+"
     r"(?:apps?|applications?|webapps?|uis?|interfaces?|pages?|"
     r"frontends?|sites?|websites?|dashboards?|consoles?|portals?|"
     r"players?|editors?|viewers?|clients?|panels?|forms?)\b"
@@ -296,7 +303,7 @@ _NON_BROWSER_RUNTIME_RE = re.compile(
 _SECTION_BROWSER_ENV_RE = re.compile(
     r"(?<!embedded )(?<!headless )(?<!in-app )(?<!inline )(?<!internal )"
     r"(?<!integrated )(?<!bundled )"
-    rf"\b{_WEB_APP_GOAL_SIGNAL_FRAGMENT}\b"
+    rf"\b(?:{_WEB_APP_GOAL_SIGNAL_FRAGMENT}|{_BROWSER_NAME_FRAGMENT})\b"
     r"(?!\s+(?!(?:and|or|nor|but|use|usage|without|with|for|on|in|at|by|"
     r"from|via|through|to|so|that|which|because|since|while|when|where|"
     r"using|during|after|before|only|instead|rather|too|as|alongside|"

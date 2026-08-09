@@ -4613,6 +4613,57 @@ def test_web_nouns_as_relation_objects_do_not_own(goal: str, outputs: str) -> No
 
 
 @pytest.mark.parametrize(
+    ("goal", "runtime"),
+    [
+        ("Build a Chrome-compatible admin dashboard", "Chrome and Firefox"),
+        ("Build a Chrome-compatible admin dashboard", "Safari"),
+        ("Build a Chrome-compatible admin dashboard", "Chromium"),
+        ("Build a Firefox admin console", "Firefox"),
+    ],
+)
+def test_concrete_browser_names_are_browser_evidence(goal: str, runtime: str) -> None:
+    """R104 guard: concrete browser runtimes declare the same
+    environment as "Modern browsers" — the closed name set is ordinary
+    browser-UI evidence."""
+    ledger = _bare_ledger(goal)
+    _seed_section(
+        ledger, "outputs", value="Interactive login form, navigation menu, and settings panels"
+    )
+    _seed_section(ledger, "runtime_context", value=runtime)
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP
+
+
+@pytest.mark.parametrize(
+    ("goal", "outputs", "runtime"),
+    [
+        (
+            "Build a Chrome-compatible admin dashboard",
+            "Interactive login form, navigation menu, and settings panels",
+            "Chrome extension",
+        ),
+        (
+            "Build an interactive desktop dashboard",
+            "Interactive charts with a filters panel",
+            "Native desktop application; Playwright launches Chrome in CI",
+        ),
+    ],
+)
+def test_browser_names_keep_component_and_harness_exclusions(
+    goal: str, outputs: str, runtime: str
+) -> None:
+    """R104 guard: the name vocabulary inherits the existing exclusions —
+    a Chrome extension is still a component and a harness-launched
+    Chrome is still the test environment."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value=outputs)
+    _seed_section(ledger, "runtime_context", value=runtime)
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes
+
+
+@pytest.mark.parametrize(
     "goal",
     [
         "Build a reusable widget consumed in web apps",
