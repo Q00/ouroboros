@@ -6083,6 +6083,37 @@ raise SystemExit(0 if activate_claude_runtime("/second/claude") else 2)
         assert observer_link.read_bytes() == secret
         assert stage.stat().st_nlink == 2
 
+    def test_secret_scrub_rechecks_contents_when_mtime_is_restored(self, tmp_path: Path) -> None:
+        """Same-size replacement bytes cannot bypass the pre-truncate guard."""
+        secret = b"sk-owned-content-generation"
+        stage = tmp_path / ".credentials.stage"
+        stage.write_bytes(secret)
+        expected = runtime_activation._snapshot_target(stage)
+        operator = b"x" * len(secret)
+
+        def _replace_contents_and_restore_mtime(path: Path) -> None:
+            if path != stage:
+                return
+            original_atime = path.stat().st_atime_ns
+            path.write_bytes(operator)
+            os.utime(
+                path,
+                ns=(original_atime, expected.modified_ns),
+                follow_symlinks=False,
+            )
+
+        with (
+            patch(
+                "ouroboros.cli.runtime_activation._secret_scrub_checkpoint",
+                side_effect=_replace_contents_and_restore_mtime,
+            ),
+            pytest.raises(runtime_activation._ConcurrentActivationError),
+        ):
+            runtime_activation._scrub_owned_artifact(stage, expected)
+
+        assert stage.read_bytes() == operator
+        assert stage.stat().st_nlink == 1
+
     def test_journal_cleanup_rechecks_secret_guard_immediately_before_scrub(
         self, tmp_path: Path
     ) -> None:

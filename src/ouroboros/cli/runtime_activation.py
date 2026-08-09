@@ -597,6 +597,17 @@ def _scrub_owned_artifact(
             before_scrub_generation != expected_before_scrub
         ):
             raise _ConcurrentActivationError(f"Secret artifact changed before scrub: {path}")
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        observed_contents = bytearray()
+        remaining = len(expected.contents) + 1
+        while remaining:
+            chunk = os.read(descriptor, min(1024 * 1024, remaining))
+            if not chunk:
+                break
+            observed_contents.extend(chunk)
+            remaining -= len(chunk)
+        if bytes(observed_contents) != expected.contents:
+            raise _ConcurrentActivationError(f"Secret artifact contents changed: {path}")
         os.ftruncate(descriptor, 0)
         os.fsync(descriptor)
         scrubbed = _snapshot_from_stat(b"", os.fstat(descriptor))
