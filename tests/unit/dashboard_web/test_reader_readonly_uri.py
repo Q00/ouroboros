@@ -2138,16 +2138,17 @@ def test_picker_bounds_large_start_history(tmp_path, monkeypatch) -> None:
 
 
 @pytest.mark.parametrize(
-    ("run_id", "expected_index"),
+    ("run_id", "expected_index", "expected_queries"),
     [
-        ("exec_target", PICKER_START_EXECUTION_INDEX),
-        ("orch_target", "PRIMARY KEY"),
+        ("exec_target", PICKER_START_EXECUTION_INDEX, 2),
+        ("orch_target", "PRIMARY KEY", 3),
     ],
 )
 def test_event_tail_bounds_identity_resolution_across_100k_starts(
     tmp_path,
     run_id: str,
     expected_index: str,
+    expected_queries: int,
 ) -> None:
     db = tmp_path / f"tail-start-identity-{run_id}.db"
     conn = sqlite3.connect(db)
@@ -2213,7 +2214,7 @@ def test_event_tail_bounds_identity_resolution_across_100k_starts(
 
     assert resolved == ["exec_target", "orch_target"]
     assert vm_steps < 500, (vm_steps, plans)
-    assert len(identity_queries) == 2
+    assert len(identity_queries) == expected_queries
     access_paths = {str(row[3]) for plan in plans for row in plan}
     assert any(expected_index in path for path in access_paths)
     assert any("USING INTEGER PRIMARY KEY" in path for path in access_paths)
@@ -2222,24 +2223,89 @@ def test_event_tail_bounds_identity_resolution_across_100k_starts(
     assert all("TEMP B-TREE" not in path for path in access_paths)
 
 
-def test_event_tail_identity_projection_preserves_duplicate_execution_starts(tmp_path) -> None:
+def test_event_tail_identity_projection_resolves_duplicate_execution_starts_symmetrically(
+    tmp_path,
+) -> None:
     db = tmp_path / "tail-duplicate-starts.db"
     _make_events_db(
         db,
         [
             ("orch-one", "orchestrator.session.started", {"execution_id": "exec-shared"}),
             ("orch-two", "orchestrator.session.started", {"execution_id": "exec-shared"}),
+            (
+                "orch-two",
+                "orchestrator.progress.updated",
+                {"execution_id": "exec-shared", "progress": {"runtime_status": "running"}},
+            ),
         ],
     )
-    conn = _connect_readonly(db)
+
+    expected_ids = ["exec-shared", "orch-one", "orch-two"]
+    expected_events = [
+        "orchestrator.session.started",
+        "orchestrator.session.started",
+        "orchestrator.progress.updated",
+    ]
+    for selected_id in expected_ids:
+        conn = _connect_readonly(db)
+        try:
+            assert EventTail(db, selected_id)._resolve_ids(conn) == expected_ids
+        finally:
+            conn.close()
+        assert [event["event_type"] for event in EventTail(db, selected_id).fetch_new()] == (
+            expected_events
+        )
+
+
+async def test_event_tail_refreshes_identity_cluster_after_first_fetch(tmp_path) -> None:
+    db = tmp_path / "tail-live-duplicate-start.db"
+    store = EventStore(f"sqlite+aiosqlite:///{db}")
+    await store.initialize()
     try:
-        assert EventTail(db, "exec-shared")._resolve_ids(conn) == [
-            "exec-shared",
-            "orch-one",
-            "orch-two",
+        await store.append(
+            BaseEvent(
+                type="orchestrator.session.started",
+                aggregate_type="session",
+                aggregate_id="orch-one",
+                data={"execution_id": "exec-shared"},
+            )
+        )
+        tail = EventTail(db, "orch-one")
+        assert [event["event_type"] for event in tail.fetch_new()] == [
+            "orchestrator.session.started"
+        ]
+
+        await store.append(
+            BaseEvent(
+                type="orchestrator.session.started",
+                aggregate_type="session",
+                aggregate_id="orch-two",
+                data={"execution_id": "exec-shared"},
+            )
+        )
+        await store.append(
+            BaseEvent(
+                type="orchestrator.progress.updated",
+                aggregate_type="session",
+                aggregate_id="orch-two",
+                data={
+                    "execution_id": "exec-shared",
+                    "progress": {"runtime_status": "running"},
+                },
+            )
+        )
+
+        assert [event["event_type"] for event in tail.fetch_new()] == [
+            "orchestrator.session.started",
+            "orchestrator.progress.updated",
+        ]
+        assert [event["event_type"] for event in EventTail(db, "exec-shared").fetch_new()] == [
+            "orchestrator.session.started",
+            "orchestrator.session.started",
+            "orchestrator.progress.updated",
         ]
     finally:
-        conn.close()
+        await store.close()
 
 
 def test_event_tail_fails_closed_for_mismatched_start_identity(tmp_path) -> None:

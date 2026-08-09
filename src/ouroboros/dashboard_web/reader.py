@@ -238,7 +238,6 @@ class EventTail:
         self._db_path = Path(db_path).expanduser()
         self._run_id = run_id
         self._cursor = 0
-        self._ids: list[str] | None = None
 
     @property
     def db_path(self) -> Path:
@@ -246,53 +245,56 @@ class EventTail:
 
     def reset(self) -> None:
         self._cursor = 0
-        self._ids = None
 
     def _resolve_ids(self, conn: sqlite3.Connection) -> list[str]:
-        """Recover {execution_id, session_id} for the run (cached)."""
-        if self._ids is not None:
-            return self._ids
+        """Recover the current bounded execution/session cluster for the run."""
         ids = {self._run_id}
-        execution_rows = conn.execute(
-            "SELECT projected.event_rowid AS projected_rowid, "
-            "projected.execution_id AS projected_execution_id, "
-            "projected.session_id AS projected_session_id, "
-            "events.rowid, events.event_type, "
-            f"{PICKER_START_EXECUTION_ID_SQL} AS eid, "
-            f"{PICKER_START_SESSION_ID_SQL} AS sid "
-            f"FROM {PICKER_START_TABLE} AS projected "
-            f"INDEXED BY {PICKER_START_EXECUTION_INDEX} "
-            "LEFT JOIN events ON events.rowid = projected.event_rowid "
-            "WHERE projected.execution_id = ?",
-            [self._run_id],
-        ).fetchall()
         expected_map_keys: set[tuple[str, str]] = set()
         session_ids: set[str] = set()
-        for row in execution_rows:
-            valid_pointer = (
-                row["projected_rowid"] is not None
-                and row["rowid"] is not None
-                and row["event_type"] == "orchestrator.session.started"
-                and int(row["rowid"]) == int(row["projected_rowid"])
-                and row["projected_execution_id"] == row["eid"]
-                and row["projected_session_id"] == row["sid"]
-            )
-            if not valid_pointer:
-                raise PickerIndexContractError(
-                    frozenset(),
-                    detail=f"start identity pointer mismatch: {row['projected_rowid']}",
-                )
-            if row["sid"]:
-                ids.add(row["sid"])
-                session_ids.add(row["sid"])
-                expected_map_keys.add((row["sid"], row["eid"] or ""))
-            if row["eid"]:
-                ids.add(row["eid"])
-
-        if not execution_rows:
-            session_ids.add(self._run_id)
+        execution_rows: list[sqlite3.Row] = []
         map_rows: list[sqlite3.Row] = []
-        for session_id in session_ids:
+        queried_sessions: set[str] = set()
+
+        def load_execution(execution_id: str) -> None:
+            rows = conn.execute(
+                "SELECT projected.event_rowid AS projected_rowid, "
+                "projected.execution_id AS projected_execution_id, "
+                "projected.session_id AS projected_session_id, "
+                "events.rowid, events.event_type, "
+                f"{PICKER_START_EXECUTION_ID_SQL} AS eid, "
+                f"{PICKER_START_SESSION_ID_SQL} AS sid "
+                f"FROM {PICKER_START_TABLE} AS projected "
+                f"INDEXED BY {PICKER_START_EXECUTION_INDEX} "
+                "LEFT JOIN events ON events.rowid = projected.event_rowid "
+                "WHERE projected.execution_id = ?",
+                [execution_id],
+            ).fetchall()
+            for row in rows:
+                valid_pointer = (
+                    row["projected_rowid"] is not None
+                    and row["rowid"] is not None
+                    and row["event_type"] == "orchestrator.session.started"
+                    and int(row["rowid"]) == int(row["projected_rowid"])
+                    and row["projected_execution_id"] == row["eid"]
+                    and row["projected_session_id"] == row["sid"]
+                )
+                if not valid_pointer:
+                    raise PickerIndexContractError(
+                        frozenset(),
+                        detail=f"start identity pointer mismatch: {row['projected_rowid']}",
+                    )
+                if row["sid"]:
+                    ids.add(row["sid"])
+                    session_ids.add(row["sid"])
+                    expected_map_keys.add((row["sid"], row["eid"] or ""))
+                if row["eid"]:
+                    ids.add(row["eid"])
+            execution_rows.extend(rows)
+
+        def load_session(session_id: str) -> None:
+            if session_id in queried_sessions:
+                return
+            queried_sessions.add(session_id)
             map_rows.extend(
                 conn.execute(
                     "SELECT projected.event_rowid AS projected_rowid, "
@@ -312,6 +314,15 @@ class EventTail:
                     [session_id],
                 ).fetchall()
             )
+
+        load_execution(self._run_id)
+        if not execution_rows:
+            load_session(self._run_id)
+            for row in map_rows:
+                if row["lookup_execution_id"]:
+                    load_execution(row["lookup_execution_id"])
+        for session_id in session_ids:
+            load_session(session_id)
         if not execution_rows and not map_rows:
             raise PickerIndexContractError(
                 frozenset(),
@@ -346,8 +357,7 @@ class EventTail:
                 frozenset(),
                 detail=f"start identity pointer mismatch: missing for {self._run_id}",
             )
-        self._ids = sorted(ids)
-        return self._ids
+        return sorted(ids)
 
     def fetch_new(self, *, limit: int = 5000) -> list[dict[str, Any]]:
         """Return events appended since the last call (advances the cursor)."""
