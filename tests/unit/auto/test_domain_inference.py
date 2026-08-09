@@ -4424,6 +4424,39 @@ def test_menu_and_popup_components_share_the_vocabulary(goal: str, runtime: str)
 @pytest.mark.parametrize(
     "goal",
     [
+        "Build a web app; browsers are unavailable because the backend is offline",
+        "Build a web app; browsers are unavailable since authentication is down",
+        "Build a web app; browsers are unavailable due to maintenance",
+    ],
+)
+def test_causal_availability_conditions_preserve_ownership(goal: str) -> None:
+    """R85 guard: causal qualifiers (because/since/due to) explain an
+    availability condition — they do not deny the artifact."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value="Interactive charts with a filters panel")
+    _seed_section(ledger, "runtime_context", value="Browser")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP
+
+
+def test_displayed_component_status_keeps_the_dashboard() -> None:
+    """R85 guard: a bare-preposition association inside a content clause
+    is displayed content — the dashboard with browser runtime owns,
+    while relation-participles (belonging to) still veto."""
+    ledger = _bare_ledger("Build a dashboard showing the status of browser extensions")
+    _seed_section(
+        ledger, "outputs", value="Extension status table with filters and install buttons"
+    )
+    _seed_section(ledger, "runtime_context", value="Runs in browsers")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
         "The product is an admin portal that runs in browsers",
         "The deliverable is an admin portal available in browsers",
     ],

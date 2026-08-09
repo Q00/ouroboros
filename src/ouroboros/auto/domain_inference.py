@@ -1908,7 +1908,7 @@ def _matches_web_app(ledger: SeedDraftLedger) -> bool:
         not any(start <= m.start() < end for start, end in content_regions)
         and not re.match(
             r"\s+(?:when|if|unless|while|whenever|wherever|until|before|"
-            r"after|without)\b",
+            r"after|without|because|since|due|owing|thanks)\b",
             goal_text_value[m.end() :],
         )
         and not re.match(
@@ -1933,8 +1933,28 @@ def _matches_web_app(ledger: SeedDraftLedger) -> bool:
     # (#1813 R83).
     if _GOAL_COMPONENT_IDENTITY_RE.search(goal_text_value):
         return False
+    # For the component rule, only that/which and participial clauses
+    # are content regions — a for/about clause IS the association being
+    # judged (#1813 R85).
+    component_content_regions = [
+        m.span() for m in re.finditer(r"\b(?:that|which)\s+[^,.;]*", goal_text_value)
+    ] + [
+        m.span()
+        for m in re.finditer(
+            rf"\b(?!{_NOMINAL_GERUND_FRAGMENT}\b)[a-z'’\-]+ing\s+[^,.;]*",
+            goal_text_value,
+        )
+    ]
     if any(
         not _EXPLICIT_WEB_VOCAB_RE.search(goal_text_value[: m.start()])
+        and not (
+            # A bare-preposition association inside a content clause is
+            # displayed/managed content (#1813 R85): "showing the status
+            # OF browser extensions". A relation-participle start
+            # ("belonging to ...") stays an ownership relation.
+            not re.match(r"[a-z'’\-]+(?:ed|ing)\b", m.group(0))
+            and any(start <= m.start() < end for start, end in component_content_regions)
+        )
         for m in _GOAL_COMPONENT_TARGET_RE.finditer(goal_text_value)
     ):
         return False
