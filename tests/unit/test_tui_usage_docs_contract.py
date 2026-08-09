@@ -30,9 +30,7 @@ def _binding_actions(path: str, class_name: str) -> dict[str, str]:
     """Extract literal ``Binding(key, action, ...)`` entries from one class."""
     module = ast.parse(_read(REPO_ROOT / path))
     target_class = next(
-        node
-        for node in module.body
-        if isinstance(node, ast.ClassDef) and node.name == class_name
+        node for node in module.body if isinstance(node, ast.ClassDef) and node.name == class_name
     )
     assignment = next(
         node
@@ -98,21 +96,25 @@ def test_textual_binding_contract_matches_documented_screen_overrides() -> None:
         "3": "show_logs",
         "4": "show_debug",
     }
-    assert _binding_actions(
-        "src/ouroboros/tui/screens/dashboard_v3.py", "DashboardScreenV3"
-    )["r"] == "resume"
-    assert _binding_actions(
-        "src/ouroboros/tui/screens/execution.py", "ExecutionScreen"
-    )["r"] == "refresh"
-    assert _binding_actions("src/ouroboros/tui/screens/debug.py", "DebugScreen")["r"] == (
-        "refresh"
+    assert (
+        _binding_actions("src/ouroboros/tui/screens/dashboard_v3.py", "DashboardScreenV3")["r"]
+        == "resume"
     )
-    assert _binding_actions(
-        "src/ouroboros/tui/screens/lineage_selector.py", "LineageSelectorScreen"
-    )["r"] == "refresh"
-    assert _binding_actions(
-        "src/ouroboros/tui/screens/lineage_detail.py", "LineageDetailScreen"
-    )["r"] == "rewind"
+    assert (
+        _binding_actions("src/ouroboros/tui/screens/execution.py", "ExecutionScreen")["r"]
+        == "refresh"
+    )
+    assert _binding_actions("src/ouroboros/tui/screens/debug.py", "DebugScreen")["r"] == ("refresh")
+    assert (
+        _binding_actions("src/ouroboros/tui/screens/lineage_selector.py", "LineageSelectorScreen")[
+            "r"
+        ]
+        == "refresh"
+    )
+    assert (
+        _binding_actions("src/ouroboros/tui/screens/lineage_detail.py", "LineageDetailScreen")["r"]
+        == "rewind"
+    )
 
     en_keys = _contract_section(_read(EN_GUIDE), "<!-- tui-contract:textual-keys -->")
     ko_keys = _contract_section(_read(KO_GUIDE), "<!-- tui-contract:textual-keys -->")
