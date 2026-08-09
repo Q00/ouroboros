@@ -1176,11 +1176,13 @@ _VERIFICATION_ATTACHMENT_CUT_RE = re.compile(
 # A production-marked noun phrase declares the artifact's identity even
 # inside verification prose ("tests cover the production Chrome browser
 # extension runtime") — the declaration survives the exemption. The
-# marker may premodify the head, head the phrase as "runtime", or
-# follow the component as a deployment/release clause (#1813 R93:
-# "extension shipped to users", "extension that is deployed in
-# production"). A bare tooling object ("tests with a browser
-# extension") carries no such marker and stays exempt.
+# structure, not a tense/adverb vocabulary, carries the marking (#1813
+# R92-R94): a prenominal production qualifier, a "runtime" head, or a
+# postnominal predication tail that anchors the component to an
+# environment through a prepositional phrase ("shipped to users",
+# "running in production", "now live for customers"). A bare tooling
+# object ("tests with a browser extension") predicates nothing of its
+# own and stays exempt.
 _PRODUCTION_IDENTITY_NP_RE = re.compile(
     rf"(?:(?:the|an?|our|its|this|that)\s+)?"
     rf"(?:production|shipped|deployed|released|live)\s+"
@@ -1188,9 +1190,17 @@ _PRODUCTION_IDENTITY_NP_RE = re.compile(
     rf"|(?:(?:the|an?|our|its|this|that)\s+)?(?:[\w\-'’]+\s+){{0,4}}?runtimes?\b"
     rf"|(?:(?:the|an?|our|its|this|that)\s+)?(?:[\w\-'’]+\s+){{0,3}}?"
     rf"(?:{_COMPONENT_ARTIFACT_FRAGMENT})\s+"
-    rf"(?:(?:that|which)\s+(?:is|are|was|were|gets?|runs?|(?:has|have)\s+been)\s+)?"
-    rf"(?:shipped|deployed|released|launched|distributed|published|live|"
-    rf"in\s+production)\b"
+    rf"(?:[\w\-'’]+\s+){{1,3}}?"
+    rf"(?:in|to|for|at|on|across|inside|within)\s+"
+    rf"[\w\-'’]+(?:\s+[\w\-'’]+){{0,2}}"
+)
+
+# Retention taint: a candidate identity phrase whose own words belong to
+# verification prose — a verification participle or a CI locus — is the
+# tooling's description, not the artifact's ("extension tested nightly",
+# "extensions in CI").
+_VERIFICATION_TAINT_RE = re.compile(
+    r"\b(?:tested|verified|validated|checked|exercised|covered|ci)\b"
 )
 
 
@@ -1231,7 +1241,9 @@ def _strip_verification_clauses(text: str) -> str:
                 kept.append(prefix)
             for np_match in _PRODUCTION_IDENTITY_NP_RE.finditer(part[len(prefix) :]):
                 phrase = np_match.group(0)
-                if not _VERIFICATION_CONTEXT_RE.search(phrase):
+                if not _VERIFICATION_CONTEXT_RE.search(
+                    phrase
+                ) and not _VERIFICATION_TAINT_RE.search(phrase):
                     kept.append(phrase)
     return " ; ".join(kept)
 

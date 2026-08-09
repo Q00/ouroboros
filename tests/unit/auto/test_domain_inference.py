@@ -4530,12 +4530,15 @@ def test_browser_test_tools_are_not_ui_products(goal: str, outputs: str) -> None
     [
         "Playwright tests with a browser extension",
         "Compatibility tests for Chrome extensions",
+        "Compatibility tests for Chrome extensions in CI",
+        "Playwright covers a browser extension tested in the nightly suite",
     ],
 )
 def test_components_inside_verification_context_do_not_veto(runtime: str) -> None:
-    """R89 guard: components used or targeted by verification tooling
-    are not the runtime's identity — the explicit web app keeps its
-    durable class."""
+    """R89/R94 guard: components used or targeted by verification tooling
+    are not the runtime's identity — a verification-owned tail ("in CI",
+    "tested in the nightly suite") is the tooling's description, and the
+    explicit web app keeps its durable class."""
     ledger = _bare_ledger("Build a web app")
     _seed_section(ledger, "outputs", value="Interactive signup page")
     _seed_section(ledger, "runtime_context", value=runtime)
@@ -4560,17 +4563,22 @@ def test_components_inside_verification_context_do_not_veto(runtime: str) -> Non
         "Playwright tests cover a Chrome browser extension shipped to users",
         "Playwright verifies the Chrome browser extension that is deployed in production",
         "Playwright tests run against a Chrome browser extension released to customers",
+        "Playwright tests exercise a Chrome browser extension running in production",
+        "Playwright tests exercise a Chrome browser extension currently deployed to users",
+        "Playwright tests exercise a Chrome browser extension now live for customers",
+        "Playwright tests exercise a Chrome browser extension used in production",
     ],
 )
 def test_production_identity_survives_adjacent_test_clauses(runtime: str) -> None:
-    """R90-R93 guard: the verification exemption is scoped per relation —
+    """R90-R94 guard: the verification exemption is scoped per relation —
     a production identity keeps its authority whether the verification
     prose sits in its own punctuated clause, shares the segment through
     a conjunction or comma, attaches within the same clause as a
     participial, passive, or hyphenated-compound modifier, or follows
-    the verification prose as a production-marked object, with the
-    marker premodifying the head or trailing it as a deployment or
-    release clause."""
+    the verification prose as a production-marked object. The marking is
+    structural: a prenominal qualifier, a runtime head, or any
+    postnominal predication tail anchoring the component to an
+    environment through a prepositional phrase."""
     ledger = _bare_ledger("Build a web app")
     _seed_section(ledger, "outputs", value="Interactive signup page")
     _seed_section(ledger, "runtime_context", value=runtime)
