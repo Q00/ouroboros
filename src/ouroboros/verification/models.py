@@ -57,11 +57,11 @@ class SpecAssertion(BaseModel, frozen=True):
 class SpecVerificationResult(BaseModel, frozen=True):
     """Result of verifying a single assertion against source code.
 
-    ``verified`` and ``discrepancy`` remain serialized fields so existing
-    callers and persisted payloads keep working. New code should use
-    ``outcome``; when loading a legacy payload without it, the outcome is
-    inferred from the old booleans. When an outcome is supplied explicitly it
-    is authoritative and contradictory legacy booleans are rejected.
+    The boolean fields remain serialized so existing callers and persisted
+    payloads keep working. New code should use ``outcome``. Legacy payloads
+    without it are inferred fail-closed, then every boolean is normalized from
+    the canonical outcome. When an outcome is supplied explicitly it is always
+    authoritative, even if legacy booleans contradict it.
     """
 
     assertion: SpecAssertion
@@ -70,28 +70,37 @@ class SpecVerificationResult(BaseModel, frozen=True):
     actual_value: str = ""
     file_path: str = ""
     discrepancy: bool = False
+    unverifiable: bool = False
+    skipped: bool = False
     detail: str = ""
 
     @model_validator(mode="after")
     def _normalize_legacy_booleans(self) -> SpecVerificationResult:
         fields_set = self.model_fields_set
         if "outcome" not in fields_set:
-            # Every legacy ``verified=False`` result represented a failed
-            # comparison; unavailable/skipped were not expressible at all.
-            inferred = (
-                VerificationOutcome.VERIFIED if self.verified else VerificationOutcome.DISCREPANCY
-            )
+            # ``verified`` / ``discrepancy`` were the only historical flags.
+            # A false legacy result remains a discrepancy even when its old
+            # ``discrepancy`` bit was omitted or contradictory. The two newer
+            # flags let transitional callers construct the richer outcomes
+            # without supplying the enum yet.
+            if self.verified:
+                inferred = VerificationOutcome.VERIFIED
+            elif self.skipped:
+                inferred = VerificationOutcome.SKIPPED
+            elif self.unverifiable:
+                inferred = VerificationOutcome.UNVERIFIABLE
+            else:
+                inferred = VerificationOutcome.DISCREPANCY
             object.__setattr__(self, "outcome", inferred)
-            return self
 
         expected_verified = self.outcome is VerificationOutcome.VERIFIED
         expected_discrepancy = self.outcome is VerificationOutcome.DISCREPANCY
-        if "verified" in fields_set and self.verified is not expected_verified:
-            raise ValueError("verified contradicts verification outcome")
-        if "discrepancy" in fields_set and self.discrepancy is not expected_discrepancy:
-            raise ValueError("discrepancy contradicts verification outcome")
+        expected_unverifiable = self.outcome is VerificationOutcome.UNVERIFIABLE
+        expected_skipped = self.outcome is VerificationOutcome.SKIPPED
         object.__setattr__(self, "verified", expected_verified)
         object.__setattr__(self, "discrepancy", expected_discrepancy)
+        object.__setattr__(self, "unverifiable", expected_unverifiable)
+        object.__setattr__(self, "skipped", expected_skipped)
         return self
 
 

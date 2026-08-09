@@ -72,6 +72,43 @@ class TestVerificationModels:
         )
         assert legacy.outcome is VerificationOutcome.VERIFIED
         assert legacy.verified is True
+        assert legacy.discrepancy is False
+        assert legacy.unverifiable is False
+        assert legacy.skipped is False
+
+        legacy_false = SpecVerificationResult.model_validate(
+            {
+                "assertion": assertion.model_dump(mode="json"),
+                "verified": False,
+                "discrepancy": False,
+            }
+        )
+        assert legacy_false.outcome is VerificationOutcome.DISCREPANCY
+        assert legacy_false.verified is False
+        assert legacy_false.discrepancy is True
+        assert legacy_false.unverifiable is False
+        assert legacy_false.skipped is False
+        assert (
+            SpecVerificationResult.model_validate(legacy_false.model_dump(mode="json"))
+            == legacy_false
+        )
+
+        contradictory = SpecVerificationResult.model_validate(
+            {
+                "assertion": assertion.model_dump(mode="json"),
+                "verified": True,
+                "discrepancy": True,
+                "unverifiable": True,
+                "skipped": True,
+            }
+        )
+        assert contradictory.outcome is VerificationOutcome.VERIFIED
+        assert (
+            contradictory.verified,
+            contradictory.discrepancy,
+            contradictory.unverifiable,
+            contradictory.skipped,
+        ) == (True, False, False, False)
 
         result = SpecVerificationResult(
             assertion=assertion,
@@ -82,20 +119,46 @@ class TestVerificationModels:
         assert payload["outcome"] == "unverifiable"
         assert payload["verified"] is False
         assert payload["discrepancy"] is False
+        assert payload["unverifiable"] is True
+        assert payload["skipped"] is False
         assert SpecVerificationResult.model_validate(payload) == result
 
-    def test_explicit_outcome_rejects_contradictory_legacy_boolean(self) -> None:
+    @pytest.mark.parametrize(
+        ("outcome", "flags"),
+        [
+            (VerificationOutcome.VERIFIED, (True, False, False, False)),
+            (VerificationOutcome.DISCREPANCY, (False, True, False, False)),
+            (VerificationOutcome.UNVERIFIABLE, (False, False, True, False)),
+            (VerificationOutcome.SKIPPED, (False, False, False, True)),
+        ],
+    )
+    def test_explicit_outcome_normalizes_contradictory_legacy_booleans(
+        self,
+        outcome: VerificationOutcome,
+        flags: tuple[bool, bool, bool, bool],
+    ) -> None:
         assertion = SpecAssertion(
             ac_index=0,
             ac_text="test",
             tier=VerificationTier.T1_CONSTANT,
         )
-        with pytest.raises(ValueError, match="verified contradicts"):
-            SpecVerificationResult(
-                assertion=assertion,
-                outcome=VerificationOutcome.UNVERIFIABLE,
-                verified=True,
-            )
+        result = SpecVerificationResult(
+            assertion=assertion,
+            outcome=outcome,
+            verified=not flags[0],
+            discrepancy=not flags[1],
+            unverifiable=not flags[2],
+            skipped=not flags[3],
+        )
+
+        assert (result.verified, result.discrepancy, result.unverifiable, result.skipped) == flags
+        payload = result.model_dump(mode="json")
+        assert (
+            payload["verified"],
+            payload["discrepancy"],
+            payload["unverifiable"],
+            payload["skipped"],
+        ) == flags
 
     def test_ac_report_verified_pass_all_pass(self) -> None:
         assertion = SpecAssertion(ac_index=0, ac_text="test", tier=VerificationTier.T1_CONSTANT)
@@ -477,16 +540,19 @@ class TestSpecVerifier:
         assert summary.verified_count == 0
         assert summary.override_approval is False
 
-    def test_no_files_match_hint(self) -> None:
-        """File hint matches nothing → verification fails closed."""
+    @pytest.mark.parametrize("tier", [VerificationTier.T1_CONSTANT, VerificationTier.T2_STRUCTURAL])
+    def test_no_files_match_hint_is_unverifiable_for_every_scanned_tier(
+        self, tier: VerificationTier
+    ) -> None:
+        """No candidate source is missing evidence, not a contradicted assertion."""
         project = self._create_project({"main.py": ""})
         verifier = SpecVerifier(project_dir=project)
         assertion = SpecAssertion(
             ac_index=0,
             ac_text="test",
-            tier=VerificationTier.T1_CONSTANT,
+            tier=tier,
             pattern=r"FOO",
-            expected_value="bar",
+            expected_value="bar" if tier is VerificationTier.T1_CONSTANT else "",
             file_hint="*.rs",
         )
         summary = verifier.verify_all((assertion,), agent_results={0: True})
@@ -495,7 +561,11 @@ class TestSpecVerifier:
         assert summary.unverifiable_count == 1
         assert summary.discrepancy_count == 1
         assert summary.confirmed_discrepancy_count == 0
-        assert summary.reports[0].results[0].outcome is VerificationOutcome.UNVERIFIABLE
+        result = summary.reports[0].results[0]
+        assert result.outcome is VerificationOutcome.UNVERIFIABLE
+        assert result.unverifiable is True
+        assert result.discrepancy is False
+        assert result.detail == "No files matched hint: *.rs"
 
     @pytest.mark.parametrize("tier", [VerificationTier.T1_CONSTANT, VerificationTier.T2_STRUCTURAL])
     @pytest.mark.parametrize(

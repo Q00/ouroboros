@@ -938,6 +938,12 @@ class SpecVerifier:
             )
 
         files = self._find_files(assertion.file_hint)
+        if not files:
+            return SpecVerificationResult(
+                assertion=assertion,
+                outcome=VerificationOutcome.UNVERIFIABLE,
+                detail=f"No files matched hint: {assertion.file_hint}",
+            )
 
         # First check: does the pattern match any filename?
         name_pattern = self._safe_compile(assertion.pattern, re.IGNORECASE)
