@@ -633,6 +633,22 @@ class _FileWritingPrintLoggerFactory:
         return _FileWritingPrintLogger()
 
 
+def default_logging_config() -> LoggingConfig:
+    """Return the config ``configure_logging()`` would pick on its own.
+
+    Callers that want to change one field must start from this rather than
+    constructing a fresh ``LoggingConfig``: the mode comes from
+    ``OUROBOROS_LOG_MODE`` and is an operator override, so building a new config
+    with only a level set would silently drop an operator's ``prod`` selection
+    back to ``dev``.
+
+    Returns:
+        The active config if logging is already configured, otherwise the
+        environment-derived default.
+    """
+    return _current_config or LoggingConfig(mode=_get_mode_from_env())
+
+
 def configure_logging(config: LoggingConfig | None = None) -> None:
     """Configure structlog for the application.
 
