@@ -19,8 +19,8 @@ No additional Python SDK is required beyond the base `ouroboros-ai` package.
 
 - **Codex CLI** installed and on your `PATH`. The marketplace-plugin path runs `codex plugin ...` from a shell, so `PATH` registration is required there. If you only have the bundled executable from the macOS ChatGPT app, put it on `PATH` (see [install steps](#installing-codex-cli) below) or use the standalone path — Ouroboros setup can discover a bundled executable, but your shell cannot resolve `codex plugin`
 - A signed-in **Codex CLI** account. API-key authentication is also supported: `printenv OPENAI_API_KEY | codex login --with-api-key`. See [`credentials.yaml`](../config-reference.md#credentialsyaml) for file-based key management
-- **`uvx`** (ships with uv) for the marketplace-plugin path. The plugin's MCP descriptor launches the server with `uvx` ([`.mcp.codex.json`](../../.mcp.codex.json)). Install uv with `pipx install uv`, `pip install --user uv`, or `brew install uv`
-- **Python >= 3.12** for the standalone installation only. On the plugin path `uvx` provisions an interpreter from the package's `requires-python = ">=3.12"`
+- **An isolated MCP launcher** — required on **both** paths, not only the plugin. The plugin's MCP descriptor launches the server with `uvx` ([`.mcp.codex.json`](../../.mcp.codex.json)). Standalone setup resolves one of three, in this order (`_codex_release_mcp_launcher()`): `uvx`; an `ouroboros` install whose `mcp serve --help` succeeds, which means the `[mcp]` extra; or a Python environment containing `mcp`. With none of them, `_register_codex_mcp_server()` aborts with `Install uv, or install Ouroboros with the [mcp] extra.` Install uv with `pipx install uv`, `pip install --user uv`, or `brew install uv`
+- **Python >= 3.12** for the standalone installation. On the plugin path `uvx` provisions an interpreter from the package's `requires-python = ">=3.12"`
 
 ## Installing Codex CLI
 

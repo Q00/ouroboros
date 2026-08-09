@@ -50,19 +50,31 @@ codex plugin add ouroboros@ouroboros
 
 ## 독립 설치 (플러그인 없이)
 
-플러그인 없이 Codex CLI를 직접 붙이려면 한 번만 준비하면 됩니다.
+플러그인 없이 Codex CLI를 직접 붙이는 경로입니다. `codex`가 `PATH`에 없고 macOS ChatGPT 앱 번들만 있는 경우에도 이 경로를 씁니다 — setup은 번들 실행 파일을 찾아낼 수 있습니다.
+
+### 사전 조건 (독립 설치 경로)
+
+**setup을 돌리기 전에** 다음이 필요합니다:
+
+- 로그인된 **Codex CLI** 계정 (위와 동일). `codex`가 `PATH`에 있으면 좋지만, 이 경로에서는 필수가 아닙니다
+- **Python >= 3.12**
+- **Ouroboros 설치**
+- **MCP launcher** — 아래 셋 중 **하나**. `_codex_release_mcp_launcher()`가 이 순서로 찾고, 셋 다 없으면 `_register_codex_mcp_server()`가 `Install uv, or install Ouroboros with the [mcp] extra.`로 중단합니다:
+  1. `uvx` (uv에 포함) ← 가장 간단
+  2. `ouroboros mcp serve --help`가 성공하는 설치, 즉 **`[mcp]` extra 포함**
+  3. `mcp` 패키지가 들어 있는 Python 환경
 
 **터미널:**
 
 ```bash
+# launcher 확보 — 다음 중 하나
+pipx install uv                          # 또는 brew install uv
+pip install 'ouroboros-ai[mcp]'          # extra 포함 설치
+
 ouroboros setup --runtime codex
 ```
 
-### 사전 조건 (독립 설치 경로)
-
-- 위 권장 경로의 사전 조건 두 가지
-- **Python >= 3.12**
-- Ouroboros 설치 — 기본 `ouroboros-ai` 패키지에 Codex CLI 런타임 어댑터가 들어 있습니다. extras는 필요 없습니다. 설치 방법 전체(pip, 한 줄 설치, 소스)는 [Getting Started](../getting-started.md)(영문) 참고
+> **`[mcp]` extra는 "필요 없음"이 아닙니다.** 기본 `ouroboros-ai` 패키지에 Codex CLI 런타임 어댑터는 들어 있지만, **MCP 등록에는 위 launcher 중 하나가 반드시 있어야 합니다.** `uvx`가 있으면 extra 없이도 되고, `uvx`가 없으면 `[mcp]` extra가 사실상 필수입니다. 설치 방법 전체(pip, 한 줄 설치, 소스)는 [Getting Started](../getting-started.md)(영문) 참고
 
 ## Codex CLI 설치
 
