@@ -11,7 +11,7 @@ import os
 from pathlib import Path
 import signal
 import tomllib
-from typing import Annotated, Any
+from typing import Annotated, Any, cast
 
 import typer
 
@@ -218,28 +218,51 @@ def _check_auto_dispatch_surface(codex_dir: Path, *, live_mcp: bool = False) -> 
     if not isinstance(command, str) or not command.strip():
         failures.append("[mcp_servers.ouroboros] is missing `command` or `url`")
     else:
-        args_obj = ouroboros_entry.get("args")
+        args_obj = ouroboros_entry.get("args", [])
+        args: tuple[str, ...] | None = None
         if not isinstance(args_obj, list):
-            args_obj = []
-        args = tuple(arg for arg in args_obj if isinstance(arg, str))
-        env_obj = ouroboros_entry.get("env")
-        env = (
-            {
-                key: value
+            failures.append("[mcp_servers.ouroboros].args must be an array of strings")
+        else:
+            invalid_args = [
+                f"index {index} ({type(argument).__name__})"
+                for index, argument in enumerate(args_obj)
+                if not isinstance(argument, str)
+            ]
+            if invalid_args:
+                failures.append(
+                    "[mcp_servers.ouroboros].args contains non-string values: "
+                    + ", ".join(invalid_args)
+                )
+            else:
+                args = cast(tuple[str, ...], tuple(args_obj))
+
+        env_obj = ouroboros_entry.get("env", {})
+        env: dict[str, str] | None = None
+        if not isinstance(env_obj, dict):
+            failures.append("[mcp_servers.ouroboros].env must be a table of string values")
+        else:
+            invalid_env = [
+                f"{key!r} ({type(value).__name__})"
                 for key, value in env_obj.items()
-                if isinstance(key, str) and isinstance(value, str)
-            }
-            if isinstance(env_obj, dict)
-            else {}
-        )
-        command_entry = _CodexMCPCommandEntry(command=command, args=args, env=env)
-        _check_mcp_runtime_dependency_surface(
-            command,
-            list(args),
-            env,
-            failures,
-            check_local_import=not live_mcp,
-        )
+                if not isinstance(key, str) or not isinstance(value, str)
+            ]
+            if invalid_env:
+                failures.append(
+                    "[mcp_servers.ouroboros].env contains non-string values: "
+                    + ", ".join(invalid_env)
+                )
+            else:
+                env = cast(dict[str, str], dict(env_obj))
+
+        if args is not None and env is not None:
+            command_entry = _CodexMCPCommandEntry(command=command, args=args, env=env)
+            _check_mcp_runtime_dependency_surface(
+                command,
+                list(args),
+                env,
+                failures,
+                check_local_import=not live_mcp,
+            )
 
     if live_mcp and command_entry is not None and not failures:
         _check_live_mcp_tool_exposure(command_entry, failures)
@@ -256,7 +279,7 @@ def _check_auto_dispatch_surface(codex_dir: Path, *, live_mcp: bool = False) -> 
 def _check_mcp_runtime_dependency_surface(
     command: str,
     args: list[object],
-    env: Mapping[str, str],
+    env: object,
     failures: list[str],
     *,
     check_local_import: bool = True,
@@ -268,8 +291,29 @@ def _check_mcp_runtime_dependency_surface(
     while the installed ``ouroboros-ai`` environment lacks the optional ``mcp``
     extra, causing Codex's real stdio handshake to close before tools are listed.
     """
+    invalid_args = [
+        f"index {index} ({type(argument).__name__})"
+        for index, argument in enumerate(args)
+        if not isinstance(argument, str)
+    ]
+    if invalid_args:
+        failures.append("Codex MCP args contains non-string values: " + ", ".join(invalid_args))
+        return
+    if not isinstance(env, Mapping):
+        failures.append("Codex MCP env must be a mapping of string values")
+        return
+    invalid_env = [
+        f"{key!r} ({type(value).__name__})"
+        for key, value in env.items()
+        if not isinstance(key, str) or not isinstance(value, str)
+    ]
+    if invalid_env:
+        failures.append("Codex MCP env contains non-string values: " + ", ".join(invalid_env))
+        return
+
     command_name = Path(command).name
-    string_args = [arg for arg in args if isinstance(arg, str)]
+    string_args = cast(list[str], args)
+    string_env = cast(Mapping[str, str], env)
 
     if command_name == "uvx":
         joined_args = " ".join(string_args)
@@ -281,10 +325,10 @@ def _check_mcp_runtime_dependency_surface(
 
         args_tuple = tuple(string_args)
         if args_tuple == _CANONICAL_CODEX_UVX_MCP_ARGS:
-            _check_codex_runtime_env(env, failures, required=True)
+            _check_codex_runtime_env(string_env, failures, required=True)
             return
         if args_tuple == _CANONICAL_CODEX_UVX_MCP_HOST_ARGS:
-            _check_codex_runtime_env(env, failures, required=False)
+            _check_codex_runtime_env(string_env, failures, required=False)
             return
 
         command_tail = ("ouroboros", "mcp", "serve")

@@ -843,6 +843,93 @@ class TestCodexDoctor:
         assert any("conflicting selectors" in failure for failure in failures)
         live_probe.assert_not_awaited()
 
+    @pytest.mark.parametrize("live_mcp", [False, True], ids=["static", "live"])
+    @pytest.mark.parametrize(
+        ("replacement", "expected_failure"),
+        [
+            ("args = 7\n", ".args must be an array of strings"),
+            (
+                'args = ["--isolated", 7, "ouroboros", "mcp", "serve"]\n',
+                ".args contains non-string values",
+            ),
+            (
+                'args = ["--isolated", ["--python", ">=3.12"], "ouroboros"]\n',
+                ".args contains non-string values",
+            ),
+            (
+                'args = ["mcp", "serve"]\nenv = ["codex"]\n',
+                ".env must be a table of string values",
+            ),
+            (
+                'args = ["mcp", "serve"]\n[mcp_servers.ouroboros.env]\n'
+                "OUROBOROS_AGENT_RUNTIME = 7\n",
+                ".env contains non-string values",
+            ),
+            (
+                'args = ["mcp", "serve"]\n[mcp_servers.ouroboros.env]\n'
+                'OUROBOROS_AGENT_RUNTIME = ["codex"]\n',
+                ".env contains non-string values",
+            ),
+        ],
+    )
+    def test_check_auto_dispatch_surface_rejects_untyped_persisted_contract_before_probe(
+        self,
+        tmp_path: Path,
+        live_mcp: bool,
+        replacement: str,
+        expected_failure: str,
+    ) -> None:
+        """Doctor must reject, not sanitize, non-string persisted argv and env values."""
+        codex_dir = tmp_path / ".codex"
+        self._write_healthy_codex_surface(codex_dir)
+        (codex_dir / "config.toml").write_text(
+            '[mcp_servers.ouroboros]\ncommand = "uvx"\n' + replacement,
+            encoding="utf-8",
+        )
+        live_probe = AsyncMock(return_value=_REQUIRED_CODEX_AUTO_TOOLS_FOR_TEST)
+
+        with patch("ouroboros.cli.commands.codex._list_stdio_mcp_tool_names", live_probe):
+            failures = _check_auto_dispatch_surface(codex_dir, live_mcp=live_mcp)
+
+        assert any(expected_failure in failure for failure in failures)
+        live_probe.assert_not_awaited()
+
+    @pytest.mark.parametrize(
+        ("args", "env", "expected_failure"),
+        [
+            (
+                ["--isolated", None, "ouroboros", "mcp", "serve"],
+                {
+                    "OUROBOROS_AGENT_RUNTIME": "codex",
+                    "OUROBOROS_LLM_BACKEND": "codex",
+                },
+                "args contains non-string values",
+            ),
+            (
+                list(codex_command._CANONICAL_CODEX_UVX_MCP_ARGS),
+                {"OUROBOROS_AGENT_RUNTIME": "codex", "OUROBOROS_LLM_BACKEND": None},
+                "env contains non-string values",
+            ),
+            (
+                list(codex_command._CANONICAL_CODEX_UVX_MCP_ARGS),
+                None,
+                "env must be a mapping",
+            ),
+        ],
+    )
+    def test_runtime_dependency_surface_rejects_null_without_sanitizing(
+        self,
+        args: list[object],
+        env: object,
+        expected_failure: str,
+    ) -> None:
+        """Defense-in-depth callers cannot use JSON-like null to change the argv contract."""
+        failures: list[str] = []
+
+        codex_command._check_mcp_runtime_dependency_surface("uvx", args, env, failures)
+
+        assert any(expected_failure in failure for failure in failures)
+
     def test_check_auto_dispatch_surface_reports_direct_ouroboros_without_mcp_import(
         self,
         tmp_path: Path,
