@@ -98,9 +98,13 @@ ouroboros detect --force      # 重新检测并覆盖已有文件
 ouroboros detect --backend codex   # 为这次 detect 调用指定 LLM 后端
 ```
 
-`ensure_mechanical_toml()` 是幂等的：文件已存在且 `force` 为假时，它立即返回，不发起 LLM 调用。它从不抛异常——任何失败都只是返回 `False`，Stage 1 因此没有命令可用。
+`ensure_mechanical_toml()` 是幂等的：文件已存在且 `force` 为假时，它立即返回，不发起 LLM 调用。
 
-> **如果 Stage 1 永远通过，通常就是这个原因。** 既没有 `.ouroboros/mechanical.toml`，也没有显式配置 `MechanicalConfig` 命令时，五项检查全部被跳过并当作通过，Stage 1 就成了一道什么都不验的空关卡。跑 `ouroboros detect`，或者手写这个 toml。
+**失败有两种形态，要分开看。** 大多数失败被处理成返回 `False`，Stage 1 因此没有命令可用。但它**并非从不抛异常**：`_ask_llm()` 调用 `tracked_complete()` 时没有异常边界，因此适配器异常会向上传播，而直接执行的 `ouroboros detect` 命令也不捕获这一调用。诊断时请把「处理过的 `False`」和「抛出的异常」当作两件事。
+
+> **如果 Stage 1 永远通过，通常就是这个原因。** 既没有 `.ouroboros/mechanical.toml`，也没有显式配置 `MechanicalConfig` 命令时，五项检查全部被跳过并当作通过，Stage 1 就成了一道什么都不验的空关卡。
+>
+> **但请注意：缺少 TOML 本身并不足以解释它。** 常规 `run` 与 MCP 评估路径都会先自动尝试生成这个文件。所以在这些路径上出现空关卡，意味着**自动检测失败了**（返回 `False` 或抛出异常），而不是「文件恰好不存在」。跑 `ouroboros detect` 看它到底报什么，或者手写这个 toml。
 
 > **已废弃：** `detect_language()` 现在什么也检测不了。它只是一个兼容垫片，读取 `.ouroboros/mechanical.toml` 并发出 `DeprecationWarning`；请改用 `ensure_mechanical_toml()` 加 `build_mechanical_config()`。
 
@@ -126,7 +130,7 @@ timeout = 120
 
 **TOML 解析错误**会被记为一条警告（`mechanical.toml_parse_error`）后静默忽略。没有预设可以回退，所以所有命令保持 `None`，Stage 1 跳过全部检查。
 
-**安全：可执行文件白名单。** `.ouroboros/mechanical.toml` 中的命令只能使用内置白名单里的可执行文件（如 `pytest`、`ruff`、`cargo`、`go`、`npm`、`make`）。如果命令指定了不在白名单里的可执行文件——或者用了 shell 操作符、绝对路径——它会被静默拦截（记为 `mechanical.blocked_executable`），该项检查被跳过。通过 `MechanicalConfig`，或通过 Python 代码交给 `build_mechanical_config()` 的 `overrides` 字典传入的命令会绕过这道检查，因为调用方是受信任的。**不存在这样做的 MCP 路径**：`ouroboros_evaluate` 没有暴露任何机械命令参数（`mcp/tools/evaluation_handlers.py:437`），其 handler 调用 `build_mechanical_config(working_dir)` 时也不传 `overrides`（`:742`）。这道机制防止不受信任的仓库配置在 CI/CD 环境里执行任意命令。
+**安全：可执行文件白名单。** `.ouroboros/mechanical.toml` 中的命令只能使用内置白名单里的可执行文件（如 `pytest`、`ruff`、`cargo`、`go`、`npm`、`make`）。如果命令指定了不在白名单里的可执行文件——或者用了 shell 操作符、绝对路径——它会被静默拦截（记为 `mechanical.blocked_executable`），该项检查被跳过。**这里有两种不同的 Python 机制，不要混为一谈。** 传给 `build_mechanical_config(..., overrides=...)` 的值**仍然会经过** shell 操作符与可执行文件头部的白名单/路径解析（`_apply_overrides()` 对每个值调用 `_parse_command()`，`evaluation/languages.py:247`），只是跳过了针对 TOML 值的仓库入口点与参数包含性校验。**只有直接构造 `MechanicalConfig`** 才会绕过这两层解析，那才是真正的受信任调用方输入。**两者都不是 MCP 请求参数**：`ouroboros_evaluate` 没有暴露任何机械命令参数（`mcp/tools/evaluation_handlers.py:437`），其 handler 调用 `build_mechanical_config(working_dir)` 时也不传 `overrides`（`:742`），也不构造特权 `MechanicalConfig`。这道机制防止不受信任的仓库配置在 CI/CD 环境里执行任意命令。
 
 | 覆写失败模式 | 现象 | 原因 / 处理 |
 |---|---|---|
@@ -204,7 +208,9 @@ if reward_hacking_risk >= 0.7     → REJECTED（最终否决，压过任何通�
 
 `_build_result()` 施加了一道所有通过路径都必经的最终关卡：如果 Stage 2 报告 `reward_hacking_risk >= 0.7`（`REWARD_HACKING_VETO_THRESHOLD`），一个本来会通过的结果会被翻成拒绝。这个阈值定得刻意偏高，好让评估器轻微的疑心不至于挡下一次真实的通过。
 
-这道否决只把「通过」变成「拒绝」——它从不挽救一个已经被拒绝的结果，所以 Stage 3 共识的拒绝仍然是拒绝。它触发时，`failure_reason` 会明确点出它，而不是报一句 `"Unknown failure"`。
+这道否决只把「通过」变成「拒绝」——它从不挽救一个已经被拒绝的结果，所以 Stage 3 共识的拒绝仍然是拒绝。
+
+> **它并非总是被点名。** `_build_result()` 里 Stage 2 AC 未通过的分支排在否决分支**之前**。所以当 `trigger_consensus=True` 带着 `ac_compliance=False` 走到一个通过的 Stage 3、再由否决翻成拒绝时，报出来的 `failure_reason` 是 Stage 2 的 AC 未通过，而不是否决本身。判断是否发生了否决，请直接看 `stage2_result.reward_hacking_risk`。
 
 ### Stage 2 失败模式
 
@@ -284,13 +290,15 @@ Stage 3 并发调用多个 Frontier 档位的模型。每个模型独立投票�
 
 ### 简单共识（默认）
 
-三个模型并行被问询。默认模型都经由 OpenRouter 路由，因此三位投票者来自三个不同厂商：
+三个模型并行被问询。出厂默认的名单如下，但**这三个名字并不能证明有三个厂商在独立投票**——原因见本节末尾的说明：
 
 ```
 openrouter/openai/gpt-4o
 openrouter/anthropic/claude-opus-4.8
 openrouter/google/gemini-2.5-pro
 ```
+
+> **名单不等于独立性。** 实际生效的名单取决于环境与后端：sentinel 后端会把三个槽位解析成字面量 `"default"`；环境变量或自定义配置名单会被原样保留；reviewer 独立性过滤还可能再改动名单。**更关键的是，所有投票都通过交给 `ConsensusEvaluator` 的那一个适配器发出**——换名单不会换适配器。因此模型标签**不能**证明来自不同厂商的独立评审。要判断实际发生了什么，请读记录下来的投票，而不是配置里的名单。
 
 每个模型返回 `{ approved, confidence, reasoning }`。
 
@@ -372,7 +380,9 @@ evaluator = DeliberativeConsensus(llm_adapter, config)
 
 ## 产物收集（Artifact Collection）
 
-在 Stage 2 运行之前，`ArtifactCollector` 会尝试读取本次执行真正改动过的源文件。这样语义评估器拿到的是真实代码，而不只是 agent 的文字摘要。
+`ArtifactCollector` 会读取本次执行真正改动过的源文件，让语义评估器拿到真实代码而不只是 agent 的文字摘要。
+
+> **它不是流水线自动跑的。** `EvaluationPipeline.evaluate()` 从不实例化 `ArtifactCollector`。**MCP 评估路径**会收集并挂上 `artifact_bundle`；**直接构造 `EvaluationPipeline` 的 Python 调用方必须自己提供**，否则语义评估退回到 `EvaluationContext.artifact`（即文字产物）。本指南后面也介绍了直接构造的用法，所以这一点要特别当心：**否则你会以为源码被评估了，实际上只评估了那段文字。**
 
 ### 收集上限
 
@@ -381,7 +391,7 @@ evaluator = DeliberativeConsensus(llm_adapter, config)
 | 单文件大小上限（`MAX_FILE_SIZE`） | 100 KB | 超过 100 KB 的文件被静默跳过 |
 | 内容总量上限（`MAX_TOTAL_CHARS`） | 150,000 字符（约 37K token） | 内容按剩余预算截断，`FileArtifact.truncated=True` |
 
-**文件数量没有上限。** 字符预算是唯一的限制器，所以一次改动很多小文件会被完整收集，而一个超大文件会被丢掉。
+**文件数量没有上限，但「字符预算是唯一限制器」的说法并不准确。** 实际上有两道独立的上限：超过 100 KB 的单个文件会被整个跳过，而大量小文件累积起来同样会耗尽 150,000 字符的**文件内容**预算并被截断。此外 `text_summary` 存放在该预算之外，不占用它。
 
 > 这两条上限的行为不一样。超过单文件大小上限的文件被**整个跳过**（绝不截断）；只是耗尽了共享字符预算的文件会被**截断**并标记 `truncated=True`。如果某个关键文件总是缺席，先看看它是不是应该被排除在评估之外的生成物、二进制或压缩产物。
 
@@ -442,7 +452,7 @@ config = PipelineConfig(stage3_enabled=False)
 | Stage 2 AC 未满足（`ac_compliance=False`） | `"Stage 2 failed: AC non-compliance (score=0.62)"` |
 | Stage 2 分数低于阈值（`ac_compliance=True` 但 `score < 0.8`） | `"Unknown failure"` —— 分数检查发生在 Stage 2 之后，但 `failure_reason` 属性只判断 `ac_compliance`。要区分这种情况，请直接查 `stage2_result.score`。 |
 | Stage 3 未达成共识 | `"Stage 3 failed: Consensus not reached (44%)"` |
-| Reward hacking 否决（`reward_hacking_risk >= 0.7`） | 一条点名风险分与 0.70 阈值的消息 —— 这道否决会被如实报告，不会藏在 `"Unknown failure"` 后面 |
+| Reward hacking 否决（`reward_hacking_risk >= 0.7`） | 通常是一条点名风险分与 0.70 阈值的消息。**但当同一次结果里 Stage 2 的 `ac_compliance=False` 时，AC 分支排在前面，报出来的会是 AC 未通过** —— 此时请查 `stage2_result.reward_hacking_risk` |
 | 所有阶段都通过或跳过，但 `final_approved=False` | `"Unknown failure"` |
 
 ---
