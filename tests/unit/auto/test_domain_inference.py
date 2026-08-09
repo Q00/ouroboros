@@ -4591,6 +4591,47 @@ def test_displayed_web_apps_are_content_not_artifact() -> None:
 
 
 @pytest.mark.parametrize(
+    ("goal", "outputs"),
+    [
+        ("Create a catalog of web apps", "Curated catalog entries"),
+        ("Create an inventory of web applications", "Inventory records"),
+        ("Write a comparison of web apps", "Comparison document"),
+        ("Generate a list of websites", "List of URLs"),
+        ("Analyze web apps", "Analysis report"),
+    ],
+)
+def test_web_nouns_as_relation_objects_do_not_own(goal: str, outputs: str) -> None:
+    """R101 guard: a noun relation re-heads the phrase — a catalog,
+    inventory, list, or comparison OF web apps produces the container,
+    and an inspection-verb goal studies its object rather than
+    producing it."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value=outputs)
+    _seed_section(ledger, "runtime_context", value="Local files")
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
+        "Build a browser compatible dashboard",
+        "Build a browser ready dashboard",
+        "Build a browser-compatible dashboard",
+    ],
+)
+def test_spaced_browser_qualifiers_own_like_hyphenated(goal: str) -> None:
+    """R101 guard: a qualifier adjective premodifying a UI head reads
+    the same spaced or hyphenated — "browser compatible dashboard" owns
+    exactly like "browser-compatible dashboard"."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value="Interactive charts and filters panel")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP
+
+
+@pytest.mark.parametrize(
     ("runtime", "expect_web_app"),
     [
         ("Native desktop application; Playwright tests run in browsers", False),

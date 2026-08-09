@@ -860,6 +860,18 @@ def _goal_artifact_head_is_web_app(goal_text: str) -> bool:
     # content, not the produced artifact (#1813 R100) — the same
     # ownership normalization the browser-context path applies.
     core = _PARTICIPIAL_CONTENT_CLAUSE_RE.sub(" ", core)
+    # A noun relation re-heads the phrase (#1813 R101): "a catalog of
+    # web apps" produces the catalog — the web nouns are its subject
+    # matter. Likewise a goal that opens with an inspection verb
+    # ("Analyze web apps") studies its object rather than producing it.
+    core = re.sub(r"\b(?:of|between|among|versus|vs\.?)\s+[^,.;]*", " ", core)
+    core = re.sub(
+        r"^\s*(?:analyz\w+|compar\w+|review\w*|audit\w*|evaluat\w+|"
+        r"benchmark\w*|survey\w*|stud(?:y|ies|ying)|inspect\w*|assess\w*|"
+        r"examin\w+|catalog\w*|index\w*|rank\w*)\b[^,.;]*",
+        " ",
+        core,
+    )
     web_matches = list(_WEB_APP_ARTIFACT_PHRASE_RE.finditer(core))
     if not web_matches:
         # A browser-qualified UI head ("browser-based admin portal",
@@ -1054,8 +1066,17 @@ def _ledger_has_browser_context(ledger: SeedDraftLedger) -> bool:
     # ("browser dashboard"), activity gerunds ("browser monitoring
     # dashboard"), deliberate hyphen compounds ("browser vector-scene
     # editor"), and the terminal "browser use" idiom keep their reading.
+    # A qualifier ADJECTIVE premodifying a UI head is a spaced qualifier,
+    # not a re-heading noun (#1813 R101): "browser compatible dashboard"
+    # reads exactly like its hyphenated form. Adjectives are recognized
+    # by morphology (-ible/-able) plus the closed qualifier set; a plain
+    # NOUN before the head ("browser certificate dashboard") stays a
+    # topic compound.
     goal_for_context = re.sub(
         rf"\bbrowsers?\s+(?!{_UI_PRODUCT_HEAD_FRAGMENT}\b)(?!use\b)"
+        rf"(?![\w'’]+(?:ible|able)\s+{_UI_PRODUCT_HEAD_FRAGMENT}\b)"
+        rf"(?!(?:ready|friendly|capable|aware|enabled|native)\s+"
+        rf"{_UI_PRODUCT_HEAD_FRAGMENT}\b)"
         r"(?![\w'’]*ing\b)[\w'’]+(?![\w'’\-])",
         " ",
         goal_for_context,
