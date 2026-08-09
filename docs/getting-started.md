@@ -11,7 +11,14 @@ Transform a vague idea into a verified, working codebase -- with any AI coding a
 
 ### Recommended: Claude Code (`ooo`)
 
-No Python install required. Run the install commands in your terminal, then run setup and auto inside Claude Code to go from idea to execution:
+No Python install required. You do need `uvx` on the host — the plugin's MCP
+server is launched with it ([`.claude-plugin/.mcp.json`](../.claude-plugin/.mcp.json)),
+so `ooo setup` cannot start without it. Install uv with `pipx install uv`,
+`pip install --user uv`, or `brew install uv`; uv fetches the Python interpreter
+itself, which is why you do not install Python.
+
+Then run the install commands in your terminal, and run setup and auto inside
+Claude Code to go from idea to execution:
 
 **1. Install the plugin** (in your terminal):
 ```bash

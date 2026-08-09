@@ -206,7 +206,7 @@ Copilot CLI 세션을 다시 시작한 뒤 세션 안에서 `ooo` 명령어를 �
 <details>
 <summary><strong>다른 설치 방법</strong></summary>
 
-**Claude Code 플러그인만** (시스템 패키지 없이):
+**Claude Code 플러그인만** (Python 패키지 설치는 없지만, 호스트에 `uvx`는 있어야 합니다):
 ```bash
 claude plugin marketplace add Q00/ouroboros && claude plugin install ouroboros@ouroboros
 ```
