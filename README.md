@@ -566,7 +566,7 @@ Every sponsor keeps the serpent evolving. Thank you.
 
 ## Activity
 
-Every number here is read live from the GitHub API when you load this page.
+These numbers are generated from GitHub data and refreshed automatically; caching may delay updates.
 
 <p align="center">
   <a href="https://github.com/Q00/ouroboros/graphs/contributors"><img src="https://img.shields.io/github/contributors/Q00/ouroboros?color=orange" alt="Contributors"></a>

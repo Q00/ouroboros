@@ -523,7 +523,7 @@ Ouroboros 采用 MIT 许可证，完全开源开发。如果它为你减少了�
 
 ## 活跃度
 
-这里的数字在你打开这个页面时从 GitHub API 实时读取。
+这里的数字基于 GitHub 数据生成并自动更新；缓存可能会导致更新延迟。
 
 <p align="center">
   <a href="https://github.com/Q00/ouroboros/graphs/contributors"><img src="https://img.shields.io/github/contributors/Q00/ouroboros?color=orange" alt="Contributors"></a>
