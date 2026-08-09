@@ -167,8 +167,7 @@ ouroboros setup --runtime copilot            # 实时获取模型列表并选择
 <details>
 <summary><strong>其他安装方式</strong></summary>
 
-**仅安装 Claude Code 插件**（不装系统包）：
-主机上需要有 `uvx`。
+**仅安装 Claude Code 插件**（无需安装 Python 包；但主机上需要有 `uvx`）：
 ```bash
 claude plugin marketplace add Q00/ouroboros && claude plugin install ouroboros@ouroboros
 ```

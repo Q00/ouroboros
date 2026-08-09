@@ -22,6 +22,16 @@ Ouroboros는 **Claude Code**를 런타임 백엔드로 쓸 수 있습니다. **C
 
 대부분의 사람은 이 길로 오면 됩니다. **Python도 pip도 API 키 설정도 필요 없습니다** — 런타임은 Claude Code가 맡습니다.
 
+시작하기 전에 호스트에 **`uvx`가 있어야 합니다.** 플러그인의 MCP 매니페스트가 `uvx`로 서버를 띄우기 때문에([`.claude-plugin/.mcp.json`](../../.claude-plugin/.mcp.json)), 이게 없으면 아래 `ooo setup`이 뜨지 않습니다. 없으면 다음 중 하나로 uv를 설치하세요:
+
+```bash
+pipx install uv
+pip install --user uv
+brew install uv          # macOS / Linuxbrew
+```
+
+`uvx`가 `--python '>=3.12'`로 띄우므로 **Python은 uv가 알아서 가져옵니다.** 위의 "Python 필요 없음"은 그래서 성립합니다.
+
 **터미널:**
 
 ```bash
@@ -47,17 +57,9 @@ ooo
 ### 사전 조건 (권장 경로)
 
 - Claude Code CLI 설치 및 인증 완료 (Pro 또는 Max Plan)
-- **`uvx`** (uv에 포함). 플러그인의 MCP 매니페스트가 `uvx`로 서버를 띄웁니다 ([`.claude-plugin/.mcp.json`](../../.claude-plugin/.mcp.json))
+- **`uvx`** (uv에 포함) — 위에서 설명한 대로 플러그인 MCP 매니페스트가 이걸로 서버를 띄웁니다
 
-`uvx`가 없으면 다음 중 하나로 uv를 설치하세요:
-
-```bash
-pipx install uv
-pip install --user uv
-brew install uv          # macOS / Linuxbrew
-```
-
-**Python은 미리 깔아둘 필요가 없습니다.** 매니페스트가 `uvx --python '>=3.12'`로 띄우기 때문에, uv가 필요한 인터프리터를 알아서 가져옵니다. 아래 독립 CLI 경로의 `Python >= 3.12` 요구사항은 **이 경로에는 해당하지 않습니다.**
+아래 독립 CLI 경로의 `Python >= 3.12` 요구사항은 **이 경로에는 해당하지 않습니다.**
 
 ## 독립 CLI로 쓰기 (선택)
 
