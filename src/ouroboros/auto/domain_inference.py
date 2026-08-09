@@ -1173,6 +1173,18 @@ _VERIFICATION_ATTACHMENT_CUT_RE = re.compile(
     r"driven|with|via|using|by|for|to|under|through|alongside)\b"
 )
 
+# A production-marked noun phrase declares the artifact's identity even
+# inside verification prose ("tests cover the production Chrome browser
+# extension runtime") — the declaration survives the exemption. A bare
+# tooling object ("tests with a browser extension") carries no such
+# marker and stays exempt.
+_PRODUCTION_IDENTITY_NP_RE = re.compile(
+    rf"(?:(?:the|an?|our|its|this|that)\s+)?"
+    rf"(?:production|shipped|deployed|released|live)\s+"
+    rf"(?:[\w\-'’]+\s+){{0,3}}?(?:{_COMPONENT_ARTIFACT_FRAGMENT}|runtimes?)\b"
+    rf"|(?:(?:the|an?|our|its|this|that)\s+)?(?:[\w\-'’]+\s+){{0,4}}?runtimes?\b"
+)
+
 
 def _strip_verification_clauses(text: str) -> str:
     """Remove verification-owned prose while keeping production identity.
@@ -1183,7 +1195,9 @@ def _strip_verification_clauses(text: str) -> str:
     Playwright" — keeps the production identity and sheds only the
     clause or attachment the verification vocabulary owns. A clause
     with no attachment boundary before its first verification word is
-    verification prose outright and drops whole.
+    verification prose outright and drops whole — except for a
+    production-marked noun phrase inside it (#1813 R92), which declares
+    the artifact's identity in either clause order.
     """
     kept: list[str] = []
     for segment in re.split(r"[.;]", text):
@@ -1207,6 +1221,10 @@ def _strip_verification_clauses(text: str) -> str:
                     prefix = candidate
             if prefix:
                 kept.append(prefix)
+            for np_match in _PRODUCTION_IDENTITY_NP_RE.finditer(part[len(prefix) :]):
+                phrase = np_match.group(0)
+                if not _VERIFICATION_CONTEXT_RE.search(phrase):
+                    kept.append(phrase)
     return " ; ".join(kept)
 
 
