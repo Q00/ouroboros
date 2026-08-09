@@ -81,7 +81,7 @@ The mechanical verifier runs zero-cost automated shell commands and checks the e
 
 ### Where Stage 1 Commands Come From
 
-Ouroboros does **not** ship hardcoded per-language presets. For configuration authored in the repository, Stage 1 trusts exactly one file: `.ouroboros/mechanical.toml` in the project root. Explicit `MechanicalConfig` commands and MCP-supplied overrides are separate trusted inputs, documented under [Project-Level Command Overrides](#project-level-command-overrides). `build_mechanical_config(working_dir)` is the deterministic reader for that file — when the file is absent, every command resolves to `None` and Stage 1 skips gracefully rather than running the wrong tool.
+Ouroboros does **not** ship hardcoded per-language presets. For configuration authored in the repository, Stage 1 trusts exactly one file: `.ouroboros/mechanical.toml` in the project root. Explicit `MechanicalConfig` commands are a separate trusted input, documented under [Project-Level Command Overrides](#project-level-command-overrides). That override dict is a **programmatic Python API**, not an MCP surface: `ouroboros_evaluate` exposes no mechanical-command parameter (`mcp/tools/evaluation_handlers.py:437`) and its handler calls `build_mechanical_config(working_dir)` with no overrides (`:742`). `build_mechanical_config(working_dir)` is the deterministic reader for that file — when the file is absent, every command resolves to `None` and Stage 1 skips gracefully rather than running the wrong tool.
 
 The file is written by `ouroboros.evaluation.detector`, which makes **one AI call** that inspects the project's manifest files (`pyproject.toml`, `uv.lock`, `package.json`, `Cargo.toml`, `go.mod`, `pom.xml`, `build.gradle`, `Makefile`, `justfile`, `Taskfile.yml`, `build.zig`, `CMakeLists.txt`, `mix.exs`, `Gemfile`, and others) and proposes commands for this specific repository. Each proposed command is validated before it is persisted — against the executable allowlist, against shell-operator and absolute-path injection, and against the repo itself (for example, a `cargo` command is only kept when `Cargo.toml` exists) — so the toml contains only safe, repository-supported commands.
 
@@ -97,7 +97,7 @@ ouroboros detect --backend codex   # use a specific LLM backend for the detect c
 
 `ensure_mechanical_toml()` is idempotent: when the file already exists and `force` is false it returns immediately without an LLM call.
 
-It returns `False` rather than raising for the failures it handles: a provider error surfaced as a returned result, an unparseable proposal, a command that fails validation, an unwritable `.ouroboros/`. That is not the same as never raising. `_ask_llm()` calls `tracked_complete()` outside an exception boundary, and `tracked_complete()` re-raises adapter exceptions (`evolution/provider_usage.py:443`), so an adapter that throws propagates out. `ouroboros detect` does not catch it either (`cli/commands/detect.py:90`). Treat the fail-closed contract as covering returned errors, not thrown ones.
+It returns `False` rather than raising for the failures it handles: a provider error surfaced as a returned result, an unparseable proposal, an unwritable `.ouroboros/`. Validation is per command, not all-or-nothing — a single proposed command that fails validation is dropped while the remaining valid ones are still persisted, and `False` comes back only when the validated set ends up empty. That is not the same as never raising. `_ask_llm()` calls `tracked_complete()` outside an exception boundary, and `tracked_complete()` re-raises adapter exceptions (`evolution/provider_usage.py:443`), so an adapter that throws propagates out. `ouroboros detect` does not catch it either (`cli/commands/detect.py:90`). Treat the fail-closed contract as covering returned errors, not thrown ones.
 
 > **If Stage 1 always passes, this is usually why.** With no `.ouroboros/mechanical.toml` and no explicitly configured `MechanicalConfig` commands, all five checks are skipped and treated as passed, which makes Stage 1 a no-op gate.
 >
@@ -121,7 +121,7 @@ timeout = 120
 ```
 
 **Override priority** (highest to lowest):
-1. Explicit `overrides` dict passed programmatically (from MCP params)
+1. Explicit `overrides` dict passed to `build_mechanical_config()` from Python. No MCP tool exposes this.
 2. `.ouroboros/mechanical.toml` in the project root
 3. All `None` (all checks skip gracefully)
 
@@ -292,13 +292,19 @@ Stage 3 calls multiple Frontier-tier models concurrently. Each votes independent
 
 Three models are queried in parallel. **What those three are depends on the active LLM backend**, and the difference matters when you audit reviewer independence.
 
-**OpenRouter-capable backends.** The shipped roster routes through OpenRouter so the voters come from three different vendors:
+**OpenRouter-routed backends.** When the active adapter really is LiteLLM/OpenRouter, the shipped roster routes through OpenRouter so the voters come from three different vendors:
 
 ```
 openrouter/openai/gpt-4o
 openrouter/anthropic/claude-opus-4.8
 openrouter/google/gemini-2.5-pro
 ```
+
+**Local adapters that still receive the OpenRouter roster.** `claude_code`, `gemini`, `goose`, and `ourocode` are not in `_SENTINEL_DEFAULT_BACKENDS`, so `get_consensus_models()` hands them the shipped OpenRouter roster. But they are not routed to OpenRouter: the ids go to their own active adapter, exactly as described under **Changing the roster does not change the adapter** below.
+
+What you actually get on these depends on the environment. Without an OpenRouter key, simple consensus falls back to the session model. With a key present incidentally, it attempts the `openrouter/...` identifiers through the local adapter. Deliberative mode has no such fallback.
+
+So the OpenRouter roster appearing in your config is **not** evidence that three vendors voted. Read the recorded votes, not the roster.
 
 **Sentinel-model backends.** For the backends in `_SENTINEL_DEFAULT_BACKENDS` (`config/loader.py:101`), `get_consensus_models()` maps the shipped roster to the literal string `"default"` for all three slots (`config/loader.py:1947`). That set is Codex, **OpenCode**, Kiro, Copilot, Hermes, Pi, GJC, Antigravity, Grok, and Zcode.
 
@@ -412,7 +418,7 @@ There is **no cap on the number of files**. The character budget is the sole lim
 | Failure mode | Symptom | Cause / Action |
 |---|---|---|
 | **project_dir not set** | Evaluation uses only text summary | `ArtifactBundle` built without file content; semantic evaluator falls back to agent text output. Set `project_dir` in the execution context. |
-| **No file paths extracted** | Same as above | Execution output did not contain recognizable `Write:` / `Edit:` / `file_path:` patterns. The fallback is the text summary. |
+| **No file paths extracted** | Usually **not** text-only | Execution output did not contain recognizable `Write:` / `Edit:` / `file_path:` patterns, so `ArtifactCollector.collect()` falls back to `_scan_directory(project_dir)` and collects eligible project files anyway (`evaluation/artifact_collector.py:197`). Stage 2 sees repository files, not just the summary. It degrades to text alone only when that scan yields no readable files. |
 | **Path traversal blocked** | File silently skipped | File path resolves outside `project_dir`. This is a security boundary, not a bug. |
 | **Permission error** | File silently skipped | Execution ran as a different user. Verify file permissions. |
 | **Large files skipped** | Missing context in evaluation | File > 100 KB. Refactor to split large files, or accept that the evaluator works from the text summary. |

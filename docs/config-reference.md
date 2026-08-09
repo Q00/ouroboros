@@ -459,7 +459,7 @@ Controls Phase 5 — multi-model consensus voting and deliberation.
 consensus:
   min_models: 3
   threshold: 0.67           # Fraction of models that must agree (2/3 majority)
-  diversity_required: true  # Require models from different providers
+  diversity_required: true  # Currently inert — see the field table below
   models:
     - openrouter/openai/gpt-4o
     - openrouter/anthropic/claude-opus-4-6
@@ -473,7 +473,7 @@ consensus:
 |--------|------|---------|-------------|
 | `min_models` | `int >= 2` | `3` | Minimum number of models required for a consensus vote. |
 | `threshold` | `float [0.0, 1.0]` | `0.67` | Fraction of models that must agree for consensus to pass (e.g., `0.67` = 2/3 majority). |
-| `diversity_required` | `bool` | `true` | When `true`, consensus requires models from at least two different providers. |
+| `diversity_required` | `bool` | `true` | **Currently inert.** The field exists on `ConsensusConfig` and in the schema, but nothing reads it. Provider diversity comes from the model roster itself, not from this flag. See [Evaluation Pipeline Guide](./guides/evaluation-pipeline.md#stage-3-multi-model-consensus). |
 | `models` | `list[string]` | (see above) | Model roster for Stage 3 simple voting. With `llm.backend: litellm`, use `provider/model` or `openrouter/provider/model`. With `llm.backend: codex`, use Codex/OpenAI model IDs such as `gpt-5.4`. Overridable via `OUROBOROS_CONSENSUS_MODELS` (comma-separated). |
 | `advocate_model` | `string` | `"openrouter/anthropic/claude-opus-4-6"` | Model that argues in favor of the proposed solution in deliberative consensus. With `llm.backend: codex`, this can be a Codex/OpenAI model ID such as `gpt-5.4`. Overridable via `OUROBOROS_CONSENSUS_ADVOCATE_MODEL`. |
 | `devil_model` | `string` | `"openrouter/openai/gpt-4o"` | Model that argues against (devil's advocate) in deliberative consensus. With `llm.backend: codex`, this can be a Codex/OpenAI model ID such as `gpt-5.4`. Overridable via `OUROBOROS_CONSENSUS_DEVIL_MODEL`. |
