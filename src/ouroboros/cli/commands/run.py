@@ -5,7 +5,6 @@ Supports both standard workflow execution and agent-runtime orchestrator mode.
 """
 
 import asyncio
-from enum import Enum
 import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any
@@ -43,7 +42,12 @@ from ouroboros.orchestrator.decomposition_limits import (
     MAX_DURABLE_DECOMPOSITION_DEPTH,
     validate_max_decomposition_depth,
 )
-from ouroboros.package_profiles import public_runtime_backend
+from ouroboros.package_profiles import (
+    PublicAgentRuntimeBackend as AgentRuntimeBackend,
+)
+from ouroboros.package_profiles import (
+    public_runtime_backend,
+)
 
 
 def _execution_model_status(runtime_backend: str | None, model: str | None) -> str:
@@ -132,26 +136,6 @@ app = typer.Typer(
     no_args_is_help=True,
     cls=_DefaultWorkflowGroup,
 )
-
-
-class AgentRuntimeBackend(str, Enum):  # noqa: UP042
-    """Supported orchestrator runtime backends for CLI selection."""
-
-    CLAUDE = "claude"
-    CLAUDE_SDK = "claude-sdk"
-    CLAUDE_CLI = "claude-cli"
-    CODEX = "codex"
-    OPENCODE = "opencode"
-    HERMES = "hermes"
-    GEMINI = "gemini"
-    COPILOT = "copilot"
-    GOOSE = "goose"
-    KIRO = "kiro"
-    PI = "pi"
-    GJC = "gjc"
-    ANTIGRAVITY = "antigravity"
-    GROK = "grok"
-    ZCODE = "zcode"
 
 
 def _derive_quality_bar(seed: "Seed") -> str:

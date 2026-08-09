@@ -34,6 +34,9 @@ from ouroboros.package_profiles import (
     has_unsupported_claude_sdk_mcp_mix,
     public_runtime_backend,
 )
+from ouroboros.package_profiles import (
+    PublicAgentRuntimeBackend as AgentRuntimeBackend,
+)
 
 # Per-instance PID registry for stale-instance accounting. Many servers run
 # concurrently (one per MCP client session), so a single-slot PID file is
@@ -64,26 +67,6 @@ _IDLE_CHECKPOINT_THRESHOLD_SECONDS = 600.0
 # Separate stderr console for stdio transport (stdout is JSON-RPC channel)
 _stderr_console = Console(stderr=True)
 log = structlog.get_logger(__name__)
-
-
-class AgentRuntimeBackend(str, Enum):  # noqa: UP042
-    """Supported orchestrator runtime backends for MCP commands."""
-
-    CLAUDE = "claude"
-    CLAUDE_SDK = "claude-sdk"
-    CLAUDE_CLI = "claude-cli"
-    CODEX = "codex"
-    OPENCODE = "opencode"
-    HERMES = "hermes"
-    GEMINI = "gemini"
-    KIRO = "kiro"
-    COPILOT = "copilot"
-    GOOSE = "goose"
-    PI = "pi"
-    GJC = "gjc"
-    ANTIGRAVITY = "antigravity"
-    GROK = "grok"
-    ZCODE = "zcode"
 
 
 class LLMBackend(str, Enum):  # noqa: UP042

@@ -330,6 +330,25 @@ def test_claude_skills_do_not_use_mcp_json_as_setup_health(skill_path: str) -> N
     assert "grep -q '\"ouroboros\"' ~/.claude/mcp.json" not in content
 
 
+@pytest.mark.parametrize(
+    "skill_path",
+    ["skills/setup/SKILL.md", ".claude-plugin/skills/setup/SKILL.md"],
+)
+def test_claude_setup_surfaces_keep_default_sdk_distinct_from_cli_worker(
+    skill_path: str,
+) -> None:
+    """Both shipped setup summaries must reflect the selected package contract."""
+    content = Path(skill_path).read_text(encoding="utf-8")
+
+    assert "default Claude Agent SDK runtime\non MCP 1.x" in content
+    assert "Mode:                     Claude Agent SDK (MCP 1.x)" in content
+    assert (
+        "dependency-free Claude CLI worker remains a distinct, explicit `[claude-cli]`" in content
+    )
+    assert "saved Ouroboros config selects the Claude CLI runtime" not in content
+    assert "Mode:                     Claude CLI\n" not in content
+
+
 def test_python_version_constraint():
     """Test that Python version is set to >=3.12."""
     root = Path(__file__).parent.parent.parent

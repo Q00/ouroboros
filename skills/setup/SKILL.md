@@ -342,8 +342,10 @@ Check agents are available:
 ls src/ouroboros/agents/*.md | wc -l  # Should show 20+ bundled agents
 ```
 
-Confirm the saved Ouroboros config selects the Claude CLI runtime while
-`~/.claude/mcp.json` was not mutated by this setup.
+Confirm the saved Ouroboros config selects the default Claude Agent SDK runtime
+on MCP 1.x while `~/.claude/mcp.json` was not mutated by this setup. The
+dependency-free Claude CLI worker remains a distinct, explicit `[claude-cli]`
+selection for the isolated MCP 2 process.
 
 ---
 
@@ -356,7 +358,7 @@ Display with celebration:
   Ouroboros Setup Complete!
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-Mode:                     Claude CLI
+Mode:                     Claude Agent SDK (MCP 1.x)
 Skills Registered:        15 workflow skills
 Agents Available:         9 specialized agents
 MCP Server:               Host-owned (config not mutated)

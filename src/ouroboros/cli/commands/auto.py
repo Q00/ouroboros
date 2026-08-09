@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from dataclasses import replace
-from enum import Enum
 import os
 from pathlib import Path
 import time
@@ -81,7 +80,12 @@ from ouroboros.mcp.tools.qa import QAHandler
 from ouroboros.mcp.tools.ralph_handlers import RalphHandler
 from ouroboros.mcp.tools.subagent import should_dispatch_via_plugin
 from ouroboros.orchestrator import resolve_agent_runtime_backend
-from ouroboros.package_profiles import public_runtime_backend
+from ouroboros.package_profiles import (
+    PublicAgentRuntimeBackend as AgentRuntimeBackend,
+)
+from ouroboros.package_profiles import (
+    public_runtime_backend,
+)
 from ouroboros.persistence.event_store import EventStore
 from ouroboros.runtime.controls import load_runtime_controls
 from ouroboros.runtime.watchdog import Watchdog
@@ -112,25 +116,6 @@ def _build_configured_ralph_handler(
         msg = "MCP composition root returned non-Ralph handler for ouroboros_ralph"
         raise TypeError(msg)
     return handler
-
-
-class AgentRuntimeBackend(str, Enum):  # noqa: UP042
-    """Supported runtime backends for auto execution handoff."""
-
-    CLAUDE = "claude"
-    CLAUDE_SDK = "claude-sdk"
-    CLAUDE_CLI = "claude-cli"
-    CODEX = "codex"
-    OPENCODE = "opencode"
-    HERMES = "hermes"
-    GEMINI = "gemini"
-    COPILOT = "copilot"
-    KIRO = "kiro"
-    PI = "pi"
-    GJC = "gjc"
-    ANTIGRAVITY = "antigravity"
-    GROK = "grok"
-    ZCODE = "zcode"
 
 
 app = typer.Typer(

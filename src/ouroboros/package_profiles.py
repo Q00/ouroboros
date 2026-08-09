@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from enum import Enum
 from importlib import metadata as importlib_metadata
 
 MCP_PROFILE = "mcp"
@@ -17,6 +18,32 @@ UNSUPPORTED_CLAUDE_SDK_MCP_MESSAGE = (
     "Use [claude] alone for the Claude SDK runtime, or use [claude-cli] with "
     "[mcp]; run the MCP 2 server in a separate environment/process."
 )
+
+
+class PublicAgentRuntimeBackend(str, Enum):  # noqa: UP042
+    """Public runtime spellings shared by every workflow CLI front door.
+
+    Package-profile names are public aliases here: ``claude-sdk`` selects the
+    canonical ``claude`` SDK backend and ``claude-cli`` selects the canonical
+    ``claude_mcp`` worker. Internal transports such as ``codex_mcp`` stay out
+    of this user-facing contract.
+    """
+
+    CLAUDE = "claude"
+    CLAUDE_SDK = "claude-sdk"
+    CLAUDE_CLI = "claude-cli"
+    CODEX = "codex"
+    OPENCODE = "opencode"
+    HERMES = "hermes"
+    GEMINI = "gemini"
+    COPILOT = "copilot"
+    GOOSE = "goose"
+    KIRO = "kiro"
+    PI = "pi"
+    GJC = "gjc"
+    ANTIGRAVITY = "antigravity"
+    GROK = "grok"
+    ZCODE = "zcode"
 
 
 def _installed_major(distribution: str) -> int | None:
@@ -60,6 +87,7 @@ __all__ = [
     "CLAUDE_SDK_PROFILE",
     "CLAUDE_SDK_RUNTIME_BACKEND",
     "MCP_PROFILE",
+    "PublicAgentRuntimeBackend",
     "UNSUPPORTED_CLAUDE_SDK_MCP_MESSAGE",
     "has_unsupported_claude_sdk_mcp_mix",
     "public_runtime_backend",
