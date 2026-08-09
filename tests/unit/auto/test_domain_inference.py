@@ -4457,6 +4457,24 @@ def test_displayed_component_status_keeps_the_dashboard() -> None:
 @pytest.mark.parametrize(
     "goal",
     [
+        "Build a Chrome browser action settings page",
+        "Build a Chrome page action popup",
+    ],
+)
+def test_browser_action_surfaces_are_components_under_generic_runtimes(goal: str) -> None:
+    """R86 guard: browser-action and page-action surfaces are components
+    in the shared vocabulary — a generic browser runtime cannot hand
+    them standalone web-app semantics."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value="Settings panel with save button")
+    _seed_section(ledger, "runtime_context", value="Runs in browsers")
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
         "The product is an admin portal that runs in browsers",
         "The deliverable is an admin portal available in browsers",
     ],

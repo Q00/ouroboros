@@ -1152,7 +1152,7 @@ _WEB_SIMILARITY_MODIFIER_RE = re.compile(
 _COMPONENT_ARTIFACT_FRAGMENT = (
     r"(?:extensions?|plugins?|add[\s\-]?ons?|addons?|sidebars?|popups?|"
     r"pop[\s\-]ups?|toolbars?|overlays?|menus?|devtools?|drivers?|"
-    r"automation)"
+    r"automation|actions?)"
 )
 # A browser/web token followed by a component-artifact noun is re-headed
 # by that component (#1813 R60): a "browser extension settings page" is
@@ -1567,6 +1567,9 @@ _COMPONENT_NOUN_WORDS = frozenset(
         "overlays",
         "menu",
         "menus",
+        # Chrome browser-action / page-action surfaces (#1813 R86).
+        "action",
+        "actions",
     ]
 )
 # An activity noun after a component word marks the component as the
