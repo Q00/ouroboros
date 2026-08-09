@@ -46,6 +46,8 @@ Artifact ready
 APPROVED          REJECTED
 ```
 
+> The diagram shows the happy path. Two things sit outside it: `trigger_consensus=true` jumps straight to Stage 3 from either the trigger matrix or a Stage 2 AC failure, and the [reward-hacking veto](#reward-hacking-veto) can flip any `APPROVED` above back to `REJECTED`.
+
 ---
 
 ## Stage 1: Mechanical Verification
@@ -77,32 +79,31 @@ The mechanical verifier runs zero-cost automated shell commands and checks the e
 | **Coverage not parseable** | Coverage check passes but no `coverage_score` in events | Output did not match the expected pattern (`TOTAL ... XX%`); ensure `pytest-cov` or compatible tool is used |
 | **OS error** | `Check <type> failed` with "OS error" | Permissions problem or missing working directory; verify `working_dir` config |
 
-### Language Auto-Detection
+### Where Stage 1 Commands Come From
 
-When `build_mechanical_config(working_dir)` is used (the default when running via `ouroboros run`), Stage 1 commands are **automatically populated** by scanning the project directory for known marker files. You do not need to configure commands manually for supported toolchains.
+Ouroboros does **not** ship hardcoded per-language presets. Stage 1 trusts exactly one source: `.ouroboros/mechanical.toml` in the project root. `build_mechanical_config(working_dir)` is the deterministic reader for that file — when the file is absent, every command resolves to `None` and Stage 1 skips gracefully rather than running the wrong tool.
 
-**Detection priority** (first match wins):
+The file is written by `ouroboros.evaluation.detector`, which makes **one AI call** that inspects the project's manifest files (`pyproject.toml`, `uv.lock`, `package.json`, `Cargo.toml`, `go.mod`, `pom.xml`, `build.gradle`, `Makefile`, `justfile`, `Taskfile.yml`, `build.zig`, `CMakeLists.txt`, `mix.exs`, `Gemfile`, and others) and proposes commands for this specific repository. Each proposed command is validated before it is persisted — against the executable allowlist, against shell-operator and absolute-path injection, and against the repo itself (for example, a `cargo` command is only kept when `Cargo.toml` exists) — so the toml contains only commands the project can actually run.
 
-| Marker file | Detected toolchain | Default commands |
-|---|---|---|
-| `uv.lock` | `python-uv` | `uv run ruff`, `uv run pytest --cov`, `uv run mypy` |
-| `build.zig` | `zig` | `zig build`, `zig build test` |
-| `Cargo.toml` | `rust` | `cargo clippy`, `cargo build`, `cargo test` |
-| `go.mod` | `go` | `go vet ./...`, `go build ./...`, `go test ./...`, `go test -cover ./...` |
-| `bun.lockb` / `bun.lock` | `node-bun` | `bun lint`, `bun run build`, `bun test` |
-| `pnpm-lock.yaml` | `node-pnpm` | `pnpm lint`, `pnpm build`, `pnpm test` |
-| `yarn.lock` | `node-yarn` | `yarn lint`, `yarn build`, `yarn test` |
-| `package-lock.json` | `node-npm` | `npm run lint`, `npm run build`, `npm test` |
-| `pyproject.toml` / `setup.py` / `setup.cfg` | `python` | `ruff check .`, `pytest --cov`, `mypy .` |
-| `package.json` (no lockfile) | `node-npm` | `npm run lint`, `npm run build`, `npm test` |
+Generate or refresh it explicitly:
 
-If no marker file is found, all commands remain `None` and all checks are silently skipped.
+```bash
+ouroboros detect              # inspect the current directory and write .ouroboros/mechanical.toml
+ouroboros detect --force      # re-detect and overwrite an existing file
+ouroboros detect --backend codex   # use a specific LLM backend for the detect call
+```
+
+`ensure_mechanical_toml()` is idempotent: when the file already exists and `force` is false it returns immediately without an LLM call. It never raises — on any failure it returns `False`, leaving Stage 1 with no commands.
+
+> **If Stage 1 always passes, this is usually why.** With no `.ouroboros/mechanical.toml` and no explicitly configured `MechanicalConfig` commands, all five checks are skipped and treated as passed, which makes Stage 1 a no-op gate. Run `ouroboros detect`, or write the toml by hand.
+
+> **Deprecated:** `detect_language()` no longer detects anything. It is a compatibility shim that reads `.ouroboros/mechanical.toml` and emits a `DeprecationWarning`; call `ensure_mechanical_toml()` plus `build_mechanical_config()` instead.
 
 > **Go coverage note:** The `go test -cover` output format (`ok  ./... coverage: XX.X% of statements`) is not matched by the coverage parser (which expects `TOTAL ... XX%` or `Coverage: XX%`). For Go projects, `coverage_score` will always be `None` in the event payload and the coverage **threshold check is skipped even if coverage is low**. Use the `.ouroboros/mechanical.toml` override to supply a custom coverage command if you need threshold enforcement on Go projects.
 
 ### Project-Level Command Overrides
 
-Create `.ouroboros/mechanical.toml` in your project root to override auto-detected commands without modifying Ouroboros configuration:
+`.ouroboros/mechanical.toml` in your project root is where Stage 1 commands live. The detector writes it, and you can edit it or author it by hand without modifying Ouroboros configuration:
 
 ```toml
 # .ouroboros/mechanical.toml
@@ -116,18 +117,17 @@ timeout = 120
 **Override priority** (highest to lowest):
 1. Explicit `overrides` dict passed programmatically (from MCP params)
 2. `.ouroboros/mechanical.toml` in the project root
-3. Auto-detected language preset
-4. All `None` (all checks skip gracefully)
+3. All `None` (all checks skip gracefully)
 
-**TOML parse errors** are logged as a warning (`mechanical.toml_parse_error`) and silently ignored; the auto-detected preset commands are still used.
+**TOML parse errors** are logged as a warning (`mechanical.toml_parse_error`) and silently ignored. There is no preset to fall back to, so every command stays `None` and Stage 1 skips all checks.
 
-**Security: executable allowlist.** Commands in `.ouroboros/mechanical.toml` may only use executables from a built-in allowlist (e.g., `pytest`, `ruff`, `cargo`, `go`, `npm`, `make`). If a command specifies an executable not in the allowlist, it is silently blocked (logged as `mechanical.blocked_executable`) and the check is skipped. Hardcoded language presets bypass this check. This prevents untrusted repository configs from running arbitrary commands in CI/CD environments.
+**Security: executable allowlist.** Commands in `.ouroboros/mechanical.toml` may only use executables from a built-in allowlist (e.g., `pytest`, `ruff`, `cargo`, `go`, `npm`, `make`). If a command specifies an executable not in the allowlist — or uses shell operators or an absolute path — it is silently blocked (logged as `mechanical.blocked_executable`) and the check is skipped. Commands passed programmatically through `MechanicalConfig` or the MCP `overrides` dict bypass this check, because they are vetted upstream. This prevents untrusted repository configs from running arbitrary commands in CI/CD environments.
 
 | Override failure mode | Symptom | Cause / Action |
 |---|---|---|
-| **TOML parse error** | Auto-detected preset used; no error raised | Malformed `.ouroboros/mechanical.toml`; check TOML syntax |
+| **TOML parse error** | All Stage 1 checks skipped; no error raised | Malformed `.ouroboros/mechanical.toml`; check TOML syntax |
 | **Blocked executable** | Check silently skipped | Executable not in allowlist; use an allowed tool or set the command in `MechanicalConfig` directly |
-| **Language not detected** | All Stage 1 checks skipped | No marker file found; add a `pyproject.toml` / `Cargo.toml` / etc., or set commands explicitly |
+| **No toml present** | All Stage 1 checks skipped | Run `ouroboros detect`, or set commands explicitly in `MechanicalConfig` |
 
 ### Stage 1 Configuration
 
@@ -144,7 +144,7 @@ mechanical:
   coverage_command: ["pytest", "--cov=src", "--cov-report=term-missing", "tests/"]
 ```
 
-> **Important:** When using `ouroboros run`, commands are auto-detected from the project directory. All Stage 1 checks are silently skipped (and treated as passed) only when no marker file is found **and** no explicit commands are configured. Use `.ouroboros/mechanical.toml` or `MechanicalConfig` overrides to customize behavior.
+> **Important:** These fields are the programmatic escape hatch. In the normal `ouroboros run` path the commands come from `.ouroboros/mechanical.toml`, and Stage 1 silently skips every check (treating it as passed) when that file is absent **and** no explicit commands are configured.
 
 ### Diagnosing Stage 1 Failures
 
@@ -176,16 +176,30 @@ Stage 2 calls a Standard-tier LLM (default: `OUROBOROS_SEMANTIC_MODEL` / config 
 | `drift_score` | float | 0.0–1.0 | Deviation from seed intent (lower is better) |
 | `uncertainty` | float | 0.0–1.0 | Model's uncertainty about its own evaluation |
 | `reasoning` | string | — | Free-text explanation |
+| `reward_hacking_risk` | float | 0.0–1.0 | Suspicion that the artifact games the evaluator instead of solving the task. Distinct from `drift_score`, and vetoes approval at `>= 0.7` |
+| `questions_used` | list | — | Questions the evaluator asked while verifying the artifact — it has to show its work |
+| `evidence` | list | — | File snippets and observations the verdict relied on |
 
 ### Approval Logic
 
 ```
-if ac_compliance == False  → REJECTED (Stage 3 not attempted)
-if score < 0.8             → REJECTED (unless Stage 3 is triggered and approves)
-if score >= 0.8 and no trigger → APPROVED
+if ac_compliance == False and not trigger_consensus  → REJECTED (Stage 3 not attempted)
+if score < 0.8                    → REJECTED (unless Stage 3 is triggered and approves)
+if score >= 0.8 and no trigger    → APPROVED
+if reward_hacking_risk >= 0.7     → REJECTED (final veto, overrides any approval)
 ```
 
-> The `satisfaction_threshold` (default `0.8`) is in `SemanticConfig`. Values between 0.0–1.0 are clamped after parsing; out-of-range model responses are corrected automatically.
+> **The score gate is hardcoded at `0.8`.** `SemanticConfig.satisfaction_threshold` (default `0.8`) exists and is validated, but the pipeline compares against a literal `0.8` and never reads the field. Changing it has no effect on approval today — do not rely on it to loosen or tighten the gate.
+
+> **`ac_compliance=False` is not always final.** When the evaluation context sets `trigger_consensus=True`, the pipeline continues to the trigger matrix instead of rejecting, so Stage 3 can deliver a second opinion on an AC the Stage 2 model failed.
+
+> Scores are clamped to 0.0–1.0 after parsing; out-of-range model responses are corrected automatically.
+
+### Reward-Hacking Veto
+
+`_build_result()` applies one final gate that every approval path funnels through: if Stage 2 reported `reward_hacking_risk >= 0.7` (`REWARD_HACKING_VETO_THRESHOLD`), an otherwise-approved result is flipped to rejected. The threshold is deliberately high so that mild suspicion never blocks a genuine pass.
+
+The veto only turns approve into reject — it never rescues an already-rejected result, so a Stage 3 consensus rejection stays a rejection. When it fires, `failure_reason` names it explicitly rather than reporting `"Unknown failure"`.
 
 ### Stage 2 Failure Modes
 
@@ -203,10 +217,10 @@ if score >= 0.8 and no trigger → APPROVED
 ```yaml
 # In PipelineConfig.semantic (SemanticConfig)
 semantic:
-  model: "claude-3-5-sonnet-20241022"   # Standard tier model
+  model: null                            # null = resolve from OUROBOROS_SEMANTIC_MODEL / config
   temperature: 0.2                       # Low for consistency
   max_tokens: 2048                       # Response token budget
-  satisfaction_threshold: 0.8           # Minimum score to approve
+  satisfaction_threshold: 0.8           # Currently inert — the gate is hardcoded to 0.8
 ```
 
 ### Diagnosing Stage 2 Failures
@@ -220,10 +234,11 @@ If `ac_compliance` is `false` but `score` seems high, the LLM may have found a p
 
 ## Consensus Trigger Matrix (Stage 2 → Stage 3 Gate)
 
-After Stage 2 passes (`ac_compliance=True`, `score >= 0.8`), six trigger conditions are evaluated **in priority order**. The first matching condition triggers Stage 3. If none match, the artifact is approved immediately.
+After Stage 2 passes (`ac_compliance=True`, `score >= 0.8`), trigger conditions are evaluated **in priority order**. The first matching condition triggers Stage 3. If none match, the artifact is approved immediately.
 
 | Priority | Trigger | Condition |
 |----------|---------|-----------|
+| 0 | `manual_request` | `manual_consensus_request=True`, set from `trigger_consensus=true` on the evaluation context |
 | 1 | `seed_modification` | `seed_modified=True` in context |
 | 2 | `ontology_evolution` | `ontology_changed=True` in context |
 | 3 | `goal_interpretation` | `goal_reinterpreted=True` in context |
@@ -231,7 +246,11 @@ After Stage 2 passes (`ac_compliance=True`, `score >= 0.8`), six trigger conditi
 | 5 | `stage2_uncertainty` | `uncertainty > uncertainty_threshold` (default **0.3**) |
 | 6 | `lateral_thinking_adoption` | `lateral_thinking_adopted=True` in context |
 
+> **`manual_request` short-circuits everything.** It is checked before the other six, so asking for consensus explicitly always reaches Stage 3 regardless of drift, uncertainty, or Stage 2's verdict.
+
 > **Only the first matching trigger fires.** If drift is 0.5 and lateral thinking was also adopted, only `seed_drift_alert` (priority 4) is reported.
+
+> **Both threshold comparisons are strict (`>`).** A `drift_score` exactly equal to `drift_threshold` does not trigger Stage 3. When Stage 2 ran, its `drift_score` and `uncertainty` take precedence over any values pre-populated on the `TriggerContext`.
 
 ### Trigger Configuration
 
@@ -260,9 +279,19 @@ Stage 3 calls multiple Frontier-tier models concurrently. Each votes independent
 
 ### Simple Consensus (Default)
 
-Three models are queried in parallel (default: `gpt-4o`, `claude-sonnet-4`, `gemini-2.5-pro`). Each returns `{ approved, confidence, reasoning }`.
+Three models are queried in parallel. The defaults route through OpenRouter so the voters come from three different vendors:
 
-**Approval rule:** `approving_votes / total_votes >= 0.66` (i.e., at least 2 of 3).
+```
+openrouter/openai/gpt-4o
+openrouter/anthropic/claude-opus-4.8
+openrouter/google/gemini-2.5-pro
+```
+
+Each returns `{ approved, confidence, reasoning }`.
+
+**Approval rule:** `approving_votes / total_votes >= 0.66` (i.e., at least 2 of 3). The ratio is computed over the votes actually **collected**, not over the number of configured models — see [Parallel Consensus Failure Tolerance](#parallel-consensus-failure-tolerance).
+
+> **Single-model fallback.** When the configured models are `openrouter/*` but `OPENROUTER_API_KEY` is missing or still a `YOUR_…` placeholder, `ConsensusEvaluator` silently switches to a single-model mode: the session model is queried three times with the advocate, devil's advocate, and judge system prompts, and those three perspectives vote. The 2-of-3 rule and the `<2` votes error are unchanged, but the reviewers are the same vendor by construction, so reviewer independence is reported as unavailable. Stage 3 events carry `session/<perspective>` model names and a `single-model-perspectives:` trigger reason — check for those if Stage 3 looks cheaper than expected. Configuring non-`openrouter/*` models skips the check and uses them as-is.
 
 ### Deliberative Consensus
 
@@ -294,14 +323,16 @@ An alternative two-round mode:
 # In PipelineConfig.consensus (ConsensusConfig)
 consensus:
   models:
-    - "gpt-4o"
-    - "claude-sonnet-4-20250514"
-    - "gemini/gemini-2.5-pro"
+    - "openrouter/openai/gpt-4o"
+    - "openrouter/anthropic/claude-opus-4.8"
+    - "openrouter/google/gemini-2.5-pro"
   temperature: 0.3
   max_tokens: 1024
   majority_threshold: 0.66     # 2/3 majority
-  diversity_required: true     # Prefer models from different providers
+  diversity_required: true     # Currently inert — see note below
 ```
+
+> **`diversity_required` is not enforced.** The field exists on `ConsensusConfig` and in the config schema, but nothing reads it. Provider diversity comes from the default model roster itself, not from this flag. If you replace the roster with three models from one vendor, setting `diversity_required: true` will not object.
 
 **Deliberative Consensus (`DeliberativeConfig`)**
 
@@ -311,9 +342,9 @@ Used with `DeliberativeConsensus` (not `ConsensusEvaluator`). Each role uses a s
 from ouroboros.evaluation.consensus import DeliberativeConfig, DeliberativeConsensus
 
 config = DeliberativeConfig(
-    advocate_model="claude-sonnet-4-20250514",   # Advocate role
-    devil_model="claude-sonnet-4-20250514",       # Devil's Advocate (ontological analysis)
-    judge_model="gpt-4o",                         # Final judgment
+    advocate_model="openrouter/anthropic/claude-opus-4.8",  # Advocate role
+    devil_model="openrouter/openai/gpt-4o",                 # Devil's Advocate (ontological analysis)
+    judge_model="openrouter/google/gemini-2.5-pro",         # Final judgment
     temperature=0.3,
     max_tokens=2048,
 )
@@ -342,11 +373,12 @@ Before Stage 2 runs, the `ArtifactCollector` attempts to read the actual source 
 
 | Limit | Value | Effect when exceeded |
 |-------|-------|---------------------|
-| Max files | 30 | Files beyond 30th are silently skipped |
-| Max file size | 50 KB | Files larger than 50 KB are silently skipped |
-| Max total content | 150,000 chars (~37K tokens) | Files are truncated at budget; `FileArtifact.truncated=True` |
+| Max file size (`MAX_FILE_SIZE`) | 100 KB | Files larger than 100 KB are silently skipped |
+| Max total content (`MAX_TOTAL_CHARS`) | 150,000 chars (~37K tokens) | Content is truncated at the remaining budget; `FileArtifact.truncated=True` |
 
-> Files that exceed the per-file size limit are **skipped entirely** (not truncated). If a critical file is always skipped, check whether it is a generated binary or minified output that should be excluded from evaluation.
+There is **no cap on the number of files**. The character budget is the sole limiter, so a change touching many small files is collected in full while one oversized file is dropped.
+
+> The two limits behave differently. A file over the per-file size limit is **skipped entirely** (never truncated); a file that only exhausts the shared character budget is **truncated** and marked `truncated=True`. If a critical file is always missing, check whether it is a generated binary or minified output that should be excluded from evaluation.
 
 ### Artifact Collection Failure Modes
 
@@ -356,7 +388,7 @@ Before Stage 2 runs, the `ArtifactCollector` attempts to read the actual source 
 | **No file paths extracted** | Same as above | Execution output did not contain recognizable `Write:` / `Edit:` / `file_path:` patterns. The fallback is the text summary. |
 | **Path traversal blocked** | File silently skipped | File path resolves outside `project_dir`. This is a security boundary, not a bug. |
 | **Permission error** | File silently skipped | Execution ran as a different user. Verify file permissions. |
-| **Large files skipped** | Missing context in evaluation | File > 50 KB. Refactor to split large files, or accept that the evaluator works from the text summary. |
+| **Large files skipped** | Missing context in evaluation | File > 100 KB. Refactor to split large files, or accept that the evaluator works from the text summary. |
 
 ---
 
@@ -393,7 +425,7 @@ config = PipelineConfig(stage3_enabled=False)
 
 > **Warning:** Disabling Stage 1 means that broken code can pass through to semantic evaluation. Disabling Stage 3 means that high-drift or high-uncertainty outputs will never be submitted to multi-model review.
 
-> **Stage 2 disabled → Stage 3 implicitly disabled.** Stage 3 runs only when a `TriggerContext` is available. When `stage2_enabled=False`, the pipeline never builds a `TriggerContext`, so Stage 3 will not run even if `stage3_enabled=True` and no external `trigger_context` is passed in. To use Stage 3 without Stage 2, pass a pre-populated `TriggerContext` explicitly to `EvaluationPipeline.evaluate()`.
+> **Stage 2 disabled does not disable Stage 3.** The trigger context is built outside the Stage 2 block precisely so that `trigger_consensus=True` still works when `stage2_enabled=False` — it fires the `manual_request` trigger and Stage 3 runs on its own. What does silently disable Stage 3 is the combination of `stage2_enabled=False`, `trigger_consensus=False`, and no external `trigger_context`: every trigger field is left at its default, so nothing matches. To reach Stage 3 without Stage 2, either set `trigger_consensus=True` or pass a pre-populated `TriggerContext` to `EvaluationPipeline.evaluate()`.
 
 ### Failure Reason Lookup
 
@@ -405,6 +437,7 @@ config = PipelineConfig(stage3_enabled=False)
 | Stage 2 AC non-compliance (`ac_compliance=False`) | `"Stage 2 failed: AC non-compliance (score=0.62)"` |
 | Stage 2 score below threshold (`ac_compliance=True` but `score < 0.8`) | `"Unknown failure"` — the score check runs after Stage 2 but the `failure_reason` property only tests `ac_compliance`. Inspect `stage2_result.score` directly to distinguish this case. |
 | Stage 3 consensus not reached | `"Stage 3 failed: Consensus not reached (44%)"` |
+| Reward-hacking veto (`reward_hacking_risk >= 0.7`) | A message naming the risk score and the 0.70 threshold — the veto is reported, not hidden behind `"Unknown failure"` |
 | All stages passed/skipped but `final_approved=False` | `"Unknown failure"` |
 
 ---
@@ -470,19 +503,23 @@ config = PipelineConfig(
 
     # Stage 2: Semantic evaluation
     semantic=SemanticConfig(
-        model="claude-3-5-sonnet-20241022",
+        model=None,                  # None = resolved from the semantic_evaluation role
         temperature=0.2,
         max_tokens=2048,
-        satisfaction_threshold=0.8,  # Minimum score for approval
+        satisfaction_threshold=0.8,  # Currently inert — the gate is hardcoded to 0.8
     ),
 
     # Stage 3: Simple consensus evaluation
     consensus=ConsensusConfig(
-        models=("gpt-4o", "claude-sonnet-4-20250514", "gemini/gemini-2.5-pro"),
+        models=(
+            "openrouter/openai/gpt-4o",
+            "openrouter/anthropic/claude-opus-4.8",
+            "openrouter/google/gemini-2.5-pro",
+        ),
         temperature=0.3,
         max_tokens=1024,
         majority_threshold=0.66,     # 2/3 majority required
-        diversity_required=True,
+        diversity_required=True,     # Currently inert
     ),
 
     # Consensus trigger thresholds
@@ -499,9 +536,9 @@ For deliberative consensus (separate from `EvaluationPipeline`):
 from ouroboros.evaluation.consensus import DeliberativeConfig, DeliberativeConsensus
 
 deliberative_config = DeliberativeConfig(
-    advocate_model="claude-sonnet-4-20250514",  # Advocate role
-    devil_model="claude-sonnet-4-20250514",      # Devil's Advocate (ontological analysis)
-    judge_model="gpt-4o",                        # Final judgment
+    advocate_model="openrouter/anthropic/claude-opus-4.8",  # Advocate role
+    devil_model="openrouter/openai/gpt-4o",                 # Devil's Advocate (ontological analysis)
+    judge_model="openrouter/google/gemini-2.5-pro",         # Final judgment
     temperature=0.3,
     max_tokens=2048,
 )
