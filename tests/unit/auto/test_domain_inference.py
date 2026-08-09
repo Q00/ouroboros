@@ -3521,6 +3521,24 @@ def test_active_containment_of_a_browser_is_consumption(goal: str, runtime: str)
 
 
 @pytest.mark.parametrize(
+    ("goal", "runtime"),
+    [
+        ("Build a desktop wrapper around an existing website", "Native desktop runtime"),
+        ("Build a mobile container around an existing PWA", "Native iOS runtime"),
+        ("Build a native shell built around a web app", "Native desktop runtime"),
+    ],
+)
+def test_native_wrappers_around_web_products_consume_them(goal: str, runtime: str) -> None:
+    """R119 guard: the native wrapper/container/shell is the produced
+    artifact; the existing web product after AROUND is its dependency."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value="Native window with settings panel and navigation")
+    _seed_section(ledger, "runtime_context", value=runtime)
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes
+
+
+@pytest.mark.parametrize(
     ("goal", "outputs"),
     [
         ("Build a browser-based admin panel", "Login and role controls"),

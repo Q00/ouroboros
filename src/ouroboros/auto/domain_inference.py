@@ -856,6 +856,10 @@ _RELATIONAL_TARGET_RE = re.compile(
     r"invoked\s+(?:by|from)|referenced\s+(?:by|from)|required\s+by|"
     r"embedded\s+(?:in|into|within|inside)|"
     r"nested\s+(?:in|within|inside)|contained\s+(?:in|within|inside)|"
+    # A wrapper/container/shell owns the produced artifact while the web
+    # product after AROUND is its consumed dependency (#1813 R119).
+    r"(?:wrappers?|containers?|shells?|wrapped|wrapping|containerized)\s+around|"
+    r"built\s+around|"
     # Active containment consumes its component (#1813 R59): an app that
     # "embeds a web browser" hosts the browser, it is not one.
     r"embeds?|embedding|contains?|containing|hosts?|hosting|"
@@ -891,7 +895,7 @@ _RELATIONAL_TARGET_RE = re.compile(
     r"(?:(?:an?|the|my|our|your)\s+)?(?:[\w\-'’]+(?:\s+[\w\-'’]+){0,2}?\s*(?:,|\band\b|\bor\b|\bas\s+well\s+as\b|\balong\s+with\b|\bplus\b|/)\s*){0,3}?"
     r"(?:an?\s+|the\s+)?(?:[\w\-'’]+\s+){0,2}?"
     r"(?:web[\s\-]?app(?:lication)?s?|webapps?|websites?|web\s+uis?|frontends?|"
-    r"front[\s\-]ends?|single[\s\-]page\s+app(?:lication)?s?|browsers?)\b"
+    r"front[\s\-]ends?|single[\s\-]page\s+app(?:lication)?s?|spas?|pwas?|browsers?)\b"
     r"(?:\s*(?:,|\band\b|\bor\b|\bas\s+well\s+as\b|\balong\s+with\b|\bplus\b|/)\s*(?:(?:an?|the|my|our|your)\s+)?[\w\-'’]+(?:\s+[\w\-'’]+){0,2}){0,3}"
 )
 
