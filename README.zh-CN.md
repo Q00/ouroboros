@@ -76,7 +76,7 @@ $ ouroboros init start --orchestrator "I want to build a task management CLI too
 ```
 
 <p align="center">
-  <img src="./docs/images/ooo-interview.gif" width="760" alt="终端录制：ouroboros init start 追问存储方式、范围、标识符和并发，最后报出模糊度 0.31，并询问是继续访谈、强制生成还是取消">
+  <img src="./docs/images/ooo-interview.gif" width="760" alt="终端录制：ouroboros init start 追问排序、崩溃后的持久性、v1 范围以及任务用什么来指认，最后报出模糊度 0.31，并询问是继续访谈、强制生成还是取消">
 </p>
 
 <p align="center">

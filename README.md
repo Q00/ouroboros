@@ -132,7 +132,7 @@ $ ouroboros init start --orchestrator "I want to build a task management CLI too
 ```
 
 <p align="center">
-  <img src="./docs/images/ooo-interview.gif" width="760" alt="Terminal recording of ouroboros init start asking about storage, scope, identifiers, and concurrency, then reporting an ambiguity score of 0.31 and offering to continue, force, or cancel">
+  <img src="./docs/images/ooo-interview.gif" width="760" alt="Terminal recording of ouroboros init start asking about ordering, crash durability, v1 scope, and how tasks get identified, then reporting an ambiguity score of 0.31 and offering to continue, force, or cancel">
 </p>
 
 <p align="center">

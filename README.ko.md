@@ -112,7 +112,7 @@ $ ouroboros init start --orchestrator "I want to build a task management CLI too
 ```
 
 <p align="center">
-  <img src="./docs/images/ooo-interview.gif" width="760" alt="ouroboros init start가 저장 방식, 범위, 식별자, 동시성을 캐묻다가 모호도 0.31을 보고하고 계속·강제 생성·취소 중 하나를 묻는 터미널 녹화">
+  <img src="./docs/images/ooo-interview.gif" width="760" alt="ouroboros init start가 순서, 크래시 내구성, v1 범위, 작업을 무엇으로 지목할지를 캐묻다가 모호도 0.31을 보고하고 계속·강제 생성·취소 중 하나를 묻는 터미널 녹화">
 </p>
 
 <p align="center">
