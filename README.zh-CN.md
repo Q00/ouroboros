@@ -43,6 +43,33 @@ Ouroboros 是面向 AI 编码的 Agent OS：一层本地优先的运行时，把
 
 ---
 
+## Ouroboros Agent OS 技术栈
+
+和任何操作系统一样，Ouroboros 分成三层：一层稳定的、提供原语的 **OS 层**，一层承载领域工作流的**应用层**，还有一个人真正坐在前面的 **shell**。三个仓库，一个技术栈：
+
+| 层级 | 仓库 | 职责 | 你得到什么 |
+| :--- | :--- | :--- | :--- |
+| **Shell**（终端客户端） | [`Ouro-labs/ourocode`](https://github.com/Ouro-labs/ourocode) | 原生终端 UI，在一个会话里跨 Claude / Codex / Gemini CLI 运行 `ooo` 工作流 | TUI、wonderTool 决策选择器、MCP 面板状态、命令发现 |
+| **Apps**（领域工作流） | [`Ouro-labs/ouroboros-plugins`](https://github.com/Ouro-labs/ouroboros-plugins) | UserLevel 插件契约 —— 把核心原语组合成可安装的领域程序（PR 操作、Jira 同步、故障处理、发布） | 插件清单、按范围授权、审计与溯源、参考插件 |
+| **OS**（本仓库） | [`Q00/ouroboros`](https://github.com/Q00/ouroboros) | Agent OS 内核 —— Seed、Ledger、Runtime、MCP、安全边界 | `ooo` 命令、规约优先的工作流引擎、多运行时适配 |
+
+**它们怎么连起来：**
+
+```
+  ourocode  ──►  ooo / ouroboros-plugins  ──►  ouroboros core (Seed · Ledger · MCP · Runtime)
+   shell             user-level apps                        kernel
+```
+
+- **内核**（`ouroboros`）持有契约：不管最终由哪个 LLM 执行，每一个动作都会变成一个绑定 seed、记入 ledger、可回放的事件。
+- **插件**（`ouroboros-plugins`）针对这份契约声明自己需要的能力范围，所以领域工作流（review 一个 PR、分诊一张 Linear 工单、跑一次发布）始终是可审计、受策略约束的，而不是一次性的 prompt。
+- **Ourocode** 是终端 shell：它把 MCP 状态、访谈问题、wonderTool 决策都做成一等公民的 TUI 元素，让你不用离开键盘、也不用在多个 CLI 之间来回切换就能驱动这套 OS。
+
+你可以只用 `ouroboros` 配任意受支持的 CLI；需要领域工作流时叠加插件；想要一个统一的终端驾驶舱时再装 `ourocode`。
+
+> **免责声明。** Ouroboros 项目及其社区**与任何加密货币、代币、meme 币或交易社群均无关联** —— 包括但不限于 pump.fun 及其他发射平台上任何名为 "ouroboros" 的代币。这是一个开源开发者工具。我们不发行、不背书、也不持有任何代币。任何声称与本项目有关联的代币都是未经授权的。
+
+---
+
 ## 为什么选 Ouroboros？
 
 绝大多数 AI 编码失败在**输入**，不在输出。瓶颈不是 AI 能力不够，而是人没把事情想清楚。

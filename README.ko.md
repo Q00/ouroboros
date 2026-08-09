@@ -44,6 +44,33 @@ Ouroboros는 **명세 우선 AI 개발 시스템**입니다. 이 시스템은 �
 
 ---
 
+## Ouroboros Agent OS 스택
+
+여느 OS와 마찬가지로 Ouroboros도 세 층으로 나뉩니다. 원시 기능을 제공하는 안정적인 **OS 층**, 도메인 워크플로우를 담는 **애플리케이션 층**, 그리고 사람이 실제로 마주 앉는 **셸**입니다. 저장소 셋, 스택 하나입니다.
+
+| 층 | 저장소 | 역할 | 얻는 것 |
+| :--- | :--- | :--- | :--- |
+| **Shell** (터미널 클라이언트) | [`Ouro-labs/ourocode`](https://github.com/Ouro-labs/ourocode) | 한 세션 안에서 Claude / Codex / Gemini CLI를 넘나들며 `ooo` 워크플로우를 실행하는 네이티브 터미널 UI | TUI, wonderTool 결정 선택기, MCP 패널 상태, 명령 탐색 |
+| **Apps** (도메인 워크플로우) | [`Ouro-labs/ouroboros-plugins`](https://github.com/Ouro-labs/ouroboros-plugins) | UserLevel 플러그인 계약 — 코어 원시 기능을 설치 가능한 도메인 프로그램(PR 작업, Jira 동기화, 장애 대응, 릴리스)으로 조립 | 플러그인 매니페스트, 범위 한정 권한, 감사/출처 추적, 참조 플러그인 |
+| **OS** (이 저장소) | [`Q00/ouroboros`](https://github.com/Q00/ouroboros) | Agent OS 코어 — Seed, Ledger, Runtime, MCP, 안전 경계 | `ooo` 명령어, 명세 우선 워크플로우 엔진, 다중 런타임 어댑터 |
+
+**어떻게 연결되나:**
+
+```
+  ourocode  ──►  ooo / ouroboros-plugins  ──►  ouroboros core (Seed · Ledger · MCP · Runtime)
+   shell             user-level apps                        kernel
+```
+
+- **커널**(`ouroboros`)이 계약을 소유합니다. 최종 실행을 어느 LLM이 맡든, 모든 행위는 seed에 묶이고 ledger에 기록되는 재생 가능한 이벤트가 됩니다.
+- **플러그인**(`ouroboros-plugins`)은 그 계약에 대고 필요한 권한 범위를 선언합니다. 그래서 도메인 워크플로우(PR 리뷰, Linear 티켓 분류, 릴리스 실행)가 일회성 프롬프트가 아니라 감사 가능하고 정책에 묶인 상태로 남습니다.
+- **Ourocode**는 터미널 셸입니다. MCP 상태, 인터뷰 질문, wonderTool 결정을 일급 TUI 요소로 드러내므로, 키보드를 떠나거나 여러 CLI를 오가지 않고도 이 OS를 몰 수 있습니다.
+
+지원되는 CLI에 `ouroboros`만 얹어 써도 되고, 도메인 워크플로우가 필요하면 플러그인을 더하고, 통합된 터미널 조종석을 원하면 `ourocode`를 설치하면 됩니다.
+
+> **고지.** Ouroboros 프로젝트와 커뮤니티는 **어떤 암호화폐, 토큰, 밈코인, 트레이딩 커뮤니티와도 무관합니다** — pump.fun을 비롯한 런치패드에 올라온 "ouroboros" 티커도 여기 포함됩니다. 이것은 오픈소스 개발자 도구입니다. 우리는 어떤 코인도 발행하거나, 보증하거나, 보유하지 않습니다. 이 프로젝트와 관련이 있다고 주장하는 토큰은 전부 무단입니다.
+
+---
+
 ## Wonder에서 온톨로지로
 
 > *Wonder → "어떻게 살아야 하는가?" → "'삶'이란 무엇인가?" → 온톨로지*
