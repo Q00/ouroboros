@@ -28,14 +28,21 @@ codex plugin marketplace add Q00/ouroboros
 codex plugin add ouroboros@ouroboros
 ```
 
-새 Codex 세션을 열고 `ooo`를 입력하세요. setup이 아직 안 돌았다면, Ouroboros가 **무언가를 바꾸기 전에 먼저 런타임을 준비할지 물어봅니다.** 준비가 끝나면 Codex의 현재 기본 모델을 자동으로 씁니다. **Directly configure models**는 특정 파이프라인 단계의 모델을 고르거나 고정하고 싶을 때만 선택하세요 — Codex에서는 임시 `localhost` 주소로 브라우저에 로컬 설정 화면이 열립니다.
+새 Codex 세션을 열고 `ooo`를 입력하세요. setup이 아직 안 돌았다면, Ouroboros가 **무언가를 바꾸기 전에 먼저 런타임을 준비할지 물어봅니다.** 준비가 끝나면 Codex의 현재 기본 모델을 자동으로 씁니다. **직접 모델 설정하기**(Directly configure models)는 특정 파이프라인 단계의 모델을 고르거나 고정하고 싶을 때만 선택하세요 — Codex에서는 임시 `localhost` 주소로 브라우저에 로컬 설정 화면이 열립니다.
 
 ### 사전 조건 (권장 경로)
 
-- **Codex CLI**가 설치돼 있고 `PATH`에 있을 것. 또는 macOS ChatGPT 앱에 딸린 실행 파일([설치 절차](#codex-cli-설치) 참고)
+- **Codex CLI**가 설치돼 있고 **`PATH`에 있을 것.** 위 `codex plugin ...` 명령을 셸에서 실행하므로 이 경로에서는 `PATH` 등록이 필수입니다. macOS ChatGPT 앱에 딸린 실행 파일만 있고 `PATH`에는 없다면, 그 실행 파일을 `PATH`에 올리거나([설치 절차](#codex-cli-설치) 참고) 아래 [독립 설치](#독립-설치-플러그인-없이) 경로를 쓰세요. Ouroboros setup은 앱 번들 실행 파일을 찾아낼 수 있지만, **셸은 `codex plugin` 명령을 해석하지 못합니다.**
 - 로그인된 **Codex CLI** 계정. API 키 인증도 됩니다: `printenv OPENAI_API_KEY | codex login --with-api-key`. 파일 기반 키 관리는 [`credentials.yaml`](../config-reference.md#credentialsyaml) 참고
+- **`uvx`** (uv에 포함). 플러그인의 MCP 서술자가 `uvx`로 서버를 띄웁니다 ([`.mcp.codex.json`](../../.mcp.codex.json)). 없으면 다음 중 하나로 설치하세요:
 
-**Python 요구사항은 아래 독립 설치 경로에만 해당합니다.**
+  ```bash
+  pipx install uv
+  pip install --user uv
+  brew install uv          # macOS / Linuxbrew
+  ```
+
+**Python은 직접 깔지 않아도 됩니다.** `uvx`가 패키지의 `requires-python = ">=3.12"`를 보고 맞는 인터프리터를 확보합니다. 아래 독립 설치 경로의 `Python >= 3.12` 요구사항은 **이 경로에는 해당하지 않습니다.**
 
 ## 독립 설치 (플러그인 없이)
 
