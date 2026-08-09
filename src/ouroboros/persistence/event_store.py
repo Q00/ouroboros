@@ -756,21 +756,15 @@ class EventStore:
     async def initialize(self, *, create_schema: bool | None = None) -> None:
         """Initialize the database connection and create tables if needed.
 
-        This method is idempotent - calling it multiple times is safe.
+        This idempotent method is also the in-process retry for deferred picker provisioning.
 
         Args:
             create_schema: When True run ``metadata.create_all`` so missing
-                tables are created. Read-only consumers (for example diagnostic
-                CLI commands that must not mutate the store) can pass ``False``
-                to skip schema creation entirely. When ``None`` (default), the
-                value follows ``read_only``: stores constructed with
-                ``read_only=True`` skip schema creation and all others create
-                it, preserving the prior default behaviour.
+                tables are created. Read-only consumers can pass ``False`` to
+                skip schema creation. When ``None``, writable stores create it.
 
-        For pathless and ``:memory:`` aiosqlite databases, backs the store with
-        SQLite's process-shared in-memory VFS (``memdb``): pooled connections
-        join one shared database with normal connection-scoped transactions,
-        and a keepalive connection anchors the database's lifetime.
+        Pathless and ``:memory:`` URLs use SQLite's process-shared ``memdb`` VFS;
+        a keepalive connection anchors their lifetime.
         """
         # Serialize with close; once work starts, settle it before surfacing cancellation.
         async with self._lifecycle_lock:
@@ -840,6 +834,12 @@ class EventStore:
             self._picker_projection_ready = await initialize_event_store_schema(
                 self._engine, logger
             )
+            # Drain writers admitted before readiness, then backfill any transition gap.
+            if self._picker_projection_ready and (writes := tuple(self._settling_writes)):
+                await asyncio.gather(*writes, return_exceptions=True)
+                self._picker_projection_ready = await initialize_event_store_schema(
+                    self._engine, logger
+                )
 
     async def append(
         self,

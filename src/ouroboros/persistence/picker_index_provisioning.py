@@ -271,7 +271,12 @@ async def provision_picker_indexes_best_effort(
                 await connection.commit()
                 return True
     except SQLAlchemyError as exc:
-        logger.warning("Dashboard picker projection provisioning deferred: %s", exc)
+        logger.warning(
+            "Dashboard picker projection provisioning deferred: %s; "
+            "the writer remains available and EventStore.initialize() can be called "
+            "again in-process to retry repair",
+            exc,
+        )
         return False
 
 

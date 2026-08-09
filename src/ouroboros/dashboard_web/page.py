@@ -64,6 +64,12 @@ _PAGE_TEMPLATE = """<!doctype html>
   .run-status.cancelled { color:var(--cancelled); }
   .list-empty { color:var(--muted); border:1px dashed var(--border); border-radius:7px;
     padding:28px 16px; text-align:center; font-size:12px; }
+  .list-unavailable { color:var(--failed); border:1px solid var(--failed); border-radius:7px;
+    padding:22px 16px; text-align:center; font-size:12px; }
+  .list-unavailable p { color:var(--muted); margin:7px 0 14px; }
+  .retry-picker { color:var(--text); background:var(--panel); border:1px solid var(--border);
+    border-radius:5px; padding:6px 11px; font:inherit; cursor:pointer; }
+  .retry-picker:hover { border-color:#58a6ff; }
   #detail-view[hidden], #run-list[hidden] { display:none; }
   .col { background: var(--panel); border: 1px solid var(--border);
     border-radius: 8px; min-height: 120px; display:flex; flex-direction:column; }
@@ -246,6 +252,28 @@ function renderRuns(runs) {
     : '<div class="list-empty">waiting for run… (ooo run / ooo auto)</div>');
 }
 
+function renderPickerUnavailable() {
+  const list = document.getElementById("run-list");
+  list.innerHTML = `<div class="list-head"><h2>Recent runs</h2></div>
+    <div class="list-unavailable" role="alert">
+      <strong>Run picker temporarily unavailable</strong>
+      <p>The dashboard remains read-only. Ask the active writer to retry dashboard index setup, then retry this view.</p>
+      <button class="retry-picker" type="button">Retry now</button>
+    </div>`;
+  list.querySelector(".retry-picker").addEventListener("click", refreshRunList);
+}
+
+function renderRunListError() {
+  const list = document.getElementById("run-list");
+  list.innerHTML = `<div class="list-head"><h2>Recent runs</h2></div>
+    <div class="list-unavailable" role="alert">
+      <strong>Run list request failed</strong>
+      <p>Check the dashboard connection, then retry this view.</p>
+      <button class="retry-picker" type="button">Retry now</button>
+    </div>`;
+  list.querySelector(".retry-picker").addEventListener("click", refreshRunList);
+}
+
 __BOOTSTRAP__
 </script>
 </body>
@@ -256,6 +284,7 @@ __BOOTSTRAP__
 # shared SQLite file is cheap to observe even when several runs are concurrent.
 _LIVE_BOOTSTRAP = """
 const WAIT_POLL_MS = 3000;
+let runListRequest = 0;
 function connect(runId) {
   setView(true, runId);
   if (window.dashboardSource) window.dashboardSource.close();
@@ -268,14 +297,27 @@ function connect(runId) {
 }
 async function fetchRuns() {
   try {
-    return (await (await fetch("/api/runs", {cache:"no-store"})).json()).runs || [];
+    const response = await fetch("/api/runs", {cache:"no-store"});
+    const payload = await response.json();
+    if (response.status === 503 && payload.error === "picker_index_contract_unavailable")
+      return {state:"picker-unavailable", runs:[]};
+    if (!response.ok) throw new Error("run picker request failed");
+    return {state:"ready", runs:Array.isArray(payload.runs) ? payload.runs : []};
   } catch (_) {}
-  return [];
+  return {state:"network-error", runs:[]};
+}
+async function refreshRunList() {
+  const request = ++runListRequest;
+  const result = await fetchRuns();
+  if (request !== runListRequest) return;
+  if (result.state === "picker-unavailable") renderPickerUnavailable();
+  else if (result.state === "ready") renderRuns(result.runs);
+  else renderRunListError();
 }
 async function startList() {
   setView(false);
   while (!new URLSearchParams(location.search).get("run")) {
-    renderRuns(await fetchRuns());
+    await refreshRunList();
     await new Promise(r => setTimeout(r, WAIT_POLL_MS));
   }
 }

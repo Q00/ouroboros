@@ -749,6 +749,156 @@ async def test_projection_failure_does_not_block_writer(
     assert "projection provisioning deferred" in caplog.text.lower()
 
 
+async def test_repeated_initialize_repairs_transient_projection_failure_in_process(
+    tmp_path, monkeypatch, caplog
+) -> None:
+    from ouroboros.persistence import event_store as event_store_module
+    from ouroboros.persistence import picker_index_provisioning as provisioning_module
+
+    original_provision = provisioning_module.provision_picker_indexes
+    attempts = 0
+
+    def fail_once(connection) -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise OperationalError(
+                "CREATE INDEX",
+                {},
+                sqlite3.OperationalError("database is locked"),
+            )
+        original_provision(connection)
+
+    monkeypatch.setattr(provisioning_module, "provision_picker_indexes", fail_once)
+    caplog.set_level(logging.WARNING, logger=event_store_module.__name__)
+    db = tmp_path / "transient-repair.db"
+    store = EventStore(f"sqlite+aiosqlite:///{db}")
+
+    await store.initialize()
+    assert store._picker_projection_ready is False
+    deferred = BaseEvent(
+        type="orchestrator.session.started",
+        aggregate_type="session",
+        aggregate_id="orch-deferred",
+        data={"execution_id": "exec-deferred"},
+    )
+    await store.append(deferred)
+    assert [event.id for event in await store.replay("session", "orch-deferred")] == [deferred.id]
+
+    # Same store, engine, and process: no close/restart is needed. The repair
+    # transaction backfills the event accepted while projection was deferred.
+    await store.initialize()
+    assert store._picker_projection_ready is True
+    assert attempts == 2
+    assert list_recent_executions(db)[0]["execution_id"] == "exec-deferred"
+
+    projected = BaseEvent(
+        type="orchestrator.session.started",
+        aggregate_type="session",
+        aggregate_id="orch-projected",
+        data={"execution_id": "exec-projected"},
+    )
+    await store.append(projected)
+    await store.close()
+
+    conn = sqlite3.connect(db)
+    try:
+        assert conn.execute(
+            f"SELECT execution_id, session_id FROM {PICKER_START_TABLE} ORDER BY event_rowid"
+        ).fetchall() == [
+            ("exec-deferred", "orch-deferred"),
+            ("exec-projected", "orch-projected"),
+        ]
+        assert conn.execute(
+            "SELECT COUNT(*) FROM events "
+            "WHERE event_type = 'orchestrator.session.started' "
+            f"AND picker_projection_version = {PICKER_PROJECTION_VERSION}"
+        ).fetchone() == (2,)
+    finally:
+        conn.close()
+    assert "eventstore.initialize() can be called again in-process" in caplog.text.lower()
+
+
+async def test_projection_repair_drains_stale_writes_before_final_backfill(
+    tmp_path, monkeypatch
+) -> None:
+    from ouroboros.persistence import event_store as event_store_module
+    from ouroboros.persistence import picker_index_provisioning as provisioning_module
+
+    original_insert = event_store_module._insert_event
+    original_provision = provisioning_module.provision_picker_indexes
+    append_entered = asyncio.Event()
+    release_append = asyncio.Event()
+    first_repair_finished = asyncio.Event()
+    captured_readiness: list[bool] = []
+    attempts = 0
+
+    def fail_once_then_signal(connection) -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise OperationalError(
+                "CREATE INDEX",
+                {},
+                sqlite3.OperationalError("database is locked"),
+            )
+        original_provision(connection)
+        if attempts == 2:
+            first_repair_finished.set()
+
+    async def pause_stale_insert(connection, event, projection_ready):
+        if event.aggregate_id == "exec-race":
+            captured_readiness.append(projection_ready)
+            append_entered.set()
+            await release_append.wait()
+        return await original_insert(connection, event, projection_ready)
+
+    monkeypatch.setattr(provisioning_module, "provision_picker_indexes", fail_once_then_signal)
+    monkeypatch.setattr(event_store_module, "_insert_event", pause_stale_insert)
+    db = tmp_path / "repair-write-race.db"
+    store = EventStore(f"sqlite+aiosqlite:///{db}")
+    await store.initialize()
+    assert store._picker_projection_ready is False
+
+    event = BaseEvent(
+        type="workflow.progress.updated",
+        aggregate_type="workflow",
+        aggregate_id="exec-race",
+        data={"execution_id": "exec-race", "runtime_status": "running"},
+    )
+    append_task = asyncio.create_task(store.append(event))
+    await asyncio.wait_for(append_entered.wait(), timeout=5)
+    repair_task = asyncio.create_task(store.initialize())
+    await asyncio.wait_for(first_repair_finished.wait(), timeout=5)
+    await asyncio.sleep(0)
+    assert not repair_task.done(), "repair returned before the stale write settled"
+
+    release_append.set()
+    await asyncio.wait_for(append_task, timeout=5)
+    await asyncio.wait_for(repair_task, timeout=5)
+    assert captured_readiness == [False]
+    assert attempts == 3
+    assert store._picker_projection_ready is True
+    assert list_recent_executions(db) == []
+    await store.close()
+
+    conn = sqlite3.connect(db)
+    try:
+        row = conn.execute(
+            "SELECT rowid, picker_projection_version FROM events WHERE id = ?",
+            (event.id,),
+        ).fetchone()
+        assert row is not None
+        assert row[1] == PICKER_PROJECTION_VERSION
+        assert conn.execute(
+            f"SELECT latest_valid_rowid FROM {PICKER_PROGRESS_TABLE} "
+            "WHERE aggregate_id = ? AND event_type = ?",
+            (event.aggregate_id, event.type),
+        ).fetchone() == (row[0],)
+    finally:
+        conn.close()
+
+
 async def test_relevant_append_survives_deferred_repair_of_malformed_meta(
     tmp_path, monkeypatch
 ) -> None:
