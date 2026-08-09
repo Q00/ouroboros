@@ -1177,15 +1177,16 @@ _VERIFICATION_ATTACHMENT_CUT_RE = re.compile(
 # inside verification prose ("tests cover the production Chrome browser
 # extension runtime") — the declaration survives the exemption. The
 # structure, not a tense/adverb vocabulary, carries the marking (#1813
-# R92-R94): a prenominal production qualifier, a "runtime" head, or a
-# postnominal predication tail that anchors the component to an
-# environment through a prepositional phrase ("shipped to users",
-# "running in production", "now live for customers"). A bare tooling
-# object ("tests with a browser extension") predicates nothing of its
-# own and stays exempt.
+# R92-R95): a prenominal production or role compound qualifier
+# ("customer-facing"), a "runtime" head, a prepositionally anchored
+# predication tail ("shipped to users", "now live for customers"), or a
+# participial/gerund predication tail of any morphology ("serving
+# paying customers", "deployed globally"). A bare tooling object
+# ("tests with a browser extension") predicates nothing of its own and
+# stays exempt.
 _PRODUCTION_IDENTITY_NP_RE = re.compile(
     rf"(?:(?:the|an?|our|its|this|that)\s+)?"
-    rf"(?:production|shipped|deployed|released|live)\s+"
+    rf"(?:production|shipped|deployed|released|live|[\w'’]+-[\w'’]+(?:ing|ed))\s+"
     rf"(?:[\w\-'’]+\s+){{0,3}}?(?:{_COMPONENT_ARTIFACT_FRAGMENT}|runtimes?)\b"
     rf"|(?:(?:the|an?|our|its|this|that)\s+)?(?:[\w\-'’]+\s+){{0,4}}?runtimes?\b"
     rf"|(?:(?:the|an?|our|its|this|that)\s+)?(?:[\w\-'’]+\s+){{0,3}}?"
@@ -1193,6 +1194,11 @@ _PRODUCTION_IDENTITY_NP_RE = re.compile(
     rf"(?:[\w\-'’]+\s+){{1,3}}?"
     rf"(?:in|to|for|at|on|across|inside|within)\s+"
     rf"[\w\-'’]+(?:\s+[\w\-'’]+){{0,2}}"
+    rf"|(?:(?:the|an?|our|its|this|that)\s+)?(?:[\w\-'’]+\s+){{0,3}}?"
+    rf"(?:{_COMPONENT_ARTIFACT_FRAGMENT})\s+"
+    rf"(?:(?:that|which)\s+(?:[\w'’]+\s+){{0,2}}?)?"
+    rf"(?!(?:during|being|nothing|something|anything|everything)\b)"
+    rf"[\w\-'’]+(?:ing|ed)\b(?:\s+[\w\-'’]+){{0,4}}"
 )
 
 # Retention taint: a candidate identity phrase whose own words belong to
@@ -1355,11 +1361,14 @@ def _matches_web_app(ledger: SeedDraftLedger) -> bool:
     # "Playwright tests with a browser extension" and "Compatibility
     # tests for Chrome extensions" describe how the app is verified —
     # the components there are used or targeted by the tooling.
-    if _EXPLICIT_WEB_VOCAB_RE.search(_goal_text(ledger)):
-        # Scoped per relation (#1813 R90/R91): only the prose the
-        # verification vocabulary syntactically owns is exempt — a
-        # production identity sharing a segment through a conjunction,
-        # comma, or participial attachment keeps its authority.
+    if _goal_artifact_head_is_web_app(_goal_text(ledger)):
+        # The exemption follows every affirmative web-product ownership
+        # path (#1813 R95) — explicit vocabulary, qualified heads, and
+        # postnominal browser qualifiers alike — and is scoped per
+        # relation (#1813 R90/R91): only the prose the verification
+        # vocabulary syntactically owns is exempt, while a production
+        # identity sharing a segment through a conjunction, comma, or
+        # participial attachment keeps its authority.
         runtime_identity = _strip_verification_clauses(runtime_identity)
     if re.search(rf"\b{component_fragment}\b", runtime_identity):
         residual = re.sub(
@@ -1395,6 +1404,11 @@ def _matches_web_app(ledger: SeedDraftLedger) -> bool:
         if not runtime_bars_browser:
             if (
                 _BARE_ADJACENT_QUALIFIER_RE.search(goal_text_raw)
+                # A postnominal qualifier states the environment in the
+                # goal's own words ("that runs in browsers") — it owns
+                # like an adjacent qualifier does (#1813 R95), without
+                # waiting for section confirmation.
+                or _POSTNOMINAL_BROWSER_QUALIFIER_RE.search(goal_text_raw)
                 or _SECTION_BROWSER_ENV_RE.search(_section_browser_context_text(ledger))
                 or _INTERACTION_HEAD_TAIL_RE.search(re.split(r"[.;:!?,]", goal_text_raw)[0])
             ):

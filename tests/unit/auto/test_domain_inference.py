@@ -4548,6 +4548,25 @@ def test_components_inside_verification_context_do_not_veto(runtime: str) -> Non
 
 
 @pytest.mark.parametrize(
+    "goal",
+    [
+        "Build a browser-based admin portal",
+        "Build an admin portal that runs in browsers",
+    ],
+)
+def test_verification_exemption_covers_qualified_web_ownership(goal: str) -> None:
+    """R95 guard: the verification exemption follows every affirmative
+    web-ownership path — a qualified or postnominal browser goal keeps
+    its class when the runtime describes only verification tooling."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value="Interactive signup page")
+    _seed_section(ledger, "runtime_context", value="Playwright tests with a browser extension")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP
+
+
+@pytest.mark.parametrize(
     "runtime",
     [
         "Production runtime is a Chrome browser extension; Playwright tests run in CI",
@@ -4567,6 +4586,9 @@ def test_components_inside_verification_context_do_not_veto(runtime: str) -> Non
         "Playwright tests exercise a Chrome browser extension currently deployed to users",
         "Playwright tests exercise a Chrome browser extension now live for customers",
         "Playwright tests exercise a Chrome browser extension used in production",
+        "Playwright tests exercise a customer-facing Chrome browser extension",
+        "Playwright tests exercise a Chrome browser extension serving paying customers",
+        "Playwright tests exercise a Chrome browser extension deployed globally",
     ],
 )
 def test_production_identity_survives_adjacent_test_clauses(runtime: str) -> None:
