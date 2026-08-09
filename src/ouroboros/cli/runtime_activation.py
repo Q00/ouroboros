@@ -325,6 +325,7 @@ def _prepare_file(
     requested_mode: int,
     preserve_exact_mode: bool,
     requested_owner: tuple[int, int] | None = None,
+    scrub_on_failure: bool = False,
 ) -> _PreparedFile:
     """Create and fsync a new file, preserving supported metadata exactly."""
     flags = os.O_RDWR | os.O_CREAT | os.O_EXCL
@@ -374,7 +375,7 @@ def _prepare_file(
         os.close(descriptor)
         descriptor = -1
         if failed_prepared is not None:
-            _discard_prepared(failed_prepared)
+            _discard_prepared(failed_prepared, scrub_contents=scrub_on_failure)
         raise
     finally:
         if descriptor >= 0:
@@ -481,6 +482,10 @@ def _artifact_cleanup_checkpoint(_path: Path) -> None:
     """Test seam immediately before an artifact is atomically quarantined."""
 
 
+def _secret_scrub_checkpoint(_path: Path) -> None:
+    """Test seam after an exact secret inode is pinned and before it is scrubbed."""
+
+
 def _remove_owned_artifact(
     path: Path,
     expected_guard: object,
@@ -516,14 +521,89 @@ def _remove_owned_artifact(
         raise OSError(f"Could not confirm owned artifact cleanup: {path}")
 
 
-def _discard_prepared(prepared: _PreparedFile) -> None:
+def _scrub_owned_artifact(
+    path: Path,
+    expected: _FileSnapshot,
+    *,
+    durable: bool = True,
+) -> None:
+    """Scrub one exact owned inode before retiring any remaining pathname.
+
+    The writable descriptor pins the expected inode before truncation. If a
+    same-UID observer replaces the pathname afterwards, only the setup-owned
+    inode is scrubbed and the foreign pathname is restored by
+    :func:`_remove_owned_artifact`.
+    """
+    if expected.kind != "file" or expected.contents is None or expected.link_count != 1:
+        raise _ConcurrentActivationError(f"Secret artifact is not a regular file: {path}")
+    flags = os.O_RDWR | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    operand, directory_fd = _authority_operand(path)
+    descriptor = os.open(operand, flags, dir_fd=directory_fd)
+    try:
+        opened = os.fstat(descriptor)
+        opened_generation = (
+            opened.st_dev,
+            opened.st_ino,
+            stat.S_IMODE(opened.st_mode),
+            opened.st_size,
+            opened.st_mtime_ns,
+            opened.st_ctime_ns,
+            opened.st_nlink,
+            opened.st_uid,
+            opened.st_gid,
+        )
+        expected_generation = (
+            expected.device,
+            expected.inode,
+            expected.mode,
+            len(expected.contents),
+            expected.modified_ns,
+            expected.changed_ns,
+            expected.link_count,
+            expected.owner_id,
+            expected.group_id,
+        )
+        if not stat.S_ISREG(opened.st_mode) or opened_generation != expected_generation:
+            raise _ConcurrentActivationError(f"Secret artifact changed concurrently: {path}")
+        _secret_scrub_checkpoint(path)
+        os.ftruncate(descriptor, 0)
+        os.fsync(descriptor)
+        scrubbed = _snapshot_from_stat(b"", os.fstat(descriptor))
+    finally:
+        os.close(descriptor)
+    _remove_owned_artifact(path, _owned_guard(scrubbed), durable=durable)
+
+
+def _scrub_guarded_artifact(
+    path: Path,
+    expected_guard: object,
+    *,
+    durable: bool = True,
+) -> None:
+    """Scrub only a generation that still matches its durable journal guard."""
+    current = _snapshot_target(path)
+    if current.kind == "missing":
+        return
+    if not _matches_guard(current, expected_guard, strict=False):
+        raise _ConcurrentActivationError(f"Secret artifact changed concurrently: {path}")
+    _scrub_owned_artifact(path, current, durable=durable)
+
+
+def _discard_prepared(
+    prepared: _PreparedFile,
+    *,
+    scrub_contents: bool = False,
+) -> None:
     """Best-effort cleanup that never path-unlinks a changed stage."""
     try:
-        _remove_owned_artifact(
-            prepared.path,
-            _owned_guard(prepared.snapshot),
-            durable=False,
-        )
+        if scrub_contents:
+            _scrub_owned_artifact(prepared.path, prepared.snapshot, durable=False)
+        else:
+            _remove_owned_artifact(
+                prepared.path,
+                _owned_guard(prepared.snapshot),
+                durable=False,
+            )
     except OSError:
         # A changed stage has already been restored to its original pathname.
         # The activation failure remains the primary error.
@@ -629,6 +709,7 @@ def _same_owned_generation(left: _FileSnapshot, right: _FileSnapshot) -> bool:
         and left.mode == right.mode
         and left.owner_id == right.owner_id
         and left.group_id == right.group_id
+        and left.link_count == right.link_count
         and left.contents == right.contents
     )
 
@@ -660,6 +741,7 @@ def _owned_guard(snapshot: _FileSnapshot) -> dict[str, object]:
         "inode": snapshot.inode,
         "owner_id": snapshot.owner_id,
         "group_id": snapshot.group_id,
+        "link_count": snapshot.link_count,
         "sha256": _digest(snapshot.contents),
     }
 
@@ -757,6 +839,8 @@ def _discard_owned_target(
     path: Path,
     expected_guard: object,
     rollback_claim: Path,
+    *,
+    scrub_contents: bool = False,
 ) -> None:
     """Remove only an owned live generation via atomic claim-and-inspect."""
     _promotion_checkpoint("rollback-claim", path)
@@ -768,7 +852,10 @@ def _discard_owned_target(
                 f"Changed target and a newer replacement were both preserved: {path}"
             )
         raise _ConcurrentActivationError(f"Refusing to remove a changed generation: {path}")
-    _remove_owned_artifact(rollback_claim, expected_guard)
+    if scrub_contents:
+        _scrub_owned_artifact(rollback_claim, claimed)
+    else:
+        _remove_owned_artifact(rollback_claim, expected_guard)
 
 
 def _cleanup_journal_artifacts(
@@ -777,6 +864,9 @@ def _cleanup_journal_artifacts(
     journal: dict[str, object],
     journal_snapshot: _FileSnapshot,
 ) -> None:
+    creates_credentials = journal.get("creates_credentials")
+    if not isinstance(creates_credentials, bool):
+        raise ValueError("Invalid activation recovery journal credentials state")
     artifact_specs = (
         ("credentials_stage", "credentials_published"),
         ("config_stage", "config_published"),
@@ -792,6 +882,10 @@ def _cleanup_journal_artifacts(
         current = _snapshot_target(stage)
         if current.kind == "missing":
             continue
+        if not creates_credentials and name_key.startswith("credentials_"):
+            raise _ConcurrentActivationError(
+                f"Unexpected credential artifact for preserved credentials: {stage}"
+            )
         guard = journal.get(guard_key)
         if not _matches_guard(current, guard, strict=False):
             raise _ConcurrentActivationError(f"Recovery artifact changed concurrently: {stage}")
@@ -806,10 +900,17 @@ def _cleanup_journal_artifacts(
         "config_rollback_claim",
     ):
         path = resolved[name_key]
-        current = _snapshot_target(path)
-        if current.kind != "missing":
-            guard_key = dict(artifact_specs)[name_key]
-            _remove_owned_artifact(path, journal.get(guard_key), durable=False)
+        guard_key = dict(artifact_specs)[name_key]
+        if name_key in {"credentials_stage", "credentials_rollback_claim"}:
+            _scrub_guarded_artifact(
+                path,
+                journal.get(guard_key),
+                durable=False,
+            )
+        else:
+            current = _snapshot_target(path)
+            if current.kind != "missing":
+                _remove_owned_artifact(path, journal.get(guard_key), durable=False)
     if not fsync_parent_directory(journal_path):
         raise OSError("Could not confirm disposable activation cleanup durability")
 
@@ -905,6 +1006,7 @@ def _recover_interrupted_activation(config_dir: Path) -> None:
             credentials_path,
             journal.get("credentials_published"),
             credentials_rollback_claim,
+            scrub_contents=True,
         )
         _cleanup_journal_artifacts(config_dir, journal_path, journal, journal_snapshot)
         return
@@ -921,6 +1023,7 @@ def _rollback_file(
     *,
     original_claim: Path,
     rollback_claim: Path,
+    scrub_created: bool = False,
 ) -> bool:
     if expected_current is None:
         return True
@@ -936,7 +1039,10 @@ def _rollback_file(
             raise _ConcurrentActivationError(f"Activation rollback generation changed: {path}")
         if original.kind == "missing":
             # The rollback claim is the activation-owned published generation.
-            _remove_owned_artifact(rollback_claim, _owned_guard(current))
+            if scrub_created:
+                _scrub_owned_artifact(rollback_claim, current)
+            else:
+                _remove_owned_artifact(rollback_claim, _owned_guard(current))
             return True
         if original.kind != "file" or original.contents is None or original.mode is None:
             raise OSError(f"Cannot restore unsupported activation target: {path}")
@@ -1219,6 +1325,7 @@ def activate_claude_runtime(
                         f"Activation claim path is already occupied: {reserved_claim}"
                     )
             prepared_files: list[_PreparedFile] = []
+            prepared_credentials: _PreparedFile | None = None
             try:
                 prepared_config = _prepare_file(
                     config_stage,
@@ -1234,30 +1341,23 @@ def activate_claude_runtime(
                     else None,
                 )
                 prepared_files.append(prepared_config)
-                prepared_credentials = _prepare_file(
-                    credentials_stage,
-                    credentials_content.encode(),
-                    requested_mode=(
-                        credentials_generation.mode
-                        if credentials_generation.mode is not None
-                        else 0o600
-                    ),
-                    preserve_exact_mode=credentials_generation.kind == "file",
-                    requested_owner=(
-                        credentials_generation.owner_id,
-                        credentials_generation.group_id,
+                if credentials_generation.kind == "missing":
+                    prepared_credentials = _prepare_file(
+                        credentials_stage,
+                        credentials_content.encode(),
+                        requested_mode=0o600,
+                        preserve_exact_mode=False,
+                        scrub_on_failure=True,
                     )
-                    if credentials_generation.kind == "file"
-                    and credentials_generation.owner_id is not None
-                    and credentials_generation.group_id is not None
-                    else None,
-                )
-                prepared_files.append(prepared_credentials)
+                    prepared_files.append(prepared_credentials)
                 if not fsync_parent_directory(config_stage):
                     raise OSError("Could not confirm prepared activation durability")
             except BaseException:
                 for prepared in prepared_files:
-                    _discard_prepared(prepared)
+                    _discard_prepared(
+                        prepared,
+                        scrub_contents=prepared is prepared_credentials,
+                    )
                 raise
 
             journal_path = config_dir / _JOURNAL_NAME
@@ -1273,7 +1373,11 @@ def activate_claude_runtime(
                 "config_published": _owned_guard(prepared_config.snapshot),
                 "credentials_original": _strict_guard(credentials_generation),
                 "credentials_original_owned": _owned_guard(credentials_generation),
-                "credentials_published": _owned_guard(prepared_credentials.snapshot),
+                "credentials_published": _owned_guard(
+                    prepared_credentials.snapshot
+                    if prepared_credentials is not None
+                    else credentials_generation
+                ),
                 "config_stage": config_stage.name,
                 "credentials_stage": credentials_stage.name,
                 "config_claim": config_claim.name,
@@ -1289,14 +1393,19 @@ def activate_claude_runtime(
                     _FileSnapshot(kind="missing"),
                 )
             except BaseException:
-                for prepared in (prepared_config, prepared_credentials):
-                    _discard_prepared(prepared)
+                for prepared in prepared_files:
+                    _discard_prepared(
+                        prepared,
+                        scrub_contents=prepared is prepared_credentials,
+                    )
                 raise
 
             config_written: _FileSnapshot | None = None
             credentials_written: _FileSnapshot | None = None
             try:
                 if credentials_generation.kind == "missing":
+                    if prepared_credentials is None:
+                        raise OSError("Missing prepared credentials generation")
                     _require_active_directory_binding()
                     credentials_written = _promote_prepared_under_lock(
                         credentials_path,
@@ -1351,6 +1460,7 @@ def activate_claude_runtime(
                     credentials_written,
                     original_claim=credentials_claim,
                     rollback_claim=credentials_rollback_claim,
+                    scrub_created=True,
                 )
                 # Rollback may already have restored both original generations.
                 # Let the durable journal verify that fact and clean only owned

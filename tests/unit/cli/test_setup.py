@@ -32,7 +32,13 @@ import ouroboros.cli.runtime_activation as runtime_activation
 from ouroboros.codex import CodexArtifactInstallResult
 from ouroboros.codex.runtime_profile import codex_uses_profile_v2
 from ouroboros.config._model_defaults import DEFAULT_OPUS_MODEL
-from ouroboros.config.models import OuroborosConfig, get_default_config, get_default_credentials
+from ouroboros.config.models import (
+    CredentialsConfig,
+    OuroborosConfig,
+    ProviderCredentials,
+    get_default_config,
+    get_default_credentials,
+)
 from ouroboros.providers.base import CompletionConfig
 from ouroboros.providers.profiles import resolve_completion_profile
 
@@ -5920,7 +5926,7 @@ raise SystemExit(0 if activate_claude_runtime("/second/claude") else 2)
     def test_setup_claude_repeated_activation_keeps_live_targets_single_linked(
         self, tmp_path: Path
     ) -> None:
-        """Retired tombstones never keep a hard link to the live generation."""
+        """Repeated setup never duplicates live credential secrets into artifacts."""
         config_dir = tmp_path / ".ouroboros"
         config_dir.mkdir()
         config_path = config_dir / "config.yaml"
@@ -5928,7 +5934,16 @@ raise SystemExit(0 if activate_claude_runtime("/second/claude") else 2)
             "orchestrator:\n  runtime_backend: codex\nllm:\n  backend: codex\n",
             encoding="utf-8",
         )
-        credentials_path = self._write_credentials(config_dir)
+        credentials_path = config_dir / "credentials.yaml"
+        secret = b"sk-existing-operator-secret"
+        credentials_path.write_text(
+            yaml.safe_dump(
+                {"providers": {"openai": {"api_key": secret.decode()}}},
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+        credentials_path.chmod(0o600)
 
         with (
             patch("pathlib.Path.home", return_value=tmp_path),
@@ -5939,7 +5954,181 @@ raise SystemExit(0 if activate_claude_runtime("/second/claude") else 2)
 
         assert config_path.stat().st_nlink == 1
         assert credentials_path.stat().st_nlink == 1
-        assert tuple(config_dir.glob("*.retired"))
+        retired = tuple(config_dir.glob("*.retired"))
+        assert retired
+        secret_bearing = [
+            path for path in config_dir.iterdir() if path.is_file() and secret in path.read_bytes()
+        ]
+        assert secret_bearing == [credentials_path]
+        assert not tuple(config_dir.glob("*.credentials.stage"))
+
+    def test_setup_claude_failed_fresh_credentials_rollback_scrubs_secret_artifacts(
+        self, tmp_path: Path
+    ) -> None:
+        """A failed activation leaves no accessible copy of generated credential bytes."""
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        config_path.write_text(
+            "orchestrator:\n  runtime_backend: codex\nllm:\n  backend: codex\n",
+            encoding="utf-8",
+        )
+        secret = b"sk-generated-rollback-secret"
+        generated = CredentialsConfig(
+            providers={
+                "openai": ProviderCredentials(api_key=secret.decode()),
+            }
+        )
+
+        def _fail_config_publish(operation: str, target: Path) -> None:
+            if operation == "publish" and target == config_path:
+                raise OSError("config publication failed")
+
+        with (
+            patch("ouroboros.config.models.get_config_dir", return_value=config_dir),
+            patch("ouroboros.config.models.get_default_credentials", return_value=generated),
+            patch(
+                "ouroboros.cli.runtime_activation._promotion_checkpoint",
+                side_effect=_fail_config_publish,
+            ),
+        ):
+            assert setup_cmd._setup_claude("/usr/local/bin/claude") is False
+
+        assert not (config_dir / "credentials.yaml").exists()
+        assert all(
+            secret not in path.read_bytes() for path in config_dir.iterdir() if path.is_file()
+        )
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX exact-inode scrub race")
+    def test_secret_scrub_preserves_foreign_replacement_inode(self, tmp_path: Path) -> None:
+        """Scrubbing a pinned stage never truncates a replacement at its pathname."""
+        secret = b"sk-owned-stage-secret"
+        stage = tmp_path / ".credentials.stage"
+        stage.write_bytes(secret)
+        expected = runtime_activation._snapshot_target(stage)
+        displaced = tmp_path / ".credentials.displaced"
+        foreign_source = tmp_path / ".operator-stage"
+        foreign = b"operator-owned-foreign-generation"
+        foreign_source.write_bytes(foreign)
+        foreign_source.chmod(0o640)
+        foreign_identity = (foreign_source.stat().st_dev, foreign_source.stat().st_ino)
+        injected = False
+
+        def _replace_after_pin(path: Path) -> None:
+            nonlocal injected
+            if path != stage or injected:
+                return
+            injected = True
+            stage.rename(displaced)
+            foreign_source.rename(stage)
+
+        with (
+            patch(
+                "ouroboros.cli.runtime_activation._secret_scrub_checkpoint",
+                side_effect=_replace_after_pin,
+            ),
+            pytest.raises(runtime_activation._ConcurrentActivationError),
+        ):
+            runtime_activation._scrub_owned_artifact(stage, expected)
+
+        assert injected
+        assert stage.read_bytes() == foreign
+        assert stat.S_IMODE(stage.stat().st_mode) == 0o640
+        assert (stage.stat().st_dev, stage.stat().st_ino) == foreign_identity
+        assert displaced.read_bytes() == b""
+        assert all(secret not in path.read_bytes() for path in tmp_path.iterdir() if path.is_file())
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX hard-link semantics")
+    def test_secret_scrub_rejects_new_hard_link_without_mutation(self, tmp_path: Path) -> None:
+        """A changed link topology cannot turn a live secret into a scrub target."""
+        secret = b"sk-hard-link-guard-secret"
+        stage = tmp_path / ".credentials.stage"
+        stage.write_bytes(secret)
+        expected = runtime_activation._snapshot_target(stage)
+        observer_link = tmp_path / "operator-link"
+        os.link(stage, observer_link)
+
+        with pytest.raises(runtime_activation._ConcurrentActivationError):
+            runtime_activation._scrub_owned_artifact(stage, expected)
+
+        assert stage.read_bytes() == secret
+        assert observer_link.read_bytes() == secret
+        assert stage.stat().st_nlink == 2
+
+    def test_journal_cleanup_rechecks_secret_guard_immediately_before_scrub(
+        self, tmp_path: Path
+    ) -> None:
+        """A replacement after journal validation is preserved without truncation."""
+        generation = "1" * 32
+        credentials_stage = tmp_path / (
+            f".claude-runtime-activation.{generation}.credentials.stage"
+        )
+        secret = b"sk-owned-journal-stage-secret"
+        credentials_stage.write_bytes(secret)
+        credentials_snapshot = runtime_activation._snapshot_target(credentials_stage)
+        journal_path = tmp_path / runtime_activation._JOURNAL_NAME
+        journal_path.write_text("{}\n", encoding="utf-8")
+        journal_snapshot = runtime_activation._snapshot_target(journal_path)
+        missing_guard = runtime_activation._owned_guard(
+            runtime_activation._FileSnapshot(kind="missing")
+        )
+        journal: dict[str, object] = {
+            "generation": generation,
+            "creates_credentials": True,
+            "credentials_published": runtime_activation._owned_guard(credentials_snapshot),
+            "config_published": missing_guard,
+            "credentials_original_owned": missing_guard,
+            "config_original_owned": missing_guard,
+            "credentials_stage": credentials_stage.name,
+            "config_stage": f".claude-runtime-activation.{generation}.config.stage",
+            "credentials_claim": (
+                f".claude-runtime-activation.{generation}.credentials-original.claim"
+            ),
+            "config_claim": f".claude-runtime-activation.{generation}.config-original.claim",
+            "credentials_rollback_claim": (
+                f".claude-runtime-activation.{generation}.credentials-rollback.claim"
+            ),
+            "config_rollback_claim": (
+                f".claude-runtime-activation.{generation}.config-rollback.claim"
+            ),
+        }
+        foreign_source = tmp_path / ".operator-secret-stage"
+        foreign = b"operator-owned-foreign-secret-stage"
+        foreign_source.write_bytes(foreign)
+        foreign_source.chmod(0o640)
+        foreign_identity = (foreign_source.stat().st_dev, foreign_source.stat().st_ino)
+        real_snapshot = runtime_activation._snapshot_target
+        stage_reads = 0
+
+        def _replace_before_cleanup_scrub(path: Path) -> runtime_activation._FileSnapshot:
+            nonlocal stage_reads
+            if path == credentials_stage:
+                stage_reads += 1
+                if stage_reads == 2:
+                    os.replace(foreign_source, credentials_stage)
+            return real_snapshot(path)
+
+        with (
+            patch(
+                "ouroboros.cli.runtime_activation._snapshot_target",
+                side_effect=_replace_before_cleanup_scrub,
+            ),
+            pytest.raises(runtime_activation._ConcurrentActivationError),
+        ):
+            runtime_activation._cleanup_journal_artifacts(
+                tmp_path,
+                journal_path,
+                journal,
+                journal_snapshot,
+            )
+
+        assert stage_reads == 2
+        assert credentials_stage.read_bytes() == foreign
+        assert stat.S_IMODE(credentials_stage.stat().st_mode) == 0o640
+        assert (
+            credentials_stage.stat().st_dev,
+            credentials_stage.stat().st_ino,
+        ) == foreign_identity
 
     @pytest.mark.parametrize("prepared_target", ["config", "credentials"])
     def test_setup_claude_preserves_operator_stage_when_prepare_sync_fails(
@@ -5951,7 +6140,8 @@ raise SystemExit(0 if activate_claude_runtime("/second/claude") else 2)
         config_path = config_dir / "config.yaml"
         original = b"orchestrator:\n  runtime_backend: codex\nllm:\n  backend: codex\n"
         config_path.write_bytes(original)
-        self._write_credentials(config_dir)
+        if prepared_target == "config":
+            self._write_credentials(config_dir)
         operator = f"operator-{prepared_target}-prepare\n".encode()
         injected_path: list[Path] = []
         injected_identity: list[tuple[int, int]] = []
@@ -6005,7 +6195,8 @@ raise SystemExit(0 if activate_claude_runtime("/second/claude") else 2)
         config_path = config_dir / "config.yaml"
         original = b"orchestrator:\n  runtime_backend: codex\nllm:\n  backend: codex\n"
         config_path.write_bytes(original)
-        self._write_credentials(config_dir)
+        if prepared_target == "config":
+            self._write_credentials(config_dir)
         operator = f"operator-{prepared_target}-journal-failure\n".encode()
         injected_path: list[Path] = []
         injected_identity: list[tuple[int, int]] = []
