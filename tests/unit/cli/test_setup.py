@@ -4507,7 +4507,7 @@ class TestClaudeSetup:
         config_path = config_dir / "config.yaml"
         config_path.write_text("{}", encoding="utf-8")
 
-        with patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir):
+        with patch("ouroboros.config.models.get_config_dir", return_value=config_dir):
             setup_cmd._setup_claude_cli("/usr/local/bin/claude")
 
         config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8"))
@@ -4544,7 +4544,7 @@ class TestClaudeSetup:
         config_path.write_text("{}", encoding="utf-8")
 
         with (
-            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch("ouroboros.config.models.get_config_dir", return_value=config_dir),
             patch("ouroboros.cli.commands.claude_setup.print_info") as print_info,
         ):
             setup_cmd._setup_claude_sdk("/usr/local/bin/claude")
@@ -4718,6 +4718,345 @@ raise SystemExit(0 if activate_claude_runtime("/usr/local/bin/claude") else 2)
         config_dir = tmp_path / ".ouroboros"
         assert stat.S_IMODE((config_dir / "config.yaml").stat().st_mode) == config_mode
         assert stat.S_IMODE((config_dir / "credentials.yaml").stat().st_mode) == 0o600
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX directory-fd authority")
+    def test_setup_claude_precreation_symlink_never_cleans_foreign_topology(
+        self, tmp_path: Path
+    ) -> None:
+        """A missing config directory cannot be swapped into a foreign cleanup root."""
+        home = tmp_path / "home"
+        home.mkdir()
+        config_dir = home / ".ouroboros"
+        victim = tmp_path / "victim"
+        victim.mkdir()
+        victim_data = victim / "data"
+        victim_logs = victim / "logs"
+        victim_data.mkdir()
+        victim_logs.mkdir()
+        victim_identities = {
+            path: (path.stat().st_dev, path.stat().st_ino)
+            for path in (victim, victim_data, victim_logs)
+        }
+        injected = False
+
+        def _swap_before_create(phase: str, path: Path) -> None:
+            nonlocal injected
+            if phase != "before-create" or path != config_dir or injected:
+                return
+            injected = True
+            config_dir.symlink_to(victim, target_is_directory=True)
+
+        with (
+            patch("pathlib.Path.home", return_value=home),
+            patch(
+                "ouroboros.cli.runtime_activation._directory_authority_checkpoint",
+                side_effect=_swap_before_create,
+            ),
+            patch("ouroboros.cli.commands.claude_setup.print_success") as mock_success,
+        ):
+            assert setup_cmd._setup_claude("/usr/local/bin/claude") is False
+
+        assert injected
+        assert config_dir.is_symlink()
+        assert os.readlink(config_dir) == str(victim)
+        for path, identity in victim_identities.items():
+            assert path.is_dir()
+            assert (path.stat().st_dev, path.stat().st_ino) == identity
+        mock_success.assert_not_called()
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX directory-fd authority")
+    def test_setup_claude_opened_directory_swap_never_selects_foreign_generation(
+        self, tmp_path: Path
+    ) -> None:
+        """The pinned descriptor must still match the generation selected by name."""
+        home = tmp_path / "home"
+        home.mkdir()
+        config_dir = home / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        original = b"orchestrator:\n  runtime_backend: codex\nllm:\n  backend: codex\n"
+        config_path.write_bytes(original)
+        self._write_credentials(config_dir)
+        displaced = home / ".ouroboros.displaced"
+        victim = tmp_path / "victim"
+        victim.mkdir()
+        marker = victim / "operator.marker"
+        marker.write_bytes(b"foreign")
+        victim_identity = (victim.stat().st_dev, victim.stat().st_ino)
+        injected = False
+
+        def _swap_after_open(phase: str, path: Path) -> None:
+            nonlocal injected
+            if phase != "opened" or path != config_dir or injected:
+                return
+            injected = True
+            config_dir.rename(displaced)
+            victim.rename(config_dir)
+
+        with (
+            patch("ouroboros.config.models.get_config_dir", return_value=config_dir),
+            patch(
+                "ouroboros.cli.runtime_activation._directory_authority_checkpoint",
+                side_effect=_swap_after_open,
+            ),
+            patch("ouroboros.cli.commands.claude_setup.print_success") as mock_success,
+        ):
+            assert setup_cmd._setup_claude("/usr/local/bin/claude") is False
+
+        assert injected
+        assert (config_dir.stat().st_dev, config_dir.stat().st_ino) == victim_identity
+        assert (config_dir / marker.name).read_bytes() == b"foreign"
+        assert not (config_dir / "config.yaml").exists()
+        assert (displaced / "config.yaml").read_bytes() == original
+        mock_success.assert_not_called()
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX directory-fd authority")
+    def test_setup_claude_created_directory_swap_never_cleans_foreign_topology(
+        self, tmp_path: Path
+    ) -> None:
+        """A just-created pathname replacement cannot become cleanup authority."""
+        home = tmp_path / "home"
+        home.mkdir()
+        config_dir = home / ".ouroboros"
+        displaced = home / ".ouroboros.displaced"
+        victim = tmp_path / "victim"
+        victim.mkdir()
+        victim_data = victim / "data"
+        victim_logs = victim / "logs"
+        victim_data.mkdir()
+        victim_logs.mkdir()
+        identities = {
+            path: (path.stat().st_dev, path.stat().st_ino)
+            for path in (victim, victim_data, victim_logs)
+        }
+        injected = False
+
+        def _swap_created_name(phase: str, path: Path) -> None:
+            nonlocal injected
+            if phase != "created-snapshotted" or path != config_dir or injected:
+                return
+            injected = True
+            config_dir.rename(displaced)
+            config_dir.symlink_to(victim, target_is_directory=True)
+
+        with (
+            patch("ouroboros.config.models.get_config_dir", return_value=config_dir),
+            patch(
+                "ouroboros.cli.runtime_activation._directory_authority_checkpoint",
+                side_effect=_swap_created_name,
+            ),
+            patch("ouroboros.cli.commands.claude_setup.print_success") as mock_success,
+        ):
+            assert setup_cmd._setup_claude("/usr/local/bin/claude") is False
+
+        assert injected
+        assert config_dir.is_symlink()
+        assert displaced.is_dir()
+        for path, identity in identities.items():
+            assert path.is_dir()
+            assert (path.stat().st_dev, path.stat().st_ino) == identity
+        mock_success.assert_not_called()
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX directory durability")
+    def test_setup_claude_fails_before_files_when_directory_sync_fails(
+        self, tmp_path: Path
+    ) -> None:
+        """A fresh directory is not treated as durable when its parent sync fails."""
+        home = tmp_path / "home"
+        home.mkdir()
+        config_dir = home / ".ouroboros"
+
+        with (
+            patch("ouroboros.config.models.get_config_dir", return_value=config_dir),
+            patch(
+                "ouroboros.cli.runtime_activation._fsync_directory_descriptor",
+                side_effect=OSError("directory sync failed"),
+            ),
+            patch("ouroboros.cli.commands.claude_setup.print_success") as mock_success,
+        ):
+            assert setup_cmd._setup_claude("/usr/local/bin/claude") is False
+
+        assert config_dir.is_dir()
+        assert not (config_dir / "config.yaml").exists()
+        assert not (config_dir / "credentials.yaml").exists()
+        mock_success.assert_not_called()
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX directory-fd authority")
+    def test_setup_claude_directory_swap_after_publish_rolls_back_pinned_generation(
+        self, tmp_path: Path
+    ) -> None:
+        """A late pathname swap cannot commit config into a displaced authority."""
+        home = tmp_path / "home"
+        home.mkdir()
+        config_dir = home / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        original = b"orchestrator:\n  runtime_backend: codex\nllm:\n  backend: codex\n"
+        config_path.write_bytes(original)
+        self._write_credentials(config_dir)
+        displaced = home / ".ouroboros.displaced"
+        victim = tmp_path / "victim"
+        victim.mkdir()
+        marker = victim / "operator.marker"
+        marker.write_bytes(b"foreign")
+        victim_identity = (victim.stat().st_dev, victim.stat().st_ino)
+        injected = False
+
+        def _swap_after_publish(name: str) -> None:
+            nonlocal injected
+            if name != "config" or injected:
+                return
+            injected = True
+            config_dir.rename(displaced)
+            victim.rename(config_dir)
+
+        with (
+            patch("ouroboros.config.models.get_config_dir", return_value=config_dir),
+            patch(
+                "ouroboros.cli.runtime_activation._publication_checkpoint",
+                side_effect=_swap_after_publish,
+            ),
+            patch("ouroboros.cli.commands.claude_setup.print_success") as mock_success,
+        ):
+            assert setup_cmd._setup_claude("/usr/local/bin/claude") is False
+
+        assert injected
+        assert (config_dir.stat().st_dev, config_dir.stat().st_ino) == victim_identity
+        assert (config_dir / marker.name).read_bytes() == b"foreign"
+        assert not (config_dir / "config.yaml").exists()
+        assert (displaced / "config.yaml").read_bytes() == original
+        mock_success.assert_not_called()
+
+    @pytest.mark.skipif(not hasattr(os, "fchown"), reason="POSIX ownership semantics")
+    def test_setup_claude_preserves_existing_owner_and_group(self, tmp_path: Path) -> None:
+        """Replacement creation explicitly preserves both ownership fields."""
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        config_path.write_text(
+            "orchestrator:\n  runtime_backend: codex\nllm:\n  backend: codex\n",
+            encoding="utf-8",
+        )
+        credentials_path = self._write_credentials(config_dir)
+        expected_owner = (config_path.stat().st_uid, config_path.stat().st_gid)
+        credentials_owner = (
+            credentials_path.stat().st_uid,
+            credentials_path.stat().st_gid,
+        )
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.cli.runtime_activation.os.fchown", wraps=os.fchown) as fchown,
+        ):
+            assert setup_cmd._setup_claude("/usr/local/bin/claude") is True
+
+        assert (config_path.stat().st_uid, config_path.stat().st_gid) == expected_owner
+        assert (
+            credentials_path.stat().st_uid,
+            credentials_path.stat().st_gid,
+        ) == credentials_owner
+        preserved = {(call.args[1], call.args[2]) for call in fchown.call_args_list}
+        assert expected_owner in preserved
+        assert credentials_owner in preserved
+
+    @pytest.mark.skipif(not hasattr(os, "fchown"), reason="POSIX ownership semantics")
+    def test_setup_claude_preserves_nondefault_existing_group(self, tmp_path: Path) -> None:
+        """A replacement retains an operator-selected supplementary group."""
+        alternative_groups = [group for group in os.getgroups() if group != os.getgid()]
+        if not alternative_groups:
+            pytest.skip("no supplementary group is available")
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        config_path.write_text(
+            "orchestrator:\n  runtime_backend: codex\nllm:\n  backend: codex\n",
+            encoding="utf-8",
+        )
+        credentials_path = self._write_credentials(config_dir)
+        selected_group = alternative_groups[0]
+        os.chown(config_path, -1, selected_group)
+        os.chown(credentials_path, -1, selected_group)
+        expected_owner = (os.geteuid(), selected_group)
+
+        with patch("ouroboros.config.models.get_config_dir", return_value=config_dir):
+            assert setup_cmd._setup_claude("/usr/local/bin/claude") is True
+
+        assert (config_path.stat().st_uid, config_path.stat().st_gid) == expected_owner
+        assert (
+            credentials_path.stat().st_uid,
+            credentials_path.stat().st_gid,
+        ) == expected_owner
+
+    @pytest.mark.skipif(
+        not hasattr(os, "geteuid") or os.geteuid() != 0,
+        reason="changing a file to a foreign uid requires root",
+    )
+    def test_setup_claude_preserves_direct_foreign_owner_and_group(self, tmp_path: Path) -> None:
+        """A supported foreign owner is preserved rather than silently normalized."""
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        config_path.write_text(
+            "orchestrator:\n  runtime_backend: codex\nllm:\n  backend: codex\n",
+            encoding="utf-8",
+        )
+        credentials_path = self._write_credentials(config_dir)
+        foreign_owner = (65534, 65534)
+        os.chown(config_path, *foreign_owner)
+        os.chown(credentials_path, *foreign_owner)
+
+        with patch("ouroboros.config.models.get_config_dir", return_value=config_dir):
+            assert setup_cmd._setup_claude("/usr/local/bin/claude") is True
+
+        assert (config_path.stat().st_uid, config_path.stat().st_gid) == foreign_owner
+        assert (
+            credentials_path.stat().st_uid,
+            credentials_path.stat().st_gid,
+        ) == foreign_owner
+
+    @pytest.mark.skipif(not hasattr(os, "fchown"), reason="POSIX ownership semantics")
+    def test_setup_claude_fails_closed_when_ownership_cannot_be_preserved(
+        self, tmp_path: Path
+    ) -> None:
+        """An unsupported owner/group replacement cannot publish new config."""
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        config_path.write_text(
+            "orchestrator:\n  runtime_backend: codex\nllm:\n  backend: codex\n",
+            encoding="utf-8",
+        )
+        credentials_path = self._write_credentials(config_dir)
+        before = {
+            path: (
+                path.read_bytes(),
+                stat.S_IMODE(path.stat().st_mode),
+                path.stat().st_uid,
+                path.stat().st_gid,
+                path.stat().st_ino,
+            )
+            for path in (config_path, credentials_path)
+        }
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch(
+                "ouroboros.cli.runtime_activation.os.fchown",
+                side_effect=PermissionError("ownership preservation denied"),
+            ),
+            patch("ouroboros.cli.commands.claude_setup.print_success") as mock_success,
+        ):
+            assert setup_cmd._setup_claude("/usr/local/bin/claude") is False
+
+        for path, expected in before.items():
+            assert (
+                path.read_bytes(),
+                stat.S_IMODE(path.stat().st_mode),
+                path.stat().st_uid,
+                path.stat().st_gid,
+                path.stat().st_ino,
+            ) == expected
+        mock_success.assert_not_called()
 
     def test_setup_claude_recovers_subprocess_crash_after_credentials_publish(
         self, tmp_path: Path

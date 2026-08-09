@@ -14,6 +14,9 @@ interval is deliberately not advertised as non-cooperative CAS.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 import ctypes
 from dataclasses import dataclass
 import errno
@@ -30,8 +33,8 @@ import yaml
 from yaml.constructor import ConstructorError
 
 from ouroboros.cli.formatters.panels import print_error, print_warning
-from ouroboros.core.file_lock import file_lock
-from ouroboros.core.owner_only import fsync_parent_directory
+from ouroboros.core.file_lock import _windows_directory_lease, file_lock
+from ouroboros.core.owner_only import fsync_parent_directory as _fsync_parent_directory_path
 
 _ACTIVATION_LOCK_NAME = ".claude-runtime-activation"
 _JOURNAL_NAME = ".claude-runtime-activation.journal.json"
@@ -50,6 +53,8 @@ class _FileSnapshot:
     modified_ns: int | None = None
     changed_ns: int | None = None
     link_count: int | None = None
+    owner_id: int | None = None
+    group_id: int | None = None
     link_target: str | None = None
 
 
@@ -59,6 +64,21 @@ class _PreparedFile:
 
     path: Path
     snapshot: _FileSnapshot
+
+
+@dataclass(frozen=True)
+class _DirectoryAuthority:
+    """Pinned no-follow authority for one activation directory."""
+
+    path: Path
+    directory_fd: int | None
+    parent_directory_fd: int | None = None
+
+
+_ACTIVE_DIRECTORY_AUTHORITY: ContextVar[_DirectoryAuthority | None] = ContextVar(
+    "active_claude_activation_directory_authority",
+    default=None,
+)
 
 
 class _ConcurrentActivationError(OSError):
@@ -117,12 +137,59 @@ _UniqueKeyLoader.add_constructor(
 )
 
 
+def _authority_operand(path: Path) -> tuple[str | Path, int | None]:
+    """Return a pathname anchored to the active pinned directory when possible."""
+    authority = _ACTIVE_DIRECTORY_AUTHORITY.get()
+    if (
+        authority is not None
+        and authority.directory_fd is not None
+        and path.parent == authority.path
+    ):
+        return path.name, authority.directory_fd
+    return path, None
+
+
+def _require_active_directory_binding() -> None:
+    """Fail if the pinned config generation is no longer the live pathname."""
+    authority = _ACTIVE_DIRECTORY_AUTHORITY.get()
+    if authority is None:
+        raise _ConcurrentActivationError("Activation directory authority is unavailable")
+    if authority.directory_fd is None or authority.parent_directory_fd is None:
+        current = _snapshot_target(authority.path)
+        if current.kind != "directory":
+            raise _ConcurrentActivationError(f"Activation directory changed: {authority.path}")
+        return
+    current = os.stat(
+        authority.path.name,
+        dir_fd=authority.parent_directory_fd,
+        follow_symlinks=False,
+    )
+    opened = os.fstat(authority.directory_fd)
+    _require_real_directory(current, authority.path)
+    _require_real_directory(opened, authority.path)
+    if _directory_identity(current) != _directory_identity(opened):
+        raise _ConcurrentActivationError(f"Activation directory changed: {authority.path}")
+
+
+def fsync_parent_directory(file_path: Path) -> bool:
+    """Flush the active pinned directory, falling back to the shared path helper."""
+    _operand, directory_fd = _authority_operand(file_path)
+    if directory_fd is None:
+        return _fsync_parent_directory_path(file_path)
+    try:
+        os.fsync(directory_fd)
+    except OSError as error:
+        return error.errno in (errno.EINVAL, errno.ENOTSUP)
+    return True
+
+
 def _read_regular_snapshot(path: Path, initial_stat: os.stat_result) -> _FileSnapshot:
     """Read a regular file through one no-follow descriptor generation."""
     flags = os.O_RDONLY
     for optional_flag in ("O_CLOEXEC", "O_NONBLOCK", "O_NOFOLLOW"):
         flags |= getattr(os, optional_flag, 0)
-    descriptor = os.open(path, flags)
+    operand, directory_fd = _authority_operand(path)
+    descriptor = os.open(operand, flags, dir_fd=directory_fd)
     try:
         before = os.fstat(descriptor)
         if not stat.S_ISREG(before.st_mode):
@@ -140,6 +207,8 @@ def _read_regular_snapshot(path: Path, initial_stat: os.stat_result) -> _FileSna
             before.st_mtime_ns,
             before.st_ctime_ns,
             before.st_nlink,
+            before.st_uid,
+            before.st_gid,
         )
         after_generation = (
             after.st_dev,
@@ -148,6 +217,8 @@ def _read_regular_snapshot(path: Path, initial_stat: os.stat_result) -> _FileSna
             after.st_mtime_ns,
             after.st_ctime_ns,
             after.st_nlink,
+            after.st_uid,
+            after.st_gid,
         )
         if after_generation != before_generation:
             raise _ConcurrentActivationError(f"Activation target changed while read: {path}")
@@ -160,6 +231,8 @@ def _read_regular_snapshot(path: Path, initial_stat: os.stat_result) -> _FileSna
             modified_ns=before.st_mtime_ns,
             changed_ns=before.st_ctime_ns,
             link_count=before.st_nlink,
+            owner_id=before.st_uid,
+            group_id=before.st_gid,
         )
     finally:
         os.close(descriptor)
@@ -167,23 +240,37 @@ def _read_regular_snapshot(path: Path, initial_stat: os.stat_result) -> _FileSna
 
 def _snapshot_target(path: Path) -> _FileSnapshot:
     """Snapshot without following links or opening special files."""
+    operand, directory_fd = _authority_operand(path)
     try:
-        stat_result = path.lstat()
+        stat_result = os.stat(operand, dir_fd=directory_fd, follow_symlinks=False)
     except FileNotFoundError:
         return _FileSnapshot(kind="missing")
     mode = stat.S_IMODE(stat_result.st_mode)
     if stat.S_ISREG(stat_result.st_mode):
         return _read_regular_snapshot(path, stat_result)
     if stat.S_ISLNK(stat_result.st_mode):
-        return _FileSnapshot(kind="symlink", mode=mode, link_target=os.readlink(path))
+        return _FileSnapshot(
+            kind="symlink",
+            mode=mode,
+            owner_id=stat_result.st_uid,
+            group_id=stat_result.st_gid,
+            link_target=os.readlink(operand, dir_fd=directory_fd),
+        )
     if stat.S_ISDIR(stat_result.st_mode):
         return _FileSnapshot(
             kind="directory",
             mode=mode,
             device=stat_result.st_dev,
             inode=stat_result.st_ino,
+            owner_id=stat_result.st_uid,
+            group_id=stat_result.st_gid,
         )
-    return _FileSnapshot(kind="other", mode=mode)
+    return _FileSnapshot(
+        kind="other",
+        mode=mode,
+        owner_id=stat_result.st_uid,
+        group_id=stat_result.st_gid,
+    )
 
 
 def _require_snapshot(path: Path, expected: _FileSnapshot) -> _FileSnapshot:
@@ -226,6 +313,8 @@ def _snapshot_from_stat(contents: bytes, result: os.stat_result) -> _FileSnapsho
         modified_ns=result.st_mtime_ns,
         changed_ns=result.st_ctime_ns,
         link_count=result.st_nlink,
+        owner_id=result.st_uid,
+        group_id=result.st_gid,
     )
 
 
@@ -235,15 +324,23 @@ def _prepare_file(
     *,
     requested_mode: int,
     preserve_exact_mode: bool,
+    requested_owner: tuple[int, int] | None = None,
 ) -> _PreparedFile:
-    """Create and fsync a new file, applying umask only for fresh targets."""
+    """Create and fsync a new file, preserving supported metadata exactly."""
     flags = os.O_RDWR | os.O_CREAT | os.O_EXCL
     flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(path, flags, requested_mode)
+    operand, directory_fd = _authority_operand(path)
+    descriptor = os.open(operand, flags, requested_mode, dir_fd=directory_fd)
     written_length = 0
     try:
         if preserve_exact_mode and hasattr(os, "fchmod"):
             os.fchmod(descriptor, requested_mode)
+        if requested_owner is not None:
+            if hasattr(os, "fchown"):
+                os.fchown(descriptor, requested_owner[0], requested_owner[1])
+            owner = os.fstat(descriptor)
+            if (owner.st_uid, owner.st_gid) != requested_owner:
+                raise OSError(f"Could not preserve file ownership for {path}")
         view = memoryview(contents)
         while view:
             written = os.write(descriptor, view)
@@ -257,6 +354,8 @@ def _prepare_file(
             raise OSError(f"Could not prepare regular replacement for {path}")
         if preserve_exact_mode and stat.S_IMODE(prepared.st_mode) != requested_mode:
             raise OSError(f"Could not preserve file mode for {path}")
+        if requested_owner is not None and (prepared.st_uid, prepared.st_gid) != requested_owner:
+            raise OSError(f"Could not preserve file ownership for {path}")
         if stat.S_IMODE(prepared.st_mode) & ~requested_mode:
             raise OSError(f"Prepared file mode exceeds the secure default for {path}")
         return _PreparedFile(path, _snapshot_from_stat(contents, prepared))
@@ -299,15 +398,29 @@ def _rename_if_absent(source: Path, destination: Path) -> None:
         return
 
     libc = ctypes.CDLL(None, use_errno=True)
-    source_bytes = os.fsencode(source)
-    destination_bytes = os.fsencode(destination)
+    source_operand, source_directory_fd = _authority_operand(source)
+    destination_operand, destination_directory_fd = _authority_operand(destination)
+    source_bytes = os.fsencode(source_operand)
+    destination_bytes = os.fsencode(destination_operand)
     result: int
     if sys.platform == "darwin":
         rename_exclusive = 0x00000004  # RENAME_EXCL
-        renamex_np = libc.renamex_np
-        renamex_np.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
-        renamex_np.restype = ctypes.c_int
-        result = renamex_np(source_bytes, destination_bytes, rename_exclusive)
+        renameatx_np = libc.renameatx_np
+        renameatx_np.argtypes = [
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        ]
+        renameatx_np.restype = ctypes.c_int
+        result = renameatx_np(
+            -2 if source_directory_fd is None else source_directory_fd,
+            source_bytes,
+            -2 if destination_directory_fd is None else destination_directory_fd,
+            destination_bytes,
+            rename_exclusive,
+        )
     elif sys.platform.startswith("linux"):
         rename_noreplace = 1
         try:
@@ -326,7 +439,13 @@ def _rename_if_absent(source: Path, destination: Path) -> None:
             ctypes.c_uint,
         ]
         renameat2.restype = ctypes.c_int
-        result = renameat2(-100, source_bytes, -100, destination_bytes, rename_noreplace)
+        result = renameat2(
+            -100 if source_directory_fd is None else source_directory_fd,
+            source_bytes,
+            -100 if destination_directory_fd is None else destination_directory_fd,
+            destination_bytes,
+            rename_noreplace,
+        )
     else:  # pragma: no cover - fail closed on unimplemented POSIX variants
         raise OSError(
             errno.ENOTSUP,
@@ -481,6 +600,11 @@ def _atomic_write_text_if_current_matches(
         content.encode("utf-8"),
         requested_mode=mode,
         preserve_exact_mode=expected.kind == "file",
+        requested_owner=(expected.owner_id, expected.group_id)
+        if expected.kind == "file"
+        and expected.owner_id is not None
+        and expected.group_id is not None
+        else None,
     )
     try:
         published = _promote_prepared_under_lock(path, prepared, expected, claim)
@@ -503,6 +627,8 @@ def _same_owned_generation(left: _FileSnapshot, right: _FileSnapshot) -> bool:
         and left.device == right.device
         and left.inode == right.inode
         and left.mode == right.mode
+        and left.owner_id == right.owner_id
+        and left.group_id == right.group_id
         and left.contents == right.contents
     )
 
@@ -520,6 +646,8 @@ def _strict_guard(snapshot: _FileSnapshot) -> dict[str, object]:
         "modified_ns": snapshot.modified_ns,
         "changed_ns": snapshot.changed_ns,
         "link_count": snapshot.link_count,
+        "owner_id": snapshot.owner_id,
+        "group_id": snapshot.group_id,
         "sha256": _digest(snapshot.contents),
     }
 
@@ -530,6 +658,8 @@ def _owned_guard(snapshot: _FileSnapshot) -> dict[str, object]:
         "mode": snapshot.mode,
         "device": snapshot.device,
         "inode": snapshot.inode,
+        "owner_id": snapshot.owner_id,
+        "group_id": snapshot.group_id,
         "sha256": _digest(snapshot.contents),
     }
 
@@ -822,20 +952,185 @@ def _rollback_file(
         return False
 
 
-def _directory_topology(paths: tuple[Path, ...]) -> dict[Path, bool]:
-    return {path: path.exists() for path in paths}
+@dataclass(frozen=True)
+class _CreatedDirectory:
+    """Identity used to prove that a just-created directory stayed selected.
+
+    Directories are deliberately retained on activation failure. POSIX and
+    Windows expose no portable rmdir-if-inode primitive, so pathname cleanup
+    would reintroduce the foreign-victim deletion race this authority prevents.
+    """
+
+    name: str
+    device: int
+    inode: int
 
 
-def _restore_directory_topology(snapshot: dict[Path, bool]) -> None:
-    for path, existed_before in sorted(
-        snapshot.items(), key=lambda item: len(item[0].parts), reverse=True
-    ):
-        if existed_before:
-            continue
+def _directory_authority_checkpoint(_phase: str, _path: Path) -> None:
+    """Test seam around no-follow activation-directory creation and binding."""
+
+
+def _directory_identity(result: os.stat_result) -> tuple[int, int]:
+    return result.st_dev, result.st_ino
+
+
+def _require_real_directory(result: os.stat_result, path: Path) -> None:
+    if not stat.S_ISDIR(result.st_mode):
+        raise ValueError(f"Activation directory must be a real directory: {path}")
+
+
+def _fsync_directory_descriptor(descriptor: int, path: Path) -> None:
+    """Confirm one directory-entry mutation when the filesystem supports it."""
+    try:
+        os.fsync(descriptor)
+    except OSError as error:
+        if error.errno not in (errno.EINVAL, errno.ENOTSUP):
+            raise OSError(f"Could not confirm activation directory durability: {path}") from error
+
+
+def _open_directory_at(parent_fd: int, name: str, path: Path) -> int:
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    flags |= getattr(os, "O_CLOEXEC", 0)
+    descriptor = os.open(name, flags, dir_fd=parent_fd)
+    try:
+        opened = os.fstat(descriptor)
+        _directory_authority_checkpoint("opened", path)
+        current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        _require_real_directory(opened, path)
+        _require_real_directory(current, path)
+        if _directory_identity(opened) != _directory_identity(current):
+            raise _ConcurrentActivationError(f"Activation directory changed: {path}")
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _open_or_create_directory_at(
+    parent_fd: int,
+    name: str,
+    path: Path,
+) -> tuple[int, _CreatedDirectory | None]:
+    """Select and pin one real directory before any descendant mutation."""
+    try:
+        return _open_directory_at(parent_fd, name, path), None
+    except FileNotFoundError:
+        _directory_authority_checkpoint("before-create", path)
         try:
-            path.rmdir()
-        except (FileNotFoundError, NotADirectoryError, OSError):
-            pass
+            os.mkdir(name, mode=0o777, dir_fd=parent_fd)
+        except FileExistsError as exc:
+            raise _ConcurrentActivationError(
+                f"Activation directory appeared concurrently: {path}"
+            ) from exc
+        created = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        _require_real_directory(created, path)
+        created_directory = _CreatedDirectory(name, created.st_dev, created.st_ino)
+        _directory_authority_checkpoint("created-snapshotted", path)
+        descriptor = _open_directory_at(parent_fd, name, path)
+        if _directory_identity(os.fstat(descriptor)) != (
+            created_directory.device,
+            created_directory.inode,
+        ):
+            os.close(descriptor)
+            raise _ConcurrentActivationError(f"Created activation directory changed: {path}")
+        _fsync_directory_descriptor(parent_fd, path.parent)
+        return descriptor, created_directory
+
+
+@contextmanager
+def _activation_directory_authority(config_dir: Path) -> Iterator[Path]:
+    """Create and pin ``config_dir`` without following a replaced pathname."""
+    parent = config_dir.parent
+    lock_target = parent / _ACTIVATION_LOCK_NAME
+
+    if os.name == "nt":  # pragma: no cover - exercised on Windows
+        # The parent lease stabilizes the lock authority. A second lease on the
+        # config directory itself prevents rename/delete topology swaps while
+        # descendant operations remain path based on Windows.
+        before = _snapshot_target(config_dir)
+        if before.kind not in {"missing", "directory"}:
+            raise ValueError(f"Activation directory must be real: {config_dir}")
+        with file_lock(lock_target, stable_parent_authority=True):
+            created: _FileSnapshot | None = None
+            if before.kind == "missing":
+                _directory_authority_checkpoint("before-create", config_dir)
+                try:
+                    config_dir.mkdir()
+                except FileExistsError as exc:
+                    raise _ConcurrentActivationError(
+                        f"Activation directory appeared concurrently: {config_dir}"
+                    ) from exc
+                created = _snapshot_target(config_dir)
+                if created.kind != "directory":
+                    raise _ConcurrentActivationError(
+                        f"Created activation directory changed: {config_dir}"
+                    )
+                _directory_authority_checkpoint("created-snapshotted", config_dir)
+            with _windows_directory_lease(config_dir):
+                selected = _snapshot_target(config_dir)
+                if selected.kind != "directory":
+                    raise _ConcurrentActivationError(f"Activation directory changed: {config_dir}")
+                if before.kind == "directory" and selected != before:
+                    raise _ConcurrentActivationError(f"Activation directory changed: {config_dir}")
+                if created is not None and selected != created:
+                    raise _ConcurrentActivationError(
+                        f"Created activation directory changed: {config_dir}"
+                    )
+                for child in (config_dir / "data", config_dir / "logs"):
+                    child_before = _snapshot_target(child)
+                    if child_before.kind == "missing":
+                        child.mkdir()
+                    elif child_before.kind != "directory":
+                        raise ValueError(f"Activation directory must be real: {child}")
+                token = _ACTIVE_DIRECTORY_AUTHORITY.set(_DirectoryAuthority(config_dir, None))
+                try:
+                    yield config_dir
+                    _require_active_directory_binding()
+                finally:
+                    _ACTIVE_DIRECTORY_AUTHORITY.reset(token)
+        return
+
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    flags |= getattr(os, "O_CLOEXEC", 0)
+    parent_fd = os.open(parent, flags)
+    config_fd = -1
+    child_descriptors: list[int] = []
+    try:
+        opened_parent = os.fstat(parent_fd)
+        current_parent = os.stat(parent, follow_symlinks=False)
+        _require_real_directory(opened_parent, parent)
+        _require_real_directory(current_parent, parent)
+        if _directory_identity(opened_parent) != _directory_identity(current_parent):
+            raise _ConcurrentActivationError(f"Activation parent changed: {parent}")
+        with file_lock(
+            lock_target,
+            parent_fd=parent_fd,
+            stable_parent_authority=True,
+        ):
+            config_fd, _created_config = _open_or_create_directory_at(
+                parent_fd, config_dir.name, config_dir
+            )
+            for child_name in ("data", "logs"):
+                child_fd, _created_child = _open_or_create_directory_at(
+                    config_fd,
+                    child_name,
+                    config_dir / child_name,
+                )
+                child_descriptors.append(child_fd)
+            token = _ACTIVE_DIRECTORY_AUTHORITY.set(
+                _DirectoryAuthority(config_dir, config_fd, parent_fd)
+            )
+            try:
+                yield config_dir
+                _require_active_directory_binding()
+            finally:
+                _ACTIVE_DIRECTORY_AUTHORITY.reset(token)
+    finally:
+        for descriptor in reversed(child_descriptors):
+            os.close(descriptor)
+        if config_fd >= 0:
+            os.close(config_fd)
+        os.close(parent_fd)
 
 
 def _publication_checkpoint(_name: str) -> None:
@@ -848,7 +1143,6 @@ def activate_claude_runtime(
     runtime_backend: Literal["claude", "claude_mcp"] = "claude",
 ) -> Path | None:
     """Activate one Claude profile plus credentials, or fail closed."""
-    from ouroboros.config.loader import ensure_config_dir
     from ouroboros.config.models import (
         CredentialsConfig,
         OuroborosConfig,
@@ -859,36 +1153,8 @@ def activate_claude_runtime(
 
     config_dir_candidate = get_config_dir()
     try:
-        directory_generation = _snapshot_target(config_dir_candidate)
-    except OSError as exc:
-        print_error(f"Could not inspect Ouroboros config directory; aborting: {exc}")
-        return None
-    if directory_generation.kind not in {"missing", "directory"}:
-        print_error(
-            "Claude setup requires ~/.ouroboros to be a real directory; "
-            f"found {directory_generation.kind}."
-        )
-        return None
-
-    topology = _directory_topology(
-        (
-            config_dir_candidate / "data",
-            config_dir_candidate / "logs",
-            config_dir_candidate,
-        )
-    )
-
-    try:
-        config_dir = ensure_config_dir()
-        # The lock lives beside the managed directory so a failed first setup
-        # can remove the fresh directory topology without deleting a lockfile
-        # that another cooperative process may already be waiting on.
-        lock_target = config_dir.parent / _ACTIVATION_LOCK_NAME
-        with file_lock(lock_target, stable_parent_authority=True):
-            if directory_generation.kind == "directory":
-                _require_snapshot(config_dir_candidate, directory_generation)
-            elif _snapshot_target(config_dir).kind != "directory":
-                raise ValueError("Ouroboros config directory was not created safely")
+        with _activation_directory_authority(config_dir_candidate) as config_dir:
+            _require_active_directory_binding()
             _recover_interrupted_activation(config_dir)
             config_path = config_dir / "config.yaml"
             credentials_path = config_dir / "credentials.yaml"
@@ -961,6 +1227,11 @@ def activate_claude_runtime(
                         config_generation.mode if config_generation.mode is not None else 0o644
                     ),
                     preserve_exact_mode=config_generation.kind == "file",
+                    requested_owner=(config_generation.owner_id, config_generation.group_id)
+                    if config_generation.kind == "file"
+                    and config_generation.owner_id is not None
+                    and config_generation.group_id is not None
+                    else None,
                 )
                 prepared_files.append(prepared_config)
                 prepared_credentials = _prepare_file(
@@ -972,6 +1243,14 @@ def activate_claude_runtime(
                         else 0o600
                     ),
                     preserve_exact_mode=credentials_generation.kind == "file",
+                    requested_owner=(
+                        credentials_generation.owner_id,
+                        credentials_generation.group_id,
+                    )
+                    if credentials_generation.kind == "file"
+                    and credentials_generation.owner_id is not None
+                    and credentials_generation.group_id is not None
+                    else None,
                 )
                 prepared_files.append(prepared_credentials)
                 if not fsync_parent_directory(config_stage):
@@ -1003,6 +1282,7 @@ def activate_claude_runtime(
                 "credentials_rollback_claim": credentials_rollback_claim.name,
             }
             try:
+                _require_active_directory_binding()
                 journal_snapshot = _write_journal(
                     journal_path,
                     journal,
@@ -1017,6 +1297,7 @@ def activate_claude_runtime(
             credentials_written: _FileSnapshot | None = None
             try:
                 if credentials_generation.kind == "missing":
+                    _require_active_directory_binding()
                     credentials_written = _promote_prepared_under_lock(
                         credentials_path,
                         prepared_credentials,
@@ -1026,6 +1307,7 @@ def activate_claude_runtime(
                     _publication_checkpoint("credentials")
                 else:
                     _require_snapshot(credentials_path, credentials_generation)
+                _require_active_directory_binding()
                 config_written = _promote_prepared_under_lock(
                     config_path,
                     prepared_config,
@@ -1036,6 +1318,7 @@ def activate_claude_runtime(
                 expected_credentials = credentials_written or credentials_generation
                 _require_snapshot(credentials_path, expected_credentials)
                 _require_snapshot(config_path, config_written)
+                _require_active_directory_binding()
                 _cleanup_journal_artifacts(
                     config_dir,
                     journal_path,
@@ -1083,6 +1366,5 @@ def activate_claude_runtime(
                     _recover_interrupted_activation(config_dir)
                 raise
     except (OSError, ValueError, RecursionError) as exc:
-        _restore_directory_topology(topology)
         print_error(f"Claude setup activation failed; aborting safely: {exc}")
         return None
