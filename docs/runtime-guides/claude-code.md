@@ -5,6 +5,8 @@ doc_metadata:
 
 # Running Ouroboros with Claude Code
 
+> 한국어: [claude-code.ko.md](./claude-code.ko.md)
+
 Ouroboros can use **Claude Code** as a runtime backend, leveraging your **Claude Code Pro or Max Plan** subscription to execute workflows without requiring a separate API key.
 
 > For installation and first-run onboarding, see [Getting Started](../getting-started.md).
