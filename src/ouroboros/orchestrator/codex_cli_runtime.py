@@ -16,7 +16,7 @@ from pathlib import Path
 import re
 import shlex
 import stat
-import subprocess
+import subprocess  # noqa: F401  # compatibility: tests patch this shared module
 import sys
 import tempfile
 import tomllib
@@ -50,6 +50,16 @@ from ouroboros.orchestrator.adapter import (
     TaskResult,
     resolve_worker_cwd,
     worker_cwd_failure_message,
+)
+from ouroboros.orchestrator.cli_version_attestation import (
+    CliExecutableVersionAttestation,
+    CliExecutableVersionState,
+    compare_cli_executable_version_attestations,
+    probe_cli_executable_version_attestation,
+    read_cli_executable_content_identity,
+    read_cli_executable_filesystem_identity,
+    read_cli_executable_resolution_chain_identity,
+    require_unchanged_cli_version_attestation,
 )
 from ouroboros.orchestrator.frugality_runtime_attestation import (
     attested_codex_child_environment,
@@ -215,6 +225,10 @@ _ITEM_FAILURE_STATUSES = frozenset(
 _ITEM_SUCCESS_STATUSES = frozenset({"completed", "success", "succeeded"})
 
 
+_CliExecutableVersionState = CliExecutableVersionState
+_CliExecutableVersionAttestation = CliExecutableVersionAttestation
+
+
 @dataclass(frozen=True, slots=True)
 class _CodexToolCall:
     """One normalized tool invocation derived from a Codex thread item."""
@@ -318,8 +332,13 @@ class CodexCliRuntime:
         self._cli_executable_content_identity_snapshot = (
             self._cli_executable_content_identity() if snapshots_cli_execution_identity else None
         )
+        self._cli_executable_version_attestation_snapshot = (
+            self._cli_executable_version_attestation() if snapshots_cli_execution_identity else None
+        )
         self._cli_executable_version_identity_snapshot = (
-            self._cli_executable_version_identity() if snapshots_cli_execution_identity else None
+            self._cli_executable_version_attestation_snapshot.identity
+            if self._cli_executable_version_attestation_snapshot is not None
+            else None
         )
         # Freeze the role-default model/profile once per runtime. Without this,
         # every ``codex exec`` call re-reads mutable profile config, so a long
@@ -512,64 +531,34 @@ class CodexCliRuntime:
         deliberately unavailable when the executable cannot provide a stable
         version response or content digest.
         """
-        executable_path = self._cli_executable_identity()
-        if executable_path is None:
-            return None
-        content_digest = self._cli_executable_content_identity()
-        if content_digest is None:
-            return None
-        symlink_identity = self._cli_executable_symlink_identity()
-        try:
-            result = subprocess.run(
-                [executable_path, "--version"],
-                capture_output=True,
-                text=True,
-                timeout=2,
-                check=False,
-            )
-        except (OSError, subprocess.TimeoutExpired):
-            return None
-        version_output = (result.stdout or result.stderr).strip()
-        if result.returncode != 0 or not version_output:
-            return None
-        return self._hash_json_payload(
-            {
-                "content_sha256": content_digest,
-                "symlink": symlink_identity,
-                "version_output": version_output,
-            }
+        return self._cli_executable_version_attestation().identity
+
+    def _cli_executable_version_attestation(
+        self,
+        initialized: _CliExecutableVersionAttestation | None = None,
+    ) -> _CliExecutableVersionAttestation:
+        """Return bounded evidence for one stable executable generation."""
+        return probe_cli_executable_version_attestation(
+            self._cli_executable_identity(),
+            initialized=initialized,
+            filesystem_identity=self._cli_executable_filesystem_identity,
+            resolution_chain_identity=self._cli_executable_resolution_chain_identity,
+            content_identity=self._cli_executable_content_identity,
+            hash_payload=self._hash_json_payload,
         )
 
-    def _cli_executable_symlink_identity(self) -> dict[str, str] | None:
-        """Return launch-path symlink target identity without dereferencing it away."""
-        executable_path = self._cli_executable_identity()
-        if executable_path is None:
-            return None
-        path = Path(executable_path)
-        try:
-            if not path.is_symlink():
-                return None
-            raw_target = os.readlink(path)
-        except OSError:
-            return None
-        target_path = Path(raw_target)
-        if not target_path.is_absolute():
-            target_path = path.parent / target_path
-        return {
-            "raw_target": raw_target,
-            "resolved_target": str(target_path.expanduser().absolute()),
-        }
+    def _cli_executable_filesystem_identity(self) -> tuple[int, int] | None:
+        return read_cli_executable_filesystem_identity(self._cli_executable_identity())
+
+    def _cli_executable_resolution_chain_identity(self) -> tuple[tuple[object, ...], ...] | None:
+        return read_cli_executable_resolution_chain_identity(self._cli_executable_identity())
+
+    _compare_cli_executable_version_attestations = staticmethod(
+        compare_cli_executable_version_attestations
+    )
 
     def _cli_executable_content_identity(self) -> str | None:
-        """Return the selected CLI byte digest without executing it."""
-        executable_path = self._cli_executable_identity()
-        if executable_path is None:
-            return None
-        try:
-            executable_bytes = Path(executable_path).read_bytes()
-        except OSError:
-            return None
-        return hashlib.sha256(executable_bytes).hexdigest()
+        return read_cli_executable_content_identity(self._cli_executable_identity())
 
     def _resolve_skills_dir(self, skills_dir: str | Path | None) -> Path | None:
         """Resolve an optional explicit skill override directory for intercept metadata."""
@@ -1114,7 +1103,13 @@ class CodexCliRuntime:
         )
 
     def _assert_cli_executable_identity_unchanged(self) -> None:
-        """Fail closed if the selected CLI executable changed in place."""
+        """Fail closed on drift or unavailable version-attestation evidence.
+
+        Initialization and check-time probe failures both block execution, but
+        use errors distinct from verified drift.  A caller may retry a
+        check-time transient failure on the same runtime; an initialization
+        failure has no trustworthy baseline and requires a new runtime.
+        """
         if self._cli_executable_path_identity is None:
             cli_path = str(self._cli_path)
             cli_candidate = Path(cli_path).expanduser()
@@ -1124,16 +1119,20 @@ class CodexCliRuntime:
                         "Codex CLI executable was unresolved at runtime initialization; "
                         "start a new execution session"
                     )
-                return
-            if cli_candidate.exists():
+            elif cli_candidate.exists():
                 raise RuntimeError(
-                    "Codex CLI executable appeared after runtime initialization; "
+                    f"{self._display_name} executable appeared after runtime initialization; "
                     "start a new execution session"
                 )
+            require_unchanged_cli_version_attestation(
+                self._display_name,
+                self._cli_executable_version_attestation_snapshot,
+                self._cli_executable_version_attestation,
+            )
             return
         if self._cli_executable_identity() != self._cli_executable_path_identity:
             raise RuntimeError(
-                "Codex CLI executable changed after runtime initialization; "
+                f"{self._display_name} executable changed after runtime initialization; "
                 "start a new execution session"
             )
         if (
@@ -1141,17 +1140,15 @@ class CodexCliRuntime:
             != self._cli_executable_content_identity_snapshot
         ):
             raise RuntimeError(
-                "Codex CLI executable changed after runtime initialization; "
+                f"{self._display_name} executable changed after runtime initialization; "
                 "start a new execution session"
             )
-        if (
-            self._cli_executable_version_identity()
-            == self._cli_executable_version_identity_snapshot
-        ):
-            return
-        raise RuntimeError(
-            "Codex CLI executable changed after runtime initialization; "
-            "start a new execution session"
+        require_unchanged_cli_version_attestation(
+            self._display_name,
+            self._cli_executable_version_attestation_snapshot,
+            lambda: self._cli_executable_version_attestation(
+                self._cli_executable_version_attestation_snapshot
+            ),
         )
 
     def _fingerprint_skill_dispatch_registry(self) -> str | None:
@@ -1230,7 +1227,13 @@ class CodexCliRuntime:
     def _fingerprint_builtin_mcp_handler_registry(self) -> str | None:
         """Fingerprint effectful built-in MCP handler authority."""
         try:
-            handlers = self._get_builtin_mcp_handlers()
+            handlers = self._builtin_mcp_handlers
+            if handlers is None:
+                from ouroboros.mcp.tools import runtime_tool_composition
+
+                handlers = runtime_tool_composition.lightweight_runtime_tool_map(
+                    runtime_backend=self._runtime_backend, llm_backend=self._llm_backend
+                )
         except Exception:
             return None
         payload: list[dict[str, Any]] = []
@@ -1349,7 +1352,7 @@ class CodexCliRuntime:
                 "kind": f"{self._runtime_handle_backend}_v1",
                 "cli_executable_path": self._cli_executable_identity(),
                 "cli_executable_content_sha256": self._cli_executable_content_identity(),
-                "cli_executable_version": self._cli_executable_version_identity(),
+                "cli_executable_version": self._cli_executable_version_identity_snapshot,
                 "fallback_model": None if native_agent else constructor_model,
                 "native_agent": native_agent,
                 "effective_model_observed": constructor_model is not None and native_agent is None,
@@ -1380,7 +1383,7 @@ class CodexCliRuntime:
             # could resume the same native thread under different defaults.
             "cli_executable_path": self._cli_executable_identity(),
             "cli_executable_content_sha256": self._cli_executable_content_identity(),
-            "cli_executable_version": self._cli_executable_version_identity(),
+            "cli_executable_version": self._cli_executable_version_identity_snapshot,
             "runtime_profile": self._runtime_profile.strip()
             if isinstance(self._runtime_profile, str) and self._runtime_profile.strip()
             else None,
@@ -1662,6 +1665,7 @@ class CodexCliRuntime:
                 for handler in get_ouroboros_tools(
                     runtime_backend=self._runtime_backend,
                     llm_backend=self._llm_backend,
+                    runtime_adapter=self,
                 )
             }
 

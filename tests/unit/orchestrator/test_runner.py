@@ -38,6 +38,7 @@ from ouroboros.orchestrator.adapter import (
     RuntimeHandle,
 )
 from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime
+from ouroboros.orchestrator.coordinator import CoordinatorReview
 from ouroboros.orchestrator.decomposition_limits import MAX_DECOMPOSITION_DEPTH
 from ouroboros.orchestrator.dependency_analyzer import ACNode, DependencyGraph
 
@@ -46,9 +47,12 @@ from ouroboros.orchestrator.dependency_analyzer import ACNode, DependencyGraph
 from ouroboros.orchestrator.parallel_executor import (
     ACExecutionOutcome,
     ACExecutionResult,
+    CoordinatorQuotaPause,
     ParallelExecutionResult,
+    ParallelExecutionStageResult,
 )
 from ouroboros.orchestrator.profile_loader import SuggestedModelTier
+from ouroboros.orchestrator.recoverable_failure import UsageLimitPauseConsequence
 from ouroboros.orchestrator.runner import (
     EXECUTION_CONTRACT_PROGRESS_KEY,
     OrchestratorError,
@@ -216,7 +220,9 @@ def _attach_live_process_local_contract(
     if not isinstance(getattr(runner._adapter, "_model", None), str):
         runner._adapter._model = "test-model"
     generation = runner._begin_process_local_authority_generation()
-    contract = runner._build_execution_contract(seed=seed, authority_generation=generation)
+    contract = runner._build_execution_contract(
+        project_identity=runner._project_identity(), seed=seed, authority_generation=generation
+    )
     runner._register_process_local_authority(
         session_id=session_id,
         execution_id=tracker.execution_id,
@@ -714,6 +720,13 @@ class TestOrchestratorRunner:
         runner = OrchestratorRunner(mock_adapter, mock_event_store, mock_console)
         _allow_mocked_precreated_durable_state(runner)
         return runner
+
+    async def test_close_adapter_awaits_runtime_lifecycle(self, runner) -> None:
+        runner._adapter.aclose = AsyncMock()
+
+        await runner._close_adapter()
+
+        runner._adapter.aclose.assert_awaited_once()
 
     def test_param_degradation_notice_surfaces_for_serial_runner(
         self,
@@ -1916,6 +1929,7 @@ class TestOrchestratorRunner:
             mock_console,
             enable_decomposition=False,
         )
+        mock_adapter.aclose = AsyncMock()
         tracker = SessionTracker.create(
             "execution-external-resume",
             seed.metadata.seed_id,
@@ -1973,6 +1987,7 @@ class TestOrchestratorRunner:
 
         assert result.is_ok
         assert parallel_resume.await_args.kwargs["externally_satisfied_acs"] == external
+        mock_adapter.aclose.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_direct_bounded_paused_route_actually_resumes_same_provider_handle(
@@ -5619,6 +5634,197 @@ class TestOrchestratorRunner:
         assert pause.pause_kind == "usage_limit"
         assert pause.resume_after == now + timedelta(hours=3)
 
+    def test_parallel_result_detects_coordinator_usage_limit_window(
+        self,
+        runner: OrchestratorRunner,
+    ) -> None:
+        """Coordinator quota evidence must reach the durable runner pause owner."""
+
+        now = datetime(2026, 1, 1, tzinfo=UTC)
+        message = AgentMessage(
+            type="result",
+            content="Usage limit reached. Please try again in 4 hours.",
+            data={"subtype": "error", "error_type": "CodexCliError"},
+        )
+        successful = ACExecutionResult(
+            ac_index=0,
+            ac_content="Patch shared.py",
+            success=True,
+            final_message="done",
+        )
+        consequence = UsageLimitPauseConsequence(
+            reason=message.content,
+            resume_hint=(
+                "Provider usage/quota window reached. Resume after "
+                "2026-01-01T04:00:00+00:00 (wait at least 4 hours)."
+            ),
+            pause_seconds=14_400,
+            resume_after=now + timedelta(hours=4),
+        )
+        coordinator_pause = CoordinatorQuotaPause(
+            execution_id="execution-coordinator-pause",
+            session_id="session-coordinator-pause",
+            level_number=1,
+            coordinator_aggregate_id="execution-coordinator-pause:l0:coord",
+            consequence=consequence,
+        )
+        parallel_result = ParallelExecutionResult(
+            results=(successful,),
+            success_count=1,
+            failure_count=0,
+            stages=(
+                ParallelExecutionStageResult(
+                    stage_index=0,
+                    ac_indices=(0,),
+                    results=(successful,),
+                    coordinator_review=CoordinatorReview(
+                        level_number=1,
+                        review_summary=message.content,
+                        recoverable_quota_pause=consequence,
+                    ),
+                ),
+            ),
+            recoverable_coordinator_pause=coordinator_pause,
+        )
+
+        pause = runner._recoverable_failure_pause_from_parallel_result(
+            parallel_result,
+            now=now,
+            default_pause_seconds=18_000,
+        )
+
+        assert parallel_result.all_succeeded is False
+        assert pause is not None
+        assert pause.pause_kind == "usage_limit"
+        assert pause.resume_after == now + timedelta(hours=4)
+        assert pause.coordinator_owner == coordinator_pause
+
+    @pytest.mark.asyncio
+    async def test_runner_publishes_and_consumes_exact_restored_coordinator_pause(
+        self,
+        runner: OrchestratorRunner,
+        sample_seed: Seed,
+    ) -> None:
+        """Crash replay publishes PAUSED before its exact owner may continue."""
+
+        from ouroboros.orchestrator.mcp_tools import assemble_session_tool_catalog
+
+        tracker = SessionTracker.create(
+            "execution-coordinator-crash-replay",
+            sample_seed.metadata.seed_id,
+            session_id="session-coordinator-crash-replay",
+        )
+        tracker = _attach_live_process_local_contract(
+            runner,
+            tracker,
+            sample_seed,
+            session_id=tracker.session_id,
+        )
+        resume_after = datetime(2026, 1, 1, 5, tzinfo=UTC)
+        consequence = UsageLimitPauseConsequence(
+            reason="Usage limit reached. Please try again in 5 hours.",
+            resume_hint=(
+                "Provider usage/quota window reached. Resume after "
+                "2026-01-01T05:00:00+00:00 (wait at least 5 hours)."
+            ),
+            pause_seconds=18_000,
+            resume_after=resume_after,
+        )
+        coordinator_pause = CoordinatorQuotaPause(
+            execution_id=tracker.execution_id,
+            session_id=tracker.session_id,
+            level_number=1,
+            coordinator_aggregate_id=f"{tracker.execution_id}:l0:coord",
+            consequence=consequence,
+        )
+        first_ac = ACExecutionResult(
+            ac_index=0,
+            ac_content=sample_seed.acceptance_criteria[0],
+            success=True,
+            final_message="stage one complete",
+        )
+        restored_pause_result = ParallelExecutionResult(
+            results=(first_ac,),
+            success_count=1,
+            failure_count=0,
+            recoverable_coordinator_pause=coordinator_pause,
+        )
+        completed_results = tuple(
+            ACExecutionResult(
+                ac_index=index,
+                ac_content=content,
+                success=True,
+                final_message="done",
+            )
+            for index, content in enumerate(sample_seed.acceptance_criteria)
+        )
+        completed = ParallelExecutionResult(
+            results=completed_results,
+            success_count=len(completed_results),
+            failure_count=0,
+        )
+        execute_parallel = AsyncMock(side_effect=(restored_pause_result, completed))
+        mark_paused = AsyncMock(return_value=Result.ok(True))
+        tool_catalog = assemble_session_tool_catalog(["Read"])
+
+        with (
+            patch.object(runner, "_check_cancellation", AsyncMock(return_value=False)),
+            patch(
+                "ouroboros.orchestrator.parallel_executor.ParallelACExecutor.execute_parallel",
+                execute_parallel,
+            ),
+            patch.object(runner._session_repo, "mark_paused", mark_paused),
+            patch.object(
+                runner,
+                "_persist_session_terminal_status",
+                AsyncMock(return_value=SessionStatus.COMPLETED),
+            ),
+            patch.object(runner, "_build_terminal_acceptance_finalizations", return_value=[]),
+            patch.object(runner, "_report_frugality_retrospective", AsyncMock(return_value=False)),
+        ):
+            crash_recovery = await runner._execute_parallel(
+                seed=sample_seed,
+                exec_id=tracker.execution_id,
+                tracker=tracker,
+                merged_tools=["Read"],
+                tool_catalog=tool_catalog,
+                system_prompt="system",
+                start_time=tracker.start_time,
+                execution_contract=tracker.progress[EXECUTION_CONTRACT_PROGRESS_KEY],
+                force_sequential_levels=True,
+            )
+
+            assert crash_recovery.is_ok
+            assert crash_recovery.value.success is False
+            owner_payload = coordinator_pause.owner_payload()
+            assert mark_paused.await_args.kwargs["pause_owner"] == owner_payload
+
+            paused_tracker = tracker.with_status(SessionStatus.PAUSED).with_progress(
+                {"pause_owner": owner_payload}
+            )
+            resumed = await runner._execute_parallel(
+                seed=sample_seed,
+                exec_id=paused_tracker.execution_id,
+                tracker=paused_tracker,
+                merged_tools=["Read"],
+                tool_catalog=tool_catalog,
+                system_prompt="system",
+                start_time=paused_tracker.start_time,
+                execution_contract=paused_tracker.progress[EXECUTION_CONTRACT_PROGRESS_KEY],
+                force_sequential_levels=True,
+            )
+
+        assert resumed.is_ok
+        assert resumed.value.success is True
+        assert execute_parallel.await_count == 2
+        assert (
+            execute_parallel.await_args_list[0].kwargs["published_coordinator_pause_owner"] is None
+        )
+        assert (
+            execute_parallel.await_args_list[1].kwargs["published_coordinator_pause_owner"]
+            == coordinator_pause.owner_payload()
+        )
+
     def test_parallel_result_requires_all_failures_recoverable(
         self,
         runner: OrchestratorRunner,
@@ -5985,7 +6191,9 @@ class TestOrchestratorRunner:
             sample_seed.metadata.seed_id,
             session_id="sess_parallel_semantics_drift",
         )
-        execution_contract = runner._build_execution_contract(seed=sample_seed)
+        execution_contract = runner._build_execution_contract(
+            project_identity=runner._project_identity(), seed=sample_seed
+        )
         runner._run_verify_commands = not runner._run_verify_commands
         analyzer = MagicMock()
         analyzer.analyze = AsyncMock(
@@ -6066,7 +6274,9 @@ class TestOrchestratorRunner:
             sample_seed.metadata.seed_id,
             session_id="sess_parallel_resolved_limits",
         )
-        execution_contract = runner._build_execution_contract(seed=sample_seed)
+        execution_contract = runner._build_execution_contract(
+            project_identity=runner._project_identity(), seed=sample_seed
+        )
         semantics = execution_contract["execution_semantics"]
         executor_cls = MagicMock()
         cancellation_result: Result[OrchestratorResult, OrchestratorError] = Result.err(
@@ -6100,6 +6310,7 @@ class TestOrchestratorRunner:
         assert result is cancellation_result
         kwargs = executor_cls.call_args.kwargs
         assert kwargs["max_concurrent"] == semantics["effective_parallel_workers"]
+        assert kwargs["adaptive_max_concurrent"] == semantics["max_parallel_workers"]
         assert (
             kwargs["resolved_self_governs_rate_limit"]
             is semantics["backend_self_governs_rate_limit"]
@@ -6535,6 +6746,7 @@ class TestOrchestratorRunner:
         execution_id = "exec-legacy-managed-linked"
         generation = runner._begin_process_local_authority_generation()
         contract = runner._build_execution_contract(
+            project_identity=runner._project_identity(),
             seed=sample_seed,
             authority_generation=generation,
         )
@@ -7206,7 +7418,11 @@ class TestOrchestratorRunner:
         from ouroboros.orchestrator.mcp_tools import assemble_session_tool_catalog
 
         runner = OrchestratorRunner(mock_adapter, mock_event_store, mock_console)
-        legacy_contract = copy.deepcopy(runner._build_execution_contract(seed=sample_seed))
+        legacy_contract = copy.deepcopy(
+            runner._build_execution_contract(
+                project_identity=runner._project_identity(), seed=sample_seed
+            )
+        )
         legacy_contract["execution_semantics"]["decomposition_mode"] = "preflight"
         legacy_contract["frugality_proof"]["execution_semantics_fingerprint"] = (
             runner._execution_semantics_fingerprint(legacy_contract["execution_semantics"])
@@ -7292,6 +7508,7 @@ class TestOrchestratorRunner:
             mock_console,
             fat_harness_mode=True,
         )
+        mock_adapter.aclose = AsyncMock()
         tracker = SessionTracker.create("exec_parallel", sample_seed.metadata.seed_id)
         dependency_graph = DependencyGraph(
             nodes=(ACNode(index=0, content=sample_seed.acceptance_criteria[0]),),
@@ -7347,6 +7564,7 @@ class TestOrchestratorRunner:
 
         assert result.is_ok
         assert captured_init["fat_harness_mode"] is True
+        mock_adapter.aclose.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_fat_harness_uses_profile_backed_prompt_contract(
@@ -7363,6 +7581,7 @@ class TestOrchestratorRunner:
             mock_console,
             fat_harness_mode=True,
         )
+        mock_adapter.aclose = AsyncMock()
         tracker = SessionTracker.create("exec_profile_prompt", sample_seed.metadata.seed_id)
         tracker = _attach_live_process_local_contract(
             runner,
@@ -7406,6 +7625,7 @@ class TestOrchestratorRunner:
         assert "tests_passed" in system_prompt
         assert "evidence record as a receipt" in system_prompt
         assert "exact successful test command" in system_prompt
+        mock_adapter.aclose.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_fat_harness_single_ac_uses_ac_executor_path(
@@ -8197,6 +8417,7 @@ class TestOrchestratorRunner:
         mock_event_store: AsyncMock,
         mock_console: MagicMock,
         sample_seed: Seed,
+        tmp_path: Path,
     ) -> None:
         """Delegated child runs should fork from the inherited parent runtime handle."""
         inherited_handle = RuntimeHandle(
@@ -8208,7 +8429,9 @@ class TestOrchestratorRunner:
         mock_adapter.runtime_backend = "claude"
         mock_adapter.llm_backend = "test-llm"
         mock_adapter._model = "test-model"
-        mock_adapter.working_directory = "/tmp/project"
+        project = tmp_path / "project"
+        project.mkdir()
+        mock_adapter.working_directory = str(project)
         mock_adapter.permission_mode = "acceptEdits"
         captured_kwargs: dict[str, Any] = {}
 
@@ -8293,7 +8516,9 @@ class TestOrchestratorRunner:
             mock_console,
             inherited_runtime_handle=inherited_handle,
         )
-        execution_contract = runner._build_execution_contract(seed=sample_seed)
+        execution_contract = runner._build_execution_contract(
+            project_identity=runner._project_identity(), seed=sample_seed
+        )
         persisted_profile = runner._execution_profile_snapshot(
             execution_contract,
             require_bound=True,

@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from dataclasses import replace
-from enum import Enum
 import os
 from pathlib import Path
 import time
@@ -72,6 +71,7 @@ from ouroboros.cli.formatters.panels import (
 )
 from ouroboros.config import get_opencode_mode
 from ouroboros.mcp.job_manager import JobManager, JobSnapshot, JobStatus
+from ouroboros.mcp.tools._dashboard import resolve_dashboard_base_url
 from ouroboros.mcp.tools.authoring_handlers import GenerateSeedHandler, InterviewHandler
 from ouroboros.mcp.tools.evaluation_handlers import LateralThinkHandler
 from ouroboros.mcp.tools.execution_handlers import ExecuteSeedHandler, StartExecuteSeedHandler
@@ -80,6 +80,12 @@ from ouroboros.mcp.tools.qa import QAHandler
 from ouroboros.mcp.tools.ralph_handlers import RalphHandler
 from ouroboros.mcp.tools.subagent import should_dispatch_via_plugin
 from ouroboros.orchestrator import resolve_agent_runtime_backend
+from ouroboros.package_profiles import (
+    PublicAgentRuntimeBackend as AgentRuntimeBackend,
+)
+from ouroboros.package_profiles import (
+    public_runtime_backend,
+)
 from ouroboros.persistence.event_store import EventStore
 from ouroboros.runtime.controls import load_runtime_controls
 from ouroboros.runtime.watchdog import Watchdog
@@ -110,23 +116,6 @@ def _build_configured_ralph_handler(
         msg = "MCP composition root returned non-Ralph handler for ouroboros_ralph"
         raise TypeError(msg)
     return handler
-
-
-class AgentRuntimeBackend(str, Enum):  # noqa: UP042
-    """Supported runtime backends for auto execution handoff."""
-
-    CLAUDE = "claude"
-    CODEX = "codex"
-    OPENCODE = "opencode"
-    HERMES = "hermes"
-    GEMINI = "gemini"
-    COPILOT = "copilot"
-    KIRO = "kiro"
-    PI = "pi"
-    GJC = "gjc"
-    ANTIGRAVITY = "antigravity"
-    GROK = "grok"
-    ZCODE = "zcode"
 
 
 app = typer.Typer(
@@ -335,7 +324,7 @@ def auto_command(
             _run_auto(
                 goal=goal,
                 resume=resume,
-                runtime=runtime.value if runtime else None,
+                runtime=public_runtime_backend(runtime.value if runtime else None),
                 max_interview_rounds=max_interview_rounds,
                 max_repair_rounds=max_repair_rounds,
                 skip_run=skip_run,
@@ -658,6 +647,12 @@ async def _run_auto(
     ralph_resumer = HandlerRalphPoller(ralph_handler) if ralph_handler is not None else None
     watchdog_event_store = EventStore()
     await watchdog_event_store.initialize()
+    # Auto does not have an execution id until interview/Seed handoff finishes.
+    # Publish the picker now; it polls until the eventual run appears, and the
+    # selected row supplies the pinned ?run=<execution_id> detail URL.
+    dashboard_url = await resolve_dashboard_base_url(watchdog_event_store)
+    if dashboard_url:
+        console.print(f"Live Dashboard (all runs): {dashboard_url}")
     watchdog = Watchdog(
         controls=load_runtime_controls(None),
         event_appender=watchdog_event_store,

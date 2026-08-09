@@ -44,21 +44,21 @@ When the user invokes this skill:
 
 The Ouroboros MCP tools are often registered as **deferred tools** that must be explicitly loaded before use. **You MUST perform this step before proceeding.**
 
-1. Use the active runtime's tool-discovery capability to find and load the evaluate MCP tool:
+1. Use the active runtime's tool-discovery capability to find and load the evaluate MCP tools:
    ```
    tool discovery query: "+ouroboros evaluate"
    ```
-2. The tool will typically be named `mcp__plugin_ouroboros_ouroboros__ouroboros_evaluate` (with a plugin prefix). After runtime tool discovery returns, the tool becomes callable.
+2. The tool will typically be named `mcp__plugin_ouroboros_ouroboros__ouroboros_start_evaluate` (with a plugin prefix). After runtime tool discovery returns, the tool becomes callable.
 3. If the tool is callable — already exposed, or loaded by discovery — proceed with the MCP-based evaluation below. An empty discovery result for an already-exposed tool is expected, not a failure. Skip to the **Fallback** section only if the tool is genuinely absent (no Ouroboros MCP server).
 
 **IMPORTANT**: Do NOT skip this step. Do NOT assume MCP tools are unavailable just because they don't appear in your immediate tool list. They are almost always available as deferred tools that need to be loaded first.
 
 **CRITICAL — deferred-schema guard (prevents "Invalid tool parameters"):**
-This skill can call `ouroboros_evaluate` after a fresh turn. A deferred tool's
+This skill can call `ouroboros_start_evaluate` after a fresh turn. A deferred tool's
 schema loaded on one turn is NOT guaranteed to still be loaded on the next. If
 you call it while its schema is not loaded in the **current** turn, the runtime
 rejects the call with **"Invalid tool parameters"** before it reaches the server.
-Therefore: **immediately before EVERY `ouroboros_evaluate` call in this skill,
+Therefore: **immediately before EVERY `ouroboros_start_evaluate` call in this skill,
 re-run `tool discovery query: "+ouroboros evaluate"`** (idempotent — a no-op when
 already loaded). If the load returns no matching tool (and the tool is not already callable — an empty load for an already-exposed tool is an expected no-op, not absence), switch to the documented
 fallback instead of retrying the failing call.
@@ -88,9 +88,10 @@ fallback instead of retrying the failing call.
    call as part of the `artifact`. If acting tools are unavailable, note that
    behaviour was not observed and evaluate on the text alone.
 
-3. Call the `ouroboros_evaluate` MCP tool:
+3. Call the background `ouroboros_start_evaluate` MCP tool so rejected verdicts
+   can continue through the configured Ralph convergence chain:
    ```
-   Tool: ouroboros_evaluate
+   Tool: ouroboros_start_evaluate
    Arguments:
      session_id: <session ID>
      artifact: <the code/output to evaluate, plus observed-behaviour evidence from 2.5>
@@ -99,11 +100,21 @@ fallback instead of retrying the failing call.
      artifact_type: "code"  (or "docs", "config")
      working_dir: <absolute project root, recommended>
      trigger_consensus: false  (true if user requests Stage 3)
+     auto_evolve: <optional override; omit to use execution.auto_evolve>
    ```
 
    `working_dir` controls both Stage 1 command execution and Stage 2 source-file visibility. Pass the absolute project root whenever available; if omitted, the MCP handler falls back to the registered brownfield default, seed project metadata, then the MCP server cwd.
 
-4. Present results clearly:
+4. Observe the returned evaluation job. If its terminal result contains
+   `chained_ralph_job_id`, follow that Ralph job to terminal before presenting
+   the convergence outcome. A missing Seed produces
+   `chained_ralph_skipped: seed_unavailable`; preserve the rejected verdict and
+   explain that automatic continuation was safely skipped. In OpenCode plugin
+   mode, `auto_evolve=true` intentionally returns this pollable parent-owned job;
+   with automatic evolution disabled, the plugin child remains the terminal
+   surface and `job_id` is `None`.
+
+5. Present results clearly:
    - Show each stage's pass/fail status
    - Highlight the final approval decision
    - If rejected, explain the failure reason

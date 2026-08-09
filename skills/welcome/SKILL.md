@@ -694,7 +694,7 @@ runtime. For a Korean conversation, use:
 - **설정하고 시작하기**: Run the setup command for the active host. In Codex
   App or Codex CLI, use `ouroboros setup --runtime codex` when the executable
   is installed. For a Marketplace-plugin-only install, use
-  `uvx --from 'ouroboros-ai[mcp]' ouroboros setup --runtime codex` instead.
+  `uvx --python '>=3.12' --from 'ouroboros-ai[mcp]' ouroboros setup --runtime codex` instead.
   In Claude Code, follow `../setup/SKILL.md`. Do not ask the user to copy a
   command when the current host can run it.
 - **나중에**: Continue with the welcome flow, but do not claim that MCP-only
@@ -793,14 +793,16 @@ Give brief personalized response (1-2 sentences) based on choice.
 
 ### Step 3: Advanced Runtime Check
 
-Standalone Claude SDK setup intentionally does not register MCP 2. Do not
-inspect or mutate `~/.claude/mcp.json` as an onboarding health check.
+Ordinary Claude setup uses the default `[claude]` Agent SDK profile on MCP 1.x.
+It intentionally leaves host-owned `~/.claude/mcp.json` untouched; do not
+inspect or mutate that file as an onboarding health check. The dependency-free
+worker is the explicit `[claude-cli]` profile used by an isolated MCP 2 process.
 
 If the active runtime does not expose Ouroboros MCP tools, **AskUserQuestion**:
 ```json
 {
   "questions": [{
-    "question": "Advanced MCP workflows require a supported CLI-backed runtime. What would you like to do?",
+    "question": "Advanced MCP workflows require a host-managed MCP 2 launcher. What would you like to do?",
     "header": "Runtime",
     "options": [
       { "label": "Continue native (Recommended)", "description": "Use Claude-native interview, seed, evaluate, and unstuck workflows" },
@@ -811,9 +813,9 @@ If the active runtime does not expose Ouroboros MCP tools, **AskUserQuestion**:
 }
 ```
 - **Continue native**: Continue to Step 4
-- **Show MCP setup**: Explain `ouroboros setup --runtime <runtime>` for a
-  supported CLI-backed runtime. Do not register MCP in the standalone Claude
-  SDK profile. Then continue to Step 4.
+- **Show MCP setup**: Explain that the Claude marketplace plugin or another
+  supported host setup owns the isolated `[mcp]` launcher. Never combine
+  `[claude-sdk]` with `[mcp]`. Then continue to Step 4.
 
 ---
 
@@ -958,7 +960,7 @@ Just include these naturally in your request:
 
 REAL-TIME MONITORING (TUI):
 When running ooo run or ooo evolve, open a separate terminal:
-  uvx --from 'ouroboros-ai[tui]' ouroboros tui monitor
+  uvx --python '>=3.12' --from 'ouroboros-ai[tui]' ouroboros tui monitor
 Press 1-4 to switch screens (Dashboard, Execution, Logs, Debug).
 
 READY TO BUILD:

@@ -5,7 +5,6 @@ Supports both standard workflow execution and agent-runtime orchestrator mode.
 """
 
 import asyncio
-from enum import Enum
 import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any
@@ -21,6 +20,7 @@ if TYPE_CHECKING:
 
 from ouroboros.cli.formatters import console
 from ouroboros.cli.formatters.panels import print_error, print_info, print_success, print_warning
+from ouroboros.cli.logging_setup import configure_cli_logging
 from ouroboros.config.loader import (
     get_config_dir,
     get_max_parallel_workers,
@@ -42,6 +42,12 @@ from ouroboros.orchestrator.decomposition_limits import (
     DEFAULT_MAX_DECOMPOSITION_DEPTH,
     MAX_DURABLE_DECOMPOSITION_DEPTH,
     validate_max_decomposition_depth,
+)
+from ouroboros.package_profiles import (
+    PublicAgentRuntimeBackend as AgentRuntimeBackend,
+)
+from ouroboros.package_profiles import (
+    public_runtime_backend,
 )
 
 
@@ -131,24 +137,6 @@ app = typer.Typer(
     no_args_is_help=True,
     cls=_DefaultWorkflowGroup,
 )
-
-
-class AgentRuntimeBackend(str, Enum):  # noqa: UP042
-    """Supported orchestrator runtime backends for CLI selection."""
-
-    CLAUDE = "claude"
-    CODEX = "codex"
-    OPENCODE = "opencode"
-    HERMES = "hermes"
-    GEMINI = "gemini"
-    COPILOT = "copilot"
-    GOOSE = "goose"
-    KIRO = "kiro"
-    PI = "pi"
-    GJC = "gjc"
-    ANTIGRAVITY = "antigravity"
-    GROK = "grok"
-    ZCODE = "zcode"
 
 
 def _derive_quality_bar(seed: "Seed") -> str:
@@ -738,6 +726,18 @@ async def _run_orchestrator(
         fat_harness_mode=resolved_fat_harness_mode,
     )
 
+    # The URL is emitted before execution starts so it can be opened while the
+    # board is still empty. It is pinned with ?run= and therefore remains
+    # correct when other run/auto invocations use the same singleton daemon.
+    try:
+        from ouroboros.mcp.tools._dashboard import resolve_dashboard_run_url
+
+        dashboard_url = await resolve_dashboard_run_url(execution_id, event_store)
+    except Exception:  # noqa: BLE001 - observability must never block execution
+        dashboard_url = None
+    if dashboard_url:
+        print_info(f"Live Dashboard: {dashboard_url}")
+
     # Execute
     try:
         if resume_session:
@@ -896,7 +896,8 @@ def workflow(
         typer.Option(
             "--runtime",
             help=(
-                "Agent runtime backend for orchestrator mode (claude, codex, "
+                "Agent runtime backend for orchestrator mode (claude, claude-sdk, "
+                "claude-cli, codex, "
                 "opencode, hermes, gemini, copilot, goose, kiro, pi, gjc, "
                 "antigravity, grok, or zcode)."
             ),
@@ -978,6 +979,11 @@ def workflow(
         # Skip ACs already satisfied by the working tree
         ouroboros run seed.yaml --skip-completed docs/completed.yaml
     """
+    # Apply the saved logging.level before the orchestrator is imported: its
+    # module-level get_logger() auto-configures logging at the default level,
+    # and whichever runs first wins.
+    configure_cli_logging(debug=debug)
+
     # Validate MCP config requires orchestrator mode
     if mcp_config and not orchestrator and not resume_session:
         print_warning("--mcp-config requires --orchestrator flag. Enabling orchestrator mode.")
@@ -1000,7 +1006,7 @@ def workflow(
                     debug,
                     parallel=not sequential,
                     no_qa=no_qa,
-                    runtime_backend=runtime.value if runtime else None,
+                    runtime_backend=public_runtime_backend(runtime.value if runtime else None),
                     max_decomposition_depth=max_decomposition_depth,
                     skip_completed=skip_completed,
                     project_dir=project_dir,

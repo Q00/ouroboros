@@ -1,9 +1,9 @@
 ---
-name: config
+name: ouroboros-config
 description: "Open or drive the Ouroboros settings GUI (browser, TUI, or conversational fallback)"
 ---
 
-# /ouroboros:config
+# /ouroboros:ouroboros-config
 
 Settings for `~/.ouroboros/config.yaml`: per-stage runtime/model selects,
 global runtime + LLM backend, install badges for missing CLIs, and
@@ -13,7 +13,7 @@ env-override warnings.
 
 ```
 ooo config
-/ouroboros:config
+/ouroboros:ouroboros-config
 ```
 
 **Trigger keywords:** "ooo config", "open settings", "configure ouroboros", "change model", "change agent"
@@ -31,7 +31,7 @@ question: **can the user open a browser pointed at this machine?**
    if command -v ouroboros >/dev/null 2>&1; then
      ouroboros config
    else
-     uvx --from 'ouroboros-ai[tui]' ouroboros config
+     uvx --python '>=3.12' --from 'ouroboros-ai[tui]' ouroboros config
    fi
    ```
 

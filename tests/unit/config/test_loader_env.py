@@ -487,6 +487,50 @@ def test_untrusted_env_cannot_redirect_backend_config_home(
     assert key not in os.environ
 
 
+@pytest.mark.parametrize(
+    "key",
+    [
+        "UV_INDEX",
+        "UV_DEFAULT_INDEX",
+        "UV_CONFIG_FILE",
+        "UV_INDEX_CORP_USERNAME",
+        "PIP_INDEX_URL",
+        "PIP_EXTRA_INDEX_URL",
+        "PIP_CONFIG_FILE",
+        "PIPX_DEFAULT_PYTHON",
+    ],
+)
+def test_untrusted_env_cannot_configure_package_manager(
+    tmp_path: Path,
+    monkeypatch,
+    key: str,
+) -> None:
+    """A cloned repo cannot redirect the persistent self-update package source."""
+    env_file = tmp_path / ".env"
+    env_file.write_text(f"{key}=https://attacker.invalid/simple\n")
+    monkeypatch.delenv(key, raising=False)
+
+    _load_env_file(env_file, trusted=False)
+
+    assert key not in os.environ
+
+
+@pytest.mark.parametrize("key", ["UV_INDEX", "PIP_INDEX_URL", "PIPX_DEFAULT_PYTHON"])
+def test_trusted_env_may_configure_package_manager(
+    tmp_path: Path,
+    monkeypatch,
+    key: str,
+) -> None:
+    """Real process/home configuration stays available for private installations."""
+    env_file = tmp_path / ".env"
+    env_file.write_text(f"{key}=https://packages.example/simple\n")
+    monkeypatch.delenv(key, raising=False)
+
+    _load_env_file(env_file, trusted=True)
+
+    assert os.environ[key] == "https://packages.example/simple"
+
+
 def test_untrusted_env_cannot_set_mixed_case_path(
     tmp_path: Path,
     monkeypatch,

@@ -2,6 +2,8 @@
 
 import asyncio
 from datetime import UTC, datetime
+import json
+import re
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, patch
@@ -32,7 +34,6 @@ from ouroboros.mcp.server.adapter import (
     _validate_parameter_constraints,
     validate_transport,
 )
-from ouroboros.mcp.tools import job_handlers as job_handlers_module
 from ouroboros.mcp.tools.job_handlers import JobResultHandler, JobWaitHandler
 from ouroboros.mcp.types import (
     ContentType,
@@ -56,6 +57,7 @@ from ouroboros.verification.models import (
     SpecVerificationSummary,
     VerificationTier,
 )
+from ouroboros.verification.verifier import SpecVerifier
 
 
 class _FakeEventStore:
@@ -705,6 +707,364 @@ Parallel Execution Verification Report
         assert summary.drift_score is None
         assert summary.run_verdict == "FAIL"
 
+    @pytest.mark.parametrize(
+        "tier",
+        [VerificationTier.T1_CONSTANT, VerificationTier.T2_STRUCTURAL],
+        ids=["T1", "T2"],
+    )
+    @pytest.mark.parametrize(
+        ("content", "ac_text", "pattern"),
+        [
+            ("  \t\n", "marker.txt MUST be empty", r"\A\Z"),
+            ("header\n\nbody\n", "marker.txt MUST be empty", r"(?m)^$"),
+            ("header\n\nbody\n", "marker.txt MUST be empty", r"^$"),
+            ("content", "marker.txt MUST be empty", r"\A.*\Z"),
+            ("content", "marker.txt MUST be empty", r"\A\w*\Z"),
+            ("content", "marker.txt MUST contain a header", r".*"),
+            ("content", "marker.txt MUST contain a header", r"x?"),
+        ],
+        ids=[
+            "whitespace-is-not-empty",
+            "multiline-blank-line",
+            "line-anchors",
+            "dot-star-pinned",
+            "word-star-pinned",
+            "matches-anywhere",
+            "optional-atom",
+        ],
+    )
+    def test_a_pattern_that_is_not_evidence_cannot_be_approved_through_the_adapter(
+        self, tmp_path: Any, tier: VerificationTier, content: str, ac_text: str, pattern: str
+    ) -> None:
+        """A pattern a file with content can satisfy must not reach formal approval.
+
+        `marker.txt` holds content in every case here, so every one of these is a
+        criterion the project has not met, and each pattern would report a match
+        on it if the verifier admitted the pattern. `.*` and `x?` match anywhere
+        in anything — the original blocker. The rest are the shapes that a guard
+        with an exit for `\\A\\Z` can be talked into admitting: `\\A.*\\Z` and
+        `\\A\\w*\\Z` are pinned to both ends and still swallow a whole file, and
+        `(?m)^$` and `^$` are pinned to the ends of a *line*, which any blank line
+        inside a full file provides.
+
+        The first case is the opposite mistake and belongs at the same boundary:
+        a whitespace-only file is blank and is not empty, `\\A\\Z` says so, and the
+        verdict must survive the trip through the adapter rather than being
+        rounded up to a pass.
+
+        Each of these published `final_approved=True`, `score=1.0`,
+        `final_verdict="pass"` at the adapter for a criterion the project
+        violates or has not met.
+        """
+        (tmp_path / "marker.txt").write_text(content)
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text=ac_text,
+            tier=tier,
+            pattern=pattern,
+            file_hint="marker.txt",
+        )
+        verification = SpecVerifier(project_dir=str(tmp_path)).verify_all(
+            (assertion,), agent_results={0: True}
+        )
+        mechanical = EvaluationSummary(
+            final_approved=True,
+            highest_stage_passed=2,
+            task_results=(
+                TaskResult(
+                    task_index=0,
+                    task_content=ac_text,
+                    status="completed",
+                    completed=True,
+                    source_ac_index=0,
+                    execution_method="legacy_parallel_report",
+                ),
+            ),
+            execution_completion_status="completed",
+            approval_status="approved",
+        )
+
+        summary = _evaluation_summary_from_spec_verification(mechanical, verification)
+
+        assert summary is not None
+        assert summary.ac_results[0].passed is False, f"{ac_text!r} must not be approved"
+        assert summary.ac_results[0].final_verdict != "pass"
+        assert summary.final_approved is False
+        assert summary.score == 0.0
+        assert summary.run_verdict == "FAIL"
+
+    @pytest.mark.parametrize(
+        "tier",
+        [VerificationTier.T1_CONSTANT, VerificationTier.T2_STRUCTURAL],
+        ids=["T1", "T2"],
+    )
+    @pytest.mark.parametrize(
+        ("content", "ac_text", "pattern"),
+        [
+            ("", "Please ensure marker.txt is empty", r"\A\Z"),
+            ("", "Kindly make sure marker.txt is empty", r"\A\Z"),
+            ("", "It is required that marker.txt be empty", r"\A\Z"),
+            ("", "Check that marker.txt is empty", r"\A\Z"),
+            ("aa\n", "marker.txt MUST contain a doubled letter", r"(a)?\1"),
+            ("aa\n", "marker.txt MUST contain a doubled letter", r"(?P<x>a)?(?P=x)"),
+            ("", "Marker.txt must be empty", r"\A\Z"),
+            ("", "MARKER.TXT must be empty", r"\A\Z"),
+            ("", "Please ensure Marker.txt is empty", r"\A\Z"),
+            ("aa\n", "marker.txt MUST contain a doubled letter", r"(a)?(?(1)|a)"),
+            ("aa\n", "marker.txt MUST contain a doubled letter", r"(a?)(?(1)a|)"),
+            ("aa\n", "marker.txt MUST contain a doubled letter", r"(?=())(?(1)a|)"),
+            ("aa\n", "marker.txt MUST contain a doubled letter", r"(?<=())(?(1)a|)"),
+            ("aa\n", "marker.txt MUST contain a doubled letter", r"(?!()x)(?(1)|a)"),
+            ("aa\n", "marker.txt MUST contain a doubled letter", r"(?!x())(?(1)|a)"),
+            ("aa\n", "marker.txt MUST contain a doubled letter", r"(?!x())\1|aa"),
+            ("aa\n", "marker.txt MUST contain a doubled letter", r"(?!)|aa"),
+            ("aa\n", "marker.txt MUST contain a doubled letter", r"aa(?!)|aa"),
+            ("aa\n", "marker.txt MUST contain a doubled letter", r"()(?(1)Impossible|)|aa"),
+            ("aa\n", "marker.txt MUST contain a doubled letter", r"aa|()(?(1)Impossible|)"),
+            ("aa\n", "marker.txt MUST contain a doubled letter", r"(?:()|x)(?(1)a|)"),
+            ("aa\n", "marker.txt MUST contain a doubled letter", r"()(?(1)()|)(?(2)a|)"),
+        ],
+        ids=[
+            "politeness-frame",
+            "politeness-and-periphrasis",
+            "impersonal-obligation",
+            "checking-verb",
+            "numbered-backreference",
+            "named-backreference",
+            "capitalized-mention",
+            "shouted-mention",
+            "capitalized-in-frame",
+            "conditional-on-an-absent-group",
+            "conditional-on-a-present-group",
+            "conditional-on-a-capture-inside-a-lookahead",
+            "conditional-on-a-capture-inside-a-lookbehind",
+            "conditional-on-a-capture-inside-a-failed-negative-lookahead",
+            "conditional-on-a-capture-after-a-consuming-atom",
+            "backreference-to-a-capture-that-did-not-take-part",
+            "branch-that-can-never-be-taken",
+            "branch-that-can-never-be-taken-after-a-literal",
+            "conditional-in-the-first-branch",
+            "conditional-in-the-second-branch",
+            "conditional-after-a-branch-only-one-of-which-can-be-empty",
+            "capture-in-the-arm-the-conditional-selects",
+        ],
+    )
+    def test_a_satisfied_criterion_is_not_converted_into_a_formal_failure(
+        self, tmp_path: Any, tier: VerificationTier, content: str, ac_text: str, pattern: str
+    ) -> None:
+        """Over-rejection is the same blocker seen from the other side.
+
+        Each case here is a project that *meets* its criterion, and each was
+        published as `final_approved=False` / `score=0.0` / `run_verdict="FAIL"`
+        — an authoritative failure manufactured by the guard rather than by the
+        code under test.
+
+        The first four were refused because a word that carries no claim at all
+        was absent from the words known to carry none: `Please ensure marker.txt
+        is empty`, with an empty `marker.txt`, failed on `please`. The last two
+        were refused because every backreference was treated as zero-width, so
+        `(a)?\\1` — which cannot match nothing and does match this file — was
+        called unusable. Three differ from the hint only in the case of the
+        filename, which the mention check ignored and the masking that follows it
+        did not. The last two are conditionals whose arms disagree, refused
+        because the reading required agreement instead of asking whether the
+        group could have taken part. The last two are the same failure made by
+        the interpreter rather than by the reading: from 3.13 the parser folds
+        `(?!)` into a single opcode this walk did not know, so a pattern with an
+        unreachable branch was evidence on 3.12 and an authoritative failure on
+        3.13 and 3.14. The final two were refused for having an alternative at
+        all: every branch was read as a path that may have been skipped, so a
+        capture and the conditional reading it, written side by side in one
+        branch, could no longer see each other. Both directions are driven
+        through the real verifier
+        and the real adapter, because the failure only becomes authoritative at
+        this boundary.
+        """
+        (tmp_path / "marker.txt").write_text(content)
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text=ac_text,
+            tier=tier,
+            pattern=pattern,
+            file_hint="marker.txt",
+        )
+        verification = SpecVerifier(project_dir=str(tmp_path)).verify_all(
+            (assertion,), agent_results={0: True}
+        )
+        mechanical = EvaluationSummary(
+            final_approved=True,
+            highest_stage_passed=2,
+            task_results=(
+                TaskResult(
+                    task_index=0,
+                    task_content=ac_text,
+                    status="completed",
+                    completed=True,
+                    source_ac_index=0,
+                    execution_method="legacy_parallel_report",
+                ),
+            ),
+            execution_completion_status="completed",
+            approval_status="approved",
+        )
+
+        summary = _evaluation_summary_from_spec_verification(mechanical, verification)
+
+        assert summary is not None
+        assert summary.ac_results[0].passed is True, f"{ac_text!r} must not be failed"
+        assert summary.ac_results[0].final_verdict == "pass"
+        assert summary.final_approved is True
+        assert summary.score == 1.0
+        assert summary.run_verdict != "FAIL"
+
+    @pytest.mark.parametrize(
+        "tier",
+        [VerificationTier.T1_CONSTANT, VerificationTier.T2_STRUCTURAL],
+        ids=["T1", "T2"],
+    )
+    @pytest.mark.parametrize(
+        "pattern",
+        [
+            r"(?!(a)?(?(1)|c))",
+            r"(?!(a)?(?(1)|x)b)",
+            "(?!" + "(" * 45 + "x" + ")" * 45 + ")",
+            r"(?!\b)",
+            r"(?<!\b)",
+            r"(?!()(?(1)a|))",
+            r"(?!(?!(a?)(?(1)|a)))",
+        ],
+        ids=[
+            "negated-conditional",
+            "negated-conditional-with-tail",
+            "negated-past-depth-limit",
+            "negated-boundary",
+            "negated-lookbehind-boundary",
+            "negated-conditional-on-a-capture-beside-it",
+            "twice-negated-conditional-on-a-nullable-capture",
+        ],
+    )
+    def test_a_negated_guess_cannot_be_approved_through_the_adapter(
+        self, tmp_path: Any, tier: VerificationTier, pattern: str
+    ) -> None:
+        """A pattern the analyzer did not understand must not reach formal approval.
+
+        Each of these matches every file, so it verifies whatever it is pointed
+        at — the original defect. Each got there through a negation: the reading
+        sends its doubt to the side that is safe when the answer stands alone,
+        `(?!…)` flips which side that is, and the guess came back out as
+        confidence that the pattern discriminates. Published here as
+        `final_approved=True`, `score=1.0`, `run_verdict="PASS"` for an AC the
+        file does not satisfy.
+
+        The last two arrive by a narrower road: the negation was also declaring
+        the captures written inside its own body absent *while that body was
+        still being read*, so a conditional standing beside such a capture took
+        the arm the runtime never takes. The body is an attempt like any other,
+        and what it captured is real to everything inside it.
+        """
+        (tmp_path / "marker.txt").write_text("hello\n")
+        ac_text = "marker.txt MUST declare a CameraProvider"
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text=ac_text,
+            tier=tier,
+            pattern=pattern,
+            file_hint="marker.txt",
+        )
+        verification = SpecVerifier(project_dir=str(tmp_path)).verify_all(
+            (assertion,), agent_results={0: True}
+        )
+        mechanical = EvaluationSummary(
+            final_approved=True,
+            highest_stage_passed=2,
+            task_results=(
+                TaskResult(
+                    task_index=0,
+                    task_content=ac_text,
+                    status="completed",
+                    completed=True,
+                    source_ac_index=0,
+                    execution_method="legacy_parallel_report",
+                ),
+            ),
+            execution_completion_status="completed",
+            approval_status="approved",
+        )
+
+        summary = _evaluation_summary_from_spec_verification(mechanical, verification)
+
+        assert summary is not None
+        assert summary.ac_results[0].passed is False, f"{pattern!r} must not be approved"
+        assert summary.ac_results[0].final_verdict != "pass"
+        assert summary.final_approved is False
+        assert summary.score == 0.0
+        assert summary.run_verdict == "FAIL"
+
+    @pytest.mark.parametrize(
+        "tier",
+        [VerificationTier.T1_CONSTANT, VerificationTier.T2_STRUCTURAL],
+        ids=["T1", "T2"],
+    )
+    @pytest.mark.parametrize(
+        "pattern",
+        [r"\B", r"(?!\B)", r"(?<!\B)", r"(?=\B)"],
+        ids=["non-boundary", "negated", "negated-lookbehind", "asserted"],
+    )
+    def test_a_non_boundary_reaches_the_formal_verdict_this_interpreter_justifies(
+        self, tmp_path: Any, tier: VerificationTier, pattern: str
+    ) -> None:
+        """Whether `\\B` holds on an empty subject changed in CPython 3.14.
+
+        Written into the anchor table as a constant, it was right on the
+        interpreter it was written on and wrong on 3.12, where `(?!\\B)` matches
+        every file: an unrelated `marker.txt` was published here as
+        `final_approved=True`, `score=1.0`, `run_verdict="PASS"` for a
+        `CameraProvider` that does not exist. The table now asks the engine, so
+        the assertion is that the formal verdict follows what this interpreter
+        actually does — a pattern that matches nothing at all is refused and
+        fails, one that discriminates is approved — and it pins every version CI
+        runs without naming one.
+        """
+        matches_nothing = re.search(pattern, "") is not None
+        (tmp_path / "marker.txt").write_text("hello\n")
+        ac_text = "marker.txt MUST declare a CameraProvider"
+        assertion = SpecAssertion(
+            ac_index=0,
+            ac_text=ac_text,
+            tier=tier,
+            pattern=pattern,
+            file_hint="marker.txt",
+        )
+        verification = SpecVerifier(project_dir=str(tmp_path)).verify_all(
+            (assertion,), agent_results={0: True}
+        )
+        mechanical = EvaluationSummary(
+            final_approved=True,
+            highest_stage_passed=2,
+            task_results=(
+                TaskResult(
+                    task_index=0,
+                    task_content=ac_text,
+                    status="completed",
+                    completed=True,
+                    source_ac_index=0,
+                    execution_method="legacy_parallel_report",
+                ),
+            ),
+            execution_completion_status="completed",
+            approval_status="approved",
+        )
+
+        summary = _evaluation_summary_from_spec_verification(mechanical, verification)
+
+        assert summary is not None
+        assert summary.ac_results[0].passed is not matches_nothing, (
+            f"{pattern!r} matches the empty string here: {matches_nothing}"
+        )
+        assert summary.final_approved is not matches_nothing
+        assert summary.score == (0.0 if matches_nothing else 1.0)
+        assert (summary.run_verdict == "FAIL") is matches_nothing
+
     def test_spec_verification_rejects_partial_ac_coverage(self) -> None:
         """A subset of verifier reports must not approve unverified ACs."""
         mechanical = EvaluationSummary(
@@ -939,11 +1299,10 @@ class TestMCPServerAdapterTools:
         finally:
             await store.close()
 
-    async def test_call_tool_job_wait_timeout_then_job_result_recovers_terminal_snapshot(
-        self, tmp_path, monkeypatch
+    async def test_call_tool_job_wait_delayed_zero_snapshot_then_result_recovers_terminal(
+        self, tmp_path
     ) -> None:
-        """A bounded wait response can be followed by adapter-routed terminal result fetch."""
-        monkeypatch.setattr(job_handlers_module, "_JOB_WAIT_RESPONSE_GRACE_SECONDS", 0.01)
+        """A delayed zero-time snapshot still composes with a later terminal result."""
         store = EventStore(f"sqlite+aiosqlite:///{tmp_path / 'jobs.db'}")
         await store.initialize()
         try:
@@ -986,7 +1345,7 @@ class TestMCPServerAdapterTools:
                     assert job_id == running.job_id
                     assert cursor == 4
                     assert timeout_seconds == 0
-                    await asyncio.sleep(1)
+                    await asyncio.sleep(1.05)
                     return running, False
 
             manager = RecoveringJobManager()
@@ -1002,7 +1361,9 @@ class TestMCPServerAdapterTools:
             result = await adapter.call_tool("ouroboros_job_result", {"job_id": running.job_id})
 
             assert wait_result.is_ok
-            assert wait_result.value.meta["wait_timed_out"] is True
+            assert "wait_timed_out" not in wait_result.value.meta
+            assert wait_result.value.meta["lifecycle_status"] == "running"
+            assert wait_result.value.meta["cursor"] == 4
             assert wait_result.value.meta["result_available"] is False
             assert result.is_ok
             assert result.value.text_content == "terminal result"
@@ -2278,7 +2639,11 @@ class TestCreateOuroborosServerOpenCodeMode:
         for name in gated_handlers:
             assert captured_modes.get(name), f"{name} was not constructed"
             assert all(backend == "opencode" for backend, _mode in captured_modes[name])
-            assert all(mode == "plugin" for _backend, mode in captured_modes[name])
+            modes = {mode for _backend, mode in captured_modes[name]}
+            if name in {"ouroboros_evolve_step", "ouroboros_start_ralph"}:
+                assert modes == {"plugin", None}
+            else:
+                assert modes == {"plugin"}
 
 
 class TestCreateOuroborosServerBrownfieldStore:
@@ -2570,3 +2935,110 @@ def test_composition_root_builds_the_registry_at_its_final_directory(tmp_path) -
 
     assert handler.fanout_registry is not None
     assert handler.fanout_registry.directory == tmp_path / "fanout"
+
+
+@pytest.mark.asyncio
+async def test_production_fanout_returns_only_disposable_envelope(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Replay is input-exact while every terminal child body stays artifact-only."""
+    from ouroboros.core.disposable_memory import DisposableResultEnvelope
+    from ouroboros.mcp.server import adapter as adapter_module
+    from ouroboros.mcp.tools import fanout_handler
+    from ouroboros.mcp.tools.fanout import FANOUT_KIND_QUESTION_ADVISORY
+
+    launcher = tmp_path / "launcher"
+    project = tmp_path / "runtime-project"
+    launcher.mkdir()
+    project.mkdir()
+    monkeypatch.chdir(launcher)
+    event_store = EventStore(f"sqlite+aiosqlite:///{project / 'events.db'}")
+    server = adapter_module.create_ouroboros_server(
+        name="fanout-disposable-probe",
+        event_store=event_store,
+        state_dir=project / "state",
+        project_dir=project,
+    )
+    handler = server._tool_handlers["ouroboros_submit_fanout_results"]
+    fetch_handler = server._tool_handlers["ouroboros_fetch_artifact"]
+    assert handler.disposable_memory is not None
+    assert handler.disposable_memory.artifact_store.root == (
+        project.resolve() / ".ouroboros" / "artifacts"
+    )
+    registry = handler.fanout_registry
+    assert registry is not None
+    fanout_id = registry.register(
+        kind=FANOUT_KIND_QUESTION_ADVISORY,
+        session_id="session-disposable",
+        correlation_key="context.lane_id",
+        expected_keys=["code_context"],
+        synthesizer_input={"lane_ids": ["code_context"]},
+        required_keys=["code_context"],
+    )
+    assert fanout_id is not None
+    marker = "large-child-body:" + ("x" * 900_000)
+    arguments = {
+        "session_id": "session-disposable",
+        "fanout_id": fanout_id,
+        "correlation_key": "context.lane_id",
+        "results": [{"key": "code_context", "content": marker}],
+    }
+    synthesis_calls = 0
+    original_synthesize = fanout_handler.synthesize_fanout_results
+
+    def tracked_synthesize(prepared):
+        nonlocal synthesis_calls
+        synthesis_calls += 1
+        return original_synthesize(prepared)
+
+    monkeypatch.setattr(fanout_handler, "synthesize_fanout_results", tracked_synthesize)
+    try:
+        first = await handler.handle(arguments)
+        second = await handler.handle(arguments)
+        assert first.is_ok and second.is_ok
+        first_result = first.unwrap()
+        second_result = second.unwrap()
+        envelope = DisposableResultEnvelope.model_validate(first_result.meta)
+
+        assert second_result.meta == first_result.meta
+        assert synthesis_calls == 1
+        assert len(json.dumps(first_result.meta).encode("utf-8")) < 4 * 1024
+        assert marker not in first_result.content[0].text
+        assert marker not in json.dumps(first_result.meta)
+
+        fetched = await fetch_handler.handle({"contract_id": envelope.contract_id})
+        assert fetched.is_ok
+        fetched_body = fetched.unwrap().meta["body"]
+        assert marker in json.dumps(fetched_body)
+        assert fetched_body["status"] == "complete"
+        events = await event_store.replay("contract", envelope.contract_id)
+        assert len(events) == 1
+        assert marker not in json.dumps(events[0].data)
+
+        changed_marker = "changed-child-body:" + ("y" * 900_000)
+        changed = await handler.handle(
+            {
+                **arguments,
+                "results": [{"key": "code_context", "content": changed_marker}],
+            }
+        )
+        assert changed.is_ok
+        changed_result = changed.unwrap()
+        changed_envelope = DisposableResultEnvelope.model_validate(changed_result.meta)
+
+        assert changed_envelope.contract_id != envelope.contract_id
+        assert changed_envelope.artifact_ref != envelope.artifact_ref
+        assert synthesis_calls == 2
+        assert len(json.dumps(changed_result.meta).encode("utf-8")) < 4 * 1024
+        assert changed_marker not in changed_result.content[0].text
+        assert changed_marker not in json.dumps(changed_result.meta)
+
+        changed_fetched = handler.disposable_memory.fetch(changed_envelope.contract_id)
+        assert changed_marker in json.dumps(changed_fetched.body)
+        assert marker not in json.dumps(changed_fetched.body)
+        assert marker in json.dumps(handler.disposable_memory.fetch(envelope.contract_id).body)
+        changed_events = await event_store.replay("contract", changed_envelope.contract_id)
+        assert len(changed_events) == 1
+        assert changed_marker not in json.dumps(changed_events[0].data)
+    finally:
+        await event_store.close()

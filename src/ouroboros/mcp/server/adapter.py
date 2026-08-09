@@ -1555,10 +1555,12 @@ def create_ouroboros_server(
     event_store: Any | None = None,
     brownfield_store: Any | None = None,
     state_dir: Any | None = None,
+    project_dir: Any | None = None,
     runtime_backend: str | None = None,
     llm_backend: str | None = None,
     opencode_mode: str | None = None,
     mcp_bridge: Any | None = None,
+    runtime_adapter: Any | None = None,
     durable_jobs: bool = True,
     forced_inline_job_id: str | None = None,
 ) -> MCPServerAdapter:
@@ -1583,9 +1585,9 @@ def create_ouroboros_server(
         event_store: Optional EventStore instance. If not provided, creates default.
         brownfield_store: Optional BrownfieldStore instance for shared brownfield
             MCP access. If not provided, handlers create their own store.
-        state_dir: Optional pathlib.Path for interview state directory.
-                   If not provided, uses ``get_config_dir() / "data"``
-                   (typically ``~/.ouroboros/data``).
+        state_dir: Optional pathlib.Path for interview state directory. Defaults to
+            ``get_config_dir() / "data"`` (typically ``~/.ouroboros/data``).
+        project_dir: Effective project workspace; defaults to the safe launcher CWD.
         runtime_backend: Optional orchestrator runtime backend override.
         llm_backend: Optional LLM-only backend override.
         opencode_mode: Optional OpenCode integration mode (``"plugin"`` or
@@ -1593,6 +1595,9 @@ def create_ouroboros_server(
             ``orchestrator.opencode_mode`` in the config file. Controls
             whether ``_subagent`` envelopes are emitted (plugin) or handlers
             run in-process (subprocess / non-opencode runtimes).
+        runtime_adapter: Optional already-resolved execution runtime. Embedded
+            builtin interceptors pass their owner here so this composition
+            root does not recursively create the same runtime.
         durable_jobs: When true, Start* background work is owned by detached
             worker processes so it survives MCP/client turn shutdown.
         forced_inline_job_id: Internal one-shot recursion boundary used by a
@@ -1659,12 +1664,13 @@ def create_ouroboros_server(
         StartEvolveStepHandler,
         StartExecuteSeedHandler,
         StartRalphHandler,
-        SubmitFanoutResultsHandler,
+        create_fanout_handlers,
     )
     from ouroboros.mcp.tools.fanout import FanoutRegistry
     from ouroboros.mcp.tools.pm_handler import PMInterviewHandler
     from ouroboros.mcp.tools.qa import QAHandler
     from ouroboros.mcp.tools.registry import ToolRegistry
+    from ouroboros.mcp.tools.seed_handoff import SeedHandoffRegistry
     from ouroboros.mcp.tools.synapse_handler import SynapseSignalHandler, SynapseTargetsHandler
     from ouroboros.orchestrator import create_agent_runtime, resolve_agent_runtime_backend
     from ouroboros.orchestrator.runner import (
@@ -1743,17 +1749,21 @@ def create_ouroboros_server(
     # Resolve a safe working directory once so all consumers agree.
     # When the MCP server is spawned with cwd=/, Path.cwd() is unusable as a
     # project root, so _safe_cwd() falls back to $HOME.
-    effective_cwd = _safe_cwd()
-
-    # Materialize the default runtime once at server creation so backend wiring
-    # is validated up front and composition-root tests can assert the selected
-    # runtime backend without waiting for a tool invocation.
-    default_execute_runtime = create_agent_runtime(
-        backend=execute_runtime_backend,
-        model=None,
-        cwd=effective_cwd,
-        llm_backend=evaluate_llm_backend,
+    effective_cwd = Path(project_dir).expanduser().resolve() if project_dir else _safe_cwd()
+    # Materialize the default runtime once so composition validates backend wiring.
+    default_execute_runtime = runtime_adapter
+    runtime_adapter_backend = (
+        resolve_agent_runtime_backend(default_execute_runtime.runtime_backend)
+        if default_execute_runtime is not None
+        else None
     )
+    if default_execute_runtime is None or runtime_adapter_backend != execute_runtime_backend:
+        default_execute_runtime = create_agent_runtime(
+            backend=execute_runtime_backend,
+            model=None,
+            cwd=effective_cwd,
+            llm_backend=evaluate_llm_backend,
+        )
 
     # Create shared LLM adapter for interview/seed paths.
     # Evaluation constructs its own adapter with higher max_turns — see
@@ -1934,6 +1944,7 @@ def create_ouroboros_server(
             mcp_tool_prefix=_evo_mcp_prefix,
             debug=False,
             enable_decomposition=True,
+            session_signal_hub=session_signal_hub,
         )
         return await evolution_runner.execute_seed(
             seed=seed,
@@ -2254,6 +2265,11 @@ def create_ouroboros_server(
     # Create tool registry for dependency injection
     registry = ToolRegistry()
 
+    # The raw Seed remains parent-owned across plugin execution/evaluation.
+    # Both public execute surfaces and StartEvaluate must share this exact
+    # process-local vault; the opaque handle is useless in any other registry.
+    seed_handoff_registry = SeedHandoffRegistry()
+
     # Create and register tool handlers with injected dependencies
     execute_seed = ExecuteSeedHandler(
         event_store=event_store,
@@ -2262,12 +2278,13 @@ def create_ouroboros_server(
         opencode_mode=opencode_mode,
         llm_backend=evaluate_llm_backend,
         session_signal_hub=session_signal_hub,
+        seed_handoff_registry=seed_handoff_registry,
     )
     synapse_signal = SynapseSignalHandler(
         SessionSignalMailbox(
             event_store=event_store,
             target_resolver=session_signal_target_resolver,
-            delivery_queue=session_signal_hub,
+            delivery_queue=None,  # Detached worker imports at its safe boundary.
         )
     )
     evolve_step = EvolveStepHandler(
@@ -2281,13 +2298,6 @@ def create_ouroboros_server(
         mcp_bridge.tool_prefix
         if mcp_bridge is not None and hasattr(mcp_bridge, "tool_prefix")
         else ""
-    )
-    start_execute_seed = StartExecuteSeedHandler(
-        execute_handler=execute_seed,
-        event_store=event_store,
-        job_manager=job_manager,
-        agent_runtime_backend=execute_runtime_backend,
-        opencode_mode=opencode_mode,
     )
 
     def build_ralph_handler(
@@ -2309,6 +2319,47 @@ def create_ouroboros_server(
         job_manager=job_manager,
         agent_runtime_backend=execute_runtime_backend,
         opencode_mode=opencode_mode,
+    )
+    # Automatic convergence is parent-owned even in passive plugin mode. Its
+    # private Ralph surface must therefore enqueue a real pollable job and use
+    # an evolve handler that does not emit another plugin delegation envelope.
+    parent_evolve_step = EvolveStepHandler(
+        evolutionary_loop=evolutionary_loop,
+        event_store=event_store,
+        agent_runtime_backend=execute_runtime_backend,
+        opencode_mode=None,
+    )
+    parent_start_ralph_handler = StartRalphHandler(
+        evolve_handler=parent_evolve_step,
+        event_store=event_store,
+        job_manager=job_manager,
+        agent_runtime_backend=execute_runtime_backend,
+        opencode_mode=None,
+    )
+    evaluate_handler = EvaluateHandler(
+        event_store=event_store,
+        llm_backend=evaluate_llm_backend,
+        agent_runtime_backend=evaluate_runtime_backend,
+        opencode_mode=opencode_mode,
+    )
+    start_evaluate_handler = StartEvaluateHandler(
+        evaluate_handler=evaluate_handler,
+        event_store=event_store,
+        job_manager=job_manager,
+        llm_backend=evaluate_llm_backend,
+        agent_runtime_backend=evaluate_runtime_backend,
+        opencode_mode=opencode_mode,
+        start_ralph_handler=parent_start_ralph_handler,
+        seed_handoff_registry=seed_handoff_registry,
+    )
+    start_execute_seed = StartExecuteSeedHandler(
+        execute_handler=execute_seed,
+        event_store=event_store,
+        job_manager=job_manager,
+        agent_runtime_backend=execute_runtime_backend,
+        opencode_mode=opencode_mode,
+        start_evaluate_handler=start_evaluate_handler,
+        seed_handoff_registry=seed_handoff_registry,
     )
     # ONE registry, shared by every producer and by the re-entry tool. A fan-out
     # registered by the interview handler is redeemed through
@@ -2438,25 +2489,14 @@ def create_ouroboros_server(
             opencode_mode=opencode_mode,
         ),
         BrownfieldHandler(_store=brownfield_store),
-        EvaluateHandler(
-            event_store=event_store,
-            llm_backend=evaluate_llm_backend,
-            agent_runtime_backend=evaluate_runtime_backend,
-            opencode_mode=opencode_mode,
-        ),
-        StartEvaluateHandler(
-            event_store=event_store,
-            job_manager=job_manager,
-            llm_backend=evaluate_llm_backend,
-            agent_runtime_backend=evaluate_runtime_backend,
-            opencode_mode=opencode_mode,
-        ),
+        evaluate_handler,
+        start_evaluate_handler,
         LateralThinkHandler(
             agent_runtime_backend=reflect_runtime_backend,
             opencode_mode=opencode_mode,
             fanout_registry=fanout_registry,
         ),
-        SubmitFanoutResultsHandler(fanout_registry=fanout_registry),
+        *create_fanout_handlers(fanout_registry, effective_cwd, event_store),
         evolve_step,
         StartEvolveStepHandler(
             evolve_handler=evolve_step,

@@ -26,10 +26,12 @@ from ouroboros.orchestrator.execution_authority import (
     request_process_local_cancellation,
 )
 from ouroboros.orchestrator.heartbeat import (
-    current_process_identity,
     is_holder_alive,
     is_owned_by_current_process,
-    is_process_identity_alive,
+)
+from ouroboros.orchestrator.persisted_process_identity import (
+    current_persisted_process_owner,  # noqa: F401 - compatibility patch seam
+    persisted_process_owner_alive,
 )
 from ouroboros.orchestrator.runner import clear_cancellation, request_cancellation
 from ouroboros.orchestrator.session import (
@@ -184,24 +186,6 @@ def _drain_interrupted_data() -> dict[str, Any]:
 
 logger = logging.getLogger(__name__)
 log = structlog.get_logger(__name__)
-
-
-def _read_owner_identity(created_data: dict[str, Any]) -> tuple[int | None, float | None]:
-    """Extract the recorded owning-process identity from a job-created event.
-
-    Returns ``(None, None)`` for jobs created before owner identity was
-    recorded, which the reconciler treats conservatively (never reconciled on
-    liveness grounds — we cannot prove the owner is dead).
-    """
-    pid_raw = created_data.get("owner_pid")
-    start_raw = created_data.get("owner_start_time")
-    pid = pid_raw if isinstance(pid_raw, int) and not isinstance(pid_raw, bool) else None
-    start = (
-        float(start_raw)
-        if isinstance(start_raw, (int, float)) and not isinstance(start_raw, bool)
-        else None
-    )
-    return pid, start
 
 
 def _consume_task_result(task: asyncio.Task[Any]) -> None:
@@ -559,6 +543,12 @@ class JobManager:
         self._forced_inline_allocations.discard(job_id)
         self._known_job_ids.discard(job_id)
 
+    def settle_external_job_acceptance(self, job_id: str) -> None:
+        """Convert a detached reservation into a known externally owned job."""
+        self._reserved_job_ids.discard(job_id)
+        self._forced_inline_allocations.discard(job_id)
+        self._known_job_ids.add(job_id)
+
     async def start_job(
         self,
         *,
@@ -569,67 +559,16 @@ class JobManager:
         job_id: str | None = None,
     ) -> JobSnapshot:
         """Create and start a new background job."""
-        await self._ensure_initialized()
+        from ouroboros.mcp.job_start import start_managed_job
 
-        if job_id is None:
-            job_id = await self.allocate_job_id()
-        elif job_id not in self._reserved_job_ids:
-            if job_id in self._known_job_ids or await self._job_exists(job_id):
-                raise ValueError(f"Job already exists: {job_id}")
-            self._known_job_ids.add(job_id)
-        self._reserved_job_ids.discard(job_id)
-        job_links = links or JobLinks()
-
-        owner_pid, owner_start_time = current_process_identity()
-        await self._append_event(
-            "mcp.job.created",
-            job_id,
-            {
-                "job_type": job_type,
-                "status": JobStatus.QUEUED.value,
-                "message": initial_message,
-                "links": {
-                    "session_id": job_links.session_id,
-                    "execution_id": job_links.execution_id,
-                    "lineage_id": job_links.lineage_id,
-                    "preserve_runner_result": job_links.preserve_runner_result,
-                },
-                # Owning-process identity for authoritative zombie reconciliation:
-                # if this process dies before writing a terminal event, a later
-                # reader can prove the job can no longer make progress.
-                "owner_pid": owner_pid,
-                "owner_start_time": owner_start_time,
-            },
+        return await start_managed_job(
+            self,
+            job_type=job_type,
+            initial_message=initial_message,
+            runner=runner,
+            links=links,
+            job_id=job_id,
         )
-
-        # Normalise ``runner`` to a Task so ``_run_job`` can rely on Task
-        # semantics (cancellation, ``done()``). Coroutines are wrapped via
-        # ``create_task``; pre-built Tasks are reused; bare awaitables (e.g.
-        # ``Future``) are wrapped through an inner coroutine so cancellation
-        # and GC remain consistent.
-        if isinstance(runner, asyncio.Task):
-            runner_task = runner
-        elif inspect.iscoroutine(runner):
-            runner_task = asyncio.create_task(runner)
-        else:
-
-            async def _await_runner(_awaitable: Any = runner) -> Any:
-                return await _awaitable
-
-            runner_task = asyncio.create_task(_await_runner())
-        self._runner_tasks[job_id] = runner_task
-        task = asyncio.create_task(self._run_job(job_id, job_type, runner_task))
-        self._tasks[job_id] = task
-        self._monitors[job_id] = asyncio.create_task(self._monitor_job(job_id))
-        # Registered synchronously with the task dicts above: marks THIS manager
-        # instance as the runner owner, so the in-process stranded-job
-        # reconciliation in get_snapshot only ever applies to jobs whose live
-        # tasks this instance owned and released (another instance in the same
-        # process cannot prove task liveness and must never terminalize live
-        # work).
-        self._started_job_ids.add(job_id)
-
-        return await self.get_snapshot(job_id)
 
     async def _job_exists(self, job_id: str) -> bool:
         events, _ = await self._event_store.get_events_after("job", job_id, last_row_id=0)
@@ -2050,16 +1989,14 @@ class JobManager:
             result_payload=result_payload,
             error=error,
         )
-        owner_pid, owner_start_time = _read_owner_identity(created.data)
-        owner_is_dead = self._job_owner_is_dead(owner_pid, owner_start_time)
+        owner_is_dead = self._job_owner_is_dead(created.data)
         snapshot = await self._recover_linked_execution_terminal_snapshot(
             snapshot,
             owner_is_dead=owner_is_dead,
         )
         snapshot = await self._reconcile_orphaned_job_snapshot(
             snapshot,
-            owner_pid=owner_pid,
-            owner_start_time=owner_start_time,
+            owner_data=created.data,
         )
         return await self._reconcile_stranded_started_job_snapshot(snapshot)
 
@@ -2169,26 +2106,22 @@ class JobManager:
 
     def _job_owner_is_dead(
         self,
-        owner_pid: int | None,
-        owner_start_time: float | None,
+        owner_data: Mapping[str, object],
     ) -> bool:
         """Return True only when the recorded owning process is provably gone.
 
         Conservative by design: a missing owner identity (legacy jobs) or a
         still-running owner — including a different live process — returns
         False, so a job is never reconciled away while it might still progress.
-        PID recycling is guarded by the recorded process start time.
+        PID reuse is fenced by versioned Linux identity or legacy epoch time.
         """
-        if owner_pid is None:
-            return False
-        return not is_process_identity_alive(owner_pid, owner_start_time)
+        return persisted_process_owner_alive(owner_data) is False
 
     async def _reconcile_orphaned_job_snapshot(
         self,
         snapshot: JobSnapshot,
         *,
-        owner_pid: int | None,
-        owner_start_time: float | None,
+        owner_data: Mapping[str, object],
     ) -> JobSnapshot:
         """Reconcile a non-terminal job whose owning process is gone.
 
@@ -2208,7 +2141,7 @@ class JobManager:
             or snapshot.job_id in self._runner_tasks
         ):
             return snapshot
-        if not self._job_owner_is_dead(owner_pid, owner_start_time):
+        if not self._job_owner_is_dead(owner_data):
             return snapshot
         # A linked runtime (execute/auto/evaluate) runs in its own session
         # process with a heartbeat lock. If that holder is still alive it — not
@@ -2392,6 +2325,19 @@ class JobManager:
                 self._monitors.get(job_id),
             )
         )
+
+    def has_accepted_job(self, job_id: str) -> bool:
+        """Return whether this manager crossed the local enqueue boundary."""
+        return job_id in self._started_job_ids
+
+    def has_unresolved_job_acceptance(self, job_id: str) -> bool:
+        """Return whether a reserved job was not definitively rejected.
+
+        Detached launch keeps the parent reservation while worker acceptance
+        is pending or externally owned. Definitive launch failures abandon it;
+        local acceptance instead moves the id into ``_started_job_ids``.
+        """
+        return job_id in self._reserved_job_ids or job_id in self._started_job_ids
 
     async def cancel_job(self, job_id: str) -> JobSnapshot:
         """Request cancellation for a running job."""
@@ -2926,6 +2872,8 @@ class JobManager:
             self._monitor_terminalized_jobs.discard(job_id)
             self._drained_job_ids.discard(job_id)
             self._started_job_ids.discard(job_id)
+            self._reserved_job_ids.discard(job_id)
+            self._forced_inline_allocations.discard(job_id)
         return len(expired)
 
     async def _append_event(

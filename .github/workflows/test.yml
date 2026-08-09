@@ -7,6 +7,45 @@ on:
     branches: [main, develop]
 
 jobs:
+  claude-sdk:
+    name: Test Claude SDK (MCP 1)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7.0.1
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v9.0.0
+        with:
+          version: "latest"
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Install isolated Claude SDK profile
+        run: uv sync --python 3.12 --dev --extra claude-sdk
+
+      - name: Verify SDK and MCP 1 contract
+        run: |
+          uv run --python 3.12 --no-sync python - <<'PY'
+          from importlib.metadata import version
+
+          import claude_agent_sdk
+          import mcp
+
+          assert claude_agent_sdk is not None
+          assert mcp is not None
+          assert version("claude-agent-sdk") == "0.2.123"
+          assert version("mcp").split(".", maxsplit=1)[0] == "1"
+          PY
+          uv pip check
+
   test:
     name: Test Python ${{ matrix.python-version }}
     runs-on: ubuntu-latest
@@ -25,7 +64,7 @@ jobs:
           fetch-depth: 0
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v8.3.2
+        uses: astral-sh/setup-uv@v9.0.0
         with:
           version: "latest"
 

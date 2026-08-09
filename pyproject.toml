@@ -1,12 +1,38 @@
 [project]
 name = "ouroboros-ai"
 dynamic = ["version"]
-description = "Specification-first workflow engine for AI coding agents. Works with Claude Code and Codex CLI."
+description = "Specification-first workflow engine for AI coding agents -- works across Claude Code, Codex CLI, OpenCode, Hermes, Gemini, Kiro, Copilot, Pi, Zcode, Goose, GJC, Antigravity, and Grok."
 readme = "README.md"
 authors = [
     { name = "Q00", email = "jqyu.lee@gmail.com" }
 ]
 requires-python = ">=3.12"
+keywords = [
+    "agent-os",
+    "ai-agent",
+    "ai-coding-agent",
+    "claude-code",
+    "cli",
+    "developer-tools",
+    "llm-orchestration",
+    "mcp",
+    "prompt-engineering",
+    "socratic-method",
+    "spec-driven-development",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Software Development :: Build Tools",
+    "Topic :: Software Development :: Code Generators",
+]
 dependencies = [
     "aiosqlite>=0.20.0,<1.0.0",
     "anyio>=4.0.0,<5.0.0",
@@ -29,21 +55,33 @@ dependencies = [
     "typer>=0.12.0,<0.28.0",
 ]
 
+[project.urls]
+Homepage = "https://ouroboros.page/"
+Repository = "https://github.com/Q00/ouroboros"
+"Bug Tracker" = "https://github.com/Q00/ouroboros/issues"
+Sponsor = "https://github.com/sponsors/Q00"
+
 [project.optional-dependencies]
 # Exact-pinned (not ranges) on purpose: a future compromised "latest" must not
 # be auto-pulled on a fresh PyPI install (pipx / uv tool / pip resolve from
 # this metadata, NOT from uv.lock). Motivated by the 2026-03 litellm
 # 1.82.7/1.82.8 supply-chain incident. Updates land via reviewed Dependabot
 # PRs; uv.lock additionally hash-pins the full transitive graph for repo/CI.
+# Claude's default runtime preserves the Agent SDK and its MCP 1.x graph. The
+# MCP 2 server runs in a separate process/profile; these extras must never be
+# selected in one interpreter.
 claude = ["claude-agent-sdk==0.2.123", "anthropic==0.117.0"]
+claude-cli = []
+# Explicit alias for automation and migrations that want to spell out the SDK
+# transport rather than rely on the historical `[claude]` name.
+claude-sdk = ["claude-agent-sdk==0.2.123", "anthropic==0.117.0"]
 copilot = []
 litellm = ["litellm==1.91.0; python_version < '3.14'"]
 dashboard = []
 mcp = ["mcp==2.0.0"]
 tui = ["textual==8.2.8", "textual-serve==1.1.3"]
-# MCP 2.x and claude-agent-sdk currently require incompatible major versions
-# of the `mcp` distribution. Keep the agent runtime and the protocol server in
-# separate processes; setup registers the latter through `uvx ...[mcp]`.
+# `[all]` remains the MCP 1.x application bundle. The MCP 2 server profile is
+# explicit and isolated; `[all,mcp]` is intentionally unsupported.
 all = ["ouroboros-ai[claude,copilot,litellm,tui,dashboard]"]
 
 [project.scripts]
@@ -135,21 +173,23 @@ litellm-test = [
 mcp-test = [
     "mcp==2.0.0",
 ]
-claude-test = [
-    "ouroboros-ai[claude]",
+claude-sdk-test = [
+    "ouroboros-ai[claude-sdk]",
 ]
 
 [tool.uv.dependency-groups]
 litellm-test = { requires-python = ">=3.12,<3.14" }
 
 [tool.uv]
-# The official Claude Agent SDK still embeds MCP 1.x internals. Declaring the
-# incompatibility lets uv lock and test both profiles without pretending they
-# are safe to import into one interpreter.
+# The official Claude Agent SDK still embeds MCP 1.x internals. Declare every
+# SDK spelling incompatible with the MCP 2 profile and test group. The
+# dependency-free `[claude-cli]` profile remains compatible with `[mcp]`.
 conflicts = [
     [{ extra = "claude" }, { extra = "mcp" }],
-    [{ extra = "all" }, { extra = "mcp" }],
     [{ extra = "claude" }, { group = "mcp-test" }],
+    [{ extra = "claude-sdk" }, { extra = "mcp" }],
+    [{ extra = "claude-sdk" }, { group = "mcp-test" }],
+    [{ extra = "all" }, { extra = "mcp" }],
     [{ extra = "all" }, { group = "mcp-test" }],
 ]
 

@@ -1,13 +1,16 @@
 """Runtime capability guards for Ouroboros Synapse."""
 
 from dataclasses import replace
+import sys
 
+from ouroboros.backends import runtime_backend_choices
 from ouroboros.core.session_signal import SessionSignalCapabilities
 from ouroboros.orchestrator.adapter import (
     FULL_CAPABILITIES,
     ClaudeAgentAdapter,
     RuntimeCapabilities,
 )
+from ouroboros.orchestrator.runtime_factory import create_agent_runtime
 
 
 def test_runtime_capabilities_default_synapse_to_unsupported() -> None:
@@ -46,3 +49,20 @@ def test_claude_sdk_declares_after_turn_delivery() -> None:
         background_reply=True,
         after_turn_delivery=True,
     )
+
+
+def test_shipped_runtime_registry_does_not_advertise_redirect_or_replace() -> None:
+    """Adding either direct capability requires revising the public mode contract."""
+    for backend in runtime_backend_choices():
+        runtime = create_agent_runtime(
+            backend=backend,
+            cli_path=sys.executable,
+            cwd="/tmp",
+            permission_mode="bypassPermissions",
+            model="test-model",
+            llm_backend="test-llm",
+        )
+        capabilities = runtime.capabilities.session_signals
+
+        assert capabilities.checkpoint_redirect is False, backend
+        assert not (capabilities.owned_turn_abort and capabilities.replacement_resume), backend

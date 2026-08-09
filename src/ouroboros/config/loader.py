@@ -625,10 +625,10 @@ def get_cli_path() -> str | None:
     Priority:
         1. OUROBOROS_CLI_PATH environment variable
         2. config.yaml orchestrator.cli_path
-        3. None (use SDK default)
+        3. None (let the active Claude runtime resolve its default)
 
     Returns:
-        Path to CLI binary or None to use SDK default.
+        Path to CLI binary or None to use the active runtime default.
     """
     # 1. Check environment variable (highest priority)
     env_path = os.environ.get("OUROBOROS_CLI_PATH", "").strip()
@@ -644,7 +644,7 @@ def get_cli_path() -> str | None:
         # Config doesn't exist or is invalid - fall back to default
         pass
 
-    # 3. Default: None (SDK uses bundled CLI)
+    # 3. Default: None (the selected Claude runtime resolves its own CLI)
     return None
 
 
@@ -655,7 +655,7 @@ def get_agent_runtime_backend() -> str:
         1. OUROBOROS_AGENT_RUNTIME environment variable
         2. OUROBOROS_RUNTIME environment variable
         3. config.yaml orchestrator.runtime_backend
-        4. "claude"
+        4. "claude" (Claude Agent SDK runtime)
 
     Returns:
         Normalized runtime backend name.
@@ -1087,11 +1087,30 @@ def get_max_parallel_workers() -> int:
 
 
 def get_auto_evaluate_enabled() -> bool:
-    """Return whether successful execute_seed runs should enqueue formal evaluation."""
+    """Return whether execute_seed runs should enqueue formal evaluation."""
     try:
         return load_config().execution.auto_evaluate
     except ConfigError:
         return True
+
+
+def get_auto_evolve_enabled() -> bool:
+    """Return whether rejected formal evaluations should enqueue Ralph."""
+
+    try:
+        return load_config().execution.auto_evolve
+    except ConfigError:
+        return True
+
+
+def get_auto_evolve_max_generations() -> int:
+    """Return the bounded generation budget for automatic Ralph chaining."""
+
+    try:
+        value = load_config().execution.auto_evolve_max_generations
+    except ConfigError:
+        return 3
+    return max(1, min(10, value))
 
 
 def get_runtime_profile() -> str | None:
@@ -1702,7 +1721,8 @@ def get_llm_backend_for_stage(
     except ConfigError:
         # Config unreadable: still honor an env-level LLM override and the
         # caller's default agent before the documented get_llm_backend() default.
-        return _explicit_llm_backend_override() or fallback_runtime_backend or get_llm_backend()
+        fallback = _explicit_llm_backend_override() or fallback_runtime_backend or get_llm_backend()
+        return _guard_llm_completion_backend(fallback)
 
     return _guard_llm_completion_backend(resolved)
 
@@ -1774,7 +1794,8 @@ def get_llm_backend_for_role(
     except ConfigError:
         # Config unreadable: still honor an env-level LLM override and the
         # caller's default agent before the documented get_llm_backend() default.
-        return _explicit_llm_backend_override() or fallback_runtime_backend or get_llm_backend()
+        fallback = _explicit_llm_backend_override() or fallback_runtime_backend or get_llm_backend()
+        return _guard_llm_completion_backend(fallback)
 
     return _guard_llm_completion_backend(resolved)
 

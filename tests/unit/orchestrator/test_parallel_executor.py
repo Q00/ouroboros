@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 from dataclasses import replace
 from datetime import UTC, datetime
 import json
@@ -11,6 +12,7 @@ from pathlib import Path
 import shlex
 import subprocess
 import sys
+import textwrap
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -34,7 +36,15 @@ from ouroboros.orchestrator.adapter import (
     RuntimeCapabilities,
     RuntimeHandle,
 )
+from ouroboros.orchestrator.adaptive_concurrency import (
+    MAX_ADAPTIVE_CONCURRENCY_COOLDOWN_SECONDS,
+    AdaptiveConcurrencyController,
+    BackendPressureKind,
+    ConcurrencyObservation,
+    observe_provider_messages,
+)
 from ouroboros.orchestrator.coordinator import CoordinatorReview, FileConflict, LevelCoordinator
+from ouroboros.orchestrator.coordinator_quota import consume_published_coordinator_pause
 from ouroboros.orchestrator.decomposition_limits import MAX_DECOMPOSITION_DEPTH
 from ouroboros.orchestrator.decomposition_policy import (
     BounceCause,
@@ -53,6 +63,9 @@ from ouroboros.orchestrator.evidence.claims import (
     _text_needs_shell_expansion,
 )
 from ouroboros.orchestrator.evidence_schema import EvidenceRecord, ValidationResult
+from ouroboros.orchestrator.execution_authority import (
+    runtime_effect_capabilities_contract,
+)
 from ouroboros.orchestrator.execution_runtime_scope import (
     ExecutionNodeIdentity,
     build_level_coordinator_runtime_scope,
@@ -63,6 +76,7 @@ from ouroboros.orchestrator.leaf_dispatcher import (
     _close_pending_targets,
     _correlated_tool_result_name,
     _pending_bash_filesystem_targets,
+    _stat_fingerprint,
 )
 from ouroboros.orchestrator.level_context import ACContextSummary, LevelContext
 from ouroboros.orchestrator.parallel_executor import (
@@ -70,6 +84,7 @@ from ouroboros.orchestrator.parallel_executor import (
     STALL_TIMEOUT_SECONDS,
     ACExecutionOutcome,
     ACExecutionResult,
+    CoordinatorQuotaPause,
     ParallelACExecutor,
     ParallelExecutionResult,
     StageExecutionOutcome,
@@ -87,7 +102,9 @@ from ouroboros.orchestrator.parallel_executor import (
     render_parallel_verification_report,
 )
 from ouroboros.orchestrator.profile_loader import EvidenceSchema, load_profile
+from ouroboros.orchestrator.recoverable_failure import UsageLimitPauseConsequence
 from ouroboros.orchestrator.verifier import VerifierVerdict
+from ouroboros.persistence.checkpoint import CheckpointStore
 from tests.unit.orchestrator.parallel_executor_test_support import ProcessLocalTestExecutor
 
 
@@ -554,6 +571,7 @@ def test_files_touched_authenticates_every_stable_multi_receiver(
 
     with _BashFilesystemLeaseTracker(task_cwd=str(tmp_path)) as tracker:
         observed_call = tracker.observe(call)
+        assert len(tracker._pending_by_id["multi-receiver"]) == 2
         completed = subprocess.run(  # noqa: S602
             command,
             cwd=tmp_path,
@@ -1012,6 +1030,82 @@ def test_files_touched_rejects_parent_symlink_swap_restored_before_completion(tm
     )
 
 
+def test_capture_rejects_intermediate_workspace_ancestor_swap(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pre-linked external inode cannot survive a task_cwd ancestor swap."""
+    ancestor = tmp_path / "trusted-ancestor"
+    workspace = ancestor / "workspace"
+    workspace.mkdir(parents=True)
+    artifact = workspace / "claimed.py"
+    artifact.write_text("before\n", encoding="utf-8")
+    displaced_ancestor = tmp_path / "displaced-ancestor"
+    outside_ancestor = tmp_path / "outside-ancestor"
+    outside_workspace = outside_ancestor / workspace.name
+    outside_workspace.mkdir(parents=True)
+    outside_artifact = outside_workspace / artifact.name
+    os.link(artifact, outside_artifact)
+    original_open = os.open
+    swapped = False
+    matching_open_count = 0
+    fingerprint_before_swap = None
+
+    def adversarial_open(path, flags, mode=0o777, *, dir_fd=None):
+        nonlocal fingerprint_before_swap, matching_open_count, swapped
+        fd = original_open(path, flags, mode, dir_fd=dir_fd)
+        if dir_fd is not None and os.fspath(path) == ancestor.name:
+            matching_open_count += 1
+            if not swapped and matching_open_count == 2:
+                fingerprint_before_swap = _stat_fingerprint(artifact.lstat())
+                ancestor.rename(displaced_ancestor)
+                ancestor.symlink_to(outside_ancestor, target_is_directory=True)
+                swapped = True
+        return fd
+
+    monkeypatch.setattr(os, "open", adversarial_open)
+    monkeypatch.setattr(os, "supports_dir_fd", {*os.supports_dir_fd, adversarial_open})
+    call = AgentMessage(
+        type="tool",
+        content="Bash: touch claimed.py",
+        tool_name="Bash",
+        data={
+            "tool_input": {"command": "touch claimed.py"},
+            "tool_call_id": "ancestor-swap",
+        },
+    )
+    completion = AgentMessage(
+        type="tool_result",
+        content="command completed with exit code 0",
+        data={
+            "subtype": "tool_result",
+            "exit_code": 0,
+            "tool_call_id": "ancestor-swap",
+        },
+    )
+
+    with _BashFilesystemLeaseTracker(task_cwd=str(workspace)) as tracker:
+        tracker.observe(call)
+        pending = tracker._pending_by_id["ancestor-swap"][0]
+        assert fingerprint_before_swap == pending.pre_fingerprint
+        completed = subprocess.run(  # noqa: S602
+            "touch claimed.py",
+            cwd=workspace,
+            shell=True,
+            check=False,
+        )
+        observed_completion = tracker.observe(completion)
+
+    assert swapped is True
+    assert completed.returncode == 0
+    assert _stat_fingerprint(outside_artifact.lstat()) != fingerprint_before_swap
+    assert "filesystem_effects" not in observed_completion.data
+    assert not _runtime_messages_support_file_claim(
+        "claimed.py",
+        (call, observed_completion),
+        task_cwd=str(workspace),
+    )
+
+
 def test_bash_receiver_lease_cleanup_is_idempotent(tmp_path) -> None:
     """Unmatched/cancelled dispatch cleanup closes every held receiver dirfd."""
     target = tmp_path / "claimed.py"
@@ -1033,6 +1127,198 @@ def test_bash_receiver_lease_cleanup_is_idempotent(tmp_path) -> None:
     for fd in fds:
         with pytest.raises(OSError):
             os.fstat(fd)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="RLIMIT_NOFILE is POSIX-only")
+def test_bash_receiver_fd_budget_preserves_pipe_headroom_under_low_rlimit(tmp_path) -> None:
+    """A wide command abandons capture before it can starve subprocess pipes."""
+    child_script = textwrap.dedent(
+        r"""
+        import os
+        from pathlib import Path
+        import resource
+        import subprocess
+        import sys
+
+        from ouroboros.orchestrator.adapter import AgentMessage
+        from ouroboros.orchestrator.leaf_dispatcher import _BashFilesystemLeaseTracker
+
+        workspace = Path(sys.argv[1])
+        _soft_limit, hard_limit = resource.getrlimit(resource.RLIMIT_NOFILE)
+        limit = 256 if hard_limit == resource.RLIM_INFINITY else min(256, hard_limit)
+        if limit < 128:
+            raise SystemExit(77)
+        resource.setrlimit(resource.RLIMIT_NOFILE, (limit, hard_limit))
+
+        fd_directory = Path("/proc/self/fd")
+        if not fd_directory.exists():
+            fd_directory = Path("/dev/fd")
+        if not fd_directory.exists():
+            raise SystemExit(77)
+
+        def fd_count():
+            return len(os.listdir(fd_directory))
+
+        baseline = fd_count()
+        receivers = [f"claimed_{index}.txt" for index in range(64)]
+        command = "touch " + " ".join(receivers)
+        call = AgentMessage(
+            type="tool",
+            content=f"Bash: {command}",
+            tool_name="Bash",
+            data={"tool_input": {"command": command}, "tool_call_id": "fd-budget"},
+        )
+        completion = AgentMessage(
+            type="tool_result",
+            content="command completed with exit code 0",
+            tool_name="Bash",
+            data={"subtype": "tool_result", "exit_code": 0, "tool_call_id": "fd-budget"},
+        )
+
+        with _BashFilesystemLeaseTracker(task_cwd=str(workspace)) as tracker:
+            tracker.observe(call)
+            assert tracker._pending_by_id["fd-budget"] == ()
+            assert fd_count() < limit // 2
+            completed = subprocess.run(
+                ["/bin/sh", "-c", command],
+                cwd=workspace,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=True,
+            )
+            assert completed.stdout == ""
+            assert completed.stderr == ""
+            observed = tracker.observe(completion)
+            assert "filesystem_effects" not in observed.data
+            probe = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    "import sys; print('stdout-ok'); print('stderr-ok', file=sys.stderr)",
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=True,
+            )
+            assert probe.stdout == "stdout-ok\n"
+            assert probe.stderr == "stderr-ok\n"
+
+        assert fd_count() <= baseline + 1
+        print("fd-budget-ok")
+        """
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-c", child_script, str(tmp_path)],
+        cwd=Path.cwd(),
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    if result.returncode == 77:  # pragma: no cover - constrained host fallback
+        pytest.skip("host cannot provide the isolated RLIMIT_NOFILE regression")
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "fd-budget-ok\n"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="RLIMIT_NOFILE is POSIX-only")
+def test_bash_receiver_fd_budget_is_process_wide_across_trackers(tmp_path) -> None:
+    """Concurrent trackers share headroom and cannot collectively starve pipes."""
+    child_script = textwrap.dedent(
+        r"""
+        import os
+        from pathlib import Path
+        import resource
+        import subprocess
+        import sys
+
+        from ouroboros.orchestrator.adapter import AgentMessage
+        from ouroboros.orchestrator.leaf_dispatcher import _BashFilesystemLeaseTracker
+
+        workspace = Path(sys.argv[1])
+        _soft_limit, hard_limit = resource.getrlimit(resource.RLIMIT_NOFILE)
+        limit = 256 if hard_limit == resource.RLIM_INFINITY else min(256, hard_limit)
+        if limit < 128:
+            raise SystemExit(77)
+        resource.setrlimit(resource.RLIMIT_NOFILE, (limit, hard_limit))
+
+        fd_directory = Path("/proc/self/fd")
+        if not fd_directory.exists():
+            fd_directory = Path("/dev/fd")
+        if not fd_directory.exists():
+            raise SystemExit(77)
+
+        def fd_count():
+            return len(os.listdir(fd_directory))
+
+        baseline = fd_count()
+        trackers = [
+            _BashFilesystemLeaseTracker(task_cwd=str(workspace)) for _index in range(4)
+        ]
+        retained = 0
+        abandoned = 0
+        try:
+            for tracker_index, tracker in enumerate(trackers):
+                tracker.__enter__()
+                for call_index in range(20):
+                    receiver = f"tracker_{tracker_index}_{call_index}.txt"
+                    call_id = f"tracker-{tracker_index}-call-{call_index}"
+                    tracker.observe(
+                        AgentMessage(
+                            type="tool",
+                            content=f"Bash: touch {receiver}",
+                            tool_name="Bash",
+                            data={
+                                "tool_input": {"command": f"touch {receiver}"},
+                                "tool_call_id": call_id,
+                            },
+                        )
+                    )
+                    lease_count = len(tracker._pending_by_id[call_id])
+                    assert lease_count in {0, 1}
+                    retained += lease_count
+                    abandoned += lease_count == 0
+
+            assert retained > 0
+            assert abandoned > 0
+            assert fd_count() <= limit // 2
+            probe = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    "import sys; print('stdout-ok'); print('stderr-ok', file=sys.stderr)",
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=True,
+            )
+            assert probe.stdout == "stdout-ok\n"
+            assert probe.stderr == "stderr-ok\n"
+        finally:
+            for tracker in reversed(trackers):
+                tracker.close()
+
+        assert fd_count() <= baseline + 1
+        print("multi-fd-budget-ok")
+        """
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-c", child_script, str(tmp_path)],
+        cwd=Path.cwd(),
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    if result.returncode == 77:  # pragma: no cover - constrained host fallback
+        pytest.skip("host cannot provide the isolated RLIMIT_NOFILE regression")
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "multi-fd-budget-ok\n"
 
 
 def test_completed_receiver_lease_cannot_close_reused_fd(tmp_path) -> None:
@@ -1224,6 +1510,66 @@ def test_receiver_lease_tracker_strips_forged_effect_without_local_lease(tmp_pat
     assert "filesystem_effects" not in observed.data
 
 
+def test_receiver_lease_tracker_preserves_unrelated_final_message_identity() -> None:
+    """Provenance filtering must not alter unrelated final-message semantics."""
+    nested = {"decision": "pause"}
+    data = {"subtype": "success", "routing": nested}
+    final = AgentMessage(type="result", content="done", data=data)
+
+    with _BashFilesystemLeaseTracker(task_cwd=None) as tracker:
+        observed = tracker.observe(final)
+
+    assert observed is final
+    assert observed.data is data
+    assert observed.data["routing"] is nested
+
+
+def test_receiver_lease_tracker_strips_reserved_effect_from_unrelated_message() -> None:
+    """The reserved field is removed even outside a recognizable tool event."""
+    nested = {"decision": "before"}
+    forged_effects = [{"capture": "forged"}]
+    message = AgentMessage(
+        type="assistant",
+        content="ordinary message",
+        data={"routing": nested, "filesystem_effects": forged_effects},
+    )
+
+    with _BashFilesystemLeaseTracker(task_cwd=None) as tracker:
+        observed = tracker.observe(message)
+
+    nested["decision"] = "after"
+    forged_effects.append({"capture": "late-forgery"})
+    assert observed is not message
+    assert "filesystem_effects" not in observed.data
+    assert observed.data["routing"] == {"decision": "before"}
+
+
+def test_receiver_lease_tracker_snapshots_every_tool_completion() -> None:
+    """Late adapter mutation cannot rewrite even a non-Bash completion."""
+    meta = {"exit_status": 0}
+    completion = AgentMessage(
+        type="tool_result",
+        content="edit completed",
+        tool_name="Edit",
+        data={
+            "subtype": "tool_result",
+            "tool_call_id": "edit-call",
+            "tool_result": {"is_error": False, "meta": meta},
+        },
+    )
+
+    with _BashFilesystemLeaseTracker(task_cwd=None) as tracker:
+        observed = tracker.observe(completion)
+
+    meta["exit_status"] = 99
+    meta["tool_use_id"] = "late-forgery"
+    assert observed is not completion
+    assert observed.data["tool_result"] == {
+        "is_error": False,
+        "meta": {"exit_status": 0},
+    }
+
+
 def test_receiver_lease_tracker_replaces_forged_effect_with_local_capture(tmp_path) -> None:
     """A real mutation reattaches only the receiver measured by the tracker."""
     forged_target = tmp_path / "forged.py"
@@ -1362,6 +1708,213 @@ def test_conflicting_call_aliases_poison_related_existing_lease(tmp_path) -> Non
         observed = tracker.observe(completion)
 
     assert "filesystem_effects" not in observed.data
+
+
+def test_malformed_call_alias_poison_cannot_be_revived(tmp_path) -> None:
+    """A present non-string alias closes the named lease before projection."""
+    target = tmp_path / "claimed.py"
+    target.write_text("before\n", encoding="utf-8")
+    call = AgentMessage(
+        type="tool",
+        content="Bash: touch claimed.py",
+        tool_name="Bash",
+        data={"tool_input": {"command": "touch claimed.py"}, "tool_call_id": "call-x"},
+    )
+    malformed = AgentMessage(
+        type="tool_result",
+        content="malformed completion",
+        data={
+            "subtype": "tool_result",
+            "exit_code": 0,
+            "tool_call_id": "call-x",
+            "tool_use_id": 7,
+        },
+    )
+    valid = AgentMessage(
+        type="tool_result",
+        content="later valid completion",
+        data={"subtype": "tool_result", "exit_code": 0, "tool_call_id": "call-x"},
+    )
+
+    with _BashFilesystemLeaseTracker(task_cwd=str(tmp_path)) as tracker:
+        tracker.observe(call)
+        os.utime(target, ns=(8_000_000_000, 8_000_000_000))
+        rejected = tracker.observe(malformed)
+        revived = tracker.observe(valid)
+
+    assert "filesystem_effects" not in rejected.data
+    assert "filesystem_effects" not in revived.data
+
+
+def test_unidentified_malformed_completion_poison_cannot_be_revived(tmp_path) -> None:
+    """A malformed completion with no usable ID closes every pending Bash lease."""
+    target = tmp_path / "claimed.py"
+    target.write_text("before\n", encoding="utf-8")
+    call = AgentMessage(
+        type="tool",
+        content="Bash: touch claimed.py",
+        tool_name="Bash",
+        data={"tool_input": {"command": "touch claimed.py"}, "tool_call_id": "call-x"},
+    )
+    malformed = AgentMessage(
+        type="tool_result",
+        content="unidentified malformed completion",
+        data={"subtype": "tool_result", "exit_code": 0, "tool_use_id": 7},
+    )
+    valid = AgentMessage(
+        type="tool_result",
+        content="later valid completion",
+        data={"subtype": "tool_result", "exit_code": 0, "tool_call_id": "call-x"},
+    )
+
+    with _BashFilesystemLeaseTracker(task_cwd=str(tmp_path)) as tracker:
+        tracker.observe(call)
+        os.utime(target, ns=(9_000_000_000, 9_000_000_000))
+        rejected = tracker.observe(malformed)
+        revived = tracker.observe(valid)
+
+    assert "filesystem_effects" not in rejected.data
+    assert "filesystem_effects" not in revived.data
+
+
+@pytest.mark.parametrize("completion_tool_name", ("Bash", None))
+def test_orphan_idless_bash_terminal_poisons_all_named_leases(
+    tmp_path,
+    completion_tool_name,
+) -> None:
+    """One unassignable terminal closes, rather than donates, every named lease."""
+    targets = (tmp_path / "first.py", tmp_path / "second.py")
+    for target in targets:
+        target.write_text("before\n", encoding="utf-8")
+    calls = tuple(
+        AgentMessage(
+            type="tool",
+            content=f"Bash: touch {target.name}",
+            tool_name="Bash",
+            data={
+                "tool_input": {"command": f"touch {target.name}"},
+                "tool_call_id": f"named-{index}",
+            },
+        )
+        for index, target in enumerate(targets)
+    )
+    orphan = AgentMessage(
+        type="tool_result",
+        content="unassigned command completed",
+        tool_name=completion_tool_name,
+        data={"subtype": "tool_result", "exit_code": 0},
+    )
+    completions = tuple(
+        AgentMessage(
+            type="tool_result",
+            content="late matching completion",
+            tool_name="Bash",
+            data={
+                "subtype": "tool_result",
+                "exit_code": 0,
+                "tool_call_id": f"named-{index}",
+            },
+        )
+        for index in range(len(targets))
+    )
+
+    with _BashFilesystemLeaseTracker(task_cwd=str(tmp_path)) as tracker:
+        for call in calls:
+            tracker.observe(call)
+        tracker.observe(orphan)
+        for index, target in enumerate(targets, start=11):
+            os.utime(target, ns=(index * 1_000_000_000, index * 1_000_000_000))
+        observed = tuple(tracker.observe(completion) for completion in completions)
+
+    assert all("filesystem_effects" not in completion.data for completion in observed)
+
+
+def test_legitimate_idless_bash_pair_does_not_poison_named_lease(tmp_path) -> None:
+    """A unique id-less Bash start owns its terminal without closing a named peer."""
+    idless_target = tmp_path / "idless.py"
+    named_target = tmp_path / "named.py"
+    idless_target.write_text("before\n", encoding="utf-8")
+    named_target.write_text("before\n", encoding="utf-8")
+    idless_call = AgentMessage(
+        type="tool",
+        content="Bash: touch idless.py",
+        tool_name="Bash",
+        data={"tool_input": {"command": "touch idless.py"}},
+    )
+    named_call = AgentMessage(
+        type="tool",
+        content="Bash: touch named.py",
+        tool_name="Bash",
+        data={
+            "tool_input": {"command": "touch named.py"},
+            "tool_call_id": "named-peer",
+        },
+    )
+    idless_completion = AgentMessage(
+        type="tool_result",
+        content="idless command completed",
+        data={"subtype": "tool_result", "exit_code": 0},
+    )
+    named_completion = AgentMessage(
+        type="tool_result",
+        content="named command completed",
+        tool_name="Bash",
+        data={
+            "subtype": "tool_result",
+            "exit_code": 0,
+            "tool_call_id": "named-peer",
+        },
+    )
+
+    with _BashFilesystemLeaseTracker(task_cwd=str(tmp_path)) as tracker:
+        tracker.observe(idless_call)
+        tracker.observe(named_call)
+        os.utime(idless_target, ns=(13_000_000_000, 13_000_000_000))
+        observed_idless = tracker.observe(idless_completion)
+        os.utime(named_target, ns=(14_000_000_000, 14_000_000_000))
+        observed_named = tracker.observe(named_completion)
+
+    assert observed_idless.data["filesystem_effects"][0]["path"] == "idless.py"
+    assert observed_named.data["filesystem_effects"][0]["path"] == "named.py"
+
+
+def test_unrelated_idless_non_bash_terminal_preserves_named_lease(tmp_path) -> None:
+    """An explicitly other-tool terminal cannot close a named Bash command."""
+    target = tmp_path / "claimed.py"
+    target.write_text("before\n", encoding="utf-8")
+    call = AgentMessage(
+        type="tool",
+        content="Bash: touch claimed.py",
+        tool_name="Bash",
+        data={
+            "tool_input": {"command": "touch claimed.py"},
+            "tool_call_id": "named-bash",
+        },
+    )
+    edit_completion = AgentMessage(
+        type="tool_result",
+        content="Edit completed",
+        tool_name="Edit",
+        data={"subtype": "tool_result", "exit_code": 0},
+    )
+    bash_completion = AgentMessage(
+        type="tool_result",
+        content="Bash completed",
+        tool_name="Bash",
+        data={
+            "subtype": "tool_result",
+            "exit_code": 0,
+            "tool_call_id": "named-bash",
+        },
+    )
+
+    with _BashFilesystemLeaseTracker(task_cwd=str(tmp_path)) as tracker:
+        tracker.observe(call)
+        tracker.observe(edit_completion)
+        os.utime(target, ns=(15_000_000_000, 15_000_000_000))
+        observed = tracker.observe(bash_completion)
+
+    assert observed.data["filesystem_effects"][0]["path"] == "claimed.py"
 
 
 @pytest.mark.parametrize("call_id", (None, "call-1"))
@@ -3018,7 +3571,11 @@ def _make_seed(*acceptance_criteria: str | AcceptanceCriterionSpec) -> Seed:
     )
 
 
-def _make_executor(*, reasoning_effort: str | None = None) -> ParallelACExecutor:
+def _make_executor(
+    *,
+    reasoning_effort: str | None = None,
+    run_verify_commands: bool = True,
+) -> ParallelACExecutor:
     """Create an executor with mocked dependencies and muted event emitters."""
     executor = ProcessLocalTestExecutor(
         adapter=MagicMock(),
@@ -3026,8 +3583,57 @@ def _make_executor(*, reasoning_effort: str | None = None) -> ParallelACExecutor
         console=MagicMock(),
         enable_decomposition=False,
         reasoning_effort=reasoning_effort,
+        run_verify_commands=run_verify_commands,
     )
     executor._coordinator.detect_file_conflicts = MagicMock(return_value=[])
+    executor._event_store.query_events = AsyncMock(return_value=[])
+    executor._emit_workflow_progress = AsyncMock()
+    executor._emit_level_started = AsyncMock()
+    executor._emit_level_completed = AsyncMock()
+    executor._emit_subtask_event = AsyncMock()
+    return executor
+
+
+class _CooldownDriftRuntime:
+    """Runtime seam whose declared capabilities can drift during admission."""
+
+    runtime_backend = "opencode"
+    working_directory = "/tmp/project"
+    permission_mode = "acceptEdits"
+
+    def __init__(self) -> None:
+        self.capabilities = FULL_CAPABILITIES
+        self.calls = 0
+
+    async def execute_task(self, **_kwargs: Any):
+        self.calls += 1
+        yield AgentMessage(
+            type="result",
+            content="[TASK_COMPLETE]",
+            data={"subtype": "success"},
+        )
+
+
+def _make_cooldown_drift_executor(
+    runtime: _CooldownDriftRuntime,
+    controller: AdaptiveConcurrencyController,
+    *,
+    enable_decomposition: bool = False,
+) -> ProcessLocalTestExecutor:
+    """Create a one-slot executor with a deterministic admission controller."""
+
+    executor = ProcessLocalTestExecutor(
+        adapter=runtime,
+        event_store=AsyncMock(),
+        console=MagicMock(),
+        enable_decomposition=enable_decomposition,
+        max_concurrent=1,
+        adaptive_max_concurrent=1,
+        expected_runtime_effect_capabilities=runtime_effect_capabilities_contract(runtime),
+    )
+    # The static policy is identical to the constructor-owned controller; only
+    # deterministic clock and sleep seams differ.
+    executor._adaptive_concurrency = controller
     executor._event_store.query_events = AsyncMock(return_value=[])
     executor._emit_workflow_progress = AsyncMock()
     executor._emit_level_started = AsyncMock()
@@ -6797,6 +7403,233 @@ class TestParallelACExecutor:
         # and ISOLATED_SESSION_REQUIRED (Bash) tools must not collapse
         # a batch to serial execution.
         assert max_active_count == 2
+
+    @pytest.mark.asyncio
+    async def test_batch_adaptive_window_grows_after_sustained_provider_success(self) -> None:
+        """The pre-flight value is an initial estimate, not a permanent cap."""
+
+        seed = _make_seed(*(f"AC {index}" for index in range(6)))
+        executor = ProcessLocalTestExecutor(
+            adapter=MagicMock(),
+            event_store=AsyncMock(),
+            console=MagicMock(),
+            enable_decomposition=False,
+            max_concurrent=1,
+            adaptive_max_concurrent=2,
+        )
+        active_count = 0
+        max_active_count = 0
+
+        async def fake_execute_single_ac(**kwargs: Any) -> ACExecutionResult:
+            nonlocal active_count, max_active_count
+            ac_index = int(kwargs["ac_index"])
+            messages = (
+                AgentMessage(
+                    type="result",
+                    content="done",
+                    data={"subtype": "success"},
+                ),
+            )
+            async with executor._adaptive_concurrency.slot() as permit_epoch:
+                active_count += 1
+                max_active_count = max(max_active_count, active_count)
+                try:
+                    await asyncio.sleep(0)
+                    await asyncio.sleep(0)
+                    await observe_provider_messages(
+                        executor._adaptive_concurrency,
+                        messages,
+                        permit_epoch,
+                        ("sess_adaptive_growth", "exec_adaptive_growth", ac_index),
+                        provider_completed=True,
+                    )
+                finally:
+                    active_count -= 1
+            return ACExecutionResult(
+                ac_index=ac_index,
+                ac_content=str(kwargs["ac_content"]),
+                success=True,
+                messages=messages,
+                final_message="done",
+            )
+
+        with patch.object(executor, "_execute_single_ac", side_effect=fake_execute_single_ac):
+            results = await executor._execute_ac_batch(
+                seed=seed,
+                batch_indices=list(range(6)),
+                session_id="sess_adaptive_growth",
+                execution_id="exec_adaptive_growth",
+                tools=["Read"],
+                tool_catalog=None,
+                system_prompt="test",
+                level_contexts=[],
+                ac_retry_attempts=dict.fromkeys(range(6), 0),
+            )
+
+        assert all(isinstance(result, ACExecutionResult) for result in results)
+        assert executor._adaptive_concurrency.snapshot().current_limit == 2
+        assert max_active_count == 2
+
+    @pytest.mark.asyncio
+    async def test_batch_preserves_completed_result_with_hostile_retry_after(self) -> None:
+        """Provider metadata cannot replace completed work with float overflow."""
+
+        seed = _make_seed("AC hostile cooldown")
+        executor = ProcessLocalTestExecutor(
+            adapter=MagicMock(),
+            event_store=AsyncMock(),
+            console=MagicMock(),
+            enable_decomposition=False,
+            max_concurrent=1,
+        )
+        completed = ACExecutionResult(
+            ac_index=0,
+            ac_content="AC hostile cooldown",
+            success=False,
+            messages=(
+                AgentMessage(
+                    type="result",
+                    content="Interface request concurrency exceeded",
+                    data={
+                        "subtype": "error",
+                        "kind": "concurrency_limit",
+                        "retry_after_seconds": 10**1000,
+                    },
+                ),
+            ),
+            final_message="provider rejected concurrency",
+        )
+
+        async def fake_execute_single_ac(**_kwargs: Any) -> ACExecutionResult:
+            async with executor._adaptive_concurrency.slot() as permit_epoch:
+                await observe_provider_messages(
+                    executor._adaptive_concurrency,
+                    completed.messages,
+                    permit_epoch,
+                    ("sess_hostile_cooldown", "exec_hostile_cooldown", 0),
+                    provider_completed=True,
+                )
+            return completed
+
+        with patch.object(executor, "_execute_single_ac", side_effect=fake_execute_single_ac):
+            results = await executor._execute_ac_batch(
+                seed=seed,
+                batch_indices=[0],
+                session_id="sess_hostile_cooldown",
+                execution_id="exec_hostile_cooldown",
+                tools=["Read"],
+                tool_catalog=None,
+                system_prompt="test",
+                level_contexts=[],
+                ac_retry_attempts={0: 0},
+            )
+
+        assert results == [completed]
+        cooldown = executor._adaptive_concurrency.snapshot().cooldown_remaining_seconds
+        assert 0 < cooldown <= MAX_ADAPTIVE_CONCURRENCY_COOLDOWN_SECONDS
+
+    @pytest.mark.asyncio
+    async def test_decomposed_child_pressure_delays_next_provider_entrance(self) -> None:
+        """A child 429 must reach AIMD before its sequential sibling dispatches."""
+
+        clock = {"now": 100.0}
+        sleeps: list[float] = []
+        provider_entrances: list[float] = []
+
+        async def fake_sleep(seconds: float) -> None:
+            sleeps.append(seconds)
+            clock["now"] += seconds
+
+        class _SequencedRuntime:
+            def __init__(self) -> None:
+                self.calls = 0
+                self._runtime_handle_backend = "opencode"
+                self._cwd = "/tmp/project"
+                self._permission_mode = "acceptEdits"
+
+            @property
+            def runtime_backend(self) -> str:
+                return self._runtime_handle_backend
+
+            @property
+            def working_directory(self) -> str | None:
+                return self._cwd
+
+            @property
+            def permission_mode(self) -> str | None:
+                return self._permission_mode
+
+            async def execute_task(
+                self,
+                prompt: str,
+                tools: list[str] | None = None,
+                system_prompt: str | None = None,
+                resume_handle: RuntimeHandle | None = None,
+                resume_session_id: str | None = None,
+                **_kwargs: Any,
+            ):
+                del prompt, tools, system_prompt, resume_session_id
+                self.calls += 1
+                provider_entrances.append(clock["now"])
+                if self.calls == 1:
+                    yield AgentMessage(
+                        type="result",
+                        content="Too many concurrent requests",
+                        data={
+                            "subtype": "error",
+                            "http_status": 429,
+                            "headers": {"Retry-After": "2"},
+                        },
+                        resume_handle=resume_handle,
+                    )
+                    return
+                yield AgentMessage(
+                    type="result",
+                    content="[TASK_COMPLETE]",
+                    data={"subtype": "success"},
+                    resume_handle=resume_handle,
+                )
+
+        event_store, _appended_events = _make_replaying_event_store()
+        executor = ProcessLocalTestExecutor(
+            adapter=_SequencedRuntime(),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=True,
+            max_concurrent=1,
+            cross_harness_redispatch=False,
+        )
+        # The policy is identical to the constructor-bound authority; only the
+        # deterministic clock/sleep seams differ for this provider-boundary test.
+        executor._adaptive_concurrency = AdaptiveConcurrencyController(
+            initial_limit=1,
+            clock=lambda: clock["now"],
+            sleep=fake_sleep,
+        )
+        executor._emit_subtask_event = AsyncMock()
+        executor._maybe_recover_with_bounce_decomposition = AsyncMock(return_value=(None, None))
+        root = ExecutionNodeIdentity.root(
+            execution_context_id="exec_child_pressure",
+            ac_index=0,
+        )
+        executor._publish_event_owned_decomposition_decision(
+            _trusted_preflight_split(root.node_id, "First child", "Second child")
+        )
+
+        result = await executor._execute_single_ac(
+            ac_index=0,
+            ac_content="Composite AC",
+            session_id="sess_child_pressure",
+            tools=["Read"],
+            tool_catalog=None,
+            system_prompt="system",
+            seed_goal="Respect provider cooldowns",
+            execution_id="exec_child_pressure",
+        )
+
+        assert len(result.sub_results) == 2
+        assert provider_entrances == [100.0, 102.0]
+        assert sleeps == [2.0]
 
     @pytest.mark.asyncio
     async def test_atomic_ac_uses_ac_scoped_runtime_handle(self) -> None:
@@ -12715,6 +13548,232 @@ class TestParallelACExecutor:
         assert runtime.cancelled is True
 
     @pytest.mark.asyncio
+    async def test_decomposition_policy_pressure_delays_next_policy_call(self) -> None:
+        """Policy streams must not discard pressure before another policy entrance."""
+
+        clock = {"now": 50.0}
+        sleeps: list[float] = []
+        provider_entrances: list[float] = []
+
+        async def fake_sleep(seconds: float) -> None:
+            sleeps.append(seconds)
+            clock["now"] += seconds
+
+        class _PolicyRuntime:
+            runtime_backend = "opencode"
+            working_directory = "/tmp/project"
+            permission_mode = "acceptEdits"
+
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def execute_task(self, **_kwargs: Any):
+                self.calls += 1
+                provider_entrances.append(clock["now"])
+                if self.calls == 1:
+                    yield AgentMessage(
+                        type="result",
+                        content="Too many concurrent requests",
+                        data={
+                            "subtype": "error",
+                            "http_status": 429,
+                            "headers": {"Retry-After": "3"},
+                        },
+                    )
+                    return
+                yield AgentMessage(
+                    type="result",
+                    content="ATOMIC",
+                    data={"subtype": "success"},
+                )
+
+        executor = ParallelACExecutor(
+            adapter=_PolicyRuntime(),
+            event_store=AsyncMock(),
+            console=MagicMock(),
+            enable_decomposition=True,
+            max_concurrent=1,
+        )
+        executor._adaptive_concurrency = AdaptiveConcurrencyController(
+            initial_limit=1,
+            clock=lambda: clock["now"],
+            sleep=fake_sleep,
+        )
+
+        first = await executor._dispatch_decomposition_prompt(
+            prompt="classify first",
+            system_prompt="system",
+        )
+        second = await executor._dispatch_decomposition_prompt(
+            prompt="classify second",
+            system_prompt="system",
+        )
+
+        assert first == "Too many concurrent requests"
+        assert second == "ATOMIC"
+        assert provider_entrances == [50.0, 53.0]
+        assert sleeps == [3.0]
+
+    @pytest.mark.asyncio
+    async def test_leaf_revalidates_runtime_capabilities_after_cooldown_wait(self) -> None:
+        """A queued leaf must not dispatch with capabilities stale after admission."""
+
+        clock = {"now": 100.0}
+        runtime = _CooldownDriftRuntime()
+
+        async def drift_during_sleep(seconds: float) -> None:
+            runtime.capabilities = replace(FULL_CAPABILITIES, structured_output=False)
+            clock["now"] += seconds
+
+        controller = AdaptiveConcurrencyController(
+            initial_limit=1,
+            max_limit=1,
+            clock=lambda: clock["now"],
+            sleep=drift_during_sleep,
+        )
+        executor = _make_cooldown_drift_executor(runtime, controller)
+        await controller.observe(
+            ConcurrencyObservation(
+                BackendPressureKind.CONCURRENCY_REJECTION,
+                retry_after_seconds=2,
+            ),
+            permit_epoch=0,
+        )
+
+        result = await executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content="Do not cross a stale runtime boundary",
+            session_id="session-leaf-cooldown-drift",
+            tools=["Read"],
+            system_prompt="test",
+            seed_goal="Revalidate provider authority",
+            depth=0,
+            start_time=datetime.now(UTC),
+            execution_id="execution-leaf-cooldown-drift",
+        )
+
+        assert runtime.calls == 0
+        assert result.outcome is ACExecutionOutcome.BLOCKED
+        assert result.error == (
+            "route admission blocked: live route state changed before provider entry"
+        )
+
+    @pytest.mark.asyncio
+    async def test_decomposition_policy_revalidates_authority_after_cooldown_wait(self) -> None:
+        """A queued policy request must re-check authority after its slot wait."""
+
+        clock = {"now": 200.0}
+        runtime = _CooldownDriftRuntime()
+        executor_holder: dict[str, ProcessLocalTestExecutor] = {}
+        drifted_dispatcher = AsyncMock()
+
+        async def drift_during_sleep(seconds: float) -> None:
+            executor_holder["executor"]._authority_leaf_dispatcher_stream = drifted_dispatcher
+            clock["now"] += seconds
+
+        controller = AdaptiveConcurrencyController(
+            initial_limit=1,
+            max_limit=1,
+            clock=lambda: clock["now"],
+            sleep=drift_during_sleep,
+        )
+        executor = _make_cooldown_drift_executor(
+            runtime,
+            controller,
+            enable_decomposition=True,
+        )
+        executor_holder["executor"] = executor
+        await controller.observe(
+            ConcurrencyObservation(
+                BackendPressureKind.CONCURRENCY_REJECTION,
+                retry_after_seconds=2,
+            ),
+            permit_epoch=0,
+        )
+
+        with pytest.raises(ValueError, match="execution authority drifted before effect"):
+            await executor._dispatch_decomposition_prompt(
+                prompt="Classify without stale authority",
+                system_prompt="test",
+            )
+
+        assert runtime.calls == 0
+        drifted_dispatcher.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_coordinator_revalidates_authority_after_cooldown_wait(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A queued coordinator must re-check authority after its slot wait."""
+
+        clock = {"now": 300.0}
+        runtime = _CooldownDriftRuntime()
+        executor_holder: dict[str, ProcessLocalTestExecutor] = {}
+        drifted_review_provider = AsyncMock()
+
+        async def drift_during_sleep(seconds: float) -> None:
+            executor_holder["executor"]._authority_coordinator_review = drifted_review_provider
+            clock["now"] += seconds
+
+        controller = AdaptiveConcurrencyController(
+            initial_limit=1,
+            max_limit=1,
+            clock=lambda: clock["now"],
+            sleep=drift_during_sleep,
+        )
+        conflict = FileConflict(file_path="src/shared.py", ac_indices=(0, 1))
+        review_provider = AsyncMock(
+            return_value=CoordinatorReview(
+                level_number=1,
+                conflicts_detected=(conflict,),
+                review_summary="should not execute",
+            )
+        )
+        monkeypatch.setattr(LevelCoordinator, "run_review", review_provider)
+        executor = _make_cooldown_drift_executor(runtime, controller)
+        executor_holder["executor"] = executor
+        executor._coordinator.detect_file_conflicts = MagicMock(return_value=[conflict])
+
+        async def execute_ac(**kwargs: Any) -> ACExecutionResult:
+            return ACExecutionResult(
+                ac_index=int(kwargs["ac_index"]),
+                ac_content=str(kwargs["ac_content"]),
+                success=True,
+                conflict_files=("src/shared.py",),
+                final_message="done",
+            )
+
+        executor._execute_single_ac = execute_ac  # type: ignore[method-assign]
+        await controller.observe(
+            ConcurrencyObservation(
+                BackendPressureKind.CONCURRENCY_REJECTION,
+                retry_after_seconds=2,
+            ),
+            permit_epoch=0,
+        )
+
+        with pytest.RaisesGroup(ValueError):
+            await executor.execute_parallel(
+                seed=_make_seed("Write shared A", "Write shared B"),
+                execution_plan=DependencyGraph(
+                    nodes=(
+                        ACNode(index=0, content="Write shared A", depends_on=()),
+                        ACNode(index=1, content="Write shared B", depends_on=()),
+                    ),
+                    execution_levels=((0, 1),),
+                ).to_execution_plan(),
+                session_id="session-coordinator-cooldown-drift",
+                execution_id="execution-coordinator-cooldown-drift",
+                tools=["Read", "Edit"],
+                system_prompt="test",
+            )
+
+        assert runtime.calls == 0
+        review_provider.assert_not_awaited()
+        drifted_review_provider.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_decomposed_ac_inlines_sub_ac_dispatch_into_single_ac(self) -> None:
         """Decomposed execution should recurse through _execute_single_ac without a helper path."""
         executor = ProcessLocalTestExecutor(
@@ -15178,6 +16237,417 @@ class TestParallelACExecutor:
         assert result.stages[0].outcome == StageExecutionOutcome.PARTIAL
         assert result.stages[1].ac_indices == (2, 3)
         assert result.stages[1].outcome == StageExecutionOutcome.PARTIAL
+
+    @pytest.mark.asyncio
+    async def test_coordinator_pressure_delays_next_stage_provider_entrance(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Coordinator Retry-After must close the next stage's provider entrance."""
+
+        clock = {"now": 100.0}
+        sleeps: list[float] = []
+        provider_entrances: list[tuple[int, float]] = []
+
+        async def fake_sleep(seconds: float) -> None:
+            sleeps.append(seconds)
+            clock["now"] += seconds
+
+        pressure = AgentMessage(
+            type="result",
+            content="Too many concurrent requests",
+            data={
+                "subtype": "error",
+                "http_status": 429,
+                "headers": {"Retry-After": "2"},
+            },
+        )
+        conflict = FileConflict(file_path="src/shared.py", ac_indices=(0, 1))
+        monkeypatch.setattr(
+            LevelCoordinator,
+            "run_review",
+            AsyncMock(
+                return_value=CoordinatorReview(
+                    level_number=1,
+                    conflicts_detected=(conflict,),
+                    review_summary=pressure.content,
+                    final_output=pressure.content,
+                    messages=(pressure,),
+                )
+            ),
+        )
+        seed = _make_seed("Write shared A", "Write shared B", "Consume shared output")
+        graph = DependencyGraph(
+            nodes=(
+                ACNode(index=0, content=seed.acceptance_criteria[0], depends_on=()),
+                ACNode(index=1, content=seed.acceptance_criteria[1], depends_on=()),
+                ACNode(index=2, content=seed.acceptance_criteria[2], depends_on=(0, 1)),
+            ),
+            execution_levels=((0, 1), (2,)),
+        )
+        controller = AdaptiveConcurrencyController(
+            initial_limit=2,
+            max_limit=2,
+            clock=lambda: clock["now"],
+            sleep=fake_sleep,
+        )
+        monkeypatch.setattr(
+            "ouroboros.orchestrator.parallel_executor.adaptive_concurrency."
+            "AdaptiveConcurrencyController",
+            lambda **_kwargs: controller,
+        )
+        executor = _make_executor()
+        executor._coordinator.detect_file_conflicts = MagicMock(side_effect=([conflict], []))
+
+        async def execute_ac(**kwargs: Any) -> ACExecutionResult:
+            ac_index = int(kwargs["ac_index"])
+            messages = (AgentMessage(type="result", content="done", data={"subtype": "success"}),)
+            async with executor._adaptive_concurrency.slot() as permit_epoch:
+                provider_entrances.append((ac_index, clock["now"]))
+                await observe_provider_messages(
+                    executor._adaptive_concurrency,
+                    messages,
+                    permit_epoch,
+                    ("session", "execution", ac_index),
+                    provider_completed=True,
+                )
+            return ACExecutionResult(
+                ac_index=ac_index,
+                ac_content=str(kwargs["ac_content"]),
+                success=True,
+                messages=messages,
+                final_message="done",
+            )
+
+        executor._execute_single_ac = execute_ac  # type: ignore[method-assign]
+        result = await executor.execute_parallel(
+            seed=seed,
+            execution_plan=graph.to_execution_plan(),
+            session_id="session-coordinator-pressure",
+            execution_id="execution-coordinator-pressure",
+            tools=["Read", "Edit"],
+            system_prompt="test",
+        )
+
+        assert result.all_succeeded is True
+        assert next(at for index, at in provider_entrances if index == 2) == 102.0
+        assert sleeps == [2.0]
+
+    @pytest.mark.asyncio
+    async def test_coordinator_quota_stops_before_next_stage_provider_effect(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Coordinator quota must become a durable pause input before stage two."""
+
+        quota = AgentMessage(
+            type="result",
+            content="Usage limit reached. Please try again in 5 hours.",
+            data={"subtype": "error", "error_type": "CodexCliError"},
+        )
+        conflict = FileConflict(file_path="src/shared.py", ac_indices=(0, 1))
+        monkeypatch.setattr(
+            LevelCoordinator,
+            "run_review",
+            AsyncMock(
+                return_value=CoordinatorReview(
+                    level_number=1,
+                    conflicts_detected=(conflict,),
+                    review_summary=quota.content,
+                    final_output=quota.content,
+                    messages=(quota,),
+                )
+            ),
+        )
+        seed = _make_seed("Write shared A", "Write shared B", "Consume shared output")
+        graph = DependencyGraph(
+            nodes=(
+                ACNode(index=0, content=seed.acceptance_criteria[0], depends_on=()),
+                ACNode(index=1, content=seed.acceptance_criteria[1], depends_on=()),
+                ACNode(index=2, content=seed.acceptance_criteria[2], depends_on=(0, 1)),
+            ),
+            execution_levels=((0, 1), (2,)),
+        )
+        executor = _make_executor()
+        executor._coordinator.detect_file_conflicts = MagicMock(return_value=[conflict])
+        provider_effects: list[int] = []
+
+        async def execute_ac(**kwargs: Any) -> ACExecutionResult:
+            ac_index = int(kwargs["ac_index"])
+            provider_effects.append(ac_index)
+            return ACExecutionResult(
+                ac_index=ac_index,
+                ac_content=str(kwargs["ac_content"]),
+                success=True,
+                final_message="done",
+            )
+
+        executor._execute_single_ac = execute_ac  # type: ignore[method-assign]
+        result = await executor.execute_parallel(
+            seed=seed,
+            execution_plan=graph.to_execution_plan(),
+            session_id="session-coordinator-quota",
+            execution_id="execution-coordinator-quota",
+            tools=["Read", "Edit"],
+            system_prompt="test",
+        )
+
+        assert provider_effects == [0, 1]
+        assert isinstance(result.recoverable_coordinator_pause, CoordinatorQuotaPause)
+        assert result.recoverable_coordinator_pause.consequence.pause_seconds == 18_000
+        assert result.all_succeeded is False
+        assert len(result.stages) == 1
+        assert result.stages[0].coordinator_review is not None
+        coordinator_event_types = [
+            call.args[0].type
+            for call in executor._event_store.append.await_args_list
+            if call.args[0].type.startswith("execution.coordinator.")
+        ]
+        assert coordinator_event_types == [
+            "execution.coordinator.started",
+            "execution.coordinator.completed",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_restored_coordinator_quota_stops_before_next_stage_provider_effect(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """Checkpoint replay consumes the exact pause before opening stage two."""
+
+        quota = AgentMessage(
+            type="result",
+            content="Usage limit reached. Please try again in 5 hours.",
+            data={"subtype": "error", "error_type": "CodexCliError"},
+        )
+        conflict = FileConflict(file_path="src/shared.py", ac_indices=(0, 1))
+        execution_id = "execution-restored-coordinator-quota"
+        session_id = "session-restored-coordinator-quota"
+        runtime_scope = build_level_coordinator_runtime_scope(execution_id, 1)
+        review_provider = AsyncMock(
+            return_value=CoordinatorReview(
+                level_number=1,
+                conflicts_detected=(conflict,),
+                review_summary=quota.content,
+                final_output=quota.content,
+                messages=(quota,),
+                session_scope_id=runtime_scope.aggregate_id,
+                session_state_path=runtime_scope.state_path,
+            )
+        )
+        monkeypatch.setattr(LevelCoordinator, "run_review", review_provider)
+        seed = _make_seed("Write shared A", "Write shared B", "Consume shared output")
+        graph = DependencyGraph(
+            nodes=(
+                ACNode(index=0, content=seed.acceptance_criteria[0], depends_on=()),
+                ACNode(index=1, content=seed.acceptance_criteria[1], depends_on=()),
+                ACNode(index=2, content=seed.acceptance_criteria[2], depends_on=(0, 1)),
+            ),
+            execution_levels=((0, 1), (2,)),
+        )
+        checkpoint_store = CheckpointStore(tmp_path)
+        checkpoint_store.initialize()
+
+        async def run_once(
+            executor: ParallelACExecutor,
+            provider_effects: list[int],
+            *,
+            published_owner: Mapping[str, object] | None = None,
+        ) -> ParallelExecutionResult:
+            async def execute_ac(**kwargs: Any) -> ACExecutionResult:
+                ac_index = int(kwargs["ac_index"])
+                provider_effects.append(ac_index)
+                return ACExecutionResult(
+                    ac_index=ac_index,
+                    ac_content=str(kwargs["ac_content"]),
+                    success=True,
+                    conflict_files=("src/shared.py",) if ac_index < 2 else (),
+                    final_message="done",
+                )
+
+            executor._coordinator.detect_file_conflicts = MagicMock(
+                side_effect=lambda results: (
+                    [conflict] if {result.ac_index for result in results} == {0, 1} else []
+                )
+            )
+            executor._execute_single_ac = execute_ac  # type: ignore[method-assign]
+            return await executor.execute_parallel(
+                seed=seed,
+                execution_plan=graph.to_execution_plan(),
+                session_id=session_id,
+                execution_id=execution_id,
+                tools=["Read", "Edit"],
+                system_prompt="test",
+                published_coordinator_pause_owner=published_owner,
+            )
+
+        first = _make_executor(run_verify_commands=False)
+        first._checkpoint_store = checkpoint_store
+        first._event_store.query_events = AsyncMock(return_value=[])
+        first_effects: list[int] = []
+        first_result = await run_once(first, first_effects)
+        first_events = [call.args[0] for call in first._event_store.append.await_args_list]
+        expected_aggregate_id = first._coordinator_aggregate_id(execution_id, 1)
+        coordinator_events = [
+            event
+            for event in first_events
+            if isinstance(event, BaseEvent)
+            and event.type in {"execution.coordinator.started", "execution.coordinator.completed"}
+        ]
+        assert [
+            (event.type, event.aggregate_type, event.aggregate_id, isinstance(event.data, dict))
+            for event in coordinator_events
+        ] == [
+            ("execution.coordinator.started", "execution", expected_aggregate_id, True),
+            ("execution.coordinator.completed", "execution", expected_aggregate_id, True),
+        ]
+        first_checkpoint = checkpoint_store.load(session_id)
+        assert first_checkpoint.is_ok
+        assert first_checkpoint.value is not None
+        assert first_checkpoint.value.state["completed_levels"] == 1
+
+        async def replay_query(*_args: Any, **kwargs: Any) -> list[BaseEvent]:
+            event_type = kwargs.get("event_type")
+            if kwargs.get("aggregate_id") != expected_aggregate_id:
+                return []
+            matched = [
+                event
+                for event in first_events
+                if isinstance(event, BaseEvent) and event.type == event_type
+            ]
+            if event_type == "execution.coordinator.quota_pause_consumed":
+                assert matched == []
+                return []
+            assert len(matched) == 1
+            assert matched[0].type == event_type
+            assert matched[0].aggregate_type == "execution"
+            assert matched[0].aggregate_id == expected_aggregate_id
+            assert isinstance(matched[0].data, dict)
+            return matched
+
+        resumed = _make_executor(run_verify_commands=False)
+        resumed._checkpoint_store = checkpoint_store
+        resumed._event_store.query_events = AsyncMock(side_effect=replay_query)
+        resumed_effects: list[int] = []
+        resumed_result = await run_once(resumed, resumed_effects)
+
+        assert first_effects == [0, 1]
+        assert isinstance(first_result.recoverable_coordinator_pause, CoordinatorQuotaPause)
+        assert resumed_effects == []
+        assert isinstance(resumed_result.recoverable_coordinator_pause, CoordinatorQuotaPause)
+        assert len(resumed_result.stages) == 0
+        assert review_provider.await_count == 1
+
+        published_owner = resumed_result.recoverable_coordinator_pause.owner_payload()
+        published = _make_executor(run_verify_commands=False)
+        published._checkpoint_store = checkpoint_store
+        published._event_store.query_events = AsyncMock(side_effect=replay_query)
+        published_effects: list[int] = []
+        published_result = await run_once(
+            published,
+            published_effects,
+            published_owner=published_owner,
+        )
+
+        assert published_effects == [2]
+        assert published_result.recoverable_coordinator_pause is None
+        assert len(published_result.stages) == 1
+        consumed_events = [
+            call.args[0]
+            for call in published._event_store.append.await_args_list
+            if call.args[0].type == "execution.coordinator.quota_pause_consumed"
+        ]
+        assert len(consumed_events) == 1
+        assert consumed_events[0].data == published_owner
+
+        replay_events = [*first_events, consumed_events[0]]
+
+        async def consumed_query(*_args: Any, **kwargs: Any) -> list[BaseEvent]:
+            event_type = kwargs.get("event_type")
+            return [event for event in replay_events if event.type == event_type]
+
+        after_consumption_crash = _make_executor(run_verify_commands=False)
+        after_consumption_crash._checkpoint_store = checkpoint_store
+        after_consumption_crash._event_store.query_events = AsyncMock(side_effect=consumed_query)
+        crash_effects: list[int] = []
+        crash_result = await run_once(after_consumption_crash, crash_effects)
+
+        assert crash_effects == []
+        assert crash_result.recoverable_coordinator_pause is None
+        assert len(crash_result.stages) == 0
+        assert review_provider.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_coordinator_pause_consumption_rejects_mismatched_owner(self) -> None:
+        """A different PAUSED owner cannot consume the restored coordinator effect."""
+
+        executor = _make_executor(run_verify_commands=False)
+        executor._event_store.query_events = AsyncMock(return_value=[])
+        pause = CoordinatorQuotaPause(
+            execution_id="execution-owner",
+            session_id="session-owner",
+            level_number=1,
+            coordinator_aggregate_id="execution-owner:l0:coord",
+            consequence=UsageLimitPauseConsequence(
+                reason="Usage limit reached",
+                resume_hint="Resume after the provider window reopens.",
+                pause_seconds=60,
+                resume_after=datetime(2026, 1, 1, 0, 1, tzinfo=UTC),
+            ),
+        )
+        mismatched_owner = {
+            **pause.owner_payload(),
+            "coordinator_aggregate_id": "execution-owner:l1:coord",
+        }
+
+        consumed = await consume_published_coordinator_pause(
+            event_store=executor._event_store,
+            pause=pause,
+            published_owner=mismatched_owner,
+        )
+
+        assert consumed is False
+        executor._event_store.append.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_coordinator_pause_consumption_fails_closed_when_ambiguous(self) -> None:
+        """Duplicate consumption records cannot authorize another provider stage."""
+
+        executor = _make_executor(run_verify_commands=False)
+        pause = CoordinatorQuotaPause(
+            execution_id="execution-owner",
+            session_id="session-owner",
+            level_number=1,
+            coordinator_aggregate_id="execution-owner:l0:coord",
+            consequence=UsageLimitPauseConsequence(
+                reason="Usage limit reached",
+                resume_hint="Resume after the provider window reopens.",
+                pause_seconds=60,
+                resume_after=datetime(2026, 1, 1, 0, 1, tzinfo=UTC),
+            ),
+        )
+        consumed_event = BaseEvent(
+            type="execution.coordinator.quota_pause_consumed",
+            aggregate_type="execution",
+            aggregate_id=pause.coordinator_aggregate_id,
+            data=pause.owner_payload(),
+        )
+        executor._event_store.query_events = AsyncMock(
+            return_value=[consumed_event, consumed_event]
+        )
+
+        with pytest.raises(
+            RuntimeError,
+            match="coordinator pause consumption state is ambiguous",
+        ):
+            await consume_published_coordinator_pause(
+                event_store=executor._event_store,
+                pause=pause,
+                published_owner=pause.owner_payload(),
+            )
+
+        executor._event_store.append.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_records_coordinator_results_at_level_scope_without_ac_attribution(

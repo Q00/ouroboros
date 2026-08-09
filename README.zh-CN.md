@@ -37,9 +37,36 @@
   <a href="#从-wonder-到本体论">理念</a>
 </p>
 
-**把一个模糊的想法，跨 Claude Code、Codex CLI、OpenCode、Hermes 变成一份经过验证、可运行的代码库。**
+**把一个模糊的想法，跨 Claude Code、Codex CLI、OpenCode、Hermes、Gemini、Kiro、Copilot、Pi、Zcode、Goose、GJC、Antigravity 和 Grok，变成一份经过验证、可运行的代码库。**
 
 Ouroboros 是面向 AI 编码的 Agent OS：一层本地优先的运行时，把非确定性的 agent 工作转换成一份可重放、可观测、受策略约束的执行契约。它用一套结构化的、规约优先的工作流取代东拼西凑的 prompt：访谈、定型、执行、评估、演化。
+
+---
+
+## Ouroboros Agent OS 技术栈
+
+和任何操作系统一样，Ouroboros 分成三层：一层稳定的、提供原语的 **OS 层**，一层承载领域工作流的**应用层**，还有一个人真正坐在前面的 **shell**。三个仓库，一个技术栈：
+
+| 层级 | 仓库 | 职责 | 你得到什么 |
+| :--- | :--- | :--- | :--- |
+| **Shell**（终端客户端） | [`Ouro-labs/ourocode`](https://github.com/Ouro-labs/ourocode) | 原生终端 UI，在一个会话里跨 Claude / Codex / Gemini CLI 运行 `ooo` 工作流 | TUI、wonderTool 决策选择器、MCP 面板状态、命令发现 |
+| **Apps**（领域工作流） | [`Ouro-labs/ouroboros-plugins`](https://github.com/Ouro-labs/ouroboros-plugins) | UserLevel 插件契约 —— 把核心原语组合成可安装的领域程序（PR 操作、Jira 同步、故障处理、发布） | 插件清单、按范围授权、审计与溯源、参考插件 |
+| **OS**（本仓库） | [`Q00/ouroboros`](https://github.com/Q00/ouroboros) | Agent OS 内核 —— Seed、Ledger、Runtime、MCP、安全边界 | `ooo` 命令、规约优先的工作流引擎、多运行时适配 |
+
+**它们怎么连起来：**
+
+```
+  ourocode  ──►  ooo / ouroboros-plugins  ──►  ouroboros core (Seed · Ledger · MCP · Runtime)
+   shell             user-level apps                        kernel
+```
+
+- **内核**（`ouroboros`）持有契约：不管最终由哪个 LLM 执行，每一个动作都会变成一个绑定 seed、记入 ledger、可回放的事件。
+- **插件**（`ouroboros-plugins`）针对这份契约声明自己需要的能力范围，所以领域工作流（review 一个 PR、分诊一张 Linear 工单、跑一次发布）始终是可审计、受策略约束的，而不是一次性的 prompt。
+- **Ourocode** 是终端 shell：它把 MCP 状态、访谈问题、wonderTool 决策都做成一等公民的 TUI 元素，让你不用离开键盘、也不用在多个 CLI 之间来回切换就能驱动这套 OS。
+
+你可以只用 `ouroboros` 配任意受支持的 CLI；需要领域工作流时叠加插件；想要一个统一的终端驾驶舱时再装 `ourocode`。
+
+> **免责声明。** Ouroboros 项目及其社区**与任何加密货币、代币、meme 币或交易社群均无关联** —— 包括但不限于 pump.fun 及其他发射平台上任何名为 "ouroboros" 的代币。这是一个开源开发者工具。我们不发行、不背书、也不持有任何代币。任何声称与本项目有关联的代币都是未经授权的。
 
 ---
 
@@ -69,7 +96,65 @@ curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.
 > ooo interview "I want to build a task management CLI"
 ```
 
-> 支持 Claude Code、Codex CLI、OpenCode、Hermes。安装脚本会为 Claude Code 配置独立的 `[claude]` 运行环境，并为 Codex CLI 和 Hermes CLI 注册隔离的 MCP 2 server。OpenCode 用户在安装后运行 `ouroboros setup --runtime opencode` 即可。
+也可以不经过 agent 宿主，直接在终端里跑：
+
+```
+$ ouroboros init start --orchestrator "I want to build a task management CLI tool"
+```
+
+<p align="center">
+  <img src="./docs/images/ooo-interview.gif" width="760" alt="终端录制：ouroboros init start 追问排序、崩溃后的持久性、v1 范围以及任务用什么来指认，最后报出模糊度 0.31，并询问是继续访谈、强制生成还是取消">
+</p>
+
+<p align="center">
+  <sub>录自终端 CLI。问了四轮，模糊度仍是 0.31，阈值是 0.2，于是 CLI 给出警告并询问：继续访谈、强制生成 Seed、还是取消。上面的 <code>ooo interview</code> 在 agent 宿主内运行，用的是同一个 0.2 模糊度阈值，并在生成 Seed 前额外加上自己的 closure 与 restate 关卡。</sub>
+</p>
+
+> 支持 Claude Code、Codex CLI、GitHub Copilot CLI、OpenCode、Hermes、Gemini、Kiro CLI、Pi CLI、Zcode、Goose、GJC、Antigravity CLI 和 Grok Build CLI。安装程序会自动检测可用的运行时，并在宿主支持的情况下注册 MCP server。如需显式选择运行时，安装后执行 `ouroboros setup --runtime <opencode|kiro|copilot|gemini|pi|zcode|goose|gjc|antigravity|grok>`。Copilot CLI 运行时会通过 GitHub Copilot models API 实时获取模型列表，并在配置过程中让你选择默认模型。
+
+<details>
+<summary><strong>Codex 插件快速开始</strong></summary>
+
+```bash
+codex plugin marketplace add Q00/ouroboros
+codex plugin add ouroboros@ouroboros
+```
+
+打开一个新的 Codex 会话，输入 `ooo`。首次使用时，Ouroboros 会在改动任何内容之前，先询问是否准备运行环境。准备就绪后，它会沿用 Codex 当前的默认模型；只有在需要为某个流水线阶段固定特定模型时，才选择**直接配置模型**。
+
+</details>
+
+<details>
+<summary><strong>Kiro CLI 快速开始</strong></summary>
+
+```bash
+pipx install 'ouroboros-ai[mcp]'       # 或者：uv tool install 'ouroboros-ai[mcp]'
+ouroboros setup --runtime kiro         # 检测 Kiro CLI、注册 MCP server，并把
+                                        # OUROBOROS_RUNTIME=kiro 写入
+                                        # ~/.kiro/settings/mcp.json（受信任的、由
+                                        # setup 管理的位置——项目内的 .env 属于不受信任
+                                        # 输入，这个键在那里会被忽略）
+```
+
+之后就可以在 Kiro CLI 会话中使用 `ooo` 命令。
+
+</details>
+
+<details>
+<summary><strong>GitHub Copilot CLI 快速开始</strong></summary>
+
+```bash
+gh auth login                                # 一次性 GitHub 认证（用于实时获取模型列表）
+pipx install 'ouroboros-ai[mcp]'             # 或者：uv tool install 'ouroboros-ai[mcp]'
+ouroboros setup --runtime copilot            # 实时获取模型列表并选择默认模型，
+                                             # 在 ~/.copilot/mcp-config.json 中注册 MCP server
+```
+
+重新启动 Copilot CLI 会话后，即可在会话中使用 `ooo` 命令。配置中其他地方使用的连字符格式 Anthropic 模型 ID（如 `claude-opus-4-6`）会在运行时自动映射为 Copilot 的点号格式（`claude-opus-4.6`），因此切换后端时现有配置仍然可用。
+
+完整说明见 [GitHub Copilot CLI 运行时指南](./docs/runtime-guides/copilot.md)。
+
+</details>
 
 <details>
 <summary><strong>其他安装方式</strong></summary>
@@ -97,7 +182,7 @@ ouroboros setup                         # 配置运行时
 
 历史兼容：在 extras 迁移期间，`ouroboros-ai[dashboard]` 仍然作为兼容别名保留。
 
-各运行时指南：[Claude Code](./docs/runtime-guides/claude-code.md) · [Codex CLI](./docs/runtime-guides/codex.md) · [Hermes](./docs/runtime-guides/hermes.md) · [OpenCode](./docs/runtime-guides/opencode.md)
+各运行时指南：[Claude Code](./docs/runtime-guides/claude-code.md) · [Codex CLI](./docs/runtime-guides/codex.md) · [Hermes](./docs/runtime-guides/hermes.md) · [OpenCode](./docs/runtime-guides/opencode.md) · [Kiro CLI](./docs/runtime-guides/kiro.md) · [Gemini CLI](./docs/runtime-guides/gemini.md) · [GitHub Copilot CLI](./docs/runtime-guides/copilot.md) · [Zcode](./docs/runtime-guides/zcode.md) · [Pi JSON mode](https://pi.dev/docs/latest/json) · [Goose](./docs/runtime-guides/goose.md) · [GJC](./docs/runtime-guides/gjc.md) · [Antigravity CLI](./docs/runtime-guides/antigravity.md) · [Grok Build CLI](./docs/runtime-guides/grok.md)
 
 </details>
 
@@ -223,6 +308,12 @@ Ralph Cycle 3: evolve_step(lineage)       -> Gen 3 -> action=CONVERGED
 | `ooo brownfield`     | *(经由 skill)*                                                    | 扫描并管理 brownfield 仓库 / worktree 默认值                  |
 | `ooo publish`        | *(skill / 运行时；底层用 `gh` CLI)*                               | 把 Seed 发布成 GitHub Epic / Task issue，用于团队协作         |
 
+> Claude Code 将 `/run`、`/status`、`/help` 和 `/config` 保留为内置命令。
+> 直接调用 Ouroboros skill 时请使用 `/ouroboros:ouroboros-run`、
+> `/ouroboros:ouroboros-status`、`/ouroboros:ouroboros-help` 和
+> `/ouroboros:ouroboros-config`；原有的 `ooo run`、`ooo status`、
+> `ooo help` 和 `ooo config` 文本入口仍然受支持。
+
 > 不是所有技能都有直接对应的 CLI 子命令。其中一些（`evaluate`、`evolve`、`unstuck`、`ralph`、`publish`）通过 agent 技能、运行时规则或 MCP 工具暴露，而不是 `ouroboros <subcommand>` 这种 shell 命令。
 > `/resume` 是 Claude Code 内置的会话选择器保留指令；要恢复 Ouroboros 进行中的会话，请使用 `ooo resume-session`。
 
@@ -281,7 +372,7 @@ src/ouroboros/
 - **Agent OS runtime** —— 跨能力发现、策略、指令、事件日志、agent 进程的可重放执行契约
 - **Runtime backends** —— 可插拔抽象层（`orchestrator.runtime_backend` 配置），原生支持 Claude Code、Codex CLI、OpenCode、Hermes；同一份工作流规约，跑在不同执行引擎上
 
-完整设计文档见 [Architecture](./docs/architecture.md)。
+完整设计文档见 [Architecture](./docs/architecture.md)（英文）。中文设计说明：[隐藏清单收敛（Hidden-Checklist Convergence）](./docs/hidden-checklist-convergence/README.zh-CN.md) —— run → 评估 → 有预算的 Ralph 链，以及为什么判分用的断言对 worker 无条件隐藏。
 
 </details>
 

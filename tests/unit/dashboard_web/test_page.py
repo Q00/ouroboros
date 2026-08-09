@@ -44,12 +44,33 @@ class TestLivePage:
         # first empty /api/runs — it shows a waiting state and keeps polling.
         assert "waiting for run" in INDEX_HTML
         assert "no active run" not in INDEX_HTML
-        # The poll must be a real loop that re-checks /api/runs, not a one-shot.
-        assert "while (!runId)" in INDEX_HTML
-        assert "pickRun()" in INDEX_HTML
+        # The base view is a real run list that re-checks /api/runs, not a
+        # one-shot latest-run redirect. Details remain pinned by ?run=.
+        assert "startList()" in INDEX_HTML
+        assert "fetchRuns()" in INDEX_HTML
+        assert "?run=" in INDEX_HTML
         # And it must be interval-gated so an idle page never spins hot.
         assert "setTimeout" in INDEX_HTML
         assert "WAIT_POLL_MS" in INDEX_HTML
+        assert "run-goal" in INDEX_HTML
+        assert "white-space:pre-wrap" in INDEX_HTML
+        assert "status-paused" in INDEX_HTML
+        assert "run-status.paused" in INDEX_HTML
+
+    def test_index_html_distinguishes_picker_503_and_offers_retry(self) -> None:
+        assert "response.status === 503" in INDEX_HTML
+        assert 'payload.error === "picker_index_contract_unavailable"' in INDEX_HTML
+        assert 'state:"picker-unavailable"' in INDEX_HTML
+        assert "Run picker temporarily unavailable" in INDEX_HTML
+        assert "The dashboard remains read-only" in INDEX_HTML
+        assert "Retry now" in INDEX_HTML
+        assert 'role="alert"' in INDEX_HTML
+        assert 'addEventListener("click", refreshRunList)' in INDEX_HTML
+        assert "Run list request failed" in INDEX_HTML
+        assert "request !== runListRequest" in INDEX_HTML
+        # The unavailable state remains in the interval-gated list loop; it is
+        # neither collapsed into the empty-run state nor allowed to spin hot.
+        assert "await refreshRunList()" in INDEX_HTML
 
 
 class TestStaticSnapshot:
@@ -59,6 +80,7 @@ class TestStaticSnapshot:
         assert "EventSource" not in html
         assert "render(" in html
         assert "snapshot" in html
+        assert "setView(true)" in html
         # The inlined board data is present.
         assert "hermes_cli" in html
         assert "red.txt" in html and "green.txt" in html

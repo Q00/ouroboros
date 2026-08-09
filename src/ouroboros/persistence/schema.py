@@ -11,6 +11,7 @@ Table: brownfield_repos
 """
 
 from datetime import UTC, datetime
+import logging
 
 from sqlalchemy import (
     JSON,
@@ -18,6 +19,7 @@ from sqlalchemy import (
     Boolean,
     Column,
     DateTime,
+    Float,
     Index,
     Integer,
     MetaData,
@@ -25,6 +27,12 @@ from sqlalchemy import (
     Table,
     Text,
     text,
+)
+from sqlalchemy.engine import Connection
+from sqlalchemy.ext.asyncio import AsyncEngine
+
+from ouroboros.persistence.picker_index_provisioning import (
+    provision_picker_indexes_best_effort,
 )
 
 # Global metadata instance for all tables
@@ -63,6 +71,29 @@ events_table = Table(
     Index("ix_events_agg_type_id_timestamp", "aggregate_type", "aggregate_id", "timestamp"),
 )
 
+# Durable single-owner leases for evolve_step (#1889). The event stream stays
+# append-only; this table decides which concurrent caller owns a lineage's
+# replay/selection/execution boundary. Serializing at lineage level (not per
+# generation) means a released lease hands the next caller a fresh replay —
+# it can never re-run a generation the previous owner already completed, and
+# it cannot skip ahead past a generation that is still running. The owner
+# refreshes the lease while working and deletes the row on exit; a row whose
+# lease expired without a refresh is presumed crashed and may be reclaimed
+# by token CAS.
+lineage_step_claims_table = Table(
+    "lineage_step_claims",
+    metadata,
+    Column("lineage_id", String(128), primary_key=True),
+    Column("claim_token", String(64), nullable=False),
+    Column("refreshed_at", Float, nullable=False),
+    # Two-phase reclaim (#1889 round four): a reclaimer first marks the
+    # expired lease as revoked and only takes ownership after a grace period
+    # of one heartbeat interval, so a scheduling owner provably observes the
+    # revocation (its refresh fails) and stops before the successor starts.
+    Column("revoking_token", String(64), nullable=True),
+    Column("revoked_at", Float, nullable=True),
+)
+
 # One durable compare-and-set guard for explicit terminal session lifecycle
 # events. The event stream remains append-only; this table only prevents two
 # concurrent terminal writers from both claiming the same session transition.
@@ -93,6 +124,26 @@ session_start_guards_table = Table(
     Column("execution_id", String(128), nullable=False),
     Column(
         "created_at",
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+        server_default=text("CURRENT_TIMESTAMP"),
+    ),
+)
+
+# Exact AC runtime ownership fence used by Synapse admission. Lifecycle events
+# remain the source of truth; this row only serializes queue admission against
+# attempt shutdown across independent MCP/worker processes.
+session_signal_target_guards_table = Table(
+    "session_signal_target_guards",
+    metadata,
+    Column("execution_id", String(128), primary_key=True),
+    Column("session_scope_id", String(256), primary_key=True),
+    Column("session_attempt_id", String(256), primary_key=True),
+    Column("active", Boolean, nullable=False),
+    Column("lifecycle_event_id", String(36), nullable=False),
+    Column(
+        "updated_at",
         DateTime(timezone=True),
         nullable=False,
         default=lambda: datetime.now(UTC),
@@ -174,3 +225,22 @@ brownfield_repos_table = Table(
         server_default=text("CURRENT_TIMESTAMP"),
     ),
 )
+
+
+def create_event_store_schema(connection: Connection) -> None:
+    """Create the required EventStore schema."""
+    metadata.create_all(connection)
+
+
+async def initialize_event_store_schema(engine: AsyncEngine, logger: logging.Logger) -> bool:
+    """Commit required tables, then provision optional picker indexes."""
+    async with engine.connect() as connection:
+        await connection.exec_driver_sql("BEGIN IMMEDIATE")
+        try:
+            await connection.run_sync(create_event_store_schema)
+        except BaseException:
+            await connection.rollback()
+            raise
+        else:
+            await connection.commit()
+    return await provision_picker_indexes_best_effort(engine, logger)

@@ -379,6 +379,68 @@ class TestLoadConfig:
         assert config.execution.max_iterations_per_ac == 10
         assert config.execution.tui_autolaunch is False
         assert config.execution.auto_evaluate is True
+        assert config.execution.auto_evolve is True
+        assert config.execution.auto_evolve_max_generations == 3
+
+    @pytest.mark.parametrize("surface", ["top_level", "default", "stage"])
+    def test_load_config_accepts_claude_mcp_runtime_surfaces(
+        self,
+        tmp_path: Path,
+        surface: str,
+    ) -> None:
+        orchestrator: dict[str, object]
+        if surface == "top_level":
+            orchestrator = {"runtime_backend": "claude_mcp"}
+        elif surface == "default":
+            orchestrator = {"runtime_profile": {"default": "claude_mcp"}}
+        else:
+            orchestrator = {
+                "runtime_profile": {"stages": {"execute": "claude_mcp"}},
+            }
+        config_path = tmp_path / f"{surface}.yaml"
+        config_path.write_text(
+            yaml.safe_dump({"orchestrator": orchestrator}),
+            encoding="utf-8",
+        )
+
+        config = load_config(config_path)
+
+        if surface == "top_level":
+            assert config.orchestrator.runtime_backend == "claude_mcp"
+        else:
+            assert config.orchestrator.runtime_profile is not None
+            if surface == "default":
+                assert config.orchestrator.runtime_profile.default == "claude_mcp"
+            else:
+                assert config.orchestrator.runtime_profile.stages == {"execute": "claude_mcp"}
+
+    @pytest.mark.parametrize(
+        ("orchestrator", "expected_surface"),
+        [
+            ({"runtime_backend": "unknown-runtime"}, "runtime_backend"),
+            ({"runtime_profile": {"default": "unknown-runtime"}}, "runtime_profile.default"),
+            (
+                {"runtime_profile": {"stages": {"execute": "unknown-runtime"}}},
+                "runtime_profile.stages",
+            ),
+        ],
+    )
+    def test_load_config_rejects_unknown_runtime_surfaces(
+        self,
+        tmp_path: Path,
+        orchestrator: dict[str, object],
+        expected_surface: str,
+    ) -> None:
+        config_path = tmp_path / "invalid-runtime.yaml"
+        config_path.write_text(
+            yaml.safe_dump({"orchestrator": orchestrator}),
+            encoding="utf-8",
+        )
+
+        with pytest.raises(ConfigError) as exc_info:
+            load_config(config_path)
+
+        assert expected_surface in str(exc_info.value)
 
     def test_load_config_execution_tui_autolaunch(self, tmp_path: Path) -> None:
         """load_config accepts the execution TUI auto-launch toggle."""
@@ -407,6 +469,22 @@ class TestLoadConfig:
 
         config = load_config(config_path)
         assert config.execution.auto_evaluate is False
+
+    def test_load_config_execution_auto_evolve(self, tmp_path: Path) -> None:
+        """load_config accepts the bounded rejected-evaluation evolution chain."""
+        config_path = tmp_path / "config.yaml"
+        config_content = {
+            "execution": {
+                "auto_evolve": False,
+                "auto_evolve_max_generations": 99,
+            }
+        }
+        with config_path.open("w") as f:
+            yaml.dump(config_content, f)
+
+        config = load_config(config_path)
+        assert config.execution.auto_evolve is False
+        assert config.execution.auto_evolve_max_generations == 10
 
 
 class TestLoadCredentials:
@@ -504,6 +582,17 @@ class TestRuntimeHelperLookups:
             ),
         ):
             assert get_agent_runtime_backend() == "codex"
+
+    def test_get_agent_runtime_backend_defaults_to_sdk_profile(self) -> None:
+        """A missing config preserves the default Claude SDK runtime."""
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch(
+                "ouroboros.config.loader.load_config",
+                side_effect=ConfigError("config unavailable"),
+            ),
+        ):
+            assert get_agent_runtime_backend() == "claude"
 
     def test_get_codex_cli_path_prefers_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Environment variable overrides config for Codex CLI path."""
@@ -1453,6 +1542,24 @@ class TestLLMHelperLookups:
         ):
             assert get_llm_backend_for_role("reflect") == "codex"
             assert get_llm_backend_for_role("context_compression") == "codex"
+
+    def test_missing_config_does_not_use_cli_runtime_as_llm_backend(self) -> None:
+        """The default Claude CLI worker is runtime-only, not a provider name."""
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch(
+                "ouroboros.config.loader.load_config",
+                side_effect=ConfigError("config unavailable"),
+            ),
+        ):
+            assert (
+                get_llm_backend_for_role("interview", fallback_runtime_backend="claude_mcp")
+                == "claude_code"
+            )
+            assert (
+                get_llm_backend_for_stage("interview", fallback_runtime_backend="claude_mcp")
+                == "claude_code"
+            )
 
     def test_get_llm_backend_for_role_preserves_explicit_override(self) -> None:
         with patch.dict(os.environ, {}, clear=True):

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
 import time
 from typing import Any
@@ -50,6 +52,37 @@ def _waiter_lease_ms() -> int:
 def _engine(event_store: EventStore) -> AsyncEngine | None:
     engine = getattr(event_store, "_engine", None)
     return engine if isinstance(engine, AsyncEngine) else None
+
+
+def _has_declared_settlement(event_store: object) -> bool:
+    """Return whether the store type declares the transactional lifecycle fence."""
+    settle = getattr(event_store, "settle_transactional_write", None)
+    declared_settle = getattr(type(event_store), "settle_transactional_write", None)
+    return callable(declared_settle) and callable(settle)
+
+
+def _can_settle_claim_transaction(event_store: EventStore) -> bool:
+    """Keep lightweight fallbacks while routing real stores through their fence."""
+    return _has_declared_settlement(event_store) or _engine(event_store) is not None
+
+
+async def _settle_claim_transaction[T](
+    event_store: EventStore,
+    transaction: Callable[[AsyncEngine], Coroutine[Any, Any, T]],
+    *,
+    operation: str,
+) -> T:
+    """Run one claim transaction inside the EventStore lifecycle fence."""
+    settle = getattr(event_store, "settle_transactional_write", None)
+    if _has_declared_settlement(event_store) and callable(settle):
+        return await settle(transaction, operation=operation)
+    engine = _engine(event_store)
+    if engine is None:
+        raise PersistenceError(
+            "EventStore must be initialized before lineage claim mutation",
+            operation=operation,
+        )
+    return await transaction(engine)
 
 
 def supports_durable_claims(event_store: object) -> bool:
@@ -132,12 +165,100 @@ async def try_acquire(
     request_key: str,
 ) -> ClaimObservation | None:
     """Acquire a lineage claim or register as a waiter on its active owner."""
-    engine = _engine(event_store)
-    if engine is None:
+    if not _can_settle_claim_transaction(event_store):
         raise PersistenceError(
             "EventStore must be initialized before lineage claim acquisition",
             operation="claim_lineage_advancement",
         )
+    loop = asyncio.get_running_loop()
+    result: asyncio.Future[ClaimObservation] = loop.create_future()
+    decision: asyncio.Future[bool] = loop.create_future()
+
+    def consume_result_failure(future: asyncio.Future[ClaimObservation]) -> None:
+        if not future.cancelled():
+            future.exception()
+
+    result.add_done_callback(consume_result_failure)
+
+    async def settled_acquisition(settled_engine: AsyncEngine) -> ClaimObservation:
+        try:
+            observation = await _try_acquire(
+                settled_engine,
+                scope=scope,
+                lineage_id=lineage_id,
+                generation_number=generation_number,
+                owner_id=owner_id,
+                request_key=request_key,
+            )
+        except BaseException as exc:
+            if not result.done():
+                result.set_exception(exc)
+            raise
+        if not result.done():
+            result.set_result(observation)
+        if not await decision:
+            await _discard_claim_participation(
+                settled_engine,
+                scope=scope,
+                lineage_id=lineage_id,
+                participant_id=owner_id,
+            )
+        return observation
+
+    settlement = asyncio.create_task(
+        _settle_claim_transaction(
+            event_store,
+            settled_acquisition,
+            operation="claim_lineage_advancement",
+        )
+    )
+
+    def publish_settlement_failure(task: asyncio.Task[ClaimObservation]) -> None:
+        if result.done():
+            if not task.cancelled():
+                task.exception()
+            return
+        if task.cancelled():
+            result.cancel()
+            return
+        error = task.exception()
+        if error is not None:
+            result.set_exception(error)
+
+    settlement.add_done_callback(publish_settlement_failure)
+    try:
+        observation = await asyncio.shield(result)
+    except asyncio.CancelledError as cancellation:
+        if not decision.done():
+            decision.set_result(False)
+        settlement_error: BaseException | None = None
+        while not settlement.done():
+            try:
+                await asyncio.shield(settlement)
+            except asyncio.CancelledError:
+                continue
+            except Exception as exc:
+                settlement_error = exc
+                break
+        if settlement_error is None and not settlement.cancelled():
+            settlement_error = settlement.exception()
+        if settlement_error is not None:
+            raise cancellation from settlement_error
+        raise cancellation
+    decision.set_result(True)
+    return observation
+
+
+async def _try_acquire(
+    engine: AsyncEngine,
+    *,
+    scope: str,
+    lineage_id: str,
+    generation_number: int,
+    owner_id: str,
+    request_key: str,
+) -> ClaimObservation:
+    """Execute the complete retry loop as one cancellation-settled write."""
     for _attempt in range(3):
         try:
             async with engine.connect() as connection:
@@ -284,6 +405,73 @@ async def try_acquire(
     )
 
 
+async def _discard_claim_participation(
+    engine: AsyncEngine,
+    *,
+    scope: str,
+    lineage_id: str,
+    participant_id: str,
+) -> None:
+    """Delete one cancelled participant and repair the owner's waiter count."""
+    async with engine.connect() as connection:
+        transaction = await _begin_write(connection)
+        row = (
+            (
+                await connection.execute(
+                    select(lineage_advancement_claims_table).where(
+                        lineage_advancement_claims_table.c.scope == scope,
+                        lineage_advancement_claims_table.c.lineage_id == lineage_id,
+                    )
+                )
+            )
+            .mappings()
+            .first()
+        )
+        if row is None:
+            await _commit(connection, transaction)
+            return
+
+        claim_owner_id = str(row["owner_id"])
+        if claim_owner_id == participant_id and not bool(row["completed"]):
+            await connection.execute(
+                delete(lineage_advancement_claims_table).where(
+                    lineage_advancement_claims_table.c.scope == scope,
+                    lineage_advancement_claims_table.c.lineage_id == lineage_id,
+                    lineage_advancement_claims_table.c.owner_id == participant_id,
+                    lineage_advancement_claims_table.c.completed.is_(False),
+                )
+            )
+            await _delete_claim_waiters(connection, scope=scope, lineage_id=lineage_id)
+            await _commit(connection, transaction)
+            return
+
+        removed = await connection.execute(
+            delete(lineage_advancement_waiters_table).where(
+                lineage_advancement_waiters_table.c.scope == scope,
+                lineage_advancement_waiters_table.c.lineage_id == lineage_id,
+                lineage_advancement_waiters_table.c.claim_owner_id == claim_owner_id,
+                lineage_advancement_waiters_table.c.waiter_id == participant_id,
+            )
+        )
+        if removed.rowcount:
+            waiter_count = await _prune_and_count_waiters(
+                connection,
+                scope=scope,
+                lineage_id=lineage_id,
+                claim_owner_id=claim_owner_id,
+            )
+            await connection.execute(
+                update(lineage_advancement_claims_table)
+                .where(
+                    lineage_advancement_claims_table.c.scope == scope,
+                    lineage_advancement_claims_table.c.lineage_id == lineage_id,
+                    lineage_advancement_claims_table.c.owner_id == claim_owner_id,
+                )
+                .values(waiter_count=waiter_count)
+            )
+        await _commit(connection, transaction)
+
+
 async def renew(
     event_store: EventStore,
     *,
@@ -292,9 +480,27 @@ async def renew(
     owner_id: str,
 ) -> bool:
     """Renew an active claim lease owned by this caller."""
-    engine = _engine(event_store)
-    if engine is None:
+    if not _can_settle_claim_transaction(event_store):
         return False
+    return await _settle_claim_transaction(
+        event_store,
+        lambda settled_engine: _renew(
+            settled_engine,
+            scope=scope,
+            lineage_id=lineage_id,
+            owner_id=owner_id,
+        ),
+        operation="renew_lineage_claim",
+    )
+
+
+async def _renew(
+    engine: AsyncEngine,
+    *,
+    scope: str,
+    lineage_id: str,
+    owner_id: str,
+) -> bool:
     async with engine.begin() as connection:
         result = await connection.execute(
             update(lineage_advancement_claims_table)
@@ -309,6 +515,70 @@ async def renew(
     return bool(result.rowcount)
 
 
+async def rebind_generation(
+    event_store: EventStore,
+    *,
+    scope: str,
+    lineage_id: str,
+    owner_id: str,
+    generation_number: int,
+) -> bool:
+    """Bind an unfinished outer receipt to the generation its core claim owns."""
+    if not _has_declared_settlement(event_store):
+        return False
+    return await _settle_claim_transaction(
+        event_store,
+        lambda engine: _rebind_generation(
+            engine,
+            scope=scope,
+            lineage_id=lineage_id,
+            owner_id=owner_id,
+            generation_number=generation_number,
+        ),
+        operation="rebind_lineage_generation",
+    )
+
+
+async def _rebind_generation(
+    engine: AsyncEngine,
+    *,
+    scope: str,
+    lineage_id: str,
+    owner_id: str,
+    generation_number: int,
+) -> bool:
+    async with engine.begin() as connection:
+        result = await _update_generation(
+            connection,
+            scope=scope,
+            lineage_id=lineage_id,
+            owner_id=owner_id,
+            generation_number=generation_number,
+        )
+    return bool(result.rowcount)
+
+
+async def _update_generation(
+    connection: AsyncConnection,
+    *,
+    scope: str,
+    lineage_id: str,
+    owner_id: str,
+    generation_number: int,
+) -> Any:
+    return await connection.execute(
+        update(lineage_advancement_claims_table)
+        .where(
+            lineage_advancement_claims_table.c.scope == scope,
+            lineage_advancement_claims_table.c.lineage_id == lineage_id,
+            lineage_advancement_claims_table.c.owner_id == owner_id,
+            lineage_advancement_claims_table.c.completed.is_(False),
+            lineage_advancement_claims_table.c.lease_expires_at_ms > _now_ms(),
+        )
+        .values(generation_number=generation_number)
+    )
+
+
 async def observe(
     event_store: EventStore,
     *,
@@ -316,9 +586,25 @@ async def observe(
     lineage_id: str,
 ) -> ClaimObservation | None:
     """Read the current owner and optional completed result."""
-    engine = _engine(event_store)
-    if engine is None:
+    if not _can_settle_claim_transaction(event_store):
         return None
+    return await _settle_claim_transaction(
+        event_store,
+        lambda settled_engine: _observe(
+            settled_engine,
+            scope=scope,
+            lineage_id=lineage_id,
+        ),
+        operation="observe_lineage_claim",
+    )
+
+
+async def _observe(
+    engine: AsyncEngine,
+    *,
+    scope: str,
+    lineage_id: str,
+) -> ClaimObservation | None:
     async with engine.connect() as connection:
         row = (
             (
@@ -355,9 +641,29 @@ async def complete(
     result_payload: dict[str, Any],
 ) -> bool:
     """Publish a result only when registered waiters need to replay it."""
-    engine = _engine(event_store)
-    if engine is None:
+    if not _can_settle_claim_transaction(event_store):
         return False
+    return await _settle_claim_transaction(
+        event_store,
+        lambda settled_engine: _complete(
+            settled_engine,
+            scope=scope,
+            lineage_id=lineage_id,
+            owner_id=owner_id,
+            result_payload=result_payload,
+        ),
+        operation="complete_lineage_claim",
+    )
+
+
+async def _complete(
+    engine: AsyncEngine,
+    *,
+    scope: str,
+    lineage_id: str,
+    owner_id: str,
+    result_payload: dict[str, Any],
+) -> bool:
     async with engine.connect() as connection:
         transaction = await _begin_write(connection)
         row = (
@@ -412,9 +718,27 @@ async def release(
     owner_id: str,
 ) -> None:
     """Release an unfinished owner claim after failure or cancellation."""
-    engine = _engine(event_store)
-    if engine is None:
+    if not _can_settle_claim_transaction(event_store):
         return
+    await _settle_claim_transaction(
+        event_store,
+        lambda settled_engine: _release(
+            settled_engine,
+            scope=scope,
+            lineage_id=lineage_id,
+            owner_id=owner_id,
+        ),
+        operation="release_lineage_claim",
+    )
+
+
+async def _release(
+    engine: AsyncEngine,
+    *,
+    scope: str,
+    lineage_id: str,
+    owner_id: str,
+) -> None:
     async with engine.begin() as connection:
         removed = await connection.execute(
             delete(lineage_advancement_claims_table).where(
@@ -441,9 +765,25 @@ async def recover_expired(
     lineage_id: str,
 ) -> bool:
     """Explicitly clear an expired unfinished claim after operator confirmation."""
-    engine = _engine(event_store)
-    if engine is None:
+    if not _can_settle_claim_transaction(event_store):
         return False
+    return await _settle_claim_transaction(
+        event_store,
+        lambda settled_engine: _recover_expired(
+            settled_engine,
+            scope=scope,
+            lineage_id=lineage_id,
+        ),
+        operation="recover_expired_lineage_claim",
+    )
+
+
+async def _recover_expired(
+    engine: AsyncEngine,
+    *,
+    scope: str,
+    lineage_id: str,
+) -> bool:
     async with engine.begin() as connection:
         result = await connection.execute(
             delete(lineage_advancement_claims_table).where(
@@ -471,9 +811,29 @@ async def renew_waiter(
     waiter_id: str,
 ) -> bool:
     """Renew one live waiter's independent receipt-registration lease."""
-    engine = _engine(event_store)
-    if engine is None:
+    if not _can_settle_claim_transaction(event_store):
         return False
+    return await _settle_claim_transaction(
+        event_store,
+        lambda settled_engine: _renew_waiter(
+            settled_engine,
+            scope=scope,
+            lineage_id=lineage_id,
+            owner_id=owner_id,
+            waiter_id=waiter_id,
+        ),
+        operation="renew_lineage_waiter",
+    )
+
+
+async def _renew_waiter(
+    engine: AsyncEngine,
+    *,
+    scope: str,
+    lineage_id: str,
+    owner_id: str,
+    waiter_id: str,
+) -> bool:
     async with engine.begin() as connection:
         result = await connection.execute(
             update(lineage_advancement_waiters_table)
@@ -498,9 +858,29 @@ async def acknowledge_waiter(
     waiter_id: str,
 ) -> None:
     """Atomically consume one exact waiter registration without a lost update."""
-    engine = _engine(event_store)
-    if engine is None:
+    if not _can_settle_claim_transaction(event_store):
         return
+    await _settle_claim_transaction(
+        event_store,
+        lambda settled_engine: _acknowledge_waiter(
+            settled_engine,
+            scope=scope,
+            lineage_id=lineage_id,
+            owner_id=owner_id,
+            waiter_id=waiter_id,
+        ),
+        operation="acknowledge_lineage_waiter",
+    )
+
+
+async def _acknowledge_waiter(
+    engine: AsyncEngine,
+    *,
+    scope: str,
+    lineage_id: str,
+    owner_id: str,
+    waiter_id: str,
+) -> None:
     async with engine.connect() as connection:
         transaction = await _begin_write(connection)
         await connection.execute(

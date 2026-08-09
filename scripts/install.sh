@@ -4,7 +4,7 @@
 #
 # Runtime selection (first match wins):
 #   1. OUROBOROS_INSTALL_RUNTIME env var
-#      (claude|codex|opencode|hermes|gemini|goose|kiro|copilot|pi|gjc|all)
+#      (claude|claude-sdk|claude-cli|codex|opencode|hermes|gemini|goose|kiro|copilot|pi|gjc|all)
 #   2. Existing ~/.ouroboros/config.yaml runtime — preserved on upgrade
 #      unless OUROBOROS_INSTALL_RECONFIGURE=1 (or --reconfigure flag) is set.
 #   3. Interactive prompt when stdin is a TTY.
@@ -260,12 +260,14 @@ RUNTIME_COUNT=0
 # Used after explicit/preserved runtime resolution to derive install extras.
 # Keep this table boring and explicit: agents reading this installer should be
 # able to see why Claude's SDK runtime and the modern MCP server are installed
-# in different environments. The Claude tool environment must not pull MCP 2.
+# in different environments. Only the explicit Claude CLI path has no SDK deps.
 _runtime_to_extras() {
   # `tui` ships with every selection so the settings GUI
   # (`ouroboros config`) works out of the box (#1414).
   case "$1" in
-    claude)  EXTRAS="[claude,tui]"; RUNTIME="claude" ;;
+    claude) EXTRAS="[claude,tui]"; RUNTIME="claude" ;;
+    claude-sdk) EXTRAS="[claude-sdk,tui]"; RUNTIME="claude-sdk" ;;
+    claude-cli) EXTRAS="[claude-cli,tui]"; RUNTIME="claude-cli" ;;
     codex)   EXTRAS="[tui]"; RUNTIME="codex" ;;
     opencode) EXTRAS="[tui]"; RUNTIME="opencode" ;;
     hermes)  EXTRAS="[mcp,tui]"; RUNTIME="hermes" ;;
@@ -279,7 +281,7 @@ _runtime_to_extras() {
     "")      EXTRAS="[tui]"; RUNTIME="" ;;
     *)
       _err "unsupported runtime '$1'"
-      _info "Expected one of: claude, codex, opencode, hermes, gemini, goose, kiro, copilot, pi, gjc, all"
+      _info "Expected one of: claude, claude-sdk, claude-cli, codex, opencode, hermes, gemini, goose, kiro, copilot, pi, gjc, all"
       exit 1
       ;;
   esac
@@ -292,7 +294,7 @@ EXISTING_CONFIG="$HOME/.ouroboros/config.yaml"
 if [ -z "$EXPLICIT_RUNTIME" ] && [ -z "$RECONFIGURE" ] && [ -f "$EXISTING_CONFIG" ] && command -v python3 &>/dev/null; then
   EXISTING_RUNTIME=$(EXISTING_CONFIG="$EXISTING_CONFIG" python3 -c "
 import os, re
-supported = {'claude', 'codex', 'opencode', 'hermes', 'gemini', 'goose', 'kiro', 'copilot', 'pi', 'gjc'}
+supported = {'claude', 'claude_mcp', 'codex', 'opencode', 'hermes', 'gemini', 'goose', 'kiro', 'copilot', 'pi', 'gjc'}
 try:
     lines = open(os.environ['EXISTING_CONFIG']).read().splitlines()
     in_orchestrator = False
@@ -305,7 +307,10 @@ try:
         if in_orchestrator:
             match = re.match(r'\s+runtime_backend:\s*[\"\']?([^\"\'\s#]+)', line)
             if match and match.group(1) in supported:
-                print(match.group(1))
+                # Preserve the transport identity on unattended upgrades:
+                # claude is the SDK/MCP 1 profile; claude_mcp is the
+                # explicit dependency-free CLI/MCP 2 worker profile.
+                print('claude-cli' if match.group(1) == 'claude_mcp' else match.group(1))
                 break
 except Exception:
     pass
@@ -325,7 +330,7 @@ elif [ "$RUNTIME_COUNT" -gt 1 ]; then
   if [ -t 0 ]; then
     _blank
     _say "${BOLD}Multiple runtimes detected. Pick where Ouroboros should appear first:${RESET}"
-    _choice 1 "Claude" "Claude SDK tool + skills; MCP registration skipped (${PACKAGE_NAME}[claude,tui])"
+    _choice 1 "Claude" "Claude SDK (MCP 1.x) + skills; MCP 2 server is isolated (${PACKAGE_NAME}[claude,tui])"
     _choice 2 "Codex" "Codex plugin artifacts (${PACKAGE_NAME}[tui])"
     _choice 3 "Hermes" "Hermes agent guides + MCP server (${PACKAGE_NAME}[mcp,tui])"
     _choice 4 "OpenCode" "OpenCode commands and agent files (${PACKAGE_NAME}[tui])"
@@ -382,7 +387,7 @@ else
   if [ -t 0 ]; then
     _blank
     _say "${BOLD}No runtime CLI detected yet. Choose the agent you plan to use:${RESET}"
-    _choice 1 "Claude" "Recommended: Claude SDK tool + skills; MCP registration skipped (${PACKAGE_NAME}[claude,tui])"
+    _choice 1 "Claude" "Claude SDK (MCP 1.x) + skills; MCP 2 server is isolated (${PACKAGE_NAME}[claude,tui])"
     _choice 2 "Codex" "Codex plugin artifacts (${PACKAGE_NAME}[tui])"
     _choice 3 "Hermes" "Hermes agent guides + MCP server (${PACKAGE_NAME}[mcp,tui])"
     _choice 4 "OpenCode" "OpenCode commands and agent files (${PACKAGE_NAME}[tui])"
@@ -414,7 +419,7 @@ else
     # Pipe mode (curl | bash): install base package, skip runtime-specific setup.
     _blank
     _warn "No runtime detected in non-interactive mode; installing the base package."
-    _info "Pick a backend afterwards with: ouroboros setup --runtime <claude|codex|opencode|hermes|gemini|goose|kiro|copilot|pi|gjc>"
+    _info "Pick a backend afterwards with: ouroboros setup --runtime <claude|claude-sdk|claude-cli|codex|opencode|hermes|gemini|goose|kiro|copilot|pi|gjc>"
     _runtime_to_extras ""
   fi
 fi
@@ -499,7 +504,7 @@ if [ "$HAS_UV" = true ]; then
   # isolated profile, so silent drift is caught in CI rather than discovered
   # by a user with a conflicting tool environment.
   case "$EXTRAS" in
-    "[claude,tui]")
+    "[claude,tui]" | "[claude-sdk,tui]")
       UV_ARGS+=(
         --with "claude-agent-sdk==0.2.123"
         --with "anthropic==0.117.0"
@@ -608,21 +613,20 @@ if [ -n "$OUROBOROS_SETUP_CMD" ]; then
   "$OUROBOROS_SETUP_CMD" setup refresh || _warn "Artifact refresh skipped; run: ouroboros setup refresh"
 fi
 
-# 5. Claude Code integration (skills only for the standalone SDK profile)
-# The Claude Agent SDK requires MCP 1.x. An isolated MCP 2 server would boot
-# without the configured Claude runtime/LLM dependencies and then fail lazily,
-# so this install path deliberately does not register it.
+# 5. Claude Code integration. The default Claude selection and its explicit
+# SDK alias stay on MCP 1.x. The plugin-owned MCP launcher starts MCP 2 in a
+# separate uvx environment and selects the dependency-free CLI worker.
 # Skill refresh is artifact-only and should happen whenever Claude is present;
 # otherwise a Codex-primary upgrade can leave Claude Code reading stale skills.
-if command -v claude &>/dev/null && { [ "$RUNTIME" = "claude" ] || [ "$EXTRAS" = "[all]" ]; }; then
+if command -v claude &>/dev/null && { [ "$RUNTIME" = "claude" ] || [ "$RUNTIME" = "claude-sdk" ] || [ "$EXTRAS" = "[all]" ]; }; then
   _blank
   _say "${BLUE}◆${RESET} ${BOLD}Claude Code extras${RESET}"
 
-  _warn "MCP registration skipped for the standalone Claude SDK profile (MCP 1.x). Use a supported CLI-backed runtime setup for the isolated MCP 2 server."
+  _warn "Claude SDK is isolated on MCP 1.x. The Claude plugin launches the Ouroboros MCP 2 server in a separate uvx environment with --runtime claude-cli."
 fi
 
 if command -v claude &>/dev/null; then
-  if ! { [ "$RUNTIME" = "claude" ] || [ "$EXTRAS" = "[all]" ]; }; then
+  if ! { [ "$RUNTIME" = "claude" ] || [ "$RUNTIME" = "claude-sdk" ] || [ "$EXTRAS" = "[all]" ]; }; then
     _blank
     _say "${BLUE}◆${RESET} ${BOLD}Claude Code skills${RESET}"
   fi
@@ -648,7 +652,7 @@ _info 'Or from the terminal: ouroboros init start "your idea here"'
 if [ -n "$RUNTIME" ]; then
   _info "Current backend: $RUNTIME"
 fi
-_info "Switch backend later: ouroboros setup --runtime <claude|codex|opencode|hermes|gemini|goose|kiro|copilot|pi|gjc>"
+_info "Switch backend later: ouroboros setup --runtime <claude|claude-sdk|claude-cli|codex|opencode|hermes|gemini|goose|kiro|copilot|pi|gjc>"
 _say "${BOLD}Model settings — use your default model or configure one directly${RESET}"
 _info 'Inside your AI agent: > ooo config   (opens in your browser)'
 _info 'From this terminal:  ouroboros config   (full-screen TUI)'
@@ -681,13 +685,13 @@ if [ -t 0 ] && [ -z "${OUROBOROS_INSTALL_SKIP_CONFIG_GUI:-}" ]; then
         # The selected extras may not include [tui]; run the GUI from an
         # ephemeral env with the tui extra instead of fattening the install.
         _info "Settings GUI needs the tui extra; running it via uvx..."
-        if uvx --from "${PACKAGE_NAME}[tui]" ouroboros config; then
+        if uvx --python "$DEFAULT_PYTHON_SPEC" --from "${PACKAGE_NAME}[tui]" ouroboros config; then
           GUI_OK=true
         fi
       fi
       if [ "$GUI_OK" = false ]; then
         _warn "Could not open the settings GUI."
-        _info "Run it later with: uvx --from '${PACKAGE_NAME}[tui]' ouroboros config"
+        _info "Run it later with: uvx --python '>=3.12' --from '${PACKAGE_NAME}[tui]' ouroboros config"
       fi
       ;;
     *)

@@ -1709,6 +1709,8 @@ def build_execute_subagent(
     max_iterations: int = 10,
     skip_qa: bool = False,
     auto_evaluate: bool = True,
+    auto_evolve: bool = True,
+    seed_handoff_id: str | None = None,
     model_tier: str | None = None,
     efficiency_mode: str = "adaptive",
     frugality_assurance: str = "observe",
@@ -1740,21 +1742,18 @@ def build_execute_subagent(
         qa_verify = "QA is skipped for this run — still confirm every acceptance criterion is met."
     else:
         qa_verify = "Run QA evaluation after execution completes and confirm it passes."
-    if auto_evaluate:
-        formal_evaluation_verify = (
-            "After successful execution, run formal 3-stage evaluation without host "
-            "involvement: call ouroboros_start_evaluate with the session_id, execution "
-            "artifact, seed_content, and working directory; poll the returned job with "
-            "ouroboros_job_wait/status and include the final APPROVED/not-approved "
-            "verdict in your report. If the evaluation job fails or times out, keep "
-            "the run success intact and report the manual retry command "
-            "`ooo evaluate <session_id>`."
-        )
-    else:
-        formal_evaluation_verify = (
-            "Formal evaluation auto-chain is disabled for this run; preserve the "
-            "legacy manual next step `ooo evaluate <session_id>`."
-        )
+    from ouroboros.mcp.tools.seed_handoff import (
+        plugin_evaluation_instruction,
+        project_worker_safe_seed,
+    )
+
+    formal_evaluation_verify = plugin_evaluation_instruction(
+        auto_evaluate=auto_evaluate,
+        auto_evolve=auto_evolve,
+        seed_handoff_id=seed_handoff_id,
+    )
+    seed_projection = project_worker_safe_seed(seed_content)
+    worker_seed_content = seed_projection.seed_content
 
     verify_lines: list[str] = [
         "Every acceptance criterion in the seed is satisfied.",
@@ -1762,10 +1761,7 @@ def build_execute_subagent(
         formal_evaluation_verify,
     ]
     if cwd:
-        # Deterministic project verify commands (parsed from
-        # .ouroboros/mechanical.toml) so the worker runs the project's real
-        # test/lint checks instead of guessing. Best-effort — omitted when
-        # the project has no detected commands.
+        # Best-effort project commands; omitted when none are detected.
         from pathlib import Path
 
         from ouroboros.orchestrator.context_pack import detected_verify_commands
@@ -1779,7 +1775,7 @@ def build_execute_subagent(
     seed_body = (
         "## Seed Specification\n"
         "```yaml\n"
-        f"{seed_content}\n"
+        f"{worker_seed_content}\n"
         "```\n\n"
         f"{render_auto_recursion_guard()}\n\n"
         "Work iteratively, testing as you go. Stop when all acceptance criteria "
@@ -1800,19 +1796,23 @@ def build_execute_subagent(
     ).render()
 
     context: dict[str, Any] = {
-        "seed_content": seed_content,
+        "seed_content": worker_seed_content,
+        "seed_handoff_id": seed_handoff_id,
         "session_id": session_id,
         "seed_path": seed_path,
         "cwd": cwd,
         "max_iterations": max_iterations,
         "skip_qa": skip_qa,
         "auto_evaluate": auto_evaluate,
+        "auto_evolve": auto_evolve,
         "model_tier": model_tier,
         "efficiency_mode": efficiency_mode,
         "frugality_assurance": frugality_assurance,
         "frugality_assurance_explicit": frugality_assurance_explicit,
         "max_parallel_workers": max_parallel_workers,
     }
+    prompt = seed_projection.redact(prompt) or "[REDACTED EXECUTION PROMPT]"
+    context = seed_projection.redact_value(context)
 
     return build_subagent_payload(
         tool_name="ouroboros_execute_seed",

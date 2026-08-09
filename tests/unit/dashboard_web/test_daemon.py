@@ -6,11 +6,55 @@ import http.client
 import json
 import os
 import sqlite3
+import threading
 import time
 
 import pytest
 
 from ouroboros.dashboard_web import daemon
+from ouroboros.persistence.picker_indexes import (
+    PICKER_CONTRACT_DDL_BY_NAME,
+    PICKER_META_TABLE,
+    PICKER_PROJECTION_SCOPE_SQL,
+    PICKER_PROJECTION_VERSION,
+    PICKER_START_EXECUTION_ID_SQL,
+    PICKER_START_SESSION_ID_SQL,
+    PICKER_START_SESSION_TABLE,
+    PICKER_START_TABLE,
+)
+
+
+def _create_events_table(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        "CREATE TABLE events (aggregate_id TEXT, event_type TEXT, payload TEXT, "
+        "picker_projection_version INTEGER)"
+    )
+    for statement in PICKER_CONTRACT_DDL_BY_NAME.values():
+        conn.execute(statement)
+    conn.execute(
+        f"INSERT INTO {PICKER_META_TABLE} "
+        "(contract_version, backfilled_through_rowid) VALUES (?, 0)",
+        (PICKER_PROJECTION_VERSION,),
+    )
+
+
+def _backfill_picker_starts(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        f"INSERT INTO {PICKER_START_TABLE} (event_rowid, execution_id, session_id) "
+        f"SELECT rowid, {PICKER_START_EXECUTION_ID_SQL}, {PICKER_START_SESSION_ID_SQL} "
+        "FROM events WHERE event_type = 'orchestrator.session.started'"
+    )
+    conn.execute(
+        f"INSERT OR IGNORE INTO {PICKER_START_SESSION_TABLE} "
+        "(session_id, execution_id, event_rowid) "
+        "SELECT session_id, coalesce(execution_id, ''), MIN(event_rowid) "
+        f"FROM {PICKER_START_TABLE} WHERE session_id IS NOT NULL "
+        "GROUP BY session_id, execution_id"
+    )
+    conn.execute(
+        f"UPDATE events SET picker_projection_version = ? WHERE {PICKER_PROJECTION_SCOPE_SQL}",
+        (PICKER_PROJECTION_VERSION,),
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -113,7 +157,7 @@ class TestDbIdentity:
     def _make_events_db(path, execution_id: str) -> None:
         conn = sqlite3.connect(path)
         try:
-            conn.execute("CREATE TABLE events (aggregate_id TEXT, event_type TEXT, payload TEXT)")
+            _create_events_table(conn)
             conn.execute(
                 "INSERT INTO events (aggregate_id, event_type, payload) VALUES (?, ?, ?)",
                 (
@@ -122,6 +166,7 @@ class TestDbIdentity:
                     json.dumps({"execution_id": execution_id}),
                 ),
             )
+            _backfill_picker_starts(conn)
             conn.commit()
         finally:
             conn.close()
@@ -207,7 +252,7 @@ class TestPendingRun:
         empty_db = tmp_path / "empty.db"
         conn = sqlite3.connect(empty_db)
         try:
-            conn.execute("CREATE TABLE events (aggregate_id TEXT, event_type TEXT, payload TEXT)")
+            _create_events_table(conn)
             conn.commit()
         finally:
             conn.close()
@@ -227,7 +272,155 @@ class TestPendingRun:
             assert status == 200
             page = body.decode("utf-8")
             assert "waiting for run" in page
-            assert "while (!runId)" in page
+            assert "startList()" in page
             assert "no active run" not in page
+        finally:
+            server.shutdown()
+
+    def test_successful_runs_poll_refreshes_idle_watchdog(self, tmp_path) -> None:
+        from ouroboros.dashboard_web.server import serve_background
+
+        empty_db = tmp_path / "empty.db"
+        conn = sqlite3.connect(empty_db)
+        try:
+            _create_events_table(conn)
+            conn.commit()
+        finally:
+            conn.close()
+
+        server, _thread = serve_background(
+            db_path=str(empty_db), host="127.0.0.1", port=daemon._free_port("127.0.0.1")
+        )
+        try:
+            touch_completed = threading.Event()
+            original_touch = server.touch
+
+            def synchronized_touch() -> None:
+                original_touch()
+                touch_completed.set()
+
+            server.touch = synchronized_touch  # type: ignore[method-assign]
+            server.last_activity = time.monotonic() - daemon.DEFAULT_IDLE_SHUTDOWN_SEC - 1
+            assert server.idle_seconds() > daemon.DEFAULT_IDLE_SHUTDOWN_SEC
+
+            status, body = self._get(server.server_address[1], "/api/runs")
+
+            assert status == 200
+            assert json.loads(body) == {"runs": []}
+            assert touch_completed.wait(timeout=2.0)
+            assert server.idle_seconds() < 1.0
+        finally:
+            server.shutdown()
+
+    def test_unavailable_picker_contract_returns_503_without_watchdog_touch(self, tmp_path) -> None:
+        from ouroboros.dashboard_web.server import serve_background
+
+        legacy_db = tmp_path / "legacy.db"
+        conn = sqlite3.connect(legacy_db)
+        try:
+            conn.execute("CREATE TABLE events (aggregate_id TEXT, event_type TEXT, payload TEXT)")
+            conn.commit()
+        finally:
+            conn.close()
+
+        server, _thread = serve_background(
+            db_path=str(legacy_db), host="127.0.0.1", port=daemon._free_port("127.0.0.1")
+        )
+        try:
+            server.last_activity = time.monotonic() - daemon.DEFAULT_IDLE_SHUTDOWN_SEC - 1
+            before = server.last_activity
+
+            status, body = self._get(server.server_address[1], "/api/runs")
+
+            assert status == 503
+            assert json.loads(body) == {
+                "runs": [],
+                "error": "picker_index_contract_unavailable",
+            }
+            assert server.last_activity == before
+        finally:
+            server.shutdown()
+
+    def test_runs_api_ignores_malformed_progress_and_refreshes_watchdog(self, tmp_path) -> None:
+        from ouroboros.dashboard_web.server import serve_background
+
+        db = tmp_path / "malformed-progress.db"
+        conn = sqlite3.connect(db)
+        try:
+            _create_events_table(conn)
+            conn.executemany(
+                "INSERT INTO events (aggregate_id, event_type, payload) VALUES (?, ?, ?)",
+                [
+                    (
+                        "orch_good",
+                        "orchestrator.session.started",
+                        json.dumps({"execution_id": "exec_good", "seed_goal": "Visible"}),
+                    ),
+                    ("foreign", "orchestrator.progress.updated", "{not-json"),
+                ],
+            )
+            _backfill_picker_starts(conn)
+            conn.commit()
+        finally:
+            conn.close()
+
+        server, _thread = serve_background(
+            db_path=str(db), host="127.0.0.1", port=daemon._free_port("127.0.0.1")
+        )
+        try:
+            touch_completed = threading.Event()
+            original_touch = server.touch
+
+            def synchronized_touch() -> None:
+                original_touch()
+                touch_completed.set()
+
+            server.touch = synchronized_touch  # type: ignore[method-assign]
+            server.last_activity = time.monotonic() - daemon.DEFAULT_IDLE_SHUTDOWN_SEC - 1
+
+            status, body = self._get(server.server_address[1], "/api/runs")
+
+            assert status == 200
+            assert json.loads(body)["runs"][0]["execution_id"] == "exec_good"
+            assert touch_completed.wait(timeout=2.0)
+            assert server.idle_seconds() < 1.0
+        finally:
+            server.shutdown()
+
+    def test_runs_api_skips_malformed_starts_before_applying_limit(self, tmp_path) -> None:
+        from ouroboros.dashboard_web.server import serve_background
+
+        db = tmp_path / "malformed-starts.db"
+        conn = sqlite3.connect(db)
+        try:
+            _create_events_table(conn)
+            conn.execute(
+                "INSERT INTO events (aggregate_id, event_type, payload) VALUES (?, ?, ?)",
+                (
+                    "orch_visible",
+                    "orchestrator.session.started",
+                    json.dumps({"execution_id": "exec_visible", "seed_goal": "Visible"}),
+                ),
+            )
+            conn.executemany(
+                "INSERT INTO events (aggregate_id, event_type, payload) VALUES (?, ?, ?)",
+                [
+                    (f"orch_bad_{index}", "orchestrator.session.started", "{not-json")
+                    for index in range(10)
+                ],
+            )
+            _backfill_picker_starts(conn)
+            conn.commit()
+        finally:
+            conn.close()
+
+        server, _thread = serve_background(
+            db_path=str(db), host="127.0.0.1", port=daemon._free_port("127.0.0.1")
+        )
+        try:
+            status, body = self._get(server.server_address[1], "/api/runs")
+
+            assert status == 200
+            assert [run["execution_id"] for run in json.loads(body)["runs"]] == ["exec_visible"]
         finally:
             server.shutdown()

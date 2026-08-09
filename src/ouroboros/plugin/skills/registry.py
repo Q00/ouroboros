@@ -681,10 +681,18 @@ class SkillRegistry:
         """
         prefixes = list(self._normalize_string_sequence(frontmatter.get("magic_prefixes")))
 
-        # Auto-generate from skill name
-        prefixes.append(f"ouroboros:{skill_name}")
-        prefixes.append(f"ooo:{skill_name}")
-        prefixes.append(f"/ouroboros:{skill_name}")
+        # The directory name is the stable runtime identity. Frontmatter may
+        # expose a different host-facing registration name to avoid reserved
+        # commands, so accept both spellings and resolve both to ``skill_name``.
+        command_names = [skill_name]
+        display_name = frontmatter.get("name")
+        if isinstance(display_name, str) and display_name.strip():
+            command_names.append(display_name.strip())
+
+        for command_name in dict.fromkeys(command_names):
+            prefixes.append(f"ouroboros:{command_name}")
+            prefixes.append(f"ooo:{command_name}")
+            prefixes.append(f"/ouroboros:{command_name}")
 
         return tuple(dict.fromkeys(prefixes))
 

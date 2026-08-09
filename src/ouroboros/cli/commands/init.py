@@ -12,6 +12,7 @@ from typing import Annotated
 
 import click
 from rich.prompt import Confirm, Prompt
+import structlog
 import typer
 import yaml
 
@@ -26,6 +27,7 @@ from ouroboros.bigbang.seed_generator import SeedGenerator
 from ouroboros.cli.formatters import console
 from ouroboros.cli.formatters.panels import print_error, print_info, print_success, print_warning
 from ouroboros.cli.formatters.prompting import multiline_prompt_async
+from ouroboros.cli.logging_setup import configure_cli_logging
 from ouroboros.config import get_clarification_model, get_llm_backend
 from ouroboros.core.errors import ProviderError
 from ouroboros.core.hitl_contract import (
@@ -46,9 +48,16 @@ from ouroboros.events.hitl import (
     create_hitl_answered_event,
     create_hitl_requested_event,
 )
-from ouroboros.observability import LoggingConfig, configure_logging
+from ouroboros.package_profiles import (
+    PublicAgentRuntimeBackend as AgentRuntimeBackend,
+)
+from ouroboros.package_profiles import (
+    public_runtime_backend,
+)
 from ouroboros.providers import create_llm_adapter, resolve_llm_backend
 from ouroboros.providers.base import LLMAdapter
+
+log = structlog.get_logger(__name__)
 
 
 class SeedGenerationResult(Enum):
@@ -57,24 +66,6 @@ class SeedGenerationResult(Enum):
     SUCCESS = auto()
     CANCELLED = auto()
     CONTINUE_INTERVIEW = auto()
-
-
-class AgentRuntimeBackend(str, Enum):  # noqa: UP042
-    """Supported orchestrator runtime backends for workflow handoff."""
-
-    CLAUDE = "claude"
-    CODEX = "codex"
-    OPENCODE = "opencode"
-    HERMES = "hermes"
-    GEMINI = "gemini"
-    GOOSE = "goose"
-    KIRO = "kiro"
-    COPILOT = "copilot"
-    PI = "pi"
-    GJC = "gjc"
-    ANTIGRAVITY = "antigravity"
-    GROK = "grok"
-    ZCODE = "zcode"
 
 
 class LLMBackend(str, Enum):  # noqa: UP042
@@ -486,7 +477,9 @@ async def _run_interview(
                 return
 
             # Generate Seed
-            seed_path, result = await _generate_seed_from_interview(state, llm_adapter, llm_backend)
+            seed_path, result = await _generate_seed_from_interview(
+                state, llm_adapter, llm_backend, engine=engine
+            )
 
             if result == SeedGenerationResult.CONTINUE_INTERVIEW:
                 # Re-open interview for more questions
@@ -541,12 +534,15 @@ async def _generate_seed_from_interview(
     state: InterviewState,
     llm_adapter: LLMAdapter,
     llm_backend: str | None = None,
+    *,
+    engine: InterviewEngine,
 ) -> tuple[Path | None, SeedGenerationResult]:
     """Generate Seed from completed interview.
 
     Args:
         state: Completed interview state.
         llm_adapter: LLM adapter for scoring and generation.
+        engine: Interview engine that owns durable state persistence.
 
     Returns:
         Tuple of (path to generated seed file or None, result status).
@@ -569,6 +565,21 @@ async def _generate_seed_from_interview(
     ambiguity_score = score_result.value
     console.print(f"[muted]Ambiguity score: {ambiguity_score.overall_score:.2f}[/]")
 
+    # Persist the evaluation like the MCP path does (#1901): without this the
+    # state file reads ambiguity_score: null and the score only survives in
+    # rotating logs. A save failure must never block seed generation.
+    state.store_ambiguity(
+        score=ambiguity_score.overall_score,
+        breakdown=ambiguity_score.breakdown.model_dump(mode="json"),
+    )
+    save_result = await engine.save_state(state)
+    if save_result.is_err:
+        log.warning(
+            "cli.init.persist_ambiguity_failed",
+            interview_id=state.interview_id,
+            error=str(save_result.error),
+        )
+
     if not ambiguity_score.is_ready_for_seed:
         print_warning(
             f"Ambiguity score ({ambiguity_score.overall_score:.2f}) is too high. "
@@ -588,6 +599,17 @@ async def _generate_seed_from_interview(
         )
 
         if choice == "1":
+            # Reopening bypasses record_response's reopen contract, so the
+            # snapshot persisted above must be invalidated here: an in-progress
+            # interview must never carry a live score.
+            state.clear_stored_ambiguity()
+            clear_result = await engine.save_state(state)
+            if clear_result.is_err:
+                log.warning(
+                    "cli.init.clear_ambiguity_failed",
+                    interview_id=state.interview_id,
+                    error=str(clear_result.error),
+                )
             return None, SeedGenerationResult.CONTINUE_INTERVIEW
         elif choice == "3":
             return None, SeedGenerationResult.CANCELLED
@@ -960,9 +982,9 @@ def start(
         print_error("Initial context is required when not resuming.")
         raise typer.Exit(code=1)
 
-    # Configure logging based on debug flag
+    # Apply the saved logging.level, with --debug overriding it.
+    configure_cli_logging(debug=debug)
     if debug:
-        configure_logging(LoggingConfig(log_level="DEBUG"))
         print_info("Debug mode enabled - showing verbose logs")
 
     if runtime and not orchestrator:
@@ -998,7 +1020,7 @@ def start(
                 state_dir,
                 orchestrator,
                 debug,
-                runtime.value if runtime else None,
+                public_runtime_backend(runtime.value if runtime else None),
                 llm_backend.value if llm_backend else None,
             )
         )

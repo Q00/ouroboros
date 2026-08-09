@@ -119,6 +119,27 @@ Fail-closed marker for a provider boundary whose effects may have occurred but
 whose terminal result is not yet durable. Recovery must not redispatch a sealed
 attempt; a later terminal lifecycle event supersedes the seal.
 
+### mcp.job.created
+
+Emitted when a background MCP job is created. Its owner fields let a later
+process determine whether recovery is authorized.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `owner_pid` | `integer` | Owning process ID; must agree with `owner_identity.pid` when the versioned identity is present |
+| `owner_start_time` | `number?` | Legacy epoch process start time used for liveness on non-Linux platforms |
+| `owner_identity` | `object?` | Versioned Linux owner identity; absent from historical events, non-Linux events, or when the Linux kernel identity cannot be read |
+| `owner_identity.version` | `integer` | Identity schema version; currently `1` |
+| `owner_identity.platform` | `string` | Always `"linux"` for version `1` |
+| `owner_identity.pid` | `integer` | Positive process ID matching `owner_pid` |
+| `owner_identity.boot_id` | `string` | Canonical UUID-shaped Linux kernel boot ID |
+| `owner_identity.start_ticks` | `integer` | Non-negative raw `/proc/<pid>/stat` process start ticks |
+
+`owner_identity` is additive within event version 1. Linux recovery readers
+must treat a missing, malformed, or unsupported identity as unknown and must
+not fall back to the legacy epoch field to prove owner death. Non-Linux readers
+retain the legacy `owner_pid` plus `owner_start_time` behavior.
+
 ### mcp.job.cancelled
 
 Emitted when a background MCP job is cancelled.
@@ -127,6 +148,37 @@ Emitted when a background MCP job is cancelled.
 |-------|------|-------------|
 | `status` | `string` | Always `"cancelled"` |
 | `message` | `string` | Human-readable cancellation message |
+
+### artifact.referenced
+
+Bounded Disposable Memory projection emitted only after the content-addressed
+body and its per-contract manifest are durable. The aggregate is
+`contract/<contract_id>`. Raw child output and transcripts are forbidden from
+this event; consumers must call the explicit artifact fetch/replay API.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `schema_version` | `int` | Disposable envelope schema, currently `1` |
+| `contract_id` | `string` | Contract owning this result |
+| `artifact_ref` | `string` | `sha256:<64 lowercase hex>` content address |
+| `result.status` | `string` | `completed` or `failed` |
+| `runtime_id` | `string` | Runtime that produced the artifact |
+| `duration_ms` | `int` | Non-negative child duration |
+| `events_emitted_count` | `int` | Runtime-authored event count; never inline events |
+
+### artifact.tombstoned
+
+Contract-scoped proof that an artifact body was deliberately pruned. The
+durable per-contract manifest is authoritative for local GC and replay;
+EventStore producers may emit the same bounded projection when they own an
+active EventStore connection. Replay checks the tombstone before looking for a
+body and never silently reruns work.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `contract_id` | `string` | Contract whose replay body was pruned |
+| `artifact_ref` | `string` | Pruned content address |
+| `reason` | `string` | Retention/explicit-prune reason |
 
 ### orchestrator.progress.updated
 

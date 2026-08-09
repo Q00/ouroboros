@@ -10,6 +10,7 @@ import pytest
 from ouroboros.auto.adapters import (
     HandlerError,
     HandlerInterviewBackend,
+    HandlerRunStarter,
     HandlerSeedGenerator,
     HandlerSynchronousRunStarter,
 )
@@ -21,6 +22,21 @@ from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
 class _FakeSeed:
     def to_dict(self) -> dict[str, object]:
         return {"goal": "Create hello_auto.py", "acceptance_criteria": ()}
+
+
+@pytest.mark.asyncio
+async def test_auto_run_starter_keeps_one_authoritative_evaluation_path(tmp_path) -> None:
+    handler = AsyncMock()
+    handler.handle = AsyncMock(
+        return_value=Result.ok(MCPToolResult(meta={"job_id": "job_run", "session_id": "orch_run"}))
+    )
+    starter = HandlerRunStarter(handler, cwd=str(tmp_path))
+
+    await starter(_FakeSeed())  # type: ignore[arg-type]
+
+    arguments = handler.handle.await_args.args[0]
+    assert arguments["auto_evaluate"] is False
+    assert arguments["auto_evolve"] is False
 
 
 @pytest.mark.asyncio
@@ -81,6 +97,8 @@ async def test_synchronous_run_starter_skips_execute_seed_qa(tmp_path) -> None:
 
     arguments = handler.handle.await_args.args[0]
     assert arguments["skip_qa"] is True
+    assert arguments["auto_evaluate"] is False
+    assert arguments["auto_evolve"] is False
     assert result["status"] == "completed"
     assert result["success"] is True
 

@@ -117,7 +117,11 @@ class TestSaveStateUsesThread:
 
         assert result.is_err
         assert saved_path.read_text(encoding="utf-8") == "original\n"
-        temp_creations = [call for call in mock_open.call_args_list if call.args[1] & os.O_EXCL]
+        temp_creations = [
+            call
+            for call in mock_open.call_args_list
+            if call.args[1] & os.O_EXCL and ".tmp-" in os.fspath(call.args[0])
+        ]
         assert len(temp_creations) == 1
         assert Path(temp_creations[0].args[0]).parent == saved_path.parent
         mock_fsync.assert_called_once()

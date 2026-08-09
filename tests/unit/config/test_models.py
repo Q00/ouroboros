@@ -1,6 +1,7 @@
 """Unit tests for ouroboros.config.models module."""
 
 from pathlib import Path
+from typing import get_args
 
 from pydantic import ValidationError
 import pytest
@@ -11,6 +12,7 @@ from ouroboros.config._model_defaults import (
     DEFAULT_SONNET_MODEL,
 )
 from ouroboros.config.models import (
+    VALID_RUNTIME_BACKENDS,
     ClarificationConfig,
     ConsensusConfig,
     CredentialsConfig,
@@ -309,6 +311,8 @@ class TestExecutionConfig:
             retrospective_interval=5,
             tui_autolaunch=True,
             auto_evaluate=False,
+            auto_evolve=False,
+            auto_evolve_max_generations=7,
             decomposition_mode="bounce_only",
             context_pack=False,
         )
@@ -316,6 +320,8 @@ class TestExecutionConfig:
         assert config.retrospective_interval == 5
         assert config.tui_autolaunch is True
         assert config.auto_evaluate is False
+        assert config.auto_evolve is False
+        assert config.auto_evolve_max_generations == 7
         assert config.default_model is None
         assert config.decomposition_mode == "bounce_only"
         assert config.context_pack is False
@@ -327,9 +333,17 @@ class TestExecutionConfig:
         assert config.retrospective_interval == 3
         assert config.tui_autolaunch is False
         assert config.auto_evaluate is True
+        assert config.auto_evolve is True
+        assert config.auto_evolve_max_generations == 3
         assert config.default_model is None
         assert config.decomposition_mode == "bounce_only"
         assert config.context_pack is True
+
+    @pytest.mark.parametrize(("raw", "expected"), [(0, 1), (11, 10), (4, 4)])
+    def test_auto_evolve_generation_budget_is_clamped(self, raw: int, expected: int) -> None:
+        assert (
+            ExecutionConfig(auto_evolve_max_generations=raw).auto_evolve_max_generations == expected
+        )
 
     def test_execution_config_migrates_legacy_preflight_to_bounce_only(self) -> None:
         """Stored preflight settings cannot re-enable pre-execution splitting."""
@@ -715,7 +729,7 @@ class TestOrchestratorConfig:
     """Test OrchestratorConfig runtime settings."""
 
     def test_orchestrator_config_defaults(self) -> None:
-        """Defaults to the Claude runtime."""
+        """Defaults to the isolated Claude SDK runtime."""
         config = OrchestratorConfig()
         assert config.runtime_backend == "claude"
         assert config.permission_mode == "acceptEdits"
@@ -948,6 +962,32 @@ class TestRuntimeProfileConfig:
         profile = RuntimeProfileConfig(default="gjc", stages={"execute": "gjc_cli"})
         assert profile.default == "gjc"
         assert profile.stages == {"execute": "gjc_cli"}
+
+    def test_runtime_profile_accepts_claude_mcp_backend(self) -> None:
+        profile = RuntimeProfileConfig(
+            default="claude_mcp",
+            stages={"execute": "claude_mcp"},
+        )
+        assert profile.default == "claude_mcp"
+        assert profile.stages == {"execute": "claude_mcp"}
+
+    def test_runtime_profile_allowlist_covers_every_persisted_backend(self) -> None:
+        persisted_backends = set(
+            get_args(OrchestratorConfig.model_fields["runtime_backend"].annotation)
+        )
+
+        assert persisted_backends <= VALID_RUNTIME_BACKENDS
+
+    @pytest.mark.parametrize(
+        "profile",
+        [
+            {"default": "unknown-runtime"},
+            {"stages": {"execute": "unknown-runtime"}},
+        ],
+    )
+    def test_runtime_profile_rejects_unknown_backends(self, profile: dict[str, object]) -> None:
+        with pytest.raises(ValidationError, match="must be one of"):
+            RuntimeProfileConfig.model_validate(profile)
 
     def test_orchestrator_runtime_profile_string_shorthand(self) -> None:
         config = OrchestratorConfig(runtime_profile="worker")

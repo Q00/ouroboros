@@ -14,6 +14,9 @@ These tests cover the regressions surfaced during PR #312 review:
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
 import pytest
 
 from ouroboros.orchestrator.adapter import ParamSupport
@@ -30,7 +33,11 @@ from ouroboros.orchestrator.runtime_message_projection import project_runtime_me
 
 
 def _make_runtime() -> GeminiCLIRuntime:
-    return GeminiCLIRuntime(cli_path="/usr/bin/gemini")
+    return GeminiCLIRuntime(cli_path=_test_cli_path())
+
+
+def _test_cli_path() -> str:
+    return str(Path(os.environ["OUROBOROS_TEST_CLI_DIR"]) / "gemini")
 
 
 def test_convert_event_surfaces_result_response_as_terminal_assistant_message() -> None:
@@ -178,7 +185,7 @@ def _approval_flag(cmd: list[str]) -> str:
 
 def test_build_command_maps_bypass_permissions_to_yolo() -> None:
     runtime = GeminiCLIRuntime(
-        cli_path="/usr/bin/gemini",
+        cli_path=_test_cli_path(),
         permission_mode="bypassPermissions",
     )
     cmd = runtime._build_command("/tmp/unused", prompt="x")
@@ -188,7 +195,7 @@ def test_build_command_maps_bypass_permissions_to_yolo() -> None:
 
 def test_build_command_maps_accept_edits_to_auto_edit() -> None:
     runtime = GeminiCLIRuntime(
-        cli_path="/usr/bin/gemini",
+        cli_path=_test_cli_path(),
         permission_mode="acceptEdits",
     )
     cmd = runtime._build_command("/tmp/unused", prompt="x")
@@ -207,7 +214,7 @@ def test_default_permission_mode_normalized_to_accept_edits() -> None:
     from structlog.testing import capture_logs
 
     with capture_logs() as cap_logs:
-        runtime = GeminiCLIRuntime(cli_path="/usr/bin/gemini", permission_mode="default")
+        runtime = GeminiCLIRuntime(cli_path=_test_cli_path(), permission_mode="default")
 
     assert runtime.permission_mode == "acceptEdits"
     cmd = runtime._build_command("/tmp/unused", prompt="x")
@@ -226,7 +233,7 @@ def test_build_command_uses_auto_edit_when_permission_mode_omitted() -> None:
     ``auto_edit`` is non-blocking under ``--non-interactive`` so this stays
     headless-safe without escalating to full ``yolo`` bypass.
     """
-    runtime = GeminiCLIRuntime(cli_path="/usr/bin/gemini")
+    runtime = GeminiCLIRuntime(cli_path=_test_cli_path())
     cmd = runtime._build_command("/tmp/unused", prompt="x")
     assert _approval_flag(cmd) == "auto_edit"
 
@@ -236,21 +243,21 @@ def test_unknown_permission_mode_raises_value_error() -> None:
     a permissive default would escalate any unchecked input."""
     with pytest.raises(ValueError, match="Unsupported Gemini permission mode"):
         GeminiCLIRuntime(
-            cli_path="/usr/bin/gemini",
+            cli_path=_test_cli_path(),
             permission_mode="acceptedits",  # plausible typo of "acceptEdits"
         )
 
 
 def test_omitted_permission_mode_resolves_to_accept_edits() -> None:
     """``None`` aligns with the orchestrator-wide ``acceptEdits`` default."""
-    runtime = GeminiCLIRuntime(cli_path="/usr/bin/gemini")
+    runtime = GeminiCLIRuntime(cli_path=_test_cli_path())
     assert runtime.permission_mode == "acceptEdits"
 
 
 def test_empty_string_permission_mode_raises() -> None:
     """Empty/whitespace-only strings are not a valid mode either."""
     with pytest.raises(ValueError, match="Unsupported Gemini permission mode"):
-        GeminiCLIRuntime(cli_path="/usr/bin/gemini", permission_mode="   ")
+        GeminiCLIRuntime(cli_path=_test_cli_path(), permission_mode="   ")
 
 
 def test_factory_built_runtime_uses_accept_edits_default() -> None:

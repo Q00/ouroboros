@@ -217,7 +217,7 @@ directly. Run it explicitly when:
 **Implementation:** invoke the CLI via Bash.
 
 ```
-uvx --from ouroboros-ai ouroboros detect [path]
+uvx --python '>=3.12' --from ouroboros-ai ouroboros detect [path]
 # or, if already installed:
 ouroboros detect [path] [--force]
 ```

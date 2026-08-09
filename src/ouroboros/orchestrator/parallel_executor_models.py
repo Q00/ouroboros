@@ -16,6 +16,7 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any
 
 from ouroboros.orchestrator.decomposition_policy import DecompositionDecisionRecord
+from ouroboros.orchestrator.recoverable_failure import UsageLimitPauseConsequence
 
 if TYPE_CHECKING:
     from ouroboros.orchestrator.adapter import AgentMessage, RuntimeHandle
@@ -163,6 +164,47 @@ class StageExecutionOutcome(str, Enum):  # noqa: UP042
 
 
 @dataclass(frozen=True, slots=True)
+class CoordinatorQuotaPause:
+    """Exact coordinator effect whose published PAUSED state may be consumed."""
+
+    execution_id: str
+    session_id: str
+    level_number: int
+    coordinator_aggregate_id: str
+    consequence: UsageLimitPauseConsequence
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.execution_id) is not str
+            or not self.execution_id
+            or len(self.execution_id) > 1_024
+            or type(self.session_id) is not str
+            or not self.session_id
+            or len(self.session_id) > 1_024
+            or type(self.level_number) is not int
+            or self.level_number < 1
+            or type(self.coordinator_aggregate_id) is not str
+            or not self.coordinator_aggregate_id
+            or len(self.coordinator_aggregate_id) > 4_096
+            or not isinstance(self.consequence, UsageLimitPauseConsequence)
+        ):
+            raise ValueError("coordinator quota pause owner is invalid")
+        self.consequence.to_payload()
+
+    def owner_payload(self) -> dict[str, object]:
+        """Return the closed identity embedded atomically in session PAUSED."""
+
+        return {
+            "schema_version": 1,
+            "kind": "coordinator_quota",
+            "execution_id": self.execution_id,
+            "session_id": self.session_id,
+            "level_number": self.level_number,
+            "coordinator_aggregate_id": self.coordinator_aggregate_id,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class ParallelExecutionStageResult:
     """Aggregate result for one serial stage of AC execution."""
 
@@ -279,6 +321,10 @@ class ParallelExecutionResult:
     # owner uses this durable signal to publish PAUSED even when another AC in
     # the same round already persisted a valid next-route decision.
     recoverable_route_pause: bool = False
+    # A coordinator review is also a provider call. Preserve the complete
+    # consequence and exact effect owner so the runner can atomically publish
+    # PAUSED and a later resume can consume that one owner exactly once.
+    recoverable_coordinator_pause: CoordinatorQuotaPause | None = None
 
     @property
     def all_succeeded(self) -> bool:
@@ -288,7 +334,10 @@ class ParallelExecutionResult:
         about non-empty coverage should also check len(self.results).
         """
         has_no_failures = (
-            self.failure_count == 0 and self.blocked_count == 0 and self.invalid_count == 0
+            self.failure_count == 0
+            and self.blocked_count == 0
+            and self.invalid_count == 0
+            and self.recoverable_coordinator_pause is None
         )
         # Empty set is trivially successful (no failures); non-empty requires >=1 satisfied
         if not self.results:
@@ -306,10 +355,30 @@ class ParallelExecutionResult:
         return self.success_count + self.externally_satisfied_count
 
 
+def collect_decomposition_depth_warning_paths(
+    result: ACExecutionResult,
+    *,
+    index_path: tuple[int, ...],
+) -> list[str]:
+    """Collect dotted AC paths that hit the soft decomposition-depth safety net."""
+
+    paths = [".".join(str(i) for i in index_path)] if result.decomposition_depth_warning else []
+    for idx, sub_result in enumerate(result.sub_results, start=1):
+        paths.extend(
+            collect_decomposition_depth_warning_paths(
+                sub_result,
+                index_path=(*index_path, idx),
+            )
+        )
+    return paths
+
+
 __all__ = [
     "ACExecutionOutcome",
     "ACExecutionResult",
+    "CoordinatorQuotaPause",
     "ParallelExecutionResult",
     "ParallelExecutionStageResult",
     "StageExecutionOutcome",
+    "collect_decomposition_depth_warning_paths",
 ]

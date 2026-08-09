@@ -11,14 +11,17 @@ shipped archive.
 from __future__ import annotations
 
 from email.parser import Parser
+import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tomllib
 import zipfile
 
 import pytest
 
+from ouroboros.package_profiles import UNSUPPORTED_CLAUDE_SDK_MCP_MESSAGE
 from ouroboros.plugin.manifest import SUPPORTED_SCHEMA_VERSIONS
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -85,6 +88,24 @@ def test_built_wheel_preserves_packaging_contracts(tmp_path: Path) -> None:
         assert len(metadata_paths) == 1, f"expected one METADATA file, got {metadata_paths}"
         metadata = Parser().parsestr(archive.read(metadata_paths[0]).decode("utf-8"))
         requires_dist = metadata.get_all("Requires-Dist") or []
+        provided_extras = set(metadata.get_all("Provides-Extra") or [])
+
+    assert {"claude", "claude-cli", "claude-sdk", "mcp", "all"} <= provided_extras
+    sdk_requirements = [
+        requirement
+        for requirement in requires_dist
+        if requirement.startswith(("claude-agent-sdk", "anthropic"))
+    ]
+    assert len(sdk_requirements) == 6
+    assert all(
+        "extra == 'all'" in requirement
+        or "extra == 'claude'" in requirement
+        or "extra == 'claude-sdk'" in requirement
+        for requirement in sdk_requirements
+    )
+    assert any("extra == 'all'" in requirement for requirement in sdk_requirements)
+    assert any("extra == 'claude'" in requirement for requirement in sdk_requirements)
+    assert any("extra == 'claude-sdk'" in requirement for requirement in sdk_requirements)
 
     pyproject = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     litellm_requirement = pyproject["project"]["optional-dependencies"]["litellm"][0]
@@ -99,6 +120,114 @@ def test_built_wheel_preserves_packaging_contracts(tmp_path: Path) -> None:
             "python_version < '3.14'" in requirement and f"extra == '{extra}'" in requirement
             for requirement in wheel_litellm_requirements
         ), f"wheel metadata lost the LiteLLM Python marker for [{extra}]"
+
+    supported_profiles = (
+        "claude",
+        "claude-cli",
+        "mcp",
+        "mcp,claude-cli",
+        "claude-sdk",
+        "all",
+    )
+    for profiles in supported_profiles:
+        result = subprocess.run(
+            [
+                "uv",
+                "pip",
+                "install",
+                "--dry-run",
+                "--python",
+                sys.executable,
+                "--target",
+                str(tmp_path / f"target-{profiles.replace(',', '-')}"),
+                f"{wheels[0]}[{profiles}]",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=180,
+            check=False,
+        )
+        assert result.returncode == 0, (
+            f"wheel profile [{profiles}] must resolve: "
+            f"stdout={result.stdout!r} stderr={result.stderr!r}"
+        )
+
+    for profiles in ("mcp,claude", "mcp,claude-sdk", "all,mcp"):
+        unsupported = subprocess.run(
+            [
+                "uv",
+                "pip",
+                "install",
+                "--dry-run",
+                "--python",
+                sys.executable,
+                "--target",
+                str(tmp_path / f"target-{profiles.replace(',', '-')}"),
+                f"{wheels[0]}[{profiles}]",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=180,
+            check=False,
+        )
+        assert unsupported.returncode != 0
+        resolver_error = unsupported.stdout + unsupported.stderr
+        assert "claude-agent-sdk" in resolver_error
+        assert "mcp" in resolver_error
+
+    # A clean MCP 2 + CLI-worker install with no persisted runtime would
+    # otherwise inherit the SDK default. The built console script must reject
+    # that bare invocation before creating any durable state.
+    probe_venv = tmp_path / "bare-mcp-cli-probe"
+    create_venv = subprocess.run(
+        ["uv", "venv", "--python", sys.executable, str(probe_venv)],
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+    assert create_venv.returncode == 0, create_venv.stderr
+    probe_python = probe_venv / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
+    install_probe = subprocess.run(
+        [
+            "uv",
+            "pip",
+            "install",
+            "--python",
+            str(probe_python),
+            f"{wheels[0]}[mcp,claude-cli]",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+    assert install_probe.returncode == 0, install_probe.stderr
+    probe_cli = probe_venv / (
+        "Scripts/ouroboros.exe" if sys.platform == "win32" else "bin/ouroboros"
+    )
+    probe_home = tmp_path / "bare-probe-home"
+    probe_home.mkdir()
+    probe_env = os.environ.copy()
+    probe_env["HOME"] = str(probe_home)
+    probe_env["USERPROFILE"] = str(probe_home)
+    for key in ("OUROBOROS_AGENT_RUNTIME", "OUROBOROS_RUNTIME", "_OUROBOROS_NESTED"):
+        probe_env.pop(key, None)
+    bare_probe = subprocess.run(
+        [str(probe_cli), "mcp", "serve"],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+        env=probe_env,
+    )
+    assert bare_probe.returncode == 1
+    rendered_probe = " ".join((bare_probe.stdout + bare_probe.stderr).split())
+    assert " ".join(UNSUPPORTED_CLAUDE_SDK_MCP_MESSAGE.split()) in rendered_probe
+    state_dir = probe_home / ".ouroboros"
+    assert not (state_dir / "ouroboros.db").exists()
+    assert not (state_dir / "config.yaml").exists()
+    assert not (state_dir / "sessions").exists()
 
 
 @pytest.mark.skipif(

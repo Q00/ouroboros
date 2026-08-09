@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+import copy
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 import hashlib
@@ -24,6 +25,20 @@ from typing import Any
 from ouroboros.core.errors import PersistenceError
 from ouroboros.core.file_lock import file_lock as _file_lock
 from ouroboros.core.types import Result
+
+
+def _checkpoint_hash(seed_id: str, phase: str, state: dict[str, Any], timestamp_iso: str) -> str:
+    """Integrity hash over one exact checkpoint payload."""
+    serialized = json.dumps(
+        {
+            "seed_id": seed_id,
+            "phase": phase,
+            "state": state,
+            "timestamp": timestamp_iso,
+        },
+        sort_keys=True,
+    )
+    return hashlib.sha256(serialized.encode()).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,15 +72,13 @@ class CheckpointData:
             New CheckpointData instance with computed hash.
         """
         timestamp = datetime.now(UTC)
-        # Create temporary instance without hash to compute it
-        temp_data = {
-            "seed_id": seed_id,
-            "phase": phase,
-            "state": state,
-            "timestamp": timestamp.isoformat(),
-        }
-        serialized = json.dumps(temp_data, sort_keys=True)
-        hash_value = hashlib.sha256(serialized.encode()).hexdigest()
+        # Snapshot the caller's state before hashing: the integrity hash must
+        # bind exactly the payload this checkpoint will carry, so a caller
+        # mutating its dictionary (or anything nested in it) after
+        # construction cannot desync the two (#1829). State is JSON-bound by
+        # the hash below, so every valid state is deep-copyable.
+        state = copy.deepcopy(state)
+        hash_value = _checkpoint_hash(seed_id, phase, state, timestamp.isoformat())
 
         return cls(
             seed_id=seed_id,
@@ -81,14 +94,9 @@ class CheckpointData:
         Returns:
             Result.ok(True) if hash matches, Result.err with details if corrupted.
         """
-        temp_data = {
-            "seed_id": self.seed_id,
-            "phase": self.phase,
-            "state": self.state,
-            "timestamp": self.timestamp.isoformat(),
-        }
-        serialized = json.dumps(temp_data, sort_keys=True)
-        computed_hash = hashlib.sha256(serialized.encode()).hexdigest()
+        computed_hash = _checkpoint_hash(
+            self.seed_id, self.phase, self.state, self.timestamp.isoformat()
+        )
 
         if computed_hash != self.hash:
             return Result.err(f"Hash mismatch: expected {self.hash}, got {computed_hash}")
@@ -272,6 +280,35 @@ class CheckpointStore:
             Result.ok(None) on success, Result.err(PersistenceError) on failure.
         """
         try:
+            # Serialize exactly once and validate that snapshot: the live
+            # object's state is caller-visible and mutable, so validating one
+            # read and writing a second would reopen the desync between
+            # payload and hash (#1829). The snapshot below is what gets
+            # written, byte for byte.
+            payload = checkpoint.to_dict()
+            snapshot_hash = _checkpoint_hash(
+                payload["seed_id"],
+                payload["phase"],
+                payload["state"],
+                payload["timestamp"],
+            )
+            if snapshot_hash != payload["hash"]:
+                # Never persist a checkpoint load() would immediately reject:
+                # refusing here keeps the committed chain untouched and
+                # surfaces the mismatch to the caller instead (#1829).
+                return Result.err(
+                    PersistenceError(
+                        "Refusing to save checkpoint with stale integrity hash: "
+                        f"expected {payload['hash']}, got {snapshot_hash}",
+                        operation="write",
+                        details={
+                            "seed_id": checkpoint.seed_id,
+                            "phase": checkpoint.phase,
+                            "integrity_mismatch": True,
+                        },
+                    )
+                )
+
             checkpoint_path = self._get_checkpoint_path(checkpoint.seed_id)
 
             # Use file locking to prevent race conditions
@@ -282,7 +319,7 @@ class CheckpointStore:
                 staged = checkpoint_path.with_name(f".tmp-{secrets.token_hex(8)}.json")
                 try:
                     with staged.open("w") as f:
-                        json.dump(checkpoint.to_dict(), f, indent=2)
+                        json.dump(payload, f, indent=2)
                         f.flush()
                         os.fsync(f.fileno())
                     self._publish_staged_checkpoint(checkpoint.seed_id, staged, checkpoint_path)

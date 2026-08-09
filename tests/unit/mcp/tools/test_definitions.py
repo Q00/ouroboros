@@ -1873,6 +1873,7 @@ class TestOuroborosTools:
         "ouroboros_evolve_rewind",
         "ouroboros_evolve_step",
         "ouroboros_execute_seed",
+        "ouroboros_fetch_artifact",
         "ouroboros_generate_seed",
         "ouroboros_interview",
         "ouroboros_job_result",
@@ -1952,6 +1953,33 @@ class TestOuroborosTools:
         }
         execute_handler = next(h for h in tools if isinstance(h, ExecuteSeedHandler))
         assert execute_handler.agent_runtime_backend == "codex"
+
+    def test_get_ouroboros_tools_uses_explicit_runtime_project_for_artifacts(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Disposable bodies belong to the runtime workspace, not launcher CWD."""
+        launcher = tmp_path / "launcher"
+        project = tmp_path / "runtime-project"
+        launcher.mkdir()
+        project.mkdir()
+        monkeypatch.chdir(launcher)
+
+        tools = get_ouroboros_tools(runtime_backend="codex", project_dir=project)
+        submit = next(
+            handler
+            for handler in tools
+            if handler.definition.name == "ouroboros_submit_fanout_results"
+        )
+
+        assert submit.disposable_memory is not None
+        assert submit.disposable_memory.artifact_store.root == (
+            project.resolve() / ".ouroboros" / "artifacts"
+        )
+        assert submit.disposable_memory.artifact_store.root != (
+            launcher.resolve() / ".ouroboros" / "artifacts"
+        )
 
     def test_get_ouroboros_tools_can_inject_llm_backend(self) -> None:
         """Tool factory propagates llm backend to LLM-only handlers."""
@@ -2045,7 +2073,10 @@ class TestAsyncJobHandlers:
         assert observer["relay"]["mode"] == "event_driven"
         assert observer["parent_session"]["availability"] == "available_after_handoff"
         assert observer["host_lifecycle"]["codex_parent_relay"]["wait_tool"] == "wait_agent"
-        assert observer["follow_result_job_keys"] == ["chained_evaluate_job_id"]
+        assert observer["follow_result_job_keys"] == [
+            "chained_evaluate_job_id",
+            "chained_ralph_job_id",
+        ]
         assert "Verification Status: executed_unverified" in result.value.text_content
         assert "Formal Evaluation: NOT evaluated" in result.value.text_content
         assert "Next: ooo evaluate orch_" in result.value.text_content
@@ -2371,6 +2402,40 @@ class TestAsyncJobHandlers:
     def test_start_evolve_step_definition_name(self) -> None:
         handler = StartEvolveStepHandler()
         assert handler.definition.name == "ouroboros_start_evolve_step"
+
+    async def test_start_evolve_step_exposes_generation_execution_id(
+        self,
+        memory_event_store: EventStore,
+    ) -> None:
+        """The start receipt, durable job link, and observer share one generation ID."""
+
+        class FakeJobManager:
+            async def allocate_job_id(self) -> str:
+                return "job_evolve"
+
+            async def start_job(self, *, job_type, initial_message, runner, links, job_id=None):
+                runner.close()
+                return SimpleNamespace(
+                    job_id=job_id or "job_evolve",
+                    links=links,
+                    status=SimpleNamespace(value="queued"),
+                    cursor=1,
+                )
+
+        handler = StartEvolveStepHandler(
+            event_store=memory_event_store,
+            job_manager=FakeJobManager(),  # type: ignore[arg-type]
+            agent_runtime_backend="codex",
+        )
+
+        result = await handler.handle({"lineage_id": "lin_signal", "execute": True})
+
+        assert result.is_ok
+        expected = "evolve:lin_signal:generation:1"
+        assert result.value.meta["execution_id"] == expected
+        assert result.value.structured_content["execution_id"] == expected
+        assert result.value.meta["job_observer"]["execution_id"] == expected
+        assert f"Execution ID: {expected}" in result.value.text_content
 
     def test_start_evolve_step_inherits_seed_yaml_text_schema(self) -> None:
         evolve_seed = next(

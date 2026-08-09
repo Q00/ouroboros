@@ -29,6 +29,10 @@
 </p>
 
 <p align="center">
+  <a href="https://trendshift.io/repositories/26008?utm_source=repository-badge&utm_medium=badge&utm_campaign=badge-repository-26008" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/repositories/26008" alt="Q00%2Fouroboros | Trendshift" width="250" height="55"/></a>
+</p>
+
+<p align="center">
   <a href="#quick-start">Quick Start</a> ·
   <a href="#why-ouroboros">Why</a> ·
   <a href="#what-you-get">Results</a> ·
@@ -37,7 +41,7 @@
   <a href="#from-wonder-to-ontology">Philosophy</a>
 </p>
 
-**Turn a vague idea into a verified, working codebase -- across Claude Code, Codex CLI, OpenCode, Hermes, Gemini, Kiro, Copilot, Pi, and Zcode.**
+**Turn a vague idea into a verified, working codebase -- across Claude Code, Codex CLI, OpenCode, Hermes, Gemini, Kiro, Copilot, Pi, Zcode, Goose, GJC, Antigravity, and Grok.**
 
 Ouroboros is an **Agent OS** for AI coding: a local-first runtime layer that
 turns non-deterministic agent work into a replayable, observable, policy-bound
@@ -55,8 +59,8 @@ sit in front of. Three repos, one stack:
 
 | Layer | Repo | Role | What it gives you |
 | :--- | :--- | :--- | :--- |
-| **Shell** (terminal client) | [`Q00/ourocode`](https://github.com/Q00/ourocode) | Native terminal UI for running `ooo` workflows across Claude / Codex / Gemini CLIs in one session | TUI, wonderTool decision pickers, MCP pane state, command discovery |
-| **Apps** (domain workflows) | [`Q00/ouroboros-plugins`](https://github.com/Q00/ouroboros-plugins) | UserLevel plugin contract — composes core primitives into installable domain programs (PR ops, Jira sync, incidents, releases) | Plugin manifest, scoped permissions, audit/provenance, reference plugins |
+| **Shell** (terminal client) | [`Ouro-labs/ourocode`](https://github.com/Ouro-labs/ourocode) | Native terminal UI for running `ooo` workflows across Claude / Codex / Gemini CLIs in one session | TUI, wonderTool decision pickers, MCP pane state, command discovery |
+| **Apps** (domain workflows) | [`Ouro-labs/ouroboros-plugins`](https://github.com/Ouro-labs/ouroboros-plugins) | UserLevel plugin contract — composes core primitives into installable domain programs (PR ops, Jira sync, incidents, releases) | Plugin manifest, scoped permissions, audit/provenance, reference plugins |
 | **OS** (this repo) | [`Q00/ouroboros`](https://github.com/Q00/ouroboros) | Agent OS core — Seed, Ledger, Runtime, MCP, safety boundaries | `ooo` commands, spec-first workflow engine, multi-runtime adapter |
 
 **How they connect:**
@@ -125,7 +129,21 @@ in your browser. You can return to those settings any time with `ooo config`.
 > ooo interview "I want to build a task management CLI"
 ```
 
-> Works with Claude Code, Codex CLI, GitHub Copilot CLI, OpenCode, Hermes, Gemini, Kiro CLI, Pi CLI, and Zcode. The installer detects available runtimes and registers the MCP server where the host supports it. For explicit selection, run `ouroboros setup --runtime <opencode|kiro|copilot|gemini|pi|zcode>` after installation. The Copilot CLI runtime live-discovers its model catalog via the GitHub Copilot models API and lets you pick a default during setup.
+Or from a plain terminal, without an agent host:
+
+```
+$ ouroboros init start --orchestrator "I want to build a task management CLI tool"
+```
+
+<p align="center">
+  <img src="./docs/images/ooo-interview.gif" width="760" alt="Terminal recording of ouroboros init start asking about ordering, crash durability, v1 scope, and how tasks get identified, then reporting an ambiguity score of 0.31 and offering to continue, force, or cancel">
+</p>
+
+<p align="center">
+  <sub>Recorded from the terminal CLI. Four rounds in, ambiguity is 0.31 against a threshold of 0.2, so the CLI warns and asks whether to keep interviewing, force a Seed anyway, or cancel. The <code>ooo interview</code> command above runs inside your agent host, gates on the same 0.2 ambiguity threshold, and adds its own closure and restate gates before a Seed is generated.</sub>
+</p>
+
+> Works with Claude Code, Codex CLI, GitHub Copilot CLI, OpenCode, Hermes, Gemini, Kiro CLI, Pi CLI, Zcode, Goose, GJC, Antigravity CLI, and Grok Build CLI. The installer detects available runtimes and registers the MCP server where the host supports it. For explicit selection, run `ouroboros setup --runtime <opencode|kiro|copilot|gemini|pi|zcode|goose|gjc|antigravity|grok>` after installation. The Copilot CLI runtime live-discovers its model catalog via the GitHub Copilot models API and lets you pick a default during setup.
 
 <details>
 <summary><strong>Codex plugin quick start</strong></summary>
@@ -147,12 +165,11 @@ to pin a specific model for a pipeline stage.
 
 ```bash
 pipx install 'ouroboros-ai[mcp]'       # or: uv tool install 'ouroboros-ai[mcp]'
-ouroboros setup            # detects Kiro CLI and registers MCP server
-```
-
-Set runtime in `.env`:
-```
-OUROBOROS_RUNTIME=kiro
+ouroboros setup --runtime kiro         # detects Kiro CLI, registers MCP server, and
+                                        # writes OUROBOROS_RUNTIME=kiro into
+                                        # ~/.kiro/settings/mcp.json (the trusted,
+                                        # setup-managed location -- a project .env
+                                        # is untrusted input and this key is ignored there)
 ```
 
 Then use `ooo` commands inside a Kiro CLI session.
@@ -187,23 +204,29 @@ Then run `ooo setup` inside a Claude Code session.
 **pip / uv / pipx**:
 ```bash
 pip install ouroboros-ai                # base
-pip install 'ouroboros-ai[claude]'        # + standalone Claude SDK profile (MCP 1.x based)
+pip install 'ouroboros-ai[claude]'        # + default Claude Agent SDK profile (MCP 1.x)
+pip install 'ouroboros-ai[claude-cli]'    # + dependency-free Claude CLI worker profile
+pip install 'ouroboros-ai[claude-sdk]'    # + explicit alias for the Claude SDK profile
 pip install 'ouroboros-ai[litellm]'       # + LiteLLM multi-provider; Python 3.12-3.13
 pip install 'ouroboros-ai[mcp]'           # + MCP server/client support
 pip install 'ouroboros-ai[tui]'           # + Textual terminal UI
-pip install 'ouroboros-ai[all]'           # Claude + LiteLLM + TUI; excludes MCP 2
+pip install 'ouroboros-ai[all]'           # MCP 1.x app bundle; excludes the MCP 2 server
 ouroboros setup                         # configure runtime
 ```
 
-Core and non-LiteLLM installs support Python 3.12-3.14. LiteLLM-bearing installs (`[litellm]`, `[all]`, and source `--all-extras`) support Python 3.12-3.13; use Python 3.13 for current examples. See [Platform Support](./docs/platform-support.md#python-profile-matrix).
+Core and non-LiteLLM installs support Python 3.12-3.14. LiteLLM-bearing installs (`[litellm]`, `[all]`, and source `--extra all`) support Python 3.12-3.13; use Python 3.13 for current examples. See [Platform Support](./docs/platform-support.md#python-profile-matrix).
 
-`[mcp]` and `[claude]` are intentionally separate profiles: MCP 2 and the current Claude Agent SDK require incompatible major versions of the `mcp` package. Supported MCP host setups launch `uvx --from 'ouroboros-ai[mcp]' ...` in a separate process. Standalone Claude SDK setup does not register that server because its configured Claude backend is unavailable inside the isolated process; use a supported CLI-backed runtime and LLM backend for MCP execution.
+`[claude]` preserves the in-process Agent SDK and its MCP 1.x dependency graph;
+`[claude-sdk]` is its explicit alias. The MCP 2 server runs from a separate
+`[mcp]` environment and selects the `[claude-cli]` subprocess worker when
+Claude is the host. Never install `[mcp,claude]`, `[mcp,claude-sdk]`, or
+`[all,mcp]` in one interpreter. See the [package compatibility and migration matrix](./docs/platform-support.md#mcp-2-and-claude-package-profiles).
 
 `pip install 'ouroboros-ai[mcp]'` is valid for embedding the MCP client/server library in an already isolated Python environment, but host registration requires `uvx` or `pipx`. Use `pipx install 'ouroboros-ai[mcp]'` or `uv tool install 'ouroboros-ai[mcp]'` before `ouroboros setup --runtime <kiro|copilot|hermes>`; setup exits without changing runtime configuration when neither isolated launcher is available.
 
 Legacy compatibility: `ouroboros-ai[dashboard]` is still accepted as a compatibility alias/no-op; it does not install dashboard runtime payload. `ouroboros-ai[all]` includes that no-op alias only for compatibility.
 
-See runtime guides: [Claude Code](./docs/runtime-guides/claude-code.md) · [Codex CLI](./docs/runtime-guides/codex.md) · [Hermes](./docs/runtime-guides/hermes.md) · [OpenCode](./docs/runtime-guides/opencode.md) · [Kiro CLI](./docs/runtime-guides/kiro.md) · [Gemini CLI](./docs/runtime-guides/gemini.md) · [GitHub Copilot CLI](./docs/runtime-guides/copilot.md) · [Zcode](./docs/runtime-guides/zcode.md) · [Pi JSON mode](https://pi.dev/docs/latest/json)
+See runtime guides: [Claude Code](./docs/runtime-guides/claude-code.md) · [Codex CLI](./docs/runtime-guides/codex.md) · [Hermes](./docs/runtime-guides/hermes.md) · [OpenCode](./docs/runtime-guides/opencode.md) · [Kiro CLI](./docs/runtime-guides/kiro.md) · [Gemini CLI](./docs/runtime-guides/gemini.md) · [GitHub Copilot CLI](./docs/runtime-guides/copilot.md) · [Zcode](./docs/runtime-guides/zcode.md) · [Pi JSON mode](https://pi.dev/docs/latest/json) · [Goose](./docs/runtime-guides/goose.md) · [GJC](./docs/runtime-guides/gjc.md) · [Antigravity CLI](./docs/runtime-guides/antigravity.md) · [Grok Build CLI](./docs/runtime-guides/grok.md)
 
 </details>
 
@@ -331,6 +354,11 @@ Inside AI coding agent sessions, use `ooo <cmd>` skills. From the terminal, use 
 
 > Not all skills have direct CLI equivalents. Some (`evaluate`, `evolve`, `unstuck`, `ralph`, `publish`) are available through agent skills, runtime rules, or MCP tools rather than a direct `ouroboros <subcommand>` shell command.
 > `/resume` is reserved for Claude Code's built-in session picker; use `ooo resume-session` for Ouroboros in-flight sessions.
+> Claude Code also reserves `/run`, `/status`, `/help`, and `/config`. The safe
+> direct skill forms are `/ouroboros:ouroboros-run`,
+> `/ouroboros:ouroboros-status`, `/ouroboros:ouroboros-help`, and
+> `/ouroboros:ouroboros-config`; the familiar `ooo run`, `ooo status`,
+> `ooo help`, and `ooo config` phrases remain supported.
 
 See the [CLI reference](./docs/cli-reference.md) for full details.
 
