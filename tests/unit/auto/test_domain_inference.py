@@ -4722,6 +4722,44 @@ def test_engine_attachment_is_not_the_environment() -> None:
     assert TaskClass.WEB_APP not in result.classes
 
 
+@pytest.mark.parametrize(
+    ("goal", "outputs"),
+    [
+        ("Build a kanban board for CLI users", "Drag-and-drop cards and navigation"),
+        ("Build a kanban board showing CLI command examples", "Drag-and-drop cards and navigation"),
+        ("Build a kanban board for REST API operators", "Drag-and-drop cards and navigation"),
+        ("Build a kanban board showing REST API status", "Drag-and-drop cards and navigation"),
+        ("Build a kanban board for teams who use an SDK", "Drag-and-drop cards and navigation"),
+        (
+            "Build a browser-based spreadsheet showing package metadata",
+            "Editable table cells and column filters",
+        ),
+    ],
+)
+def test_audience_and_displayed_subjects_own_nothing(goal: str, outputs: str) -> None:
+    """R109 guard: audience phrases and displayed-subject participles
+    carry CLI/service/library vocabulary without producing those
+    artifacts — the custom-headed browser product keeps its clean
+    single web_app class."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value=outputs)
+    _seed_section(ledger, "runtime_context", value="Modern browsers")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP
+
+
+def test_artifact_defining_library_clauses_still_own() -> None:
+    """R109 guard: an artifact-defining clause ("which exposes an SDK")
+    is not audience or content — the toolkit keeps its library class."""
+    ledger = _bare_ledger("Build a toolkit which exposes an SDK")
+    _seed_section(ledger, "outputs", value="Importable package with public API")
+    _seed_section(ledger, "runtime_context", value="Local Python process")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.LIBRARY
+
+
 def test_bundled_engine_accompaniment_keeps_native_ownership() -> None:
     """R108 guard: a bare accompaniment preposition before the engine
     name ships the engine inside the host — an Electron desktop runtime

@@ -516,8 +516,13 @@ def _matches_cli(ledger: SeedDraftLedger) -> bool:
     # CLI" / "no CLI" goals as CLI (second-round PR #1264 blocker), so
     # both classes route through `_goal_has_unnegated_cli_signal`.
     # Consumed tooling ("using a command-line image converter") is a
-    # dependency, not the produced artifact (#1813 R28).
-    goal_text = _strip_consumed_dependencies(_goal_text(ledger))
+    # dependency, not the produced artifact (#1813 R28). Audience and
+    # displayed-subject mentions own nothing either (#1813 R109): "for
+    # CLI users" names who the product serves, "showing CLI command
+    # examples" names what it displays.
+    goal_text = _strip_audience_and_displayed_subjects(
+        _strip_consumed_dependencies(_goal_text(ledger))
+    )
     # Attributive CLI mentions follow the final-head rule shared with the
     # library and web-app vocabulary (#1813 R61): in "a CLI documentation
     # website" the produced artifact is the website, so the goal-side CLI
@@ -575,7 +580,12 @@ def _matches_web_service(ledger: SeedDraftLedger) -> bool:
         return False
     # Denied service vocabulary is not evidence (#1813 R32): the goal
     # routes through the shared negation strip before keyword matching.
-    service_goal = _strip_negated_signals(goal, _WEB_SERVICE_SIGNAL_FRAGMENT)
+    # Audience and displayed-subject mentions own nothing (#1813 R109):
+    # "for REST API operators" and "showing REST API status" describe
+    # the UI's audience and content.
+    service_goal = _strip_audience_and_displayed_subjects(
+        _strip_negated_signals(goal, _WEB_SERVICE_SIGNAL_FRAGMENT)
+    )
     # A production verb governing the API ("serving predictions via a
     # REST API") keeps it produced even through via/through (#1813 W1).
     # Goal-side service evidence follows the final-head rule (#1813 R61):
@@ -1006,6 +1016,25 @@ _AUDIENCE_CLAUSE_RE = re.compile(
 )
 
 
+# A for-phrase ending at a people noun is audience (#1813 R109): "for
+# CLI users" and "for REST API operators" name who the product serves,
+# not what it produces.
+_PLAIN_AUDIENCE_PHRASE_RE = re.compile(
+    r"\bfor\s+(?:[\w\-'’]+\s+){0,3}?(?:users?|operators?|developers?|"
+    r"engineers?|admins?|administrators?|teams?|customers?|analysts?|"
+    r"managers?|owners?|stakeholders?|people|staff|audiences?)\b"
+)
+
+
+def _strip_audience_and_displayed_subjects(text: str) -> str:
+    """Remove audience phrases and displayed-subject participles — the
+    vocabulary inside them describes who the product serves or what it
+    shows, and owns nothing for any class (#1813 R109)."""
+    text = _AUDIENCE_CLAUSE_RE.sub(" ", text)
+    text = _PLAIN_AUDIENCE_PHRASE_RE.sub(" ", text)
+    return _PARTICIPIAL_CONTENT_CLAUSE_RE.sub(" ", text)
+
+
 # "browser-like", "web-app-style": a similarity suffix marks the web token
 # as a comparison reference, not the produced artifact (#1813 R44).
 def _strip_consumer_relations(text: str) -> str:
@@ -1176,7 +1205,12 @@ def _library_visible_goal(ledger: SeedDraftLedger) -> str:
     clauses are subject matter (#1813 R18/R19), denials are stripped
     (#1813 R12), consumed dependencies are not produced shape (#1813
     R25), and artifact-defining clauses survive."""
-    goal = _LIBRARY_SUBJECT_CLAUSE_RE.sub(" ", _goal_text(ledger))
+    # Audience clauses and displayed-subject participles leave first
+    # (#1813 R109): "for teams who use an SDK" and "showing package
+    # metadata" carry library vocabulary without producing a library —
+    # artifact-defining clauses ("which exposes an SDK") are untouched.
+    goal = _strip_audience_and_displayed_subjects(_goal_text(ledger))
+    goal = _LIBRARY_SUBJECT_CLAUSE_RE.sub(" ", goal)
     goal = _strip_consumed_dependencies(goal)
     return _strip_negated_signals(goal, _LIBRARY_INTENT_FRAGMENT)
 
@@ -1583,7 +1617,12 @@ def _matches_web_app(ledger: SeedDraftLedger) -> bool:
     # explicitly requests a web app in its own conjunct ("... and a
     # separate admin web app") keeps independent web ownership, and the
     # overlap becomes an honest ambiguity instead of a veto.
-    guard_goal = _strip_consumed_dependencies(_SUBJECT_CLAUSE_RE.sub(" ", _goal_text(ledger)))
+    # Bare displayed-subject participles are subject matter too (#1813
+    # R109): "showing package metadata" cannot veto the spreadsheet that
+    # shows it.
+    guard_goal = _strip_consumed_dependencies(
+        _PARTICIPIAL_CONTENT_CLAUSE_RE.sub(" ", _SUBJECT_CLAUSE_RE.sub(" ", _goal_text(ledger)))
+    )
     intent_text = _MANIFEST_TOKEN_RE.sub(
         " ", _strip_negated_signals(guard_goal, _LIBRARY_INTENT_FRAGMENT)
     )
