@@ -237,9 +237,10 @@ def _prepare_file(
     preserve_exact_mode: bool,
 ) -> _PreparedFile:
     """Create and fsync a new file, applying umask only for fresh targets."""
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    flags = os.O_RDWR | os.O_CREAT | os.O_EXCL
     flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     descriptor = os.open(path, flags, requested_mode)
+    written_length = 0
     try:
         if preserve_exact_mode and hasattr(os, "fchmod"):
             os.fchmod(descriptor, requested_mode)
@@ -248,6 +249,7 @@ def _prepare_file(
             written = os.write(descriptor, view)
             if written <= 0:
                 raise OSError(f"Could not prepare replacement for {path}")
+            written_length += written
             view = view[written:]
         os.fsync(descriptor)
         prepared = os.fstat(descriptor)
@@ -259,12 +261,21 @@ def _prepare_file(
             raise OSError(f"Prepared file mode exceeds the secure default for {path}")
         return _PreparedFile(path, _snapshot_from_stat(contents, prepared))
     except BaseException:
+        failed_prepared: _PreparedFile | None = None
+        try:
+            failed_stat = os.fstat(descriptor)
+            failed_prepared = _PreparedFile(
+                path,
+                _snapshot_from_stat(contents[:written_length], failed_stat),
+            )
+        except OSError:
+            # Without a descriptor-derived identity there is no safe pathname
+            # cleanup.  Leave the stage for recovery rather than guessing.
+            pass
         os.close(descriptor)
         descriptor = -1
-        try:
-            path.unlink()
-        except OSError:
-            pass
+        if failed_prepared is not None:
+            _discard_prepared(failed_prepared)
         raise
     finally:
         if descriptor >= 0:
@@ -389,6 +400,20 @@ def _remove_owned_artifact(
         raise OSError(f"Could not confirm owned artifact cleanup: {path}")
 
 
+def _discard_prepared(prepared: _PreparedFile) -> None:
+    """Best-effort cleanup that never path-unlinks a changed stage."""
+    try:
+        _remove_owned_artifact(
+            prepared.path,
+            _owned_guard(prepared.snapshot),
+            durable=False,
+        )
+    except OSError:
+        # A changed stage has already been restored to its original pathname.
+        # The activation failure remains the primary error.
+        pass
+
+
 def _promotion_checkpoint(_operation: str, _target: Path) -> None:
     """Test seam immediately before a live target is claimed or published."""
 
@@ -483,10 +508,7 @@ def _atomic_write_text_if_current_matches(
                 raise _DurabilityError(path, published) from exc
         return published
     finally:
-        try:
-            staging.unlink()
-        except OSError:
-            pass
+        _discard_prepared(prepared)
 
 
 def _same_owned_generation(left: _FileSnapshot, right: _FileSnapshot) -> bool:
@@ -569,10 +591,7 @@ def _write_journal(
             raise _DurabilityError(path, published)
         return published
     finally:
-        try:
-            staging.unlink()
-        except OSError:
-            pass
+        _discard_prepared(prepared)
 
 
 def _load_journal(path: Path) -> tuple[dict[str, object], _FileSnapshot]:
@@ -954,6 +973,7 @@ def activate_claude_runtime(claude_path: str) -> Path | None:
                     raise _ConcurrentActivationError(
                         f"Activation claim path is already occupied: {reserved_claim}"
                     )
+            prepared_files: list[_PreparedFile] = []
             try:
                 prepared_config = _prepare_file(
                     config_stage,
@@ -963,6 +983,7 @@ def activate_claude_runtime(claude_path: str) -> Path | None:
                     ),
                     preserve_exact_mode=config_generation.kind == "file",
                 )
+                prepared_files.append(prepared_config)
                 prepared_credentials = _prepare_file(
                     credentials_stage,
                     credentials_content.encode(),
@@ -973,14 +994,12 @@ def activate_claude_runtime(claude_path: str) -> Path | None:
                     ),
                     preserve_exact_mode=credentials_generation.kind == "file",
                 )
+                prepared_files.append(prepared_credentials)
                 if not fsync_parent_directory(config_stage):
                     raise OSError("Could not confirm prepared activation durability")
             except BaseException:
-                for stage in (config_stage, credentials_stage):
-                    try:
-                        stage.unlink()
-                    except OSError:
-                        pass
+                for prepared in prepared_files:
+                    _discard_prepared(prepared)
                 raise
 
             journal_path = config_dir / _JOURNAL_NAME
@@ -1011,11 +1030,8 @@ def activate_claude_runtime(claude_path: str) -> Path | None:
                     _FileSnapshot(kind="missing"),
                 )
             except BaseException:
-                for stage in (config_stage, credentials_stage):
-                    try:
-                        stage.unlink()
-                    except OSError:
-                        pass
+                for prepared in (prepared_config, prepared_credentials):
+                    _discard_prepared(prepared)
                 raise
 
             config_written: _FileSnapshot | None = None

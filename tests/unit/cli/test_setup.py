@@ -5378,6 +5378,193 @@ raise SystemExit(0 if activate_claude_runtime("/second/claude") else 2)
         assert not (config_dir / runtime_activation._JOURNAL_NAME).exists()
         mock_success.assert_not_called()
 
+    @pytest.mark.parametrize("prepared_target", ["config", "credentials"])
+    def test_setup_claude_preserves_operator_stage_when_prepare_sync_fails(
+        self, tmp_path: Path, prepared_target: str
+    ) -> None:
+        """A prepare failure never path-unlinks a replacement staging inode."""
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        original = b"orchestrator:\n  runtime_backend: codex\nllm:\n  backend: codex\n"
+        config_path.write_bytes(original)
+        self._write_credentials(config_dir)
+        operator = f"operator-{prepared_target}-prepare\n".encode()
+        injected_path: list[Path] = []
+        injected_identity: list[tuple[int, int]] = []
+        real_fsync = os.fsync
+
+        def _replace_stage_then_fail(descriptor: int) -> None:
+            descriptor_stat = os.fstat(descriptor)
+            pattern = f"*.{prepared_target}.stage"
+            for stage in config_dir.glob(pattern):
+                stage_stat = stage.stat()
+                if (stage_stat.st_dev, stage_stat.st_ino) != (
+                    descriptor_stat.st_dev,
+                    descriptor_stat.st_ino,
+                ):
+                    continue
+                replacement = config_dir / f".operator-{prepared_target}-prepare"
+                replacement.write_bytes(operator)
+                replacement.chmod(0o640)
+                os.replace(replacement, stage)
+                injected_path.append(stage)
+                injected_identity.append((stage.stat().st_dev, stage.stat().st_ino))
+                raise OSError("prepared stage sync failed after operator replacement")
+            real_fsync(descriptor)
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch(
+                "ouroboros.cli.runtime_activation.os.fsync",
+                side_effect=_replace_stage_then_fail,
+            ),
+            patch("ouroboros.cli.commands.setup.print_success") as mock_success,
+        ):
+            assert setup_cmd._setup_claude("/usr/local/bin/claude") is False
+
+        assert injected_path
+        preserved = injected_path[0]
+        assert preserved.read_bytes() == operator
+        assert stat.S_IMODE(preserved.stat().st_mode) == 0o640
+        assert (preserved.stat().st_dev, preserved.stat().st_ino) == injected_identity[0]
+        assert config_path.read_bytes() == original
+        mock_success.assert_not_called()
+
+    @pytest.mark.parametrize("prepared_target", ["config", "credentials"])
+    def test_setup_claude_preserves_operator_stage_when_journal_write_fails(
+        self, tmp_path: Path, prepared_target: str
+    ) -> None:
+        """Pre-journal cleanup removes only descriptor-identified stages."""
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        original = b"orchestrator:\n  runtime_backend: codex\nllm:\n  backend: codex\n"
+        config_path.write_bytes(original)
+        self._write_credentials(config_dir)
+        operator = f"operator-{prepared_target}-journal-failure\n".encode()
+        injected_path: list[Path] = []
+        injected_identity: list[tuple[int, int]] = []
+
+        def _replace_stage_then_fail(*_args: object, **_kwargs: object) -> None:
+            stage = next(config_dir.glob(f"*.{prepared_target}.stage"))
+            replacement = config_dir / f".operator-{prepared_target}-journal-failure"
+            replacement.write_bytes(operator)
+            replacement.chmod(0o640)
+            os.replace(replacement, stage)
+            injected_path.append(stage)
+            injected_identity.append((stage.stat().st_dev, stage.stat().st_ino))
+            raise OSError("journal write failed after operator stage replacement")
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch(
+                "ouroboros.cli.runtime_activation._write_journal",
+                side_effect=_replace_stage_then_fail,
+            ),
+            patch("ouroboros.cli.commands.setup.print_success") as mock_success,
+        ):
+            assert setup_cmd._setup_claude("/usr/local/bin/claude") is False
+
+        assert injected_path
+        preserved = injected_path[0]
+        assert preserved.read_bytes() == operator
+        assert stat.S_IMODE(preserved.stat().st_mode) == 0o640
+        assert (preserved.stat().st_dev, preserved.stat().st_ino) == injected_identity[0]
+        assert config_path.read_bytes() == original
+        mock_success.assert_not_called()
+
+    def test_setup_claude_preserves_operator_journal_stage_republished_before_finally(
+        self, tmp_path: Path
+    ) -> None:
+        """Journal finalization never deletes a generation published after cleanup."""
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        config_path.write_text(
+            "orchestrator:\n  runtime_backend: codex\nllm:\n  backend: codex\n",
+            encoding="utf-8",
+        )
+        self._write_credentials(config_dir)
+        operator = b"operator-journal-stage-finalizer\n"
+        injected_path: list[Path] = []
+        injected_identity: list[tuple[int, int]] = []
+        original_remove = runtime_activation._remove_owned_artifact
+
+        def _remove_then_republish(
+            path: Path, expected_guard: object, *, durable: bool = True
+        ) -> None:
+            original_remove(path, expected_guard, durable=durable)
+            if injected_path or not (
+                path.name.startswith(f".{runtime_activation._JOURNAL_NAME}.")
+                and path.name.endswith(".tmp")
+            ):
+                return
+            path.write_bytes(operator)
+            path.chmod(0o640)
+            injected_path.append(path)
+            injected_identity.append((path.stat().st_dev, path.stat().st_ino))
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch(
+                "ouroboros.cli.runtime_activation._remove_owned_artifact",
+                side_effect=_remove_then_republish,
+            ),
+        ):
+            assert setup_cmd._setup_claude("/usr/local/bin/claude") is True
+
+        assert injected_path
+        preserved = injected_path[0]
+        assert preserved.read_bytes() == operator
+        assert stat.S_IMODE(preserved.stat().st_mode) == 0o640
+        assert (preserved.stat().st_dev, preserved.stat().st_ino) == injected_identity[0]
+
+    def test_atomic_write_preserves_operator_stage_republished_before_finally(
+        self, tmp_path: Path
+    ) -> None:
+        """One-file rollback finalization guards a republished staging path."""
+        target = tmp_path / "config.yaml"
+        target.write_text("before\n", encoding="utf-8")
+        expected = runtime_activation._snapshot_target(target)
+        operator = b"operator-atomic-stage-finalizer\n"
+        injected_path: list[Path] = []
+        injected_identity: list[tuple[int, int]] = []
+        original_remove = runtime_activation._remove_owned_artifact
+
+        def _remove_then_republish(
+            path: Path, expected_guard: object, *, durable: bool = True
+        ) -> None:
+            original_remove(path, expected_guard, durable=durable)
+            if injected_path or not path.name.endswith(".config.stage"):
+                return
+            path.write_bytes(operator)
+            path.chmod(0o640)
+            injected_path.append(path)
+            injected_identity.append((path.stat().st_dev, path.stat().st_ino))
+
+        with patch(
+            "ouroboros.cli.runtime_activation._remove_owned_artifact",
+            side_effect=_remove_then_republish,
+        ):
+            published = runtime_activation._atomic_write_text_if_current_matches(
+                target,
+                "after\n",
+                expected,
+                mode=0o644,
+            )
+
+        assert published.contents == b"after\n"
+        assert target.read_bytes() == b"after\n"
+        assert injected_path
+        preserved = injected_path[0]
+        assert preserved.read_bytes() == operator
+        assert stat.S_IMODE(preserved.stat().st_mode) == 0o640
+        assert (preserved.stat().st_dev, preserved.stat().st_ino) == injected_identity[0]
+
     def test_setup_claude_preserves_original_on_file_sync_failure(self, tmp_path: Path) -> None:
         config_dir = tmp_path / ".ouroboros"
         config_dir.mkdir()
