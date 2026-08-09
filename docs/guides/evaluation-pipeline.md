@@ -81,7 +81,7 @@ The mechanical verifier runs zero-cost automated shell commands and checks the e
 
 ### Where Stage 1 Commands Come From
 
-Ouroboros does **not** ship hardcoded per-language presets. Stage 1 trusts exactly one source: `.ouroboros/mechanical.toml` in the project root. `build_mechanical_config(working_dir)` is the deterministic reader for that file — when the file is absent, every command resolves to `None` and Stage 1 skips gracefully rather than running the wrong tool.
+Ouroboros does **not** ship hardcoded per-language presets. For configuration authored in the repository, Stage 1 trusts exactly one file: `.ouroboros/mechanical.toml` in the project root. Explicit `MechanicalConfig` commands and MCP-supplied overrides are separate trusted inputs, documented under [Project-Level Command Overrides](#project-level-command-overrides). `build_mechanical_config(working_dir)` is the deterministic reader for that file — when the file is absent, every command resolves to `None` and Stage 1 skips gracefully rather than running the wrong tool.
 
 The file is written by `ouroboros.evaluation.detector`, which makes **one AI call** that inspects the project's manifest files (`pyproject.toml`, `uv.lock`, `package.json`, `Cargo.toml`, `go.mod`, `pom.xml`, `build.gradle`, `Makefile`, `justfile`, `Taskfile.yml`, `build.zig`, `CMakeLists.txt`, `mix.exs`, `Gemfile`, and others) and proposes commands for this specific repository. Each proposed command is validated before it is persisted — against the executable allowlist, against shell-operator and absolute-path injection, and against the repo itself (for example, a `cargo` command is only kept when `Cargo.toml` exists) — so the toml contains only safe, repository-supported commands.
 
@@ -95,7 +95,9 @@ ouroboros detect --force      # re-detect and overwrite an existing file
 ouroboros detect --backend codex   # use a specific LLM backend for the detect call
 ```
 
-`ensure_mechanical_toml()` is idempotent: when the file already exists and `force` is false it returns immediately without an LLM call. It never raises — on any failure it returns `False`, leaving Stage 1 with no commands.
+`ensure_mechanical_toml()` is idempotent: when the file already exists and `force` is false it returns immediately without an LLM call.
+
+It returns `False` rather than raising for the failures it handles: a provider error surfaced as a returned result, an unparseable proposal, a command that fails validation, an unwritable `.ouroboros/`. That is not the same as never raising. `_ask_llm()` calls `tracked_complete()` outside an exception boundary, and `tracked_complete()` re-raises adapter exceptions (`evolution/provider_usage.py:443`), so an adapter that throws propagates out. `ouroboros detect` does not catch it either (`cli/commands/detect.py:90`). Treat the fail-closed contract as covering returned errors, not thrown ones.
 
 > **If Stage 1 always passes, this is usually why.** With no `.ouroboros/mechanical.toml` and no explicitly configured `MechanicalConfig` commands, all five checks are skipped and treated as passed, which makes Stage 1 a no-op gate.
 >
@@ -298,11 +300,17 @@ openrouter/anthropic/claude-opus-4.8
 openrouter/google/gemini-2.5-pro
 ```
 
-**Sentinel-model backends.** Codex, Kiro, Copilot, Hermes, Pi, GJC, Antigravity, Grok, and Zcode select their model through their own CLI config rather than a `--model` flag, so `get_consensus_models()` maps the shipped roster to the literal string `"default"` for all three slots (`config/loader.py:1947`, `_SENTINEL_DEFAULT_BACKENDS` at `config/loader.py:101`).
+**Sentinel-model backends.** For the backends in `_SENTINEL_DEFAULT_BACKENDS` (`config/loader.py:101` — Codex, Kiro, Copilot, Hermes, Pi, GJC, Antigravity, Grok, Zcode), `get_consensus_models()` maps the shipped roster to the literal string `"default"` for all three slots (`config/loader.py:1947`). OpenCode is not in that set.
 
 `_should_use_multi_model()` treats anything that does not start with `openrouter/` as a genuine multi-model roster (`evaluation/consensus.py:313`), so `"default"` does **not** trigger the single-model perspective fallback below. On these backends Stage 3 casts three votes labeled `default`, all from the one model that backend is configured to use.
 
-> **Auditing note.** Three votes labeled `default` are not three independent reviewers. If your consensus evidence shows that, the roster was resolved to the sentinel and the votes came from one model. Set `OUROBOROS_CONSENSUS_MODELS` or `consensus.models` explicitly when you need genuine cross-vendor independence on those backends.
+> **Auditing note.** Three votes labeled `default` are not three independent reviewers. If your consensus evidence shows that, the roster resolved to the sentinel and the votes came from one model.
+
+**Changing the roster does not change the adapter.** `ConsensusEvaluator` holds a single `self._llm` and sends every vote through it (`evaluation/consensus.py:281`, and the `tracked_complete(self._llm, ...)` calls at `:476`, `:563`, `:886`, `:1030`). The roster only decides the model **string** handed to that one adapter.
+
+So setting `OUROBOROS_CONSENSUS_MODELS` or `consensus.models` does not route votes to other vendors. On a local CLI backend, an `openrouter/...` entry is passed to that CLI as a model name and has to exist in its supported catalog; it does not become a request to OpenRouter. Depending on the backend you get an unsupported-model failure, or three votes from the same backend under different labels.
+
+Cross-vendor independence requires the active LLM backend to be one that can actually reach those providers. Pick the roster to match the backend you are on, not the other way round.
 
 Each returns `{ approved, confidence, reasoning }`.
 
