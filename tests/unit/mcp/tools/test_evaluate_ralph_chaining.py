@@ -101,7 +101,7 @@ class _StaticEvaluateHandler:
     def __init__(self, result: MCPToolResult) -> None:
         self.result = result
 
-    async def handle(self, _: dict[str, Any]) -> Result[MCPToolResult, Any]:
+    async def handle(self, _: dict[str, Any], **_kwargs: Any) -> Result[MCPToolResult, Any]:
         return Result.ok(self.result)
 
 

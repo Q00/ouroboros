@@ -89,7 +89,7 @@ together, always.
 | `install_completed` | `install.sh` finishes | source, os, arch, method (uv/pipx/pip), runtime, detected_runtimes (count), version |
 | `command_run` (source=mcp) | An `ouroboros_*` MCP tool is invoked from any host CLI (Claude Code, Codex, OpenCode, …) | command (interview/seed/run/evolve/auto/evaluate/qa/…), tool, source, is_funnel, phase (`submission` or `completion`), accepted (submission only), ok (completion only), duration_ms, error_type, sample_rate (polling tools only), runtime_backend, execute_runtime_backend, interview_llm_backend, evaluate_llm_backend, frontdoor, app_version, os, python_version, ci |
 | `command_run` (source=cli) | A direct `ooo <subcommand>` invocation in a terminal | command, source, is_funnel, app_version, os, python_version, frontdoor, ci — no tool, phase, duration/outcome fields, or backend context: those are mcp-only |
-| `workflow_outcome` | A background MCP job reaches a durable terminal event | command, phase (`terminal`), terminal_status, ok, verified, final_approved, `$insert_id` (one-way event deduplication digest), runtime_backend, execute_runtime_backend, interview_llm_backend, evaluate_llm_backend, app_version, os, python_version, frontdoor, ci |
+| `workflow_outcome` | Two producers (never both for the same evaluation — see Notes): a background MCP job reaches a durable terminal event, **or** a direct (non-job) `ouroboros_evaluate` / `ouroboros_checklist_verify` completion | command, phase (`terminal`), terminal_status, ok, verified, final_approved, `$insert_id` (job-derived variant only — one-way event deduplication digest), runtime_backend, execute_runtime_backend, interview_llm_backend, evaluate_llm_backend, app_version, os, python_version, frontdoor, ci |
 | `mcp_serve_started` | A host CLI attaches the Ouroboros MCP server for a session | transport, tool_count, frontdoor, app_version, os, ci — no python_version, no backend/provider context |
 
 Notes:
@@ -110,9 +110,20 @@ Notes:
   never a message or traceback.
 - Start-tool `command_run` events are submission receipts. They intentionally
   have `accepted`, not `ok`; queue acceptance is never a completed or verified
-  run. `workflow_outcome` comes from the durable job-terminal boundary. Only a
-  completed formal evaluation with explicit `final_approved=true` sets
-  `verified=true`.
+  run. `workflow_outcome` is the durable/direct terminal boundary described
+  below. Only a completed formal evaluation with explicit `final_approved=true`
+  sets `verified=true`.
+- `workflow_outcome` has two producers, and exactly one fires per evaluation:
+  the durable job-terminal boundary (`JobTelemetryBoundary`, stamping
+  `$insert_id` so a retried/redelivered terminal event dedupes) covers
+  `ouroboros_start_evaluate`'s background job; the direct-evaluation boundary
+  (`record_direct_evaluation_outcome`, no `$insert_id` — each invocation is
+  its own outcome, there is no durable job row to replay against) covers
+  `ouroboros_evaluate` and `ouroboros_checklist_verify`, both of which never
+  create a job. When a direct evaluation runs *inside* a background job (the
+  `ouroboros_start_evaluate` path reuses the same handler internally), the
+  direct boundary is explicitly suppressed for that call so the job-derived
+  event is the only one emitted — one evaluation, one `workflow_outcome`.
 - Events are sent to PostHog via a fire-and-forget background thread using a
   **public, write-only** project API key. Telemetry never blocks a command,
   never raises, and silently drops events when offline. The worker is a
@@ -138,4 +149,13 @@ Collection is triggered only at these audited call sites:
   exactly one MCP request outcome, including validation and security failures;
 - [`src/ouroboros/mcp/job_manager.py`](src/ouroboros/mcp/job_manager.py) —
   durable background-job terminal outcomes;
+- [`src/ouroboros/mcp/telemetry_boundary.py`](src/ouroboros/mcp/telemetry_boundary.py) —
+  the shared boundary module: the adapter's per-request observation wrapper,
+  the job-terminal observer `job_manager.py` calls into, and the direct
+  (non-job) evaluation-outcome boundary described above;
+- [`src/ouroboros/mcp/tools/evaluation_handlers.py`](src/ouroboros/mcp/tools/evaluation_handlers.py) —
+  triggers the direct-evaluation `workflow_outcome` variant from
+  `EvaluateHandler.handle()` (direct `ouroboros_evaluate`) and
+  `ChecklistVerifyHandler`'s nested multi-AC delegation; suppresses it when
+  the same handler runs behind the job-backed `ouroboros_start_evaluate` path;
 - [`scripts/install.sh`](scripts/install.sh) — disclosed install start/completion.

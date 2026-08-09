@@ -257,7 +257,9 @@ async def test_successful_run_enqueues_chained_evaluate_job(
         def __init__(self, **kwargs: Any) -> None:
             self.kwargs = kwargs
 
-        async def handle(self, arguments: dict[str, Any]) -> Result[MCPToolResult, Any]:
+        async def handle(
+            self, arguments: dict[str, Any], **_kwargs: Any
+        ) -> Result[MCPToolResult, Any]:
             evaluate_calls.append({"arguments": arguments, "kwargs": self.kwargs})
             return Result.ok(
                 MCPToolResult(
@@ -401,7 +403,9 @@ async def test_failed_run_rejection_persists_failed_gen1_status(
     monkeypatch.setattr(evaluation_handlers, "get_auto_evolve_enabled", lambda: True)
 
     class RejectedEvaluateHandler:
-        async def handle(self, arguments: dict[str, Any]) -> Result[MCPToolResult, Any]:
+        async def handle(
+            self, arguments: dict[str, Any], **_kwargs: Any
+        ) -> Result[MCPToolResult, Any]:
             return Result.ok(
                 MCPToolResult(
                     content=(MCPContentItem(type=ContentType.TEXT, text="REJECTED"),),
@@ -484,7 +488,9 @@ async def test_run_job_stranded_without_terminal_event_still_terminalizes(
         def __init__(self, **kwargs: Any) -> None:
             self.kwargs = kwargs
 
-        async def handle(self, arguments: dict[str, Any]) -> Result[MCPToolResult, Any]:
+        async def handle(
+            self, arguments: dict[str, Any], **_kwargs: Any
+        ) -> Result[MCPToolResult, Any]:
             return Result.ok(
                 MCPToolResult(
                     content=(MCPContentItem(type=ContentType.TEXT, text="approved"),),
@@ -571,7 +577,9 @@ async def test_chained_evaluate_uses_execution_worktree_when_present(
         def __init__(self, **kwargs: Any) -> None:
             self.kwargs = kwargs
 
-        async def handle(self, arguments: dict[str, Any]) -> Result[MCPToolResult, Any]:
+        async def handle(
+            self, arguments: dict[str, Any], **_kwargs: Any
+        ) -> Result[MCPToolResult, Any]:
             evaluate_calls.append(arguments)
             return Result.ok(
                 MCPToolResult(
@@ -740,7 +748,7 @@ async def test_start_evaluate_timeout_writes_terminal_event(
     event_store,
 ) -> None:
     class SlowEvaluateHandler:
-        async def handle(self, _: dict[str, Any]) -> Result[MCPToolResult, Any]:
+        async def handle(self, _: dict[str, Any], **_kwargs: Any) -> Result[MCPToolResult, Any]:
             await asyncio.sleep(1)
             return Result.ok(MCPToolResult())
 
@@ -771,7 +779,7 @@ async def test_start_evaluate_timeout_writes_terminal_event(
 
 async def test_start_evaluate_zero_deadline_waits_without_timeout(event_store) -> None:
     class ImmediateEvaluateHandler:
-        async def handle(self, _: dict[str, Any]) -> Result[MCPToolResult, Any]:
+        async def handle(self, _: dict[str, Any], **_kwargs: Any) -> Result[MCPToolResult, Any]:
             await asyncio.sleep(0)
             return Result.ok(
                 MCPToolResult(

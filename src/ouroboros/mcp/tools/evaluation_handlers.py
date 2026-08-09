@@ -506,11 +506,24 @@ class EvaluateHandler:
     async def handle(
         self,
         arguments: dict[str, Any],
+        *,
+        emit_terminal_telemetry: bool = True,
     ) -> Result[MCPToolResult, MCPServerError]:
         """Handle an evaluation request.
 
         Args:
             arguments: Tool arguments including session_id, artifact, and optional seed_content.
+            emit_terminal_telemetry: Whether this call owns the direct-evaluation
+                telemetry boundary. True (default) for genuine top-level direct
+                calls — the MCP adapter dispatching ``ouroboros_evaluate``, or
+                ``ChecklistVerifyHandler`` delegating in multi-AC mode (neither
+                is observed by JobManager). False when the caller is itself
+                job-backed (``run_evaluation_job`` behind ``StartEvaluateHandler``),
+                since ``JobTelemetryBoundary`` already emits a deduplicated
+                (``$insert_id``-keyed) terminal outcome for that job — this
+                handler is a shared instance reused across both call shapes
+                (see ``definitions.py``), so the decision must be made by the
+                caller at each call, not baked into the instance.
 
         Returns:
             Result containing evaluation results or error.
@@ -769,6 +782,7 @@ class EvaluateHandler:
                     working_dir=working_dir,
                     executor_backend=executor_backend,
                     ac_spec_map=ac_spec_map,
+                    emit_terminal_telemetry=emit_terminal_telemetry,
                 )
 
             context = EvaluationContext(
@@ -799,7 +813,8 @@ class EvaluateHandler:
                     llm_backend=backend,
                     error=rendered_error,
                 )
-                record_direct_evaluation_outcome(final_approved=None, failed=True)
+                if emit_terminal_telemetry:
+                    record_direct_evaluation_outcome(final_approved=None, failed=True)
                 return Result.err(
                     MCPToolError(
                         f"Evaluation failed: {rendered_error}",
@@ -840,7 +855,8 @@ class EvaluateHandler:
                 "code_changes_detected": code_changes,
             }
 
-            record_direct_evaluation_outcome(final_approved=eval_result.final_approved)
+            if emit_terminal_telemetry:
+                record_direct_evaluation_outcome(final_approved=eval_result.final_approved)
             return Result.ok(
                 MCPToolResult(
                     content=(MCPContentItem(type=ContentType.TEXT, text=result_text),),
@@ -852,7 +868,8 @@ class EvaluateHandler:
             # Configuration/bootstrap errors (unsupported backend, missing
             # provider install) — actionable by the user, safe to surface.
             log.warning("mcp.tool.evaluate.config_error", error=str(e))
-            record_direct_evaluation_outcome(final_approved=None, failed=True)
+            if emit_terminal_telemetry:
+                record_direct_evaluation_outcome(final_approved=None, failed=True)
             return Result.err(
                 MCPToolError(
                     f"Evaluation setup failed: {e}",
@@ -861,7 +878,8 @@ class EvaluateHandler:
             )
         except Exception:
             log.exception("mcp.tool.evaluate.error")
-            record_direct_evaluation_outcome(final_approved=None, failed=True)
+            if emit_terminal_telemetry:
+                record_direct_evaluation_outcome(final_approved=None, failed=True)
             return Result.err(
                 MCPToolError(
                     "Evaluation failed due to an internal error. Check server logs for details.",
@@ -888,6 +906,7 @@ class EvaluateHandler:
         working_dir: Path,
         executor_backend: str | None = None,
         ac_spec_map: dict[str, AcceptanceCriterionSpec] | None = None,
+        emit_terminal_telemetry: bool = True,
     ) -> Result[MCPToolResult, MCPServerError]:
         """Evaluate each AC individually and return an aggregated checklist (#366).
 
@@ -937,7 +956,8 @@ class EvaluateHandler:
         if first_result.is_err:
             err = first_result.error
             rendered = err.format_details() if hasattr(err, "format_details") else str(err)
-            record_direct_evaluation_outcome(final_approved=None, failed=True)
+            if emit_terminal_telemetry:
+                record_direct_evaluation_outcome(final_approved=None, failed=True)
             return Result.err(
                 MCPToolError(
                     f"Evaluation failed: {rendered}",
@@ -982,7 +1002,8 @@ class EvaluateHandler:
                     "mcp.tool.evaluate.multi_ac_exception",
                     session_id=session_id,
                 )
-                record_direct_evaluation_outcome(final_approved=None, failed=True)
+                if emit_terminal_telemetry:
+                    record_direct_evaluation_outcome(final_approved=None, failed=True)
                 return Result.err(
                     MCPToolError(
                         f"Evaluation failed during multi-AC run: {entry}",
@@ -997,7 +1018,8 @@ class EvaluateHandler:
                     session_id=session_id,
                     error=rendered,
                 )
-                record_direct_evaluation_outcome(final_approved=None, failed=True)
+                if emit_terminal_telemetry:
+                    record_direct_evaluation_outcome(final_approved=None, failed=True)
                 return Result.err(
                     MCPToolError(
                         f"Evaluation failed: {rendered}",
@@ -1054,7 +1076,8 @@ class EvaluateHandler:
             all_passed=checklist.all_passed,
         )
 
-        record_direct_evaluation_outcome(final_approved=checklist.all_passed)
+        if emit_terminal_telemetry:
+            record_direct_evaluation_outcome(final_approved=checklist.all_passed)
         return Result.ok(
             MCPToolResult(
                 content=(MCPContentItem(type=ContentType.TEXT, text=result_text),),
@@ -1384,6 +1407,11 @@ class ChecklistVerifyHandler:
             ac_count=len(acceptance_criteria),
         )
 
+        # ouroboros_checklist_verify is itself a genuine top-level direct MCP
+        # tool (no "Start" job-backed variant, no JobManager wraps it), so the
+        # nested EvaluateHandler call keeps emit_terminal_telemetry at its
+        # default True — nothing else will emit a workflow_outcome for this
+        # invocation.
         result = await evaluator.handle(evaluate_args)
 
         if result.is_err:
