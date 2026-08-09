@@ -194,7 +194,7 @@ ouroboros setup --runtime copilot            # discovers models live, picks a de
                                              # registers MCP server in ~/.copilot/mcp-config.json
 ```
 
-Restart your Copilot CLI session, then use `ooo` commands inside it. Hyphenated Anthropic model IDs (`claude-opus-4-6`) used elsewhere in your config are auto-mapped to the dotted Copilot form (`claude-opus-4.6`) at runtime, so existing configs keep working when you switch backends.
+Restart your Copilot CLI session, then use `ooo` commands inside it. Model-ID mapping is narrower than it looks: the static map covers `claude-opus-4-6` and `claude-sonnet-4-5`, any ID already containing a `.` passes through unchanged, and the hyphen-to-dot fallback rewrites *every* hyphen, so the current default `claude-opus-4-8` becomes `claude.opus.4.8` and misses. Leave role models unset so setup writes a discovered ID, or set a Copilot-valid dotted ID explicitly. See [#1995](https://github.com/Q00/ouroboros/issues/1995) and the [Copilot runtime guide](./docs/runtime-guides/copilot.md).
 
 See the [GitHub Copilot CLI runtime guide](./docs/runtime-guides/copilot.md) for full details.
 
