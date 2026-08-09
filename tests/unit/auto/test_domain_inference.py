@@ -4888,6 +4888,26 @@ def test_coordinated_web_dashboard_keeps_honest_ambiguity() -> None:
     assert result.classes == frozenset({TaskClass.CLI, TaskClass.WEB_APP})
 
 
+@pytest.mark.parametrize(
+    "goal",
+    [
+        "Build a CLI; avoid a browser UI",
+        "Build a CLI and avoid a browser UI",
+        "Build a CLI; skip the web UI",
+    ],
+)
+def test_exclusion_predicates_deny_like_negators(goal: str) -> None:
+    """R112 guard: "avoid a browser UI" rejects the UI it names — the
+    excluded phrase cannot become a co-product and the CLI keeps its
+    single class."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value="Deterministic stdout and exit code 0")
+    _seed_section(ledger, "runtime_context", value="Local shell / terminal")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.CLI
+
+
 def test_neither_nor_denies_both_alternatives() -> None:
     """R102 guard: "neither a web app nor a website" denies BOTH
     alternatives — a denied artifact can never become a match or a

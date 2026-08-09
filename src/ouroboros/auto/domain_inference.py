@@ -107,6 +107,10 @@ _CLI_GOAL_PHRASE_RE = re.compile(r"\bcommand[\s\-]line\b")
 _NEGATION_CUE_FRAGMENT = (
     r"(?:not|no|never|"
     r"without|excluding|excludes?|omit(?:s|ted)?|sans|"
+    # Exclusion predicates deny like negators (#1813 R112): "avoid a
+    # browser UI" rejects the UI it names.
+    r"avoid(?:s|ed|ing)?|skips?|skipping|skipped|forgo(?:es|ing|ne)?|"
+    r"eschews?|eschewing|refrains?\s+from|refraining\s+from|"
     r"isn[’']?t|aren[’']?t|wasn[’']?t|weren[’']?t|"
     r"won[’']?t|wouldn[’']?t|shouldn[’']?t|"
     r"can[’']?t|cannot|"
