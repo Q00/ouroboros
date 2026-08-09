@@ -1784,6 +1784,25 @@ _DESTINATION_CONTEXT_RE = re.compile(
 )
 
 
+# A relative clause whose subject is a UI artifact names what the UI
+# acts on (#1813 R113): "login form that communicates with a REST API"
+# consumes the API through WHATEVER verb — the relation is structural,
+# not a verb list. Production verbs and copulas are the exception: a
+# dashboard that EXPOSES a REST API produces it.
+_UI_ACTS_ON_DEPENDENCY_RE = re.compile(
+    rf"(?P<head>{_UI_PRODUCT_HEAD_FRAGMENT})\s+(?:that|which)\s+"
+    rf"(?!(?:exposes?|exposing|provides?|providing|offers?|offering|"
+    rf"serves?|serving|publishes?|publishing|hosts?|hosting|implements?|"
+    rf"implementing|builds?|building|creates?|creating|delivers?|"
+    rf"delivering|is|are|was|were|becomes?|exports?|exporting|produces?|"
+    rf"producing|generates?|generating)\b)"
+    rf"(?:[\w\-'’]+\s+){{1,4}}?"
+    rf"(?:an?\s+|the\s+)?(?:[\w\-'’]+\s+){{0,2}}?"
+    rf"(?:public\s+api|rest\s+apis?|graphql\s+apis?|apis?|sdks?|clis?|"
+    rf"web\s+services?)\b"
+)
+
+
 def _strip_consumed_dependencies(text: str) -> str:
     """Remove relational and prenominal dependency/client declarations."""
 
@@ -1795,6 +1814,7 @@ def _strip_consumed_dependencies(text: str) -> str:
             return match.group(0)
         return " "
 
+    text = _UI_ACTS_ON_DEPENDENCY_RE.sub(lambda m: m.group("head") + " ", text)
     text = _CONSUMED_DEPENDENCY_RE.sub(_spare_destinations, text)
     return _PRENOMINAL_DEPENDENCY_CLIENT_RE.sub(" ", text)
 

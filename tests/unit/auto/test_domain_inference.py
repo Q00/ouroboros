@@ -4749,6 +4749,38 @@ def test_audience_and_displayed_subjects_own_nothing(goal: str, outputs: str) ->
     assert result.single is TaskClass.WEB_APP
 
 
+@pytest.mark.parametrize(
+    "outputs",
+    [
+        "Login form that communicates with a REST API",
+        "Login form that queries a REST API",
+        "Login form that accesses a REST API",
+        "Login form that communicates with a payments SDK",
+        "Login form that imports a payments SDK",
+    ],
+)
+def test_ui_relative_clause_objects_are_dependencies(outputs: str) -> None:
+    """R113 guard: a relative clause whose subject is a UI artifact
+    names what the UI acts on — the API or SDK is consumed through
+    whatever verb, and the web app keeps its clean single class."""
+    ledger = _bare_ledger("Build an admin web app")
+    _seed_section(ledger, "outputs", value=outputs)
+    _seed_section(ledger, "runtime_context", value="Modern browsers")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP
+
+
+def test_produced_declarations_in_ui_clauses_still_own() -> None:
+    """R113 guard: production verbs are the exception — a dashboard that
+    EXPOSES a REST API produces it, keeping the honest ambiguity."""
+    ledger = _bare_ledger("Build an admin web app")
+    _seed_section(ledger, "outputs", value="Admin pages and a dashboard that exposes a REST API")
+    _seed_section(ledger, "runtime_context", value="Modern browsers")
+    result = derive_domain_from_ledger(ledger)
+    assert result.classes == frozenset({TaskClass.WEB_APP, TaskClass.WEB_SERVICE})
+
+
 def test_artifact_defining_library_clauses_still_own() -> None:
     """R109 guard: an artifact-defining clause ("which exposes an SDK")
     is not audience or content — the toolkit keeps its library class."""
