@@ -1173,28 +1173,32 @@ _VERIFICATION_ATTACHMENT_CUT_RE = re.compile(
     r"driven|with|via|using|by|for|to|under|through|alongside)\b"
 )
 
-# A production-marked noun phrase declares the artifact's identity even
-# inside verification prose ("tests cover the production Chrome browser
+# A described noun phrase declares the artifact's identity even inside
+# verification prose ("tests cover the production Chrome browser
 # extension runtime") — the declaration survives the exemption. The
-# grammar of the marking is unrestricted (#1813 R92-R96): prenominal
-# qualifiers, participial or prepositional tails, and bare finite
-# relative clauses ("the extension customers use daily") all count.
-# What is required is SEMANTIC ownership — the component's surrounding
-# description must anchor it to real operation: a consumer noun, a
-# release-state word, an operational locus, or a runtime head. A bare
-# tooling object ("tests with a browser extension") or a test-fixture
-# description without such an anchor ("installed temporarily") owns
-# nothing and stays exempt.
+# distinction is structural, not an ownership vocabulary (#1813
+# R92-R97): a component that carries a description of its own — any
+# postnominal predication (participial, prepositional, or a bare finite
+# relative clause) or a prenominal state/role qualifier — is a produced
+# artifact by default. What removes it is the exception classes the
+# tooling owns: verification vocabulary, fixture words ("mock",
+# "fixtures"), and transience markers ("installed temporarily"). A bare
+# tooling object ("tests with a browser extension") carries no
+# description and owns nothing.
 _COMPONENT_NP_SPAN_RE = re.compile(
-    rf"(?:(?:the|an?|our|its|this|that)\s+)?(?:[\w\-'’]+\s+){{0,3}}?"
-    rf"(?:{_COMPONENT_ARTIFACT_FRAGMENT})\b(?:\s+[\w\-'’]+){{0,7}}"
+    rf"(?:(?:the|an?|our|its|this|that)\s+)?(?P<premods>(?:[\w\-'’]+\s+){{0,3}}?)"
+    rf"(?:{_COMPONENT_ARTIFACT_FRAGMENT})\b(?P<window>(?:\s+[\w\-'’]+){{0,7}})"
 )
 
-_PRODUCTION_ANCHOR_RE = re.compile(
-    r"\b(?:production|prod|shipped|shipping|deployed|released|launched|"
-    r"published|distributed|globally|worldwide|daily|everyday|live|"
-    r"runtimes?|users?|customers?|clients?|visitors?|subscribers?|"
-    r"members?|consumers?|audiences?|employees?|staff|public)\b"
+_PRENOMINAL_STATE_QUALIFIER_RE = re.compile(
+    r"\b(?:production|shipped|deployed|released|live|[\w'’]+-[\w'’]+(?:ing|ed))\b"
+)
+
+_FIXTURE_MARKER_RE = re.compile(
+    r"\b(?:mocks?|mocked|stubs?|stubbed|fakes?|faked|dumm(?:y|ies)|"
+    r"placeholders?|fixtures?|scaffold\w*|sandbox\w*|throwaway|disposable|"
+    r"synthetic|simulated|samples?|temporar\w*|briefly|momentarily|"
+    r"transient\w*|ephemeral|short[\s\-]lived|provisional|interim|scratch)\b"
 )
 
 # Retention taint: a candidate identity phrase whose own words belong to
@@ -1243,10 +1247,14 @@ def _strip_verification_clauses(text: str) -> str:
                 kept.append(prefix)
             for np_match in _COMPONENT_NP_SPAN_RE.finditer(part[len(prefix) :]):
                 phrase = np_match.group(0)
+                is_described = bool(np_match.group("window").strip()) or bool(
+                    _PRENOMINAL_STATE_QUALIFIER_RE.search(np_match.group("premods"))
+                )
                 if (
-                    _PRODUCTION_ANCHOR_RE.search(phrase)
+                    is_described
                     and not _VERIFICATION_CONTEXT_RE.search(phrase)
                     and not _VERIFICATION_TAINT_RE.search(phrase)
+                    and not _FIXTURE_MARKER_RE.search(phrase)
                 ):
                     kept.append(phrase)
     return " ; ".join(kept)
