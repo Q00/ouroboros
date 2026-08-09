@@ -105,12 +105,18 @@ curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.
 > ooo interview "I want to build a task management CLI"
 ```
 
+에이전트 호스트 없이 터미널에서 바로 쓸 수도 있습니다:
+
+```
+$ ouroboros init start --orchestrator "I want to build a task management CLI tool"
+```
+
 <p align="center">
-  <img src="./docs/images/ooo-interview.gif" width="760" alt="ooo interview가 저장 방식, 범위, 식별자를 캐묻다가 모호도 0.28에서 멈추는 장면">
+  <img src="./docs/images/ooo-interview.gif" width="760" alt="ouroboros init start가 저장 방식, 범위, 식별자, 동시성을 캐묻다가 모호도 0.31을 보고하고 계속·강제 생성·취소 중 하나를 묻는 터미널 녹화">
 </p>
 
 <p align="center">
-  <sub>네 번을 주고받아도 모호도가 0.28이라 Seed를 만들지 않습니다. 임계값은 0.2입니다.</sub>
+  <sub>터미널 CLI에서 녹화했습니다. 네 번을 주고받아도 모호도가 0.31이고 임계값은 0.2라, CLI는 경고를 띄우고 인터뷰를 더 할지, Seed를 강제로 만들지, 취소할지 묻습니다. 위의 <code>ooo interview</code>는 에이전트 호스트 안에서 돌고, 모호도 임계값 0.2는 동일하며, Seed 생성 전에 자체 closure·restate 게이트가 추가로 붙습니다.</sub>
 </p>
 
 > Claude Code, Codex CLI, GitHub Copilot CLI, OpenCode, Hermes, Gemini, Kiro CLI, Pi CLI, Zcode, Goose, GJC, Antigravity CLI, Grok Build CLI를 지원합니다. 설치 프로그램은 사용 가능한 런타임을 자동으로 감지하고 호스트가 지원하는 경우 MCP 서버를 등록합니다. 런타임을 명시적으로 선택하려면 설치 후 `ouroboros setup --runtime <opencode|kiro|copilot|gemini|pi|zcode|goose|gjc|antigravity|grok>`를 실행하세요. Copilot CLI 런타임은 GitHub Copilot models API를 통해 모델 카탈로그를 실시간으로 검색하고 설정 중 기본값을 선택할 수 있습니다.

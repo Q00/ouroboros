@@ -69,12 +69,18 @@ curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.
 > ooo interview "I want to build a task management CLI"
 ```
 
+也可以不经过 agent 宿主，直接在终端里跑：
+
+```
+$ ouroboros init start --orchestrator "I want to build a task management CLI tool"
+```
+
 <p align="center">
-  <img src="./docs/images/ooo-interview.gif" width="760" alt="ooo interview 追问存储方式、范围和标识符，最后停在模糊度 0.28">
+  <img src="./docs/images/ooo-interview.gif" width="760" alt="终端录制：ouroboros init start 追问存储方式、范围、标识符和并发，最后报出模糊度 0.31，并询问是继续访谈、强制生成还是取消">
 </p>
 
 <p align="center">
-  <sub>问了四轮，模糊度仍是 0.28，于是不生成 Seed。阈值是 0.2。</sub>
+  <sub>录自终端 CLI。问了四轮，模糊度仍是 0.31，阈值是 0.2，于是 CLI 给出警告并询问：继续访谈、强制生成 Seed、还是取消。上面的 <code>ooo interview</code> 在 agent 宿主内运行，用的是同一个 0.2 模糊度阈值，并在生成 Seed 前额外加上自己的 closure 与 restate 关卡。</sub>
 </p>
 
 > 支持 Claude Code、Codex CLI、GitHub Copilot CLI、OpenCode、Hermes、Gemini、Kiro CLI、Pi CLI、Zcode、Goose、GJC、Antigravity CLI 和 Grok Build CLI。安装程序会自动检测可用的运行时，并在宿主支持的情况下注册 MCP server。如需显式选择运行时，安装后执行 `ouroboros setup --runtime <opencode|kiro|copilot|gemini|pi|zcode|goose|gjc|antigravity|grok>`。Copilot CLI 运行时会通过 GitHub Copilot models API 实时获取模型列表，并在配置过程中让你选择默认模型。
