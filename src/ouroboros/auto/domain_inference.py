@@ -515,8 +515,7 @@ def _strip_replaced_background(text: str) -> str:
     kept = [
         segment
         for segment in re.split(r"(?<=[.;!?])", text)
-        if not _CURRENT_STATE_MARKER_RE.search(segment)
-        or _REPLACEMENT_DIRECTIVE_RE.search(segment)
+        if not _CURRENT_STATE_MARKER_RE.search(segment) or _REPLACEMENT_DIRECTIVE_RE.search(segment)
     ]
     return _REPLACED_OBJECT_RE.sub(" ", "".join(kept))
 
