@@ -4533,6 +4533,28 @@ class TestClaudeSetup:
         assert exc_info.value.exit_code == 1
         assert config_path.read_text(encoding="utf-8") == original
 
+    def test_setup_claude_sdk_reports_requested_alias_but_persists_sdk_backend(
+        self, tmp_path: Path
+    ) -> None:
+        """The explicit alias remains visible without creating a new backend identity."""
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        config_path.write_text("{}", encoding="utf-8")
+
+        with (
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch("ouroboros.cli.commands.claude_setup.print_info") as print_info,
+        ):
+            setup_cmd._setup_claude_sdk("/usr/local/bin/claude")
+
+        messages = [str(call.args[0]).replace("\\", "") for call in print_info.call_args_list]
+        assert any("ouroboros-ai[claude-sdk]" in message for message in messages)
+        assert all("ouroboros-ai[claude] (SDK" not in message for message in messages)
+        config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert config_dict["orchestrator"]["runtime_backend"] == "claude"
+        assert config_dict["llm"]["backend"] == "claude"
+
     def test_legacy_claude_mcp_registration_shim_is_fail_closed(self, tmp_path: Path) -> None:
         """Older plugin callers cannot reactivate the incompatible MCP path."""
         with patch("pathlib.Path.home", return_value=tmp_path):

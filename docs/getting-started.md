@@ -436,7 +436,7 @@ env | grep -E 'ANTHROPIC|OPENAI'        # verify
 
 ```bash
 ouroboros mcp info
-ouroboros mcp serve
+ouroboros mcp serve --runtime claude-cli
 ```
 
 ### TUI not displaying

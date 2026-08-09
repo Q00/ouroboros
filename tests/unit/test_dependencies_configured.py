@@ -349,6 +349,22 @@ def test_claude_setup_surfaces_keep_default_sdk_distinct_from_cli_worker(
     assert "Mode:                     Claude CLI\n" not in content
 
 
+def test_mcp_serve_documentation_names_runtime_and_public_claude_aliases() -> None:
+    """Shipped commands cannot silently inherit the SDK default in an MCP 2 process."""
+    cli_reference = Path("docs/cli-reference.md").read_text(encoding="utf-8")
+
+    assert "`claude`, `claude-sdk`, `claude-cli`, `codex`" in cli_reference
+    assert "MCP 2 server rejects SDK-backed `claude`/`claude-sdk`" in cli_reference
+
+    docs_with_commands = [Path("docs/cli-reference.md"), *Path("docs").rglob("*.md")]
+    for doc_path in dict.fromkeys(docs_with_commands):
+        for line in doc_path.read_text(encoding="utf-8").splitlines():
+            command = line.strip()
+            assert command != "ouroboros mcp serve", doc_path
+            if command.startswith("ouroboros mcp serve") and "--llm-backend" in command:
+                assert "--runtime" in command, doc_path
+
+
 def test_python_version_constraint():
     """Test that Python version is set to >=3.12."""
     root = Path(__file__).parent.parent.parent

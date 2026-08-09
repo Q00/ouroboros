@@ -11,6 +11,7 @@ shipped archive.
 from __future__ import annotations
 
 from email.parser import Parser
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -20,6 +21,7 @@ import zipfile
 
 import pytest
 
+from ouroboros.package_profiles import UNSUPPORTED_CLAUDE_SDK_MCP_MESSAGE
 from ouroboros.plugin.manifest import SUPPORTED_SCHEMA_VERSIONS
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -172,6 +174,60 @@ def test_built_wheel_preserves_packaging_contracts(tmp_path: Path) -> None:
         resolver_error = unsupported.stdout + unsupported.stderr
         assert "claude-agent-sdk" in resolver_error
         assert "mcp" in resolver_error
+
+    # A clean MCP 2 + CLI-worker install with no persisted runtime would
+    # otherwise inherit the SDK default. The built console script must reject
+    # that bare invocation before creating any durable state.
+    probe_venv = tmp_path / "bare-mcp-cli-probe"
+    create_venv = subprocess.run(
+        ["uv", "venv", "--python", sys.executable, str(probe_venv)],
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+    assert create_venv.returncode == 0, create_venv.stderr
+    probe_python = probe_venv / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
+    install_probe = subprocess.run(
+        [
+            "uv",
+            "pip",
+            "install",
+            "--python",
+            str(probe_python),
+            f"{wheels[0]}[mcp,claude-cli]",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+    assert install_probe.returncode == 0, install_probe.stderr
+    probe_cli = probe_venv / (
+        "Scripts/ouroboros.exe" if sys.platform == "win32" else "bin/ouroboros"
+    )
+    probe_home = tmp_path / "bare-probe-home"
+    probe_home.mkdir()
+    probe_env = os.environ.copy()
+    probe_env["HOME"] = str(probe_home)
+    probe_env["USERPROFILE"] = str(probe_home)
+    for key in ("OUROBOROS_AGENT_RUNTIME", "OUROBOROS_RUNTIME", "_OUROBOROS_NESTED"):
+        probe_env.pop(key, None)
+    bare_probe = subprocess.run(
+        [str(probe_cli), "mcp", "serve"],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+        env=probe_env,
+    )
+    assert bare_probe.returncode == 1
+    rendered_probe = " ".join((bare_probe.stdout + bare_probe.stderr).split())
+    assert " ".join(UNSUPPORTED_CLAUDE_SDK_MCP_MESSAGE.split()) in rendered_probe
+    state_dir = probe_home / ".ouroboros"
+    assert not (state_dir / "ouroboros.db").exists()
+    assert not (state_dir / "config.yaml").exists()
+    assert not (state_dir / "sessions").exists()
 
 
 @pytest.mark.skipif(

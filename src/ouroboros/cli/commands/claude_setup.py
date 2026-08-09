@@ -36,8 +36,8 @@ def _write_claude_runtime_config(claude_path: str, *, runtime_backend: str) -> P
     return config_path
 
 
-def setup_claude(claude_path: str) -> None:
-    """Configure the default isolated Claude Agent SDK package profile."""
+def _setup_claude_sdk_profile(claude_path: str, *, profile: str) -> None:
+    """Configure one public spelling of the isolated Agent SDK profile."""
     if has_unsupported_claude_sdk_mcp_mix():
         print_error(escape(UNSUPPORTED_CLAUDE_SDK_MCP_MESSAGE))
         raise typer.Exit(1)
@@ -50,13 +50,18 @@ def setup_claude(claude_path: str) -> None:
         )
     )
     print_success(f"Configured Claude SDK runtime (CLI: {claude_path})")
-    print_info(escape("Package profile: ouroboros-ai[claude] (SDK/MCP 1.x)"))
+    print_info(escape(f"Package profile: ouroboros-ai[{profile}] (SDK/MCP 1.x)"))
     print_info(f"Config saved to: {config_path}")
+
+
+def setup_claude(claude_path: str) -> None:
+    """Configure the default isolated Claude Agent SDK package profile."""
+    _setup_claude_sdk_profile(claude_path, profile="claude")
 
 
 def setup_claude_sdk(claude_path: str) -> None:
     """Configure the explicit alias for the Claude Agent SDK profile."""
-    setup_claude(claude_path)
+    _setup_claude_sdk_profile(claude_path, profile="claude-sdk")
 
 
 def setup_claude_cli(claude_path: str) -> None:

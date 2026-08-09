@@ -255,7 +255,10 @@ class TestMCPCommands:
             "ouroboros.cli.commands.mcp._run_mcp_server",
             new=AsyncMock(),
         ) as mock_run_mcp_server:
-            result = runner.invoke(app, ["mcp", "serve", "--llm-backend", "pi"])
+            result = runner.invoke(
+                app,
+                ["mcp", "serve", "--runtime", "pi", "--llm-backend", "pi"],
+            )
 
         assert result.exit_code == 0
         mock_run_mcp_server.assert_awaited_once_with(
@@ -263,7 +266,7 @@ class TestMCPCommands:
             8080,
             "stdio",
             None,
-            None,
+            "pi",
             "pi",
         )
 

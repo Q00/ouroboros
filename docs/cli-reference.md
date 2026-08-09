@@ -1121,29 +1121,35 @@ ouroboros mcp serve [OPTIONS]
 | `-p, --port INTEGER` | Port to bind to (default: 8080) |
 | `-t, --transport TEXT` | Transport type: `stdio`, `sse`, or `streamable-http` (default: stdio). Note: `http` is only a client config alias for outbound MCP connections and is NOT a valid serve transport. |
 | `--db TEXT` | Path to the EventStore database file |
-| `--runtime TEXT` | Agent runtime backend for orchestrator-driven tools (`claude`, `codex`, `opencode`, `hermes`, `gemini`, `copilot`, `goose`, `kiro`, `pi`, `gjc`, `antigravity`, `grok`, `zcode`). Affects which tool variants are instantiated |
+| `--runtime TEXT` | Agent runtime backend for orchestrator-driven tools (`claude`, `claude-sdk`, `claude-cli`, `codex`, `opencode`, `hermes`, `gemini`, `copilot`, `goose`, `kiro`, `pi`, `gjc`, `antigravity`, `grok`, `zcode`). The MCP 2 server rejects SDK-backed `claude`/`claude-sdk`; use `claude-cli` for its out-of-process Claude worker. |
 | `--llm-backend TEXT` | LLM backend for interview/seed/evaluation tools (`claude_code`, `litellm`, `codex`, `copilot`, `opencode`, `gemini`, `goose`, `kiro`, `pi`, `gjc`). Affects which tool variants are instantiated |
 
 **Examples:**
 
 ```bash
 # Start with stdio transport (for Claude Desktop)
-ouroboros mcp serve
+ouroboros mcp serve --runtime claude-cli
 
 # Start with SSE transport on custom port
-ouroboros mcp serve --transport sse --port 9000
+ouroboros mcp serve --runtime claude-cli --transport sse --port 9000
 
 # Start with streamable HTTP transport on custom port
-ouroboros mcp serve --transport streamable-http --port 9000
+ouroboros mcp serve --runtime claude-cli --transport streamable-http --port 9000
 
 # Start with Codex-backed orchestrator tools
 ouroboros mcp serve --runtime codex --llm-backend codex
 
 # Start on specific host
-ouroboros mcp serve --host 0.0.0.0 --port 8080 --transport sse
+ouroboros mcp serve --runtime claude-cli --host 0.0.0.0 --port 8080 --transport sse
 ```
 
 For serving with streamable HTTP, use `streamable-http`, not `http`. `http` is accepted only in MCP client configuration as a compatibility alias for dialing another server's streamable HTTP endpoint; `mcp serve` uses the precise protocol name so users do not confuse it with a generic HTTP API. Streamable HTTP clients should connect to `http://<host>:<port>/mcp`.
+
+When `--runtime` is omitted, `mcp serve` inherits the configured runtime and
+ultimately the default `[claude]` Agent SDK profile. Because the server process
+uses MCP 2, it fails closed before startup if that effective runtime is
+SDK-backed. Pass an explicit MCP-2-compatible runtime or persist one with
+`ouroboros setup`.
 
 MCP SDK server caveats: Network serving uses the SDK v2 `MCPServer` API. The streamable HTTP path is `/mcp`. Authentication and rate limiting configured on `MCPServerAdapter` are rejected for SDK-managed transports because the handler boundary does not expose credentials or stable client identity; protect `0.0.0.0` binds with normal network controls.
 

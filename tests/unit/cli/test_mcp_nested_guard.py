@@ -22,7 +22,7 @@ runner = CliRunner()
 def test_nested_guard_exits_cleanly(monkeypatch):
     """Nested ouroboros MCP server should exit with code 0."""
     monkeypatch.setenv("_OUROBOROS_NESTED", "1")
-    result = runner.invoke(app, ["serve"])
+    result = runner.invoke(app, ["serve", "--runtime", "claude-cli"])
     assert result.exit_code == 0
 
 
@@ -47,7 +47,7 @@ def test_serve_sets_nested_env_var(monkeypatch):
         "ouroboros.cli.commands.mcp._run_mcp_server",
         new=AsyncMock(side_effect=mock_run_mcp_server),
     ):
-        result = runner.invoke(app, ["serve"])
+        result = runner.invoke(app, ["serve", "--runtime", "claude-cli"])
 
     # Should exit cleanly (no exception)
     assert result.exit_code == 0
@@ -66,7 +66,10 @@ def test_serve_defaults_to_port_8080_when_port_omitted(monkeypatch):
         "ouroboros.cli.commands.mcp._run_mcp_server",
         new=mock_run_mcp_server,
     ):
-        result = runner.invoke(app, ["serve", "--transport", "streamable-http"])
+        result = runner.invoke(
+            app,
+            ["serve", "--runtime", "claude-cli", "--transport", "streamable-http"],
+        )
 
     assert result.exit_code == 0
     mock_run_mcp_server.assert_awaited_once_with(
@@ -74,7 +77,7 @@ def test_serve_defaults_to_port_8080_when_port_omitted(monkeypatch):
         8080,
         "streamable-http",
         None,
-        None,
+        "claude_mcp",
         None,
     )
 
@@ -133,9 +136,82 @@ def test_forced_sdk_mcp_mix_fails_before_process_state(monkeypatch):
         "ouroboros.cli.commands.mcp.has_unsupported_claude_sdk_mcp_mix",
         return_value=True,
     ):
-        result = runner.invoke(app, ["serve"])
+        result = runner.invoke(app, ["serve", "--runtime", "claude-cli"])
 
     assert result.exit_code == 1
     for profile in ("ouroboros-ai[mcp]", "ouroboros-ai[claude]", "[claude-sdk]", "[claude-cli]"):
         assert profile in result.output
     assert "_OUROBOROS_NESTED" not in os.environ
+
+
+def _clear_runtime_selection(monkeypatch) -> None:
+    monkeypatch.delenv("OUROBOROS_AGENT_RUNTIME", raising=False)
+    monkeypatch.delenv("OUROBOROS_RUNTIME", raising=False)
+    monkeypatch.delenv("_OUROBOROS_NESTED", raising=False)
+
+
+def _assert_rejected_before_start(result, run_mcp_server: AsyncMock, home) -> None:
+    assert result.exit_code == 1
+    assert " ".join(result.output.split()) == " ".join(UNSUPPORTED_CLAUDE_SDK_MCP_MESSAGE.split())
+    run_mcp_server.assert_not_awaited()
+    assert "_OUROBOROS_NESTED" not in os.environ
+    assert not (home / ".ouroboros" / "ouroboros.db").exists()
+
+
+def test_bare_serve_rejects_missing_config_sdk_default_before_mutation(
+    monkeypatch, tmp_path
+) -> None:
+    """Missing config falls back to SDK Claude and must fail before startup."""
+    _clear_runtime_selection(monkeypatch)
+    run_mcp_server = AsyncMock()
+
+    with (
+        patch("pathlib.Path.home", return_value=tmp_path),
+        patch("ouroboros.cli.commands.mcp._run_mcp_server", new=run_mcp_server),
+    ):
+        result = runner.invoke(app, ["serve"])
+
+    _assert_rejected_before_start(result, run_mcp_server, tmp_path)
+    assert not (tmp_path / ".ouroboros").exists()
+
+
+def test_bare_serve_rejects_configured_sdk_before_mutation(monkeypatch, tmp_path) -> None:
+    """Persisted legacy SDK selection cannot cross the MCP 2 boundary."""
+    _clear_runtime_selection(monkeypatch)
+    config_dir = tmp_path / ".ouroboros"
+    config_dir.mkdir()
+    (config_dir / "config.yaml").write_text(
+        "orchestrator:\n  runtime_backend: claude\nllm:\n  backend: claude\n",
+        encoding="utf-8",
+    )
+    run_mcp_server = AsyncMock()
+
+    with (
+        patch("pathlib.Path.home", return_value=tmp_path),
+        patch("ouroboros.cli.commands.mcp._run_mcp_server", new=run_mcp_server),
+    ):
+        result = runner.invoke(app, ["serve"])
+
+    _assert_rejected_before_start(result, run_mcp_server, tmp_path)
+    assert sorted(path.name for path in config_dir.iterdir()) == ["config.yaml"]
+
+
+def test_bare_serve_allows_configured_cli_worker(monkeypatch, tmp_path) -> None:
+    """The persisted dependency-free worker is a valid effective MCP 2 runtime."""
+    _clear_runtime_selection(monkeypatch)
+    config_dir = tmp_path / ".ouroboros"
+    config_dir.mkdir()
+    (config_dir / "config.yaml").write_text(
+        "orchestrator:\n  runtime_backend: claude_mcp\nllm:\n  backend: claude\n",
+        encoding="utf-8",
+    )
+    run_mcp_server = AsyncMock()
+
+    with (
+        patch("pathlib.Path.home", return_value=tmp_path),
+        patch("ouroboros.cli.commands.mcp._run_mcp_server", new=run_mcp_server),
+    ):
+        result = runner.invoke(app, ["serve"])
+
+    assert result.exit_code == 0
+    run_mcp_server.assert_awaited_once_with("localhost", 8080, "stdio", None, "claude_mcp", None)

@@ -49,7 +49,7 @@ connection:
 ### 2. Start MCP server
 
 ```bash
-ouroboros mcp serve
+ouroboros mcp serve --runtime claude-cli
 # Output: MCP Bridge: 1/1 upstream server(s) connected
 ```
 
