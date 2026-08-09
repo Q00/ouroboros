@@ -334,14 +334,59 @@ def _rename_if_absent(source: Path, destination: Path) -> None:
 
 def _restore_claim_if_absent(claim: Path, target: Path) -> bool:
     """Restore a claimed inode without overwriting a newer target generation."""
+    claimed = _snapshot_target(claim)
+    if claimed.kind != "file":
+        raise _ConcurrentActivationError(f"Recovery claim is not a regular file: {claim}")
     try:
         _link_if_absent(claim, target)
     except FileExistsError:
         return False
-    claim.unlink()
+    _claim_restoration_checkpoint("linked", target)
     if not fsync_parent_directory(target):
         raise OSError(f"Could not confirm claimed generation restoration: {target}")
+    _claim_restoration_checkpoint("durable", target)
+    _remove_owned_artifact(claim, _owned_guard(claimed))
     return True
+
+
+def _claim_restoration_checkpoint(_phase: str, _target: Path) -> None:
+    """Test seam around restored-live durability and claim retirement."""
+
+
+def _artifact_cleanup_checkpoint(_path: Path) -> None:
+    """Test seam immediately before an artifact is atomically quarantined."""
+
+
+def _remove_owned_artifact(
+    path: Path,
+    expected_guard: object,
+    *,
+    durable: bool = True,
+) -> None:
+    """Quarantine then remove only the exact owned generation at ``path``.
+
+    The operator-visible path is never unlinked after a separate check.  A
+    last-moment replacement is atomically moved to quarantine, identified as
+    foreign, and restored without changing its inode, contents, or mode.
+    """
+    current = _snapshot_target(path)
+    if current.kind == "missing":
+        return
+    quarantine = path.parent / f".{path.name}.{uuid4().hex}.cleanup"
+    _artifact_cleanup_checkpoint(path)
+    _rename_if_absent(path, quarantine)
+    quarantined = _snapshot_target(quarantine)
+    if not _matches_guard(quarantined, expected_guard, strict=False):
+        if not _restore_claim_if_absent(quarantine, path):
+            raise _ConcurrentActivationError(
+                f"Changed cleanup target and its replacement were both preserved: {path}"
+            )
+        raise _ConcurrentActivationError(f"Refusing to remove a changed artifact: {path}")
+    # The quarantine name is unpredictable and was populated by the atomic
+    # no-replace move above; the disclosed/original path is never path-unlinked.
+    quarantine.unlink()
+    if durable and not fsync_parent_directory(path):
+        raise OSError(f"Could not confirm owned artifact cleanup: {path}")
 
 
 def _promotion_checkpoint(_operation: str, _target: Path) -> None:
@@ -367,6 +412,7 @@ def _promote_prepared_under_lock(
         _promotion_checkpoint("claim", target)
         _rename_if_absent(target, claim)
         claimed = _snapshot_target(claim)
+        _claim_publication_checkpoint(target)
         if not _same_owned_generation(claimed, expected):
             if not _restore_claim_if_absent(claim, target):
                 raise _ConcurrentActivationError(
@@ -386,15 +432,27 @@ def _promote_prepared_under_lock(
         if expected.kind == "file" and _snapshot_target(claim).kind == "file":
             _restore_claim_if_absent(claim, target)
         raise
-    # The destination now names the prepared inode.  Remove only our
-    # generation-specific staging link; no destination check/unlink occurs.
-    prepared.path.unlink()
+    published = _snapshot_target(target)
+    if not _matches_guard(published, _owned_guard(prepared.snapshot), strict=False):
+        raise _ConcurrentActivationError(f"Prepared generation was not published: {target}")
+    try:
+        _remove_owned_artifact(
+            prepared.path,
+            _owned_guard(prepared.snapshot),
+            durable=False,
+        )
+    except BaseException as exc:
+        raise _DurabilityError(target, published) from exc
     published = _snapshot_target(target)
     if not _same_owned_generation(published, prepared.snapshot):
-        raise _ConcurrentActivationError(f"Prepared generation was not published: {target}")
+        raise _ConcurrentActivationError(f"Published generation changed: {target}")
     if not fsync_parent_directory(target):
         raise _DurabilityError(target, published)
     return published
+
+
+def _claim_publication_checkpoint(_target: Path) -> None:
+    """Test seam immediately after a live target is moved into its claim."""
 
 
 def _atomic_write_text_if_current_matches(
@@ -419,9 +477,10 @@ def _atomic_write_text_if_current_matches(
         # generation is no longer needed once the replacement is durable.
         claimed = _snapshot_target(claim)
         if claimed.kind == "file":
-            claim.unlink()
-            if not fsync_parent_directory(path):
-                raise _DurabilityError(path, published)
+            try:
+                _remove_owned_artifact(claim, _owned_guard(claimed))
+            except OSError as exc:
+                raise _DurabilityError(path, published) from exc
         return published
     finally:
         try:
@@ -436,7 +495,6 @@ def _same_owned_generation(left: _FileSnapshot, right: _FileSnapshot) -> bool:
         and left.device == right.device
         and left.inode == right.inode
         and left.mode == right.mode
-        and left.link_count == right.link_count == 1
         and left.contents == right.contents
     )
 
@@ -493,10 +551,20 @@ def _write_journal(
         _require_snapshot(path, expected)
         _journal_publication_checkpoint(path)
         _link_if_absent(staging, path)
-        staging.unlink()
+        published = _snapshot_target(path)
+        if not _matches_guard(published, _owned_guard(prepared.snapshot), strict=False):
+            raise _ConcurrentActivationError("Activation journal generation changed during write")
+        try:
+            _remove_owned_artifact(
+                staging,
+                _owned_guard(prepared.snapshot),
+                durable=False,
+            )
+        except BaseException as exc:
+            raise _DurabilityError(path, published) from exc
         published = _snapshot_target(path)
         if not _same_owned_generation(published, prepared.snapshot):
-            raise _ConcurrentActivationError("Activation journal generation changed during write")
+            raise _ConcurrentActivationError("Activation journal generation changed after publish")
         if not fsync_parent_directory(path):
             raise _DurabilityError(path, published)
         return published
@@ -576,9 +644,7 @@ def _discard_owned_target(
                 f"Changed target and a newer replacement were both preserved: {path}"
             )
         raise _ConcurrentActivationError(f"Refusing to remove a changed generation: {path}")
-    rollback_claim.unlink()
-    if not fsync_parent_directory(path):
-        raise OSError(f"Could not confirm owned generation cleanup: {path}")
+    _remove_owned_artifact(rollback_claim, expected_guard)
 
 
 def _cleanup_journal_artifacts(
@@ -616,23 +682,33 @@ def _cleanup_journal_artifacts(
         "config_rollback_claim",
     ):
         path = resolved[name_key]
-        if _snapshot_target(path).kind != "missing":
-            path.unlink()
+        current = _snapshot_target(path)
+        if current.kind != "missing":
+            guard_key = dict(artifact_specs)[name_key]
+            _remove_owned_artifact(path, journal.get(guard_key), durable=False)
     if not fsync_parent_directory(journal_path):
         raise OSError("Could not confirm disposable activation cleanup durability")
 
     # Past this point config is the durable commit.  Cleanup failures must not
     # enter rollback because original claims may already be gone.
-    for name_key in ("credentials_claim", "config_claim"):
-        path = resolved[name_key]
-        if _snapshot_target(path).kind != "missing":
-            path.unlink()
-    if not fsync_parent_directory(journal_path):
-        raise _CommittedCleanupError("Could not confirm original-claim cleanup durability")
-    _require_snapshot(journal_path, journal_snapshot)
-    journal_path.unlink()
-    if not fsync_parent_directory(journal_path):
-        raise _CommittedCleanupError("Could not confirm activation journal cleanup durability")
+    try:
+        for name_key in ("credentials_claim", "config_claim"):
+            path = resolved[name_key]
+            current = _snapshot_target(path)
+            if current.kind != "missing":
+                guard_key = dict(artifact_specs)[name_key]
+                _remove_owned_artifact(path, journal.get(guard_key), durable=False)
+        if not fsync_parent_directory(journal_path):
+            raise OSError("Could not confirm original-claim cleanup durability")
+        _remove_owned_artifact(
+            journal_path,
+            _owned_guard(journal_snapshot),
+            durable=False,
+        )
+        if not fsync_parent_directory(journal_path):
+            raise OSError("Could not confirm activation journal cleanup durability")
+    except OSError as exc:
+        raise _CommittedCleanupError(str(exc)) from exc
 
 
 def _recover_interrupted_activation(config_dir: Path) -> None:
@@ -649,10 +725,20 @@ def _recover_interrupted_activation(config_dir: Path) -> None:
     )
     config_now = _snapshot_target(config_path)
     credentials_now = _snapshot_target(credentials_path)
-    config_is_original = _matches_guard(config_now, journal.get("config_original"), strict=True)
+    config_is_original = _matches_guard(
+        config_now, journal.get("config_original"), strict=True
+    ) or _matches_guard(
+        config_now,
+        journal.get("config_original_owned"),
+        strict=False,
+    )
     config_is_published = _matches_guard(config_now, journal.get("config_published"), strict=False)
     credentials_is_original = _matches_guard(
         credentials_now, journal.get("credentials_original"), strict=True
+    ) or _matches_guard(
+        credentials_now,
+        journal.get("credentials_original_owned"),
+        strict=False,
     )
     credentials_is_published = _matches_guard(
         credentials_now, journal.get("credentials_published"), strict=False
@@ -726,9 +812,7 @@ def _rollback_file(
             raise _ConcurrentActivationError(f"Activation rollback generation changed: {path}")
         if original.kind == "missing":
             # The rollback claim is the activation-owned published generation.
-            rollback_claim.unlink()
-            if not fsync_parent_directory(path):
-                raise OSError(f"Could not confirm rollback durability for {path}")
+            _remove_owned_artifact(rollback_claim, _owned_guard(current))
             return True
         if original.kind != "file" or original.contents is None or original.mode is None:
             raise OSError(f"Cannot restore unsupported activation target: {path}")
@@ -737,9 +821,7 @@ def _rollback_file(
             raise _ConcurrentActivationError(f"Original rollback claim changed: {original_claim}")
         if not _restore_claim_if_absent(original_claim, path):
             raise _ConcurrentActivationError(f"Newer generation prevented rollback: {path}")
-        rollback_claim.unlink()
-        if not fsync_parent_directory(path):
-            raise OSError(f"Could not confirm rollback cleanup durability for {path}")
+        _remove_owned_artifact(rollback_claim, _owned_guard(current))
         return True
     except OSError as exc:
         print_warning(f"Preserved current {path.name}; activation rollback was incomplete: {exc}")
