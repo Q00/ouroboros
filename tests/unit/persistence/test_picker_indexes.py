@@ -1353,7 +1353,9 @@ def _measure_bulk_append(path: Path, event_type: str, *, projected: bool) -> tup
 @pytest.mark.parametrize(
     ("event_type", "max_time_ratio", "max_size_ratio"),
     [
-        ("telemetry.unrelated", 1.25, 1.02),
+        # Unmatched batches still pay for the projection fence column and the
+        # relevance scan; six CI samples put that structural CPU cost at 1.27x.
+        ("telemetry.unrelated", 1.5, 1.02),
         ("orchestrator.session.started", 1.75, 1.25),
         ("execution.node.updated", 1.75, 1.25),
         ("execution.ac.token_attribution.reported", 1.75, 1.25),

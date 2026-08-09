@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from itertools import pairwise
 import json
 import multiprocessing
 import os
@@ -21,6 +20,7 @@ from ouroboros.core.disposable_memory import (
 from ouroboros.events.base import BaseEvent
 import ouroboros.orchestrator.agent_process as agent_process_module
 from ouroboros.orchestrator.agent_process import AgentProcessHandle
+import ouroboros.orchestrator.disposable_memory as disposable_memory_module
 from ouroboros.orchestrator.disposable_memory import DisposableMemory
 from ouroboros.persistence.artifact_store import (
     ArtifactManifestError,
@@ -68,6 +68,45 @@ def _service(tmp_path: Path) -> tuple[DisposableMemory, _EventStore]:
         checkpoint_store=CheckpointStore(tmp_path / "checkpoints"),
     )
     return service, event_store
+
+
+class _ControlledDeadline:
+    def __init__(self) -> None:
+        self._task: asyncio.Task[Any] | None = None
+        self._expired = False
+
+    async def __aenter__(self) -> None:
+        self._task = asyncio.current_task()
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        _exc: BaseException | None,
+        _traceback: Any,
+    ) -> None:
+        if self._expired and exc_type is asyncio.CancelledError:
+            raise TimeoutError from None
+
+    def expire(self) -> None:
+        assert self._task is not None
+        self._expired = True
+        self._task.cancel()
+
+
+def _install_controlled_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+    delay: float,
+) -> _ControlledDeadline:
+    deadline = _ControlledDeadline()
+    original_timeout = asyncio.timeout
+
+    def controlled_timeout(requested_delay: float | None) -> Any:
+        if requested_delay == delay:
+            return deadline
+        return original_timeout(requested_delay)
+
+    monkeypatch.setattr(disposable_memory_module.asyncio, "timeout", controlled_timeout)
+    return deadline
 
 
 def _run_disposable_process(
@@ -366,58 +405,60 @@ def test_overlapping_processes_execute_same_contract_child_once(tmp_path: Path) 
 @pytest.mark.asyncio
 async def test_store_contention_preserves_event_loop_timeout_and_cancellation(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service, _ = _service(tmp_path)
-    lock_entered = threading.Event()
-    release_lock = threading.Event()
-    holder: threading.Thread | None = None
-    heartbeat: list[float] = []
-    stop_heartbeat = asyncio.Event()
+    release_persistence = threading.Event()
+    persistence_entered = threading.Event()
+    persistence_settled = threading.Event()
+    original_put = service.artifact_store.put_for_contract
     child_calls = 0
+    deadline = _install_controlled_deadline(monkeypatch, 0.1)
 
-    async def pulse() -> None:
-        while not stop_heartbeat.is_set():
-            heartbeat.append(asyncio.get_running_loop().time())
-            await asyncio.sleep(0.01)
+    def observe_persistence(**kwargs: Any) -> DisposableResultEnvelope:
+        persistence_entered.set()
+        try:
+            release_persistence.wait()
+            return original_put(**kwargs)
+        finally:
+            persistence_settled.set()
+
+    monkeypatch.setattr(service.artifact_store, "put_for_contract", observe_persistence)
 
     async def child_work(_handle: AgentProcessHandle) -> dict[str, bool]:
-        nonlocal child_calls, holder
+        nonlocal child_calls
         child_calls += 1
-
-        def hold_global_store_lock() -> None:
-            with service.artifact_store._store_lock(exclusive=True):
-                lock_entered.set()
-                release_lock.wait(1.0)
-
-        holder = threading.Thread(target=hold_global_store_lock, daemon=True)
-        holder.start()
-        assert await asyncio.to_thread(lock_entered.wait, 1.0)
         return {"must_not_publish_after_timeout": True}
 
-    pulse_task = asyncio.create_task(pulse())
-    started = asyncio.get_running_loop().time()
+    run_task = asyncio.create_task(
+        service.run(
+            intent="contended-persistence",
+            runtime_id="fixture-runtime",
+            work_fn=child_work,
+            contract_id="01K1DISPOSABLEMEMORY00012",
+            timeout=0.1,
+        )
+    )
     try:
+        assert await asyncio.to_thread(persistence_entered.wait, 2.0)
+        deadline.expire()
         with pytest.raises(TimeoutError):
-            await service.run(
-                intent="contended-persistence",
-                runtime_id="fixture-runtime",
-                work_fn=child_work,
-                contract_id="01K1DISPOSABLEMEMORY00012",
-                timeout=0.1,
-            )
-        elapsed = asyncio.get_running_loop().time() - started
+            await run_task
     finally:
-        release_lock.set()
-        if holder is not None:
-            await asyncio.to_thread(holder.join, 2.0)
-        await asyncio.sleep(0.1)
-        stop_heartbeat.set()
-        await pulse_task
+        release_persistence.set()
+        if not run_task.done():
+            run_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await run_task
 
-    assert elapsed < 0.5
+    assert await asyncio.to_thread(persistence_settled.wait, 2.0)
+
+    # Persistence can only be released by the finally block after ``run`` returns.
+    # Reaching the TimeoutError while the worker thread is still contended is a
+    # synchronization proof that persistence did not block the event loop. A
+    # heartbeat-gap wall-clock budget measures xdist scheduling instead.
+    assert persistence_entered.is_set()
     assert child_calls == 1
-    assert len(heartbeat) >= 5
-    assert max(b - a for a, b in pairwise(heartbeat)) < 0.2
     with pytest.raises(ArtifactNotFoundError):
         service.fetch("01K1DISPOSABLEMEMORY00012")
 
@@ -428,11 +469,26 @@ async def test_timeout_after_commit_gate_waits_for_durable_publication(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(agent_process_module, "_CANCELLED_WORK_DRAIN_GRACE_SECONDS", 0.05)
+    deadline = _install_controlled_deadline(monkeypatch, 0.1)
     service, _ = _service(tmp_path)
     commit_entered = threading.Event()
     release_commit = threading.Event()
     original_write = service.artifact_store._write_blob_locked
+    original_settle = disposable_memory_module._settle_committed_publication
+    timeout_settlement_entered = asyncio.Event()
     child_calls = 0
+
+    async def observe_timeout_settlement(
+        publication: asyncio.Task[DisposableResultEnvelope],
+    ) -> DisposableResultEnvelope:
+        timeout_settlement_entered.set()
+        return await original_settle(publication)
+
+    monkeypatch.setattr(
+        disposable_memory_module,
+        "_settle_committed_publication",
+        observe_timeout_settlement,
+    )
 
     def pause_after_commit_gate(
         digest: str,
@@ -441,8 +497,7 @@ async def test_timeout_after_commit_gate_waits_for_durable_publication(
         authority_check: Any = None,
     ) -> None:
         commit_entered.set()
-        if not release_commit.wait(2.0):
-            raise AssertionError("test did not release the durable commit")
+        release_commit.wait()
         original_write(digest, payload, authority_check=authority_check)
 
     monkeypatch.setattr(service.artifact_store, "_write_blob_locked", pause_after_commit_gate)
@@ -473,7 +528,11 @@ async def test_timeout_after_commit_gate_waits_for_durable_publication(
                 contract_id=contract_id,
             )
         )
-        await asyncio.sleep(0.15)
+        deadline.expire()
+        # Observe the product timeout entering the irreversible-publication
+        # settlement path. This replaces a sleep race: the assertion is about
+        # state ordering, not how quickly a loaded xdist worker is scheduled.
+        await asyncio.wait_for(timeout_settlement_entered.wait(), timeout=10.0)
         first_was_pending = not first_task.done()
         retry_was_pending = not retry_task.done()
         calls_before_release = child_calls
