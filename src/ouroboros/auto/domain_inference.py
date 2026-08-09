@@ -207,9 +207,16 @@ _QUALITY_NOUN_RE = re.compile(
 )
 
 
+_NEITHER_NOR_SPAN_RE = re.compile(r"\bneither\b[^,.;]*?\bnor\b[^,.;]*")
+
+
 def _strip_negated_signals(text: str, signal_fragment: str) -> str:
     """Remove recognized denials of *signal_fragment* from *text*, keeping
     affirmative-flip expansions ("not just a browser page") intact."""
+    # "neither X nor Y" denies BOTH alternatives for every class (#1813
+    # R102) — the whole span leaves before any signal is read, so a
+    # denied alternative can never become a match or a co-product.
+    text = _NEITHER_NOR_SPAN_RE.sub(" ", text)
     negated, prefix = _negation_res_for(signal_fragment)
 
     def _keep_if_affirmative(match: re.Match[str]) -> str:
@@ -810,12 +817,17 @@ _RELATIONAL_TARGET_RE = re.compile(
 )
 
 
-# A participial content clause names what the product DISPLAYS, not what
-# is produced (#1813 R100): "desktop dashboard showing a list of web
-# apps" shows web apps; it is not one.
+# A participial content clause names what the product DISPLAYS or
+# INSPECTS, not what is produced (#1813 R100/R102): "desktop dashboard
+# showing a list of web apps" shows web apps, and "a report analyzing
+# web applications" studies them — neither is one. Attributive gerunds
+# that premodify a head ("delivery tracking web app") are not in this
+# class and keep their reading.
 _PARTICIPIAL_CONTENT_CLAUSE_RE = re.compile(
     r"\b(?:showing|displaying|listing|presenting|visualizing|summarizing|"
-    r"highlighting|cataloging|cataloguing|enumerating)\b.*$"
+    r"highlighting|cataloging|cataloguing|enumerating|analyzing|analysing|"
+    r"comparing|evaluating|indexing|describing|auditing|reviewing|"
+    r"inspecting|assessing|examining|benchmarking|ranking|surveying)\b.*$"
 )
 
 

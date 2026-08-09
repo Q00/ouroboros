@@ -4612,6 +4612,63 @@ def test_web_nouns_as_relation_objects_do_not_own(goal: str, outputs: str) -> No
     assert TaskClass.WEB_APP not in result.classes
 
 
+def test_neither_nor_denies_both_alternatives() -> None:
+    """R102 guard: "neither a web app nor a website" denies BOTH
+    alternatives — a denied artifact can never become a match or a
+    co-product."""
+    ledger = _bare_ledger("Build a native desktop dashboard, neither a web app nor a website")
+    _seed_section(ledger, "outputs", value="Interactive settings panel and navigation bar")
+    _seed_section(ledger, "runtime_context", value="Native desktop application")
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes
+
+
+@pytest.mark.parametrize(
+    ("goal", "outputs", "runtime", "expected_only"),
+    [
+        (
+            "Build a report analyzing web applications",
+            "PDF analysis report written to disk",
+            "Local batch process",
+            None,
+        ),
+        (
+            "Build a library indexing websites",
+            "Reusable indexing functions",
+            "Local Python process",
+            TaskClass.LIBRARY,
+        ),
+        (
+            "Build a CLI comparing web apps",
+            "Deterministic stdout and exit code 0",
+            "Local shell / terminal",
+            TaskClass.CLI,
+        ),
+        (
+            "Build a scorecard evaluating web apps",
+            "Score summaries written to disk",
+            "Local batch process",
+            None,
+        ),
+        ("Build a document describing websites", "Markdown document", "Local files", None),
+    ],
+)
+def test_transitive_inspection_participles_do_not_own(
+    goal: str, outputs: str, runtime: str, expected_only: TaskClass | None
+) -> None:
+    """R102 guard: a transitive inspection participle after the produced
+    head names the studied object — the report/library/CLI keeps its own
+    class and the web nouns own nothing."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value=outputs)
+    _seed_section(ledger, "runtime_context", value=runtime)
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes
+    if expected_only is not None:
+        assert result.is_single
+        assert result.single is expected_only
+
+
 @pytest.mark.parametrize(
     "goal",
     [
