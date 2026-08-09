@@ -4,7 +4,7 @@
 > [requirements.md](./requirements.md) · [architecture.md](./architecture.md) · [implementation.md](./implementation.md)。
 > RFC 原文：[#1917](https://github.com/Q00/ouroboros/issues/1917)，实现：[#1916](https://github.com/Q00/ouroboros/pull/1916)。
 
-这份改动把 `ooo run` 从「执行一次然后报告」变成一个循环：run → 正式评估 → 有预算上限的 Ralph 演化，全部由一次 `ooo run` 驱动，直到 seed 的隐藏清单全部通过。
+这份改动把 `ooo run` 从「执行一次然后报告」变成一个循环：run → 正式评估 → 有预算上限的 Ralph 演化，全部由一次 `ooo run` 驱动。循环的目标是让 seed 的隐藏清单全部通过，但它是有边界的：收敛、震荡、等级回退、墙钟、世代预算中任何一条先触发，循环就会提前停止（见下文「3. 被拒绝的评估进入有预算的 Ralph 循环」）。
 
 ## 动机：两个让单次执行不可靠的结构性问题
 
@@ -20,7 +20,7 @@ verify gate（[#1591](https://github.com/Q00/ouroboros/issues/1591)）、run→e
 
 ## 三条已确认的原则
 
-1. **无条件隐藏。** worker 只能看到验收标准的描述和预期产物。`verify_command` / `output_assertion` 永不展示。不提供任何披露级别的配置项（该提案被显式否决）。
+1. **无条件隐藏。** worker 只能看到验收标准的描述和预期产物。`verify_command` / `output_assertion` 永不展示。不提供任何披露级别的配置项（该提案被显式否决）。这里的「无条件」指的是**没有配置项可以把它打开**，而不是说存在一个文件系统沙箱——保密边界的确切范围见下文「保密边界的范围」。
 2. **用提示循环替代公开答案。** 验证失败时，下一轮的指令根据这次会话实际做了什么来修正——工具调用轨迹、证据清单、验证器结论——并且提示本身也要过滤掉断言字符串。
 3. **run → eval → evolve 是一条链。** 只有未通过的验收标准进入聚焦重执行（第 2 代起），已通过的保持冻结。BLOCKED 只在演化预算耗尽后作为最后手段出现。
 
@@ -30,6 +30,14 @@ verify gate（[#1591](https://github.com/Q00/ouroboros/issues/1591)）、run→e
 
 - **正向**：`_build_success_contract_block` 现在只渲染描述和 `expected_artifacts`，验证由 harness 独立完成。
 - **反向**：verify gate 的失败原因不再内嵌断言的 `repr()`。重试提示改由断言安全的构造器（`orchestrator/retry_hints.py`）生成，它复用只读的证据清单（`deliver_gate.load_ac_evidence_manifest`），并从每一个片段中过滤断言字符串，**包括那段 2000 字符的命令输出尾巴**。
+
+#### 保密边界的范围（重要）
+
+这个保密边界覆盖的是 **Ouroboros 自己传递给 worker 的那些数据**：worker prompt、context、事件、产物、以及重试面。在这个范围内，验证器的键会被移除，它们的值——原样的、被引号包裹的、被转义的——都会由与重试提示同一个「最长优先」的合约脱敏器抹掉。
+
+**它不是文件系统沙箱。** 如果操作者把原始 seed 文件放在 worker 的 Read / Bash 能力够得着的位置，worker 仍然可以自己发现那个文件。因此，真正强的 holdout 隔离还需要额外做一件事：把原始 seed 放到 worker 可见的工作区之外，或者给 worker 套一个合适的文件系统沙箱。
+
+（英文正文对应处：[`requirements.md`](./requirements.md) 的 Clarified Specification 第一条，以及 [`implementation.md`](./implementation.md) 的 confidentiality boundary 段落。）
 
 ### 2. 失败的 run 也进入评估
 
@@ -56,7 +64,8 @@ verify gate（[#1591](https://github.com/Q00/ouroboros/issues/1591)）、run→e
 
 ## 不在本次范围内
 
-- 披露级别配置项（显式否决，隐藏是无条件的）
+- 披露级别配置项（显式否决，隐藏没有配置开关）
+- 文件系统沙箱本身（本 RFC 只管 Ouroboros 传递的数据，见上文「保密边界的范围」）
 - 对重试指令做 LLM「教练式改写」（先交付确定性提示，观察效果后再议）
 - 单 AC 评估的元数据增强（链式路径实际上都是多 AC）
 

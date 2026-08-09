@@ -331,7 +331,7 @@ src/ouroboros/
 - **Agent OS runtime** —— 跨能力发现、策略、指令、事件日志、agent 进程的可重放执行契约
 - **Runtime backends** —— 可插拔抽象层（`orchestrator.runtime_backend` 配置），原生支持 Claude Code、Codex CLI、OpenCode、Hermes；同一份工作流规约，跑在不同执行引擎上
 
-完整设计文档见 [Architecture](./docs/architecture.md)。
+完整设计文档见 [Architecture](./docs/architecture.md)（英文）。中文设计说明：[隐藏清单收敛（Hidden-Checklist Convergence）](./docs/hidden-checklist-convergence/README.zh-CN.md) —— run → 评估 → 有预算的 Ralph 链，以及为什么判分用的断言对 worker 无条件隐藏。
 
 </details>
 
