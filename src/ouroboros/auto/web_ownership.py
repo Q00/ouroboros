@@ -19,7 +19,7 @@ import re
 # only the full single-page-application phrase denotes browser context.
 _WEB_APP_GOAL_SIGNAL_FRAGMENT = (
     r"(?:browsers?|web[\s\-]?app(?:lication)?s?|websites?|web\s+uis?|frontends?|"
-    r"front[\s\-]ends?|single[\s\-]page\s+app(?:lication)?s?)"
+    r"front[\s\-]ends?|single[\s\-]page\s+app(?:lication)?s?|spas?)"
 )
 _WEB_APP_GOAL_SIGNAL_RE = re.compile(rf"\b{_WEB_APP_GOAL_SIGNAL_FRAGMENT}\b")
 
@@ -45,9 +45,11 @@ _ENGINE_CONTAINMENT_RE = re.compile(
     rf"(?:{_BROWSER_NAME_FRAGMENT}|browsers?)\b(?:\s+[\w\-'’]+){{0,2}}"
 )
 
+# "SPA" is the canonical abbreviation of the single-page-application
+# subtype (#1813 R115) — token-bounded so ordinary words stay words.
 _WEB_APP_ARTIFACT_PHRASE_RE = re.compile(
     r"\b(?:web[\s\-]?app(?:lication)?s?|webapps?|websites?|web\s+uis?|frontends?|"
-    r"front[\s\-]ends?|single[\s\-]page\s+app(?:lication)?s?)\b"
+    r"front[\s\-]ends?|single[\s\-]page\s+app(?:lication)?s?|spas?)\b"
 )
 _UI_PRODUCT_HEAD_FRAGMENT = (
     r"(?:apps?|applications?|webapps?|uis?|interfaces?|pages?|"
@@ -293,7 +295,7 @@ _BROWSER_COMPONENT_RE = re.compile(
 
 _EXPLICIT_WEB_VOCAB_RE = re.compile(
     r"\b(?:web[\s\-]?app(?:lication)?s?|webapps?|websites?|web\s+uis?|"
-    r"frontends?|front[\s\-]ends?|single[\s\-]page\s+app(?:lication)?s?)\b"
+    r"frontends?|front[\s\-]ends?|single[\s\-]page\s+app(?:lication)?s?|spas?)\b"
     r"|\bweb[\s\-]based\b|\bin[\s\-]browser\b"
 )
 _BARE_ADJACENT_QUALIFIER_RE = re.compile(

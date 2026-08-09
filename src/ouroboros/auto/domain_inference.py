@@ -150,6 +150,10 @@ def _goal_has_unnegated_cli_signal(goal_text: str) -> bool:
     re-check. If a positive signal survives the strip, the goal
     genuinely asserts CLI.
     """
+    # "neither X nor Y" denies both alternatives here too (#1813
+    # R102/R115) — the CLI path shares the rule with the negation-strip
+    # primitive.
+    goal_text = _NEITHER_NOR_SPAN_RE.sub(" ", goal_text)
     has_signal = bool(_CLI_GOAL_TOKEN_RE.search(goal_text)) or bool(
         _CLI_GOAL_PHRASE_RE.search(goal_text)
     )
@@ -1627,8 +1631,6 @@ def _matches_web_app(ledger: SeedDraftLedger) -> bool:
         # a display-class "certificate dashboard" naturally takes
         # topics, so it needs section confirmation).
         goal_text_raw = _goal_text(ledger)
-        if _EXPLICIT_WEB_VOCAB_RE.search(goal_text_raw):
-            return True
         runtime_env = _strip_negated_signals(
             _ENGINE_CONTAINMENT_RE.sub(" ", _POSTPOSITIVE_BROWSER_DENIAL_RE.sub(" ", runtime)),
             _WEB_APP_GOAL_SIGNAL_FRAGMENT,
@@ -1636,6 +1638,16 @@ def _matches_web_app(ledger: SeedDraftLedger) -> bool:
         runtime_bars_browser = bool(
             _NON_BROWSER_RUNTIME_RE.search(runtime_env)
         ) and not _SECTION_BROWSER_ENV_RE.search(runtime_env)
+        if _EXPLICIT_WEB_VOCAB_RE.search(goal_text_raw):
+            # Bare "frontend" is not inherently browser-hosted (#1813
+            # R115): a native app's frontend is native. It owns outright
+            # only alongside stronger web vocabulary or when no
+            # authoritative non-browser runtime competes.
+            if (
+                _EXPLICIT_WEB_VOCAB_RE.search(re.sub(r"\bfront[\s\-]?ends?\b", " ", goal_text_raw))
+                or not runtime_bars_browser
+            ):
+                return True
         if not runtime_bars_browser:
             if (
                 _BARE_ADJACENT_QUALIFIER_RE.search(goal_text_raw)

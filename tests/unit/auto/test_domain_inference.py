@@ -4864,6 +4864,39 @@ def test_later_ui_conjunct_takes_browser_corroboration() -> None:
     assert result.classes == frozenset({TaskClass.WEB_SERVICE, TaskClass.WEB_APP})
 
 
+def test_bare_frontend_respects_native_runtime() -> None:
+    """R115 guard: bare "frontend" is not inherently browser-hosted — a
+    native app's frontend stays native under an authoritative
+    non-browser runtime, while a frontend against browsers owns."""
+    ledger = _bare_ledger("Build the frontend of a native mobile app")
+    _seed_section(ledger, "outputs", value="Login form and settings page")
+    _seed_section(ledger, "runtime_context", value="Native iOS and Android application")
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes
+
+
+def test_neither_nor_reaches_the_cli_path() -> None:
+    """R115 guard: the CLI matcher shares the neither/nor denial — the
+    denied CLI cannot pollute the library's single class."""
+    ledger = _bare_ledger("Build neither a CLI nor a web app; create a library")
+    _seed_section(ledger, "outputs", value="Importable package with public API")
+    _seed_section(ledger, "runtime_context", value="Local Python process")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.LIBRARY
+
+
+def test_spa_abbreviation_owns_like_its_expansion() -> None:
+    """R115 guard: "SPA" is the canonical abbreviation of the
+    single-page-application subtype and owns the class outright."""
+    ledger = _bare_ledger("Build a React SPA")
+    _seed_section(ledger, "outputs", value="Interactive login form and settings panel")
+    _seed_section(ledger, "runtime_context", value="Vite dev server")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP
+
+
 def test_capability_exclusion_is_not_artifact_denial() -> None:
     """R105 guard: a transitive exclusion is the app's own compatibility
     policy — "a web app that excludes unsupported browsers" is still the
