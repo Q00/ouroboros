@@ -505,14 +505,16 @@ Ouroboros는 MIT 라이선스로 공개 개발되는 오픈소스입니다. 이 
 
 ---
 
-## Star 히스토리
+## 활동
 
-<a href="https://www.star-history.com/?repos=Q00/ouroboros&type=Date#gh-light-mode-only">
-  <img src="https://api.star-history.com/svg?repos=Q00/ouroboros&type=Date&theme=light" alt="Star History Chart" width="100%" />
-</a>
-<a href="https://www.star-history.com/?repos=Q00/ouroboros&type=Date#gh-dark-mode-only">
-  <img src="https://api.star-history.com/svg?repos=Q00/ouroboros&type=Date&theme=dark" alt="Star History Chart" width="100%" />
-</a>
+여기 있는 숫자는 이 페이지를 열 때 GitHub API에서 실시간으로 읽어옵니다.
+
+<p align="center">
+  <a href="https://github.com/Q00/ouroboros/graphs/contributors"><img src="https://img.shields.io/github/contributors/Q00/ouroboros?color=orange" alt="Contributors"></a>
+  <a href="https://github.com/Q00/ouroboros/commits/main"><img src="https://img.shields.io/github/commit-activity/m/Q00/ouroboros?color=orange" alt="Commit activity"></a>
+  <a href="https://github.com/Q00/ouroboros/pulls?q=is%3Apr+is%3Aclosed"><img src="https://img.shields.io/github/issues-pr-closed/Q00/ouroboros?color=orange" alt="Closed pull requests"></a>
+  <a href="https://github.com/Q00/ouroboros/commits/main"><img src="https://img.shields.io/github/last-commit/Q00/ouroboros?color=orange" alt="Last commit"></a>
+</p>
 
 ---
 
