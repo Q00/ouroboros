@@ -67,12 +67,18 @@ codex plugin add ouroboros@ouroboros
 **터미널:**
 
 ```bash
-# launcher 확보 — 다음 중 하나
-pipx install uv                          # 또는 brew install uv
-pip install 'ouroboros-ai[mcp]'          # extra 포함 설치
+# 1. Ouroboros 설치 (launcher 선택과 무관하게 항상 필요)
+pip install ouroboros-ai
 
+# 2. MCP launcher 확보 — 둘 중 하나
+pipx install uv                          # uvx. brew install uv도 가능
+pip install 'ouroboros-ai[mcp]'          # 또는 extra로 갈아끼우기 (1단계를 대체)
+
+# 3. 연결
 ouroboros setup --runtime codex
 ```
+
+> 1단계와 2단계는 별개입니다. `pipx install uv`는 `uvx`만 설치하고 **`ouroboros` 실행 파일은 설치하지 않습니다.** `pip install 'ouroboros-ai[mcp]'`만이 우연히 둘 다 해결합니다. 다른 설치 방법(한 줄 설치, 소스)은 [Getting Started](../getting-started.md)(영문) 참고
 
 > **`[mcp]` extra는 "필요 없음"이 아닙니다.** 기본 `ouroboros-ai` 패키지에 Codex CLI 런타임 어댑터는 들어 있지만, **MCP 등록에는 위 launcher 중 하나가 반드시 있어야 합니다.** `uvx`가 있으면 extra 없이도 되고, `uvx`가 없으면 `[mcp]` extra가 사실상 필수입니다. 설치 방법 전체(pip, 한 줄 설치, 소스)는 [Getting Started](../getting-started.md)(영문) 참고
 
@@ -162,9 +168,17 @@ consensus:
 ### 설치 확인
 
 ```bash
-codex --version
 ouroboros --help
+codex --version
 ```
+
+> `codex --version`이 `command not found`로 나와도 **독립 설치 경로에서는 고장이 아닙니다.** 이 경로는 macOS ChatGPT 앱 번들 실행 파일만 있고 `PATH`에는 없는 사용자를 지원하며, setup은 그 번들을 찾아냅니다. 그 경우 setup이 기록한 경로로 확인하세요:
+>
+> ```bash
+> ouroboros config show | grep codex_cli_path
+> ```
+>
+> `codex`를 `PATH`에 올린 경우와 권장(플러그인) 경로에서는 `codex --version`이 정상 확인 방법입니다.
 
 ---
 

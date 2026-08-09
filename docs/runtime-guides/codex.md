@@ -41,7 +41,7 @@ For alternative install methods and shell completions, see the [Codex CLI README
 ## Installing Ouroboros
 
 > For all installation options (pip, one-liner, from source) and first-run onboarding, see **[Getting Started](../getting-started.md)**.
-> The base `ouroboros-ai` package includes the Codex CLI runtime adapter — no extras are required.
+> The base `ouroboros-ai` package includes the Codex CLI **runtime adapter** — no extras are required *for the adapter*. MCP registration is separate: standalone setup still needs `uvx`, the `[mcp]` extra, or an environment containing `mcp`, as listed under [Prerequisites](#prerequisites).
 
 ## Platform Notes
 
