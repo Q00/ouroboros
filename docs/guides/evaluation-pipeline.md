@@ -97,7 +97,7 @@ ouroboros detect --backend codex   # use a specific LLM backend for the detect c
 
 `ensure_mechanical_toml()` is idempotent: when the file already exists and `force` is false it returns immediately without an LLM call.
 
-It returns `False` rather than raising for the failures it handles: a provider error surfaced as a returned result, an unparseable proposal, an unwritable `.ouroboros/`. Validation is per command, not all-or-nothing — a single proposed command that fails validation is dropped while the remaining valid ones are still persisted, and `False` comes back only when the validated set ends up empty. That is not the same as never raising. `_ask_llm()` calls `tracked_complete()` outside an exception boundary, and `tracked_complete()` re-raises adapter exceptions (`evolution/provider_usage.py:443`), so an adapter that throws propagates out. `ouroboros detect` does not catch it either (`cli/commands/detect.py:90`). Treat the fail-closed contract as covering returned errors, not thrown ones.
+It returns `False` for the failures it handles: no manifests, a provider error surfaced as a returned `Result`, an unparseable proposal, an empty validated proposal, or an `OSError` while writing. Validation is per command, not all-or-nothing — one invalid proposal is dropped while the remaining valid commands can still be persisted, and validation returns `False` only when none remain. That is not the same as never raising. `_ask_llm()` calls `tracked_complete()` outside an exception boundary, and `tracked_complete()` re-raises adapter exceptions (`evolution/provider_usage.py:443-489`), so an adapter that throws propagates out. `ouroboros detect` does not catch it either (`cli/commands/detect.py:90`). The `run` artifact builder and MCP evaluation handler catch unexpected auto-detection exceptions as best-effort work (`evaluation/verification_artifacts.py:119-122`, `mcp/tools/evaluation_handlers.py:729-742`), leaving Stage 1 with no commands. Treat the direct function's fail-closed contract as covering handled failures, not every thrown exception.
 
 > **If Stage 1 always passes, this is usually why.** With no `.ouroboros/mechanical.toml` and no explicitly configured `MechanicalConfig` commands, all five checks are skipped and treated as passed, which makes Stage 1 a no-op gate.
 >
@@ -318,7 +318,7 @@ OpenCode is easy to miss here: it is not a separate member of the union, it ride
 
 So setting `OUROBOROS_CONSENSUS_MODELS` or `consensus.models` does not route votes to other vendors. On a local CLI backend, an `openrouter/...` entry is passed to that CLI as a model name and has to exist in its supported catalog; it does not become a request to OpenRouter. Depending on the backend you get an unsupported-model failure, or three votes from the same backend under different labels.
 
-Cross-vendor independence requires the active LLM backend to be one that can actually reach those providers. Pick the roster to match the backend you are on, not the other way round.
+Cross-vendor independence requires the active LLM backend to be one that can actually reach those providers. Pick the roster to match the backend you are on, not the other way round, and verify actual transport/provider evidence: the requested roster and `reviewer_independence` label are classifications, not routing attestation.
 
 Each returns `{ approved, confidence, reasoning }`.
 
