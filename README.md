@@ -143,6 +143,14 @@ $ ouroboros init start --orchestrator "I want to build a task management CLI too
   <sub>Recorded from the terminal CLI. Four rounds in, ambiguity is 0.31 against a threshold of 0.2, so the CLI warns and asks whether to keep interviewing, force a Seed anyway, or cancel. The <code>ooo interview</code> command above runs inside your agent host, gates on the same 0.2 ambiguity threshold, and adds its own closure and restate gates before a Seed is generated.</sub>
 </p>
 
+<p align="center">
+  <img src="./docs/images/ooo-setup-refresh.gif" width="760" alt="Terminal recording of ouroboros setup refresh installing Codex rules and skills, Hermes skills, the OpenCode plugin and instruction guide, and the Pi and GJC bridges, ending with the line Refreshed runtime artifacts: codex, hermes, opencode, pi, gjc">
+</p>
+
+<p align="center">
+  <sub><code>ouroboros setup refresh</code> on one machine. It installs into the hosts that machine actually has, each in the shape that host expects: rules and skills for Codex, skills for Hermes, a plugin and an <code>AGENTS.md</code> for OpenCode, bridges for Pi and GJC. Your machine will show whichever of the thirteen you have installed.</sub>
+</p>
+
 > Works with Claude Code, Codex CLI, GitHub Copilot CLI, OpenCode, Hermes, Gemini, Kiro CLI, Pi CLI, Zcode, Goose, GJC, Antigravity CLI, and Grok Build CLI. The installer detects available runtimes and registers the MCP server where the host supports it. For explicit selection, run `ouroboros setup --runtime <opencode|kiro|copilot|gemini|pi|zcode|goose|gjc|antigravity|grok>` after installation. The Copilot CLI runtime live-discovers its model catalog via the GitHub Copilot models API and lets you pick a default during setup.
 
 <details>
