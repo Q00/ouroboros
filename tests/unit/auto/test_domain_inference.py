@@ -4684,6 +4684,40 @@ def test_passive_consumption_relations_do_not_own(goal: str) -> None:
     assert TaskClass.WEB_APP not in result.classes
 
 
+def test_engine_attachment_is_not_the_environment() -> None:
+    """R106 guard: an engine attachment names the host's implementation —
+    a desktop app powered by Chromium is hosted natively and the
+    non-browser host dominates."""
+    ledger = _bare_ledger("Build a native desktop settings dashboard")
+    _seed_section(ledger, "outputs", value="Settings form and navigation sidebar")
+    _seed_section(ledger, "runtime_context", value="Desktop application powered by Chromium")
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes
+
+
+def test_library_tokens_premodifying_ui_heads_are_content() -> None:
+    """R106 guard: "package search form" and "package detail pages"
+    render content about packages — the registry frontend keeps a clean
+    single web_app class."""
+    ledger = _bare_ledger("Build a package registry frontend")
+    _seed_section(ledger, "outputs", value="Package search form and package detail pages")
+    _seed_section(ledger, "runtime_context", value="Runs in browsers")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP
+
+
+def test_later_ui_conjunct_takes_browser_corroboration() -> None:
+    """R106 guard: a later UI-headed conjunct gets the same browser
+    corroboration as the first noun phrase — a backend with an admin
+    dashboard against browsers is an honest service/app ambiguity."""
+    ledger = _bare_ledger("Build a backend with an admin dashboard")
+    _seed_section(ledger, "outputs", value="REST endpoints and admin pages")
+    _seed_section(ledger, "runtime_context", value="Server process and modern browsers")
+    result = derive_domain_from_ledger(ledger)
+    assert result.classes == frozenset({TaskClass.WEB_SERVICE, TaskClass.WEB_APP})
+
+
 def test_capability_exclusion_is_not_artifact_denial() -> None:
     """R105 guard: a transitive exclusion is the app's own compatibility
     policy — "a web app that excludes unsupported browsers" is still the

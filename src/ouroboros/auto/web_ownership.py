@@ -311,6 +311,11 @@ _NON_BROWSER_RUNTIME_RE = re.compile(
 _SECTION_BROWSER_ENV_RE = re.compile(
     r"(?<!embedded )(?<!headless )(?<!in-app )(?<!inline )(?<!internal )"
     r"(?<!integrated )(?<!bundled )"
+    # An engine attachment names the host's implementation, not the
+    # execution environment (#1813 R106): a desktop app "powered by
+    # Chromium" is hosted natively — the non-browser host dominates.
+    r"(?<!powered by )(?<!built on )(?<!based on )(?<!backed by )"
+    r"(?<!using )(?<!wrapping )(?<!wraps )(?<!atop )(?<!on top of )"
     rf"\b(?:{_WEB_APP_GOAL_SIGNAL_FRAGMENT}|{_BROWSER_NAME_FRAGMENT})\b"
     r"(?!\s+(?!(?:and|or|nor|but|use|usage|without|with|for|on|in|at|by|"
     r"from|via|through|to|so|that|which|because|since|while|when|where|"

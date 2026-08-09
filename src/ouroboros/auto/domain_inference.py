@@ -1541,6 +1541,19 @@ def _matches_web_app(ledger: SeedDraftLedger) -> bool:
     # wording (#1813 R30) — the overlap stays an honest ambiguity.
     if _goal_has_web_co_product_conjunct(_goal_text(ledger)):
         return True
+    # A later UI-headed conjunct takes the same browser-runtime
+    # corroboration as the first noun phrase (#1813 R106): "a backend
+    # with an admin dashboard" running against browsers keeps the
+    # dashboard's web ownership as an honest ambiguity. Negative
+    # coordinators surrender the conjunct before splitting.
+    conjunct_goal = re.sub(
+        r"\b(?:without|minus|excluding|except)\b[^,.;]*", " ", _goal_text(ledger)
+    )
+    if any(
+        _goal_first_np_is_ui_headed(conjunct)
+        for conjunct in _GOAL_CONJUNCT_SPLIT_RE.split(conjunct_goal)[1:]
+    ) and _SECTION_BROWSER_ENV_RE.search(_section_browser_context_text(ledger)):
+        return True
     # Subject/secondary clauses in the goal ("for game leaderboards",
     # "with a public API") name what the app is about or co-produces, not
     # its artifact shape — they do not surrender ownership (#1813 R16).
@@ -1716,6 +1729,18 @@ def _matches_library(ledger: SeedDraftLedger) -> bool:
     # API", "tokens from the payments SDK") is a dependency, not produced
     # library shape (#1813 R23).
     produced_outputs = _strip_consumed_dependencies(outputs)
+    # A library token premodifying a UI head is the app's displayed
+    # subject matter, not a produced surface (#1813 R106): "package
+    # search form" and "API documentation pages" render content ABOUT
+    # packages and APIs. Prepositions break the chain, so "package with
+    # a CLI client" keeps its library reading.
+    produced_outputs = re.sub(
+        rf"\b(?:packages?|apis?|sdks?|librar(?:y|ies))\s+"
+        rf"(?:(?!(?:with|and|or|for|plus|via|from|to|in|on)\b)[\w\-'’]+\s+){{0,2}}?"
+        rf"{_UI_PRODUCT_HEAD_FRAGMENT}\b",
+        " ",
+        produced_outputs,
+    )
     text = _MANIFEST_TOKEN_RE.sub(" ", produced_outputs + " " + goal_evidence)
     return bool(_LIBRARY_PACKAGE_WORD_RE.search(text)) or _any_of(
         text,
