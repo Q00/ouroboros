@@ -4388,6 +4388,42 @@ def test_component_vocabulary_is_shared_across_decisions() -> None:
 @pytest.mark.parametrize(
     "goal",
     [
+        "Build a web app; browser support is unavailable to guest users",
+        "Build a web app; browser support is unavailable until sign-in",
+    ],
+)
+def test_audience_and_temporal_limits_preserve_ownership(goal: str) -> None:
+    """R84 guard: an availability limit scoped to an audience ("to
+    guest users") or a condition ("until sign-in") does not deny the
+    artifact."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value="Interactive charts with a filters panel")
+    _seed_section(ledger, "runtime_context", value="Browser")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP
+
+
+@pytest.mark.parametrize(
+    ("goal", "runtime"),
+    [
+        ("Build a browser menu settings page", "Browser menu runtime"),
+        ("Build a web app that is a browser pop-up", "Runs in browsers"),
+    ],
+)
+def test_menu_and_popup_components_share_the_vocabulary(goal: str, runtime: str) -> None:
+    """R84 guard: menus and pop-ups are components in every identity
+    decision — one vocabulary SSOT."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value="Settings panel with save button")
+    _seed_section(ledger, "runtime_context", value=runtime)
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
         "The product is an admin portal that runs in browsers",
         "The deliverable is an admin portal available in browsers",
     ],

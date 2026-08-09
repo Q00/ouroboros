@@ -1147,14 +1147,20 @@ _WEB_SIMILARITY_MODIFIER_RE = re.compile(
     rf"\b{_WEB_APP_GOAL_SIGNAL_FRAGMENT}[\s\-]+"
     r"(?:like|style|styled|esque|inspired|themed|free)\b"
 )
+# One shared component vocabulary across first-NP, goal-identity, and
+# runtime-identity decisions (#1813 R83).
+_COMPONENT_ARTIFACT_FRAGMENT = (
+    r"(?:extensions?|plugins?|add[\s\-]?ons?|addons?|sidebars?|popups?|"
+    r"pop[\s\-]ups?|toolbars?|overlays?|menus?|devtools?|drivers?|"
+    r"automation)"
+)
 # A browser/web token followed by a component-artifact noun is re-headed
 # by that component (#1813 R60): a "browser extension settings page" is
 # an extension surface, not a standalone browser application, so the
 # browser word carries no web-product evidence. The component noun stays
 # behind for the other matchers.
 _BROWSER_COMPONENT_RE = re.compile(
-    r"\b(?:web|browsers?)[\s\-]+"
-    r"(?=(?:extensions?|plugins?|add[\s\-]?ons?|automation|devtools?|drivers?)\b)"
+    rf"\b(?:web|browsers?)[\s\-]+(?={_COMPONENT_ARTIFACT_FRAGMENT}\b)"
 )
 
 
@@ -1371,12 +1377,6 @@ _INSPECTION_TOOL_GOAL_RE = re.compile(
 # (#1813 R66) — the postfix mirror of the first-NP component rule. The
 # trailing rejection keeps audiences ("for extension developers")
 # outside the veto.
-# One shared component vocabulary across first-NP, goal-identity, and
-# runtime-identity decisions (#1813 R83).
-_COMPONENT_ARTIFACT_FRAGMENT = (
-    r"(?:extensions?|plugins?|add[\s\-]?ons?|addons?|sidebars?|popups?|"
-    r"toolbars?|overlays?|devtools?|drivers?|automation)"
-)
 # IDENTITY relations re-head the surface unconditionally (#1813 R83):
 # copulas, "ships as", "packaged/distributed as", bare "as" toward a
 # determined NP.
@@ -1907,11 +1907,13 @@ def _matches_web_app(ledger: SeedDraftLedger) -> bool:
     if any(
         not any(start <= m.start() < end for start, end in content_regions)
         and not re.match(
-            r"\s+(?:when|if|unless|while|whenever|wherever)\b", goal_text_value[m.end() :]
+            r"\s+(?:when|if|unless|while|whenever|wherever|until|before|"
+            r"after|without)\b",
+            goal_text_value[m.end() :],
         )
         and not re.match(
             r"\s+(?:from|in|within|inside|for|on|by|under|across|during|"
-            r"except|only|outside)\b"
+            r"except|only|outside|to)\b"
             # A condition/time qualifier is not a scope OBJECT (#1813
             # R81): "in production" and "for now" exclude globally.
             r"(?!\s+(?:(?:the|this|that)\s+)?(?:production|staging|"
