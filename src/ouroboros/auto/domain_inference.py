@@ -1371,43 +1371,50 @@ _INSPECTION_TOOL_GOAL_RE = re.compile(
 # (#1813 R66) — the postfix mirror of the first-NP component rule. The
 # trailing rejection keeps audiences ("for extension developers")
 # outside the veto.
+# One shared component vocabulary across first-NP, goal-identity, and
+# runtime-identity decisions (#1813 R83).
+_COMPONENT_ARTIFACT_FRAGMENT = (
+    r"(?:extensions?|plugins?|add[\s\-]?ons?|addons?|sidebars?|popups?|"
+    r"toolbars?|overlays?|devtools?|drivers?|automation)"
+)
+# IDENTITY relations re-head the surface unconditionally (#1813 R83):
+# copulas, "ships as", "packaged/distributed as", bare "as" toward a
+# determined NP.
+_GOAL_COMPONENT_IDENTITY_RE = re.compile(
+    r"\b(?:(?:is|are|was|were|becomes?)|[\w\-'’]+s\s+as|"
+    r"[\w\-'’]+(?:ed|ing)\s+as|(?<!well\s)as(?=\s+(?:an?|the|our|my|your|their|its)\b))\s+"
+    r"(?:(?:an?|the|our|my|your|their|its)\s+)?"
+    r"(?:(?!(?:not|no|never)\b)(?![\w\-'’]+ing\b)[\w\-'’]+\s+){0,3}?"
+    rf"{_COMPONENT_ARTIFACT_FRAGMENT}\b"
+    r"(?!\s+(?!(?:and|or|nor|but|without|with|for|on|in|at|by|from|via|"
+    r"through|to|so|that|which)\b)[\w'’\-]+)"
+)
+# ASSOCIATION relations re-head only a generic surface (#1813 R83): an
+# explicit web artifact before the relation is an independent
+# co-product, audience, or content owner and keeps its class.
 _GOAL_COMPONENT_TARGET_RE = re.compile(
-    # Any relational introduction reaches the component (#1813 R69/R70):
-    # bare prepositions, "attached/belonging TO", "used BY", and
-    # participial relations ("exposed THROUGH", "associated WITH") —
-    # bare "with" stays outside so a co-produced component is not
-    # swallowed.
     r"\b(?:(?:[\w\-'’]+(?:ed|ing)\s+)?(?:for|of|in|inside|within|into|"
     # Bare "to" carries identity only toward a determined NP ("attached
     # to a browser extension"); an infinitive purpose ("to manage
     # browser extensions") names managed content (#1813 R81).
     r"to(?=\s+(?:an?|the|our|my|your|their|its)\b)|"
-    r"by|alongside|beside|as)|[\w\-'’]+(?:ed|ing)\s+"
-    # "hosted/mounted ON", "running/nested UNDER" (#1813 R71);
-    # identity relations "packaged/distributed AS" (#1813 R75).
-    r"(?:through|with|from|on|onto|under|beneath|atop|as)"
-    # Copular identity anywhere in the goal (#1813 R76): "it is a Chrome
-    # browser extension", "that is ...", "it ships as ...".
-    r"|(?:is|are|was|were|becomes?)|[\w\-'’]+s\s+as"
+    r"by|alongside|beside)|[\w\-'’]+(?:ed|ing)\s+"
+    # "hosted/mounted ON", "running/nested UNDER" (#1813 R71).
+    r"(?:through|with|from|on|onto|under|beneath|atop)"
     # A bare host preposition reaches the component when its object is a
-    # SINGULAR instance — with a determiner ("on a browser extension",
-    # #1813 R72) or brand-qualified without one ("on Chrome browser
-    # extension", #1813 R74); the topical plural ("on browser
-    # extensions") stays outside the veto.
+    # SINGULAR instance (#1813 R72/R74).
     r"|(?:on|onto|under|beneath|atop)(?=\s+(?:(?:an?|the|our|my|your|their|its)\s+)?"
     r"(?:[\w\-'’]+\s+){0,3}?"
-    r"(?:extension|plugin|add[\s\-]?on|addon|sidebar|popup|toolbar|overlay|devtool)\b(?!s)))\s+"
+    r"(?:extension|plugin|add[\s\-]?on|addon|sidebar|popup|toolbar|overlay|devtool|driver)\b(?!s)))\s+"
     r"(?:(?:an?|the|our|my|your|their|its)\s+)?"
     # A gerund in the target NP marks the component as managed content
     # ("for configuring browser extensions"), whatever the activity —
     # structural, no verb enumeration (#1813 R81/R82).
     r"(?:(?!(?:not|no|never)\b)(?![\w\-'’]+ing\b)[\w\-'’]+\s+){0,3}?"
-    r"(?:extensions?|plugins?|add[\s\-]?ons?|addons?|sidebars?|popups?|"
-    r"toolbars?|overlays?|devtools?)\b"
+    rf"{_COMPONENT_ARTIFACT_FRAGMENT}\b"
     r"(?!\s+(?!(?:and|or|nor|but|without|with|for|on|in|at|by|from|via|"
     r"through|to|so|that|which)\b)[\w'’\-]+)"
 )
-
 
 _BROWSER_UI_PRODUCT_HEAD_RE = re.compile(
     r"\b(?:apps?|applications?|dashboards?|pages?|websites?|web\s+uis?|"
@@ -1918,9 +1925,16 @@ def _matches_web_app(ledger: SeedDraftLedger) -> bool:
     ):
         return False
     # Goal-side component identity resolves before every affirmative
-    # grant (#1813 R80): "a web app that is a Chrome browser extension"
-    # is an extension, whatever the goal called it first.
-    if _GOAL_COMPONENT_TARGET_RE.search(goal_text_value):
+    # grant (#1813 R80). Identity relations re-head unconditionally;
+    # association relations spare an explicit web artifact named before
+    # them — an independent co-product, audience, or content owner
+    # (#1813 R83).
+    if _GOAL_COMPONENT_IDENTITY_RE.search(goal_text_value):
+        return False
+    if any(
+        not _EXPLICIT_WEB_VOCAB_RE.search(goal_text_value[: m.start()])
+        for m in _GOAL_COMPONENT_TARGET_RE.finditer(goal_text_value)
+    ):
         return False
     # An explicit component runtime is authoritative (#1813 R77) — as an
     # IDENTITY (#1813 R78/R79): negated mentions do not count, and the
@@ -1928,10 +1942,7 @@ def _matches_web_app(ledger: SeedDraftLedger) -> bool:
     # browser/web identity survives outside its own noun phrase, so a
     # two-product runtime keeps web ownership whichever side is named
     # first.
-    component_fragment = (
-        r"(?:extensions?|plugins?|add[\s\-]?ons?|addons?|devtools?|"
-        r"sidebars?|popups?|toolbars?|overlays?)"
-    )
+    component_fragment = _COMPONENT_ARTIFACT_FRAGMENT
     runtime_identity = _strip_negated_signals(
         _section_text(ledger, "runtime_context"), component_fragment
     )

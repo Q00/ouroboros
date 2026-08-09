@@ -4358,6 +4358,36 @@ def test_conditional_clauses_qualify_rather_than_deny(goal: str) -> None:
 @pytest.mark.parametrize(
     "goal",
     [
+        "Build a web app alongside a browser extension",
+        "Build a web app as well as a browser extension",
+        "Build a web app for users of browser extensions",
+        "Build a web app showing the status of browser extensions",
+    ],
+)
+def test_association_relations_spare_explicit_web_artifacts(goal: str) -> None:
+    """R83 guard: an explicit web artifact before an association
+    relation is an independent co-product, audience, or content owner —
+    only identity relations re-head it."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value="Login form with a settings panel shown in the browser")
+    _seed_section(ledger, "runtime_context", value="Browser")
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP in result.classes
+
+
+def test_component_vocabulary_is_shared_across_decisions() -> None:
+    """R83 guard: drivers and automation are components in every
+    decision — goal identity and runtime identity alike."""
+    ledger = _bare_ledger("Build a web app that is a browser driver")
+    _seed_section(ledger, "outputs", value="Settings panel with save button")
+    _seed_section(ledger, "runtime_context", value="Browser driver runtime")
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP not in result.classes
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
         "The product is an admin portal that runs in browsers",
         "The deliverable is an admin portal available in browsers",
     ],
