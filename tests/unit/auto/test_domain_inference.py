@@ -4180,6 +4180,41 @@ def test_component_runtime_is_authoritative_over_the_grant() -> None:
     assert TaskClass.WEB_APP not in result.classes
 
 
+def test_displayed_denials_are_content_not_scope() -> None:
+    """R78 guard: a denial the app DISPLAYS ("showing which browsers are
+    unsupported") lives in a content clause and keeps the web-app
+    request intact."""
+    ledger = _bare_ledger("Build a web app showing which browsers are unsupported")
+    _seed_section(ledger, "outputs", value="Interactive compatibility matrix with a filters panel")
+    _seed_section(ledger, "runtime_context", value="Browser")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP
+
+
+def test_negated_component_runtimes_do_not_veto() -> None:
+    """R78 guard: "No browser extension" in the runtime is a denial, not
+    the runtime's identity — the standalone website keeps its class."""
+    ledger = _bare_ledger("Build a standalone website")
+    _seed_section(ledger, "outputs", value="Landing pages with signup forms")
+    _seed_section(
+        ledger, "runtime_context", value="No browser extension; runs as a standalone website"
+    )
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP
+
+
+def test_companion_component_runtimes_do_not_veto() -> None:
+    """R78 guard: a companion component in the runtime is a co-product,
+    not the runtime's identity — explicit web ownership survives."""
+    ledger = _bare_ledger("Build a web app and a companion browser extension")
+    _seed_section(ledger, "outputs", value="Login form with a settings panel shown in the browser")
+    _seed_section(ledger, "runtime_context", value="Browser app plus companion extension runtime")
+    result = derive_domain_from_ledger(ledger)
+    assert TaskClass.WEB_APP in result.classes
+
+
 @pytest.mark.parametrize(
     "goal",
     [

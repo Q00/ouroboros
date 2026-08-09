@@ -1868,20 +1868,32 @@ def _matches_web_app(ledger: SeedDraftLedger) -> bool:
     # accessibility report") cannot revive the denied classification.
     if _goal_denies_web_app_artifact(_goal_text(ledger)):
         return False
-    # Goal-side postpositive exclusions precede every grant (#1813 R77):
-    # "browsers are unsupported" and "browser use is forbidden" bar the
-    # class even when the goal also names a web artifact.
-    if _POSTPOSITIVE_BROWSER_DENIAL_RE.search(_goal_text(ledger)):
-        return False
-    # An explicit component runtime is authoritative (#1813 R77): a UI
-    # whose standardized runtime is an extension/plugin surface belongs
-    # to that component, whatever the goal's phrasing — no per-surface
-    # vocabulary needed.
-    if re.search(
-        r"\b(?:extensions?|plugins?|add[\s\-]?ons?|addons?|devtools?|"
-        r"sidebars?|popups?|toolbars?|overlays?)\b",
-        _section_text(ledger, "runtime_context"),
+    # Goal-side postpositive exclusions precede every grant (#1813 R77),
+    # scoped by content clauses like the artifact denials (#1813 R78): a
+    # denial the app DISPLAYS ("showing which browsers are unsupported")
+    # is content, not scope.
+    goal_text_value = _goal_text(ledger)
+    content_regions = [m.span() for m in _CONTENT_CLAUSE_RE.finditer(goal_text_value)]
+    if any(
+        not any(start <= m.start() < end for start, end in content_regions)
+        for m in _POSTPOSITIVE_BROWSER_DENIAL_RE.finditer(goal_text_value)
     ):
+        return False
+    # An explicit component runtime is authoritative (#1813 R77) — as an
+    # IDENTITY (#1813 R78): negated mentions ("No browser extension")
+    # and companion co-products ("plus companion extension") are not the
+    # runtime's own identity and do not veto.
+    component_fragment = (
+        r"(?:extensions?|plugins?|add[\s\-]?ons?|addons?|devtools?|"
+        r"sidebars?|popups?|toolbars?|overlays?)"
+    )
+    runtime_identity = _strip_negated_signals(
+        _section_text(ledger, "runtime_context"), component_fragment
+    )
+    runtime_identity = re.sub(
+        r"\b(?:plus|and|alongside|with|companion)\b[^,.;]*", " ", runtime_identity
+    )
+    if re.search(rf"\b{component_fragment}\b", runtime_identity):
         return False
     # An affirmative web-product request owns its output description
     # (#1813 R27): when the goal's artifact head is a web app, the
