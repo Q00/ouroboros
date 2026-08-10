@@ -19,6 +19,7 @@ from ouroboros.evaluation.mechanical import (
 )
 from ouroboros.evaluation.models import (
     REWARD_HACKING_VETO_THRESHOLD,
+    SEMANTIC_APPROVAL_SCORE,
     CheckType,
     EvaluationContext,
     EvaluationResult,
@@ -246,7 +247,9 @@ class EvaluationPipeline:
         # here — this branch only decides the Stage 2 pass conditions.
         final_approved = True
         if stage2_result:
-            final_approved = stage2_result.ac_compliance and stage2_result.score >= 0.8
+            final_approved = (
+                stage2_result.ac_compliance and stage2_result.score >= SEMANTIC_APPROVAL_SCORE
+            )
 
         return self._build_result(
             context.execution_id,
