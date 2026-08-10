@@ -5530,3 +5530,33 @@ def test_shell_runtime_still_owns_cli_products() -> None:
     result = derive_domain_from_ledger(ledger)
     assert result.is_single
     assert result.single is TaskClass.CLI
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
+        "Build not a web app but a browser game",
+        "Build not a game but a browser game",
+        "Build neither a CLI nor a web app but a browser game",
+        "Build neither a CLI nor a web app, but a browser game",
+    ],
+)
+def test_adversative_pivots_keep_the_affirmed_game(goal: str) -> None:
+    """R122 probe: the affirmed game after but/yet re-heads the goal —
+    the denial prefix cannot suppress the produced game class."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value="Player controls, score updates, and level transitions")
+    _seed_section(ledger, "runtime_context", value="Runs in browsers")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.GAME_2D
+
+
+def test_denied_game_pivots_still_release_ownership() -> None:
+    """R122 guard: a pivot into a non-game product keeps its own class."""
+    ledger = _bare_ledger("Build not a browser game but a web app")
+    _seed_section(ledger, "outputs", value="Interactive signup page and settings panels")
+    _seed_section(ledger, "runtime_context", value="Runs in browsers")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP

@@ -875,6 +875,9 @@ _WEB_SERVICE_SIGNAL_FRAGMENT = (
 _WEBHOOK_SIGNAL_FRAGMENT = (
     r"(?:webhooks?|callback\s+urls?|http\s+posts?|incoming\s+events?|event\s+payloads?)"
 )
+# An adversative but/yet followed by an article introduces the affirmed
+# pivot product after a denial (#1813 R122).
+_ADVERSATIVE_PIVOT_RE = re.compile(r"\b(?:but|yet)\s+(?=(?:an?|the)\s+)")
 # Webhook ownership needs affirmative receiver/input semantics (#1813
 # R121): a receiving-artifact compound, a receiving verb governing the
 # payload vocabulary, an incoming/inbound qualifier, or the delivery

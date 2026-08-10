@@ -38,6 +38,7 @@ import re
 from ouroboros.auto.ledger import LedgerSection, LedgerStatus, SeedDraftLedger
 from ouroboros.auto.task_classes import TaskClass
 from ouroboros.auto.web_ownership import (
+    _ADVERSATIVE_PIVOT_RE,
     _BARE_ADJACENT_QUALIFIER_RE,
     _BROWSER_COMPONENT_RE,
     _BROWSER_QUALIFIED_UI_HEAD_RE,
@@ -559,9 +560,8 @@ def _matches_cli(ledger: SeedDraftLedger) -> bool:
         ("stdout", "exit code", "printed", "console output", "command output"),
     )
     runtime_signal = _any_of(runtime, ("shell", "terminal", "subprocess", "command line"))
-    # A shell/terminal that merely launches the product is a launcher
-    # relation, not CLI runtime identity (#1813 R121): with an affirmed
-    # browser product and no CLI-shaped output evidence, it owns nothing.
+    # A launcher shell/terminal is not CLI runtime identity (#1813 R121):
+    # with an affirmed browser product it needs output corroboration.
     if runtime_signal and not output_signal:
         runtime_signal = not (
             _SECTION_BROWSER_ENV_RE.search(runtime)
@@ -589,13 +589,9 @@ def _matches_cli(ledger: SeedDraftLedger) -> bool:
     goal_signal = _goal_has_unnegated_cli_signal(goal_text) and not _goal_first_np_is_ui_headed(
         _goal_text(ledger)
     )
-    # Each of the three signals is independently sufficient once the
-    # ledger-evidence gate above is satisfied. The earlier form
-    # `runtime_signal or (output_signal and (goal_signal or outputs))`
-    # made `goal_signal` dead code (outputs is already non-empty past
-    # the gate), which blocked cli-todo on ledger_only closures whose
-    # conservative-default outputs lack stdout/exit-code vocabulary.
-    # See #1170 R2 evidence and #1157 closure policy.
+    # Each signal is independently sufficient past the evidence gate;
+    # nesting goal_signal under outputs made it dead code and blocked
+    # ledger_only closures (#1170 R2, #1157 closure policy).
     return runtime_signal or goal_signal or output_signal
 
 
@@ -605,8 +601,7 @@ def _matches_webhook(ledger: SeedDraftLedger) -> bool:
     goal = _goal_text(ledger)
     if not (inputs or outputs or goal):
         return False
-    # Goal-side webhook evidence routes through the shared normalization
-    # (#1813 R121): denials, audiences, and dependencies own nothing.
+    # Denials, audiences, and dependencies own nothing (#1813 R121).
     webhook_goal = _strip_audience_and_displayed_subjects(
         _strip_consumed_dependencies(_strip_negated_signals(goal, _WEBHOOK_SIGNAL_FRAGMENT))
     )
@@ -735,11 +730,16 @@ def _matches_game_2d(ledger: SeedDraftLedger) -> bool:
     if not (outputs or goal):
         return False
     visible = _game_visible_text(ledger)
-    # Token-bounded (#1813 R13): substring matching made "iframe" satisfy
-    # "frame" and would accept similar embeddings for the other terms.
+    # Token-bounded (#1813 R13): substrings made "iframe" satisfy "frame".
     if _GAME_CORE_RE.search(visible):
         return True
-    goal_head = _goal_first_np_head(_strip_negated_signals(goal, _GAME_GOAL_SIGNAL_FRAGMENT))
+    head_goal = _strip_negated_signals(goal, _GAME_GOAL_SIGNAL_FRAGMENT)
+    # An adversative pivot re-heads the goal (#1813 R122): what follows
+    # the last but/yet is the produced artifact.
+    pivots = list(_ADVERSATIVE_PIVOT_RE.finditer(head_goal))
+    if pivots:
+        head_goal = head_goal[pivots[-1].end() :]
+    goal_head = _goal_first_np_head(head_goal)
     if re.fullmatch(r"games?|platformers?|shooters?", goal_head or ""):
         return bool(_GAME_DOMAIN_RE.search(visible))
     if not _GAME_SHARED_SHAPE_RE.search(visible):
