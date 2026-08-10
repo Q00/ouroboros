@@ -214,6 +214,8 @@ ouroboros uninstall
 </details>
 
 > **需要 Python >= 3.12**。包含 LiteLLM 的 profile 支持 Python 3.12-3.13。详见 [Platform Support](./docs/platform-support.md#python-profile-matrix) 和 [pyproject.toml](./pyproject.toml)。
+>
+> **作为 MCP 服务器安装时请用 0.51.1 或更新的版本。** 更早的版本在已有环境遮蔽 `[mcp]` profile 时会启动失败，报 `Failed to reconnect to plugin:ouroboros:ouroboros: -32000`（[#2012](https://github.com/Q00/ouroboros/issues/2012)）。如果你不是从 PyPI 而是从发行版软件包安装，尤其要注意——那边的版本可能落后。
 
 
 <p align="center">

@@ -257,6 +257,8 @@ Removes all configuration, MCP registration, and data. See [UNINSTALL.md](./UNIN
 </details>
 
 > **Python >= 3.12 required.** LiteLLM-bearing profiles support Python 3.12-3.13. See [Platform Support](./docs/platform-support.md#python-profile-matrix) and [pyproject.toml](./pyproject.toml).
+>
+> **Installing as an MCP server: use 0.51.1 or later.** Earlier versions can fail at startup with `Failed to reconnect to plugin:ouroboros:ouroboros: -32000` when an existing environment shadows the `[mcp]` profile ([#2012](https://github.com/Q00/ouroboros/issues/2012)). This matters if you install through a downstream package rather than PyPI, since those can lag.
 
 <p align="center">
   <sub>Most people find out they were unclear about three files into the review.<br/>

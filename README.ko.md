@@ -253,6 +253,8 @@ ouroboros uninstall
 
 </details>
 
+> **MCP 서버로 설치한다면 0.51.1 이상을 쓰세요.** 이전 버전은 기존 환경이 `[mcp]` 프로필을 가릴 때 `Failed to reconnect to plugin:ouroboros:ouroboros: -32000`로 기동에 실패할 수 있습니다([#2012](https://github.com/Q00/ouroboros/issues/2012)). PyPI가 아니라 배포판 패키지로 설치할 때 특히 해당됩니다 — 그쪽은 버전이 뒤질 수 있습니다.
+
 <details>
 <summary><strong>무슨 일이 일어났나요?</strong></summary>
 
