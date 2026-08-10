@@ -88,7 +88,9 @@ APPROVED          REJECTED
 
 Ouroboros **不再内置**按语言硬编码的预设（preset）。Stage 1 只信任一个来源：项目根目录下的 `.ouroboros/mechanical.toml`。`build_mechanical_config(working_dir)` 只是这个文件的确定性读取器——文件不存在时，所有命令解析为 `None`，Stage 1 优雅跳过，而不是去猜一个工具来跑。
 
-这个文件由 `ouroboros.evaluation.detector` 写入：它发起**一次 AI 调用**，读取项目的清单文件（`pyproject.toml`、`uv.lock`、`package.json`、`Cargo.toml`、`go.mod`、`pom.xml`、`build.gradle`、`Makefile`、`justfile`、`Taskfile.yml`、`build.zig`、`CMakeLists.txt`、`mix.exs`、`Gemfile` 等），为这个具体仓库提出命令。每条被提出的命令在落盘前都要过校验——可执行文件白名单、shell 操作符与绝对路径注入、以及仓库本身（例如只有存在 `Cargo.toml` 时才保留 `cargo` 命令）——所以 toml 里只会留下这个项目真的跑得起来的命令。
+这个文件由 `ouroboros.evaluation.detector` 写入：它发起**一次 AI 调用**，读取项目的清单文件（`pyproject.toml`、`uv.lock`、`package.json`、`Cargo.toml`、`go.mod`、`pom.xml`、`build.gradle`、`Makefile`、`justfile`、`Taskfile.yml`、`build.zig`、`CMakeLists.txt`、`mix.exs`、`Gemfile` 等），为这个具体仓库提出命令。每条被提出的命令在落盘前都要过校验——可执行文件白名单、shell 操作符与绝对路径注入、以及仓库本身（例如只有存在 `Cargo.toml` 时才保留 `cargo` 命令）——所以 toml 里只会留下安全的、且被该仓库声明过的命令。
+
+**校验到此为止。** `_command_is_valid()` **有意不查询主机的 `PATH`**（`evaluation/detector.py:496`），因此它证明的是「命令安全且仓库声明了它」，而不是「这个可执行文件在本机装好了」。清单里声明的 `pytest` 命令即使本地没装 `pytest` 也会被写入，Stage 1 会在运行时报 "Command not found"。
 
 显式生成或刷新：
 
@@ -299,6 +301,19 @@ openrouter/google/gemini-2.5-pro
 ```
 
 > **名单不等于独立性。** 实际生效的名单取决于环境与后端：sentinel 后端会把三个槽位解析成字面量 `"default"`；环境变量或自定义配置名单会被原样保留；reviewer 独立性过滤还可能再改动名单。**更关键的是，所有投票都通过交给 `ConsensusEvaluator` 的那一个适配器发出**——换名单不会换适配器。因此模型标签**不能**证明来自不同厂商的独立评审。要判断实际发生了什么，请读记录下来的投票，而不是配置里的名单。
+
+#### 哨兵模型后端（sentinel-model backends）
+
+没有 `OUROBOROS_CONSENSUS_MODELS` 覆盖时，后端感知的配置/默认解析会把**出厂名单**的三个槽位全部映射成字面量字符串 `"default"`——只要该后端属于 `_SENTINEL_DEFAULT_BACKENDS`（`config/loader.py:101`）。环境变量名单，或非出厂的自定义配置名单，则**原样保留**。哨兵集合为：Codex、**OpenCode**、Kiro、Copilot、Hermes、Pi、GJC、Antigravity、Grok、Zcode。
+
+**OpenCode 很容易被漏掉**：它不是这个并集里的独立成员，而是通过 `_CODEX_LLM_BACKENDS`（即 `frozenset({"codex", "codex_cli", "opencode", "opencode_cli"})`，`config/loader.py:76`）搭车进来的。因此在与 Codex 相同的「无环境覆盖」条件下，它的出厂名单同样会归一化为 `("default", "default", "default")`。位于 `config/loader.py:113` 的 `_OPENCODE_BACKENDS` 是另一回事，用于权限模式解析，与模型默认值无关。
+
+`_should_use_multi_model()` 对任何**不含 `openrouter/` 条目**的名单都会选择 `_evaluate_multi_model()` 分支（`evaluation/consensus.py:313`），所以 `"default"` **不会**触发单模型回退。**分支名并不能证明模型多样性**：在这些后端上，Stage 3 投出三票、标签都是 `default`，而它们全部来自该后端所配置的那**一个**模型。
+
+> **审计提示。** 三张标着 `default` 的票不是三位独立评审。如果你的共识证据长这样，说明名单解析到了哨兵值，而这些票来自同一个模型。
+
+**评审独立性过滤发生在模型档位解析之前。** 多模型路径以配置名单为起点；当 `EvaluationContext.executor_backend` 存在时，会把这些请求标签连同 `available_runtime_backends()` 一起交给 `resolve_reviewer_independence()`。若检测到的、已安装且可运行的后端中**厂商家族少于两个**，过滤就是空操作并报告 `unavailable`。否则，与执行器同厂商的标签只有在「至少还能剩两个」时才会被移除；未知厂商的标签会被保留；如果过滤后不足两位投票者，则保留原名单。`evaluation.stage3.started` 事件与并发投票任务列表用的都是**过滤后**的名单。
+
 
 每个模型返回 `{ approved, confidence, reasoning }`。
 
