@@ -290,6 +290,7 @@ class AgentPool:
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
         self._task_results: dict[str, TaskResult] = {}
         self._task_waiters: dict[str, set[asyncio.Future[None]]] = {}
+        self._pending_task_ids: set[str] = set()
 
         # Background tasks
         self._dispatcher_task: asyncio.Task[None] | None = None
@@ -331,27 +332,58 @@ class AgentPool:
     async def stop(self) -> None:
         """Stop the agent pool gracefully.
 
-        Waits for running tasks to complete, then terminates all agents.
+        Cancels outstanding tasks with terminal results, then terminates agents.
         """
         log.info("agents.pool.stopping")
 
         self._shutdown = True
 
-        # Cancel background tasks
-        if self._dispatcher_task:
-            self._dispatcher_task.cancel()
-        if self._scaler_task:
-            self._scaler_task.cancel()
-        if self._health_task:
-            self._health_task.cancel()
+        background_tasks = tuple(
+            task
+            for task in (self._dispatcher_task, self._scaler_task, self._health_task)
+            if task is not None
+        )
+        for task in background_tasks:
+            task.cancel()
+        if background_tasks:
+            await asyncio.gather(*background_tasks, return_exceptions=True)
+        self._dispatcher_task = None
+        self._scaler_task = None
+        self._health_task = None
 
-        # Wait for running tasks
-        if self._running_tasks:
+        # A stopped pool cannot finish outstanding work. Cancel execution tasks
+        # first so their normal terminal-result path can notify result waiters.
+        running_tasks = tuple(self._running_tasks.values())
+        if running_tasks:
             log.info(
-                "agents.pool.waiting_tasks",
-                count=len(self._running_tasks),
+                "agents.pool.cancelling_tasks",
+                count=len(running_tasks),
             )
-            await asyncio.gather(*self._running_tasks.values(), return_exceptions=True)
+            for task in running_tasks:
+                task.cancel()
+            await asyncio.gather(*running_tasks, return_exceptions=True)
+            for task_id, task in tuple(self._running_tasks.items()):
+                self._forget_running_task(task_id, task)
+
+        # Tasks still pending were queued or owned temporarily by the cancelled
+        # dispatcher. Publish a durable terminal result rather than stranding
+        # their waiters or silently forgetting them.
+        for task_id in tuple(self._pending_task_ids):
+            self._publish_task_result(
+                TaskResult(
+                    task_id=task_id,
+                    success=False,
+                    error_message="Task cancelled",
+                )
+            )
+
+        while not self._task_queue.empty():
+            try:
+                self._task_queue.get_nowait()
+            except asyncio.QueueEmpty:  # pragma: no cover - single-loop defensive guard
+                break
+            else:
+                self._task_queue.task_done()
 
         # Terminate all agents
         for agent_id in list(self._agents.keys()):
@@ -400,6 +432,7 @@ class AgentPool:
         )
 
         # Add to queue (priority queue uses negative for max-heap behavior)
+        self._pending_task_ids.add(task_id)
         await self._task_queue.put((-priority, task))
 
         log.debug(
@@ -429,34 +462,65 @@ class AgentPool:
         Raises:
             asyncio.TimeoutError: If timeout expires before task completes.
         """
-        # Check if result already available
-        if task_id in self._task_results:
-            return self._task_results[task_id]
+        # Results are non-destructive snapshots retained for the lifetime of
+        # the pool. This lets concurrent and retrying callers observe the same
+        # terminal outcome without competing for ownership.
+        result = self._task_results.get(task_id)
+        if result is not None:
+            return result
 
         # Wait for result
-        future: asyncio.Future[None] = asyncio.Future()
-
-        if task_id not in self._task_waiters:
-            self._task_waiters[task_id] = set()
-
-        self._task_waiters[task_id].add(future)
+        future = asyncio.get_running_loop().create_future()
+        self._task_waiters.setdefault(task_id, set()).add(future)
 
         try:
-            await asyncio.wait_for(future, timeout=timeout)
+            # Shield keeps caller timeouts from cancelling the pool-owned
+            # notification future while completion is being published.
+            await asyncio.wait_for(asyncio.shield(future), timeout=timeout)
         except TimeoutError:
-            # Remove from waiters
-            self._task_waiters[task_id].discard(future)
-            if not self._task_waiters[task_id]:
-                del self._task_waiters[task_id]
+            # Terminal publication wins a boundary race with caller timeout.
+            result = self._task_results.get(task_id)
+            if result is not None:
+                return result
             raise
+        finally:
+            # Completion may already have detached the entire bucket. Cleanup
+            # must therefore be identity-safe and idempotent.
+            waiters = self._task_waiters.get(task_id)
+            if waiters is not None:
+                waiters.discard(future)
+                if not waiters:
+                    self._task_waiters.pop(task_id, None)
 
         # Return result
-        if task_id in self._task_results:
-            return self._task_results[task_id]
+        result = self._task_results.get(task_id)
+        if result is not None:
+            return result
 
         # Should not happen
         msg = f"Task {task_id} completed but result not found"
         raise RuntimeError(msg)
+
+    def _publish_task_result(self, result: TaskResult) -> None:
+        """Publish one durable terminal result and detach its waiters atomically."""
+        self._task_results[result.task_id] = result
+        self._pending_task_ids.discard(result.task_id)
+
+        for waiter in self._task_waiters.pop(result.task_id, set()):
+            if not waiter.done():
+                waiter.set_result(None)
+
+    def _track_running_task(self, task_id: str, task: asyncio.Task[None]) -> None:
+        """Track an execution task until completion, even if its body never starts."""
+        self._running_tasks[task_id] = task
+        task.add_done_callback(
+            lambda completed, task_id=task_id: self._forget_running_task(task_id, completed)
+        )
+
+    def _forget_running_task(self, task_id: str, task: asyncio.Task[None]) -> None:
+        """Forget only the tracked generation represented by ``task``."""
+        if self._running_tasks.get(task_id) is task:
+            self._running_tasks.pop(task_id, None)
 
     async def _spawn_agent(self, agent_id: str) -> AgentInstance:
         """Spawn a new agent instance.
@@ -552,12 +616,14 @@ class AgentPool:
         log.info("agents.pool.dispatcher_started")
 
         while not self._shutdown:
+            queue_item_acquired = False
             try:
                 # Get next task with timeout
                 priority, task = await asyncio.wait_for(
                     self._task_queue.get(),
                     timeout=1.0,
                 )
+                queue_item_acquired = True
 
                 # Wait for available agent
                 agent = await self._wait_for_agent(task.agent_type)
@@ -579,7 +645,7 @@ class AgentPool:
                 task.started_at = time.time()
 
                 task_coro = self._execute_task(agent, task)
-                self._running_tasks[task.id] = asyncio.create_task(task_coro)
+                self._track_running_task(task.id, asyncio.create_task(task_coro))
 
             except TimeoutError:
                 continue
@@ -588,6 +654,9 @@ class AgentPool:
                     "agents.pool.dispatcher_error",
                     error=str(e),
                 )
+            finally:
+                if queue_item_acquired:
+                    self._task_queue.task_done()
 
     async def _wait_for_agent(
         self,
@@ -697,7 +766,7 @@ class AgentPool:
                 duration_seconds=duration,
             )
 
-            self._task_results[task.id] = result
+            self._publish_task_result(result)
 
             log.info(
                 "agents.pool.task_completed",
@@ -719,7 +788,7 @@ class AgentPool:
                 messages=tuple(messages),
                 duration_seconds=duration,
             )
-            self._task_results[task.id] = result
+            self._publish_task_result(result)
 
             log.warning(
                 "agents.pool.task_cancelled",
@@ -743,7 +812,7 @@ class AgentPool:
                 duration_seconds=duration,
             )
 
-            self._task_results[task.id] = result
+            self._publish_task_result(result)
 
             log.error(
                 "agents.pool.task_failed",
@@ -761,13 +830,6 @@ class AgentPool:
 
             # Remove from running tasks
             self._running_tasks.pop(task.id, None)
-
-            # Notify waiters
-            if task.id in self._task_waiters:
-                for waiter in self._task_waiters[task.id]:
-                    if not waiter.done():
-                        waiter.set_result(None)
-                del self._task_waiters[task.id]
 
             # Emit completion event
             await self._emit_event(

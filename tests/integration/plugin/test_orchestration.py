@@ -8,13 +8,15 @@ Tests cover:
 import asyncio
 from pathlib import Path
 import tempfile
-from unittest.mock import MagicMock, Mock
+from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 
 from ouroboros.plugin.agents.pool import (
     AgentPool,
     AgentPoolConfig,
+    TaskRequest,
+    TaskResult,
 )
 from ouroboros.plugin.agents.registry import (
     BUILTIN_AGENTS,
@@ -118,9 +120,12 @@ class TestAgentPoolIntegration:
     async def test_agent_pool_cancels_stuck_task(self) -> None:
         """Health checker cancels timed-out tasks instead of only resetting state."""
         adapter = MagicMock()
+        task_started = asyncio.Event()
+        never_finishes = asyncio.Event()
 
         async def stalled_execute_task(*args, **kwargs):
-            await asyncio.sleep(1.0)
+            task_started.set()
+            await never_finishes.wait()
             if False:  # pragma: no cover - keep this an async generator
                 yield None
 
@@ -142,13 +147,232 @@ class TestAgentPoolIntegration:
             prompt="stuck task",
             priority=1,
         )
+        await asyncio.wait_for(task_started.wait(), timeout=0.5)
 
         result = await pool.get_task_result(task_id, timeout=0.5)
 
         assert result.success is False
         assert result.error_message == "Task cancelled"
+        assert await pool.get_task_result(task_id, timeout=0) is result
+        assert task_id not in pool._task_waiters
 
         await pool.stop()
+
+    @pytest.mark.asyncio
+    async def test_agent_pool_fans_out_terminal_result_to_concurrent_waiters(self) -> None:
+        """Completion owns waiter detachment; every registered waiter gets the result."""
+        pool = AgentPool(adapter=MagicMock(), config=AgentPoolConfig(min_instances=0))
+        task_id = "task-concurrent-waiters"
+        result = pool._task_results.get(task_id)
+        assert result is None
+
+        waiters = [
+            asyncio.create_task(pool.get_task_result(task_id, timeout=0.5)) for _ in range(16)
+        ]
+        await asyncio.sleep(0)
+
+        expected = TaskResult(task_id=task_id, success=False, error_message="Task cancelled")
+        pool._publish_task_result(expected)
+
+        assert await asyncio.gather(*waiters) == [expected] * len(waiters)
+        assert task_id not in pool._task_waiters
+        assert await pool.get_task_result(task_id, timeout=0) is expected
+
+    @pytest.mark.asyncio
+    async def test_agent_pool_timeout_cleanup_preserves_late_result(self) -> None:
+        """A caller timeout relinquishes only its waiter, not the terminal result."""
+        pool = AgentPool(adapter=MagicMock(), config=AgentPoolConfig(min_instances=0))
+        task_id = "task-timeout-then-result"
+
+        with pytest.raises(TimeoutError):
+            await pool.get_task_result(task_id, timeout=0)
+
+        assert task_id not in pool._task_waiters
+
+        expected = TaskResult(task_id=task_id, success=True)
+        pool._publish_task_result(expected)
+        assert await pool.get_task_result(task_id, timeout=0) is expected
+
+    @pytest.mark.asyncio
+    async def test_agent_pool_completion_wins_exact_timeout_boundary(self) -> None:
+        """Publishing during timeout cleanup returns the result instead of raising KeyError."""
+        pool = AgentPool(adapter=MagicMock(), config=AgentPoolConfig(min_instances=0))
+        task_id = "task-exact-timeout-boundary"
+        expected = TaskResult(task_id=task_id, success=False, error_message="Task cancelled")
+
+        async def publish_then_timeout(*args, **kwargs):
+            pool._publish_task_result(expected)
+            raise TimeoutError
+
+        with patch(
+            "ouroboros.plugin.agents.pool.asyncio.wait_for",
+            side_effect=publish_then_timeout,
+        ):
+            result = await pool.get_task_result(task_id, timeout=0.1)
+
+        assert result is expected
+        assert task_id not in pool._task_waiters
+
+    @pytest.mark.asyncio
+    async def test_agent_pool_stop_cancels_running_and_queued_results(self) -> None:
+        """Shutdown terminalizes all accepted tasks and leaves no live waiter state."""
+        adapter = MagicMock()
+        first_started = asyncio.Event()
+        never_finishes = asyncio.Event()
+
+        async def stalled_execute_task(*args, **kwargs):
+            first_started.set()
+            await never_finishes.wait()
+            if False:  # pragma: no cover - keep this an async generator
+                yield None
+
+        adapter.execute_task = stalled_execute_task
+        pool = AgentPool(
+            adapter=adapter,
+            config=AgentPoolConfig(
+                min_instances=1,
+                max_instances=1,
+                enable_auto_scaling=False,
+            ),
+        )
+        await pool.start()
+        running_id = await pool.submit_task(agent_type="executor", prompt="running")
+        queued_id = await pool.submit_task(agent_type="executor", prompt="queued")
+        await asyncio.wait_for(first_started.wait(), timeout=0.5)
+
+        result_waiters = [
+            asyncio.create_task(pool.get_task_result(task_id, timeout=0.5))
+            for task_id in (running_id, queued_id)
+        ]
+        await asyncio.sleep(0)
+        await pool.stop()
+
+        results = await asyncio.gather(*result_waiters)
+        assert [result.task_id for result in results] == [running_id, queued_id]
+        assert all(result.success is False for result in results)
+        assert all(result.error_message == "Task cancelled" for result in results)
+        assert pool._running_tasks == {}
+        assert pool._pending_task_ids == set()
+        assert pool._task_waiters == {}
+        assert pool._task_queue.empty()
+        await asyncio.wait_for(pool._task_queue.join(), timeout=0.1)
+        assert pool._dispatcher_task is None
+        assert pool._scaler_task is None
+        assert pool._health_task is None
+
+    @pytest.mark.asyncio
+    async def test_agent_pool_stop_acknowledges_dispatcher_owned_queue_item(self) -> None:
+        """Cancelling a dispatcher-held item settles its queue ownership exactly once."""
+        dispatcher_owned = asyncio.Event()
+        never_returns = asyncio.Event()
+
+        async def hold_dispatcher_ownership(*args, **kwargs):
+            dispatcher_owned.set()
+            await never_returns.wait()
+
+        pool = AgentPool(
+            adapter=MagicMock(),
+            config=AgentPoolConfig(
+                min_instances=0,
+                max_instances=0,
+                enable_auto_scaling=False,
+            ),
+        )
+        with patch.object(pool, "_wait_for_agent", side_effect=hold_dispatcher_ownership):
+            await pool.start()
+            task_id = await pool.submit_task(agent_type="executor", prompt="dispatcher-owned")
+            await asyncio.wait_for(dispatcher_owned.wait(), timeout=0.5)
+            await pool.stop()
+
+        result = await pool.get_task_result(task_id, timeout=0)
+        assert result.error_message == "Task cancelled"
+        await asyncio.wait_for(pool._task_queue.join(), timeout=0.1)
+        with pytest.raises(ValueError, match=r"task_done\(\) called too many times"):
+            pool._task_queue.task_done()
+
+    @pytest.mark.asyncio
+    async def test_agent_pool_stop_acknowledges_requeued_item_without_double_counting(
+        self,
+    ) -> None:
+        """Requeue transfers ownership before shutdown drains the replacement item."""
+        no_agent_checked = asyncio.Event()
+
+        async def return_no_agent(*args, **kwargs):
+            no_agent_checked.set()
+            return None
+
+        pool = AgentPool(
+            adapter=MagicMock(),
+            config=AgentPoolConfig(
+                min_instances=0,
+                max_instances=0,
+                enable_auto_scaling=False,
+            ),
+        )
+        with patch.object(pool, "_wait_for_agent", side_effect=return_no_agent):
+            await pool.start()
+            task_id = await pool.submit_task(agent_type="executor", prompt="requeued")
+            await asyncio.wait_for(no_agent_checked.wait(), timeout=0.5)
+            for _ in range(100):
+                if not pool._task_queue.empty():
+                    break
+                await asyncio.sleep(0)
+            assert pool._task_queue.qsize() == 1
+            await pool.stop()
+
+        result = await pool.get_task_result(task_id, timeout=0)
+        assert result.error_message == "Task cancelled"
+        await asyncio.wait_for(pool._task_queue.join(), timeout=0.1)
+        with pytest.raises(ValueError, match=r"task_done\(\) called too many times"):
+            pool._task_queue.task_done()
+
+    @pytest.mark.asyncio
+    async def test_agent_pool_stop_forgets_execution_cancelled_before_first_instruction(
+        self,
+    ) -> None:
+        """Shutdown cleanup does not depend on the execution coroutine entering its body."""
+        pool = AgentPool(adapter=MagicMock(), config=AgentPoolConfig(min_instances=0))
+        agent = await pool._spawn_agent("agent-prestart-cancel")
+        task = TaskRequest(
+            id="task-prestart-cancel",
+            agent_type="executor",
+            prompt="never starts",
+            context={},
+        )
+        pool._pending_task_ids.add(task.id)
+        execution = asyncio.create_task(pool._execute_task(agent, task))
+        pool._track_running_task(task.id, execution)
+        execution.cancel()
+
+        await pool.stop()
+
+        result = await pool.get_task_result(task.id, timeout=0)
+        assert result.error_message == "Task cancelled"
+        assert execution.cancelled()
+        assert pool._running_tasks == {}
+        assert pool._pending_task_ids == set()
+
+    @pytest.mark.asyncio
+    async def test_agent_pool_running_task_cleanup_is_generation_safe(self) -> None:
+        """An older done callback cannot discard a replacement tracked generation."""
+        pool = AgentPool(adapter=MagicMock(), config=AgentPoolConfig(min_instances=0))
+        first_gate = asyncio.Event()
+        replacement_gate = asyncio.Event()
+        first = asyncio.create_task(first_gate.wait())
+        replacement = asyncio.create_task(replacement_gate.wait())
+        task_id = "task-reused-tracking-key"
+        pool._track_running_task(task_id, first)
+        pool._track_running_task(task_id, replacement)
+
+        first.cancel()
+        await asyncio.gather(first, return_exceptions=True)
+        await asyncio.sleep(0)
+        assert pool._running_tasks[task_id] is replacement
+
+        replacement.cancel()
+        await asyncio.gather(replacement, return_exceptions=True)
+        await asyncio.sleep(0)
+        assert task_id not in pool._running_tasks
 
 
 class TestAgentRegistryIntegration:
