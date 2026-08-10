@@ -183,6 +183,19 @@ def test_slt_screen_and_mock_fallback_contract_matches_source() -> None:
     )
     assert "`q`, `1`-`4`, `Ctrl+P`는 계속 예약됩니다" in _read(KO_GUIDE)
 
+    en_lifecycle = _contract_section(_read(EN_GUIDE), "<!-- tui-contract:slt-lifecycle -->")
+    ko_lifecycle = _contract_section(_read(KO_GUIDE), "<!-- tui-contract:slt-lifecycle -->")
+    assert (
+        "| `Esc` | Close the command palette when active; otherwise close the open "
+        "Execution log panel |"
+    ) in en_lifecycle
+    assert (
+        "| `Esc` | 명령 팔레트가 열려 있으면 팔레트만 닫고, 그 외에는 열린 실행 로그 패널 닫기 |"
+        in ko_lifecycle
+    )
+    assert "| `Esc` | Close the open Execution log panel |" not in _read(EN_GUIDE)
+    assert "| `Esc` | 열린 실행 로그 패널 닫기 |" not in _read(KO_GUIDE)
+
     assert "contains no events" in _read(EN_GUIDE)
     assert "cannot be opened" in _read(EN_GUIDE)
     assert "이벤트가 하나도 없는" in _read(KO_GUIDE)

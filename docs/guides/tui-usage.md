@@ -203,7 +203,7 @@ View evolutionary lineage across generations when using evolutionary loops (`ooo
 | `e` | Lineage screen (`3`) |
 | `s` | Sessions screen (`4`) |
 | `l` | Open the log panel while Execution (`2`) is active |
-| `Esc` | Close the open Execution log panel |
+| `Esc` | Close the command palette when active; otherwise close the open Execution log panel |
 | `Ctrl+P` | Open the command palette |
 | `q` | Quit the TUI |
 | `p` / `r` | Pause/resume only when SLT owns a demo simulation |
