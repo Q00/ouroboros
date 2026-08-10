@@ -1666,6 +1666,7 @@ def create_ouroboros_server(
         StartRalphHandler,
         create_fanout_handlers,
     )
+    from ouroboros.mcp.tools.evaluation_composition import create_shared_evaluation_handlers
     from ouroboros.mcp.tools.fanout import FanoutRegistry
     from ouroboros.mcp.tools.pm_handler import PMInterviewHandler
     from ouroboros.mcp.tools.qa import QAHandler
@@ -2336,11 +2337,8 @@ def create_ouroboros_server(
         agent_runtime_backend=execute_runtime_backend,
         opencode_mode=None,
     )
-    evaluate_handler = EvaluateHandler(
-        event_store=event_store,
-        llm_backend=evaluate_llm_backend,
-        agent_runtime_backend=evaluate_runtime_backend,
-        opencode_mode=opencode_mode,
+    evaluate_handler, checklist_verify_handler = create_shared_evaluation_handlers(
+        EvaluateHandler, event_store, evaluate_llm_backend, evaluate_runtime_backend, opencode_mode
     )
     start_evaluate_handler = StartEvaluateHandler(
         evaluate_handler=evaluate_handler,
@@ -2490,6 +2488,7 @@ def create_ouroboros_server(
         BrownfieldHandler(_store=brownfield_store),
         evaluate_handler,
         start_evaluate_handler,
+        checklist_verify_handler,
         LateralThinkHandler(
             agent_runtime_backend=reflect_runtime_backend,
             opencode_mode=opencode_mode,

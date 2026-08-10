@@ -159,6 +159,10 @@ $ ouroboros init start --orchestrator "I want to build a task management CLI too
 <details>
 <summary><strong>Codex 플러그인 빠른 시작</strong></summary>
 
+`codex`가 `PATH`에 있어야 하고, 호스트에 `uvx`가 필요합니다(플러그인의 MCP
+서술자가 `uvx`로 서버를 띄웁니다). `pipx install uv`, `pip install --user uv`,
+`brew install uv` 중 하나로 설치하세요.
+
 ```bash
 codex plugin marketplace add Q00/ouroboros
 codex plugin add ouroboros@ouroboros
@@ -197,7 +201,7 @@ ouroboros setup --runtime copilot            # 모델 실시간 검색 및 기�
                                              # ~/.copilot/mcp-config.json에 MCP 서버 등록
 ```
 
-Copilot CLI 세션을 다시 시작한 뒤 세션 안에서 `ooo` 명령어를 사용합니다. 다른 설정에서 사용하는 하이픈 형식의 Anthropic 모델 ID(`claude-opus-4-6`)는 런타임에서 Copilot의 점 표기 형식(`claude-opus-4.6`)으로 자동 변환되므로, 백엔드를 전환해도 기존 설정을 그대로 사용할 수 있습니다.
+Copilot CLI 세션을 다시 시작한 뒤 세션 안에서 `ooo` 명령어를 사용합니다. **모델 ID 변환 범위는 생각보다 좁습니다.** 정적 맵은 `claude-opus-4-6`과 `claude-sonnet-4-5`까지 커버하고, `.`이 이미 들어간 ID는 그대로 통과하며, 하이픈-점 폴백은 **하이픈을 전부** 바꾸기 때문에 현재 기본값 `claude-opus-4-8`은 `claude.opus.4.8`이 되어 매칭에 실패합니다. 역할별 모델을 비워 두어 setup이 발견한 ID를 쓰게 하거나, 점 표기 Copilot ID를 명시하세요. [#1995](https://github.com/Q00/ouroboros/issues/1995)와 [Copilot 런타임 가이드](./docs/runtime-guides/copilot.ko.md) 참고.
 
 자세한 내용은 [GitHub Copilot CLI 런타임 가이드](./docs/runtime-guides/copilot.md)를 참고하세요.
 

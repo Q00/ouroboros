@@ -61,7 +61,11 @@ ouroboros run ~/.ouroboros/seeds/seed_abc123.yaml
 
 ### Codex first use
 
-For the Codex plugin, add the marketplace and install Ouroboros:
+For the Codex plugin, add the marketplace and install Ouroboros. This needs
+`codex` on your `PATH` and `uvx` on the host — the plugin's MCP descriptor
+launches the server with it ([`.mcp.codex.json`](../.mcp.codex.json)). Install uv
+with `pipx install uv`, `pip install --user uv`, or `brew install uv`; you do not
+need to install Python yourself.
 
 ```bash
 codex plugin marketplace add Q00/ouroboros

@@ -5,6 +5,8 @@ doc_metadata:
 
 # Running Ouroboros with Codex CLI
 
+> 한국어: [codex.ko.md](./codex.ko.md) (설치까지 번역됨, 이후 절은 이 문서를 보세요)
+
 > For installation and first-run onboarding, see [Getting Started](../getting-started.md).
 
 Ouroboros can use **OpenAI Codex** as a runtime backend. [Codex CLI](https://github.com/openai/codex) is the local execution surface that the adapter talks to; on macOS, setup also detects the executable bundled with the ChatGPT app when it is not on your `PATH`. In Ouroboros, that backend is presented as a **session-oriented runtime** with the same specification-first workflow harness (acceptance criteria, evaluation principles, deterministic exit conditions), even though the adapter itself communicates with the local `codex` executable. By default, Ouroboros uses the model currently selected by Codex and supplies only the role's reasoning effort.
@@ -15,9 +17,10 @@ No additional Python SDK is required beyond the base `ouroboros-ai` package.
 
 ## Prerequisites
 
-- **Codex CLI** installed and on your `PATH`, or the bundled executable from the macOS ChatGPT app (see [install steps](#installing-codex-cli) below)
+- **Codex CLI** installed and on your `PATH`. The marketplace-plugin path runs `codex plugin ...` from a shell, so `PATH` registration is required there. If you only have the bundled executable from the macOS ChatGPT app, put it on `PATH` (see [install steps](#installing-codex-cli) below) or use the standalone path — Ouroboros setup can discover a bundled executable, but your shell cannot resolve `codex plugin`
 - A signed-in **Codex CLI** account. API-key authentication is also supported: `printenv OPENAI_API_KEY | codex login --with-api-key`. See [`credentials.yaml`](../config-reference.md#credentialsyaml) for file-based key management
-- **Python >= 3.12**
+- **An isolated MCP launcher** — required on **both** paths, not only the plugin. The plugin's MCP descriptor launches the server with `uvx` ([`.mcp.codex.json`](../../.mcp.codex.json)). Standalone setup resolves one of three, in this order (`_codex_release_mcp_launcher()`): `uvx`; an `ouroboros` install whose `mcp serve --help` succeeds, which means the `[mcp]` extra; or a Python environment containing `mcp`. With none of them, `_register_codex_mcp_server()` aborts with `Could not find a launchable Ouroboros MCP command. Install uv, or install Ouroboros with the [mcp] extra, then rerun setup.` — note that Rich consumes `[mcp]` as markup, so the terminal shows `with the extra` Install uv with `pipx install uv`, `pip install --user uv`, or `brew install uv`
+- **Python >= 3.12** for the standalone installation. On the plugin path `uvx` provisions an interpreter from the package's `requires-python = ">=3.12"`
 
 ## Installing Codex CLI
 
@@ -38,7 +41,7 @@ For alternative install methods and shell completions, see the [Codex CLI README
 ## Installing Ouroboros
 
 > For all installation options (pip, one-liner, from source) and first-run onboarding, see **[Getting Started](../getting-started.md)**.
-> The base `ouroboros-ai` package includes the Codex CLI runtime adapter — no extras are required.
+> The base `ouroboros-ai` package includes the Codex CLI **runtime adapter** — no extras are required *for the adapter*. MCP registration is separate: standalone setup still needs `uvx`, the `[mcp]` extra, or an environment containing `mcp`, as listed under [Prerequisites](#prerequisites).
 
 ## Platform Notes
 
