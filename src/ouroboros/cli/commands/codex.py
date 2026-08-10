@@ -62,6 +62,36 @@ _CODEX_RUNTIME_ENV = {
     "OUROBOROS_LLM_BACKEND": "codex",
 }
 _CODEX_RUNTIME_SELECTOR_ENV_KEYS = frozenset({*_CODEX_RUNTIME_ENV, "OUROBOROS_RUNTIME"})
+_CODEX_MCP_APPROVAL_MODES = frozenset({"auto", "prompt", "approve"})
+_CODEX_MCP_CONFIG_FIELDS = frozenset(
+    {
+        "command",
+        "args",
+        "env",
+        "env_vars",
+        "cwd",
+        "http_headers",
+        "env_http_headers",
+        "url",
+        "bearer_token",
+        "bearer_token_env_var",
+        "experimental_environment",
+        "startup_timeout_sec",
+        "startup_timeout_ms",
+        "tool_timeout_sec",
+        "enabled",
+        "required",
+        "supports_parallel_tool_calls",
+        "default_tools_approval_mode",
+        "enabled_tools",
+        "disabled_tools",
+        "scopes",
+        "oauth",
+        "oauth_resource",
+        "name",
+        "tools",
+    }
+)
 
 
 class _StdioMcpFramingMismatch(RuntimeError):
@@ -205,6 +235,7 @@ def _check_auto_dispatch_surface(codex_dir: Path, *, live_mcp: bool = False) -> 
         failures.append("Codex config does not contain [mcp_servers.ouroboros]")
         return failures
 
+    _check_mcp_schema_surface(ouroboros_entry, failures)
     _check_mcp_activation_surface(ouroboros_entry, failures)
     _check_mcp_execution_surface(ouroboros_entry, failures)
 
@@ -281,6 +312,160 @@ def _check_auto_dispatch_surface(codex_dir: Path, *, live_mcp: bool = False) -> 
     return failures
 
 
+def _check_mcp_schema_surface(ouroboros_entry: Mapping[str, object], failures: list[str]) -> None:
+    """Validate Codex 0.132's fail-closed MCP transport and shared schema."""
+    unknown_fields = sorted(set(ouroboros_entry) - _CODEX_MCP_CONFIG_FIELDS)
+    if unknown_fields:
+        failures.append(
+            "[mcp_servers.ouroboros] contains unsupported fields: " + ", ".join(unknown_fields)
+        )
+
+    has_command = "command" in ouroboros_entry
+    has_url = "url" in ouroboros_entry
+    if has_command and has_url:
+        failures.append(
+            "[mcp_servers.ouroboros] mixes stdio `command` with HTTP `url`; "
+            "Codex requires exactly one transport"
+        )
+
+    if has_command:
+        for field in (
+            "bearer_token_env_var",
+            "http_headers",
+            "env_http_headers",
+            "oauth",
+            "oauth_resource",
+        ):
+            if field in ouroboros_entry:
+                failures.append(
+                    f"[mcp_servers.ouroboros].{field} is not supported for stdio `command`"
+                )
+    elif has_url:
+        for field in ("args", "env", "env_vars", "cwd"):
+            if field in ouroboros_entry:
+                failures.append(f"[mcp_servers.ouroboros].{field} is not supported for HTTP `url`")
+
+    if "bearer_token" in ouroboros_entry:
+        failures.append(
+            "[mcp_servers.ouroboros].bearer_token is unsupported; use "
+            "`bearer_token_env_var` on an HTTP entry"
+        )
+
+    _check_optional_string_field(ouroboros_entry, "url", failures)
+    _check_optional_string_field(ouroboros_entry, "bearer_token_env_var", failures)
+    _check_optional_string_field(ouroboros_entry, "oauth_resource", failures)
+    _check_optional_string_field(ouroboros_entry, "name", failures)
+
+    for field in ("http_headers", "env_http_headers"):
+        if field in ouroboros_entry:
+            _check_string_table_field(ouroboros_entry[field], field, failures)
+
+    for field in ("required", "supports_parallel_tool_calls"):
+        if field in ouroboros_entry and not isinstance(ouroboros_entry[field], bool):
+            failures.append(f"[mcp_servers.ouroboros].{field} must be a boolean")
+
+    if "default_tools_approval_mode" in ouroboros_entry:
+        _check_mcp_approval_mode(
+            ouroboros_entry["default_tools_approval_mode"],
+            "default_tools_approval_mode",
+            failures,
+        )
+
+    if "scopes" in ouroboros_entry:
+        scopes = ouroboros_entry["scopes"]
+        if not isinstance(scopes, list):
+            failures.append("[mcp_servers.ouroboros].scopes must be an array of strings")
+        else:
+            invalid_scopes = [
+                f"index {index} ({type(scope).__name__})"
+                for index, scope in enumerate(scopes)
+                if not isinstance(scope, str) or not scope.strip()
+            ]
+            if invalid_scopes:
+                failures.append(
+                    "[mcp_servers.ouroboros].scopes contains empty or non-string values: "
+                    + ", ".join(invalid_scopes)
+                )
+
+    if "oauth" in ouroboros_entry:
+        oauth = ouroboros_entry["oauth"]
+        if not isinstance(oauth, Mapping):
+            failures.append("[mcp_servers.ouroboros].oauth must be a table")
+        else:
+            unknown_oauth_fields = sorted(set(oauth) - {"client_id"})
+            if unknown_oauth_fields:
+                failures.append(
+                    "[mcp_servers.ouroboros].oauth contains unsupported fields: "
+                    + ", ".join(unknown_oauth_fields)
+                )
+            _check_optional_string_field(oauth, "client_id", failures, prefix="oauth.")
+
+    if "tools" in ouroboros_entry:
+        tools = ouroboros_entry["tools"]
+        if not isinstance(tools, Mapping):
+            failures.append("[mcp_servers.ouroboros].tools must be a table")
+        else:
+            for tool_name, tool_config in tools.items():
+                if not isinstance(tool_name, str) or not tool_name.strip():
+                    failures.append(
+                        "[mcp_servers.ouroboros].tools contains an empty or non-string tool name"
+                    )
+                    continue
+                if not isinstance(tool_config, Mapping):
+                    failures.append(f"[mcp_servers.ouroboros].tools.{tool_name} must be a table")
+                    continue
+                unknown_tool_fields = sorted(set(tool_config) - {"approval_mode"})
+                if unknown_tool_fields:
+                    failures.append(
+                        f"[mcp_servers.ouroboros].tools.{tool_name} contains unsupported "
+                        "fields: " + ", ".join(unknown_tool_fields)
+                    )
+                if "approval_mode" in tool_config:
+                    _check_mcp_approval_mode(
+                        tool_config["approval_mode"],
+                        f"tools.{tool_name}.approval_mode",
+                        failures,
+                    )
+
+
+def _check_optional_string_field(
+    config: Mapping[object, object],
+    field: str,
+    failures: list[str],
+    *,
+    prefix: str = "",
+) -> None:
+    """Validate an optional Codex MCP string without truthy coercion."""
+    if field in config and not isinstance(config[field], str):
+        failures.append(f"[mcp_servers.ouroboros].{prefix}{field} must be a string")
+
+
+def _check_string_table_field(value: object, field: str, failures: list[str]) -> None:
+    """Validate a Codex MCP table whose keys and values must both be strings."""
+    if not isinstance(value, Mapping):
+        failures.append(f"[mcp_servers.ouroboros].{field} must be a table of strings")
+        return
+    invalid_entries = [
+        f"{key!r} ({type(item).__name__})"
+        for key, item in value.items()
+        if not isinstance(key, str) or not isinstance(item, str)
+    ]
+    if invalid_entries:
+        failures.append(
+            f"[mcp_servers.ouroboros].{field} contains non-string values: "
+            + ", ".join(invalid_entries)
+        )
+
+
+def _check_mcp_approval_mode(value: object, field: str, failures: list[str]) -> None:
+    """Require the three approval modes accepted by Codex CLI 0.132."""
+    if not isinstance(value, str) or value not in _CODEX_MCP_APPROVAL_MODES:
+        failures.append(
+            f"[mcp_servers.ouroboros].{field} must be one of: "
+            + ", ".join(sorted(_CODEX_MCP_APPROVAL_MODES))
+        )
+
+
 def _check_mcp_activation_surface(
     ouroboros_entry: Mapping[str, object], failures: list[str]
 ) -> None:
@@ -351,7 +536,7 @@ def _check_mcp_execution_surface(
     unsupported_fields = {
         "cwd": "the stdio process working directory",
         "env_vars": "which ambient environment variables Codex forwards",
-        "environment_id": "the Codex execution environment",
+        "experimental_environment": "the Codex execution environment",
         "startup_timeout_sec": "the Codex MCP initialization deadline",
         "startup_timeout_ms": "the legacy Codex MCP initialization deadline",
         "tool_timeout_sec": "the Codex MCP tool-call deadline",

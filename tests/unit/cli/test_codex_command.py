@@ -39,6 +39,13 @@ _REQUIRED_CODEX_AUTO_TOOLS_FOR_TEST = {
     "ouroboros_generate_seed",
 }
 _REPO_ROOT = Path(__file__).resolve().parents[3]
+_CANONICAL_CODEX_MCP_ENTRY = (
+    "[mcp_servers.ouroboros]\n"
+    'command = "uvx"\n'
+    'args = ["--isolated", "--python", ">=3.12", "--from", '
+    '"ouroboros-ai[mcp]", "ouroboros", "mcp", "serve"]\n'
+    'env = { OUROBOROS_AGENT_RUNTIME = "codex", OUROBOROS_LLM_BACKEND = "codex" }\n'
+)
 
 
 class TestCodexRefresh:
@@ -540,6 +547,329 @@ class TestCodexDoctor:
 
     @pytest.mark.parametrize("live_mcp", [False, True], ids=["static", "live"])
     @pytest.mark.parametrize(
+        ("config_text", "expected_failure"),
+        [
+            (
+                _CANONICAL_CODEX_MCP_ENTRY.replace(
+                    "[mcp_servers.ouroboros]\n",
+                    '[mcp_servers.ouroboros]\nurl = "http://127.0.0.1:12000/mcp"\n',
+                    1,
+                ),
+                "mixes stdio `command` with HTTP `url`",
+            ),
+            (
+                '[mcp_servers.ouroboros]\nurl = "http://127.0.0.1:12000/mcp"\nargs = []\n',
+                ".args is not supported for HTTP `url`",
+            ),
+            (
+                '[mcp_servers.ouroboros]\nurl = "http://127.0.0.1:12000/mcp"\nenv = {}\n',
+                ".env is not supported for HTTP `url`",
+            ),
+            *[
+                (
+                    _CANONICAL_CODEX_MCP_ENTRY.replace(
+                        "[mcp_servers.ouroboros]\n",
+                        "[mcp_servers.ouroboros]\n" + field_config,
+                        1,
+                    ),
+                    expected_failure,
+                )
+                for field_config, expected_failure in [
+                    (
+                        'bearer_token_env_var = "OUROBOROS_TOKEN"\n',
+                        ".bearer_token_env_var is not supported for stdio `command`",
+                    ),
+                    (
+                        'http_headers = { X_Test = "value" }\n',
+                        ".http_headers is not supported for stdio `command`",
+                    ),
+                    (
+                        'env_http_headers = { X_Token = "OUROBOROS_TOKEN" }\n',
+                        ".env_http_headers is not supported for stdio `command`",
+                    ),
+                    (
+                        'oauth = { client_id = "ouroboros" }\n',
+                        ".oauth is not supported for stdio `command`",
+                    ),
+                    (
+                        'oauth_resource = "https://ouroboros.example"\n',
+                        ".oauth_resource is not supported for stdio `command`",
+                    ),
+                    (
+                        'bearer_token = "plaintext-secret"\n',
+                        ".bearer_token is unsupported",
+                    ),
+                    (
+                        'environment_id = "remote"\n',
+                        "contains unsupported fields: environment_id",
+                    ),
+                ]
+            ],
+            (
+                "[mcp_servers.ouroboros]\nurl = 7\n",
+                ".url must be a string",
+            ),
+            (
+                '[mcp_servers.ouroboros]\nurl = "http://127.0.0.1:12000/mcp"\n'
+                "bearer_token_env_var = 7\n",
+                ".bearer_token_env_var must be a string",
+            ),
+            (
+                '[mcp_servers.ouroboros]\nurl = "http://127.0.0.1:12000/mcp"\noauth_resource = 7\n',
+                ".oauth_resource must be a string",
+            ),
+            (
+                '[mcp_servers.ouroboros]\nurl = "http://127.0.0.1:12000/mcp"\n'
+                'http_headers = "invalid"\n',
+                ".http_headers must be a table of strings",
+            ),
+            (
+                '[mcp_servers.ouroboros]\nurl = "http://127.0.0.1:12000/mcp"\n'
+                "http_headers = { X_Test = 7 }\n",
+                ".http_headers contains non-string values",
+            ),
+            (
+                '[mcp_servers.ouroboros]\nurl = "http://127.0.0.1:12000/mcp"\n'
+                'env_http_headers = "invalid"\n',
+                ".env_http_headers must be a table of strings",
+            ),
+            (
+                '[mcp_servers.ouroboros]\nurl = "http://127.0.0.1:12000/mcp"\n'
+                "env_http_headers = { X_Token = 7 }\n",
+                ".env_http_headers contains non-string values",
+            ),
+            (
+                '[mcp_servers.ouroboros]\nurl = "http://127.0.0.1:12000/mcp"\nrequired = "true"\n',
+                ".required must be a boolean",
+            ),
+            (
+                '[mcp_servers.ouroboros]\nurl = "http://127.0.0.1:12000/mcp"\n'
+                "supports_parallel_tool_calls = 1\n",
+                ".supports_parallel_tool_calls must be a boolean",
+            ),
+            (
+                '[mcp_servers.ouroboros]\nurl = "http://127.0.0.1:12000/mcp"\n'
+                'default_tools_approval_mode = "ask"\n',
+                ".default_tools_approval_mode must be one of:",
+            ),
+            (
+                '[mcp_servers.ouroboros]\nurl = "http://127.0.0.1:12000/mcp"\n'
+                "default_tools_approval_mode = 1\n",
+                ".default_tools_approval_mode must be one of:",
+            ),
+            (
+                '[mcp_servers.ouroboros]\nurl = "http://127.0.0.1:12000/mcp"\nscopes = "openid"\n',
+                ".scopes must be an array of strings",
+            ),
+            (
+                '[mcp_servers.ouroboros]\nurl = "http://127.0.0.1:12000/mcp"\nscopes = [""]\n',
+                ".scopes contains empty or non-string values",
+            ),
+            (
+                '[mcp_servers.ouroboros]\nurl = "http://127.0.0.1:12000/mcp"\n'
+                'scopes = ["openid", 7]\n',
+                ".scopes contains empty or non-string values",
+            ),
+            (
+                '[mcp_servers.ouroboros]\nurl = "http://127.0.0.1:12000/mcp"\nname = 7\n',
+                ".name must be a string",
+            ),
+            (
+                '[mcp_servers.ouroboros]\nurl = "http://127.0.0.1:12000/mcp"\noauth = "invalid"\n',
+                ".oauth must be a table",
+            ),
+            (
+                '[mcp_servers.ouroboros]\nurl = "http://127.0.0.1:12000/mcp"\n'
+                "oauth = { client_id = 7 }\n",
+                ".oauth.client_id must be a string",
+            ),
+            (
+                '[mcp_servers.ouroboros]\nurl = "http://127.0.0.1:12000/mcp"\n'
+                'oauth = { client_id = "ouroboros", redirect_uri = "https://example.com" }\n',
+                ".oauth contains unsupported fields: redirect_uri",
+            ),
+            (
+                '[mcp_servers.ouroboros]\nurl = "http://127.0.0.1:12000/mcp"\ntools = "invalid"\n',
+                ".tools must be a table",
+            ),
+            (
+                '[mcp_servers.ouroboros]\nurl = "http://127.0.0.1:12000/mcp"\n'
+                'tools = { "" = { approval_mode = "auto" } }\n',
+                ".tools contains an empty or non-string tool name",
+            ),
+            (
+                '[mcp_servers.ouroboros]\nurl = "http://127.0.0.1:12000/mcp"\n'
+                'tools = { ouroboros_start_auto = "approve" }\n',
+                ".tools.ouroboros_start_auto must be a table",
+            ),
+            (
+                '[mcp_servers.ouroboros]\nurl = "http://127.0.0.1:12000/mcp"\n'
+                "tools = { ouroboros_start_auto = { extra = true } }\n",
+                ".tools.ouroboros_start_auto contains unsupported fields: extra",
+            ),
+            (
+                '[mcp_servers.ouroboros]\nurl = "http://127.0.0.1:12000/mcp"\n'
+                'tools = { ouroboros_start_auto = { approval_mode = "ask" } }\n',
+                ".tools.ouroboros_start_auto.approval_mode must be one of:",
+            ),
+            (
+                '[mcp_servers.ouroboros]\nurl = "http://127.0.0.1:12000/mcp"\n'
+                "tools = { ouroboros_start_auto = { approval_mode = 7 } }\n",
+                ".tools.ouroboros_start_auto.approval_mode must be one of:",
+            ),
+        ],
+        ids=[
+            "mixed-transports",
+            "http-args",
+            "http-env",
+            "stdio-token-env",
+            "stdio-headers",
+            "stdio-env-headers",
+            "stdio-oauth",
+            "stdio-oauth-resource",
+            "plaintext-token",
+            "unknown-field",
+            "untyped-url",
+            "untyped-token-env",
+            "untyped-oauth-resource",
+            "scalar-http-headers",
+            "untyped-http-header",
+            "scalar-env-http-headers",
+            "untyped-env-http-header",
+            "untyped-required",
+            "untyped-parallel-tools",
+            "invalid-default-approval",
+            "untyped-default-approval",
+            "scalar-scopes",
+            "empty-scope",
+            "untyped-scope",
+            "untyped-name",
+            "scalar-oauth",
+            "untyped-oauth-client-id",
+            "unknown-oauth-field",
+            "scalar-tools",
+            "empty-tool-name",
+            "scalar-tool-config",
+            "unknown-tool-field",
+            "invalid-tool-approval",
+            "untyped-tool-approval",
+        ],
+    )
+    def test_check_auto_dispatch_surface_rejects_invalid_mcp_schema_before_probe(
+        self,
+        tmp_path: Path,
+        live_mcp: bool,
+        config_text: str,
+        expected_failure: str,
+    ) -> None:
+        """Codex transport and shared config must fail closed before live launch."""
+        codex_dir = tmp_path / ".codex"
+        self._write_healthy_codex_surface(codex_dir)
+        (codex_dir / "config.toml").write_text(config_text, encoding="utf-8")
+        live_probe = AsyncMock(return_value=_REQUIRED_CODEX_AUTO_TOOLS_FOR_TEST)
+
+        with patch("ouroboros.cli.commands.codex._list_stdio_mcp_tool_names", live_probe):
+            failures = _check_auto_dispatch_surface(codex_dir, live_mcp=live_mcp)
+
+        assert any(expected_failure in failure for failure in failures)
+        live_probe.assert_not_awaited()
+
+    @pytest.mark.parametrize("live_mcp", [False, True], ids=["static", "live"])
+    def test_check_auto_dispatch_surface_accepts_canonical_stdio_schema(
+        self,
+        tmp_path: Path,
+        live_mcp: bool,
+    ) -> None:
+        codex_dir = tmp_path / ".codex"
+        self._write_healthy_codex_surface(codex_dir)
+        (codex_dir / "config.toml").write_text(
+            _CANONICAL_CODEX_MCP_ENTRY,
+            encoding="utf-8",
+        )
+        live_probe = AsyncMock(return_value=_REQUIRED_CODEX_AUTO_TOOLS_FOR_TEST)
+
+        with patch("ouroboros.cli.commands.codex._list_stdio_mcp_tool_names", live_probe):
+            assert _check_auto_dispatch_surface(codex_dir, live_mcp=live_mcp) == []
+
+        if live_mcp:
+            live_probe.assert_awaited_once()
+        else:
+            live_probe.assert_not_awaited()
+
+    @pytest.mark.parametrize("live_mcp", [False, True], ids=["static", "live"])
+    @pytest.mark.parametrize("approval_mode", ["auto", "prompt", "approve"])
+    def test_check_auto_dispatch_surface_accepts_shared_stdio_schema(
+        self,
+        tmp_path: Path,
+        live_mcp: bool,
+        approval_mode: str,
+    ) -> None:
+        shared_fields = (
+            "required = true\n"
+            "supports_parallel_tool_calls = true\n"
+            f'default_tools_approval_mode = "{approval_mode}"\n'
+            'scopes = ["openid", "profile"]\n'
+            'name = "Ouroboros"\n'
+            "tools = { ouroboros_start_auto = "
+            f'{{ approval_mode = "{approval_mode}" }} }}\n'
+        )
+        config_text = _CANONICAL_CODEX_MCP_ENTRY.replace(
+            "[mcp_servers.ouroboros]\n",
+            "[mcp_servers.ouroboros]\n" + shared_fields,
+            1,
+        )
+        codex_dir = tmp_path / ".codex"
+        self._write_healthy_codex_surface(codex_dir)
+        (codex_dir / "config.toml").write_text(config_text, encoding="utf-8")
+        live_probe = AsyncMock(return_value=_REQUIRED_CODEX_AUTO_TOOLS_FOR_TEST)
+
+        with patch("ouroboros.cli.commands.codex._list_stdio_mcp_tool_names", live_probe):
+            assert _check_auto_dispatch_surface(codex_dir, live_mcp=live_mcp) == []
+
+        if live_mcp:
+            live_probe.assert_awaited_once()
+        else:
+            live_probe.assert_not_awaited()
+
+    @pytest.mark.parametrize("live_mcp", [False, True], ids=["static", "live"])
+    def test_check_auto_dispatch_surface_accepts_extended_http_schema(
+        self,
+        tmp_path: Path,
+        live_mcp: bool,
+    ) -> None:
+        codex_dir = tmp_path / ".codex"
+        self._write_healthy_codex_surface(codex_dir)
+        (codex_dir / "config.toml").write_text(
+            "[mcp_servers.ouroboros]\n"
+            'url = "https://ouroboros.example/mcp"\n'
+            'bearer_token_env_var = "OUROBOROS_TOKEN"\n'
+            'http_headers = { X_Client = "ouroboros" }\n'
+            'env_http_headers = { X_Api_Key = "OUROBOROS_API_KEY" }\n'
+            "enabled = true\n"
+            "required = true\n"
+            "supports_parallel_tool_calls = true\n"
+            'default_tools_approval_mode = "prompt"\n'
+            'scopes = ["openid", "profile"]\n'
+            'oauth = { client_id = "ouroboros" }\n'
+            'oauth_resource = "https://ouroboros.example"\n'
+            'name = "Ouroboros"\n'
+            'tools = { ouroboros_start_auto = { approval_mode = "approve" } }\n',
+            encoding="utf-8",
+        )
+        live_probe = AsyncMock(return_value=_REQUIRED_CODEX_AUTO_TOOLS_FOR_TEST)
+
+        with patch("ouroboros.cli.commands.codex._list_stdio_mcp_tool_names", live_probe):
+            failures = _check_auto_dispatch_surface(codex_dir, live_mcp=live_mcp)
+
+        if live_mcp:
+            assert any("uses `url`" in failure for failure in failures)
+            assert any("verifies only stdio `command` entries" in failure for failure in failures)
+        else:
+            assert failures == []
+        live_probe.assert_not_awaited()
+
+    @pytest.mark.parametrize("live_mcp", [False, True], ids=["static", "live"])
+    @pytest.mark.parametrize(
         ("activation_config", "expected_failure"),
         [
             ("enabled = false\n", "is disabled (`enabled = false`)"),
@@ -675,7 +1005,7 @@ class TestCodexDoctor:
         [
             ('cwd = "."\n', "cwd"),
             ('env_vars = ["PATH"]\n', "env_vars"),
-            ('environment_id = "remote"\n', "environment_id"),
+            ('experimental_environment = "remote"\n', "experimental_environment"),
             ("startup_timeout_sec = 0.25\n", "startup_timeout_sec"),
             ("startup_timeout_ms = 250\n", "startup_timeout_ms"),
             ("tool_timeout_sec = 0.001\n", "tool_timeout_sec"),
@@ -683,7 +1013,7 @@ class TestCodexDoctor:
         ids=[
             "working-directory",
             "ambient-environment",
-            "execution-environment",
+            "experimental-execution-environment",
             "startup-timeout-seconds",
             "startup-timeout-milliseconds",
             "tool-timeout-seconds",
