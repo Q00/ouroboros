@@ -394,8 +394,13 @@ json.load(open(sys.argv[1], encoding="utf-8"))
     # `_publish_new_state` / `_repair_state`, which apply the same
     # UUID-validate-canonicalize-and-salvage rules).
     tmp="$f.$$.tmp"
-    printf '{"distinct_id": "%s", "created_at": "%s", "notice_shown": false}\n' \
-      "$id" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$tmp" 2>/dev/null || true
+    # Grouped so an unwritable `$HOME/.ouroboros` (read-only dir, e.g.) is
+    # silent: a shell redirection's own open failure prints to the *current*
+    # stderr before the trailing `2>/dev/null` on this line ever takes
+    # effect, unlike an external command's (mv/ln/mkdir below) own error
+    # output, which a trailing `2>/dev/null` does catch.
+    { printf '{"distinct_id": "%s", "created_at": "%s", "notice_shown": false}\n' \
+      "$id" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$tmp"; } 2>/dev/null || true
     if [ "$file_existed" = true ]; then
       lockdir="$f.repair.lock"
       if mkdir "$lockdir" 2>/dev/null; then
@@ -428,8 +433,27 @@ json.load(open(sys.argv[1], encoding="utf-8"))
       ln "$tmp" "$f" 2>/dev/null || true
     fi
     rm -f "$tmp" 2>/dev/null || true
-    winner_id=$(_telemetry_canonical_id "$f")
-    [ -n "$winner_id" ] && id="$winner_id"
+    # Fail-closed reread: if neither our own publish/repair attempt nor
+    # anyone else's landed a pattern-valid id on disk (e.g. `$HOME/.ouroboros`
+    # is unwritable/read-only, so every `mv`/`ln` above silently failed),
+    # printing the local candidate would emit under an ephemeral,
+    # never-persisted identity that no other process -- or a later run of
+    # this same one -- could ever reproduce, permanently fragmenting
+    # identity instead of just skipping a run's telemetry. Drop instead
+    # (callers already treat a nonzero return as "skip telemetry"), matching
+    # telemetry.py's stable-identity contract. Deliberately the LENIENT
+    # extractor here, not the strict one: this is a "is there now a real,
+    # reusable identity at all" check, not a "was it perfectly repaired"
+    # check -- a pattern-valid id already sitting in a file we couldn't
+    # write to is still a stable value every future read of that same file
+    # will keep finding, so it's the best available anchor, not a reason to
+    # go fully ephemeral.
+    winner_id=$(_telemetry_extract_uuid "$f")
+    if [ -z "$winner_id" ]; then
+      unset -f _telemetry_extract_uuid _telemetry_canonical_id
+      return 1
+    fi
+    id="$winner_id"
   fi
   unset -f _telemetry_extract_uuid _telemetry_canonical_id
   printf '%s' "$id"

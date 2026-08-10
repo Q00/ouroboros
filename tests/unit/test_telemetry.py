@@ -348,6 +348,175 @@ class TestDistinctIdValidation:
         assert _SHELL_UUID_PATTERN.fullmatch(persisted["distinct_id"])
 
 
+def _require_non_root() -> None:
+    """chmod-based read-only tests are meaningless as root (root ignores
+    directory permission bits and can write anyway)."""
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        pytest.skip("root ignores directory permission bits")
+
+
+class TestIdentityFailClosed:
+    """Regression: identity repair must fail closed, never emit under a
+    process-local, unpersisted candidate.
+
+    _repair_state()/_publish_new_state() previously fell back to returning
+    their process-local candidate when every write and every reread failed,
+    so _load_state() cached it and capture() transmitted events under an id
+    that never actually landed on disk. A probe against a read-only
+    ~/.ouroboros produced two different UUIDs in two fresh processes as a
+    result. Now: an event may only be emitted under an id that was either
+    already valid on disk, or freshly persisted and reread back as valid --
+    otherwise capture() drops silently, exactly like every other telemetry
+    failure mode.
+    """
+
+    def test_readonly_dir_with_invalid_file_drops_in_two_fresh_processes(
+        self, tmp_path: Path
+    ) -> None:
+        """The reviewer's exact probe, inverted: read-only ~/.ouroboros with
+        an invalid file used to mint a different UUID per fresh process and
+        transmit it. Now neither process transmits anything, and
+        distinct_id() is empty in both."""
+        _require_non_root()
+        home = tmp_path / "home"
+        state_dir = home / ".ouroboros"
+        state_dir.mkdir(parents=True)
+        (state_dir / "telemetry.json").write_text(
+            json.dumps({"distinct_id": "not-a-valid-uuid"}), encoding="utf-8"
+        )
+        os.chmod(state_dir, 0o500)
+        try:
+            repo_root = Path(__file__).resolve().parents[2]
+            env = os.environ.copy()
+            env["HOME"] = str(home)
+            env["PYTHONPATH"] = str(repo_root / "src")
+            env["OUROBOROS_POSTHOG_API_KEY"] = "phc_test"
+            for key in ("DO_NOT_TRACK", "OUROBOROS_TELEMETRY", "OUROBOROS_POSTHOG_HOST"):
+                env.pop(key, None)
+
+            script = (
+                "from ouroboros import telemetry\n"
+                "captured = []\n"
+                "telemetry._post = lambda batch: captured.extend(batch)\n"
+                "telemetry.capture('mcp_serve_started', "
+                "{'transport': 'stdio', 'tool_count': 1})\n"
+                "telemetry.flush(timeout=2.0)\n"
+                "print(telemetry.distinct_id() or '<empty>')\n"
+                "print('TRANSMITTED' if captured else 'NOTHING')\n"
+            )
+
+            outputs = []
+            for _ in range(2):
+                completed = subprocess.run(
+                    [sys.executable, "-c", script],
+                    env=env,
+                    text=True,
+                    capture_output=True,
+                    timeout=10,
+                    check=True,
+                )
+                outputs.append(completed.stdout.strip().splitlines())
+        finally:
+            os.chmod(state_dir, 0o700)
+
+        for lines in outputs:
+            assert lines == ["<empty>", "NOTHING"], f"unexpected output: {lines}"
+
+    def test_readonly_dir_with_valid_file_still_emits(
+        self, tmp_path: Path, sent: list[dict[str, Any]]
+    ) -> None:
+        """Adoption of an already-valid identity needs no write -- a
+        read-only directory must not block reading a file that's fine."""
+        _require_non_root()
+        state_dir = tmp_path / ".ouroboros"
+        state_dir.mkdir(parents=True)
+        valid_id = str(uuid.uuid4())
+        (state_dir / "telemetry.json").write_text(
+            json.dumps({"distinct_id": valid_id, "notice_shown": False}), encoding="utf-8"
+        )
+        os.chmod(state_dir, 0o500)
+        try:
+            telemetry.capture("mcp_serve_started", {"transport": "stdio", "tool_count": 1})
+            telemetry.flush(timeout=2.0)
+        finally:
+            os.chmod(state_dir, 0o700)
+
+        assert len(sent) == 1
+        assert sent[0]["distinct_id"] == valid_id
+
+    def test_readonly_dir_with_uppercase_file_still_emits_lowercased(
+        self, tmp_path: Path, sent: list[dict[str, Any]]
+    ) -> None:
+        """Case canonicalization is in-memory-sufficient: even though the
+        best-effort rewrite to lowercase fails (read-only dir), the
+        underlying UUID was already durable, so the event still ships under
+        the canonicalized id."""
+        _require_non_root()
+        state_dir = tmp_path / ".ouroboros"
+        state_dir.mkdir(parents=True)
+        upper = "3F2504E0-4F89-11D3-9A0C-0305E82C3301"
+        (state_dir / "telemetry.json").write_text(
+            json.dumps({"distinct_id": upper, "notice_shown": False}), encoding="utf-8"
+        )
+        os.chmod(state_dir, 0o500)
+        try:
+            telemetry.capture("mcp_serve_started", {"transport": "stdio", "tool_count": 1})
+            telemetry.flush(timeout=2.0)
+        finally:
+            os.chmod(state_dir, 0o700)
+
+        assert len(sent) == 1
+        assert sent[0]["distinct_id"] == upper.lower()
+
+    def test_readonly_dir_with_absent_file_drops(
+        self, tmp_path: Path, sent: list[dict[str, Any]]
+    ) -> None:
+        """No file at all, in a parent directory that can't be written to
+        -- nothing can ever be persisted, so nothing should be emitted."""
+        _require_non_root()
+        state_dir = tmp_path / ".ouroboros"
+        state_dir.mkdir(parents=True)
+        os.chmod(state_dir, 0o500)
+        try:
+            telemetry.capture("mcp_serve_started", {"transport": "stdio", "tool_count": 1})
+            telemetry.flush(timeout=2.0)
+            result = telemetry.distinct_id()
+        finally:
+            os.chmod(state_dir, 0o700)
+
+        assert sent == []
+        assert result == ""
+
+    def test_failure_is_not_cached_recovers_after_dir_becomes_writable(
+        self, tmp_path: Path, sent: list[dict[str, Any]]
+    ) -> None:
+        """A failed attempt must not poison _state_cache: the same process,
+        with no restart, must recover once the filesystem does."""
+        _require_non_root()
+        state_dir = tmp_path / ".ouroboros"
+        state_dir.mkdir(parents=True)
+        (state_dir / "telemetry.json").write_text(
+            json.dumps({"distinct_id": "not-a-valid-uuid"}), encoding="utf-8"
+        )
+        os.chmod(state_dir, 0o500)
+        try:
+            telemetry.capture("mcp_serve_started", {"transport": "stdio", "tool_count": 1})
+            telemetry.flush(timeout=2.0)
+            assert sent == []
+            assert telemetry.distinct_id() == ""
+        finally:
+            os.chmod(state_dir, 0o700)
+
+        telemetry.capture("mcp_serve_started", {"transport": "stdio", "tool_count": 2})
+        telemetry.flush(timeout=2.0)
+
+        assert len(sent) == 1
+        persisted_id = sent[0]["distinct_id"]
+        assert telemetry._UUID_PATTERN.fullmatch(persisted_id)
+        persisted = json.loads((state_dir / "telemetry.json").read_text(encoding="utf-8"))
+        assert persisted["distinct_id"] == persisted_id
+
+
 class TestCapture:
     def test_event_shape(self, sent: list[dict[str, Any]]) -> None:
         telemetry.set_context(runtime_backend="codex")

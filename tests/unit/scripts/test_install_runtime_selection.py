@@ -778,6 +778,72 @@ def test_installer_repaired_telemetry_json_matches_fresh_install_shape(tmp_path:
     )
 
 
+_skip_if_root = pytest.mark.skipif(
+    hasattr(os, "geteuid") and os.geteuid() == 0,
+    reason="root ignores directory permission modes",
+)
+
+
+@_skip_if_root
+def test_installer_drops_telemetry_when_identity_storage_is_unwritable(tmp_path: Path) -> None:
+    """An invalid identity file in an unwritable directory can't be
+    repaired. The installer must still succeed -- installation itself is
+    unrelated to telemetry -- but must drop telemetry for this run rather
+    than emit under a local candidate that never actually got persisted (an
+    ephemeral identity no other process, or a later run of this one, could
+    ever reproduce).
+    """
+    state_dir = tmp_path / "home" / ".ouroboros"
+    state_dir.mkdir(parents=True)
+    state = state_dir / "telemetry.json"
+    state.write_text("not-json{{{\n", encoding="utf-8")
+    state_dir.chmod(0o500)
+    try:
+        result = _run_installer(
+            tmp_path,
+            env={"OUROBOROS_TELEMETRY": ""},
+            fake_commands=_telemetry_fake_commands(tmp_path),
+        )
+    finally:
+        state_dir.chmod(0o700)  # restore write access so tmp cleanup can proceed
+
+    assert result.returncode == 0, result.stderr
+    assert not (tmp_path / "telemetry.log").exists()
+
+
+@_skip_if_root
+def test_installer_sends_telemetry_from_valid_identity_in_unwritable_dir(tmp_path: Path) -> None:
+    """A directory being unwritable must not block telemetry when the
+    existing identity is already fully valid -- adopting it needs no write
+    at all, only a read.
+    """
+    state_dir = tmp_path / "home" / ".ouroboros"
+    state_dir.mkdir(parents=True)
+    state = state_dir / "telemetry.json"
+    # notice_shown is pre-set to true: flipping it also needs a write, which
+    # this scenario cannot do, and that's an orthogonal concern from what
+    # this test is checking (event capture using the existing identity).
+    state.write_text(
+        '{"distinct_id": "3f2504e0-4f89-11d3-9a0c-0305e82c3301", '
+        '"created_at": "2020-01-01T00:00:00Z", "notice_shown": true}\n',
+        encoding="utf-8",
+    )
+    state_dir.chmod(0o500)
+    try:
+        result = _run_installer(
+            tmp_path,
+            env={"OUROBOROS_TELEMETRY": ""},
+            fake_commands=_telemetry_fake_commands(tmp_path),
+        )
+    finally:
+        state_dir.chmod(0o700)
+
+    assert result.returncode == 0, result.stderr
+    captures = _wait_for_telemetry(tmp_path)
+    assert '"event":"install_completed"' in captures
+    assert '"distinct_id":"3f2504e0-4f89-11d3-9a0c-0305e82c3301"' in captures
+
+
 def _extract_distinct_id_function() -> str:
     """Pull `_telemetry_distinct_id` verbatim out of install.sh.
 

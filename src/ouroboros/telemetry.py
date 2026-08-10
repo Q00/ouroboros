@@ -371,7 +371,20 @@ def _build_repair_candidate(raw_text: str) -> dict[str, Any]:
     }
 
 
-def _load_state() -> dict[str, Any]:
+def _load_state() -> dict[str, Any] | None:
+    """Load (or create/repair) telemetry state, or None if identity is
+    unavailable this attempt.
+
+    None means neither an already-valid identity could be read, nor a
+    repaired one could be persisted and reread back as valid (e.g. a
+    read-only ~/.ouroboros). Callers must treat that as "no identity right
+    now" and drop rather than emit under a process-local, never-persisted
+    candidate -- two fresh processes hitting the same failure would
+    otherwise each mint and report a different id for what PostHog would
+    count as the same installation. A None outcome is never cached: the
+    filesystem may become writable later, and every attempt is bounded file
+    I/O, so the next capture() gets a fresh try instead of being stuck.
+    """
     global _state_cache
     with _lock:
         if _state_cache is not None:
@@ -407,6 +420,10 @@ def _load_state() -> dict[str, Any]:
                         # persist the canonical form so every future reader,
                         # this process included, converges on the exact same
                         # bytes instead of re-canonicalizing on every load.
+                        # Best-effort: the underlying UUID was already
+                        # durable and valid, so a failed rewrite here still
+                        # means `state` is adopted below -- see
+                        # _write_state's never-raises contract.
                         _write_state(validated)
 
         if not state.get("distinct_id"):
@@ -415,16 +432,20 @@ def _load_state() -> dict[str, Any]:
                 if file_absent or raw_text is None
                 else _build_repair_candidate(raw_text)
             )
-            state = (
+            repaired = (
                 _publish_new_state(path, candidate)
                 if file_absent
                 else _repair_state(path, candidate)
             )
+            if repaired is None:
+                return None  # fail closed -- see docstring; do not cache
+            state = repaired
+
         _state_cache = state
         return state
 
 
-def _publish_new_state(path: Path, candidate: dict[str, Any]) -> dict[str, Any]:
+def _publish_new_state(path: Path, candidate: dict[str, Any]) -> dict[str, Any] | None:
     """Atomically publish a freshly generated identity, then adopt the winner.
 
     Concurrent processes (multiple MCP sessions starting at once, the
@@ -440,11 +461,17 @@ def _publish_new_state(path: Path, candidate: dict[str, Any]) -> dict[str, Any]:
     whatever `distinct_id` actually landed there, rather than trusting its
     own candidate. This is the process-local half of the fix; the installer
     coordinates with the same create-if-not-exists protocol.
+
+    Returns None -- never the unpersisted candidate -- if the publish AND
+    every reread both failed (e.g. a read-only ~/.ouroboros): an event may
+    only ever be emitted under an id that was actually durable, never a
+    process-local value that a second fresh process could independently
+    (and differently) mint under the same failure.
     """
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
     except Exception:
-        return candidate
+        return None
 
     payload = json.dumps(candidate, indent=2) + "\n"
     tmp_path = path.parent / f"telemetry.json.{os.getpid()}.tmp"
@@ -481,10 +508,10 @@ def _publish_new_state(path: Path, candidate: dict[str, Any]) -> dict[str, Any]:
             return state
         if attempt < 2:
             time.sleep(0.02)
-    return candidate
+    return None
 
 
-def _repair_state(path: Path, candidate: dict[str, Any]) -> dict[str, Any]:
+def _repair_state(path: Path, candidate: dict[str, Any]) -> dict[str, Any] | None:
     """Atomically replace a corrupt/invalid telemetry.json, then adopt the winner.
 
     ``_publish_new_state``'s create-if-absent primitives (``os.link`` /
@@ -496,6 +523,11 @@ def _repair_state(path: Path, candidate: dict[str, Any]) -> dict[str, Any]:
     alike) adopts whatever ends up on disk afterward. Without that, retention
     and weekly-active metrics would fragment across as many ids as there were
     racing processes, every time the file happened to get corrupted.
+
+    Returns None -- never the unpersisted candidate -- if the replace AND
+    every reread both failed (e.g. a read-only ~/.ouroboros): see
+    _publish_new_state's docstring for why that must fail closed rather than
+    emit under a value that never actually landed on disk.
     """
     lock_path = path.with_name(path.name + ".repair.lock")
     try:
@@ -513,7 +545,7 @@ def _repair_state(path: Path, candidate: dict[str, Any]) -> dict[str, Any]:
                     _atomic_write(path, candidate)
                 except Exception:
                     pass
-                state = _read_valid_state(path) or candidate
+                state = _read_valid_state(path)
         finally:
             try:
                 os.close(fd)
@@ -544,7 +576,7 @@ def _repair_state(path: Path, candidate: dict[str, Any]) -> dict[str, Any]:
             return state
         if attempt < 2:
             time.sleep(0.02)
-    return candidate
+    return None
 
 
 def _write_state(state: dict[str, Any]) -> None:
@@ -555,8 +587,18 @@ def _write_state(state: dict[str, Any]) -> None:
 
 
 def distinct_id() -> str:
-    """Stable anonymous id for this machine/user."""
-    return str(_load_state()["distinct_id"])
+    """Stable anonymous id for this machine/user.
+
+    Returns "" when no identity is available this attempt (see
+    _load_state) -- never a process-local, unpersisted UUID. Callers must
+    treat an empty string as "no identity", not as a literal id; capture()
+    does exactly that, dropping the event rather than emitting it under a
+    value that never actually landed on disk.
+    """
+    state = _load_state()
+    if state is None:
+        return ""
+    return str(state["distinct_id"])
 
 
 def _is_allowed_scalar(value: Any) -> bool:
@@ -721,6 +763,12 @@ def capture(event: str, properties: dict[str, Any] | None = None) -> None:
     variant) not on the disclosed table is dropped entirely, and any
     property not on that exact variant's set is dropped before the
     properties dict is built. See _resolve_allowed_keys.
+
+    Also enforces identity fail-closed: the id is resolved via distinct_id()
+    up front, before anything is built or queued, and a "" result (no
+    durable identity available -- see _load_state) drops the event entirely
+    rather than emitting it under a process-local candidate that never
+    landed on disk.
     """
     try:
         if not is_enabled():
@@ -728,6 +776,9 @@ def capture(event: str, properties: dict[str, Any] | None = None) -> None:
         allowed_keys = _resolve_allowed_keys(event, properties)
         if allowed_keys is None:
             return  # not on the disclosed event table -- drop, don't guess
+        resolved_id = distinct_id()
+        if not resolved_id:
+            return  # no durable identity this attempt -- drop, don't emit
         props = _base_properties()
         if properties:
             props.update({k: v for k, v in properties.items() if v is not None})
@@ -735,7 +786,7 @@ def capture(event: str, properties: dict[str, Any] | None = None) -> None:
         _queue.put_nowait(
             {
                 "event": event,
-                "distinct_id": distinct_id(),
+                "distinct_id": resolved_id,
                 "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                 "properties": props,
             }
@@ -909,11 +960,19 @@ def show_first_run_notice() -> None:
     notice may print again next time (benign duplicate) rather than the flag
     getting set with nothing ever having been shown (silent, permanent
     non-disclosure).
+
+    If no identity is available at all (e.g. a read-only ~/.ouroboros --
+    see _load_state), does nothing: no collection can happen without a
+    durable id anyway, and claiming notice_shown against a state that was
+    never actually persisted would be the same silent-non-disclosure
+    failure mode this function exists to avoid.
     """
     try:
         if not is_enabled():
             return
         state = _load_state()
+        if state is None:
+            return
         if state.get("notice_shown"):
             return
         marker_path = _state_path().with_name("telemetry.notice")
