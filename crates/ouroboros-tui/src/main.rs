@@ -540,15 +540,23 @@ fn render_footer(ui: &mut Context, state: &AppState) {
     let dim = ui.theme().text_dim;
     let accent = ui.theme().accent;
 
-    // Tab-specific hints
-    let extra_keys: &[(&str, &str)] = match state.screen {
-        Screen::Dashboard => &[("↑↓", "Navigate tree"), ("Enter", "Expand/Collapse")],
-        Screen::Execution if state.show_log_panel => {
-            &[("Esc", "Close logs"), ("↑↓", "Scroll")]
+    // Modal hints take precedence over the underlying screen. In particular,
+    // Escape dismisses the command palette without closing an Execution log
+    // panel underneath it.
+    let extra_keys: &[(&str, &str)] = if state.command_palette.open {
+        &[("Esc", "Close palette"), ("↑↓", "Select"), ("Enter", "Run")]
+    } else {
+        match state.screen {
+            Screen::Dashboard => &[("↑↓", "Navigate tree"), ("Enter", "Expand/Collapse")],
+            Screen::Execution if state.show_log_panel => {
+                &[("Esc", "Close logs"), ("↑↓", "Scroll")]
+            }
+            Screen::Execution => &[("l", "Open logs"), ("↑↓", "Scroll")],
+            Screen::Lineage => &[("↑↓", "Select lineage")],
+            Screen::SessionSelector => {
+                &[("Enter", "Load session"), ("←→", "Page"), ("Esc", "Back")]
+            }
         }
-        Screen::Execution => &[("l", "Open logs"), ("↑↓", "Scroll")],
-        Screen::Lineage => &[("↑↓", "Select lineage")],
-        Screen::SessionSelector => &[("Enter", "Load session"), ("←→", "Page"), ("Esc", "Back")],
     };
 
     // Pause/Resume is advertised only when this process owns the execution
@@ -798,5 +806,24 @@ mod tests {
         assert!(state.command_palette.open);
         assert!(state.show_log_panel);
         assert_eq!(state.log_filter.value, "persisted logs");
+    }
+
+    #[test]
+    fn footer_advertises_palette_escape_over_underlying_log_close() {
+        let mut state = AppState::new();
+        state.screen = Screen::Execution;
+        state.tabs.selected = 1;
+        state.show_log_panel = true;
+        state.command_palette.open = true;
+
+        let mut backend = TestBackend::new(120, 3);
+        backend.render(|ui| render_footer(ui, &state));
+        backend.assert_contains("Esc Close palette");
+        assert!(!backend.to_string_trimmed().contains("Esc Close logs"));
+
+        state.command_palette.open = false;
+        backend.render(|ui| render_footer(ui, &state));
+        backend.assert_contains("Esc Close logs");
+        assert!(!backend.to_string_trimmed().contains("Esc Close palette"));
     }
 }

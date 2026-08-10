@@ -51,9 +51,11 @@ Lineage screens:
 ### SLT screens (native backend)
 
 SLT has a different four-screen set. It has no separate Logs or Debug screen;
-`l` opens a log panel inside Execution and `Esc` closes it. While the filter has
-focus, `l` enters filter text instead of closing the panel. The global `q`,
-`1`-`4`, and `Ctrl+P` shortcuts remain reserved while the panel is open.
+`l` opens a log panel inside Execution and, when no modal owns the key, `Esc`
+closes it. While the command palette is open, `Esc` closes the palette and
+preserves the underlying log panel and filter. While the filter has focus, `l`
+enters filter text instead of closing the panel. The global `q`, `1`-`4`, and
+`Ctrl+P` shortcuts remain reserved while the panel is open.
 
 | Key | Shortcut | Screen | Purpose |
 |-----|----------|--------|---------|
@@ -62,7 +64,7 @@ focus, `l` enters filter text instead of closing the panel. The global `q`,
 | `3` | `e` | **Lineage** | Evolutionary generation history |
 | `4` | `s` | **Sessions** | Browse and load sessions |
 | | `l` | **Execution log panel** | Open only while Execution is active |
-| | `Esc` | **Execution log panel** | Close the open panel |
+| | `Esc` | **Execution log panel** | Close the open panel when no modal is active |
 
 ## Textual Dashboard Screen (Key: 1)
 

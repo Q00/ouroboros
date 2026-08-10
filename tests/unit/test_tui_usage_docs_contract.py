@@ -169,12 +169,16 @@ def test_slt_screen_and_mock_fallback_contract_matches_source() -> None:
         assert "`p` / `r`" in lifecycle
 
     assert "`l` opens" in _read(EN_GUIDE)
-    assert "`Esc` closes" in _read(EN_GUIDE)
-    assert "While the filter has\nfocus, `l` enters filter text" in _read(EN_GUIDE)
-    assert "global `q`,\n`1`-`4`, and `Ctrl+P` shortcuts remain reserved" in _read(EN_GUIDE)
+    assert "when no modal owns the key, `Esc`\ncloses it" in _read(EN_GUIDE)
+    assert "`Esc` closes the palette and\npreserves the underlying log panel and filter" in _read(
+        EN_GUIDE
+    )
+    assert "While the filter has focus, `l`\nenters filter text" in _read(EN_GUIDE)
+    assert "global `q`, `1`-`4`, and\n`Ctrl+P` shortcuts remain reserved" in _read(EN_GUIDE)
     assert "`l`은 실행" in _read(KO_GUIDE)
-    assert "`Esc`는 닫습니다" in _read(KO_GUIDE)
-    assert "필터에 포커스가 있을 때 `l`은\n패널을 닫지 않고 필터 문자로 입력됩니다" in _read(
+    assert "모달이 키를 소유하지 않을 때 `Esc`는 패널을 닫습니다" in _read(KO_GUIDE)
+    assert "`Esc`는 팔레트만 닫고 아래의 로그 패널과 필터는\n그대로 보존합니다" in _read(KO_GUIDE)
+    assert "필터에 포커스가 있을 때 `l`은 패널을 닫지 않고 필터 문자로\n입력됩니다" in _read(
         KO_GUIDE
     )
     assert "`q`, `1`-`4`, `Ctrl+P`는 계속 예약됩니다" in _read(KO_GUIDE)
@@ -192,9 +196,12 @@ def test_slt_screen_and_mock_fallback_contract_matches_source() -> None:
         "| `3` | `e` | Lineage",
         "| `4` | `s` | Sessions",
         "| | `l` | Open the log panel",
-        "| | `Esc` | Close the open log panel",
+        "| | `Esc` | Close the open log panel when no modal is active",
     ):
         assert row in slt_readme
+    assert "`Esc` closes only the palette and preserves the underlying log panel and filter" in (
+        slt_readme
+    )
     assert "`1-5` screens" not in slt_readme
 
 
