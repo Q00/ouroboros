@@ -1,7 +1,7 @@
 [project]
 name = "ouroboros-ai"
 dynamic = ["version"]
-description = "Specification-first workflow engine for AI coding agents -- works across Claude Code, Codex CLI, OpenCode, Hermes, Gemini, Kiro, Copilot, Pi, Zcode, Goose, GJC, Antigravity, and Grok."
+description = "Pins the acceptance spec before the run and keeps the grading command out of the agent prompt. Works with Claude Code, Codex CLI, OpenCode and 10 more runtimes."
 readme = "README.md"
 authors = [
     { name = "Q00", email = "jqyu.lee@gmail.com" }
