@@ -171,7 +171,10 @@ ouroboros setup --runtime copilot            # 实时获取模型列表并选择
 <details>
 <summary><strong>其他安装方式</strong></summary>
 
-**仅安装 Claude Code 插件**（无需安装 Python 包；但主机上需要有 `uvx` 和 `python3`（建议 3.12，最低 3.11）—— 见 #2001）：
+**仅安装 Claude Code 插件**（无需安装 Python 包或全局 Python；主机唯一的
+前置条件是 uv。uv 提供启动 MCP server 的 `uvx`，并可为插件技能配置
+Python >= 3.12。兼容的全局 `python3` 或 `python` 只是可选的快速路径；
+缺失或版本过旧时，技能会使用 uv 管理的解释器）：
 ```bash
 claude plugin marketplace add Q00/ouroboros && claude plugin install ouroboros@ouroboros
 ```

@@ -152,7 +152,11 @@ ooo setup
 ooo help        # verify installation
 ```
 
-No pip install of Ouroboros and no API key configuration needed -- Claude Code handles the runtime. The host still needs `uvx` and `python3` >= 3.11, as above — the shipped `.claude-plugin/skills/welcome/SKILL.md` imports `datetime.UTC`, which does not exist before 3.11.
+No pip install of Ouroboros and no API key configuration is needed -- Claude
+Code handles the runtime. uv is the only host prerequisite: it provides `uvx`
+for the MCP server and can provision Python >= 3.12 for shipped skill snippets.
+A compatible global `python3` or `python` is only an optional fast path; when it
+is absent or too old, the skills use the uv-managed interpreter.
 
 ### Option 2: pip Install
 
