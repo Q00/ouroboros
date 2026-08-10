@@ -827,10 +827,13 @@ class ClaudeCodeAdapter:
                 content=content,
                 model=config.model,
                 usage=UsageInfo(
+                    # The normalizer is the single accounting authority.  A
+                    # total-only provider payload cannot be split truthfully;
+                    # UsageInfo's legacy integer component fields stay zero
+                    # while raw_response["usage"] retains their absence.
                     prompt_tokens=int(usage.get("input_tokens") or 0),
                     completion_tokens=int(usage.get("output_tokens") or 0),
-                    total_tokens=int(usage.get("input_tokens") or 0)
-                    + int(usage.get("output_tokens") or 0),
+                    total_tokens=int(usage.get("total_tokens") or 0),
                 ),
                 finish_reason=normalized.stop_reason or "stop",
                 raw_response=payload,

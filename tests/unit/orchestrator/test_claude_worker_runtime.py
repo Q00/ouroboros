@@ -46,6 +46,7 @@ class TestParseTurn:
             "input_tokens": 10,
             "output_tokens": 2,
             "cache_read_input_tokens": 40,
+            "total_tokens": 52,
         }
 
     def test_is_error_flag_propagates(self) -> None:
@@ -96,7 +97,7 @@ class TestParseTurn:
         assert turn == WorkerTurn(
             text="final",
             session_id="array-session",
-            usage={"input_tokens": 4, "output_tokens": 2},
+            usage={"input_tokens": 4, "output_tokens": 2, "total_tokens": 6},
         )
 
     def test_structured_error_uses_result_when_stderr_is_empty(self) -> None:
@@ -146,7 +147,7 @@ class TestParseTurn:
             session_id="error-session",
             is_error=True,
             error="error_max_turns",
-            usage={"input_tokens": 9, "output_tokens": 2},
+            usage={"input_tokens": 9, "output_tokens": 2, "total_tokens": 11},
         )
 
     @pytest.mark.parametrize(
@@ -168,6 +169,18 @@ class TestParseTurn:
                 '"usage":{"cache_read_input_tokens":' + "9" * 1000 + "}}",
                 "bounded non-negative integer",
                 id="thousand-digit-secondary-usage",
+            ),
+            pytest.param(
+                '{"type":"result","is_error":false,"result":"done",'
+                '"usage":{"prompt_tokens":' + "9" * 1000 + "}}",
+                "bounded non-negative integer",
+                id="thousand-digit-primary-alias",
+            ),
+            pytest.param(
+                '{"type":"result","is_error":false,"result":"done",'
+                '"usage":{"prompt_tokens":true,"completion_tokens":2}}',
+                "bounded non-negative integer",
+                id="malformed-primary-alias",
             ),
         ],
     )
@@ -378,11 +391,27 @@ class TestRuntimeWiring:
         }
 
     @pytest.mark.asyncio
-    async def test_hostile_secondary_usage_never_reaches_frugality_consumer(self) -> None:
-        stdout = (
-            '{"type":"result","is_error":false,"result":"done",'
-            '"usage":{"cache_read_input_tokens":' + "9" * 1000 + "}}"
-        )
+    @pytest.mark.parametrize(
+        "stdout",
+        [
+            pytest.param(
+                '{"type":"result","is_error":false,"result":"done",'
+                '"usage":{"cache_read_input_tokens":' + "9" * 1000 + "}}",
+                id="huge-secondary",
+            ),
+            pytest.param(
+                '{"type":"result","is_error":false,"result":"done",'
+                '"usage":{"prompt_tokens":' + "9" * 1000 + "}}",
+                id="huge-alias",
+            ),
+            pytest.param(
+                '{"type":"result","is_error":false,"result":"done",'
+                '"usage":{"prompt_tokens":true,"completion_tokens":2}}',
+                id="malformed-alias",
+            ),
+        ],
+    )
+    async def test_hostile_usage_never_reaches_frugality_consumer(self, stdout: str) -> None:
         turn = ClaudeWorkerTransport._parse_turn(stdout, "", 0)
         assert turn.is_error is True
         assert turn.usage is None
@@ -424,7 +453,11 @@ class TestRuntimeWiring:
             0,
         )
         assert turn.is_error is False
-        assert turn.usage == {"input_tokens": 110, "output_tokens": 22}
+        assert turn.usage == {
+            "input_tokens": 110,
+            "output_tokens": 22,
+            "total_tokens": 132,
+        }
 
         rt = build_claude_worker_runtime(cwd="/tmp")
         transport = rt._transport
@@ -435,10 +468,46 @@ class TestRuntimeWiring:
         transport.spawn = _fake_spawn  # type: ignore[method-assign]
         messages = [message async for message in rt.execute_task("hi")]
 
-        assert messages[-1].data["usage"] == {"input_tokens": 110, "output_tokens": 22}
+        assert messages[-1].data["usage"] == {
+            "input_tokens": 110,
+            "output_tokens": 22,
+            "total_tokens": 132,
+        }
         assert harvest_token_spend(messages) == (
             132.0,
-            {"input_tokens": 110.0, "output_tokens": 22.0},
+            {"input_tokens": 110.0, "output_tokens": 22.0, "total_tokens": 132.0},
+        )
+
+    @pytest.mark.asyncio
+    async def test_total_only_cli_usage_reaches_final_receipt_without_allocation(self) -> None:
+        turn = ClaudeWorkerTransport._parse_turn(
+            json.dumps(
+                {
+                    "type": "result",
+                    "is_error": False,
+                    "result": "ok",
+                    "usage": {"total_tokens": 132},
+                }
+            ),
+            "",
+            0,
+        )
+        assert turn.is_error is False
+        assert turn.usage == {"total_tokens": 132}
+
+        rt = build_claude_worker_runtime(cwd="/tmp")
+        transport = rt._transport
+
+        async def _fake_spawn(**_kwargs) -> WorkerTurn:
+            return turn
+
+        transport.spawn = _fake_spawn  # type: ignore[method-assign]
+        messages = [message async for message in rt.execute_task("hi")]
+
+        assert messages[-1].data["usage"] == {"total_tokens": 132}
+        assert harvest_token_spend(messages) == (
+            132.0,
+            {"total_tokens": 132.0},
         )
 
     @pytest.mark.asyncio

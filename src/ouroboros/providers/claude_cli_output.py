@@ -47,6 +47,10 @@ _TOKEN_SPEND_KEYS = (
     "cache_read_input_tokens",
 )
 _PRIMARY_TOKEN_KEYS = frozenset({"input_tokens", "output_tokens"})
+_TOKEN_KEY_ALIASES = {
+    "prompt_tokens": "input_tokens",
+    "completion_tokens": "output_tokens",
+}
 # Stay well below CPython's configurable 4,300-digit default so hostile JSON
 # cannot escape this boundary as an interpreter-level ``ValueError``.
 _MAX_JSON_INTEGER_DIGITS = 1024
@@ -317,7 +321,14 @@ def _result_usage(
 
 
 def _validated_usage(raw_usage: Any) -> dict[str, Any]:
-    """Copy one usage object after validating every token-shaped counter."""
+    """Return one canonical, internally reconciled usage authority.
+
+    Claude wrappers occasionally rename the primary counters, but every
+    consumer needs the same names and the same total.  Canonicalization happens
+    here, before the worker and provider adapter diverge.  A total-only payload
+    remains total-only: no prompt/completion allocation can be inferred from a
+    scalar total.
+    """
     if not isinstance(raw_usage, Mapping):
         raise ClaudeCliOutputError("usage must be a JSON object")
 
@@ -331,6 +342,47 @@ def _validated_usage(raw_usage: Any) -> dict[str, Any]:
             or not 0 <= value <= _MAX_TOKEN_COUNT
         ):
             raise ClaudeCliOutputError(f"usage.{key} must be a bounded non-negative integer")
+
+    for alias, canonical in _TOKEN_KEY_ALIASES.items():
+        if alias not in usage:
+            continue
+        if canonical in usage and usage[canonical] != usage[alias]:
+            raise ClaudeCliOutputError(f"usage.{alias} disagrees with canonical usage.{canonical}")
+        usage[canonical] = usage[alias]
+        del usage[alias]
+
+    unsupported_token_keys = {
+        key for key in usage if key.endswith("_tokens") and key not in _TOKEN_USAGE_KEYS
+    }
+    if unsupported_token_keys:
+        keys = ", ".join(sorted(unsupported_token_keys))
+        raise ClaudeCliOutputError(f"usage has unsupported token counters: {keys}")
+
+    fallback_keys = {key for key in _TOKEN_SPEND_KEYS if key in usage}
+    has_components = _PRIMARY_TOKEN_KEYS.issubset(fallback_keys)
+    total = usage.get("total_tokens")
+    if total is not None:
+        if fallback_keys and not has_components:
+            raise ClaudeCliOutputError("usage with total_tokens has incomplete additive counters")
+        if has_components:
+            component_total = _bounded_usage_sum(
+                (usage[key] for key in _TOKEN_SPEND_KEYS if key in usage),
+                key="additive token counters",
+            )
+            if total != component_total:
+                raise ClaudeCliOutputError(
+                    "usage.total_tokens disagrees with additive token counters"
+                )
+        return usage
+
+    if not has_components:
+        raise ClaudeCliOutputError(
+            "usage must include total_tokens or both input_tokens and output_tokens"
+        )
+    usage["total_tokens"] = _bounded_usage_sum(
+        (usage[key] for key in _TOKEN_SPEND_KEYS if key in usage),
+        key="total_tokens",
+    )
     return usage
 
 
@@ -343,41 +395,11 @@ def _aggregate_turn_usages(turn_usages: Sequence[dict[str, Any]]) -> dict[str, A
     Partial event telemetry is rejected because summing only the fields that
     happen to be present could manufacture a smaller request total.
     """
-    spend_by_turn: list[int] = []
     all_turns_have_components = True
     for usage in turn_usages:
         fallback_keys = {key for key in _TOKEN_SPEND_KEYS if key in usage}
         has_components = _PRIMARY_TOKEN_KEYS.issubset(fallback_keys)
         all_turns_have_components = all_turns_have_components and has_components
-        total = usage.get("total_tokens")
-
-        if total is not None:
-            if fallback_keys and not has_components:
-                raise ClaudeCliOutputError(
-                    "fallback usage with total_tokens has incomplete additive counters"
-                )
-            if has_components:
-                component_total = _bounded_usage_sum(
-                    (usage[key] for key in _TOKEN_SPEND_KEYS if key in usage),
-                    key="additive token counters",
-                )
-                if total != component_total:
-                    raise ClaudeCliOutputError(
-                        "fallback usage total_tokens disagrees with additive counters"
-                    )
-            spend_by_turn.append(total)
-            continue
-
-        if not has_components:
-            raise ClaudeCliOutputError(
-                "fallback usage must include total_tokens or both input_tokens and output_tokens"
-            )
-        spend_by_turn.append(
-            _bounded_usage_sum(
-                (usage[key] for key in _TOKEN_SPEND_KEYS if key in usage),
-                key="additive token counters",
-            )
-        )
 
     token_keys = {
         key
@@ -393,21 +415,12 @@ def _aggregate_turn_usages(turn_usages: Sequence[dict[str, Any]]) -> dict[str, A
         for key in token_keys
     }
 
-    if all_turns_have_components:
-        # A total present on only some turns is a partial total, not a request
-        # total.  Drop it so consumers use the complete additive breakdown.
-        if not all("total_tokens" in usage for usage in turn_usages):
-            aggregated.pop("total_tokens", None)
-    else:
+    if not all_turns_have_components:
         # Some turns expose only their authoritative total, so a complete
         # per-counter breakdown cannot be reconstructed.  Preserve the exact
         # request spend as a total and omit partial additive components.
         for key in _TOKEN_SPEND_KEYS:
             aggregated.pop(key, None)
-        aggregated["total_tokens"] = _bounded_usage_sum(
-            spend_by_turn,
-            key="total_tokens",
-        )
 
     # Preserve stable non-token metadata (for example ``service_tier``) only
     # when every turn reports the same value.  Selecting one turn's metadata

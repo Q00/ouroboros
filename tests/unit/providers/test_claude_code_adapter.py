@@ -2579,7 +2579,122 @@ class TestCLIFallbackWhenSDKAbsent:
         assert result.value.raw_response["usage"] == {
             "input_tokens": 110,
             "output_tokens": 22,
+            "total_tokens": 132,
         }
+
+    @pytest.mark.parametrize(
+        ("wire_usage", "expected_components", "expected_raw"),
+        [
+            pytest.param(
+                {"total_tokens": 132},
+                (0, 0, 132),
+                {"total_tokens": 132},
+                id="total-only-is-not-allocated",
+            ),
+            pytest.param(
+                {
+                    "input_tokens": 100,
+                    "output_tokens": 20,
+                    "cache_read_input_tokens": 12,
+                },
+                (100, 20, 132),
+                {
+                    "input_tokens": 100,
+                    "output_tokens": 20,
+                    "cache_read_input_tokens": 12,
+                    "total_tokens": 132,
+                },
+                id="components-derive-cache-inclusive-total",
+            ),
+            pytest.param(
+                {"input_tokens": 110, "output_tokens": 22, "total_tokens": 132},
+                (110, 22, 132),
+                {"input_tokens": 110, "output_tokens": 22, "total_tokens": 132},
+                id="consistent-components-and-total",
+            ),
+            pytest.param(
+                {"prompt_tokens": 110, "completion_tokens": 22},
+                (110, 22, 132),
+                {"input_tokens": 110, "output_tokens": 22, "total_tokens": 132},
+                id="aliases-become-canonical-components",
+            ),
+        ],
+    )
+    def test_cli_fallback_uses_normalized_canonical_usage_authority(
+        self,
+        wire_usage: dict[str, int],
+        expected_components: tuple[int, int, int],
+        expected_raw: dict[str, int],
+    ) -> None:
+        adapter = self._adapter()
+        payload = json.dumps(
+            {
+                "type": "result",
+                "subtype": "success",
+                "is_error": False,
+                "result": "answer",
+                "usage": wire_usage,
+            }
+        ).encode()
+        with (
+            patch.dict("sys.modules", {"claude_agent_sdk": None}),
+            patch(
+                "asyncio.create_subprocess_exec",
+                new=AsyncMock(return_value=self._proc(payload)),
+            ),
+        ):
+            result = asyncio.run(
+                adapter.complete(
+                    [Message(role=MessageRole.USER, content="ping")],
+                    CompletionConfig(model="claude-haiku-4-5"),
+                )
+            )
+
+        assert result.is_ok, result
+        assert (
+            result.value.usage.prompt_tokens,
+            result.value.usage.completion_tokens,
+            result.value.usage.total_tokens,
+        ) == expected_components
+        assert result.value.raw_response["usage"] == expected_raw
+
+    def test_invalid_terminal_total_cannot_fall_back_or_split_authority(self) -> None:
+        adapter = self._adapter()
+        payload = json.dumps(
+            [
+                {
+                    "type": "assistant",
+                    "message": {"usage": {"input_tokens": 100, "output_tokens": 20}},
+                },
+                {
+                    "type": "result",
+                    "subtype": "success",
+                    "is_error": False,
+                    "result": "answer",
+                    "usage": {
+                        "input_tokens": 110,
+                        "output_tokens": 22,
+                        "total_tokens": 12,
+                    },
+                },
+            ]
+        ).encode()
+        with (
+            patch.dict("sys.modules", {"claude_agent_sdk": None}),
+            patch(
+                "asyncio.create_subprocess_exec",
+                new=AsyncMock(return_value=self._proc(payload)),
+            ),
+        ):
+            result = asyncio.run(
+                adapter.complete(
+                    [Message(role=MessageRole.USER, content="ping")],
+                    CompletionConfig(model="claude-haiku-4-5"),
+                )
+            )
+
+        assert result.is_err
+        assert "usage.total_tokens disagrees" in result.error.details["parse_error"]
 
     def test_the_adapters_own_permission_vocabulary_is_not_forwarded_blindly(self) -> None:
         """`default` is a mode this adapter has and the CLI does not.
@@ -2681,7 +2796,11 @@ class TestCLIFallbackWhenSDKAbsent:
         assert result.error.details["subtype"] == "error_max_turns"
         assert result.error.details["session_id"] == "error-session"
         assert result.error.details["stop_reason"] == "max_turns"
-        assert result.error.details["usage"] == {"input_tokens": 9, "output_tokens": 2}
+        assert result.error.details["usage"] == {
+            "input_tokens": 9,
+            "output_tokens": 2,
+            "total_tokens": 11,
+        }
 
     @pytest.mark.parametrize(
         ("payload", "message"),
@@ -2702,6 +2821,18 @@ class TestCLIFallbackWhenSDKAbsent:
                 b'"usage":{"cache_read_input_tokens":' + b"9" * 1000 + b"}}",
                 "bounded non-negative integer",
                 id="thousand-digit-secondary-usage",
+            ),
+            pytest.param(
+                b'{"type":"result","is_error":false,"result":"done",'
+                b'"usage":{"prompt_tokens":' + b"9" * 1000 + b"}}",
+                "bounded non-negative integer",
+                id="thousand-digit-primary-alias",
+            ),
+            pytest.param(
+                b'{"type":"result","is_error":false,"result":"done",'
+                b'"usage":{"prompt_tokens":true,"completion_tokens":2}}',
+                "bounded non-negative integer",
+                id="malformed-primary-alias",
             ),
         ],
     )

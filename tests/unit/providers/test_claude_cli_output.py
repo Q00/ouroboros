@@ -54,7 +54,11 @@ def test_normalizes_single_result_object() -> None:
     assert normalized.result == "done"
     assert normalized.session_id == "session-1"
     assert normalized.is_error is False
-    assert normalized.usage == {"input_tokens": 11, "output_tokens": 7}
+    assert normalized.usage == {
+        "input_tokens": 11,
+        "output_tokens": 7,
+        "total_tokens": 18,
+    }
     assert normalized.stop_reason == "end_turn"
     assert normalized.event_count == 1
 
@@ -214,7 +218,11 @@ def test_error_envelope_allows_empty_result_and_preserves_metadata(
     assert normalized.is_error is True
     assert normalized.subtype == "error_max_turns"
     assert normalized.session_id == "error-session"
-    assert normalized.usage == {"input_tokens": 9, "output_tokens": 2}
+    assert normalized.usage == {
+        "input_tokens": 9,
+        "output_tokens": 2,
+        "total_tokens": 11,
+    }
     assert normalized.raw_payload["result"] == ""
 
 
@@ -237,7 +245,11 @@ def test_usage_falls_back_to_nested_assistant_usage() -> None:
 
     normalized = normalize_claude_cli_output(json.dumps(_events(final)))
 
-    assert normalized.usage == {"input_tokens": 3, "output_tokens": 1}
+    assert normalized.usage == {
+        "input_tokens": 3,
+        "output_tokens": 1,
+        "total_tokens": 4,
+    }
 
 
 def test_missing_terminal_usage_aggregates_every_assistant_turn() -> None:
@@ -253,7 +265,7 @@ def test_missing_terminal_usage_aggregates_every_assistant_turn() -> None:
                 "input_tokens": 100,
                 "output_tokens": 20,
                 "cache_read_input_tokens": 7,
-                "reasoning_tokens": 4,
+                "cached_input_tokens": 4,
             },
         },
     )
@@ -264,7 +276,8 @@ def test_missing_terminal_usage_aggregates_every_assistant_turn() -> None:
         "input_tokens": 103,
         "output_tokens": 21,
         "cache_read_input_tokens": 7,
-        "reasoning_tokens": 4,
+        "cached_input_tokens": 4,
+        "total_tokens": 131,
     }
 
 
@@ -281,7 +294,94 @@ def test_terminal_usage_is_authoritative_and_never_double_counted() -> None:
 
     normalized = normalize_claude_cli_output(json.dumps(events))
 
-    assert normalized.usage == {"input_tokens": 110, "output_tokens": 22}
+    assert normalized.usage == {
+        "input_tokens": 110,
+        "output_tokens": 22,
+        "total_tokens": 132,
+    }
+
+
+@pytest.mark.parametrize(
+    ("raw_usage", "expected"),
+    [
+        pytest.param(
+            {"total_tokens": 132},
+            {"total_tokens": 132},
+            id="total-only-stays-unallocated",
+        ),
+        pytest.param(
+            {"input_tokens": 110, "output_tokens": 22},
+            {"input_tokens": 110, "output_tokens": 22, "total_tokens": 132},
+            id="components-derive-total",
+        ),
+        pytest.param(
+            {"input_tokens": 110, "output_tokens": 22, "total_tokens": 132},
+            {"input_tokens": 110, "output_tokens": 22, "total_tokens": 132},
+            id="consistent-total-and-components",
+        ),
+        pytest.param(
+            {"prompt_tokens": 110, "completion_tokens": 22},
+            {"input_tokens": 110, "output_tokens": 22, "total_tokens": 132},
+            id="primary-aliases-canonicalized",
+        ),
+        pytest.param(
+            {
+                "input_tokens": 100,
+                "output_tokens": 20,
+                "cache_creation_input_tokens": 8,
+                "cache_read_input_tokens": 4,
+                "cached_input_tokens": 90,
+            },
+            {
+                "input_tokens": 100,
+                "output_tokens": 20,
+                "cache_creation_input_tokens": 8,
+                "cache_read_input_tokens": 4,
+                "cached_input_tokens": 90,
+                "total_tokens": 132,
+            },
+            id="secondary-additive-and-diagnostic-counters",
+        ),
+    ],
+)
+def test_usage_is_one_canonical_accounting_authority(
+    raw_usage: dict[str, int], expected: dict[str, int]
+) -> None:
+    normalized = normalize_claude_cli_output(json.dumps(_result(usage=raw_usage)))
+
+    assert normalized.usage == expected
+    assert normalized.raw_payload["usage"] == expected
+
+
+@pytest.mark.parametrize(
+    "raw_usage",
+    [
+        pytest.param(
+            {"input_tokens": 110, "output_tokens": 22, "total_tokens": 12},
+            id="inconsistent-total",
+        ),
+        pytest.param(
+            {"input_tokens": 110, "total_tokens": 132},
+            id="partial-components-with-total",
+        ),
+        pytest.param(
+            {"input_tokens": 110, "prompt_tokens": 109, "output_tokens": 22},
+            id="conflicting-alias",
+        ),
+        pytest.param(
+            {"input_tokens": 110, "output_tokens": 22, "reasoning_tokens": 1},
+            id="unsupported-token-counter",
+        ),
+        pytest.param({}, id="empty-usage"),
+    ],
+)
+def test_invalid_terminal_usage_never_falls_back_to_assistant_totals(
+    raw_usage: dict[str, int],
+) -> None:
+    events = _events(_result(usage=raw_usage))
+
+    with pytest.raises(ClaudeCliOutputError, match="usage|token"):
+        normalize_claude_cli_output(json.dumps(events))
 
 
 def test_fallback_aggregates_reconciled_per_turn_totals_and_metadata() -> None:
@@ -407,7 +507,7 @@ def test_rejects_multi_turn_counter_sum_overflow() -> None:
             "usage": {
                 "input_tokens": 1,
                 "output_tokens": 1,
-                "reasoning_tokens": (1 << 63) - 1,
+                "cached_input_tokens": (1 << 63) - 1,
             },
         },
         {
@@ -415,13 +515,13 @@ def test_rejects_multi_turn_counter_sum_overflow() -> None:
             "usage": {
                 "input_tokens": 1,
                 "output_tokens": 1,
-                "reasoning_tokens": 1,
+                "cached_input_tokens": 1,
             },
         },
         final,
     ]
 
-    with pytest.raises(ClaudeCliOutputError, match="aggregated usage.reasoning_tokens"):
+    with pytest.raises(ClaudeCliOutputError, match="aggregated usage.cached_input_tokens"):
         normalize_claude_cli_output(json.dumps(events))
 
 
@@ -564,6 +664,26 @@ def test_rejects_invalid_secondary_token_counter_types(value: object) -> None:
     with pytest.raises(
         ClaudeCliOutputError,
         match="usage.cache_read_input_tokens must be a bounded non-negative integer",
+    ):
+        normalize_claude_cli_output(json.dumps(payload))
+
+
+@pytest.mark.parametrize(
+    ("alias", "value"),
+    [
+        pytest.param("prompt_tokens", True, id="boolean-prompt-alias"),
+        pytest.param("completion_tokens", 1.5, id="fractional-completion-alias"),
+        pytest.param("prompt_tokens", -1, id="negative-prompt-alias"),
+    ],
+)
+def test_rejects_malformed_primary_aliases(alias: str, value: object) -> None:
+    usage: dict[str, object] = {"prompt_tokens": 1, "completion_tokens": 2}
+    usage[alias] = value
+    payload = _result(usage=usage)
+
+    with pytest.raises(
+        ClaudeCliOutputError,
+        match=rf"usage\.{alias} must be a bounded non-negative integer",
     ):
         normalize_claude_cli_output(json.dumps(payload))
 
