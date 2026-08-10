@@ -1,7 +1,7 @@
 {
   "name": "ouroboros",
   "version": "0.51.1",
-  "description": "Turn vague ideas into validated specifications and verified software.",
+  "description": "Sits in front of Claude Code and fixes the brief before the code. An interview scores how vague your request is and refuses to generate a spec until it clears the bar, though you can force past it. The acceptance criteria are then pinned and verified independently, and the command and assertion used to grade the work never enter the executing agent's prompt, with no flag to put them back.",
   "author": {
     "name": "Q00",
     "email": "jqyu.lee@gmail.com",
