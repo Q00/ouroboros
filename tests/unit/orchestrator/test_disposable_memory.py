@@ -540,9 +540,12 @@ async def test_timeout_after_commit_gate_waits_for_durable_publication(
         release_commit.set()
 
     assert retry_task is not None
+    # The release above is the synchronization boundary.  This timeout is only
+    # a deadlock guard: completion still depends on the persistence worker being
+    # scheduled, which can legitimately take more than two seconds under xdist.
     first, retry = await asyncio.wait_for(
         asyncio.gather(first_task, retry_task),
-        timeout=2.0,
+        timeout=30.0,
     )
 
     assert first_was_pending
