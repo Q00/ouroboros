@@ -915,6 +915,214 @@ def test_installer_shows_notice_when_top_level_value_is_a_string_not_bool(
     assert final_state.get("notice_shown") is True
 
 
+_HOSTILE_UNAME_SCRIPT = (
+    "#!/bin/sh\n"
+    'if [ "$1" = "-s" ]; then printf \'Linux","leaked":"project-secret\'; exit 0; fi\n'
+    'if [ "$1" = "-m" ]; then printf \'x86_64\\ninjected\\ttab\'; exit 0; fi\n'
+    "exit 1\n"
+)
+
+
+def _capture_dashd_curl(captures: Path) -> str:
+    """Fake curl that logs ONLY the raw `-d` argument of each call, one per
+    line -- lets a test `json.loads()` the exact payload instead of
+    substring-matching the whole curl invocation (which also contains
+    unrelated flags like `-fsS -X POST ...`).
+    """
+    return f"""#!/bin/sh
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "-d" ]; then
+    printf '%s\\n' "$arg" >> {captures!s}
+  fi
+  prev="$arg"
+done
+exit 0
+"""
+
+
+def _build_no_python3_path(target_dir: Path) -> str:
+    """Symlink every real executable from /usr/bin and /bin into
+    `target_dir`, except anything named python*/pip* -- gives a PATH with
+    normal coreutils (sed, tr, mkdir, uuidgen, mv, ln, rm, date, ...) but no
+    Python interpreter anywhere on it, for exercising an installer code
+    path's NO_PYTHON3 fallback in real isolation rather than just hoping no
+    python3 happens to be first on some CI runner's PATH.
+    """
+    target_dir.mkdir(exist_ok=True)
+    for source_dir in (Path("/usr/bin"), Path("/bin")):
+        if not source_dir.is_dir():
+            continue
+        for entry in source_dir.iterdir():
+            name = entry.name
+            if name.startswith("python") or name.startswith("pip"):
+                continue
+            link = target_dir / name
+            if link.exists() or link.is_symlink():
+                continue
+            try:
+                link.symlink_to(entry)
+            except OSError:
+                continue
+    return str(target_dir)
+
+
+def _drive_telemetry_ping(
+    tmp_path: Path, *, home: Path, path_env: str, extra_setup: str = ""
+) -> subprocess.CompletedProcess[str]:
+    """Extract `_telemetry_distinct_id` + `_telemetry_ping` verbatim from
+    install.sh and run them in an isolated driver, bypassing `_telemetry_enabled`
+    (irrelevant to payload construction) and giving full control over PATH --
+    the standard `_run_installer` harness can't hide python3 since its PATH
+    always includes the real /usr/bin.
+    """
+    driver = tmp_path / "driver.sh"
+    driver.write_text(
+        "#!/bin/bash\nset -u\n"
+        + _extract_function("_telemetry_distinct_id")
+        + _extract_function("_telemetry_ping")
+        + f"""
+PH_API_KEY="phc_test_key_000000000000000000"
+PH_HOST="https://telemetry.invalid"
+_telemetry_enabled() {{ return 0; }}
+{extra_setup}
+_telemetry_ping install_started "is_local=true" "pre=no" "version=1.2.3"
+wait
+""",
+        encoding="utf-8",
+    )
+    driver.chmod(0o755)
+
+    run_env = os.environ.copy()
+    run_env["HOME"] = str(home)
+    run_env["PATH"] = path_env
+    return subprocess.run(
+        ["bash", str(driver)],
+        env=run_env,
+        text=True,
+        capture_output=True,
+        timeout=10,
+    )
+
+
+def test_installer_ping_escapes_hostile_uname_output_with_python3(tmp_path: Path) -> None:
+    """A hostile executable named `uname` earlier on PATH -- returning a
+    value crafted to break out of its declared JSON string and inject an
+    undeclared `"leaked":"project-secret"` property, plus a literal control
+    character (newline/tab) in the other field -- must never be able to
+    alter the payload's structure. python3's real encoder is on PATH here,
+    so this exercises the structural-encoding path.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    captures = tmp_path / "captures.log"
+    _write_executable(bin_dir / "uname", _HOSTILE_UNAME_SCRIPT)
+    _write_executable(bin_dir / "curl", _capture_dashd_curl(captures))
+
+    result = _drive_telemetry_ping(
+        tmp_path,
+        home=tmp_path / "home",
+        path_env=f"{bin_dir}:/usr/bin:/bin",
+    )
+
+    assert result.returncode == 0, result.stderr
+    lines = [line for line in captures.read_text(encoding="utf-8").splitlines() if line]
+    assert lines, f"no payload captured; stderr={result.stderr!r}"
+    payload = json.loads(lines[0])
+    assert "leaked" not in payload
+    assert "leaked" not in payload.get("properties", {})
+    assert payload["properties"]["os"] == "unknown"
+    assert payload["properties"]["arch"] == "unknown"
+    assert payload["properties"]["is_local"] == "true"
+
+
+def test_installer_ping_escapes_hostile_uname_output_without_python3(tmp_path: Path) -> None:
+    """Same hostile-uname probe, forced down the NO_PYTHON3 shell-sanitizer
+    fallback (a curated PATH with no python3/python anywhere on it): every
+    value must instead survive a strict safe-token filter before string
+    concatenation, so structure mutation is still impossible either way.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    captures = tmp_path / "captures.log"
+    _write_executable(bin_dir / "uname", _HOSTILE_UNAME_SCRIPT)
+    _write_executable(bin_dir / "curl", _capture_dashd_curl(captures))
+    no_python_dir = _build_no_python3_path(tmp_path / "no-python-bin")
+
+    home = tmp_path / "home"
+    state_dir = home / ".ouroboros"
+    state_dir.mkdir(parents=True)
+    # Pre-seed an already-valid canonical identity so _telemetry_distinct_id
+    # succeeds via its own sed-only NO_PYTHON3 fallback, independent of
+    # whether `uuidgen` happens to exist on this platform.
+    (state_dir / "telemetry.json").write_text(
+        '{"distinct_id": "3f2504e0-4f89-11d3-9a0c-0305e82c3301", '
+        '"created_at": "2020-01-01T00:00:00Z", "notice_shown": true}\n',
+        encoding="utf-8",
+    )
+
+    result = _drive_telemetry_ping(
+        tmp_path,
+        home=home,
+        path_env=f"{bin_dir}:{no_python_dir}",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "command not found" not in result.stderr.lower(), result.stderr
+    lines = [line for line in captures.read_text(encoding="utf-8").splitlines() if line]
+    assert lines, f"no payload captured; stderr={result.stderr!r}"
+    payload = json.loads(lines[0])
+    assert "leaked" not in payload
+    assert "leaked" not in payload.get("properties", {})
+    assert payload["properties"]["os"] == "unknown"
+    assert payload["properties"]["arch"] == "unknown"
+    assert payload["distinct_id"] == "3f2504e0-4f89-11d3-9a0c-0305e82c3301"
+
+
+def test_installer_ping_uses_exact_declared_property_structure(tmp_path: Path) -> None:
+    """A normal install run (real uname, no hostile injection): every
+    captured event still parses as JSON with EXACTLY the declared top-level
+    and `properties` keys -- the installer-side structural whitelist,
+    verified end-to-end through the real installer harness.
+    """
+    result = _run_installer(
+        tmp_path,
+        env={"OUROBOROS_TELEMETRY": ""},
+        fake_commands={
+            **_telemetry_fake_commands(tmp_path),
+            "curl": _capture_dashd_curl(tmp_path / "telemetry.log"),
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    captures = _wait_for_telemetry(tmp_path)
+    lines = [line for line in captures.splitlines() if line]
+    events = {}
+    for line in lines:
+        payload = json.loads(line)
+        assert set(payload.keys()) == {"api_key", "event", "distinct_id", "properties"}
+        events[payload["event"]] = payload
+
+    assert set(events) == {"install_started", "install_completed"}
+    assert set(events["install_started"]["properties"].keys()) == {
+        "source",
+        "os",
+        "arch",
+        "is_local",
+        "pre",
+        "version",
+    }
+    assert set(events["install_completed"]["properties"].keys()) == {
+        "source",
+        "os",
+        "arch",
+        "method",
+        "runtime",
+        "detected_runtimes",
+        "version",
+    }
+
+
 def test_installer_ignores_nested_distinct_id_in_valid_json_and_mints_fresh(
     tmp_path: Path,
 ) -> None:
@@ -1026,15 +1234,17 @@ def test_installer_still_salvages_uuid_from_unparseable_text_with_nested_shape(
     assert '"distinct_id":"3f2504e0-4f89-11d3-9a0c-0305e82c3301"' in captures
 
 
-def _extract_distinct_id_function() -> str:
-    """Pull `_telemetry_distinct_id` verbatim out of install.sh.
+def _extract_function(name: str) -> str:
+    """Pull a bash function definition verbatim out of install.sh.
 
-    Lets a driver script race the real repair-lock logic directly, without
-    paying for N full installer subprocess trees per concurrency test.
+    Lets a driver script exercise real installer logic directly -- e.g. to
+    race the repair-lock protocol, or to isolate `_telemetry_ping` under a
+    controlled PATH -- without paying for a full installer subprocess tree
+    per test.
     """
     text = INSTALL_SH.read_text(encoding="utf-8")
-    match = re.search(r"(?ms)^_telemetry_distinct_id\(\) \{.*?\n\}\n", text)
-    assert match is not None, "could not locate _telemetry_distinct_id() in install.sh"
+    match = re.search(rf"(?ms)^{re.escape(name)}\(\) \{{.*?\n\}}\n", text)
+    assert match is not None, f"could not locate {name}() in install.sh"
     return match.group(0)
 
 
@@ -1056,7 +1266,7 @@ def _race_distinct_id_drivers(
     driver = tmp_path / "driver.sh"
     driver.write_text(
         "#!/bin/bash\nset -u\n"
-        + _extract_distinct_id_function()
+        + _extract_function("_telemetry_distinct_id")
         + f"""
 while [ ! -f {shlex.quote(str(barrier))} ]; do
   sleep 0.01

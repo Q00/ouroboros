@@ -605,17 +605,82 @@ with open(sys.argv[2], "w", encoding="utf-8") as fh:
 # _telemetry_ping <event> [key=value ...] — fire-and-forget, never fails.
 _telemetry_ping() {
   _telemetry_enabled || return 0
-  local event="$1" id props kv k v
+  local event="$1" id os arch py body kv k v props api_key_safe event_safe id_safe
   shift
   id=$(_telemetry_distinct_id) || return 0
-  props='"source":"install_sh","os":"'"$(uname -s | tr '[:upper:]' '[:lower:]')"'","arch":"'"$(uname -m)"'"'
-  for kv in "$@"; do
-    k="${kv%%=*}"
-    v="${kv#*=}"
-    props="$props,\"$k\":\"$v\""
-  done
+
+  # Token-constrain os/arch at the source: a hostile executable earlier on
+  # PATH (or a nonstandard uname) can emit anything, including embedded
+  # quotes that would otherwise mutate the JSON structure below -- neither
+  # os nor arch legitimately needs more than this charset (darwin, linux,
+  # arm64, x86_64, ...), so anything that doesn't fullmatch is discarded
+  # outright rather than partially trusted.
+  os=$(uname -s | tr '[:upper:]' '[:lower:]')
+  [[ "$os" =~ ^[A-Za-z0-9._-]{1,32}$ ]] || os="unknown"
+  arch=$(uname -m)
+  [[ "$arch" =~ ^[A-Za-z0-9._-]{1,32}$ ]] || arch="unknown"
+
+  py=$(command -v python3 2>/dev/null || true)
+  body=""
+  if [ -n "$py" ]; then
+    # Structural encoding: every value is JSON-escaped by python3's real
+    # encoder and passed in via argv -- never interpolated into the -c code
+    # string itself -- so a hostile value (embedded quotes, backslashes,
+    # control characters, an attempted `","injected":"...` payload) can
+    # only ever become the STRING CONTENTS of its own declared property; it
+    # can never alter the payload's structure or add an undeclared key.
+    # Keys are call-site literals already, but are still whitelisted to
+    # `[A-Za-z0-9_]+` defensively -- a key that fails that check is
+    # dropped, never stringified into a place it could do damage.
+    body=$("$py" -c '
+import json, re, sys
+
+event, distinct_id, api_key, os_name, arch = sys.argv[1:6]
+props = {"source": "install_sh", "os": os_name, "arch": arch}
+key_re = re.compile(r"^[A-Za-z0-9_]+$")
+for kv in sys.argv[6:]:
+    key, sep, value = kv.partition("=")
+    if sep and key_re.match(key):
+        props[key] = value
+print(json.dumps(
+    {
+        "api_key": api_key,
+        "event": event,
+        "distinct_id": distinct_id,
+        "properties": props,
+    },
+    separators=(",", ":"),
+))
+' "$event" "$id" "$PH_API_KEY" "$os" "$arch" "$@" 2>/dev/null)
+  fi
+
+  if [ -z "$body" ]; then
+    # No python3 (or the structural encoder failed): sanitize every value
+    # through a strict safe-token filter before string concatenation, so no
+    # quote/backslash/control character can ever survive to mutate the JSON
+    # structure. Every legitimate installer value (version numbers,
+    # method/runtime names, yes/no flags, a canonical-lowercase distinct_id,
+    # the os/arch tokens above) fits this charset losslessly; anything that
+    # doesn't is stripped down to it (then length-capped) or falls back to
+    # `unknown` -- best-effort, consistent with the identity/notice
+    # readers' own NO_PYTHON3 fallback posture elsewhere in this file.
+    props='"source":"install_sh","os":"'"$os"'","arch":"'"$arch"'"'
+    for kv in "$@"; do
+      k=$(printf '%s' "${kv%%=*}" | tr -cd 'A-Za-z0-9_')
+      [ -n "$k" ] || continue
+      v=$(printf '%s' "${kv#*=}" | tr -cd 'A-Za-z0-9._-')
+      v="${v:0:64}"
+      [ -n "$v" ] || v="unknown"
+      props="$props,\"$k\":\"$v\""
+    done
+    api_key_safe=$(printf '%s' "$PH_API_KEY" | tr -cd 'A-Za-z0-9._-')
+    event_safe=$(printf '%s' "$event" | tr -cd 'A-Za-z0-9._-')
+    id_safe=$(printf '%s' "$id" | tr -cd 'A-Za-z0-9._-')
+    body='{"api_key":"'"$api_key_safe"'","event":"'"$event_safe"'","distinct_id":"'"$id_safe"'","properties":{'"$props"'}}'
+  fi
+
   curl -fsS -m 4 -X POST "$PH_HOST/capture/" -H 'Content-Type: application/json' \
-    -d '{"api_key":"'"$PH_API_KEY"'","event":"'"$event"'","distinct_id":"'"$id"'","properties":{'"$props"'}}' \
+    -d "$body" \
     >/dev/null 2>&1 &
   return 0
 }
