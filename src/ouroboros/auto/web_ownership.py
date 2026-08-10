@@ -856,3 +856,34 @@ def _goal_first_np_is_ui_headed(goal_text: str) -> bool:
     command line habit tracker")."""
     head = _goal_first_np_head(goal_text)
     return head is not None and bool(_UI_HEAD_NOUN_RE.match(head))
+
+
+_PRODUCED_SERVICE_RE = re.compile(
+    r"\b(?:serv\w+|expos\w+|provid\w+|offer\w+|host\w+|publish\w+|"
+    r"implement\w+|deliver\w+)\b[^,.;]*\b"
+    r"(?:rest\s+apis?|apis?|endpoints?|web\s+services?|https?\s+servers?)"
+)
+_PRODUCED_SERVICE_RESPONSE_RE = re.compile(
+    r"\b(?:servers?|backends?|services?|apis?|endpoints?)\b[^,.;]*?\b"
+    r"(?:returns?|responds?(?:\s+with)?|sends?|emits?|serves?|produces?)\b"
+    r"[^,.;]*?\b(?:https?\s+responses?|json\s+(?:bodies?|responses?))\b"
+)
+_WEB_SERVICE_SIGNAL_FRAGMENT = (
+    r"(?:rest\s+apis?|rest\s+endpoints?|web\s+services?|web\s+servers?|"
+    r"https?\s+servers?|apis?|endpoints?)"
+)
+_WEBHOOK_SIGNAL_FRAGMENT = (
+    r"(?:webhooks?|callback\s+urls?|http\s+posts?|incoming\s+events?|event\s+payloads?)"
+)
+# Webhook ownership needs affirmative receiver/input semantics (#1813
+# R121): a receiving-artifact compound, a receiving verb governing the
+# payload vocabulary, an incoming/inbound qualifier, or the delivery
+# nouns themselves — a bare topic word owns nothing.
+_WEBHOOK_RECEIVER_RE = re.compile(
+    r"\b(?:webhooks?|callback\s+urls?)\s+"
+    r"(?:receivers?|endpoints?|listeners?|handlers?|consumers?|processors?|ingestion|intake)\b"
+    r"|\b(?:receiv\w+|ingest\w+|handl\w+|process\w+|consum\w+|accept\w+|listen\w+)\b"
+    r"[^,.;]*\b(?:webhooks?|callback\s+urls?|http\s+posts?|incoming\s+events?|event\s+payloads?)\b"
+    r"|\b(?:incoming|inbound)\s+(?:webhooks?|http\s+posts?|events?|payloads?)\b"
+    r"|\bwebhooks?\s+(?:posts?|payloads?|deliveries|events?)\b"
+)

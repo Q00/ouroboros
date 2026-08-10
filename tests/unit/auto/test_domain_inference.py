@@ -5433,3 +5433,100 @@ def test_denied_game_heads_do_not_claim_ownership() -> None:
     result = derive_domain_from_ledger(ledger)
     assert result.is_single
     assert result.single is TaskClass.WEB_APP
+
+
+@pytest.mark.parametrize(
+    ("goal", "outputs", "runtime", "expected"),
+    [
+        (
+            "Build neither a CLI nor a web app but a REST API",
+            "JSON responses with status codes",
+            "Containerized HTTP service",
+            TaskClass.WEB_SERVICE,
+        ),
+        (
+            "Build neither a CLI nor a desktop tool but a web app",
+            "Interactive signup page and settings panels",
+            "Runs in browsers",
+            TaskClass.WEB_APP,
+        ),
+        (
+            "Build neither a web app nor a service but a CLI",
+            "Deterministic stdout and exit code 0",
+            "Local shell / terminal",
+            TaskClass.CLI,
+        ),
+    ],
+)
+def test_neither_nor_spares_the_adversative_pivot(
+    goal: str, outputs: str, runtime: str, expected: TaskClass
+) -> None:
+    """R121 probe: the neither/nor strip stops at but/yet — the denied
+    alternatives leave while the affirmed product keeps its durable
+    class."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value=outputs)
+    _seed_section(ledger, "runtime_context", value=runtime)
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is expected
+
+
+@pytest.mark.parametrize(
+    ("goal", "outputs"),
+    [
+        (
+            "Build a web app, not a webhook receiver",
+            "Interactive signup page with stored preferences",
+        ),
+        (
+            "Build a browser dashboard without webhooks",
+            "Login form with stored history and settings panels",
+        ),
+        (
+            "Build a website for users who configure webhooks",
+            "Interactive settings pages with stored preferences",
+        ),
+    ],
+)
+def test_webhook_topic_words_do_not_own(goal: str, outputs: str) -> None:
+    """R121 probe: webhook evidence routes through the shared negation,
+    audience, and dependency rules and needs affirmative receiver
+    semantics — a topic word plus a stored-output cannot fabricate the
+    ambiguity that blocks the web_app class."""
+    ledger = _bare_ledger(goal)
+    _seed_section(ledger, "outputs", value=outputs)
+    _seed_section(ledger, "runtime_context", value="Runs in browsers")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP
+
+
+@pytest.mark.parametrize(
+    "runtime",
+    [
+        "Development server launched from a terminal",
+        "Run npm start in the shell to serve modern browsers",
+        "Local shell starts the Vite server; app runs in browsers",
+    ],
+)
+def test_shell_launch_mechanisms_do_not_own_cli(runtime: str) -> None:
+    """R121 probe: a shell/terminal that merely launches the product is
+    a consumer/launcher relation — with an affirmative browser product
+    and no CLI-shaped evidence, it cannot assert CLI ownership."""
+    ledger = _bare_ledger("Build a web app")
+    _seed_section(ledger, "outputs", value="Interactive signup page")
+    _seed_section(ledger, "runtime_context", value=runtime)
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.WEB_APP
+
+
+def test_shell_runtime_still_owns_cli_products() -> None:
+    """R121 guard: genuine CLI ledgers keep their shell runtime signal."""
+    ledger = _bare_ledger("Build a habit-tracker CLI tool")
+    _seed_section(ledger, "outputs", value="Deterministic stdout and exit code 0")
+    _seed_section(ledger, "runtime_context", value="Local shell / terminal")
+    result = derive_domain_from_ledger(ledger)
+    assert result.is_single
+    assert result.single is TaskClass.CLI

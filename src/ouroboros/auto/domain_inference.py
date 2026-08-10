@@ -51,6 +51,8 @@ from ouroboros.auto.web_ownership import (
     _NON_BROWSER_RUNTIME_RE,
     _POSTNOMINAL_BROWSER_QUALIFIER_RE,
     _POSTPOSITIVE_BROWSER_DENIAL_RE,
+    _PRODUCED_SERVICE_RE,
+    _PRODUCED_SERVICE_RESPONSE_RE,
     _RUNTIME_BROWSER_CONSUMER_RE,
     _SECTION_BROWSER_ENV_RE,
     _SUBJECT_COMPOUND_NOUN_FRAGMENT,
@@ -58,7 +60,10 @@ from ouroboros.auto.web_ownership import (
     _WEB_APP_ARTIFACT_PHRASE_RE,
     _WEB_APP_GOAL_SIGNAL_FRAGMENT,
     _WEB_APP_GOAL_SIGNAL_RE,
+    _WEB_SERVICE_SIGNAL_FRAGMENT,
     _WEB_SIMILARITY_MODIFIER_RE,
+    _WEBHOOK_RECEIVER_RE,
+    _WEBHOOK_SIGNAL_FRAGMENT,
     _goal_first_np_has_ui_shape,
     _goal_first_np_head,
     _goal_first_np_is_ui_headed,
@@ -218,7 +223,8 @@ _QUALITY_NOUN_RE = re.compile(
 )
 
 
-_NEITHER_NOR_SPAN_RE = re.compile(r"\bneither\b[^,.;]*?\bnor\b[^,.;]*")
+# The span stops at adversative but/yet — the pivot survives (#1813 R121).
+_NEITHER_NOR_SPAN_RE = re.compile(r"\bneither\b[^,.;]*?\bnor\b(?:(?!\s(?:but|yet)\b)[^,.;])*")
 
 
 def _strip_negated_signals(text: str, signal_fragment: str) -> str:
@@ -553,6 +559,14 @@ def _matches_cli(ledger: SeedDraftLedger) -> bool:
         ("stdout", "exit code", "printed", "console output", "command output"),
     )
     runtime_signal = _any_of(runtime, ("shell", "terminal", "subprocess", "command line"))
+    # A shell/terminal that merely launches the product is a launcher
+    # relation, not CLI runtime identity (#1813 R121): with an affirmed
+    # browser product and no CLI-shaped output evidence, it owns nothing.
+    if runtime_signal and not output_signal:
+        runtime_signal = not (
+            _SECTION_BROWSER_ENV_RE.search(runtime)
+            or _goal_artifact_head_is_web_app(_goal_text(ledger))
+        )
     # Goal-side CLI signal: token-bounded "cli" OR explicit "command line"
     # / "command-line" multi-word phrase, with explicit-negation
     # stripping. Substring-only matching against "cli" would false-
@@ -591,31 +605,17 @@ def _matches_webhook(ledger: SeedDraftLedger) -> bool:
     goal = _goal_text(ledger)
     if not (inputs or outputs or goal):
         return False
-    has_webhook_in = _any_of(
-        inputs + " " + goal,
-        ("webhook", "http post", "incoming event", "event payload", "callback url"),
+    # Goal-side webhook evidence routes through the shared normalization
+    # (#1813 R121): denials, audiences, and dependencies own nothing.
+    webhook_goal = _strip_audience_and_displayed_subjects(
+        _strip_consumed_dependencies(_strip_negated_signals(goal, _WEBHOOK_SIGNAL_FRAGMENT))
     )
+    has_webhook_in = bool(_WEBHOOK_RECEIVER_RE.search(inputs + " " + webhook_goal))
     has_side_effect = _any_of(
         outputs,
         ("side effect", "db row", "database row", "log entry", "stored", "external call"),
     )
     return has_webhook_in and has_side_effect
-
-
-_PRODUCED_SERVICE_RE = re.compile(
-    r"\b(?:serv\w+|expos\w+|provid\w+|offer\w+|host\w+|publish\w+|"
-    r"implement\w+|deliver\w+)\b[^,.;]*\b"
-    r"(?:rest\s+apis?|apis?|endpoints?|web\s+services?|https?\s+servers?)"
-)
-_PRODUCED_SERVICE_RESPONSE_RE = re.compile(
-    r"\b(?:servers?|backends?|services?|apis?|endpoints?)\b[^,.;]*?\b"
-    r"(?:returns?|responds?(?:\s+with)?|sends?|emits?|serves?|produces?)\b"
-    r"[^,.;]*?\b(?:https?\s+responses?|json\s+(?:bodies?|responses?))\b"
-)
-_WEB_SERVICE_SIGNAL_FRAGMENT = (
-    r"(?:rest\s+apis?|rest\s+endpoints?|web\s+services?|web\s+servers?|"
-    r"https?\s+servers?|apis?|endpoints?)"
-)
 
 
 def _matches_web_service(ledger: SeedDraftLedger) -> bool:
